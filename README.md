@@ -14,6 +14,7 @@ token-station 是面向 AI Agent 工具和 LLM 模型供应商的智能模型路
 ## 开工依据
 
 - [V2 开发计划](docs/planning/token-station-V2开发计划.md)
+- [个人版（社区版客户端）开发计划](docs/planning/个人版开发计划.md)
 - [V2 阶段需求清单](docs/planning/V2阶段需求清单.md)
 - [代码仓库规划](docs/architecture/代码仓库规划.md)
 - [双端 adapter 插件架构](docs/architecture/protocol-provider-adapter插件架构.md)
