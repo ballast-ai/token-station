@@ -7,8 +7,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+serde = { workspace = true }
 token-station-protocol = { path = "../protocol" }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
-
