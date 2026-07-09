@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<!--
+  产品路由: GET /dashboard/byok
+  详设小节: docs/design/V2页面详细设计.md §2.5(★V2 新页)
+  主体阶段: P1(凭证表「归属」org/team 维度为 P3)
+  区块: 口径说明卡(§0.4,链接 devices)/ 凭证表 / 新增凭证(模式三态+账路)/
+        订阅凭证区(Claude Code·Codex·Copilot OAuth 绑定卡)/ 账路说明(链接 billing)
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>自带上游 · Token Station</title>
+  <script>
+  (function(){
+    try {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+  </script>
+  <link rel="stylesheet" href="../assets/dash.css">
+  <link rel="stylesheet" href="../assets/v2.css">
+  <style>
+  .lang-inline{display:inline-flex;align-items:center;gap:2px;border:1px solid var(--line,#e2e8f0);border-radius:6px;padding:2px;vertical-align:middle;}
+  .lang-inline .lang-opt{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:24px;padding:0 5px;font-size:12px;font-weight:600;color:var(--text-2,#64748b);text-decoration:none;border-radius:4px;line-height:1;}
+  .lang-inline .lang-opt:hover{color:var(--text-0,#0f172a);}
+  .lang-inline .lang-opt.active{background:var(--bg-2,#f1f5f9);color:var(--text-0,#0f172a);}
+  html[data-theme="dark"] .lang-inline{border-color:#334155;}
+  html[data-theme="dark"] .lang-inline .lang-opt:hover{color:#f1f5f9;}
+  html[data-theme="dark"] .lang-inline .lang-opt.active{background:#1e293b;color:#f1f5f9;}
+  @media (max-width:768px){ .lang-inline{display:none;} }
+  </style>
+</head>
+<body class="app">
+  <div class="shell">
+    <button class="hamburger" onclick="toggleSidebar()" aria-label="菜单">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <aside class="sidebar">
+      <a href="dashboard.html" class="brand">
+        <span class="brand-mark">T</span>
+        <span class="col" style="gap:1px;">
+          <span class="brand-name">Token Station</span>
+          <span class="brand-sub">工作区 · V2</span>
+        </span>
+      </a>
+      <nav class="nav">
+        <div class="nav-group-label">我的空间</div>
+        <a href="dashboard.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>仪表盘</a>
+        <a href="playground.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg></span>体验场</a>
+        <a href="keys.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span>API 密钥</a>
+        <a href="byok.html" class="nav-item active"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 7V2"/><path d="M15 7V2"/><path d="M6 13V8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4Z"/></svg></span>自带上游</a>
+        <a href="models.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg></span>模型目录</a>
+        <div class="nav-group-label">智能路由</div>
+        <a href="rules.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span>路由规则</a>
+        <a href="presets.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg></span>预设 Preset</a>
+        <a href="decisions.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg></span>决策记录</a>
+        <div class="nav-group-label">用量与账单</div>
+        <a href="usage.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>用量</a>
+        <a href="billing.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg></span>账单</a>
+        <div class="nav-group-label">组织</div>
+        <a href="org.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>组织与团队</a>
+        <a href="devices.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="8" x="5" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 18h2"/><path d="M12 18h6"/></svg></span>设备与客户端</a>
+        <div class="nav-group-label">参考</div>
+        <a href="docs.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>文档</a>
+        <a href="settings.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span>设置</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="avatar xs green">D</div>
+        <div class="who">
+          <span class="who-name">dev@example.com</span>
+          <a href="#" class="who-role" style="color:var(--text-3);">退出登录</a>
+        </div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="crumbs"><span>工作区</span><span class="sep">›</span><span class="leaf">自带上游</span></div>
+        <div class="topbar-spacer"></div>
+        <nav class="lang-inline" aria-label="语言"><a href="#" class="lang-opt" title="English"><span class="lang-g">EN</span></a><a href="#" class="lang-opt active" aria-current="true" title="简体中文"><span class="lang-g">简</span></a><a href="#" class="lang-opt" title="繁體中文"><span class="lang-g">繁</span></a><a href="#" class="lang-opt" title="日本語"><span class="lang-g">日</span></a><a href="#" class="lang-opt" title="한국어"><span class="lang-g">한</span></a></nav>
+        <button type="button" class="theme-toggle topbar-icon" aria-label="切换主题">
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m4.93 19.07 1.41-1.41"/><path d="m17.66 6.34 1.41-1.41"/></svg>
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+        <a href="docs.html" class="topbar-icon" title="文档"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></a>
+      </header>
+      <div class="page">
+        <div class="page-head">
+            <div>
+                <h1 class="page-title">自带上游 BYOK<span class="stage-row"><span class="stage stage-p1">P1</span></span></h1>
+                <div class="page-sub">自带 provider key 或订阅凭证，由网关代你直连上游；模式与账路决定它和平台凭证的关系、以及钱从哪条路走。</div>
+            </div>
+        </div>
+
+        <!-- 口径说明卡(§2.5 区块 1 / §0.4)· P1 -->
+        <div class="card">
+            <div class="card-head"><div class="card-title">口径说明：服务端 BYOK ≠ 客户端 BYOK <span class="stage stage-p1">P1</span></div></div>
+            <div class="card-body">
+                <p style="margin:0 0 8px;font-size:12.5px;color:var(--text-1)"><strong>此处录入的 key 属于服务端 BYOK</strong>：由平台<strong>加密保管</strong>（仅存密文与校验哈希，不可回显），仅用于网关代你直连上游；决策记录只保存凭证<strong>归因</strong>，不保存凭证内容。</p>
+                <p style="margin:0;font-size:12.5px;color:var(--text-1)"><strong>本地客户端（交付物①）的 BYOK key 永不上传云端</strong>：key 只存在你的设备上，云端配置 profile 中只有引用名——两者互不矛盾，请勿混淆隐私承诺的适用范围。本地客户端管理见 <a href="devices.html">设备与客户端</a>。</p>
+            </div>
+        </div>
+
+        <!-- 凭证表(§2.5 区块 2)· P1(归属 org/team 为 P3) -->
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">凭证表 <span class="stage stage-p1">P1</span></div>
+                <span class="muted" style="font-size:11px">共 4 条 · 删除后决策记录仍保留归因快照</span>
+            </div>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead><tr>
+                        <th>Provider</th>
+                        <th>类型</th>
+                        <th>名称</th>
+                        <th>模式</th>
+                        <th>账路</th>
+                        <th>校验状态</th>
+                        <th>归属 <span class="stage stage-p3">P3</span></th>
+                        <th>操作</th>
+                    </tr></thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="provider"><span class="logo anthropic">A</span>Anthropic</span></td>
+                            <td><span class="badge">API Key</span></td>
+                            <td>anthropic-main</td>
+                            <td><span class="badge accent">always-use</span></td>
+                            <td><span class="badge info">routing_fee · 仅路由服务费</span></td>
+                            <td><span class="row" style="gap:6px"><span class="dot ok"></span><span class="muted" style="font-size:11.5px">校验通过 · 2 小时前</span></span></td>
+                            <td class="muted">dev@example.com（个人）</td>
+                            <td><div class="row"><button type="button" class="btn sm">编辑</button><button type="button" class="btn sm danger">删除</button></div></td>
+                        </tr>
+                        <tr>
+                            <td><span class="provider"><span class="logo openai">O</span>OpenAI</span></td>
+                            <td><span class="badge">API Key</span></td>
+                            <td>openai-team</td>
+                            <td><span class="badge">fallback</span></td>
+                            <td><span class="badge warn">resale · 代采购转卖</span></td>
+                            <td><span class="row" style="gap:6px"><span class="dot ok"></span><span class="muted" style="font-size:11.5px">校验通过 · 昨天</span></span></td>
+                            <td class="muted">Acme（组织）</td>
+                            <td><div class="row"><button type="button" class="btn sm">编辑</button><button type="button" class="btn sm danger">删除</button></div></td>
+                        </tr>
+                        <tr>
+                            <td><span class="provider"><span class="logo deepseek">D</span>DeepSeek</span></td>
+                            <td><span class="badge">API Key</span></td>
+                            <td>deepseek-dev</td>
+                            <td><span class="badge">默认回退</span></td>
+                            <td><span class="badge warn">resale · 代采购转卖</span></td>
+                            <td><span class="row" style="gap:6px"><span class="dot warn"></span><span class="muted" style="font-size:11.5px">校验中…</span></span></td>
+                            <td class="muted">dev@example.com（个人）</td>
+                            <td><div class="row"><button type="button" class="btn sm">编辑</button><button type="button" class="btn sm danger">删除</button></div></td>
+                        </tr>
+                        <tr>
+                            <td><span class="provider"><span class="logo anthropic">A</span>Anthropic</span></td>
+                            <td><span class="badge accent">OAuth 订阅</span></td>
+                            <td>claude-code-max</td>
+                            <td><span class="badge accent">always-use</span></td>
+                            <td><span class="badge info">routing_fee · 仅路由服务费</span></td>
+                            <td><span class="row" style="gap:6px"><span class="dot ok"></span><span class="muted" style="font-size:11.5px">token 自动刷新</span></span></td>
+                            <td class="muted">dev@example.com（个人）</td>
+                            <td><div class="row"><button type="button" class="btn sm">编辑</button><button type="button" class="btn sm danger">删除</button></div></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 新增凭证(§2.5 区块 3)· P1 -->
+        <div class="card">
+            <div class="card-head"><div class="card-title">新增凭证 <span class="stage stage-p1">P1</span></div></div>
+            <div class="card-body">
+                <form method="post" action="#" onsubmit="return false">
+                    <div class="row" style="flex-wrap:wrap;gap:16px;align-items:flex-start">
+                        <div class="field" style="min-width:200px">
+                            <label class="label" for="provider">Provider</label>
+                            <select name="provider" id="provider" class="select">
+                                <option>Anthropic</option>
+                                <option>OpenAI</option>
+                                <option>DeepSeek</option>
+                                <option>Zhipu GLM</option>
+                            </select>
+                        </div>
+                        <div class="field" style="min-width:200px">
+                            <label class="label" for="cred_name">名称</label>
+                            <input type="text" name="cred_name" id="cred_name" placeholder="例如 anthropic-main" class="input">
+                        </div>
+                        <div class="field" style="flex:1;min-width:260px">
+                            <label class="label" for="cred_key">API Key</label>
+                            <input type="password" name="cred_key" id="cred_key" placeholder="sk-…" class="input">
+                            <div class="help">明文仅在此输入一次；保存后平台只保留密文与校验哈希，不可回显。</div>
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label class="label">模式（三态）</label>
+                        <label class="row" style="gap:8px;font-size:12px;color:var(--text-1);margin-bottom:6px">
+                            <input type="radio" name="mode" value="always-use" checked style="width:auto"> <span class="badge accent">always-use</span> 始终用我的凭证——平台凭证<strong>绝不参与</strong>该用户派单；我的凭证故障时请求直接失败。
+                        </label>
+                        <label class="row" style="gap:8px;font-size:12px;color:var(--text-1);margin-bottom:6px">
+                            <input type="radio" name="mode" value="fallback" style="width:auto"> <span class="badge">fallback</span> 优先用我的凭证，故障时回退平台凭证。
+                        </label>
+                        <label class="row" style="gap:8px;font-size:12px;color:var(--text-1)">
+                            <input type="radio" name="mode" value="default" style="width:auto"> <span class="badge">默认回退</span> 默认走平台凭证，平台侧无可用凭证时才使用我的。
+                        </label>
+                    </div>
+                    <div class="field">
+                        <label class="label">账路</label>
+                        <label class="row" style="gap:8px;font-size:12px;color:var(--text-1);margin-bottom:6px">
+                            <input type="radio" name="billing_route" value="resale" checked style="width:auto"> <span class="badge warn">resale · 代采购转卖</span> 用平台 credits 结算，可含平台加价。
+                        </label>
+                        <label class="row" style="gap:8px;font-size:12px;color:var(--text-1)">
+                            <input type="radio" name="billing_route" value="routing_fee" style="width:auto"> <span class="badge info">routing_fee · 仅路由服务费</span> 算力钱直付 provider，平台只收路由服务费（费率可为 0）。
+                        </label>
+                    </div>
+                    <div class="row" style="gap:8px">
+                        <button type="submit" class="btn primary">保存并校验</button>
+                        <span class="help" style="margin-top:0">保存后将向该 provider 发起一次最小校验请求，确认凭证可用。</span>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- 订阅凭证区(§2.5 区块 4)· P1〔V2-P1-7〕 -->
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">订阅凭证 <span class="stage stage-p1">P1</span></div>
+                <span class="muted" style="font-size:11px">kind='oauth' · access token 按刷新协议自动续期</span>
+            </div>
+            <div class="card-body">
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px">
+                    <div class="card" style="margin:0">
+                        <div class="card-body">
+                            <div class="row" style="justify-content:space-between;margin-bottom:8px">
+                                <span class="provider"><span class="logo anthropic">A</span>Claude Code</span>
+                                <span class="badge ok"><span class="dot ok"></span>已绑定</span>
+                            </div>
+                            <div class="help" style="margin:0 0 10px">Max 订阅 · token 自动刷新 · 绑定于 2026-06-20</div>
+                            <button type="button" class="btn sm danger">解绑</button>
+                        </div>
+                    </div>
+                    <div class="card" style="margin:0">
+                        <div class="card-body">
+                            <div class="row" style="justify-content:space-between;margin-bottom:8px">
+                                <span class="provider"><span class="logo openai">O</span>Codex</span>
+                                <span class="badge">未绑定</span>
+                            </div>
+                            <div class="help" style="margin:0 0 10px">绑定后可用你的 Codex 订阅额度经网关派单。</div>
+                            <button type="button" class="btn sm primary">绑定（OAuth 授权）</button>
+                        </div>
+                    </div>
+                    <div class="card" style="margin:0">
+                        <div class="card-body">
+                            <div class="row" style="justify-content:space-between;margin-bottom:8px">
+                                <span class="provider"><span class="logo xai">C</span>Copilot</span>
+                                <span class="badge">未绑定</span>
+                            </div>
+                            <div class="help" style="margin:0 0 10px">绑定后可用你的 Copilot 订阅额度经网关派单。</div>
+                            <button type="button" class="btn sm primary">绑定（OAuth 授权）</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="help" style="margin-top:10px">绑定走各产品官方 OAuth 流程，平台不接触你的账号密码；订阅凭证同样只存密文，可随时解绑。</div>
+            </div>
+        </div>
+
+        <!-- 账路说明(§2.5 区块 5)· P1〔V2-P1-6〕 -->
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">账路说明：双账路对照 <span class="stage stage-p1">P1</span></div>
+                <a href="billing.html" class="btn sm ghost">账单中的账路分列口径 →</a>
+            </div>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead><tr><th>维度</th><th><span class="badge warn">resale · 代采购转卖</span></th><th><span class="badge info">routing_fee · 仅路由服务费</span></th></tr></thead>
+                    <tbody>
+                        <tr>
+                            <td class="muted">算力费支付方向</td>
+                            <td>平台代付 provider，从你的平台 credits 扣减</td>
+                            <td>你直付 provider（用你自己的账户），平台不经手算力钱</td>
+                        </tr>
+                        <tr>
+                            <td class="muted">平台收费</td>
+                            <td>可含平台加价，计入消费</td>
+                            <td>仅路由服务费，费率随套餐、可为 0</td>
+                        </tr>
+                        <tr>
+                            <td class="muted">账单呈现</td>
+                            <td>计入「消费」流水</td>
+                            <td>单列「路由服务费」</td>
+                        </tr>
+                        <tr>
+                            <td class="muted">用量呈现</td>
+                            <td colspan="2">用量页按 billing_route 分段可分别查看（全部 · 平台 · BYOK 转卖 · BYOK 路由费）</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="../assets/app.js"></script>
+</body>
+</html>

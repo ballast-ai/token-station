@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<!--
+  产品路由: /dashboard/docs
+  详设小节: docs/design/V2页面详细设计.md §2.16 文档
+  主体阶段: V1 + P1/P2 增量（新增 SDK/错误码/模型后缀/路由控制/hint/Preset 章节）
+  说明: 静态原型。沿 v1-prototype/user/docs.html 的侧边栏目录(nav-sub)形态,
+        目录按 §2.16 章节表扩充且每章带阶段徽章;正文完整呈现「快速接入/SDK/错误码」
+        三章示例内容,其余章节保留标题+首段,截断处以 HTML 注释标注。
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>文档 · Token Station</title>
+  <script>
+  (function(){
+    try {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+  </script>
+  <link rel="stylesheet" href="../assets/dash.css">
+  <link rel="stylesheet" href="../assets/v2.css">
+  <style>
+  .lang-inline{display:inline-flex;align-items:center;gap:2px;border:1px solid var(--line,#e2e8f0);border-radius:6px;padding:2px;vertical-align:middle;}
+  .lang-inline .lang-opt{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:24px;padding:0 5px;font-size:12px;font-weight:600;color:var(--text-2,#64748b);text-decoration:none;border-radius:4px;line-height:1;}
+  .lang-inline .lang-opt:hover{color:var(--text-0,#0f172a);}
+  .lang-inline .lang-opt.active{background:var(--bg-2,#f1f5f9);color:var(--text-0,#0f172a);}
+  html[data-theme="dark"] .lang-inline{border-color:#334155;}
+  html[data-theme="dark"] .lang-inline .lang-opt:hover{color:#f1f5f9;}
+  html[data-theme="dark"] .lang-inline .lang-opt.active{background:#1e293b;color:#f1f5f9;}
+  @media (max-width:768px){ .lang-inline{display:none;} }
+  </style>
+</head>
+<body class="app">
+  <div class="shell">
+    <button class="hamburger" onclick="toggleSidebar()" aria-label="菜单">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <aside class="sidebar">
+      <a href="dashboard.html" class="brand">
+        <span class="brand-mark">T</span>
+        <span class="col" style="gap:1px;">
+          <span class="brand-name">Token Station</span>
+          <span class="brand-sub">工作区 · V2</span>
+        </span>
+      </a>
+      <nav class="nav">
+        <div class="nav-group-label">我的空间</div>
+        <a href="dashboard.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>仪表盘</a>
+        <a href="playground.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg></span>体验场</a>
+        <a href="keys.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span>API 密钥</a>
+        <a href="byok.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 7V2"/><path d="M15 7V2"/><path d="M6 13V8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4Z"/></svg></span>自带上游</a>
+        <a href="models.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg></span>模型目录</a>
+        <div class="nav-group-label">智能路由</div>
+        <a href="rules.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span>路由规则</a>
+        <a href="presets.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg></span>预设 Preset</a>
+        <a href="decisions.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg></span>决策记录</a>
+        <div class="nav-group-label">用量与账单</div>
+        <a href="usage.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>用量</a>
+        <a href="billing.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg></span>账单</a>
+        <div class="nav-group-label">组织</div>
+        <a href="org.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>组织与团队</a>
+        <a href="devices.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="8" x="5" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 18h2"/><path d="M12 18h6"/></svg></span>设备与客户端</a>
+        <div class="nav-group-label">参考</div>
+        <a href="docs.html" class="nav-item active"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>文档</a>
+        <!-- docs 页特例: 章节目录锚点(沿 v1 DOCS_TOC 形态,章节按 §2.16 扩充,每章带阶段徽章) -->
+        <div class="nav-sub" id="docs-toc">
+          <a href="#quickstart" class="nav-sub-item" data-toc-target="quickstart">快速接入 <span class="stage" style="margin-left:auto;">V1</span></a>
+          <a href="#sdk" class="nav-sub-item" data-toc-target="sdk">SDK <span class="stage stage-p1" style="margin-left:auto;">P1</span></a>
+          <a href="#error-codes" class="nav-sub-item" data-toc-target="error-codes">错误码 <span class="stage stage-p1" style="margin-left:auto;">P1</span><span class="stage stage-p4" style="margin-left:4px;">P4</span></a>
+          <a href="#model-suffix" class="nav-sub-item" data-toc-target="model-suffix">模型后缀 <span class="stage stage-p1" style="margin-left:auto;">P1</span></a>
+          <a href="#routing-control" class="nav-sub-item" data-toc-target="routing-control">路由控制 <span class="stage stage-p2" style="margin-left:auto;">P2</span></a>
+          <a href="#hint-header" class="nav-sub-item" data-toc-target="hint-header">hint header <span class="stage stage-p2" style="margin-left:auto;">P2</span></a>
+          <a href="#preset-ref" class="nav-sub-item" data-toc-target="preset-ref">Preset 引用 <span class="stage stage-p4" style="margin-left:auto;">P4</span></a>
+        </div>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="avatar xs green">D</div>
+        <div class="who">
+          <span class="who-name">dev@example.com</span>
+          <a href="#" class="who-role" style="color:var(--text-3);">退出登录</a>
+        </div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="crumbs"><span>工作区</span><span class="sep">›</span><span class="leaf">文档</span></div>
+        <div class="topbar-spacer"></div>
+        <nav class="lang-inline" aria-label="语言"><a href="#" class="lang-opt" title="English"><span class="lang-g">EN</span></a><a href="#" class="lang-opt active" aria-current="true" title="简体中文"><span class="lang-g">简</span></a><a href="#" class="lang-opt" title="繁體中文"><span class="lang-g">繁</span></a><a href="#" class="lang-opt" title="日本語"><span class="lang-g">日</span></a><a href="#" class="lang-opt" title="한국어"><span class="lang-g">한</span></a></nav>
+        <button type="button" class="theme-toggle topbar-icon" aria-label="切换主题">
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m4.93 19.07 1.41-1.41"/><path d="m17.66 6.34 1.41-1.41"/></svg>
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+        <a href="docs.html" class="topbar-icon" title="文档"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></a>
+      </header>
+      <div class="page">
+    <style>
+        .docs h2 { font-size: 18px; font-weight: 600; margin: 28px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line); letter-spacing: -0.01em; color: var(--text-0); scroll-margin-top: 64px; }
+        .docs h3 { font-size: 14px; font-weight: 600; margin: 18px 0 6px; color: var(--text-0); scroll-margin-top: 64px; }
+        .docs p { color: var(--text-2); line-height: 1.7; margin: 8px 0; }
+        .docs code { background: var(--bg-2); padding: 1px 6px; border-radius: 4px; font-size: 11.5px; border: 1px solid var(--line); color: var(--accent-hi); font-family: var(--font-mono); }
+        .docs pre { background: var(--bg-2); border: 1px solid var(--line); padding: 12px 14px; border-radius: 6px; overflow-x: auto; font-size: 11.5px; line-height: 1.6; margin: 10px 0; }
+        .docs pre code { background: none; padding: 0; color: var(--text-1); border: none; }
+        .docs table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }
+        .docs th { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); font-weight: 500; color: var(--text-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; background: var(--bg-1); }
+        .docs td { padding: 12px 14px; border-bottom: 1px solid var(--line-soft); color: var(--text-1); vertical-align: top; }
+        .docs td code { font-size: 11px; }
+        .docs strong { color: var(--text-0); font-weight: 600; }
+        .docs a { color: var(--accent-hi); }
+        .docs a:hover { color: var(--text-0); }
+    </style>
+    <div class="docs">
+    <div class="page-head">
+        <div>
+            <h1 class="page-title">文档<span class="stage-row"><span class="stage">V1</span><span class="stage stage-p1">P1</span><span class="stage stage-p2">P2</span></span></h1>
+            <div class="page-sub">Token Station API 参考。统一身份验证：<code>Authorization: Bearer gw-YOUR_KEY</code>。参见<a href="models.html">模型目录</a>与<a href="decisions.html">决策记录</a>。</div>
+        </div>
+    </div>
+
+    <h2 id="quickstart">快速接入 <span class="stage">V1</span></h2>
+    <p>把任意兼容 OpenAI 的 SDK 或 HTTP 客户端指向网关地址，改一下 <code>model</code> 字段即可切换提供商——网关自动完成格式转换与路由。</p>
+    <p>Base URL：<code>https://api.tokenstation.example/v1</code>　密钥前缀：<code>gw-</code>（在 <a href="keys.html">API 密钥</a> 页创建）</p>
+    <pre><code>curl -X POST https://api.tokenstation.example/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer gw-YOUR_KEY" \
+  -d '{
+    "model": "glm-5.2",
+    "messages": [
+      {"role": "system", "content": "You are helpful."},
+      {"role": "user", "content": "你好!"}
+    ],
+    "stream": true
+  }'</code></pre>
+    <p>把 <code>model</code> 换成 <code>claude-sonnet</code>、<code>claude-haiku</code>、<code>gpt-5-mini</code>、<code>deepseek-v4</code>，或者交给路由：填 <code>auto</code>（见<a href="#routing-control">路由控制</a>）或 <code>@acme/code-review</code>（见 <a href="#preset-ref">Preset 引用</a>）。每个响应都带 <code>X-Routed-Model</code> / <code>X-Routed-Reason</code> / <code>X-Cost</code> 三个响应头，可在<a href="decisions.html">决策记录</a>按 <code>request_id</code> 回查。</p>
+
+    <h2 id="sdk">SDK <span class="stage stage-p1">P1</span></h2>
+    <p>官方 SDK 是对 OpenAI SDK 的薄封装：预置 base_url、错误码类型化、内建路由响应头解析〔V2-P1-9〕。</p>
+    <h3>Python</h3>
+    <pre><code>pip install token-station</code></pre>
+    <pre><code>from token_station import TokenStation
+
+client = TokenStation(api_key="gw-YOUR_KEY")
+
+resp = client.chat.completions.create(
+    model="glm-5.2",
+    messages=[{"role": "user", "content": "你好!"}],
+)
+print(resp.choices[0].message.content)
+print(resp.routed_model, resp.routed_reason, resp.cost)  # 路由三件套已解析</code></pre>
+    <h3>JavaScript / TypeScript</h3>
+    <pre><code>npm install @token-station/sdk</code></pre>
+    <pre><code>import TokenStation from "@token-station/sdk";
+
+const client = new TokenStation({ apiKey: "gw-YOUR_KEY" });
+
+const resp = await client.chat.completions.create({
+  model: "claude-haiku",
+  messages: [{ role: "user", content: "你好!" }],
+});
+console.log(resp.choices[0].message.content);</code></pre>
+    <h3>直接用 OpenAI SDK</h3>
+    <pre><code>from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://api.tokenstation.example/v1",
+    api_key="gw-YOUR_KEY",
+)</code></pre>
+
+    <h2 id="error-codes">错误码 <span class="stage stage-p1">P1</span> <span class="stage stage-p4">P4</span></h2>
+    <p>所有错误响应的 <code>error</code> 对象内都有<strong>稳定的 <code>code</code></strong>（跨版本不变，供程序分支）以及 <code>request_id</code> / <code>trace_id</code>（供<a href="decisions.html">决策记录</a>与日志关联）〔V2-P1-2〕。<code>message</code> 仅供人读，不要对其做字符串匹配。</p>
+    <pre><code>HTTP/1.1 402 Payment Required
+{
+  "error": {
+    "code": "insufficient_balance",
+    "message": "余额不足,请充值后重试。",
+    "request_id": "req_01j9x7v2m3",
+    "trace_id": "tr_8f24bd01"
+  }
+}</code></pre>
+    <table>
+    <tr><th>code</th><th>HTTP</th><th>语义</th><th>建议处理</th></tr>
+    <tr><td><code>invalid_request</code></td><td>400</td><td>请求体不合法（缺字段/参数越界）</td><td>修正请求，不重试</td></tr>
+    <tr><td><code>invalid_api_key</code></td><td>401</td><td>key 不存在、已过期或已吊销</td><td>检查 <a href="keys.html">密钥</a>状态与轮换宽限期</td></tr>
+    <tr><td><code>insufficient_balance</code></td><td>402</td><td>余额不足</td><td>充值后重试</td></tr>
+    <tr><td><code>model_not_allowed</code></td><td>403</td><td>被治理策略（白/黑名单/数据策略）拒绝</td><td>联系 org admin 或换模型</td></tr>
+    <tr><td><code>budget_exceeded</code></td><td>403</td><td>任一层级预算超 hard 限额（逐层 AND）</td><td>等待周期重置或调预算</td></tr>
+    <tr><td><code>rate_limited</code></td><td>429</td><td>RPM/TPM 超限，响应带 <code>limit/remaining/reset</code> 头</td><td>按 <code>reset</code> 退避重试</td></tr>
+    <tr><td><code>upstream_unavailable</code></td><td>502</td><td>上游容量故障且 fallback 链耗尽</td><td>指数退避重试</td></tr>
+    </table>
+    <p>按 <code>code</code> 分支的示例：</p>
+    <pre><code>try:
+    resp = client.chat.completions.create(model="auto", messages=msgs)
+except TokenStationError as e:
+    if e.code == "rate_limited":
+        time.sleep(e.reset_after)      # 响应头 reset
+    elif e.code == "insufficient_balance":
+        notify_billing(e.request_id)   # 带 request_id 便于回查
+    else:
+        raise</code></pre>
+    <p><span class="stage stage-p4">P4</span> 错误文案（<code>message</code>）随 <code>Accept-Language</code> 提供五语言版本（EN/简/繁/日/韩）；<code>code</code> 恒为英文标识符，不受语言影响〔V2-P4-7〕。</p>
+
+    <h2 id="model-suffix">模型后缀 <span class="stage stage-p1">P1</span></h2>
+    <p>在模型名后追加后缀声明形态偏好：<code>glm-5.2-thinking</code>（要求思维链档）、<code>claude-sonnet-high</code>（要求高推理力度）。后缀的解析结果会写入决策记录〔V2-P1-10〕。</p>
+    <!-- [原型截断] 后缀语法全表与组合规则见 models.html 后缀语法卡;此处仅保留首段。 -->
+
+    <h2 id="routing-control">路由控制 <span class="stage stage-p2">P2</span></h2>
+    <p>请求级供给控制：<code>provider</code> 偏好（<code>order</code> / <code>only</code> / <code>ignore</code>）、<code>sort</code>（价格/吞吐/延迟）、约束参数（<code>max_price</code>、<code>require_parameters</code>、<code>quantizations</code>、<code>data_collection</code>、<code>zdr</code>），以及 <code>model: "auto"</code> 逻辑模型（①用户规则 + ②启发式的默认组合）〔V2-P2-5/6/7/11〕。</p>
+    <!-- [原型截断] 各参数字段表、auto 端点语义与 curl 示例从略;词汇与 models.html 筛选排序条一致。 -->
+
+    <h2 id="hint-header">hint header <span class="stage stage-p2">P2</span></h2>
+    <p>Agent 框架可用 <code>X-Hint-Step</code> 请求头声明步骤类型（<code>planning</code> / <code>execution</code> / <code>summarize</code> …），第②层路由据此选档；无 hint 的流量归「未声明」并走启发式打分〔V2-P2-4〕。</p>
+    <!-- [原型截断] 步骤类型枚举表与声明规范从略;用量页「步骤类型分布」区块消费同一词汇。 -->
+
+    <h2 id="preset-ref">Preset 引用 <span class="stage stage-p4">P4</span></h2>
+    <p>把 <code>model</code> 写成 <code>@preset/</code> 别名（如 <code>"model": "@acme/code-review"</code>）即引用整套「模型 + 参数 + provider 偏好 + 路由策略」，改配置不改代码，版本可回滚〔V2-P4-1〕。管理入口见<a href="presets.html">预设 Preset</a>。</p>
+    <!-- [原型截断] preset 解析优先级、版本引用与导出格式从略。 -->
+
+    </div>
+    <script>
+    (function() {
+        // 目录滚动高亮,沿 v1 docs 页脚本
+        const subItems = document.querySelectorAll('.nav-sub-item[data-toc-target]');
+        if (subItems.length === 0) return;
+        const sections = [];
+        subItems.forEach(item => {
+            const sec = document.getElementById(item.dataset.tocTarget);
+            if (sec) sections.push(sec);
+        });
+        if (sections.length === 0) return;
+
+        function updateActive() {
+            // 80px clears the 52px sticky topbar with a small reading buffer.
+            const threshold = 80;
+            let current = sections[0];
+            for (const sec of sections) {
+                if (sec.getBoundingClientRect().top <= threshold) {
+                    current = sec;
+                } else {
+                    break;
+                }
+            }
+            subItems.forEach(el => {
+                el.classList.toggle('active', el.dataset.tocTarget === current.id);
+            });
+        }
+
+        let ticking = false;
+        function onScroll() {
+            if (ticking) return;
+            ticking = true;
+            requestAnimationFrame(() => { updateActive(); ticking = false; });
+        }
+
+        window.addEventListener('scroll', onScroll, { passive: true });
+        updateActive();
+    })();
+    </script>
+      </div>
+    </main>
+  </div>
+  <script src="../assets/app.js"></script>
+</body>
+</html>

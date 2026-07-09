@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<!--
+  产品路由: GET /dashboard/presets
+  详设依据: docs/design/V2页面详细设计.md §2.8 预设 Preset
+  主体阶段: P4
+  · @preset/xxx 一个别名引用整套「模型+参数+provider 偏好+路由策略」〔V2-P4-1〕
+  · 区块: 引用示例卡 / 预设表 / 预设详情(config 四段 + 版本历史带回滚) / 与远程配置的关系(→ devices.html)
+  · 与 V2-C2-4 的边界: preset 建立在 P3 config profile 之上,客户端最小远程配置不要求 preset 别名
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>预设 Preset · Token Station</title>
+  <script>
+  (function(){
+    try {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+  </script>
+  <link rel="stylesheet" href="../assets/dash.css">
+  <link rel="stylesheet" href="../assets/v2.css">
+  <style>
+  .lang-inline{display:inline-flex;align-items:center;gap:2px;border:1px solid var(--line,#e2e8f0);border-radius:6px;padding:2px;vertical-align:middle;}
+  .lang-inline .lang-opt{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:24px;padding:0 5px;font-size:12px;font-weight:600;color:var(--text-2,#64748b);text-decoration:none;border-radius:4px;line-height:1;}
+  .lang-inline .lang-opt:hover{color:var(--text-0,#0f172a);}
+  .lang-inline .lang-opt.active{background:var(--bg-2,#f1f5f9);color:var(--text-0,#0f172a);}
+  html[data-theme="dark"] .lang-inline{border-color:#334155;}
+  html[data-theme="dark"] .lang-inline .lang-opt:hover{color:#f1f5f9;}
+  html[data-theme="dark"] .lang-inline .lang-opt.active{background:#1e293b;color:#f1f5f9;}
+  @media (max-width:768px){ .lang-inline{display:none;} }
+  </style>
+</head>
+<body class="app">
+  <div class="shell">
+    <button class="hamburger" onclick="toggleSidebar()" aria-label="菜单">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <aside class="sidebar">
+      <a href="dashboard.html" class="brand">
+        <span class="brand-mark">T</span>
+        <span class="col" style="gap:1px;">
+          <span class="brand-name">Token Station</span>
+          <span class="brand-sub">工作区 · V2</span>
+        </span>
+      </a>
+      <nav class="nav">
+        <div class="nav-group-label">我的空间</div>
+        <a href="dashboard.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>仪表盘</a>
+        <a href="playground.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg></span>体验场</a>
+        <a href="keys.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span>API 密钥</a>
+        <a href="byok.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 7V2"/><path d="M15 7V2"/><path d="M6 13V8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4Z"/></svg></span>自带上游</a>
+        <a href="models.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg></span>模型目录</a>
+        <div class="nav-group-label">智能路由</div>
+        <a href="rules.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span>路由规则</a>
+        <a href="presets.html" class="nav-item active"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg></span>预设 Preset</a>
+        <a href="decisions.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg></span>决策记录</a>
+        <div class="nav-group-label">用量与账单</div>
+        <a href="usage.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>用量</a>
+        <a href="billing.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg></span>账单</a>
+        <div class="nav-group-label">组织</div>
+        <a href="org.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>组织与团队</a>
+        <a href="devices.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="8" x="5" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 18h2"/><path d="M12 18h6"/></svg></span>设备与客户端</a>
+        <div class="nav-group-label">参考</div>
+        <a href="docs.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>文档</a>
+        <a href="settings.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span>设置</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="avatar xs green">D</div>
+        <div class="who">
+          <span class="who-name">dev@example.com</span>
+          <a href="#" class="who-role" style="color:var(--text-3);">退出登录</a>
+        </div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="crumbs"><span>工作区</span><span class="sep">›</span><span class="leaf">预设 Preset</span></div>
+        <div class="topbar-spacer"></div>
+        <nav class="lang-inline" aria-label="语言"><a href="#" class="lang-opt" title="English"><span class="lang-g">EN</span></a><a href="#" class="lang-opt active" aria-current="true" title="简体中文"><span class="lang-g">简</span></a><a href="#" class="lang-opt" title="繁體中文"><span class="lang-g">繁</span></a><a href="#" class="lang-opt" title="日本語"><span class="lang-g">日</span></a><a href="#" class="lang-opt" title="한국어"><span class="lang-g">한</span></a></nav>
+        <button type="button" class="theme-toggle topbar-icon" aria-label="切换主题">
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m4.93 19.07 1.41-1.41"/><path d="m17.66 6.34 1.41-1.41"/></svg>
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+        <a href="docs.html" class="topbar-icon" title="文档"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></a>
+      </header>
+      <div class="page">
+        <div class="page-head">
+            <div>
+                <h1 class="page-title">预设 Preset<span class="stage-row"><span class="stage stage-p4">P4</span></span></h1>
+                <div class="page-sub">一个 <span class="codeline">@preset/xxx</span> 别名引用整套「模型 + 生成参数 + provider 偏好 + 路由策略」——改配置不改代码。</div>
+            </div>
+            <div class="page-actions"><button type="button" class="btn primary" onclick="return false">新建预设</button></div>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">引用示例 <span class="stage stage-p4">P4</span></div>
+                <button type="button" class="btn sm" onclick="return false">复制</button>
+            </div>
+            <div class="card-body">
+                <div class="key-display">{ "model": "@acme/code-review", "messages": [...] }</div>
+                <div class="help" style="margin-top:8px">在任意兼容 OpenAI 的 SDK 中，把 <span class="codeline">model</span> 字段写成预设别名即可。团队改动预设配置（换模型、调参数、改路由策略）后<strong>所有引用方立即生效，无需改一行代码、无需重新发版</strong>。</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">预设表 <span class="stage stage-p4">P4</span></div>
+                <span class="muted" style="font-size:11px">共 4 个 · 行点击展开详情</span>
+            </div>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead><tr><th>@scope/name</th><th>scope</th><th>当前版本</th><th>套餐门槛</th><th>更新时间</th><th>操作</th></tr></thead>
+                    <tbody>
+                        <tr style="background:var(--bg-2)">
+                            <td><span class="codeline">@acme/code-review</span> <span class="muted" style="font-size:10.5px">▾ 已展开</span></td>
+                            <td><span class="badge accent">org · Acme</span></td>
+                            <td><span class="badge">v7</span></td>
+                            <td><span class="badge warn">min_plan: Pro</span></td>
+                            <td class="num muted">2026-07-07 18:22</td>
+                            <td><div class="row"><button type="button" class="btn sm" onclick="return false">编辑</button><button type="button" class="btn sm" onclick="return false">导出 JSON</button><button type="button" class="btn sm danger" onclick="return false">删除</button></div></td>
+                        </tr>
+                        <tr>
+                            <td><span class="codeline">@acme/agent-cheap</span></td>
+                            <td><span class="badge accent">org · Acme</span></td>
+                            <td><span class="badge">v3</span></td>
+                            <td><span class="badge">min_plan: Free</span></td>
+                            <td class="num muted">2026-07-05 11:03</td>
+                            <td><div class="row"><button type="button" class="btn sm" onclick="return false">编辑</button><button type="button" class="btn sm" onclick="return false">导出 JSON</button><button type="button" class="btn sm danger" onclick="return false">删除</button></div></td>
+                        </tr>
+                        <tr>
+                            <td><span class="codeline">@acme/infra-team/summarize</span></td>
+                            <td><span class="badge">team · 推理平台组</span></td>
+                            <td><span class="badge">v2</span></td>
+                            <td><span class="badge">min_plan: Free</span></td>
+                            <td class="num muted">2026-07-02 09:47</td>
+                            <td><div class="row"><button type="button" class="btn sm" onclick="return false">编辑</button><button type="button" class="btn sm" onclick="return false">导出 JSON</button><button type="button" class="btn sm danger" onclick="return false">删除</button></div></td>
+                        </tr>
+                        <tr>
+                            <td><span class="codeline">@preset/chat-default</span></td>
+                            <td><span class="badge info">平台公共</span></td>
+                            <td><span class="badge">v12</span></td>
+                            <td><span class="badge">min_plan: Free</span></td>
+                            <td class="num muted">2026-06-30 16:10</td>
+                            <td><span class="muted" style="font-size:11px">只读（平台维护）</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">预设详情 — <span class="codeline">@acme/code-review</span> · v7 <span class="stage stage-p4">P4</span></div>
+                <div class="row"><button type="button" class="btn sm" onclick="return false">导出 JSON</button><span class="muted" style="font-size:11px">〔V2-P4-1〕</span></div>
+            </div>
+            <div class="card-body">
+                <div class="grid-2">
+                    <div class="card">
+                        <div class="card-head"><div class="card-title">① 默认模型</div></div>
+                        <div class="card-body">
+                            <div class="row" style="justify-content:space-between"><span class="provider"><span class="logo anthropic">A</span>claude-sonnet</span><span class="badge accent">主选</span></div>
+                            <div class="help" style="margin-top:8px">兜底池：quality（claude-sonnet → glm-5.2）</div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-head"><div class="card-title">② 生成参数</div></div>
+                        <div class="card-body">
+                            <div class="row" style="gap:6px;flex-wrap:wrap">
+                                <span class="badge">temperature: 0.2</span>
+                                <span class="badge">max_tokens: 4096</span>
+                                <span class="badge">top_p: 0.9</span>
+                                <span class="badge">stop: ["&lt;/review&gt;"]</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-head"><div class="card-title">③ provider 偏好</div></div>
+                        <div class="card-body">
+                            <div class="row" style="gap:8px;flex-wrap:wrap">
+                                <span class="provider"><span class="logo anthropic">A</span>anthropic 直连</span>
+                                <span class="muted">→</span>
+                                <span class="provider"><span class="logo glm">G</span>glm 备选</span>
+                            </div>
+                            <div class="help" style="margin-top:8px">供给侧健康 / 约束过滤仍然生效，偏好仅影响候选排序。</div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-head"><div class="card-title">④ 路由策略（内嵌规则）</div></div>
+                        <div class="card-body">
+                            <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:6px"><span class="badge">token ≥ 8,000</span><span class="muted">→</span><span class="provider"><span class="logo anthropic">A</span>claude-sonnet</span></div>
+                            <div class="row" style="gap:6px;flex-wrap:wrap"><span class="badge">diff 行数 &lt; 80</span><span class="muted">→</span><span class="provider"><span class="logo anthropic">A</span>claude-haiku</span></div>
+                            <div class="help" style="margin-top:8px">内嵌规则仅对引用本预设的请求生效，优先级低于<a href="rules.html">路由规则</a>页的用户级规则。</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-top:4px">
+                    <div class="card-head">
+                        <div class="card-title">版本历史</div>
+                        <span class="muted" style="font-size:11px">回滚 = current_version_id 指回该版本，不产生新版本号</span>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="table">
+                            <thead><tr><th>version</th><th>修改人</th><th>时间</th><th>变更说明</th><th>操作</th></tr></thead>
+                            <tbody>
+                                <tr>
+                                    <td><span class="badge accent">v7 · 当前</span></td>
+                                    <td>dev@example.com</td>
+                                    <td class="num muted">2026-07-07 18:22</td>
+                                    <td class="muted">temperature 0.3 → 0.2；provider 备选 openai → glm</td>
+                                    <td><span class="muted" style="font-size:11px">—</span></td>
+                                </tr>
+                                <tr>
+                                    <td><span class="badge">v6</span></td>
+                                    <td>ops@acme.dev</td>
+                                    <td class="num muted">2026-07-03 10:15</td>
+                                    <td class="muted">内嵌规则新增「diff 行数 &lt; 80 → claude-haiku」</td>
+                                    <td><button type="button" class="btn sm" onclick="return false">回滚到此版</button></td>
+                                </tr>
+                                <tr>
+                                    <td><span class="badge">v5</span></td>
+                                    <td>dev@example.com</td>
+                                    <td class="num muted">2026-06-28 14:40</td>
+                                    <td class="muted">max_tokens 2048 → 4096</td>
+                                    <td><button type="button" class="btn sm" onclick="return false">回滚到此版</button></td>
+                                </tr>
+                                <tr>
+                                    <td><span class="badge">v4</span></td>
+                                    <td>ops@acme.dev</td>
+                                    <td class="num muted">2026-06-20 09:02</td>
+                                    <td class="muted">默认模型 glm-5.2 → claude-sonnet</td>
+                                    <td><button type="button" class="btn sm" onclick="return false">回滚到此版</button></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">与远程配置的关系 <span class="stage stage-p4">P4</span></div>
+            </div>
+            <div class="card-body">
+                <p style="font-size:12.5px;color:var(--text-1);margin:0 0 8px">预设建立在 P3 的 <strong>config profile（远程配置）</strong>之上：profile 解决「客户端从云端拉哪套连接配置」，preset 解决「一个别名代表哪套模型策略」。两者独立演进——</p>
+                <div class="list-row" style="padding-left:0"><span class="badge info">C2</span><span style="font-size:12px;color:var(--text-2)">本地客户端的<strong>最小远程配置不要求 preset 别名</strong>：只拉 profile 里的网关地址与凭证引用名即可跑通（BYOK key 永不上传，只存本地）。</span></div>
+                <div class="list-row" style="padding-left:0"><span class="badge accent">P4</span><span style="font-size:12px;color:var(--text-2)">客户端若在请求里引用 <span class="codeline">@acme/code-review</span>，别名在<strong>网关侧</strong>解析为当前版本配置，客户端无感知版本变化。</span></div>
+                <div style="margin-top:10px"><a href="devices.html" class="btn sm">查看设备与客户端 · 远程配置卡 →</a></div>
+            </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="../assets/app.js"></script>
+</body>
+</html>

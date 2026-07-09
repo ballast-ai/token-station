@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<!--
+  产品路由: GET /admin/orgs — 管理后台 · 组织列表
+  详设依据: docs/design/V2页面详细设计.md §3.5
+  主体阶段: P3 ★新 — 多租户重构(org→team),吸收 V1 admin/teams.html 的入口职责〔V2-P3-1〕
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>组织 · Token Station Admin</title>
+  <script>
+  (function(){
+    try {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+  </script>
+  <link rel="stylesheet" href="../assets/dash.css">
+  <link rel="stylesheet" href="../assets/v2.css">
+  <style>
+  .lang-inline{display:inline-flex;align-items:center;gap:2px;border:1px solid var(--line,#e2e8f0);border-radius:6px;padding:2px;vertical-align:middle;}
+  .lang-inline .lang-opt{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:24px;padding:0 5px;font-size:12px;font-weight:600;color:var(--text-2,#64748b);text-decoration:none;border-radius:4px;line-height:1;}
+  .lang-inline .lang-opt:hover{color:var(--text-0,#0f172a);}
+  .lang-inline .lang-opt.active{background:var(--bg-2,#f1f5f9);color:var(--text-0,#0f172a);}
+  html[data-theme="dark"] .lang-inline{border-color:#334155;}
+  html[data-theme="dark"] .lang-inline .lang-opt:hover{color:#f1f5f9;}
+  html[data-theme="dark"] .lang-inline .lang-opt.active{background:#1e293b;color:#f1f5f9;}
+  @media (max-width:768px){ .lang-inline{display:none;} }
+  </style>
+</head>
+<body class="app">
+  <div class="shell">
+    <button class="hamburger" onclick="toggleSidebar()" aria-label="菜单">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <aside class="sidebar">
+      <a href="overview.html" class="brand">
+        <span class="brand-mark">A</span>
+        <span class="col" style="gap:1px;">
+          <span class="brand-name">管理后台</span>
+          <span class="brand-sub">Token Station · V2</span>
+        </span>
+      </a>
+      <nav class="nav">
+        <div class="nav-group-label">运营</div>
+        <a href="overview.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span>概览</a>
+        <a href="logs.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/></svg></span>请求日志</a>
+        <a href="plans.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/></svg></span>套餐与计费</a>
+        <a href="credits.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg></span>额度</a>
+        <div class="nav-group-label">租户</div>
+        <a href="orgs.html" class="nav-item active"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/></svg></span>组织</a>
+        <a href="users.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>用户</a>
+        <a href="audit.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg></span>审计日志</a>
+        <div class="nav-group-label">路由</div>
+        <a href="providers.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 7V2"/><path d="M15 7V2"/><path d="M6 13V8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4Z"/></svg></span>提供商</a>
+        <a href="models.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>模型</a>
+        <a href="routing.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg></span>供给路由</a>
+        <a href="smart-routing.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg></span>智能路由</a>
+        <a href="flywheel.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg></span>数据飞轮</a>
+        <div class="nav-group-label">平台</div>
+        <a href="licenses.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="6"/><path d="M15.477 12.89 17 22l-5-3-5 3 1.523-9.11"/></svg></span>License</a>
+        <a href="releases.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span>客户端发布</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="avatar xs purple">A</div>
+        <div class="who">
+          <span class="who-name">平台管理员</span>
+          <a href="#" class="who-role" style="color:var(--text-3);">退出登录</a>
+        </div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="crumbs"><span>管理后台</span><span class="sep">›</span><span class="leaf">组织</span></div>
+        <div class="topbar-spacer"></div>
+        <nav class="lang-inline" aria-label="语言"><a href="#" class="lang-opt" title="English"><span class="lang-g">EN</span></a><a href="#" class="lang-opt active" aria-current="true" title="简体中文"><span class="lang-g">简</span></a><a href="#" class="lang-opt" title="繁體中文"><span class="lang-g">繁</span></a><a href="#" class="lang-opt" title="日本語"><span class="lang-g">日</span></a><a href="#" class="lang-opt" title="한국어"><span class="lang-g">한</span></a></nav>
+        <button type="button" class="theme-toggle topbar-icon" aria-label="切换主题">
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m4.93 19.07 1.41-1.41"/><path d="m17.66 6.34 1.41-1.41"/></svg>
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+      </header>
+      <div class="page">
+        <div class="page-head">
+    <div>
+        <h1 class="page-title">组织<span class="stage-row"><span class="stage stage-p3">P3</span></span></h1>
+        <div class="page-sub">共 2 个组织 · 4 名成员 · 2 个团队 · 本页吸收 V1「团队」页入口职责，团队降为组织内层级〔V2-P3-1〕</div>
+    </div>
+    <div class="page-actions"><a href="#new-org" class="btn primary">+ 新建组织</a></div>
+</div>
+
+<div class="card">
+    <div class="card-head">
+        <div class="card-title">组织列表<span class="stage-row"><span class="stage stage-p3">P3</span></span></div>
+        <form method="get" action="#" class="row" style="gap:6px">
+            <select name="plan" class="input" style="width:140px; padding:5px 10px"><option value="">所有套餐</option><option value="free">Free</option><option value="pro">Pro</option><option value="team">Team</option></select>
+            <input type="text" name="q" value="" placeholder="按组织名搜索…" class="input" style="width:200px; padding:5px 10px">
+            <button type="submit" class="btn sm">搜索</button>
+        </form>
+    </div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>组织</th>
+                    <th>成员数</th>
+                    <th>团队数</th>
+                    <th>订阅套餐</th>
+                    <th>本期花费</th>
+                    <th style="min-width:180px">预算水位</th>
+                    <th>创建时间</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>
+                        <a href="org-detail.html" class="row" style="gap:10px; align-items:center; color:var(--text-0); text-decoration:none">
+                            <span class="avatar xs purple">A</span>
+                            <span>Acme</span>
+                        </a>
+                    </td>
+                    <td class="num">3</td>
+                    <td class="num">2</td>
+                    <td><span class="badge accent">Team</span></td>
+                    <td class="num">$486.20</td>
+                    <td>
+                        <div class="between" style="margin-bottom:4px"><span class="num muted" style="font-size:11px">$486.20 / $800.00</span><span class="num muted" style="font-size:11px">61%</span></div>
+                        <div class="bar"><div class="bar-fill" style="width:61%"></div></div>
+                    </td>
+                    <td class="num muted">2026-04-02</td>
+                    <td><a class="btn sm" href="org-detail.html">管理 ›</a></td>
+                </tr>
+                <tr>
+                    <td>
+                        <a href="org-detail.html" class="row" style="gap:10px; align-items:center; color:var(--text-0); text-decoration:none">
+                            <span class="avatar xs cyan">B</span>
+                            <span>Beta Lab</span>
+                        </a>
+                    </td>
+                    <td class="num">1</td>
+                    <td class="num">1</td>
+                    <td><span class="badge">Pro</span></td>
+                    <td class="num">$42.75</td>
+                    <td>
+                        <div class="between" style="margin-bottom:4px"><span class="num muted" style="font-size:11px">$42.75 / 未设置预算</span><span class="num muted" style="font-size:11px">—</span></div>
+                        <div class="bar"><div class="bar-fill" style="width:0%"></div></div>
+                    </td>
+                    <td class="num muted">2026-05-20</td>
+                    <td><a class="btn sm" href="org-detail.html">管理 ›</a></td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card" id="new-org">
+    <div class="card-head"><div class="card-title">新建组织<span class="stage-row"><span class="stage stage-p3">P3</span></span></div></div>
+    <div class="card-body">
+        <form method="post" action="#" class="row" style="align-items:flex-end; gap:10px; flex-wrap:wrap">
+            <div class="field" style="flex:1; min-width:220px; margin-bottom:0">
+                <label class="label" for="new-org-name">组织名称</label>
+                <input type="text" id="new-org-name" name="name" required class="input" placeholder="Acme">
+            </div>
+            <div class="field" style="min-width:240px; margin-bottom:0">
+                <label class="label" for="new-org-owner">Owner 邮箱（组织管理员）</label>
+                <input type="email" id="new-org-owner" name="owner_email" required class="input" placeholder="admin@acme.dev">
+            </div>
+            <button type="submit" class="btn primary">创建</button>
+        </form>
+        <p class="muted" style="font-size:11.5px;margin-top:10px;margin-bottom:0">创建后可在组织详情页管理团队、成员、层级预算、治理策略与租户路由；订阅套餐在「套餐与计费」页绑定。</p>
+    </div>
+</div>
+      </div>
+    </main>
+  </div>
+  <script src="../assets/app.js"></script>
+</body>
+</html>

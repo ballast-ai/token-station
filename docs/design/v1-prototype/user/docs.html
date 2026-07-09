@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<!--
+  路由: /dashboard/docs
+  还原依据: src/templates/docs.rs docs_page() + docs_body-zh-cn.html(官方简中正文,直接取用)
+           + layout.rs dash_layout_authed() / dash_sidebar_user() + DOCS_TOC(nav-sub 目录)
+  文案来源: docs_body-zh-cn.html 本身 + src/i18n/zh-CN.json(目录标签)
+  说明: 静态原型 — 前两章(通用端点/聊天补全)完整保留;图像生成保留主干;
+        其余章节保留标题+首段/代表性内容,截断处以 HTML 注释标注。
+        正文尾部的 copy-as-markdown + 目录滚动高亮脚本按源码完整保留。
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>文档 · Token Station</title>
+  <script>
+  (function(){
+    try {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+  </script>
+  <link rel="stylesheet" href="../assets/dash.css">
+  <style>
+  /* lang_toggle 样式,照搬 layout.rs */
+  .lang-inline{display:inline-flex;align-items:center;gap:2px;border:1px solid var(--line,#e2e8f0);border-radius:6px;padding:2px;vertical-align:middle;}
+  .lang-inline .lang-opt{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:24px;padding:0 5px;font-size:12px;font-weight:600;color:var(--text-2,#64748b);text-decoration:none;border-radius:4px;line-height:1;}
+  .lang-inline .lang-opt:hover{color:var(--text-0,#0f172a);}
+  .lang-inline .lang-opt.active{background:var(--bg-2,#f1f5f9);color:var(--text-0,#0f172a);}
+  html[data-theme="dark"] .lang-inline{border-color:#334155;}
+  html[data-theme="dark"] .lang-inline .lang-opt:hover{color:#f1f5f9;}
+  html[data-theme="dark"] .lang-inline .lang-opt.active{background:#1e293b;color:#f1f5f9;}
+  @media (max-width:768px){ .lang-inline{display:none;} }
+  </style>
+</head>
+<body class="app">
+  <div class="shell">
+    <button class="hamburger" onclick="toggleSidebar()" aria-label="菜单">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <aside class="sidebar">
+      <a href="dashboard.html" class="brand">
+        <span class="brand-mark">T</span>
+        <span class="col" style="gap:1px;">
+          <span class="brand-name">Token Station</span>
+          <span class="brand-sub">工作区</span>
+        </span>
+      </a>
+      <nav class="nav">
+        <div class="nav-group-label">我的空间</div>
+        <a href="dashboard.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>仪表盘</a>
+        <a href="playground.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg></span>体验场</a>
+        <a href="keys.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span>API 密钥</a>
+        <a href="models.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg></span>模型</a>
+        <a href="usage.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>用量</a>
+        <a href="profile.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>构建者画像</a>
+        <a href="billing.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg></span>账单</a>
+        <div class="nav-group-label">参考</div>
+        <a href="docs.html" class="nav-item active"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>文档</a>
+        <!-- docs 页特例: DOCS_TOC 目录锚点(layout.rs dash_sidebar_user, active_page=="docs" 分支) -->
+        <div class="nav-sub" id="docs-toc">
+          <a href="#universal-endpoints" class="nav-sub-item" data-toc-target="universal-endpoints">通用端点</a>
+          <a href="#chat-completions" class="nav-sub-item" data-toc-target="chat-completions">聊天补全</a>
+          <a href="#image-generation" class="nav-sub-item" data-toc-target="image-generation">图像生成</a>
+          <a href="#video-generation" class="nav-sub-item" data-toc-target="video-generation">视频生成</a>
+          <a href="#audio" class="nav-sub-item" data-toc-target="audio">音频</a>
+          <a href="#vision-and-video-understanding" class="nav-sub-item" data-toc-target="vision-and-video-understanding">视觉与视频</a>
+          <a href="#provider-native-endpoints" class="nav-sub-item" data-toc-target="provider-native-endpoints">提供商原生</a>
+          <a href="#wasm-middleware" class="nav-sub-item" data-toc-target="wasm-middleware">WASM 中间件</a>
+          <a href="#authentication" class="nav-sub-item" data-toc-target="authentication">身份验证</a>
+          <a href="#json-api" class="nav-sub-item" data-toc-target="json-api">JSON API</a>
+        </div>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="avatar xs green">D</div>
+        <div class="who">
+          <span class="who-name">dev@example.com</span>
+          <a href="#" class="who-role" style="color:var(--text-3);">退出登录</a>
+        </div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="crumbs"><span>工作区</span><span class="sep">›</span><span class="leaf">文档</span></div>
+        <div class="topbar-spacer"></div>
+        <nav class="lang-inline" aria-label="语言"><a href="#" class="lang-opt" title="English"><span class="lang-g">EN</span></a><a href="#" class="lang-opt active" aria-current="true" title="简体中文"><span class="lang-g">简</span></a><a href="#" class="lang-opt" title="繁體中文"><span class="lang-g">繁</span></a><a href="#" class="lang-opt" title="日本語"><span class="lang-g">日</span></a><a href="#" class="lang-opt" title="한국어"><span class="lang-g">한</span></a></nav>
+        <button type="button" class="theme-toggle topbar-icon" aria-label="切换主题">
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m4.93 19.07 1.41-1.41"/><path d="m17.66 6.34 1.41-1.41"/></svg>
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+        <a href="docs.html" class="topbar-icon" title="文档"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></a>
+      </header>
+      <div class="page">
+        <!-- ↓ 正文取自 docs_body-zh-cn.html -->
+    <style>
+        .docs-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+        .docs-head-copy { min-width: 0; }
+        .docs h1.page-title { margin-bottom: 0; }
+        .docs h2 { font-size: 18px; font-weight: 600; margin: 28px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line); letter-spacing: -0.01em; color: var(--text-0); scroll-margin-top: 64px; }
+        .docs h3 { font-size: 14px; font-weight: 600; margin: 18px 0 6px; color: var(--text-0); scroll-margin-top: 64px; }
+        .docs p { color: var(--text-2); line-height: 1.7; margin: 8px 0; }
+        .docs code { background: var(--bg-2); padding: 1px 6px; border-radius: 4px; font-size: 11.5px; border: 1px solid var(--line); color: var(--accent-hi); font-family: var(--font-mono); }
+        .docs pre { background: var(--bg-2); border: 1px solid var(--line); padding: 12px 14px; border-radius: 6px; overflow-x: auto; font-size: 11.5px; line-height: 1.6; margin: 10px 0; }
+        .docs pre code { background: none; padding: 0; color: var(--text-1); border: none; }
+        .docs table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }
+        .docs th { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); font-weight: 500; color: var(--text-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; background: var(--bg-1); }
+        .docs td { padding: 12px 14px; border-bottom: 1px solid var(--line-soft); color: var(--text-1); vertical-align: top; }
+        .docs td code { font-size: 11px; }
+        .docs strong { color: var(--text-0); font-weight: 600; }
+        .docs a { color: var(--accent-hi); }
+        .docs a:hover { color: var(--text-0); }
+        .docs-copy-btn { flex: none; white-space: nowrap; }
+        .docs-copy-btn svg { width: 14px; height: 14px; flex: none; }
+        .docs-copy-btn[data-copy-state="copied"] { border-color: rgba(16,185,129,0.35); color: #6ee7b7; background: var(--ok-soft); }
+        .docs-copy-btn[data-copy-state="error"] { border-color: rgba(239,68,68,0.35); color: #fca5a5; background: var(--err-soft); }
+        @media (max-width: 720px) {
+            .docs-head { flex-direction: column; align-items: stretch; }
+            .docs-copy-btn { width: 100%; }
+        }
+    </style>
+    <div class="docs" data-docs-copy-root>
+    <div class="docs-head">
+        <div class="docs-head-copy">
+            <h1 class="page-title">文档</h1>
+            <p>Token Station 的完整 API 参考。所有端点采用统一的身份验证方式：<code>Authorization: Bearer gw-YOUR_KEY</code>。参见<a href="models.html">所有支持的模型</a>。</p>
+        </div>
+        <button type="button" class="btn docs-copy-btn" data-copy-docs data-copy-ignore aria-label="Copy documentation as Markdown for LLMs" title="Copy documentation as Markdown for LLMs">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="8" y="8" width="12" height="12" rx="2"></rect>
+                <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>
+            </svg>
+            <span data-copy-label>复制为 LLM 格式</span>
+        </button>
+    </div>
+
+    <h2 id="universal-endpoints">通用端点（兼容 OpenAI）</h2>
+    <p>这些端点接受 OpenAI 格式的请求，适用于<strong>所有提供商</strong>。只需修改 <code>model</code> 字段即可切换提供商——网关会自动完成格式转换。</p>
+
+    <p>以下三个端点对所有 LLM 提供商通用。先列出 OpenAI 风格的端点，再列出对应的 Anthropic 端点：</p>
+    <table>
+    <tr><th>端点</th><th>方法</th><th>描述</th></tr>
+    <tr><td><code>/v1/chat/completions</code></td><td>POST</td><td>OpenAI Chat Completions——适用于所有 LLM 提供商，支持流式响应。</td></tr>
+    <tr><td><code>/v1/responses</code></td><td>POST</td><td>OpenAI Responses API——<strong>无状态</strong>模式适用于所有 LLM 提供商。<strong>有状态</strong>的推理连续性（跨轮次保留的 <code>encrypted_content</code> / Anthropic thinking 块）仅在原生支持该特性的提供商上有效——请在<a href="models.html">模型列表</a>中查看 <span class="badge info">Stateful</span> 标记。</td></tr>
+    <tr><td><code>/v1/messages</code></td><td>POST</td><td>Anthropic Messages API——适用于所有 LLM 提供商。Anthropic 与 Claude Code 的原生流量按字节原样透传；其他提供商的流量经转换后以 Anthropic SSE 形式返回。</td></tr>
+    <tr><td><code>/v1/images/generations</code></td><td>POST</td><td>图像生成——OpenAI DALL-E、Gemini Imagen、xAI Grok、Bailian Wan 2.7、MiniMax image-01</td></tr>
+    <tr><td><code>/v1/video/generations</code></td><td>POST</td><td>视频生成——Gemini Veo、Kling、Bailian Wan、BytePlus Seedance、MiniMax Hailuo、xAI Grok</td></tr>
+    <tr><td><code>/v1/audio/speech</code></td><td>POST</td><td>文本转语音——OpenAI、Groq、xAI、MiMo、Bailian Qwen3-TTS、MiniMax Speech</td></tr>
+    <tr><td><code>/v1/audio/transcriptions</code></td><td>POST</td><td>音频转录——OpenAI、Groq、ElevenLabs</td></tr>
+    <tr><td><code>/v1/audio/translations</code></td><td>POST</td><td>音频翻译——OpenAI、Groq</td></tr>
+    <tr><td><code>/v1/music/generations</code></td><td>POST</td><td>音乐生成——MiniMax music-2.6（完整歌曲 / 纯器乐）</td></tr>
+    </table>
+
+    <h2 id="chat-completions">聊天补全</h2>
+    <p>适用于所有 LLM 提供商。设置 <code>"stream": true</code> 即可启用流式响应。</p>
+    <pre><code>curl -X POST http://GATEWAY/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer gw-YOUR_KEY" \
+  -d '{
+    "model": "openai/gpt-5.4",
+    "messages": [
+      {"role": "system", "content": "You are helpful."},
+      {"role": "user", "content": "Hello!"}
+    ],
+    "max_completion_tokens": 1024,
+    "stream": true
+  }'</code></pre>
+    <p>更改模型名称即可切换提供商：</p>
+    <table>
+    <tr><th>提供商</th><th>示例模型</th></tr>
+    <tr><td>OpenAI</td><td><code>openai/gpt-5.4</code>, <code>openai/gpt-5.4-mini</code>, <code>openai/o3</code></td></tr>
+    <tr><td>Anthropic</td><td><code>anthropic/claude-opus-4-6</code>, <code>anthropic/claude-sonnet-4-6</code></td></tr>
+    <tr><td>Google Gemini</td><td><code>gemini/gemini-3.1-pro-preview</code>, <code>gemini/gemini-3.5-flash</code>, <code>gemini/gemini-2.5-flash</code></td></tr>
+    <tr><td>xAI Grok</td><td><code>xai/grok-4.20</code>, <code>xai/grok-build-0.1</code></td></tr>
+    <tr><td>Groq</td><td><code>groq/llama-4-scout</code>, <code>groq/gpt-oss-20b</code></td></tr>
+    <tr><td>Alibaba Bailian</td><td><code>bailian/qwen3.7-plus</code>, <code>bailian/qwen3-coder-next</code></td></tr>
+    <tr><td>Zhipu GLM</td><td><code>glm/glm-5</code>, <code>glm/glm-5-turbo</code></td></tr>
+    <tr><td>Zhipu GLM Coding</td><td><code>glm-coding/glm-5.2</code>, <code>glm-coding/glm-5.1</code></td></tr>
+    <tr><td>Moonshot Kimi</td><td><code>kimi/kimi-k2.7-code</code>, <code>kimi/kimi-k2.6</code>, <code>kimi/kimi-k2.5</code></td></tr>
+    <tr><td>MiniMax</td><td><code>minimax/MiniMax-M2.7</code>, <code>minimax/MiniMax-M2.5</code></td></tr>
+    <tr><td>NVIDIA NIM</td><td><code>nvidia-nim/llama-3.3-70b-instruct</code>, <code>nvidia-nim/nemotron-3-super-120b-a12b</code></td></tr>
+    </table>
+    <p>Anthropic、Gemini 和 GLM 的请求会在 OpenAI 格式与各提供商的原生格式之间自动双向转换——流式响应同样支持。</p>
+
+    <h2 id="image-generation">图像生成</h2>
+    <pre><code>curl -X POST http://GATEWAY/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer gw-YOUR_KEY" \
+  -d '{
+    "model": "openai/gpt-image-1.5",
+    "prompt": "A sunset over mountains",
+    "n": 1,
+    "size": "1024x1024"
+  }'</code></pre>
+    <p>支持的模型：<code>openai/dall-e-3</code>、<code>openai/gpt-image-2</code>、<code>openai/gpt-image-1.5</code>、<code>gemini/imagen-4.0-generate-001</code>、<code>xai/grok-imagine-image</code>、<code>bailian/wan2.7-image</code>、<code>bailian/wan2.7-image-pro</code>、<code>bailian/qwen-image</code>、<code>bailian/qwen-image-max</code>、<code>bailian/qwen-image-edit</code>、<code>bailian/qwen-image-edit-plus</code>、<code>minimax/image-01</code></p>
+    <p>MiniMax <code>image-01</code>（按宽高比生成；附加 <code>subject_reference</code> 数组或 <code>image_url</code> 即可实现角色一致性生成）：</p>
+    <pre><code>curl -X POST http://GATEWAY/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer gw-YOUR_KEY" \
+  -d '{
+    "model": "minimax/image-01",
+    "prompt": "a red panda sipping tea, studio lighting",
+    "aspect_ratio": "1:1",
+    "n": 1
+  }'</code></pre>
+    <!-- [原型截断] 此处省略「图像生成」的三个 h3 小节:
+         Alibaba Bailian Wan 2.7 Image / Alibaba Bailian Qwen-Image /
+         通过 Codex 订阅进行图像生成 (gpt-image-2)。
+         完整内容见 docs_body-zh-cn.html 第 113-234 行。 -->
+
+    <h2 id="video-generation">视频生成</h2>
+    <p>统一的 <code>/v1/video/generations</code> 端点在内部完成异步轮询——只需发送一次请求，视频就绪后即可拿到视频 URL。适用于所有视频提供商。</p>
+    <!-- [原型截断] 此处省略「视频生成」的各提供商 h3 小节:
+         Gemini Veo / Kling / Bailian Wan / BytePlus Seedance / MiniMax Hailuo / xAI Grok 等。
+         完整内容见 docs_body-zh-cn.html 第 239-430 行。 -->
+
+    <h2 id="audio">音频</h2>
+    <h3>TTS（文本转语音）</h3>
+    <pre><code># OpenAI TTS
+curl -X POST http://GATEWAY/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer gw-YOUR_KEY" \
+  -d '{
+    "model": "openai/tts-1",
+    "input": "Hello, world!",
+    "voice": "alloy"
+  }' --output speech.mp3
+
+# Bailian Qwen3-TTS (returns wav)
+curl -X POST http://GATEWAY/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer gw-YOUR_KEY" \
+  -d '{
+    "model": "bailian/qwen3-tts-flash",
+    "input": "Hello, world!",
+    "voice": "Cherry"
+  }' --output speech.wav
+
+# MiniMax Speech (mp3 by default; wav/flac/pcm via response_format)
+curl -X POST http://GATEWAY/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer gw-YOUR_KEY" \
+  -d '{
+    "model": "minimax/speech-2.6-turbo",
+    "input": "Hello, world!",
+    "voice": "Wise_Woman",
+    "response_format": "wav"
+  }' --output speech.wav</code></pre>
+    <p>OpenAI：<code>openai/tts-1</code>、<code>openai/tts-1-hd</code>、<code>openai/gpt-4o-mini-tts</code></p>
+    <p>Groq：<code>groq/orpheus-v1-english</code>、<code>groq/orpheus-arabic-saudi</code></p>
+    <p>Bailian：<code>bailian/qwen3-tts-flash</code>、<code>bailian/qwen3-tts-instruct-flash</code>（音色：Cherry、Ethan、Serena 等——OpenAI 音色名称会统一映射为 Cherry）</p>
+    <p>MiniMax：<code>minimax/speech-2.8-hd</code>、<code>-2.8-turbo</code>、<code>-2.6-hd</code>、<code>-2.6-turbo</code>、<code>-02-hd</code>、<code>-02-turbo</code>（音色：Wise_Woman、English_Graceful_Lady 等——OpenAI 音色名称会统一映射为 Wise_Woman；mp3/wav/flac/pcm）</p>
+
+    <h3>ASR（转录）</h3>
+    <pre><code>curl -X POST http://GATEWAY/v1/audio/transcriptions \
+  -H "Authorization: Bearer gw-YOUR_KEY" \
+  -F file=@audio.mp3 \
+  -F model=openai/gpt-4o-transcribe</code></pre>
+    <p>OpenAI：<code>openai/gpt-4o-transcribe</code>、<code>openai/gpt-4o-mini-transcribe</code>、<code>openai/gpt-4o-transcribe-diarize</code>、<code>openai/whisper-1</code></p>
+    <p>Groq：<code>groq/whisper-large-v3</code>、<code>groq/whisper-large-v3-turbo</code></p>
+    <p>ElevenLabs：<code>elevenlabs/scribe-v2</code>（自动由 OpenAI 格式转换）</p>
+
+    <h2 id="music">音乐</h2>
+    <h3>音乐生成 (MiniMax)</h3>
+    <p>同步生成完整歌曲 / 纯器乐 / 翻唱。统一路由返回一个 JSON 信封，音频以 base64 编码存放在 <code>data[0].b64_json</code> 中，并附带 <code>extra_info</code>（时长、采样率、比特率）。按每次生成统一计费。</p>
+    <p>模型：<code>minimax/music-2.6</code>。格式：mp3（默认）、wav、pcm。按每次生成统一计费（$0.15/首，最长 5 分钟）。</p>
+    <!-- [原型截断] 此处省略「音乐」的 4 段 curl 示例(完整歌曲/纯器乐/翻唱/原生透传)。
+         完整内容见 docs_body-zh-cn.html 第 480-519 行。 -->
+
+    <h2 id="vision-and-video-understanding">视觉与视频理解</h2>
+    <h3>图像理解</h3>
+    <pre><code>curl -X POST http://GATEWAY/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer gw-YOUR_KEY" \
+  -d '{
+    "model": "gemini/gemini-3.5-flash",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "What do you see?"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg"}}
+      ]
+    }]
+  }'</code></pre>
+
+    <h3>视频理解（仅限 Gemini）</h3>
+    <pre><code>curl -X POST http://GATEWAY/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer gw-YOUR_KEY" \
+  -d '{
+    "model": "gemini/gemini-2.5-flash",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "What happens in this video?"},
+        {"type": "video_url", "video_url": {
+          "url": "https://storage.googleapis.com/bucket/video.mp4",
+          "mime_type": "video/mp4"
+        }}
+      ]
+    }]
+  }'</code></pre>
+
+    <h2 id="provider-native-endpoints">提供商原生端点</h2>
+    <p>这些端点直接使用提供商自身的 API 格式——不做任何转换。当你需要某个提供商的特有功能时，请使用它们。</p>
+
+    <h3>Anthropic Messages API</h3>
+    <pre><code>curl -X POST http://GATEWAY/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer gw-YOUR_KEY" \
+  -d '{
+    "model": "anthropic/claude-sonnet-4-6",
+    "max_tokens": 1024,
+    "system": "You are helpful.",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'</code></pre>
+    <!-- [原型截断] 此处省略「提供商原生端点」的其余 h3 小节:
+         ElevenLabs TTS / Gemini 原生 generateContent / Kling 原生视频 API。
+         完整内容见 docs_body-zh-cn.html 第 570-608 行。 -->
+
+    <h2 id="wasm-middleware">WASM 中间件</h2>
+    <p>API 密钥可以绑定 WASM 中间件模块，在转发请求前对其进行拦截和改写。请在控制台中选择预设模块，或上传你自己的模块。</p>
+    <p>内置模块：</p>
+    <table>
+    <tr><th>模块</th><th>描述</th></tr>
+    <tr><td><strong>Complexity Router</strong></td><td>基于 10 维请求分析，自动路由到低价 / 中端 / 高端模型</td></tr>
+    <tr><td><strong>Echo Redirect</strong></td><td>模板——原样回显请求体，并重定向到固定模型</td></tr>
+    </table>
+
+    <h2 id="authentication">身份验证</h2>
+    <p>所有 API 请求都需要提供网关密钥：<code>Authorization: Bearer gw-YOUR_KEY</code></p>
+    <p>网关在向上游转发时会注入对应提供商的认证请求头——你的请求中无需携带任何提供商的 API 密钥。</p>
+
+    <h2 id="json-api">JSON API</h2>
+    <table>
+    <tr><th>端点</th><th>方法</th><th>描述</th></tr>
+    <tr><td><code>/api/models</code></td><td>GET</td><td>列出所有可用模型（JSON）</td></tr>
+    <tr><td><code>/api/keys</code></td><td>POST</td><td>创建新的 API 密钥</td></tr>
+    <tr><td><code>/api/keys/{id}</code></td><td>GET</td><td>获取密钥信息</td></tr>
+    <tr><td><code>/api/keys/{id}/usage</code></td><td>GET</td><td>获取指定密钥的用量记录</td></tr>
+    <tr><td><code>/api/keys/{id}/wasm</code></td><td>POST</td><td>设置 / 移除 WASM 中间件</td></tr>
+    <tr><td><code>/api/keys/{id}/wasm/upload</code></td><td>POST</td><td>上传 WASM 文件（multipart）</td></tr>
+    </table>
+
+    </div>
+    <script>
+    (function() {
+        const copyButton = document.querySelector('[data-copy-docs]');
+        const docsRoot = document.querySelector('[data-docs-copy-root]');
+
+        function markdownInline(node) {
+            if (node.nodeType === Node.TEXT_NODE) {
+                return node.textContent.replace(/\s+/g, ' ');
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE || node.matches('[data-copy-ignore]')) {
+                return '';
+            }
+
+            const tag = node.tagName.toLowerCase();
+            if (tag === 'br') return '\n';
+            if (tag === 'code') {
+                return '`' + node.textContent.trim().replace(/`/g, '\\`') + '`';
+            }
+
+            const text = Array.from(node.childNodes).map(markdownInline).join('');
+            if (tag === 'strong' || tag === 'b') return '**' + text.trim() + '**';
+            if (tag === 'a') {
+                const label = text.trim();
+                const href = node.getAttribute('href');
+                if (!label || !href) return label;
+                try {
+                    const url = href.startsWith('#') ? href : new URL(href, window.location.origin).href;
+                    return '[' + label + '](' + url + ')';
+                } catch (e) {
+                    return label;
+                }
+            }
+            return text;
+        }
+
+        function cleanInline(node) {
+            return markdownInline(node)
+                .replace(/[ \t]+\n/g, '\n')
+                .replace(/\n[ \t]+/g, '\n')
+                .replace(/[ \t]{2,}/g, ' ')
+                .trim();
+        }
+
+        function markdownTable(table) {
+            const rows = Array.from(table.querySelectorAll('tr')).map(row =>
+                Array.from(row.children).map(cell =>
+                    cleanInline(cell).replace(/\|/g, '\\|').replace(/\n/g, '<br>')
+                )
+            );
+            if (rows.length === 0) return '';
+
+            const columnCount = Math.max.apply(null, rows.map(row => row.length));
+            rows.forEach(row => {
+                while (row.length < columnCount) row.push('');
+            });
+
+            const header = rows[0];
+            const separator = header.map(() => '---');
+            return [header, separator].concat(rows.slice(1))
+                .map(row => '| ' + row.join(' | ') + ' |')
+                .join('\n');
+        }
+
+        function collectMarkdownBlocks(element, blocks) {
+            if (!element || (element.matches && element.matches('[data-copy-ignore]'))) return;
+
+            const tag = element.tagName.toLowerCase();
+            if (tag === 'h1' || tag === 'h2' || tag === 'h3') {
+                const depth = tag === 'h1' ? '#' : tag === 'h2' ? '##' : '###';
+                const heading = cleanInline(element);
+                if (heading) blocks.push(depth + ' ' + heading);
+                return;
+            }
+            if (tag === 'p') {
+                const paragraph = cleanInline(element);
+                if (paragraph) blocks.push(paragraph);
+                return;
+            }
+            if (tag === 'pre') {
+                const code = (element.querySelector('code') || element).textContent.trim();
+                if (code) blocks.push('```bash\n' + code + '\n```');
+                return;
+            }
+            if (tag === 'table') {
+                const table = markdownTable(element);
+                if (table) blocks.push(table);
+                return;
+            }
+            if (tag === 'li') {
+                const item = cleanInline(element);
+                if (item) blocks.push('- ' + item);
+                return;
+            }
+            if (tag === 'style' || tag === 'script') return;
+
+            Array.from(element.children).forEach(child => collectMarkdownBlocks(child, blocks));
+        }
+
+        function buildDocsMarkdown() {
+            if (!docsRoot) return '';
+            const blocks = [];
+            Array.from(docsRoot.children).forEach(child => collectMarkdownBlocks(child, blocks));
+            return blocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+        }
+
+        function fallbackCopy(text) {
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.setAttribute('readonly', '');
+            area.style.position = 'fixed';
+            area.style.left = '-9999px';
+            area.style.top = '0';
+            document.body.appendChild(area);
+            area.select();
+            let ok = false;
+            try { ok = document.execCommand('copy'); } catch (e) {}
+            document.body.removeChild(area);
+            return ok ? Promise.resolve() : Promise.reject(new Error('copy failed'));
+        }
+
+        function copyText(text) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                return navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+            }
+            return fallbackCopy(text);
+        }
+
+        function setCopyState(label, state) {
+            if (!copyButton) return;
+            const labelEl = copyButton.querySelector('[data-copy-label]');
+            copyButton.dataset.copyState = state;
+            if (labelEl) labelEl.textContent = label;
+            window.clearTimeout(copyButton._copyReset);
+            copyButton._copyReset = window.setTimeout(() => {
+                copyButton.dataset.copyState = '';
+                if (labelEl) labelEl.textContent = '复制为 LLM 格式';
+                copyButton.disabled = false;
+            }, 1500);
+        }
+
+        if (copyButton && docsRoot) {
+            copyButton.addEventListener('click', () => {
+                copyButton.disabled = true;
+                copyText(buildDocsMarkdown())
+                    .then(() => setCopyState('已复制', 'copied'))
+                    .catch(() => setCopyState('复制失败', 'error'));
+            });
+        }
+
+        const subItems = document.querySelectorAll('.nav-sub-item[data-toc-target]');
+        if (subItems.length === 0) return;
+        const sections = [];
+        subItems.forEach(item => {
+            const sec = document.getElementById(item.dataset.tocTarget);
+            if (sec) sections.push(sec);
+        });
+        if (sections.length === 0) return;
+
+        function updateActive() {
+            // 80px clears the 52px sticky topbar with a small reading buffer.
+            const threshold = 80;
+            let current = sections[0];
+            for (const sec of sections) {
+                if (sec.getBoundingClientRect().top <= threshold) {
+                    current = sec;
+                } else {
+                    break;
+                }
+            }
+            subItems.forEach(el => {
+                el.classList.toggle('active', el.dataset.tocTarget === current.id);
+            });
+        }
+
+        let ticking = false;
+        function onScroll() {
+            if (ticking) return;
+            ticking = true;
+            requestAnimationFrame(() => { updateActive(); ticking = false; });
+        }
+
+        window.addEventListener('scroll', onScroll, { passive: true });
+        updateActive();
+    })();
+    </script>
+      </div>
+    </main>
+  </div>
+  <script src="../assets/app.js"></script>
+</body>
+</html>

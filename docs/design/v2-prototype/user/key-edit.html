@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<!--
+  产品路由: GET /dashboard/keys/{id}
+  详设小节: docs/design/V2页面详细设计.md §2.4
+  主体阶段: P3(Virtual Key 生命周期编辑面;基本信息/危险区为 V1,预设绑定为 P4)
+  V1 基线: v1-prototype/user/key-edit.html(名称字段 + WASM 中间件区含预设下拉/自定义上传/内联 JS 保留),
+  V2 叠加: 生命周期(expires_at/轮换/rotated_from 链)、访问控制(ip_allowlist)、预设绑定、
+           限流(RPM/TPM + limit/remaining/reset 头说明)、预算(limit_amount/duration/soft%)、危险区(停用/软删)
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>编辑密钥 · Token Station</title>
+  <script>
+  (function(){
+    try {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+  </script>
+  <link rel="stylesheet" href="../assets/dash.css">
+  <link rel="stylesheet" href="../assets/v2.css">
+  <style>
+  .lang-inline{display:inline-flex;align-items:center;gap:2px;border:1px solid var(--line,#e2e8f0);border-radius:6px;padding:2px;vertical-align:middle;}
+  .lang-inline .lang-opt{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:24px;padding:0 5px;font-size:12px;font-weight:600;color:var(--text-2,#64748b);text-decoration:none;border-radius:4px;line-height:1;}
+  .lang-inline .lang-opt:hover{color:var(--text-0,#0f172a);}
+  .lang-inline .lang-opt.active{background:var(--bg-2,#f1f5f9);color:var(--text-0,#0f172a);}
+  html[data-theme="dark"] .lang-inline{border-color:#334155;}
+  html[data-theme="dark"] .lang-inline .lang-opt:hover{color:#f1f5f9;}
+  html[data-theme="dark"] .lang-inline .lang-opt.active{background:#1e293b;color:#f1f5f9;}
+  @media (max-width:768px){ .lang-inline{display:none;} }
+  </style>
+</head>
+<body class="app">
+  <div class="shell">
+    <button class="hamburger" onclick="toggleSidebar()" aria-label="菜单">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <aside class="sidebar">
+      <a href="dashboard.html" class="brand">
+        <span class="brand-mark">T</span>
+        <span class="col" style="gap:1px;">
+          <span class="brand-name">Token Station</span>
+          <span class="brand-sub">工作区 · V2</span>
+        </span>
+      </a>
+      <nav class="nav">
+        <div class="nav-group-label">我的空间</div>
+        <a href="dashboard.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>仪表盘</a>
+        <a href="playground.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg></span>体验场</a>
+        <a href="keys.html" class="nav-item active"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span>API 密钥</a>
+        <a href="byok.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 7V2"/><path d="M15 7V2"/><path d="M6 13V8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4Z"/></svg></span>自带上游</a>
+        <a href="models.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg></span>模型目录</a>
+        <div class="nav-group-label">智能路由</div>
+        <a href="rules.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span>路由规则</a>
+        <a href="presets.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg></span>预设 Preset</a>
+        <a href="decisions.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg></span>决策记录</a>
+        <div class="nav-group-label">用量与账单</div>
+        <a href="usage.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>用量</a>
+        <a href="billing.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg></span>账单</a>
+        <div class="nav-group-label">组织</div>
+        <a href="org.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>组织与团队</a>
+        <a href="devices.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="8" x="5" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 18h2"/><path d="M12 18h6"/></svg></span>设备与客户端</a>
+        <div class="nav-group-label">参考</div>
+        <a href="docs.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>文档</a>
+        <a href="settings.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span>设置</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="avatar xs green">D</div>
+        <div class="who">
+          <span class="who-name">dev@example.com</span>
+          <a href="#" class="who-role" style="color:var(--text-3);">退出登录</a>
+        </div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="crumbs"><span>工作区</span><span class="sep">›</span><span>API 密钥</span><span class="sep">›</span><span class="leaf">gw-prod-01</span></div>
+        <div class="topbar-spacer"></div>
+        <nav class="lang-inline" aria-label="语言"><a href="#" class="lang-opt" title="English"><span class="lang-g">EN</span></a><a href="#" class="lang-opt active" aria-current="true" title="简体中文"><span class="lang-g">简</span></a><a href="#" class="lang-opt" title="繁體中文"><span class="lang-g">繁</span></a><a href="#" class="lang-opt" title="日本語"><span class="lang-g">日</span></a><a href="#" class="lang-opt" title="한국어"><span class="lang-g">한</span></a></nav>
+        <button type="button" class="theme-toggle topbar-icon" aria-label="切换主题">
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m4.93 19.07 1.41-1.41"/><path d="m17.66 6.34 1.41-1.41"/></svg>
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+        <a href="docs.html" class="topbar-icon" title="文档"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></a>
+      </header>
+      <div class="page">
+        <div class="page-head">
+            <div>
+                <h1 class="page-title">编辑密钥 <span class="codeline">gw-prod-01</span><span class="stage-row"><span class="stage stage-p3">P3</span></span></h1>
+                <div class="page-sub">Virtual Key 完整生命周期编辑面：过期 / 轮换 / IP 白名单 / 限流 / 预算（P3），预设绑定（P4）。</div>
+            </div>
+            <a href="keys.html" class="btn">返回密钥</a>
+        </div>
+
+        <!-- 基本信息(§2.4 区块 1)· V1:名称 + WASM 中间件(遗留,Ent 扩展点) -->
+        <div class="card">
+            <div class="card-head"><div class="card-title">基本信息 <span class="stage stage-v1">V1</span></div></div>
+            <div class="card-body">
+                <form method="post" action="#" onsubmit="return false" enctype="multipart/form-data">
+                    <div class="field">
+                        <label class="label" for="name">密钥名称</label>
+                        <input type="text" name="name" id="name" value="gw-prod-01" placeholder="例如 gw-prod-01" class="input">
+                    </div>
+                    <div class="row" style="flex-wrap:wrap;gap:16px;font-size:12px">
+                        <span><span class="muted">密钥：</span><span class="codeline">gw-a1b2c3d4…</span></span>
+                        <span><span class="muted">状态：</span><span class="badge ok"><span class="dot ok"></span>活跃</span></span>
+                        <span class="muted">创建 2026-06-12 · 最近使用 5 分钟前</span>
+                    </div>
+
+                    <hr class="div">
+                    <div class="card-title" style="margin-bottom:4px">WASM 中间件 <span class="stage stage-v1">V1</span></div>
+                    <div class="help" style="margin:0 0 10px">V1 遗留能力保留；自定义模块上传在私有部署中为 Enterprise 扩展点 <span class="stage stage-ent">Ent</span></div>
+                    <div class="field"><span class="muted">当前 WASM：</span> <span class="codeline">complexity_router.wasm</span></div>
+                    <label class="row" style="gap:8px; font-size:12px; color:var(--text-2); margin-top:6px">
+                        <input type="checkbox" name="remove_wasm" value="1" style="width:auto"> 移除 WASM 中间件
+                    </label>
+                    <div class="field" style="margin-top:14px">
+                        <label class="label" for="wasm_preset">选择 WASM 模块</label>
+                        <select name="wasm_preset" id="wasm_preset" onchange="toggleCustomUpload()" class="select">
+                            <option value="">— 无更改 —</option>
+                            <option value="https://download.bytefuture.ai/complexity_router.wasm">Complexity Router — Auto-route to cheap/mid/premium models based on request complexity</option>
+                            <option value="https://download.bytefuture.ai/echo_redirect.wasm">Echo Redirect — Example: echoes body unchanged, redirects to gpt-5-mini</option>
+                            <option value="__custom__">上传你自己的…</option>
+                        </select>
+                    </div>
+                    <div id="custom-upload" style="display:none">
+                        <div class="field">
+                            <label class="label" for="wasm_file">上传 WASM 文件（最大 5MB）</label>
+                            <input type="file" name="wasm_file" id="wasm_file" accept=".wasm" class="input">
+                        </div>
+                        <div class="field">
+                            <label class="label" for="wasm_url">或从 URL 加载</label>
+                            <input type="url" name="wasm_url" id="wasm_url" placeholder="https://example.com/transform.wasm" class="input">
+                        </div>
+                    </div>
+                    <script>
+                    function toggleCustomUpload() {
+                        var sel = document.getElementById('wasm_preset');
+                        var box = document.getElementById('custom-upload');
+                        box.style.display = sel.value === '__custom__' ? 'block' : 'none';
+                    }
+                    </script>
+                </form>
+            </div>
+        </div>
+
+        <!-- 生命周期(§2.4 区块 2)· P3 -->
+        <div class="card">
+            <div class="card-head"><div class="card-title">生命周期 <span class="stage stage-p3">P3</span></div></div>
+            <div class="card-body">
+                <div class="field" style="max-width:280px">
+                    <label class="label" for="expires_at">过期时间（expires_at）</label>
+                    <input type="date" name="expires_at" id="expires_at" value="2026-12-31" class="input">
+                    <div class="help">留空 = 永不过期；到期后 key 自动转为「已过期」，请求返回 401。</div>
+                </div>
+                <div class="row" style="margin:4px 0 14px">
+                    <button type="button" class="btn">立即轮换</button>
+                    <span class="help" style="margin-top:0">轮换需二次确认：生成新 key 并继承本条配置，旧 key 72 小时宽限期后失效。</span>
+                </div>
+                <div class="label" style="margin-bottom:6px">轮换历史（rotated_from 链）</div>
+                <div class="table-wrap">
+                    <table class="table">
+                        <thead><tr><th>密钥</th><th>状态</th><th>轮换时间</th><th>来源</th></tr></thead>
+                        <tbody>
+                            <tr>
+                                <td><span class="codeline">gw-a1b2c3d4…</span></td>
+                                <td><span class="badge ok"><span class="dot ok"></span>当前</span></td>
+                                <td class="num muted">2026-03-02</td>
+                                <td class="muted">rotated_from → <span class="codeline">gw-e5f6a7b8…</span></td>
+                            </tr>
+                            <tr>
+                                <td><span class="codeline">gw-e5f6a7b8…</span></td>
+                                <td><span class="badge err"><span class="dot err"></span>已失效</span></td>
+                                <td class="num muted">2025-11-18</td>
+                                <td class="muted">rotated_from → <span class="codeline">gw-0c1d2e3f…</span></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 访问控制(§2.4 区块 3)· P3 -->
+        <div class="card">
+            <div class="card-head"><div class="card-title">访问控制 <span class="stage stage-p3">P3</span></div></div>
+            <div class="card-body">
+                <div class="field" style="max-width:420px;margin-bottom:0">
+                    <label class="label" for="ip_allowlist">IP 白名单（ip_allowlist）</label>
+                    <textarea name="ip_allowlist" id="ip_allowlist" class="input" rows="3" style="font-family:var(--font-mono);font-size:12px">203.0.113.0/24
+198.51.100.7</textarea>
+                    <div class="help">每行一条 IP 或 CIDR；留空 = 不限制来源 IP。白名单外的请求返回 403。</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 预设绑定(§2.4 区块 4)· P4 -->
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">预设绑定 <span class="stage stage-p4">P4</span></div>
+                <a href="presets.html" class="btn sm ghost">管理预设 →</a>
+            </div>
+            <div class="card-body">
+                <div class="field" style="max-width:320px;margin-bottom:0">
+                    <label class="label" for="preset">默认 Preset</label>
+                    <select name="preset" id="preset" class="select">
+                        <option value="">—（不绑定）</option>
+                        <option value="@acme/code-review" selected>@acme/code-review</option>
+                        <option value="@acme/chat-default">@acme/chat-default</option>
+                    </select>
+                    <div class="help">该 key 的请求未显式指定模型或 <span class="codeline">@preset/…</span> 引用时，默认走此 preset 的整套「模型 + 参数 + provider 偏好 + 路由策略」。</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 限流(§2.4 区块 5)· P3 -->
+        <div class="card">
+            <div class="card-head"><div class="card-title">限流 <span class="stage stage-p3">P3</span></div></div>
+            <div class="card-body">
+                <div class="row" style="flex-wrap:wrap;gap:16px;align-items:flex-end">
+                    <div class="field" style="margin-bottom:0;max-width:160px">
+                        <label class="label" for="rpm">RPM（请求/分钟）</label>
+                        <input type="number" name="rpm" id="rpm" value="300" class="input">
+                    </div>
+                    <div class="field" style="margin-bottom:0;max-width:160px">
+                        <label class="label" for="tpm">TPM（token/分钟）</label>
+                        <input type="number" name="tpm" id="tpm" value="200000" class="input">
+                    </div>
+                </div>
+                <div class="help">key 层限流（rate_limits）；超限返回 429，响应携带 <span class="codeline">X-RateLimit-Limit</span> / <span class="codeline">X-RateLimit-Remaining</span> / <span class="codeline">X-RateLimit-Reset</span> 头。</div>
+            </div>
+        </div>
+
+        <!-- 预算(§2.4 区块 6)· P3 -->
+        <div class="card">
+            <div class="card-head"><div class="card-title">预算 <span class="stage stage-p3">P3</span></div></div>
+            <div class="card-body">
+                <div class="row" style="flex-wrap:wrap;gap:16px;align-items:flex-end">
+                    <div class="field" style="margin-bottom:0;max-width:160px">
+                        <label class="label" for="limit_amount">限额（limit_amount）</label>
+                        <input type="text" name="limit_amount" id="limit_amount" value="$200.00" class="input">
+                    </div>
+                    <div class="field" style="margin-bottom:0;max-width:160px">
+                        <label class="label" for="budget_duration">周期（budget_duration）</label>
+                        <select name="budget_duration" id="budget_duration" class="select">
+                            <option>每日</option>
+                            <option selected>每月</option>
+                            <option>每季度</option>
+                        </select>
+                    </div>
+                    <div class="field" style="margin-bottom:0;max-width:160px">
+                        <label class="label" for="soft_pct">Soft 阈值 %</label>
+                        <input type="number" name="soft_pct" id="soft_pct" value="80" class="input">
+                    </div>
+                </div>
+                <div class="help">key 级预算（budgets key 层）：已用超过 soft 阈值时发出告警通知；达到硬限额（100%）后请求被拒绝，周期重置后恢复。本期已用 $128.40 / $200.00（64%）。</div>
+            </div>
+        </div>
+
+        <div class="row" style="margin:4px 0 18px; gap:8px">
+            <button type="button" class="btn primary">保存更改</button>
+            <a href="keys.html" class="btn">取消</a>
+        </div>
+
+        <!-- 危险区(§2.4 区块 7)· V1 -->
+        <div class="card">
+            <div class="card-head"><div class="card-title">危险区 <span class="stage stage-v1">V1</span></div></div>
+            <div class="card-body">
+                <div class="row" style="gap:8px;flex-wrap:wrap">
+                    <button type="button" class="btn">停用</button>
+                    <button type="button" class="btn danger">删除（软删）</button>
+                    <span class="help" style="margin-top:0">删除为软删：key 立即不可用，历史用量与决策记录保留归因。</span>
+                </div>
+            </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="../assets/app.js"></script>
+</body>
+</html>

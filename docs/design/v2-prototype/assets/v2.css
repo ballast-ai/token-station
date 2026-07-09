@@ -1,0 +1,60 @@
+/* === Token Station · V2 原型新增组件 ===
+ *
+ * 只增不改:基础组件一律用 dash.css(V1 原样);本文件收敛 V2 新组件,
+ * 详见 docs/design/V2页面详细设计.md §0.2/§0.3。
+ *
+ * 组件清单:
+ *   .stage-*      阶段徽章(V1/P1/P2/P3/P4/C2/Ent)
+ *   .timeline     决策时间线(decision-detail 逐层视图)
+ *   .knob         成本旋钮滑杆
+ *   .matrix-table license 开关矩阵表
+ *   .ent-locked   Enterprise 置灰升级引导态
+ */
+
+/* ── 阶段徽章 ── */
+body.app .stage { display: inline-flex; align-items: center; padding: 1px 7px; border-radius: 999px; font-size: 9.5px; font-weight: 700; letter-spacing: 0.05em; border: 1px solid var(--line-strong); background: var(--bg-3); color: var(--text-3); font-family: var(--font-mono); vertical-align: middle; flex: none; }
+body.app .stage-v1 { }
+body.app .stage-p1 { background: var(--accent-soft); color: var(--accent-hi); border-color: var(--accent-line); }
+body.app .stage-p2 { background: var(--info-soft); color: #67e8f9; border-color: rgba(6,182,212,0.3); }
+body.app .stage-p3 { background: var(--warn-soft); color: #fcd34d; border-color: rgba(245,158,11,0.3); }
+body.app .stage-p4 { background: rgba(236,72,153,0.14); color: #f9a8d4; border-color: rgba(236,72,153,0.3); }
+body.app .stage-c2 { background: var(--ok-soft); color: #6ee7b7; border-color: rgba(16,185,129,0.3); }
+body.app .stage-ent { background: transparent; color: #fca5a5; border: 1px dashed rgba(239,68,68,0.45); }
+html[data-theme="light"] body.app .stage-p2 { color: #0e7490; }
+html[data-theme="light"] body.app .stage-p3 { color: #b45309; }
+html[data-theme="light"] body.app .stage-p4 { color: #be185d; }
+html[data-theme="light"] body.app .stage-c2 { color: #047857; }
+html[data-theme="light"] body.app .stage-ent { color: #b91c1c; }
+
+/* 页面标题行内的徽章组 */
+body.app .stage-row { display: inline-flex; gap: 5px; margin-left: 8px; vertical-align: middle; }
+
+/* ── 决策时间线 ── */
+body.app .timeline { position: relative; padding-left: 26px; }
+body.app .timeline::before { content: ''; position: absolute; left: 8px; top: 6px; bottom: 6px; width: 2px; background: var(--line-strong); border-radius: 2px; }
+body.app .tl-step { position: relative; padding: 0 0 18px 0; }
+body.app .tl-step:last-child { padding-bottom: 0; }
+body.app .tl-marker { position: absolute; left: -26px; top: 2px; width: 18px; height: 18px; border-radius: 50%; background: var(--bg-3); border: 2px solid var(--line-strong); display: grid; place-items: center; font-size: 9px; font-weight: 700; color: var(--text-2); font-family: var(--font-mono); }
+body.app .tl-step.hit .tl-marker { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-hi); }
+body.app .tl-step.skip .tl-marker { opacity: 0.55; }
+body.app .tl-title { font-size: 12.5px; font-weight: 600; color: var(--text-0); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+body.app .tl-step.skip .tl-title { color: var(--text-3); font-weight: 500; }
+body.app .tl-body { font-size: 12px; color: var(--text-2); margin-top: 4px; }
+body.app .tl-body .card { margin: 8px 0 0; }
+
+/* ── 成本旋钮 ── */
+body.app .knob { width: 100%; max-width: 420px; }
+body.app .knob input[type="range"] { width: 100%; accent-color: var(--accent); }
+body.app .knob-scale { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--text-3); font-family: var(--font-mono); margin-top: 4px; }
+body.app .knob-range-note { font-size: 11px; color: var(--warn); margin-top: 6px; }
+
+/* ── 开关矩阵表 ── */
+body.app .matrix-table td.yes { color: #6ee7b7; font-weight: 700; text-align: center; }
+body.app .matrix-table td.no { color: var(--text-4); text-align: center; }
+html[data-theme="light"] body.app .matrix-table td.yes { color: #047857; }
+
+/* ── Enterprise 置灰升级引导态 ── */
+body.app .ent-locked { position: relative; }
+body.app .ent-locked > *:not(.ent-note) { opacity: 0.38; pointer-events: none; filter: saturate(0.6); }
+body.app .ent-note { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border: 1px dashed rgba(239,68,68,0.45); border-radius: 8px; background: var(--err-soft); color: #fca5a5; font-size: 12px; margin-bottom: 12px; }
+html[data-theme="light"] body.app .ent-note { color: #b91c1c; }

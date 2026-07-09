@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<!--
+  路由: GET /dashboard
+  还原依据: src/templates/user_pages.rs dashboard_page()（余额模式:无 team_panel / quota_card）
+  + src/templates/charts.rs sparkline_svg()（110×30 填充折线,#818cf8）
+  + src/templates/dash.css / src/i18n/zh-CN.json 官方译文
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>仪表盘 · Token Station</title>
+  <script>
+  (function(){
+    try {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+  </script>
+  <link rel="stylesheet" href="../assets/dash.css">
+  <style>
+  /* lang_toggle 样式,照搬 layout.rs */
+  .lang-inline{display:inline-flex;align-items:center;gap:2px;border:1px solid var(--line,#e2e8f0);border-radius:6px;padding:2px;vertical-align:middle;}
+  .lang-inline .lang-opt{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:24px;padding:0 5px;font-size:12px;font-weight:600;color:var(--text-2,#64748b);text-decoration:none;border-radius:4px;line-height:1;}
+  .lang-inline .lang-opt:hover{color:var(--text-0,#0f172a);}
+  .lang-inline .lang-opt.active{background:var(--bg-2,#f1f5f9);color:var(--text-0,#0f172a);}
+  html[data-theme="dark"] .lang-inline{border-color:#334155;}
+  html[data-theme="dark"] .lang-inline .lang-opt:hover{color:#f1f5f9;}
+  html[data-theme="dark"] .lang-inline .lang-opt.active{background:#1e293b;color:#f1f5f9;}
+  @media (max-width:768px){ .lang-inline{display:none;} }
+  </style>
+</head>
+<body class="app">
+  <div class="shell">
+    <button class="hamburger" onclick="toggleSidebar()" aria-label="菜单">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <aside class="sidebar">
+      <a href="dashboard.html" class="brand">
+        <span class="brand-mark">T</span>
+        <span class="col" style="gap:1px;">
+          <span class="brand-name">Token Station</span>
+          <span class="brand-sub">工作区</span>
+        </span>
+      </a>
+      <nav class="nav">
+        <div class="nav-group-label">我的空间</div>
+        <a href="dashboard.html" class="nav-item active"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>仪表盘</a>
+        <a href="playground.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg></span>体验场</a>
+        <a href="keys.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span>API 密钥</a>
+        <a href="models.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg></span>模型</a>
+        <a href="usage.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>用量</a>
+        <a href="profile.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>构建者画像</a>
+        <a href="billing.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg></span>账单</a>
+        <div class="nav-group-label">参考</div>
+        <a href="docs.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>文档</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="avatar xs green">D</div>
+        <div class="who">
+          <span class="who-name">dev@example.com</span>
+          <a href="#" class="who-role" style="color:var(--text-3);">退出登录</a>
+        </div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="crumbs"><span>工作区</span><span class="sep">›</span><span class="leaf">仪表盘</span></div>
+        <div class="topbar-spacer"></div>
+        <nav class="lang-inline" aria-label="语言"><a href="#" class="lang-opt" title="English"><span class="lang-g">EN</span></a><a href="#" class="lang-opt active" aria-current="true" title="简体中文"><span class="lang-g">简</span></a><a href="#" class="lang-opt" title="繁體中文"><span class="lang-g">繁</span></a><a href="#" class="lang-opt" title="日本語"><span class="lang-g">日</span></a><a href="#" class="lang-opt" title="한국어"><span class="lang-g">한</span></a></nav>
+        <button type="button" class="theme-toggle topbar-icon" aria-label="切换主题">
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m4.93 19.07 1.41-1.41"/><path d="m17.66 6.34 1.41-1.41"/></svg>
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+        <a href="docs.html" class="topbar-icon" title="文档"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></a>
+      </header>
+      <div class="page">
+        <div class="page-head">
+            <div>
+                <h1 class="page-title">仪表盘</h1>
+                <div class="page-sub">当前登录：dev@example.com</div>
+            </div>
+            <div class="page-actions">
+                <a href="keys.html" class="btn">管理 API 密钥</a>
+                <a href="billing.html" class="btn primary">充值</a>
+            </div>
+        </div>
+
+        <div class="kpi-grid">
+            <div class="kpi">
+                <div class="kpi-label">余额</div>
+                <div class="kpi-value">$18.42</div>
+                <div class="kpi-spark"><svg width="110" height="30" viewBox="0 0 110 30"><path d="M 0.0,16.3 L 3.8,14.8 L 7.6,10.2 L 11.4,17.9 L 15.2,14.5 L 19.0,15.3 L 22.8,10.9 L 26.6,18.2 L 30.3,20.3 L 34.1,19.6 L 37.9,21.8 L 41.7,25.0 L 45.5,26.8 L 49.3,21.4 L 53.1,26.8 L 56.9,22.7 L 60.7,25.2 L 64.5,29.0 L 68.3,18.0 L 72.1,17.5 L 75.9,13.8 L 79.7,11.6 L 83.4,9.7 L 87.2,14.0 L 91.0,8.7 L 94.8,9.6 L 98.6,6.6 L 102.4,9.4 L 106.2,6.3 L 110.0,1.0 L 110,30 L 0,30 Z" fill="#818cf8" fill-opacity="0.18"/><path d="M 0.0,16.3 L 3.8,14.8 L 7.6,10.2 L 11.4,17.9 L 15.2,14.5 L 19.0,15.3 L 22.8,10.9 L 26.6,18.2 L 30.3,20.3 L 34.1,19.6 L 37.9,21.8 L 41.7,25.0 L 45.5,26.8 L 49.3,21.4 L 53.1,26.8 L 56.9,22.7 L 60.7,25.2 L 64.5,29.0 L 68.3,18.0 L 72.1,17.5 L 75.9,13.8 L 79.7,11.6 L 83.4,9.7 L 87.2,14.0 L 91.0,8.7 L 94.8,9.6 L 98.6,6.6 L 102.4,9.4 L 106.2,6.3 L 110.0,1.0" fill="none" stroke="#818cf8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">累计消费（全部时间）</div>
+                <div class="kpi-value">$6.58</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">API 密钥</div>
+                <div class="kpi-value">3</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">近期请求</div>
+                <div class="kpi-value">1,284</div>
+                <div class="kpi-delta">最近 1,284 条记录</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">近期活动</div>
+                <a href="usage.html" class="btn sm ghost">查看全部</a>
+            </div>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead><tr><th>时间</th><th>模型</th><th>用量</th><th>费用</th></tr></thead>
+                    <tbody>
+                        <tr><td class="num">2026-07-08T09:41:07</td><td>gpt-5.2</td><td class="num">4,382 tok</td><td class="num">$0.0261</td></tr>
+                        <tr><td class="num">2026-07-08T09:37:52</td><td>claude-sonnet-4-5</td><td class="num">12,940 tok</td><td class="num">$0.0864</td></tr>
+                        <tr><td class="num">2026-07-08T09:31:18</td><td>gemini-2.5-flash-image</td><td class="num">2 img</td><td class="num">$0.0780</td></tr>
+                        <tr><td class="num">2026-07-08T09:24:45</td><td>gemini-2.5-pro</td><td class="num">1,872 tok</td><td class="num">$0.0093</td></tr>
+                        <tr><td class="num">2026-07-08T09:12:03</td><td>kimi-k2</td><td class="num">6,204 tok</td><td class="num">$0.0049</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<!--
+  对应路由：/admin/models（模型管理，issue #56/#121 后为只读目录）
+  还原依据：cloud_ai_gateway/src/templates/admin_models_pages.rs
+    - admin_models_page()：config.toml 只读说明卡 + 隐藏模型提示 + 搜索/提供商筛选表单 + 模型表
+    - render_admin_model_row()：6 列——模型（逻辑名 + → upstream_model）/提供商/通道数/In-Out 微美元价/上下文/标签
+    - 列头 "In / Out per 1M (μ$)" 在源码中为硬编码英文（未走 tr!），故保留原文
+  文案：src/i18n/zh-CN.json 官方中文翻译
+  模型名/价格/上下文取自 config.example.toml 真实条目（价格为微美元/百万 Token 原始整数值，与源码直接输出一致）
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>模型 · Token Station Admin</title>
+  <script>
+  (function(){
+    try {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+  </script>
+  <link rel="stylesheet" href="../assets/dash.css">
+  <style>
+  .lang-inline{display:inline-flex;align-items:center;gap:2px;border:1px solid var(--line,#e2e8f0);border-radius:6px;padding:2px;vertical-align:middle;}
+  .lang-inline .lang-opt{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:24px;padding:0 5px;font-size:12px;font-weight:600;color:var(--text-2,#64748b);text-decoration:none;border-radius:4px;line-height:1;}
+  .lang-inline .lang-opt:hover{color:var(--text-0,#0f172a);}
+  .lang-inline .lang-opt.active{background:var(--bg-2,#f1f5f9);color:var(--text-0,#0f172a);}
+  html[data-theme="dark"] .lang-inline{border-color:#334155;}
+  html[data-theme="dark"] .lang-inline .lang-opt:hover{color:#f1f5f9;}
+  html[data-theme="dark"] .lang-inline .lang-opt.active{background:#1e293b;color:#f1f5f9;}
+  @media (max-width:768px){ .lang-inline{display:none;} }
+  </style>
+</head>
+<body class="app">
+  <div class="shell">
+    <button class="hamburger" onclick="toggleSidebar()" aria-label="菜单">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <aside class="sidebar">
+      <a href="overview.html" class="brand">
+        <span class="brand-mark">A</span>
+        <span class="col" style="gap:1px;">
+          <span class="brand-name">管理后台</span>
+          <span class="brand-sub">Token Station</span>
+        </span>
+      </a>
+      <nav class="nav">
+        <div class="nav-group-label">运营</div>
+        <a href="overview.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span>概览</a>
+        <a href="logs.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/></svg></span>请求日志</a>
+        <a href="credits.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg></span>额度</a>
+        <div class="nav-group-label">人员</div>
+        <a href="users.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>用户</a>
+        <a href="teams.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg></span>团队</a>
+        <div class="nav-group-label">路由</div>
+        <a href="providers.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 7V2"/><path d="M15 7V2"/><path d="M6 13V8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4Z"/></svg></span>提供商</a>
+        <a href="models.html" class="nav-item active"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>模型</a>
+        <a href="routing.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg></span>路由</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="avatar xs purple">A</div>
+        <div class="who">
+          <span class="who-name">管理员</span>
+          <a href="#" class="who-role" style="color:var(--text-3);">退出登录</a>
+        </div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="crumbs"><span>路由</span><span class="sep">›</span><span class="leaf">模型</span></div>
+        <div class="topbar-spacer"></div>
+        <nav class="lang-inline" aria-label="语言"><a href="#" class="lang-opt" title="English"><span class="lang-g">EN</span></a><a href="#" class="lang-opt active" aria-current="true" title="简体中文"><span class="lang-g">简</span></a><a href="#" class="lang-opt" title="繁體中文"><span class="lang-g">繁</span></a><a href="#" class="lang-opt" title="日本語"><span class="lang-g">日</span></a><a href="#" class="lang-opt" title="한국어"><span class="lang-g">한</span></a></nav>
+        <button type="button" class="theme-toggle topbar-icon" aria-label="切换主题">
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m4.93 19.07 1.41-1.41"/><path d="m17.66 6.34 1.41-1.41"/></svg>
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+      </header>
+      <div class="page">
+        <div class="page-head">
+            <div>
+                <h1 class="page-title">模型</h1>
+                <div class="page-sub">共 12 个模型，显示 12 个。定价以每百万 Token 的微美元计。</div>
+            </div>
+            <div class="page-actions">
+                <a href="#" class="btn">价格 CSV</a>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-body">
+                <p class="muted" style="margin:0;">
+                    模型目录在 <span class="codeline">config.toml</span> 中定义，在此处
+            为只读。如需添加、重命名、重新定价或删除模型，请编辑
+            <span class="codeline">config.toml</span> 并重启网关。删除某个模型后，
+            其记录会在重启时被删除（以 config.toml 为准）；用量
+            历史会保留该模型名称。
+                </p>
+            </div>
+        </div>
+        <div class="alert alert-info" style="margin-top:14px;">已隐藏 6 个模型——它们的提供商没有启用的凭证，因此无法提供服务。请在 <a href="providers.html">提供商</a> 下添加凭证以将它们列出。</div>
+
+        <div class="card">
+            <div class="card-body">
+                <form method="get" action="#" class="row" style="gap:10px;flex-wrap:wrap;align-items:flex-end;">
+                    <div class="field" style="flex:1;min-width:220px;margin-bottom:0;">
+                        <label class="label" for="q">搜索</label>
+                        <input type="text" id="q" name="q" value="" placeholder="模型名或上游 id" class="input">
+                    </div>
+                    <div class="field" style="flex:0 0 200px;margin-bottom:0;">
+                        <label class="label" for="provider">提供商</label>
+                        <select id="provider" name="provider" class="select">
+                            <option value="" selected>全部提供商</option>
+                            <option value="anthropic">anthropic</option>
+                            <option value="claude-code">claude-code</option>
+                            <option value="deepseek">deepseek</option>
+                            <option value="gemini">gemini</option>
+                            <option value="github-copilot">github-copilot</option>
+                            <option value="glm-coding">glm-coding</option>
+                            <option value="kimi">kimi</option>
+                            <option value="kimi-code">kimi-code</option>
+                            <option value="kiro">kiro</option>
+                            <option value="kling">kling</option>
+                            <option value="openai">openai</option>
+                            <option value="openai-codex">openai-codex</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="btn">筛选</button>
+                    <a href="models.html" class="btn ghost">重置</a>
+                </form>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-head"><div class="card-title">模型</div><span class="muted" style="font-size:11px;">已显示 12 个</span></div>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>模型</th>
+                            <th>提供商</th>
+                            <th class="num">通道</th>
+                            <th class="num">In / Out per 1M (μ$)</th>
+                            <th class="num">上下文</th>
+                            <th>标签</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="codeline">anthropic/claude-fable-5</span><br><span class="muted" style="font-size:10.5px;">→ claude-fable-5</span></td>
+                            <td>anthropic</td>
+                            <td class="num"><span class="muted">—</span></td>
+                            <td class="num">10000000 / 50000000</td>
+                            <td class="num">1000000</td>
+                            <td><span class="badge">flagship</span></td>
+                        </tr>
+                        <tr>
+                            <td><span class="codeline">anthropic/claude-sonnet-4-6</span><br><span class="muted" style="font-size:10.5px;">→ claude-sonnet-4-6</span></td>
+                            <td>anthropic</td>
+                            <td class="num"><span class="badge">1</span></td>
+                            <td class="num">3000000 / 15000000</td>
+                            <td class="num">200000</td>
+                            <td><span class="muted">—</span></td>
+                        </tr>
+                        <tr>
+                            <td><span class="codeline">anthropic/claude-haiku-4-5</span><br><span class="muted" style="font-size:10.5px;">→ claude-haiku-4-5</span></td>
+                            <td>anthropic</td>
+                            <td class="num"><span class="muted">—</span></td>
+                            <td class="num">1000000 / 5000000</td>
+                            <td class="num">200000</td>
+                            <td><span class="muted">—</span></td>
+                        </tr>
+                        <tr>
+                            <td><span class="codeline">claude-code/claude-sonnet-4-6</span><br><span class="muted" style="font-size:10.5px;">→ claude-sonnet-4-6</span></td>
+                            <td>claude-code</td>
+                            <td class="num"><span class="badge">1</span></td>
+                            <td class="num">3000000 / 15000000</td>
+                            <td class="num">200000</td>
+                            <td><span class="badge">subscription</span></td>
+                        </tr>
+                        <tr>
+                            <td><span class="codeline">kiro/claude-sonnet-4-6</span><br><span class="muted" style="font-size:10.5px;">→ claude-sonnet-4-6</span></td>
+                            <td>kiro</td>
+                            <td class="num"><span class="badge">1</span></td>
+                            <td class="num">0 / 0</td>
+                            <td class="num">200000</td>
+                            <td><span class="badge">subscription</span></td>
+                        </tr>
+                        <tr>
+                            <td><span class="codeline">openai/gpt-5.5</span><br><span class="muted" style="font-size:10.5px;">→ gpt-5.5</span></td>
+                            <td>openai</td>
+                            <td class="num"><span class="badge">1</span></td>
+                            <td class="num">5000000 / 30000000</td>
+                            <td class="num">1000000</td>
+                            <td><span class="badge">flagship</span> <span class="badge">vision</span></td>
+                        </tr>
+                        <tr>
+                            <td><span class="codeline">openai/gpt-5.4</span><br><span class="muted" style="font-size:10.5px;">→ gpt-5.4</span></td>
+                            <td>openai</td>
+                            <td class="num"><span class="muted">—</span></td>
+                            <td class="num">2500000 / 15000000</td>
+                            <td class="num">1000000</td>
+                            <td><span class="muted">—</span></td>
+                        </tr>
+                        <tr>
+                            <td><span class="codeline">openai/gpt-5-mini</span><br><span class="muted" style="font-size:10.5px;">→ gpt-5-mini</span></td>
+                            <td>openai</td>
+                            <td class="num"><span class="muted">—</span></td>
+                            <td class="num">250000 / 2000000</td>
+                            <td class="num">200000</td>
+                            <td><span class="muted">—</span></td>
+                        </tr>
+                        <tr>
+                            <td><span class="codeline">github-copilot/gpt-5.5</span><br><span class="muted" style="font-size:10.5px;">→ gpt-5.5</span></td>
+                            <td>github-copilot</td>
+                            <td class="num"><span class="badge">1</span></td>
+                            <td class="num">5000000 / 30000000</td>
+                            <td class="num">1000000</td>
+                            <td><span class="badge">subscription</span></td>
+                        </tr>
+                        <tr>
+                            <td><span class="codeline">gemini/gemini-3.1-pro-preview</span><br><span class="muted" style="font-size:10.5px;">→ gemini-3.1-pro-preview</span></td>
+                            <td>gemini</td>
+                            <td class="num"><span class="muted">—</span></td>
+                            <td class="num">2000000 / 12000000</td>
+                            <td class="num">1048576</td>
+                            <td><span class="muted">—</span></td>
+                        </tr>
+                        <tr>
+                            <td><span class="codeline">deepseek/deepseek-v4-flash</span><br><span class="muted" style="font-size:10.5px;">→ deepseek-v4-flash</span></td>
+                            <td>deepseek</td>
+                            <td class="num"><span class="badge">1</span></td>
+                            <td class="num">140000 / 280000</td>
+                            <td class="num">1000000</td>
+                            <td><span class="muted">—</span></td>
+                        </tr>
+                        <tr>
+                            <td><span class="codeline">kimi-code/k2.6</span><br><span class="muted" style="font-size:10.5px;">→ kimi-k2.6</span></td>
+                            <td>kimi-code</td>
+                            <td class="num"><span class="muted">—</span></td>
+                            <td class="num">0 / 0</td>
+                            <td class="num">262144</td>
+                            <td><span class="badge">subscription</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="../assets/app.js"></script>
+</body>
+</html>

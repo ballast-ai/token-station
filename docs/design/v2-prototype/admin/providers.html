@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<!--
+  产品路由：/admin/providers（提供商总览 + 行展开凭证池）
+  详设依据：docs/design/V2页面详细设计.md §3.10 · 主体阶段 V1+P1/P2
+  V1 对照：v1-prototype/admin/providers.html（总览表 V1 原样保留）
+  V2 增量：
+    - 数据策略列 data_policy（collects/zdr badge）〔P1〕
+    - 熔断状态机列：closed（dot ok）/ open（dot err，剩余冷却秒）/ half-open（dot warn，探测中）〔P2，V2-P2-9〕
+      与 routing.html#resilience 容灾参数卡互链
+    - 行展开凭证池：平台凭证明细 + BYOK 凭证只显示计数（管理入口在 user-detail）
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>提供商 · Token Station Admin</title>
+  <script>
+  (function(){
+    try {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+  </script>
+  <link rel="stylesheet" href="../assets/dash.css">
+  <link rel="stylesheet" href="../assets/v2.css">
+  <style>
+  .lang-inline{display:inline-flex;align-items:center;gap:2px;border:1px solid var(--line,#e2e8f0);border-radius:6px;padding:2px;vertical-align:middle;}
+  .lang-inline .lang-opt{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:24px;padding:0 5px;font-size:12px;font-weight:600;color:var(--text-2,#64748b);text-decoration:none;border-radius:4px;line-height:1;}
+  .lang-inline .lang-opt:hover{color:var(--text-0,#0f172a);}
+  .lang-inline .lang-opt.active{background:var(--bg-2,#f1f5f9);color:var(--text-0,#0f172a);}
+  html[data-theme="dark"] .lang-inline{border-color:#334155;}
+  html[data-theme="dark"] .lang-inline .lang-opt:hover{color:#f1f5f9;}
+  html[data-theme="dark"] .lang-inline .lang-opt.active{background:#1e293b;color:#f1f5f9;}
+  @media (max-width:768px){ .lang-inline{display:none;} }
+  </style>
+</head>
+<body class="app">
+  <div class="shell">
+    <button class="hamburger" onclick="toggleSidebar()" aria-label="菜单">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <aside class="sidebar">
+      <a href="overview.html" class="brand">
+        <span class="brand-mark">A</span>
+        <span class="col" style="gap:1px;">
+          <span class="brand-name">管理后台</span>
+          <span class="brand-sub">Token Station · V2</span>
+        </span>
+      </a>
+      <nav class="nav">
+        <div class="nav-group-label">运营</div>
+        <a href="overview.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span>概览</a>
+        <a href="logs.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/></svg></span>请求日志</a>
+        <a href="plans.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/></svg></span>套餐与计费</a>
+        <a href="credits.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg></span>额度</a>
+        <div class="nav-group-label">租户</div>
+        <a href="orgs.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/></svg></span>组织</a>
+        <a href="users.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>用户</a>
+        <a href="audit.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg></span>审计日志</a>
+        <div class="nav-group-label">路由</div>
+        <a href="providers.html" class="nav-item active"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 7V2"/><path d="M15 7V2"/><path d="M6 13V8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4Z"/></svg></span>提供商</a>
+        <a href="models.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>模型</a>
+        <a href="routing.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg></span>供给路由</a>
+        <a href="smart-routing.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg></span>智能路由</a>
+        <a href="flywheel.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg></span>数据飞轮</a>
+        <div class="nav-group-label">平台</div>
+        <a href="licenses.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="6"/><path d="M15.477 12.89 17 22l-5-3-5 3 1.523-9.11"/></svg></span>License</a>
+        <a href="releases.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span>客户端发布</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="avatar xs purple">A</div>
+        <div class="who">
+          <span class="who-name">平台管理员</span>
+          <a href="#" class="who-role" style="color:var(--text-3);">退出登录</a>
+        </div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="crumbs"><span>管理后台</span><span class="sep">›</span><span>路由</span><span class="sep">›</span><span class="leaf">提供商</span></div>
+        <div class="topbar-spacer"></div>
+        <nav class="lang-inline" aria-label="语言"><a href="#" class="lang-opt" title="English"><span class="lang-g">EN</span></a><a href="#" class="lang-opt active" aria-current="true" title="简体中文"><span class="lang-g">简</span></a><a href="#" class="lang-opt" title="繁體中文"><span class="lang-g">繁</span></a><a href="#" class="lang-opt" title="日本語"><span class="lang-g">日</span></a><a href="#" class="lang-opt" title="한국어"><span class="lang-g">한</span></a></nav>
+        <button type="button" class="theme-toggle topbar-icon" aria-label="切换主题">
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m4.93 19.07 1.41-1.41"/><path d="m17.66 6.34 1.41-1.41"/></svg>
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+      </header>
+      <div class="page">
+        <div class="page-head">
+            <div>
+                <h1 class="page-title">提供商<span class="stage-row"><span class="stage stage-v1">V1</span><span class="stage stage-p1">P1</span><span class="stage stage-p2">P2</span></span></h1>
+                <div class="page-sub">每个上游提供商的凭证池、数据策略与熔断状态。已配置 6 个。点击行首箭头展开凭证池。</div>
+            </div>
+        </div>
+
+        <!-- ── 提供商总览表：V1 五列原样保留 + 数据策略(P1) + 熔断状态机(P2) ── -->
+        <div class="card">
+            <div class="card-head"><div class="card-title">全部提供商 <span class="stage stage-v1">V1</span></div><span class="muted" style="font-size:11px;">健康探测每 60s 一轮（p50 / 错误率沿 V1）</span></div>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>提供商</th>
+                            <th class="num">合计</th>
+                            <th class="num">已启用</th>
+                            <th>类型</th>
+                            <th>状态</th>
+                            <th>数据策略 <span class="stage stage-p1">P1</span></th>
+                            <th>熔断状态机 <span class="stage stage-p2">P2</span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- glm：默认展开示范凭证池 -->
+                        <tr class="row-link" data-href="#glm-pool">
+                            <td><span class="provider"><span class="logo glm">G</span><span class="codeline">glm</span></span> <span class="muted" style="font-size:10.5px;">▾ 已展开</span></td>
+                            <td class="num">3</td>
+                            <td class="num">3</td>
+                            <td><span class="codeline">api_key×2 · oauth×1</span></td>
+                            <td><span class="badge ok" title="3 已启用 · 3 可达 / 0 失败中 · p50 412ms · 错误率 0.2%">健康</span></td>
+                            <td><span class="badge warn" title="data_policy = collects：上游声明会留存/使用请求数据">collects</span></td>
+                            <td><span style="display:inline-flex;align-items:center;gap:6px;"><span class="dot ok"></span><span class="codeline">closed</span></span></td>
+                        </tr>
+                        <tr id="glm-pool">
+                            <td colspan="7" style="background:var(--bg-2);">
+                                <div style="padding:10px 8px 12px;">
+                                    <div class="card-title" style="font-size:12px;margin-bottom:8px;">glm · 凭证池 <span class="muted" style="font-weight:400;font-size:11px;">凭证策略 <span class="codeline">round_robin</span></span></div>
+                                    <div class="table-wrap" style="margin-bottom:10px;">
+                                        <table class="table">
+                                            <thead><tr><th>ID</th><th>类型</th><th>标签</th><th>密钥</th><th class="num">权重</th><th>已启用</th><th>健康状态</th><th>来源</th></tr></thead>
+                                            <tbody>
+                                                <tr>
+                                                    <td class="num">7</td>
+                                                    <td><span class="badge accent">api_key</span></td>
+                                                    <td>primary</td>
+                                                    <td><span class="codeline">glm-…Xk2A</span></td>
+                                                    <td class="num">3</td>
+                                                    <td><span class="badge ok">开启</span></td>
+                                                    <td><span class="badge ok" title="HTTP 200 · 412 ms · 已探测 2026-07-09 09:41:03">健康</span></td>
+                                                    <td><span class="src-badge platform"><span class="src-dot"></span>平台凭证</span></td>
+                                                </tr>
+                                                <tr>
+                                                    <td class="num">12</td>
+                                                    <td><span class="badge accent">api_key</span></td>
+                                                    <td>backup-低配额</td>
+                                                    <td><span class="codeline">glm-…9fQw</span></td>
+                                                    <td class="num">1</td>
+                                                    <td><span class="badge ok">开启</span></td>
+                                                    <td><span class="badge ok" title="HTTP 200 · 388 ms · 已探测 2026-07-09 09:41:05">健康</span></td>
+                                                    <td><span class="src-badge platform"><span class="src-dot"></span>平台凭证</span></td>
+                                                </tr>
+                                                <tr>
+                                                    <td class="num">18</td>
+                                                    <td><span class="badge accent">oauth</span></td>
+                                                    <td>coding-plan</td>
+                                                    <td><span class="codeline">oauth…Tr7e</span></td>
+                                                    <td class="num">2</td>
+                                                    <td><span class="badge ok">开启</span></td>
+                                                    <td><span class="badge ok" title="HTTP 200 · 505 ms · 已探测 2026-07-09 09:41:07">健康</span></td>
+                                                    <td><span class="src-badge platform"><span class="src-dot"></span>平台凭证</span></td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    <div class="row" style="align-items:center;gap:8px;flex-wrap:wrap;">
+                                        <span class="src-badge byok"><span class="src-dot"></span>BYOK 凭证 × 4</span>
+                                        <span class="muted" style="font-size:11px;">用户自带凭证仅显示计数，不在此展示明细——管理入口在对应 <a href="user-detail.html">用户详情</a> 的 BYOK 区块。</span>
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr class="row-link" data-href="#">
+                            <td><span class="provider"><span class="logo anthropic">A</span><span class="codeline">anthropic</span></span></td>
+                            <td class="num">2</td>
+                            <td class="num">2</td>
+                            <td><span class="codeline">api_key×2</span></td>
+                            <td><span class="badge ok" title="2 已启用 · 2 可达 / 0 失败中 · p50 618ms · 错误率 0.1%">健康</span></td>
+                            <td><span class="badge ok" title="data_policy = zdr：零数据保留，请求不留存不训练">zdr</span></td>
+                            <td><span style="display:inline-flex;align-items:center;gap:6px;"><span class="dot ok"></span><span class="codeline">closed</span></span></td>
+                        </tr>
+                        <tr class="row-link" data-href="#">
+                            <td><span class="provider"><span class="logo openai">O</span><span class="codeline">openai</span></span></td>
+                            <td class="num">2</td>
+                            <td class="num">2</td>
+                            <td><span class="codeline">api_key×2</span></td>
+                            <td><span class="badge warn" title="2 已启用 · 1 可达 / 1 失败中 · p50 890ms · 错误率 3.4%">降级</span></td>
+                            <td><span class="badge warn" title="data_policy = collects">collects</span></td>
+                            <td><span style="display:inline-flex;align-items:center;gap:6px;"><span class="dot warn"></span><span class="codeline">half-open</span><span class="muted" style="font-size:11px;">探测中 1/3</span></span></td>
+                        </tr>
+                        <tr class="row-link" data-href="#">
+                            <td><span class="provider"><span class="logo deepseek">D</span><span class="codeline">deepseek</span></span></td>
+                            <td class="num">1</td>
+                            <td class="num">1</td>
+                            <td><span class="codeline">api_key×1</span></td>
+                            <td><span class="badge ok" title="1 已启用 · 1 可达 / 0 失败中 · p50 350ms · 错误率 0.3%">健康</span></td>
+                            <td><span class="badge warn" title="data_policy = collects">collects</span></td>
+                            <td><span style="display:inline-flex;align-items:center;gap:6px;"><span class="dot ok"></span><span class="codeline">closed</span></span></td>
+                        </tr>
+                        <tr class="row-link" data-href="#">
+                            <td><span class="provider"><span class="logo groq">Q</span><span class="codeline">groq</span></span></td>
+                            <td class="num">1</td>
+                            <td class="num">1</td>
+                            <td><span class="codeline">api_key×1</span></td>
+                            <td><span class="badge err" title="1 已启用 · 0 可达 / 1 失败中 · 连续失败 5 次触发熔断">不健康</span></td>
+                            <td><span class="badge ok" title="data_policy = zdr">zdr</span></td>
+                            <td><span style="display:inline-flex;align-items:center;gap:6px;"><span class="dot err"></span><span class="codeline">open</span><span class="muted" style="font-size:11px;">冷却剩 42s</span></span></td>
+                        </tr>
+                        <tr class="row-link" data-href="#">
+                            <td><span class="provider"><span class="logo xai">X</span><span class="codeline">xai</span></span></td>
+                            <td class="num">0</td>
+                            <td class="num">0</td>
+                            <td><span class="muted">—</span></td>
+                            <td><span class="badge">无凭证</span></td>
+                            <td><span class="muted">—</span></td>
+                            <td><span style="display:inline-flex;align-items:center;gap:6px;"><span class="dot idle"></span><span class="muted" style="font-size:11px;">未参与</span></span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="alert alert-info">
+            熔断状态机（closed → open → half-open）〔V2-P2-9〕的触发阈值 <span class="codeline">failure_threshold</span>、冷却退避 <span class="codeline">backoff_base/max/jitter</span> 与半开探测数 <span class="codeline">half_open_probes</span> 在<a href="routing.html#resilience">供给路由 · 容灾参数卡</a>中按路由组配置；本列为各提供商的实时状态汇总。
+        </div>
+
+        <script>
+        document.addEventListener('click', function(e){
+          if (e.target.closest && e.target.closest('a, button')) return;
+          var row = e.target.closest && e.target.closest('tr.row-link[data-href]');
+          if (row) window.location = row.getAttribute('data-href');
+        });
+        </script>
+      </div>
+    </main>
+  </div>
+  <script src="../assets/app.js"></script>
+</body>
+</html>

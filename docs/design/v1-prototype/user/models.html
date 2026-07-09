@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<!--
+  路由: /dashboard/models
+  还原依据: src/templates/models_pages.rs dashboard_models_page() + models_catalog_body()
+           + models_catalog.css(整段内嵌) + models_catalog.js(卡片/侧栏/chips 渲染结构)
+           + layout.rs dash_layout_authed() / dash_sidebar_user()
+  文案来源: src/i18n/zh-CN.json
+  说明: 静态原型 — 客户端渲染的卡片网格以静态 HTML 呈现;模型/提供商名取自
+        源码 docs_body 与 playground SURFACES 中真实出现的名称;品牌 logo 用
+        mc-glyph 字形回退(原版从 /logos/ 加载 svg)。团队治理横幅为
+        team_name=Some 时的形态。
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>模型 · Token Station</title>
+  <script>
+  (function(){
+    try {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+  </script>
+  <link rel="stylesheet" href="../assets/dash.css">
+  <style>
+  /* lang_toggle 样式,照搬 layout.rs */
+  .lang-inline{display:inline-flex;align-items:center;gap:2px;border:1px solid var(--line,#e2e8f0);border-radius:6px;padding:2px;vertical-align:middle;}
+  .lang-inline .lang-opt{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:24px;padding:0 5px;font-size:12px;font-weight:600;color:var(--text-2,#64748b);text-decoration:none;border-radius:4px;line-height:1;}
+  .lang-inline .lang-opt:hover{color:var(--text-0,#0f172a);}
+  .lang-inline .lang-opt.active{background:var(--bg-2,#f1f5f9);color:var(--text-0,#0f172a);}
+  html[data-theme="dark"] .lang-inline{border-color:#334155;}
+  html[data-theme="dark"] .lang-inline .lang-opt:hover{color:#f1f5f9;}
+  html[data-theme="dark"] .lang-inline .lang-opt.active{background:#1e293b;color:#f1f5f9;}
+  @media (max-width:768px){ .lang-inline{display:none;} }
+  </style>
+</head>
+<body class="app">
+  <div class="shell">
+    <button class="hamburger" onclick="toggleSidebar()" aria-label="菜单">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <aside class="sidebar">
+      <a href="dashboard.html" class="brand">
+        <span class="brand-mark">T</span>
+        <span class="col" style="gap:1px;">
+          <span class="brand-name">Token Station</span>
+          <span class="brand-sub">工作区</span>
+        </span>
+      </a>
+      <nav class="nav">
+        <div class="nav-group-label">我的空间</div>
+        <a href="dashboard.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>仪表盘</a>
+        <a href="playground.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg></span>体验场</a>
+        <a href="keys.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span>API 密钥</a>
+        <a href="models.html" class="nav-item active"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg></span>模型</a>
+        <a href="usage.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>用量</a>
+        <a href="profile.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>构建者画像</a>
+        <a href="billing.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg></span>账单</a>
+        <div class="nav-group-label">参考</div>
+        <a href="docs.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>文档</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="avatar xs green">D</div>
+        <div class="who">
+          <span class="who-name">dev@example.com</span>
+          <a href="#" class="who-role" style="color:var(--text-3);">退出登录</a>
+        </div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="crumbs"><span>我的空间</span><span class="sep">›</span><span class="leaf">模型</span></div>
+        <div class="topbar-spacer"></div>
+        <nav class="lang-inline" aria-label="语言"><a href="#" class="lang-opt" title="English"><span class="lang-g">EN</span></a><a href="#" class="lang-opt active" aria-current="true" title="简体中文"><span class="lang-g">简</span></a><a href="#" class="lang-opt" title="繁體中文"><span class="lang-g">繁</span></a><a href="#" class="lang-opt" title="日本語"><span class="lang-g">日</span></a><a href="#" class="lang-opt" title="한국어"><span class="lang-g">한</span></a></nav>
+        <button type="button" class="theme-toggle topbar-icon" aria-label="切换主题">
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m4.93 19.07 1.41-1.41"/><path d="m17.66 6.34 1.41-1.41"/></svg>
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+        <a href="docs.html" class="topbar-icon" title="文档"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></a>
+      </header>
+      <div class="page">
+        <!-- 团队治理横幅(dashboard_models_page team_banner, team_name=Some 分支) -->
+        <div class="card" style="margin-bottom:14px"><div class="card-body"><p class="muted" style="margin:0"><strong>21 个模型 · 由您的团队设定</strong> — 由 Core Team 设定。如需变更存取权限，请联系您的管理员。</p></div></div>
+
+        <!-- ↓ models_catalog_body() 渲染结果;CSS = models_catalog.css 全量内嵌 -->
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+        <style>
+/* Public model catalog (/models). mc-* prefixed so it never collides with dash.css. */
+.public-layout { max-width: 1180px; }
+
+.mc-head { margin-bottom: 18px; }
+.mc-title { font-family: 'Space Grotesk', Inter, sans-serif; font-size: clamp(26px, 4vw, 40px); font-weight: 700; letter-spacing: -0.03em; margin: 0 0 10px; color: #18181b; }
+.mc-sub { color: #71717a; font-size: 15px; line-height: 1.6; margin: 0 0 22px; max-width: 680px; }
+
+.mc-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 16px; }
+.mc-search { flex: 1; min-width: 220px; padding: 10px 14px; border: 1px solid #e4e4e7; border-radius: 10px; font-size: 14px; font-family: inherit; background: #fff; color: #18181b; }
+.mc-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.mc-chip { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; padding: 7px 12px; border-radius: 50px; border: 1px solid #e4e4e7; background: #fff; color: #52525b; cursor: pointer; }
+.mc-chip[aria-pressed="true"] { background: #2563EB; border-color: #2563EB; color: #fff; }
+.mc-summary { font-size: 13px; color: #71717a; margin-bottom: 16px; font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+/* ── Two-column layout: filter sidebar + main column ─────────── */
+.mc-layout { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 28px; align-items: start; }
+.mc-side-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.mc-side-title { font-family: 'Space Grotesk', Inter, sans-serif; font-weight: 700; font-size: 15px; color: #18181b; }
+.mc-clear { background: none; border: none; padding: 0; font-size: 12px; color: #2563EB; cursor: pointer; font-family: inherit; }
+.mc-clear:hover { text-decoration: underline; }
+.mc-side-group { margin-bottom: 22px; }
+.mc-side-label { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: #a1a1aa; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+.mc-sel { color: #2563EB; text-transform: none; letter-spacing: 0; }
+
+.mc-seg { display: flex; border: 1px solid #e4e4e7; border-radius: 10px; overflow: hidden; background: #fff; }
+.mc-seg button { flex: 1; padding: 7px 6px; font-size: 12px; font-weight: 600; font-family: inherit; border: none; border-right: 1px solid #e4e4e7; background: transparent; color: #52525b; cursor: pointer; }
+.mc-seg button:last-child { border-right: none; }
+.mc-seg button[aria-pressed="true"] { background: #2563EB; color: #fff; }
+
+.mc-provs { display: flex; flex-direction: column; gap: 1px; }
+.mc-provs .mc-prov { display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 8px; cursor: pointer; user-select: none; margin: 0; }
+.mc-prov:hover { background: #f4f4f5; }
+.mc-prov input { margin: 0; flex: none; accent-color: #2563EB; }
+.mc-prov-logo { width: 18px; height: 18px; border-radius: 5px; display: flex; align-items: center; justify-content: center; background: #fff; border: 1px solid #e4e4e7; flex: none; overflow: hidden; }
+.mc-prov-logo img { width: 12px; height: 12px; object-fit: contain; }
+.mc-prov-logo .mc-glyph { font-size: 9px; }
+.mc-prov-name { font-size: 12.5px; color: #3f3f46; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-prov-n { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; color: #a1a1aa; flex: none; }
+.mc-prov.is-on { background: #eff6ff; }
+.mc-prov.is-on:hover { background: #e0ecff; }
+.mc-prov.is-empty { opacity: 0.4; }
+
+@media (max-width: 860px) {
+  .mc-layout { grid-template-columns: 1fr; gap: 18px; }
+  .mc-sidebar { display: none; }
+}
+
+.mc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(264px, 1fr)); gap: 16px; }
+.mc-card { background: #fff; border: 1px solid #e4e4e7; border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 12px; transition: border-color .2s, transform .2s, box-shadow .2s; text-decoration: none; color: inherit; cursor: pointer; }
+.mc-card:hover { border-color: #2563EB; transform: translateY(-2px); box-shadow: 0 8px 24px rgba(24,24,27,0.06); }
+.mc-top { display: flex; align-items: center; gap: 10px; }
+.mc-logo { width: 34px; height: 34px; border-radius: 9px; display: flex; align-items: center; justify-content: center; background: #fff; border: 1px solid #e4e4e7; flex-shrink: 0; overflow: hidden; }
+.mc-logo img { width: 22px; height: 22px; object-fit: contain; }
+.mc-glyph { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 14px; line-height: 1; }
+.mc-prov { font-size: 12px; color: #52525b; font-weight: 500; }
+.mc-name { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 13px; font-weight: 500; color: #18181b; word-break: break-word; line-height: 1.45; }
+.mc-mods { display: flex; flex-wrap: wrap; gap: 4px; }
+.mc-badge { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 5px; background: #eef4ff; color: #2563EB; border: 1px solid rgba(37,99,235,0.18); }
+.mc-badge.media { background: #f0fdfa; color: #0D9488; border-color: rgba(13,148,136,0.20); }
+.mc-foot { display: flex; justify-content: space-between; align-items: center; margin-top: auto; padding-top: 11px; border-top: 1px solid #f4f4f5; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; color: #71717a; }
+.mc-price .mc-free { color: #0D9488; font-weight: 600; }
+.mc-price .mc-metered { color: #a1a1aa; font-weight: 500; }
+.mc-state { padding: 48px; text-align: center; color: #71717a; }
+
+/* ── Dark mode (mirrors the dashboard palette) ───────────────── */
+html[data-theme="dark"] .mc-title { color: #f1f5f9; }
+html[data-theme="dark"] .mc-sub,
+html[data-theme="dark"] .mc-summary { color: #94a3b8; }
+html[data-theme="dark"] .mc-search { background: #0f172a; border-color: #334155; color: #e2e8f0; }
+html[data-theme="dark"] .mc-chip { background: #1e293b; border-color: #334155; color: #cbd5e1; }
+html[data-theme="dark"] .mc-chip[aria-pressed="true"] { background: #2563EB; border-color: #2563EB; color: #fff; }
+html[data-theme="dark"] .mc-card { background: #1e293b; border-color: #334155; }
+html[data-theme="dark"] .mc-card:hover { border-color: #3b82f6; box-shadow: 0 8px 24px rgba(0,0,0,0.30); }
+html[data-theme="dark"] .mc-prov { color: #94a3b8; }
+html[data-theme="dark"] .mc-name { color: #e2e8f0; }
+html[data-theme="dark"] .mc-badge { background: rgba(37,99,235,0.18); color: #60a5fa; border-color: rgba(37,99,235,0.30); }
+html[data-theme="dark"] .mc-badge.media { background: rgba(13,148,136,0.18); color: #2dd4bf; border-color: rgba(13,148,136,0.30); }
+html[data-theme="dark"] .mc-foot { color: #94a3b8; border-top-color: #334155; }
+html[data-theme="dark"] .mc-price .mc-free { color: #2dd4bf; }
+html[data-theme="dark"] .mc-price .mc-metered { color: #64748b; }
+html[data-theme="dark"] .mc-state { color: #94a3b8; }
+html[data-theme="dark"] .mc-side-title { color: #f1f5f9; }
+html[data-theme="dark"] .mc-side-label { color: #64748b; }
+html[data-theme="dark"] .mc-clear { color: #60a5fa; }
+html[data-theme="dark"] .mc-seg { background: #0f172a; border-color: #334155; }
+html[data-theme="dark"] .mc-seg button { color: #cbd5e1; border-right-color: #334155; }
+html[data-theme="dark"] .mc-seg button[aria-pressed="true"] { background: #2563EB; color: #fff; }
+html[data-theme="dark"] .mc-prov:hover { background: #1e293b; }
+html[data-theme="dark"] .mc-prov.is-on { background: rgba(37,99,235,0.16); }
+html[data-theme="dark"] .mc-prov.is-on:hover { background: rgba(37,99,235,0.24); }
+html[data-theme="dark"] .mc-prov-name { color: #cbd5e1; }
+html[data-theme="dark"] .mc-prov-n { color: #64748b; }
+html[data-theme="dark"] .mc-prov-logo { border-color: #334155; }
+        </style>
+        <div class="mc-head">
+          <h1 class="mc-title">你的模型</h1>
+          <p class="mc-sub">你的账户被授权使用的模型——此列表由你的管理员决定。<strong>点击任意模型即可在体验场中打开。</strong></p>
+        </div>
+        <div class="mc-layout">
+          <aside class="mc-sidebar" aria-label="Filters">
+            <div class="mc-side-head">
+              <span class="mc-side-title">筛选</span>
+              <button type="button" class="mc-clear" id="mc-clear" hidden>全部清除</button>
+            </div>
+            <div class="mc-side-group">
+              <div class="mc-side-label">价格</div>
+              <div class="mc-seg" id="mc-price" role="group" aria-label="Filter by price">
+                <button type="button" data-price="all" aria-pressed="true">全部</button>
+                <button type="button" data-price="free">免费</button>
+                <button type="button" data-price="paid">付费</button>
+              </div>
+            </div>
+            <div class="mc-side-group">
+              <div class="mc-side-label">提供商 <span class="mc-sel" id="mc-prov-sel" hidden></span></div>
+              <div class="mc-provs" id="mc-provs">
+                <label class="mc-prov"><input type="checkbox"><span class="mc-prov-logo"><span class="mc-glyph" style="color:#615CED">百</span></span><span class="mc-prov-name" title="Alibaba Bailian (Intl)">Alibaba Bailian (Intl)</span><span class="mc-prov-n">3</span></label>
+                <label class="mc-prov"><input type="checkbox"><span class="mc-prov-logo"><span class="mc-glyph" style="color:#D97757">A</span></span><span class="mc-prov-name" title="Anthropic">Anthropic</span><span class="mc-prov-n">2</span></label>
+                <label class="mc-prov"><input type="checkbox"><span class="mc-prov-logo"><span class="mc-glyph" style="color:#A78BFA">11</span></span><span class="mc-prov-name" title="ElevenLabs">ElevenLabs</span><span class="mc-prov-n">1</span></label>
+                <label class="mc-prov"><input type="checkbox"><span class="mc-prov-logo"><span class="mc-glyph" style="color:#4F8DFA">G</span></span><span class="mc-prov-name" title="Google Gemini">Google Gemini</span><span class="mc-prov-n">2</span></label>
+                <label class="mc-prov"><input type="checkbox"><span class="mc-prov-logo"><span class="mc-glyph" style="color:#F55036">G</span></span><span class="mc-prov-name" title="Groq">Groq</span><span class="mc-prov-n">2</span></label>
+                <label class="mc-prov"><input type="checkbox"><span class="mc-prov-logo"><span class="mc-glyph" style="color:#F472B6">M</span></span><span class="mc-prov-name" title="MiniMax">MiniMax</span><span class="mc-prov-n">3</span></label>
+                <label class="mc-prov"><input type="checkbox"><span class="mc-prov-logo"><span class="mc-glyph" style="color:#5B8DEE">月</span></span><span class="mc-prov-name" title="Moonshot Kimi">Moonshot Kimi</span><span class="mc-prov-n">1</span></label>
+                <label class="mc-prov"><input type="checkbox"><span class="mc-prov-logo"><span class="mc-glyph" style="color:#10A37F">O</span></span><span class="mc-prov-name" title="OpenAI">OpenAI</span><span class="mc-prov-n">4</span></label>
+                <label class="mc-prov"><input type="checkbox"><span class="mc-prov-logo"><span class="mc-glyph" style="color:#18181b">X</span></span><span class="mc-prov-name" title="xAI">xAI</span><span class="mc-prov-n">2</span></label>
+                <label class="mc-prov"><input type="checkbox"><span class="mc-prov-logo"><span class="mc-glyph" style="color:#9B7BF7">智</span></span><span class="mc-prov-name" title="Zhipu GLM">Zhipu GLM</span><span class="mc-prov-n">1</span></label>
+              </div>
+            </div>
+          </aside>
+          <div class="mc-main">
+            <div class="mc-controls">
+              <input id="mc-search" class="mc-search" type="search" placeholder="搜索模型或提供商…" aria-label="Search models">
+              <div id="mc-chips" class="mc-chips" role="group" aria-label="Filter by modality">
+                <button class="mc-chip" aria-pressed="true">全部</button>
+                <button class="mc-chip" aria-pressed="false">对话</button>
+                <button class="mc-chip" aria-pressed="false">多模态</button>
+                <button class="mc-chip" aria-pressed="false">图像</button>
+                <button class="mc-chip" aria-pressed="false">图像编辑</button>
+                <button class="mc-chip" aria-pressed="false">视频</button>
+                <button class="mc-chip" aria-pressed="false">图生视频</button>
+                <button class="mc-chip" aria-pressed="false">语音合成</button>
+                <button class="mc-chip" aria-pressed="false">语音识别</button>
+                <button class="mc-chip" aria-pressed="false">向量嵌入</button>
+                <button class="mc-chip" aria-pressed="false">音乐</button>
+              </div>
+            </div>
+            <div class="mc-summary" id="mc-summary">显示 21 个模型中的 21 个 · 10 个提供商 · 实时来自 /api/models</div>
+            <div id="mc-out">
+              <div class="mc-grid">
+                <!-- anthropic -->
+                <a class="mc-card" href="playground.html?model=anthropic%2Fclaude-opus-4-6" title="Open anthropic/claude-opus-4-6 in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#D97757">A</span></div><div class="mc-prov">Anthropic</div></div>
+                  <div class="mc-name" title="anthropic/claude-opus-4-6">claude-opus-4-6</div>
+                  <div class="mc-mods"><span class="mc-badge">对话</span><span class="mc-badge">多模态</span></div>
+                  <div class="mc-foot"><span>200K 上下文</span><span class="mc-price">$5 / $25</span></div>
+                </a>
+                <a class="mc-card" href="playground.html?model=anthropic%2Fclaude-sonnet-4-6" title="Open anthropic/claude-sonnet-4-6 in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#D97757">A</span></div><div class="mc-prov">Anthropic</div></div>
+                  <div class="mc-name" title="anthropic/claude-sonnet-4-6">claude-sonnet-4-6</div>
+                  <div class="mc-mods"><span class="mc-badge">对话</span><span class="mc-badge">多模态</span></div>
+                  <div class="mc-foot"><span>200K 上下文</span><span class="mc-price">$3 / $15</span></div>
+                </a>
+                <!-- bailian-intl -->
+                <a class="mc-card" href="playground.html?model=bailian%2Fqwen-image-edit-plus" title="Open bailian/qwen-image-edit-plus in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#615CED">百</span></div><div class="mc-prov">Alibaba Bailian (Intl)</div></div>
+                  <div class="mc-name" title="bailian/qwen-image-edit-plus">qwen-image-edit-plus</div>
+                  <div class="mc-mods"><span class="mc-badge media">图像编辑</span></div>
+                  <div class="mc-foot"><span></span><span class="mc-price"><span class="mc-metered">按量计费</span></span></div>
+                </a>
+                <a class="mc-card" href="playground.html?model=bailian%2Fqwen3-tts-flash" title="Open bailian/qwen3-tts-flash in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#615CED">百</span></div><div class="mc-prov">Alibaba Bailian (Intl)</div></div>
+                  <div class="mc-name" title="bailian/qwen3-tts-flash">qwen3-tts-flash</div>
+                  <div class="mc-mods"><span class="mc-badge media">语音合成</span></div>
+                  <div class="mc-foot"><span></span><span class="mc-price"><span class="mc-metered">按量计费</span></span></div>
+                </a>
+                <a class="mc-card" href="playground.html?model=bailian%2Fqwen3.7-plus" title="Open bailian/qwen3.7-plus in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#615CED">百</span></div><div class="mc-prov">Alibaba Bailian (Intl)</div></div>
+                  <div class="mc-name" title="bailian/qwen3.7-plus">qwen3.7-plus</div>
+                  <div class="mc-mods"><span class="mc-badge">对话</span></div>
+                  <div class="mc-foot"><span>1M 上下文</span><span class="mc-price">$0.4 / $1.2</span></div>
+                </a>
+                <!-- elevenlabs -->
+                <a class="mc-card" href="playground.html?model=elevenlabs%2Fscribe-v2" title="Open elevenlabs/scribe-v2 in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#A78BFA">11</span></div><div class="mc-prov">ElevenLabs</div></div>
+                  <div class="mc-name" title="elevenlabs/scribe-v2">scribe-v2</div>
+                  <div class="mc-mods"><span class="mc-badge media">语音识别</span></div>
+                  <div class="mc-foot"><span></span><span class="mc-price"><span class="mc-metered">按量计费</span></span></div>
+                </a>
+                <!-- gemini -->
+                <a class="mc-card" href="playground.html?model=gemini%2Fgemini-3.5-flash" title="Open gemini/gemini-3.5-flash in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#4F8DFA">G</span></div><div class="mc-prov">Google Gemini</div></div>
+                  <div class="mc-name" title="gemini/gemini-3.5-flash">gemini-3.5-flash</div>
+                  <div class="mc-mods"><span class="mc-badge">对话</span><span class="mc-badge">多模态</span></div>
+                  <div class="mc-foot"><span>1M 上下文</span><span class="mc-price">$0.3 / $2.5</span></div>
+                </a>
+                <a class="mc-card" href="playground.html?model=gemini%2Fgemini-embedding-001" title="Open gemini/gemini-embedding-001 in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#4F8DFA">G</span></div><div class="mc-prov">Google Gemini</div></div>
+                  <div class="mc-name" title="gemini/gemini-embedding-001">gemini-embedding-001</div>
+                  <div class="mc-mods"><span class="mc-badge media">向量嵌入</span></div>
+                  <div class="mc-foot"><span>2K 上下文</span><span class="mc-price">$0.15 / $0</span></div>
+                </a>
+                <!-- glm -->
+                <a class="mc-card" href="playground.html?model=glm%2Fglm-5" title="Open glm/glm-5 in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#9B7BF7">智</span></div><div class="mc-prov">Zhipu GLM</div></div>
+                  <div class="mc-name" title="glm/glm-5">glm-5</div>
+                  <div class="mc-mods"><span class="mc-badge">对话</span></div>
+                  <div class="mc-foot"><span>200K 上下文</span><span class="mc-price">$0.6 / $2.2</span></div>
+                </a>
+                <!-- groq -->
+                <a class="mc-card" href="playground.html?model=groq%2Fllama-4-scout" title="Open groq/llama-4-scout in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#F55036">G</span></div><div class="mc-prov">Groq</div></div>
+                  <div class="mc-name" title="groq/llama-4-scout">llama-4-scout</div>
+                  <div class="mc-mods"><span class="mc-badge">对话</span></div>
+                  <div class="mc-foot"><span>128K 上下文</span><span class="mc-price"><span class="mc-free">免费</span></span></div>
+                </a>
+                <a class="mc-card" href="playground.html?model=groq%2Fwhisper-large-v3" title="Open groq/whisper-large-v3 in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#F55036">G</span></div><div class="mc-prov">Groq</div></div>
+                  <div class="mc-name" title="groq/whisper-large-v3">whisper-large-v3</div>
+                  <div class="mc-mods"><span class="mc-badge media">语音识别</span></div>
+                  <div class="mc-foot"><span></span><span class="mc-price"><span class="mc-metered">按量计费</span></span></div>
+                </a>
+                <!-- kimi -->
+                <a class="mc-card" href="playground.html?model=kimi%2Fkimi-k2.6" title="Open kimi/kimi-k2.6 in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#5B8DEE">月</span></div><div class="mc-prov">Moonshot Kimi</div></div>
+                  <div class="mc-name" title="kimi/kimi-k2.6">kimi-k2.6</div>
+                  <div class="mc-mods"><span class="mc-badge">对话</span></div>
+                  <div class="mc-foot"><span>256K 上下文</span><span class="mc-price">$0.6 / $2.5</span></div>
+                </a>
+                <!-- minimax -->
+                <a class="mc-card" href="playground.html?model=minimax%2FMiniMax-M2.5" title="Open minimax/MiniMax-M2.5 in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#F472B6">M</span></div><div class="mc-prov">MiniMax</div></div>
+                  <div class="mc-name" title="minimax/MiniMax-M2.5">MiniMax-M2.5</div>
+                  <div class="mc-mods"><span class="mc-badge">对话</span></div>
+                  <div class="mc-foot"><span>200K 上下文</span><span class="mc-price">$0.3 / $1.2</span></div>
+                </a>
+                <a class="mc-card" href="playground.html?model=minimax%2Fmusic-2.6" title="Open minimax/music-2.6 in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#F472B6">M</span></div><div class="mc-prov">MiniMax</div></div>
+                  <div class="mc-name" title="minimax/music-2.6">music-2.6</div>
+                  <div class="mc-mods"><span class="mc-badge media">音乐</span></div>
+                  <div class="mc-foot"><span></span><span class="mc-price"><span class="mc-metered">按量计费</span></span></div>
+                </a>
+                <a class="mc-card" href="playground.html?model=minimax%2Fspeech-2.6-turbo" title="Open minimax/speech-2.6-turbo in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#F472B6">M</span></div><div class="mc-prov">MiniMax</div></div>
+                  <div class="mc-name" title="minimax/speech-2.6-turbo">speech-2.6-turbo</div>
+                  <div class="mc-mods"><span class="mc-badge media">语音合成</span></div>
+                  <div class="mc-foot"><span></span><span class="mc-price"><span class="mc-metered">按量计费</span></span></div>
+                </a>
+                <!-- openai -->
+                <a class="mc-card" href="playground.html?model=openai%2Fgpt-4o-transcribe" title="Open openai/gpt-4o-transcribe in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#10A37F">O</span></div><div class="mc-prov">OpenAI</div></div>
+                  <div class="mc-name" title="openai/gpt-4o-transcribe">gpt-4o-transcribe</div>
+                  <div class="mc-mods"><span class="mc-badge media">语音识别</span></div>
+                  <div class="mc-foot"><span></span><span class="mc-price"><span class="mc-metered">按量计费</span></span></div>
+                </a>
+                <a class="mc-card" href="playground.html?model=openai%2Fgpt-5.5" title="Open openai/gpt-5.5 in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#10A37F">O</span></div><div class="mc-prov">OpenAI</div></div>
+                  <div class="mc-name" title="openai/gpt-5.5">gpt-5.5</div>
+                  <div class="mc-mods"><span class="mc-badge">对话</span><span class="mc-badge">多模态</span></div>
+                  <div class="mc-foot"><span>400K 上下文</span><span class="mc-price">$1.25 / $10</span></div>
+                </a>
+                <a class="mc-card" href="playground.html?model=openai%2Fgpt-image-2" title="Open openai/gpt-image-2 in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#10A37F">O</span></div><div class="mc-prov">OpenAI</div></div>
+                  <div class="mc-name" title="openai/gpt-image-2">gpt-image-2</div>
+                  <div class="mc-mods"><span class="mc-badge media">图像</span><span class="mc-badge media">图像编辑</span></div>
+                  <div class="mc-foot"><span></span><span class="mc-price"><span class="mc-metered">按量计费</span></span></div>
+                </a>
+                <a class="mc-card" href="playground.html?model=openai%2Ftts-1" title="Open openai/tts-1 in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#10A37F">O</span></div><div class="mc-prov">OpenAI</div></div>
+                  <div class="mc-name" title="openai/tts-1">tts-1</div>
+                  <div class="mc-mods"><span class="mc-badge media">语音合成</span></div>
+                  <div class="mc-foot"><span></span><span class="mc-price"><span class="mc-metered">按量计费</span></span></div>
+                </a>
+                <!-- xai -->
+                <a class="mc-card" href="playground.html?model=xai%2Fgrok-4.20" title="Open xai/grok-4.20 in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#18181b">X</span></div><div class="mc-prov">xAI</div></div>
+                  <div class="mc-name" title="xai/grok-4.20">grok-4.20</div>
+                  <div class="mc-mods"><span class="mc-badge">对话</span></div>
+                  <div class="mc-foot"><span>256K 上下文</span><span class="mc-price">$3 / $15</span></div>
+                </a>
+                <a class="mc-card" href="playground.html?model=xai%2Fgrok-imagine-video" title="Open xai/grok-imagine-video in the playground">
+                  <div class="mc-top"><div class="mc-logo"><span class="mc-glyph" style="color:#18181b">X</span></div><div class="mc-prov">xAI</div></div>
+                  <div class="mc-name" title="xai/grok-imagine-video">grok-imagine-video</div>
+                  <div class="mc-mods"><span class="mc-badge media">视频</span><span class="mc-badge media">图生视频</span></div>
+                  <div class="mc-foot"><span></span><span class="mc-price"><span class="mc-metered">按量计费</span></span></div>
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="../assets/app.js"></script>
+</body>
+</html>

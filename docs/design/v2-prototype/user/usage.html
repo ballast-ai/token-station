@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<!--
+  产品路由: GET /dashboard/usage?range=30d
+  详设: docs/design/V2页面详细设计.md §2.11
+  主体阶段: V1+P1
+  说明: V1 结构与内容保留(范围选择/汇总 KPI/堆叠面积图/按模型费用/请求记录,沿 v1-prototype/user/usage.html),
+        V2 增量叠加:账路分段 seg-tabs(P1)、明细行 request_id 与决策链接列(P1)、步骤类型分布(P2)。
+        注:V2 模拟数据词汇统一为纯 LLM 模型,V1 明细表的「用量」列(非 token 行,如 2 img)无对应数据,已并入输入/输出列。
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>用量 · Token Station</title>
+  <script>
+  (function(){
+    try {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+  </script>
+  <link rel="stylesheet" href="../assets/dash.css">
+  <link rel="stylesheet" href="../assets/v2.css">
+  <style>
+  .lang-inline{display:inline-flex;align-items:center;gap:2px;border:1px solid var(--line,#e2e8f0);border-radius:6px;padding:2px;vertical-align:middle;}
+  .lang-inline .lang-opt{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:24px;padding:0 5px;font-size:12px;font-weight:600;color:var(--text-2,#64748b);text-decoration:none;border-radius:4px;line-height:1;}
+  .lang-inline .lang-opt:hover{color:var(--text-0,#0f172a);}
+  .lang-inline .lang-opt.active{background:var(--bg-2,#f1f5f9);color:var(--text-0,#0f172a);}
+  html[data-theme="dark"] .lang-inline{border-color:#334155;}
+  html[data-theme="dark"] .lang-inline .lang-opt:hover{color:#f1f5f9;}
+  html[data-theme="dark"] .lang-inline .lang-opt.active{background:#1e293b;color:#f1f5f9;}
+  @media (max-width:768px){ .lang-inline{display:none;} }
+  </style>
+</head>
+<body class="app">
+  <div class="shell">
+    <button class="hamburger" onclick="toggleSidebar()" aria-label="菜单">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <aside class="sidebar">
+      <a href="dashboard.html" class="brand">
+        <span class="brand-mark">T</span>
+        <span class="col" style="gap:1px;">
+          <span class="brand-name">Token Station</span>
+          <span class="brand-sub">工作区 · V2</span>
+        </span>
+      </a>
+      <nav class="nav">
+        <div class="nav-group-label">我的空间</div>
+        <a href="dashboard.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>仪表盘</a>
+        <a href="playground.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg></span>体验场</a>
+        <a href="keys.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span>API 密钥</a>
+        <a href="byok.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 7V2"/><path d="M15 7V2"/><path d="M6 13V8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4Z"/></svg></span>自带上游</a>
+        <a href="models.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg></span>模型目录</a>
+        <div class="nav-group-label">智能路由</div>
+        <a href="rules.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span>路由规则</a>
+        <a href="presets.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg></span>预设 Preset</a>
+        <a href="decisions.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg></span>决策记录</a>
+        <div class="nav-group-label">用量与账单</div>
+        <a href="usage.html" class="nav-item active"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>用量</a>
+        <a href="billing.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg></span>账单</a>
+        <div class="nav-group-label">组织</div>
+        <a href="org.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>组织与团队</a>
+        <a href="devices.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="8" x="5" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 18h2"/><path d="M12 18h6"/></svg></span>设备与客户端</a>
+        <div class="nav-group-label">参考</div>
+        <a href="docs.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>文档</a>
+        <a href="settings.html" class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span>设置</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="avatar xs green">D</div>
+        <div class="who">
+          <span class="who-name">dev@example.com</span>
+          <a href="#" class="who-role" style="color:var(--text-3);">退出登录</a>
+        </div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="crumbs"><span>工作区</span><span class="sep">›</span><span class="leaf">用量</span></div>
+        <div class="topbar-spacer"></div>
+        <nav class="lang-inline" aria-label="语言"><a href="#" class="lang-opt" title="English"><span class="lang-g">EN</span></a><a href="#" class="lang-opt active" aria-current="true" title="简体中文"><span class="lang-g">简</span></a><a href="#" class="lang-opt" title="繁體中文"><span class="lang-g">繁</span></a><a href="#" class="lang-opt" title="日本語"><span class="lang-g">日</span></a><a href="#" class="lang-opt" title="한국어"><span class="lang-g">한</span></a></nav>
+        <button type="button" class="theme-toggle topbar-icon" aria-label="切换主题">
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m4.93 19.07 1.41-1.41"/><path d="m17.66 6.34 1.41-1.41"/></svg>
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+        <a href="docs.html" class="topbar-icon" title="文档"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></a>
+      </header>
+      <div class="page">
+        <div class="page-head">
+            <div>
+                <h1 class="page-title">用量<span class="stage-row"><span class="stage stage-v1">V1</span><span class="stage stage-p1">P1</span></span></h1>
+                <div class="page-sub">按请求的历史明细与汇总 · Past 30 days</div>
+            </div>
+            <div class="page-actions"><select class="input" style="width:auto;padding:6px 12px" aria-label="Time range" onchange="return false"><option value="all">All time</option><option value="30d" selected>Past 30 days</option><option value="7d">Past 7 days</option><option value="mtd">July 2026 (MTD)</option><option value="month:2026-06">June 2026</option><option value="month:2026-05">May 2026</option></select></div>
+        </div>
+
+        <!-- 时间范围/汇总 · V1 -->
+        <div class="kpi-grid">
+            <div class="kpi">
+                <div class="kpi-label">总请求数</div>
+                <div class="kpi-value">1,284</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">Token 总数</div>
+                <div class="kpi-value">2,464,306</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">总费用</div>
+                <div class="kpi-value">$4.21</div>
+            </div>
+            <div class="kpi">
+                <div class="kpi-label">平均每次请求费用</div>
+                <div class="kpi-value">$0.003279</div>
+            </div>
+        </div>
+
+        <!-- 账路分段 · P1〔V2-P1-6〕 -->
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">账路 billing_route <span class="stage stage-p1">P1</span></div>
+                <span class="muted" style="font-size:11px">双账路账单可区分的用量侧〔V2-P1-6〕· usage_records.billing_route</span>
+            </div>
+            <div class="card-body">
+                <div class="seg-tabs">
+                    <a href="#" class="seg active">全部 <span class="seg-count">1,284</span></a>
+                    <a href="#" class="seg"><span class="src-badge platform"><span class="src-dot"></span>平台</span> <span class="seg-count">1,046</span></a>
+                    <a href="#" class="seg"><span class="src-badge byok"><span class="src-dot"></span>BYOK 转卖</span> <span class="seg-count">182</span></a>
+                    <a href="#" class="seg"><span class="src-badge byok"><span class="src-dot"></span>BYOK 路由费</span> <span class="seg-count">56</span></a>
+                </div>
+            </div>
+        </div>
+
+        <!-- 趋势图 · V1(图表沿 V1 堆叠面积做法,系列词汇更新为 V2 统一模型) -->
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">按模型 Token 用量 <span class="stage stage-v1">V1</span></div>
+                <div class="row" style="gap:12px;flex-wrap:wrap"><span class="row" style="gap:6px"><span class="dot" style="background:#818cf8"></span><span class="muted" style="font-size:11.5px">glm-5.2</span></span><span class="row" style="gap:6px"><span class="dot" style="background:#10b981"></span><span class="muted" style="font-size:11.5px">claude-sonnet</span></span><span class="row" style="gap:6px"><span class="dot" style="background:#06b6d4"></span><span class="muted" style="font-size:11.5px">claude-haiku</span></span><span class="row" style="gap:6px"><span class="dot" style="background:#f59e0b"></span><span class="muted" style="font-size:11.5px">gpt-5-mini</span></span><span class="row" style="gap:6px"><span class="dot" style="background:#ec4899"></span><span class="muted" style="font-size:11.5px">deepseek-v4</span></span><span class="row" style="gap:6px"><span class="dot" style="background:#6b7280"></span><span class="muted" style="font-size:11.5px">other</span></span></div>
+            </div>
+            <div class="card-body"><svg viewBox="0 0 1000 240" width="100%" height="240" preserveAspectRatio="none"><line x1="36.0" y1="212.0" x2="988.0" y2="212.0" stroke="#1f242c" stroke-dasharray="2 4"/><text x="28.0" y="215.0" text-anchor="end" font-size="10" fill="#6b7280">0</text><line x1="36.0" y1="162.0" x2="988.0" y2="162.0" stroke="#1f242c" stroke-dasharray="2 4"/><text x="28.0" y="165.0" text-anchor="end" font-size="10" fill="#6b7280">35.8K</text><line x1="36.0" y1="112.0" x2="988.0" y2="112.0" stroke="#1f242c" stroke-dasharray="2 4"/><text x="28.0" y="115.0" text-anchor="end" font-size="10" fill="#6b7280">71.6K</text><line x1="36.0" y1="62.0" x2="988.0" y2="62.0" stroke="#1f242c" stroke-dasharray="2 4"/><text x="28.0" y="65.0" text-anchor="end" font-size="10" fill="#6b7280">107.5K</text><line x1="36.0" y1="12.0" x2="988.0" y2="12.0" stroke="#1f242c" stroke-dasharray="2 4"/><text x="28.0" y="15.0" text-anchor="end" font-size="10" fill="#6b7280">143.3K</text><text x="36.0" y="232.0" text-anchor="middle" font-size="10" fill="#6b7280">2026-06-09</text><text x="200.1" y="232.0" text-anchor="middle" font-size="10" fill="#6b7280">2026-06-14</text><text x="364.3" y="232.0" text-anchor="middle" font-size="10" fill="#6b7280">2026-06-19</text><text x="528.4" y="232.0" text-anchor="middle" font-size="10" fill="#6b7280">2026-06-24</text><text x="692.6" y="232.0" text-anchor="middle" font-size="10" fill="#6b7280">2026-06-29</text><text x="856.7" y="232.0" text-anchor="middle" font-size="10" fill="#6b7280">2026-07-04</text><text x="988.0" y="232.0" text-anchor="middle" font-size="10" fill="#6b7280">2026-07-08</text><g><path d="M 36.0,145.3 L 68.8,150.9 L 101.7,142.5 L 134.5,139.8 L 167.3,128.5 L 200.1,127.6 L 233.0,123.1 L 265.8,136.6 L 298.6,132.0 L 331.4,140.4 L 364.3,139.7 L 397.1,138.0 L 429.9,149.5 L 462.8,150.2 L 495.6,146.2 L 528.4,151.3 L 561.2,159.6 L 594.1,155.7 L 626.9,153.4 L 659.7,167.5 L 692.6,153.7 L 725.4,154.2 L 758.2,157.9 L 791.0,157.9 L 823.9,140.7 L 856.7,146.6 L 889.5,145.9 L 922.3,140.8 L 955.2,123.2 L 988.0,122.5 L 988.0,212.0 L 955.2,212.0 L 922.3,212.0 L 889.5,212.0 L 856.7,212.0 L 823.9,212.0 L 791.0,212.0 L 758.2,212.0 L 725.4,212.0 L 692.6,212.0 L 659.7,212.0 L 626.9,212.0 L 594.1,212.0 L 561.2,212.0 L 528.4,212.0 L 495.6,212.0 L 462.8,212.0 L 429.9,212.0 L 397.1,212.0 L 364.3,212.0 L 331.4,212.0 L 298.6,212.0 L 265.8,212.0 L 233.0,212.0 L 200.1,212.0 L 167.3,212.0 L 134.5,212.0 L 101.7,212.0 L 68.8,212.0 L 36.0,212.0 Z" fill="#818cf8" opacity="0.65"/><path d="M 36.0,145.3 L 68.8,150.9 L 101.7,142.5 L 134.5,139.8 L 167.3,128.5 L 200.1,127.6 L 233.0,123.1 L 265.8,136.6 L 298.6,132.0 L 331.4,140.4 L 364.3,139.7 L 397.1,138.0 L 429.9,149.5 L 462.8,150.2 L 495.6,146.2 L 528.4,151.3 L 561.2,159.6 L 594.1,155.7 L 626.9,153.4 L 659.7,167.5 L 692.6,153.7 L 725.4,154.2 L 758.2,157.9 L 791.0,157.9 L 823.9,140.7 L 856.7,146.6 L 889.5,145.9 L 922.3,140.8 L 955.2,123.2 L 988.0,122.5" fill="none" stroke="#818cf8" stroke-width="1.2"/></g><g><path d="M 36.0,96.0 L 68.8,101.9 L 101.7,95.7 L 134.5,88.8 L 167.3,85.3 L 200.1,84.1 L 233.0,78.5 L 265.8,96.7 L 298.6,91.7 L 331.4,105.6 L 364.3,105.7 L 397.1,113.3 L 429.9,124.2 L 462.8,125.3 L 495.6,124.1 L 528.4,127.3 L 561.2,136.3 L 594.1,129.0 L 626.9,120.9 L 659.7,135.6 L 692.6,119.0 L 725.4,118.2 L 758.2,118.1 L 791.0,107.5 L 823.9,90.4 L 856.7,94.0 L 889.5,95.8 L 922.3,82.6 L 955.2,70.0 L 988.0,66.2 L 988.0,122.5 L 955.2,123.2 L 922.3,140.8 L 889.5,145.9 L 856.7,146.6 L 823.9,140.7 L 791.0,157.9 L 758.2,157.9 L 725.4,154.2 L 692.6,153.7 L 659.7,167.5 L 626.9,153.4 L 594.1,155.7 L 561.2,159.6 L 528.4,151.3 L 495.6,146.2 L 462.8,150.2 L 429.9,149.5 L 397.1,138.0 L 364.3,139.7 L 331.4,140.4 L 298.6,132.0 L 265.8,136.6 L 233.0,123.1 L 200.1,127.6 L 167.3,128.5 L 134.5,139.8 L 101.7,142.5 L 68.8,150.9 L 36.0,145.3 Z" fill="#10b981" opacity="0.65"/><path d="M 36.0,96.0 L 68.8,101.9 L 101.7,95.7 L 134.5,88.8 L 167.3,85.3 L 200.1,84.1 L 233.0,78.5 L 265.8,96.7 L 298.6,91.7 L 331.4,105.6 L 364.3,105.7 L 397.1,113.3 L 429.9,124.2 L 462.8,125.3 L 495.6,124.1 L 528.4,127.3 L 561.2,136.3 L 594.1,129.0 L 626.9,120.9 L 659.7,135.6 L 692.6,119.0 L 725.4,118.2 L 758.2,118.1 L 791.0,107.5 L 823.9,90.4 L 856.7,94.0 L 889.5,95.8 L 922.3,82.6 L 955.2,70.0 L 988.0,66.2" fill="none" stroke="#10b981" stroke-width="1.2"/></g><g><path d="M 36.0,72.9 L 68.8,81.6 L 101.7,76.8 L 134.5,70.2 L 167.3,66.8 L 200.1,67.1 L 233.0,66.0 L 265.8,86.3 L 298.6,80.3 L 331.4,95.1 L 364.3,95.9 L 397.1,99.0 L 429.9,110.1 L 462.8,114.1 L 495.6,110.1 L 528.4,113.8 L 561.2,118.4 L 594.1,112.6 L 626.9,104.2 L 659.7,117.4 L 692.6,97.5 L 725.4,97.2 L 758.2,94.0 L 791.0,80.4 L 823.9,65.7 L 856.7,70.0 L 889.5,66.8 L 922.3,56.7 L 955.2,47.1 L 988.0,44.1 L 988.0,66.2 L 955.2,70.0 L 922.3,82.6 L 889.5,95.8 L 856.7,94.0 L 823.9,90.4 L 791.0,107.5 L 758.2,118.1 L 725.4,118.2 L 692.6,119.0 L 659.7,135.6 L 626.9,120.9 L 594.1,129.0 L 561.2,136.3 L 528.4,127.3 L 495.6,124.1 L 462.8,125.3 L 429.9,124.2 L 397.1,113.3 L 364.3,105.7 L 331.4,105.6 L 298.6,91.7 L 265.8,96.7 L 233.0,78.5 L 200.1,84.1 L 167.3,85.3 L 134.5,88.8 L 101.7,95.7 L 68.8,101.9 L 36.0,96.0 Z" fill="#06b6d4" opacity="0.65"/><path d="M 36.0,72.9 L 68.8,81.6 L 101.7,76.8 L 134.5,70.2 L 167.3,66.8 L 200.1,67.1 L 233.0,66.0 L 265.8,86.3 L 298.6,80.3 L 331.4,95.1 L 364.3,95.9 L 397.1,99.0 L 429.9,110.1 L 462.8,114.1 L 495.6,110.1 L 528.4,113.8 L 561.2,118.4 L 594.1,112.6 L 626.9,104.2 L 659.7,117.4 L 692.6,97.5 L 725.4,97.2 L 758.2,94.0 L 791.0,80.4 L 823.9,65.7 L 856.7,70.0 L 889.5,66.8 L 922.3,56.7 L 955.2,47.1 L 988.0,44.1" fill="none" stroke="#06b6d4" stroke-width="1.2"/></g><g><path d="M 36.0,64.2 L 68.8,70.3 L 101.7,64.5 L 134.5,59.0 L 167.3,56.9 L 200.1,56.2 L 233.0,52.8 L 265.8,75.3 L 298.6,68.1 L 331.4,83.9 L 364.3,88.7 L 397.1,89.6 L 429.9,101.6 L 462.8,106.7 L 495.6,104.2 L 528.4,106.9 L 561.2,113.8 L 594.1,106.7 L 626.9,98.2 L 659.7,109.3 L 692.6,89.2 L 725.4,90.8 L 758.2,86.0 L 791.0,72.9 L 823.9,54.5 L 856.7,58.1 L 889.5,56.4 L 922.3,44.2 L 955.2,34.0 L 988.0,32.2 L 988.0,44.1 L 955.2,47.1 L 922.3,56.7 L 889.5,66.8 L 856.7,70.0 L 823.9,65.7 L 791.0,80.4 L 758.2,94.0 L 725.4,97.2 L 692.6,97.5 L 659.7,117.4 L 626.9,104.2 L 594.1,112.6 L 561.2,118.4 L 528.4,113.8 L 495.6,110.1 L 462.8,114.1 L 429.9,110.1 L 397.1,99.0 L 364.3,95.9 L 331.4,95.1 L 298.6,80.3 L 265.8,86.3 L 233.0,66.0 L 200.1,67.1 L 167.3,66.8 L 134.5,70.2 L 101.7,76.8 L 68.8,81.6 L 36.0,72.9 Z" fill="#f59e0b" opacity="0.65"/><path d="M 36.0,64.2 L 68.8,70.3 L 101.7,64.5 L 134.5,59.0 L 167.3,56.9 L 200.1,56.2 L 233.0,52.8 L 265.8,75.3 L 298.6,68.1 L 331.4,83.9 L 364.3,88.7 L 397.1,89.6 L 429.9,101.6 L 462.8,106.7 L 495.6,104.2 L 528.4,106.9 L 561.2,113.8 L 594.1,106.7 L 626.9,98.2 L 659.7,109.3 L 692.6,89.2 L 725.4,90.8 L 758.2,86.0 L 791.0,72.9 L 823.9,54.5 L 856.7,58.1 L 889.5,56.4 L 922.3,44.2 L 955.2,34.0 L 988.0,32.2" fill="none" stroke="#f59e0b" stroke-width="1.2"/></g><g><path d="M 36.0,60.8 L 68.8,67.6 L 101.7,61.6 L 134.5,56.8 L 167.3,55.8 L 200.1,54.6 L 233.0,51.9 L 265.8,72.9 L 298.6,65.9 L 331.4,81.7 L 364.3,87.2 L 397.1,88.4 L 429.9,98.7 L 462.8,103.5 L 495.6,102.1 L 528.4,103.8 L 561.2,111.1 L 594.1,102.6 L 626.9,93.8 L 659.7,105.7 L 692.6,84.9 L 725.4,86.2 L 758.2,81.8 L 791.0,67.7 L 823.9,50.0 L 856.7,54.1 L 889.5,52.0 L 922.3,39.6 L 955.2,30.5 L 988.0,28.9 L 988.0,32.2 L 955.2,34.0 L 922.3,44.2 L 889.5,56.4 L 856.7,58.1 L 823.9,54.5 L 791.0,72.9 L 758.2,86.0 L 725.4,90.8 L 692.6,89.2 L 659.7,109.3 L 626.9,98.2 L 594.1,106.7 L 561.2,113.8 L 528.4,106.9 L 495.6,104.2 L 462.8,106.7 L 429.9,101.6 L 397.1,89.6 L 364.3,88.7 L 331.4,83.9 L 298.6,68.1 L 265.8,75.3 L 233.0,52.8 L 200.1,56.2 L 167.3,56.9 L 134.5,59.0 L 101.7,64.5 L 68.8,70.3 L 36.0,64.2 Z" fill="#ec4899" opacity="0.65"/><path d="M 36.0,60.8 L 68.8,67.6 L 101.7,61.6 L 134.5,56.8 L 167.3,55.8 L 200.1,54.6 L 233.0,51.9 L 265.8,72.9 L 298.6,65.9 L 331.4,81.7 L 364.3,87.2 L 397.1,88.4 L 429.9,98.7 L 462.8,103.5 L 495.6,102.1 L 528.4,103.8 L 561.2,111.1 L 594.1,102.6 L 626.9,93.8 L 659.7,105.7 L 692.6,84.9 L 725.4,86.2 L 758.2,81.8 L 791.0,67.7 L 823.9,50.0 L 856.7,54.1 L 889.5,52.0 L 922.3,39.6 L 955.2,30.5 L 988.0,28.9" fill="none" stroke="#ec4899" stroke-width="1.2"/></g><g><path d="M 36.0,58.7 L 68.8,65.8 L 101.7,59.9 L 134.5,55.0 L 167.3,54.4 L 200.1,53.2 L 233.0,50.4 L 265.8,71.4 L 298.6,64.7 L 331.4,80.6 L 364.3,86.4 L 397.1,87.3 L 429.9,98.0 L 462.8,102.3 L 495.6,101.0 L 528.4,103.4 L 561.2,110.6 L 594.1,101.7 L 626.9,93.2 L 659.7,105.1 L 692.6,83.5 L 725.4,85.0 L 758.2,80.5 L 791.0,66.1 L 823.9,48.3 L 856.7,52.7 L 889.5,50.5 L 922.3,37.8 L 955.2,28.6 L 988.0,26.8 L 988.0,28.9 L 955.2,30.5 L 922.3,39.6 L 889.5,52.0 L 856.7,54.1 L 823.9,50.0 L 791.0,67.7 L 758.2,81.8 L 725.4,86.2 L 692.6,84.9 L 659.7,105.7 L 626.9,93.8 L 594.1,102.6 L 561.2,111.1 L 528.4,103.8 L 495.6,102.1 L 462.8,103.5 L 429.9,98.7 L 397.1,88.4 L 364.3,87.2 L 331.4,81.7 L 298.6,65.9 L 265.8,72.9 L 233.0,51.9 L 200.1,54.6 L 167.3,55.8 L 134.5,56.8 L 101.7,61.6 L 68.8,67.6 L 36.0,60.8 Z" fill="#6b7280" opacity="0.65"/><path d="M 36.0,58.7 L 68.8,65.8 L 101.7,59.9 L 134.5,55.0 L 167.3,54.4 L 200.1,53.2 L 233.0,50.4 L 265.8,71.4 L 298.6,64.7 L 331.4,80.6 L 364.3,86.4 L 397.1,87.3 L 429.9,98.0 L 462.8,102.3 L 495.6,101.0 L 528.4,103.4 L 561.2,110.6 L 594.1,101.7 L 626.9,93.2 L 659.7,105.1 L 692.6,83.5 L 725.4,85.0 L 758.2,80.5 L 791.0,66.1 L 823.9,48.3 L 856.7,52.7 L 889.5,50.5 L 922.3,37.8 L 955.2,28.6 L 988.0,26.8" fill="none" stroke="#6b7280" stroke-width="1.2"/></g></svg></div>
+        </div>
+
+        <!-- 按模型费用 · V1 -->
+        <div class="card">
+            <div class="card-head"><div class="card-title">按模型费用 <span class="stage stage-v1">V1</span></div></div>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead><tr><th>模型</th><th>请求数</th><th>用量</th><th>费用</th></tr></thead>
+                    <tbody>
+                        <tr><td><span class="provider"><span class="logo glm">G</span>glm-5.2</span></td><td class="num">512</td><td class="num">1,204,331 tok</td><td class="num">$1.99</td></tr>
+                        <tr><td><span class="provider"><span class="logo anthropic">A</span>claude-sonnet</span></td><td class="num">318</td><td class="num">689,120 tok</td><td class="num">$1.63</td></tr>
+                        <tr><td><span class="provider"><span class="logo anthropic">A</span>claude-haiku</span></td><td class="num">201</td><td class="num">312,882 tok</td><td class="num">$0.31</td></tr>
+                        <tr><td><span class="provider"><span class="logo openai">O</span>gpt-5-mini</span></td><td class="num">157</td><td class="num">204,110 tok</td><td class="num">$0.21</td></tr>
+                        <tr><td><span class="provider"><span class="logo deepseek">D</span>deepseek-v4</span></td><td class="num">96</td><td class="num">53,863 tok</td><td class="num">$0.07</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 步骤类型分布 · P2〔V2-P2-4〕 -->
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">步骤类型分布 <span class="stage stage-p2">P2</span></div>
+                <span class="muted" style="font-size:11px">X-Hint-Step 声明的 Agent 步骤类型占比〔V2-P2-4〕· 无 hint 流量归「未声明」</span>
+            </div>
+            <div class="card-body">
+                <div class="col" style="gap:9px;">
+                    <div class="row" style="gap:10px;"><span style="width:110px;flex:none;font-size:12px;color:var(--text-2);">执行 execute</span><div class="bar" style="flex:1;"><div class="bar-fill" style="width:46%"></div></div><span class="muted" style="font-size:11px;width:92px;text-align:right;flex:none;">46% · 591 次</span></div>
+                    <div class="row" style="gap:10px;"><span style="width:110px;flex:none;font-size:12px;color:var(--text-2);">规划 plan</span><div class="bar" style="flex:1;"><div class="bar-fill" style="width:18%"></div></div><span class="muted" style="font-size:11px;width:92px;text-align:right;flex:none;">18% · 231 次</span></div>
+                    <div class="row" style="gap:10px;"><span style="width:110px;flex:none;font-size:12px;color:var(--text-2);">摘要 summarize</span><div class="bar" style="flex:1;"><div class="bar-fill" style="width:12%"></div></div><span class="muted" style="font-size:11px;width:92px;text-align:right;flex:none;">12% · 154 次</span></div>
+                    <div class="row" style="gap:10px;"><span style="width:110px;flex:none;font-size:12px;color:var(--text-2);">检索 retrieve</span><div class="bar" style="flex:1;"><div class="bar-fill" style="width:9%"></div></div><span class="muted" style="font-size:11px;width:92px;text-align:right;flex:none;">9% · 116 次</span></div>
+                    <div class="row" style="gap:10px;"><span style="width:110px;flex:none;font-size:12px;color:var(--text-2);">评审 review</span><div class="bar" style="flex:1;"><div class="bar-fill" style="width:4%"></div></div><span class="muted" style="font-size:11px;width:92px;text-align:right;flex:none;">4% · 51 次</span></div>
+                    <div class="row" style="gap:10px;"><span style="width:110px;flex:none;font-size:12px;color:var(--text-2);">未声明</span><div class="bar" style="flex:1;"><div class="bar-fill" style="width:11%;background:var(--text-4);"></div></div><span class="muted" style="font-size:11px;width:92px;text-align:right;flex:none;">11% · 141 次</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 明细表 · V1 + P1(request_id、决策链接列) -->
+        <div class="card">
+            <div class="card-head">
+                <div class="card-title">请求记录 <span class="stage stage-v1">V1</span> <span class="stage stage-p1">P1</span></div>
+                <span class="muted" style="font-size:11px">最近 50 条，共 1,284 条 · 行内决策链接为 P1 增量</span>
+            </div>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead><tr><th>时间</th><th>request_id</th><th>模型</th><th>端点</th><th>输入</th><th>输出</th><th>费用</th><th>决策</th></tr></thead>
+                    <tbody>
+                        <tr><td class="num">2026-07-08T09:41:07</td><td><span class="codeline">req_01JZXK7M2Q…</span></td><td>glm-5.2</td><td><span class="codeline">/v1/chat/completions</span></td><td class="num">3,102</td><td class="num">1,280</td><td class="num">$0.0026</td><td><a href="decision-detail.html">决策 →</a></td></tr>
+                        <tr><td class="num">2026-07-08T09:37:52</td><td><span class="codeline">req_01JZXK5W8H…</span></td><td>claude-sonnet</td><td><span class="codeline">/v1/messages</span></td><td class="num">9,845</td><td class="num">3,095</td><td class="num">$0.0864</td><td><a href="decision-detail.html">决策 →</a></td></tr>
+                        <tr><td class="num">2026-07-08T09:31:18</td><td><span class="codeline">req_01JZXK3N6D…</span></td><td>claude-haiku</td><td><span class="codeline">/v1/chat/completions</span></td><td class="num">2,214</td><td class="num">508</td><td class="num">$0.0021</td><td><a href="decision-detail.html">决策 →</a></td></tr>
+                        <tr><td class="num">2026-07-08T09:24:45</td><td><span class="codeline">req_01JZXK1R9S…</span></td><td>gpt-5-mini</td><td><span class="codeline">/v1/chat/completions</span></td><td class="num">1,344</td><td class="num">528</td><td class="num">$0.0009</td><td><a href="decision-detail.html">决策 →</a></td></tr>
+                        <tr><td class="num">2026-07-08T09:12:03</td><td><span class="codeline">req_01JZXJZT4K…</span></td><td>glm-5.2</td><td><span class="codeline">/v1/chat/completions</span></td><td class="num">4,921</td><td class="num">1,283</td><td class="num">$0.0038</td><td><a href="decision-detail.html">决策 →</a></td></tr>
+                        <tr><td class="num">2026-07-08T08:58:26</td><td><span class="codeline">req_01JZXJX2M7…</span></td><td>gpt-5-mini</td><td><span class="codeline">/v1/chat/completions</span></td><td class="num">2,207</td><td class="num">946</td><td class="num">$0.0014</td><td><a href="decision-detail.html">决策 →</a></td></tr>
+                        <tr><td class="num">2026-07-08T08:47:11</td><td><span class="codeline">req_01JZXJVQ5B…</span></td><td>deepseek-v4</td><td><span class="codeline">/v1/chat/completions</span></td><td class="num">618</td><td class="num">402</td><td class="num">$0.0011</td><td><a href="decision-detail.html">决策 →</a></td></tr>
+                        <tr><td class="num">2026-07-08T08:32:54</td><td><span class="codeline">req_01JZXJT8C3…</span></td><td>claude-sonnet</td><td><span class="codeline">/v1/messages</span></td><td class="num">6,730</td><td class="num">2,214</td><td class="num">$0.0602</td><td><a href="decision-detail.html">决策 →</a></td></tr>
+                        <tr><td class="num">2026-07-08T08:19:37</td><td><span class="codeline">req_01JZXJRK1F…</span></td><td>glm-5.2</td><td><span class="codeline">/v1/chat/completions</span></td><td class="num">1,088</td><td class="num">356</td><td class="num">$0.0008</td><td><a href="decision-detail.html">决策 →</a></td></tr>
+                        <tr><td class="num">2026-07-07T22:41:29</td><td><span class="codeline">req_01JZXG9P2V…</span></td><td>claude-haiku</td><td><span class="codeline">/v1/chat/completions</span></td><td class="num">2,933</td><td class="num">1,027</td><td class="num">$0.0027</td><td><a href="decision-detail.html">决策 →</a></td></tr>
+                        <tr><td class="num">2026-07-07T21:56:08</td><td><span class="codeline">req_01JZXG7D6N…</span></td><td>deepseek-v4</td><td><span class="codeline">/v1/chat/completions</span></td><td class="num">3,410</td><td class="num">884</td><td class="num">$0.0018</td><td><a href="decision-detail.html">决策 →</a></td></tr>
+                        <tr><td class="num">2026-07-07T21:14:40</td><td><span class="codeline">req_01JZXG5S3W…</span></td><td>glm-5.2</td><td><span class="codeline">/v1/chat/completions</span></td><td class="num">5,266</td><td class="num">2,148</td><td class="num">$0.0041</td><td><a href="decision-detail.html">决策 →</a></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="../assets/app.js"></script>
+</body>
+</html>

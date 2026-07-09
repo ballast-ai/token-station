@@ -1,0 +1,446 @@
+/* === Token Router · Dashboard ===
+ *
+ * Design tokens + component classes for the authenticated /dashboard/*
+ * and /admin/* pages. Ported from a designer-built prototype
+ * stylesheet, minus the onboarding-wizard and marketing-doc sections.
+ *
+ * Every rule is scoped under `body.app` so that loading this stylesheet
+ * on a public page (`<body>` without the `app` class) is a no-op. The
+ * dashboard layout functions set `<body class="app">` to opt in.
+ *
+ * Authoring rules:
+ *   - Use the design tokens (--bg-*, --text-*, --accent-*, etc.).
+ *   - New shared components belong here, not inside individual page
+ *     templates.
+ *
+ * Typography note: we intentionally do NOT pull Geist from a remote
+ * font CDN — that adds an external dependency, leaks visitor IPs to
+ * a third party, breaks under strict CSPs, and degrades in offline /
+ * air-gapped deployments. The fallback chain on --font-sans /
+ * --font-mono lands on the OS's UI font, which already looks clean
+ * with this dark palette. If self-hosted Geist is wanted later, drop
+ * the .woff2 files under src/templates/fonts/ and reference them via
+ * @font-face from served static assets.
+ */
+
+/* ── Base + tokens ──
+ * Tokens live on body.app (not :root) so they don't leak into the
+ * global namespace if this stylesheet is ever accidentally loaded on
+ * a public (non-dashboard) page. Every descendant inherits the
+ * custom properties through the variable cascade, which is what the
+ * `body.app .foo { color: var(--text-0); }` rules below rely on.
+ */
+body.app {
+  --bg-0: #07080a;
+  --bg-1: #0b0d10;
+  --bg-2: #101317;
+  --bg-3: #161a1f;
+  --bg-4: #1c2128;
+  --bg-hover: #181c22;
+  --line: #1f242c;
+  --line-strong: #2a313b;
+  --line-soft: #14181d;
+
+  --text-0: #f4f5f7;
+  --text-1: #d6d9de;
+  --text-2: #9aa1ac;
+  --text-3: #6b7280;
+  --text-4: #4b5563;
+
+  --accent: #6366f1;
+  --accent-hi: #818cf8;
+  --accent-lo: #4f46e5;
+  --accent-soft: rgba(99, 102, 241, 0.14);
+  --accent-line: rgba(99, 102, 241, 0.35);
+
+  --ok: #10b981;
+  --ok-soft: rgba(16, 185, 129, 0.14);
+  --warn: #f59e0b;
+  --warn-soft: rgba(245, 158, 11, 0.14);
+  --err: #ef4444;
+  --err-soft: rgba(239, 68, 68, 0.14);
+  --info: #06b6d4;
+  --info-soft: rgba(6, 182, 212, 0.14);
+
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --radius-1: 6px;
+  --radius-2: 8px;
+  --radius-3: 12px;
+
+  --shadow-sm: 0 1px 0 rgba(255,255,255,0.02) inset, 0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md: 0 1px 0 rgba(255,255,255,0.03) inset, 0 8px 24px rgba(0,0,0,0.45);
+
+  margin: 0; padding: 0;
+  font-family: var(--font-sans);
+  background: var(--bg-0);
+  color: var(--text-1);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+body.app * { box-sizing: border-box; }
+body.app button { font-family: inherit; cursor: pointer; }
+body.app input, body.app select, body.app textarea { font-family: inherit; color: inherit; }
+body.app a { color: var(--accent-hi); text-decoration: none; }
+body.app a:hover { color: var(--text-0); }
+body.app h1, body.app h2, body.app h3, body.app h4 { color: var(--text-0); font-weight: 600; margin: 0; }
+
+/* ── Layout shell ── */
+body.app .shell { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+body.app .sidebar { background: var(--bg-1); border-right: 1px solid var(--line); position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; }
+body.app .brand { display: flex; align-items: center; gap: 10px; padding: 18px 18px 16px; border-bottom: 1px solid var(--line-soft); text-decoration: none; }
+body.app .brand-mark { width: 26px; height: 26px; border-radius: 7px; background: linear-gradient(135deg, var(--accent), var(--accent-lo)); display: grid; place-items: center; color: white; font-weight: 700; font-size: 13px; box-shadow: 0 4px 14px rgba(99,102,241,0.35), inset 0 1px 0 rgba(255,255,255,0.25); flex: none; }
+body.app .brand-name { font-weight: 600; color: var(--text-0); font-size: 13.5px; letter-spacing: -0.01em; }
+body.app .brand-sub { font-size: 10.5px; color: var(--text-3); font-weight: 500; }
+
+body.app .nav { padding: 6px 8px; flex: 1; overflow-y: auto; }
+body.app .nav-group-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-4); padding: 14px 10px 6px; font-weight: 600; }
+body.app .nav-item { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 6px; color: var(--text-2); font-size: 12.5px; font-weight: 500; cursor: pointer; user-select: none; border: none; background: transparent; width: 100%; text-align: left; text-decoration: none; }
+body.app .nav-item:hover { background: var(--bg-hover); color: var(--text-1); }
+body.app .nav-item.active { background: var(--bg-3); color: var(--text-0); }
+body.app .nav-item.active .nav-icon { color: var(--accent-hi); }
+body.app .nav-icon { width: 15px; height: 15px; flex: none; color: var(--text-3); }
+body.app .nav-count { margin-left: auto; font-size: 10.5px; color: var(--text-3); font-variant-numeric: tabular-nums; background: var(--bg-3); padding: 1px 6px; border-radius: 999px; font-weight: 500; }
+body.app .nav-item.active .nav-count { background: var(--accent-soft); color: var(--accent-hi); }
+
+/* Sub-nav under an active top-level item (e.g. TOC on Documentation page). */
+body.app .nav-sub { display: flex; flex-direction: column; gap: 1px; margin: 2px 0 6px 18px; padding-left: 9px; border-left: 1px solid var(--line-soft); }
+body.app .nav-sub-item { display: block; padding: 5px 10px; border-radius: 5px; color: var(--text-3); font-size: 11.5px; font-weight: 500; text-decoration: none; line-height: 1.4; }
+body.app .nav-sub-item:hover { background: var(--bg-hover); color: var(--text-1); }
+body.app .nav-sub-item.active { background: var(--bg-3); color: var(--text-0); }
+
+body.app .sidebar-foot { border-top: 1px solid var(--line-soft); padding: 10px 12px; display: flex; align-items: center; gap: 10px; }
+body.app .avatar { width: 28px; height: 28px; border-radius: 7px; background: linear-gradient(135deg, #f59e0b, #f97316); display: grid; place-items: center; color: white; font-weight: 600; font-size: 11px; flex: none; text-transform: uppercase; }
+body.app .avatar.xs { width: 22px; height: 22px; font-size: 10px; border-radius: 5px; }
+body.app .avatar.purple { background: linear-gradient(135deg, #8b5cf6, #6366f1); }
+body.app .avatar.green { background: linear-gradient(135deg, #10b981, #059669); }
+body.app .avatar.cyan { background: linear-gradient(135deg, #06b6d4, #0891b2); }
+body.app .avatar.pink { background: linear-gradient(135deg, #ec4899, #db2777); }
+body.app .who { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+body.app .who-name { font-size: 12px; color: var(--text-0); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+body.app .who-role { font-size: 10.5px; color: var(--text-3); }
+
+/* ── Main column ── */
+body.app .main { background: var(--bg-0); min-width: 0; }
+body.app .topbar { height: 52px; display: flex; align-items: center; gap: 16px; padding: 0 24px; border-bottom: 1px solid var(--line); background: rgba(7, 8, 10, 0.85); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px); }
+body.app .crumbs { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-2); }
+body.app .crumbs .sep { color: var(--text-4); }
+body.app .crumbs .leaf { color: var(--text-0); font-weight: 500; }
+body.app .topbar-spacer { flex: 1; }
+body.app .topbar-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 6px; color: var(--text-2); border: 1px solid var(--line); background: var(--bg-1); text-decoration: none; }
+body.app .topbar-icon:hover { background: var(--bg-2); color: var(--text-0); }
+body.app .kbd { font-family: var(--font-mono); background: var(--bg-3); border: 1px solid var(--line-strong); border-radius: 4px; padding: 1px 5px; font-size: 10px; color: var(--text-3); }
+
+body.app .page { padding: 24px 28px 80px; max-width: 1480px; }
+body.app .page-head { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 22px; gap: 16px; flex-wrap: wrap; }
+body.app .page-title { font-size: 22px; font-weight: 600; color: var(--text-0); letter-spacing: -0.02em; margin: 0; }
+body.app .page-sub { font-size: 12.5px; color: var(--text-3); margin-top: 4px; }
+body.app .page-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ── Cards ── */
+body.app .card { background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--radius-3); margin-bottom: 14px; }
+body.app .card-pad { padding: 18px; }
+body.app .card-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line-soft); gap: 12px; flex-wrap: wrap; }
+body.app .card-body { padding: 14px 18px; }
+body.app .card-title { font-size: 13px; font-weight: 600; color: var(--text-0); letter-spacing: -0.005em; margin: 0; }
+body.app .card-sub { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
+
+/* ── Buttons ── */
+body.app .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 12px; font-size: 12px; font-weight: 500; border-radius: 6px; border: 1px solid var(--line-strong); background: var(--bg-2); color: var(--text-1); letter-spacing: 0.005em; transition: background 0.12s, border-color 0.12s; text-decoration: none; cursor: pointer; font-family: inherit; }
+body.app .btn:hover { background: var(--bg-3); border-color: var(--line-strong); color: var(--text-0); }
+body.app .btn.primary { background: linear-gradient(180deg, var(--accent), var(--accent-lo)); border-color: var(--accent-lo); color: white; box-shadow: 0 1px 0 rgba(255,255,255,0.18) inset, 0 4px 12px rgba(99,102,241,0.3); }
+body.app .btn.primary:hover { filter: brightness(1.07); color: white; }
+body.app .btn.ghost { background: transparent; border-color: transparent; color: var(--text-2); }
+body.app .btn.ghost:hover { background: var(--bg-2); color: var(--text-0); }
+body.app .btn.danger { color: #fca5a5; border-color: #4b1f1f; background: rgba(239,68,68,0.08); }
+body.app .btn.danger:hover { background: rgba(239,68,68,0.16); color: #fecaca; }
+body.app .btn.sm { padding: 4px 8px; font-size: 11px; }
+body.app .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Keyboard focus rings ──
+   Interactive elements need a visible focus state on the dark background.
+   `:focus-visible` only fires for keyboard navigation, so mouse-clicks
+   don't leave a stale ring behind. Inputs already define their own focus
+   treatment below and are excluded here. */
+body.app a:focus-visible,
+body.app .btn:focus-visible,
+body.app .nav-item:focus-visible,
+body.app .topbar-icon:focus-visible,
+body.app .tab:focus-visible,
+body.app .seg-tabs .seg:focus-visible,
+body.app .toggle:focus-visible {
+  outline: 2px solid var(--accent-hi);
+  outline-offset: 2px;
+}
+
+/* ── Inputs ── */
+body.app .input,
+body.app .select,
+body.app input[type="text"],
+body.app input[type="email"],
+body.app input[type="url"],
+body.app input[type="password"],
+body.app input[type="number"],
+body.app input[type="file"],
+body.app textarea,
+body.app select {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text-0);
+  padding: 6px 10px;
+  font-size: 12px;
+  outline: none;
+  width: 100%;
+  font-family: inherit;
+}
+body.app textarea { resize: vertical; min-height: 76px; }
+body.app .input:focus,
+body.app .select:focus,
+body.app input:focus,
+body.app textarea:focus,
+body.app select:focus { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
+body.app .label,
+body.app label { font-size: 11.5px; color: var(--text-2); font-weight: 500; margin-bottom: 6px; display: block; text-transform: none; letter-spacing: normal; }
+body.app .help { font-size: 11px; color: var(--text-4); margin-top: 4px; }
+body.app .field { margin-bottom: 14px; }
+
+/* ── Badges & dots ── */
+body.app .badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 500; background: var(--bg-3); color: var(--text-2); border: 1px solid var(--line-strong); font-variant-numeric: tabular-nums; }
+body.app .badge.ok { background: var(--ok-soft); color: #6ee7b7; border-color: rgba(16,185,129,0.3); }
+body.app .badge.warn { background: var(--warn-soft); color: #fcd34d; border-color: rgba(245,158,11,0.3); }
+body.app .badge.err { background: var(--err-soft); color: #fca5a5; border-color: rgba(239,68,68,0.3); }
+body.app .badge.info { background: var(--info-soft); color: #67e8f9; border-color: rgba(6,182,212,0.3); }
+body.app .badge.accent { background: var(--accent-soft); color: var(--accent-hi); border-color: var(--accent-line); }
+body.app .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex: none; }
+body.app .dot.ok { background: var(--ok); box-shadow: 0 0 8px rgba(16,185,129,0.6); }
+body.app .dot.warn { background: var(--warn); box-shadow: 0 0 8px rgba(245,158,11,0.5); }
+body.app .dot.err { background: var(--err); }
+body.app .dot.idle { background: var(--text-4); }
+
+/* ── Tables ── */
+body.app .table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+body.app .table thead th { text-align: left; font-weight: 500; color: var(--text-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--bg-1); }
+body.app .table tbody td { padding: 12px 14px; border-bottom: 1px solid var(--line-soft); color: var(--text-1); vertical-align: middle; }
+body.app .table tbody tr:hover td { background: var(--bg-2); }
+body.app .table tbody tr:last-child td { border-bottom: none; }
+body.app .table tbody tr.row-link { cursor: pointer; }
+body.app .table-wrap { overflow-x: auto; }
+body.app .num { font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: 12px; }
+body.app .muted { color: var(--text-3); }
+
+/* ── KPI ── */
+body.app .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+body.app .kpi-grid.kpi-2 { grid-template-columns: repeat(2, 1fr); }
+body.app .kpi-grid.kpi-3 { grid-template-columns: repeat(3, 1fr); }
+body.app .kpi { background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--radius-3); padding: 16px 18px; display: flex; flex-direction: column; gap: 4px; position: relative; overflow: hidden; min-height: 92px; }
+body.app .kpi-label { font-size: 11.5px; color: var(--text-3); font-weight: 500; }
+body.app .kpi-value { font-size: 26px; font-weight: 600; color: var(--text-0); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; margin-top: 2px; display: flex; align-items: baseline; gap: 6px; }
+body.app .kpi-unit { font-size: 13px; font-weight: 500; color: var(--text-3); }
+body.app .kpi-delta { display: flex; align-items: center; gap: 5px; font-size: 11px; margin-top: 4px; color: var(--text-3); }
+body.app .kpi-delta.up { color: #6ee7b7; }
+body.app .kpi-delta.down { color: #fca5a5; }
+body.app .kpi-spark { position: absolute; right: 14px; bottom: 12px; opacity: 0.85; pointer-events: none; }
+
+/* ── Progress bar ── */
+body.app .bar { height: 6px; background: var(--bg-3); border-radius: 999px; overflow: hidden; position: relative; }
+body.app .bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent-lo), var(--accent-hi)); border-radius: 999px; transition: width 0.2s; }
+body.app .bar-fill.warn { background: linear-gradient(90deg, #d97706, #f59e0b); }
+body.app .bar-fill.err { background: linear-gradient(90deg, #b91c1c, #ef4444); }
+body.app .bar-fill.ok { background: linear-gradient(90deg, #059669, #10b981); }
+
+/* ── Layout helpers ── */
+body.app .row { display: flex; align-items: center; gap: 8px; }
+body.app .col { display: flex; flex-direction: column; gap: 8px; }
+body.app .between { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+body.app .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+body.app .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+body.app .grid-2-1 { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; }
+body.app .grid-1-2 { display: grid; grid-template-columns: 1fr 2fr; gap: 14px; }
+body.app .spacer { flex: 1; }
+body.app hr.div { border: none; border-top: 1px solid var(--line); margin: 22px 0; }
+
+/* ── Tabs ── */
+body.app .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 18px; flex-wrap: wrap; }
+body.app .tab { background: transparent; border: none; color: var(--text-3); padding: 9px 14px; font-size: 12.5px; font-weight: 500; border-bottom: 2px solid transparent; margin-bottom: -1px; text-decoration: none; cursor: pointer; font-family: inherit; }
+body.app .tab:hover { color: var(--text-1); }
+body.app .tab.active { color: var(--text-0); border-bottom-color: var(--accent); }
+
+/* ── Segmented filter tabs (with optional count chips) ── */
+body.app .seg-tabs { display: inline-flex; gap: 2px; background: var(--bg-2); padding: 3px; border-radius: 7px; border: 1px solid var(--line); flex-wrap: wrap; }
+body.app .seg-tabs .seg { background: transparent; border: none; color: var(--text-2); font-size: 12px; padding: 5px 12px; border-radius: 5px; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; text-decoration: none; font-family: inherit; }
+body.app .seg-tabs .seg:hover { color: var(--text-0); }
+body.app .seg-tabs .seg.active { background: var(--bg-4); color: var(--text-0); }
+body.app .seg-count { font-size: 10.5px; color: var(--text-3); background: var(--bg-3); padding: 1px 6px; border-radius: 99px; font-variant-numeric: tabular-nums; }
+body.app .seg-tabs .seg.active .seg-count { background: var(--accent-soft); color: var(--accent-hi); }
+
+/* ── Source badges (Platform/BYOK) — used by future channels page ── */
+body.app .src-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; font-weight: 500; padding: 3px 7px; border-radius: 5px; border: 1px solid var(--line); background: var(--bg-2); color: var(--text-2); }
+body.app .src-badge.platform { color: var(--text-1); }
+body.app .src-badge.byok { background: rgba(245, 158, 11, 0.10); border-color: rgba(245, 158, 11, 0.30); color: #fcd34d; }
+body.app .src-dot { width: 6px; height: 6px; border-radius: 99px; background: var(--text-3); }
+body.app .src-badge.platform .src-dot { background: var(--accent-hi); }
+
+/* ── Code / mono blocks ── */
+body.app .mono { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-1); }
+body.app svg text { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+body.app .codeline { font-family: var(--font-mono); background: var(--bg-2); border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px; font-size: 11.5px; color: var(--text-1); display: inline-flex; align-items: center; gap: 6px; word-break: break-all; }
+body.app pre { font-family: var(--font-mono); background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; font-size: 11.5px; color: var(--text-1); overflow-x: auto; line-height: 1.6; margin: 8px 0; }
+body.app code { font-family: var(--font-mono); font-size: 11.5px; background: var(--bg-2); padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--accent-hi); }
+body.app pre code { background: transparent; padding: 0; border: none; color: inherit; }
+body.app .key-display { font-family: var(--font-mono); background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; padding: 14px; font-size: 12px; word-break: break-all; color: var(--text-0); }
+
+/* ── Toggle (on/off) ── */
+body.app .toggle { position: relative; width: 30px; height: 17px; background: var(--bg-3); border-radius: 999px; border: 1px solid var(--line-strong); cursor: pointer; flex: none; transition: background 0.16s, border-color 0.16s; display: inline-block; }
+body.app .toggle::after { content: ''; position: absolute; width: 11px; height: 11px; background: var(--text-2); border-radius: 50%; top: 2px; left: 2px; transition: transform 0.16s, background 0.16s; }
+body.app .toggle.on { background: var(--accent); border-color: var(--accent-lo); }
+body.app .toggle.on::after { transform: translateX(13px); background: white; }
+
+/* ── Provider logo chips ── */
+body.app .provider { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-1); font-weight: 500; }
+body.app .provider .logo { width: 18px; height: 18px; border-radius: 4px; display: grid; place-items: center; font-size: 10px; font-weight: 700; color: white; flex: none; }
+body.app .logo.openai     { background: linear-gradient(135deg,#10a37f,#0e8c6c); }
+body.app .logo.anthropic  { background: linear-gradient(135deg,#d97757,#b85a3d); }
+body.app .logo.azure      { background: linear-gradient(135deg,#0078d4,#005a9e); }
+body.app .logo.gemini     { background: linear-gradient(135deg,#4285f4,#0f9d58); }
+body.app .logo.gcp        { background: linear-gradient(135deg,#4285f4,#0f9d58); }
+body.app .logo.groq       { background: linear-gradient(135deg,#f55036,#d63a1f); }
+body.app .logo.xai        { background: linear-gradient(135deg,#1f2937,#111827); }
+body.app .logo.kimi       { background: linear-gradient(135deg,#1f2937,#374151); color:#a78bfa; }
+body.app .logo.glm        { background: linear-gradient(135deg,#0ea5e9,#0284c7); }
+body.app .logo.bailian    { background: linear-gradient(135deg,#615ced,#4f46e5); }
+body.app .logo.deepseek   { background: linear-gradient(135deg,#4d6bfe,#3548c7); }
+body.app .logo.qwen       { background: linear-gradient(135deg,#615ced,#4f46e5); }
+body.app .logo.minimax    { background: linear-gradient(135deg,#10b981,#059669); }
+body.app .logo.byteplus   { background: linear-gradient(135deg,#ef4444,#b91c1c); }
+body.app .logo.kling      { background: linear-gradient(135deg,#ec4899,#db2777); }
+body.app .logo.elevenlabs { background: linear-gradient(135deg,#111111,#374151); }
+
+/* ── List rows ── */
+body.app .list-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line-soft); }
+body.app .list-row:last-child { border-bottom: none; }
+body.app .list-row:hover { background: var(--bg-2); }
+
+/* ── Empty state ── */
+body.app .empty { padding: 36px; text-align: center; color: var(--text-3); border: 1px dashed var(--line-strong); border-radius: 10px; background: var(--bg-1); }
+
+/* ── Channel weight bar (used by routing) ── */
+body.app .weight-bar { display: flex; height: 22px; border-radius: 5px; overflow: hidden; background: var(--bg-3); border: 1px solid var(--line); }
+body.app .weight-seg { display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 600; color: white; min-width: 24px; border-right: 1px solid rgba(0,0,0,0.3); font-variant-numeric: tabular-nums; }
+body.app .weight-seg:last-child { border-right: none; }
+
+/* ── Custom scrollbar ── */
+body.app::-webkit-scrollbar { width: 10px; height: 10px; }
+body.app::-webkit-scrollbar-track { background: transparent; }
+body.app::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; border: 2px solid var(--bg-0); }
+body.app::-webkit-scrollbar-thumb:hover { background: var(--text-4); }
+
+/* ── Alerts ── */
+body.app .alert { padding: 12px 14px; border-radius: var(--radius-2); margin-bottom: 14px; font-size: 12.5px; border: 1px solid var(--line); color: var(--text-1); }
+body.app .alert.alert-success { background: var(--ok-soft); border-color: rgba(16,185,129,0.3); color: #6ee7b7; }
+body.app .alert.alert-warning { background: var(--warn-soft); border-color: rgba(245,158,11,0.3); color: #fcd34d; }
+body.app .alert.alert-error { background: var(--err-soft); border-color: rgba(239,68,68,0.3); color: #fca5a5; }
+body.app .alert.alert-info { background: var(--info-soft); border-color: rgba(6,182,212,0.3); color: #67e8f9; }
+
+/* ── Mobile / responsive ── */
+body.app .hamburger { display: none; position: fixed; top: 12px; left: 12px; z-index: 200; background: var(--bg-2); color: var(--text-0); border: 1px solid var(--line-strong); border-radius: 6px; padding: 6px; cursor: pointer; line-height: 0; }
+body.app .sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 90; }
+@media (max-width: 768px) {
+  body.app .hamburger { display: block; }
+  body.app .shell { grid-template-columns: 1fr; }
+  body.app .sidebar { position: fixed; left: 0; top: 0; transform: translateX(-100%); transition: transform 0.2s ease; z-index: 100; width: 260px; height: 100vh; }
+  body.app .sidebar.open { transform: translateX(0); }
+  body.app .sidebar-overlay.open { display: block; }
+  body.app .page { padding: 18px 16px 80px; }
+  body.app .topbar { padding-left: 64px; }
+  body.app .kpi-grid,
+  body.app .kpi-grid.kpi-2,
+  body.app .kpi-grid.kpi-3 { grid-template-columns: repeat(2, 1fr); }
+  body.app .grid-2,
+  body.app .grid-2-1,
+  body.app .grid-1-2,
+  body.app .grid-3 { grid-template-columns: 1fr; }
+}
+@media (max-width: 480px) {
+  body.app .kpi-grid,
+  body.app .kpi-grid.kpi-2,
+  body.app .kpi-grid.kpi-3 { grid-template-columns: 1fr; }
+}
+
+/* ── Light-mode token overrides ──
+ * Applied when the user toggles light mode via the topbar / public-nav
+ * theme switch. The `data-theme` attribute is set on <html> by an
+ * inline <head> script before paint (see `theme_init_script()` in
+ * templates.rs), so there's no flash-of-wrong-theme during navigation.
+ * Dark remains the default when the attribute is absent — preserves
+ * behavior on any page that doesn't yet emit the init script.
+ */
+html[data-theme="light"] body.app {
+  --bg-0: #ffffff;
+  --bg-1: #f9fafb;
+  --bg-2: #f3f4f6;
+  --bg-3: #e5e7eb;
+  --bg-4: #d1d5db;
+  --bg-hover: #f3f4f6;
+  --line: #e5e7eb;
+  --line-strong: #cbd5e1;
+  --line-soft: #f1f5f9;
+
+  --text-0: #0f172a;
+  --text-1: #1e293b;
+  --text-2: #475569;
+  --text-3: #64748b;
+  --text-4: #94a3b8;
+
+  --accent: #4f46e5;
+  --accent-hi: #4338ca;
+  --accent-lo: #3730a3;
+  --accent-soft: rgba(79, 70, 229, 0.10);
+  --accent-line: rgba(79, 70, 229, 0.30);
+
+  --ok: #059669;
+  --ok-soft: rgba(5, 150, 105, 0.12);
+  --warn: #d97706;
+  --warn-soft: rgba(217, 119, 6, 0.12);
+  --err: #dc2626;
+  --err-soft: rgba(220, 38, 38, 0.12);
+  --info: #0891b2;
+  --info-soft: rgba(8, 145, 178, 0.12);
+
+  --shadow-sm: 0 1px 0 rgba(0,0,0,0.02) inset, 0 1px 2px rgba(0,0,0,0.06);
+  --shadow-md: 0 1px 0 rgba(0,0,0,0.02) inset, 0 8px 24px rgba(0,0,0,0.08);
+}
+
+/* Spot fixes: dash.css has a handful of rules that hardcode colors
+ * (rgba blacks/whites, bright-on-dark pastel text). Token overrides
+ * above don't reach them, so re-bind those rules under the same
+ * data-theme selector. */
+html[data-theme="light"] body.app .topbar { background: rgba(255, 255, 255, 0.85); }
+html[data-theme="light"] body.app .sidebar-overlay { background: rgba(0, 0, 0, 0.35); }
+html[data-theme="light"] body.app .badge.ok { color: #047857; }
+html[data-theme="light"] body.app .badge.warn { color: #b45309; }
+html[data-theme="light"] body.app .badge.err { color: #b91c1c; }
+html[data-theme="light"] body.app .badge.info { color: #0e7490; }
+html[data-theme="light"] body.app .kpi-delta.up { color: #047857; }
+html[data-theme="light"] body.app .kpi-delta.down { color: #b91c1c; }
+html[data-theme="light"] body.app .src-badge.byok { color: #b45309; }
+html[data-theme="light"] body.app .alert.alert-success { color: #065f46; }
+html[data-theme="light"] body.app .alert.alert-warning { color: #92400e; }
+html[data-theme="light"] body.app .alert.alert-error { color: #991b1b; }
+html[data-theme="light"] body.app .alert.alert-info { color: #155e75; }
+html[data-theme="light"] body.app .btn.danger { color: #b91c1c; border-color: #fecaca; background: rgba(220,38,38,0.06); }
+html[data-theme="light"] body.app .btn.danger:hover { background: rgba(220,38,38,0.12); color: #7f1d1d; }
+
+/* Theme toggle button — sun + moon icons, only one visible at a time
+ * based on the current `data-theme`. Reuses `.topbar-icon` styling on
+ * the dashboard/admin shells; the public layout adds its own padding
+ * via `global_css`. Default-when-no-attribute shows the sun (i.e. "in
+ * dark mode, click to switch to light"). */
+.theme-toggle .icon-moon { display: none; }
+.theme-toggle .icon-sun { display: inline-flex; }
+html[data-theme="light"] .theme-toggle .icon-sun { display: none; }
+html[data-theme="light"] .theme-toggle .icon-moon { display: inline-flex; }
+.theme-toggle { background: none; }
