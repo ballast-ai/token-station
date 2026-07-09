@@ -6,16 +6,25 @@
 //! translation only: routing, budget, fallback, billing and audit stay in the
 //! host, so nothing here can name a provider, a credential or a budget.
 //!
-//! Two boundaries are enforced by the type system rather than by convention:
+//! Four boundaries are enforced by the type system rather than by convention:
 //!
 //! - [`HeaderDigest`] cannot hold the value of an authentication header, so an
 //!   `agent-adapter` never observes an inbound credential.
-//! - [`HttpRequestDescriptor`] carries a [`SecretRef`] and [`SafeHeaders`], so a
-//!   `provider-adapter` can name a credential but never spell one out. The host
-//!   injects the real value before the request leaves the process.
+//! - [`HttpRequestDescriptor`] carries an [`Auth`] and [`SafeHeaders`], so a
+//!   `provider-adapter` can name a credential and say how to present it, but
+//!   never spell one out. The host injects the real value before the request
+//!   leaves the process.
+//! - [`ProviderEndpoint`] cannot express a credential, so the operator's config
+//!   cannot leak a key *into* the sandbox through a `?api-key=` query or a
+//!   `user:pass@` authority.
+//! - [`ProviderConfig::authorize`] refuses a descriptor addressed outside the
+//!   configured upstream. Choosing the URL and naming the credential are both
+//!   the plugin's to do; only this check stops them combining into an
+//!   exfiltration.
 //!
-//! Both survive deserialization, which is what makes them auditable: a fixture
-//! cannot smuggle a credential back in through the wire format.
+//! The first three survive deserialization, which is what makes them auditable:
+//! a fixture cannot smuggle a credential back in through the wire format. The
+//! fourth is a host obligation, checked here so both hosts check it alike.
 //!
 //! # Versioning
 //!
@@ -37,6 +46,7 @@ mod envelope;
 mod error;
 mod hint;
 mod http;
+mod provider;
 mod stream;
 mod usage;
 
@@ -51,9 +61,10 @@ pub use envelope::{AgentRequestEnvelope, HeaderDigest, Principal};
 pub use error::{ErrorCode, ErrorEnvelope};
 pub use hint::{AgentHint, HintKind};
 pub use http::{
-    HttpMethod, HttpRequestDescriptor, HttpResponseParts, SafeHeaders, SecretBoundaryError,
-    SecretRef,
+    Auth, AuthPlacementError, HttpMethod, HttpRequestDescriptor, HttpResponseParts, SafeHeaders,
+    SecretBoundaryError, SecretRef,
 };
+pub use provider::{DescriptorError, EndpointError, ProviderConfig, ProviderEndpoint};
 pub use stream::{StreamChunk, StreamEvent};
 pub use usage::Usage;
 
