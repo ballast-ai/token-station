@@ -6,6 +6,13 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+wit-parser = "0.253"
+
 [lints]
 workspace = true
 

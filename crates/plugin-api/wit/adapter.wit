@@ -1,0 +1,157 @@
+// Adapter ABI, version 1.
+//
+// Payloads are JSON documents rather than WIT records. The Canonical IR is
+// defined once, in `crates/protocol`, where exact `parse -> serialize` fixtures
+// pin its wire format. Mirroring it here would give two definitions that drift,
+// and WIT cannot express the open JSON values the IR carries (`tool.parameters`,
+// the raw inbound `body`, and every `extensions` bag). The cost is one
+// serialization per call and type errors that surface at run time; conformance
+// fixtures are what catch those.
+//
+// Each `json` parameter names the canonical type it carries. That name is the
+// contract: `crates/protocol` is the schema.
+//
+// Neither world imports `wasi:filesystem` or `wasi:sockets`. An adapter has no
+// file system and no network, which is what makes the host's routing, budget,
+// billing and audit impossible to bypass. Only `provider-adapter-v1` imports
+// `host`, and only to *name* a credential it can never read.
+
+package token-station:adapter@1.0.0;
+
+/// Identity and liveness, reported by both adapter roles.
+interface common {
+    enum adapter-kind {
+        agent,
+        provider,
+    }
+
+    record adapter-metadata {
+        name: string,
+        version: string,
+        kind: adapter-kind,
+        /// Must equal the world this adapter was built against, e.g.
+        /// `agent-adapter-v1`.
+        api-version: string,
+    }
+
+    enum health-status {
+        ready,
+        degraded,
+        unavailable,
+    }
+
+    record adapter-health {
+        status: health-status,
+        detail: option<string>,
+    }
+}
+
+/// Credential operations the host performs on a provider adapter's behalf.
+///
+/// The adapter passes the *name* of a credential; the host resolves it. This is
+/// how an adapter can sign a request for an upstream that needs HMAC without
+/// ever holding the key.
+interface host {
+    /// `secret-ref` is a name declared in the adapter's manifest under
+    /// `permissions.secrets`. Signing a name the manifest did not declare fails.
+    sign: func(secret-ref: string, payload: list<u8>, algorithm: string) -> result<list<u8>, string>;
+
+    oauth-token: func(secret-ref: string, scopes: list<string>) -> result<string, string>;
+}
+
+/// Northbound: translates an agent tool's protocol into the Canonical IR.
+interface agent-adapter {
+    use common.{adapter-metadata, adapter-health};
+
+    /// A JSON document. The doc comment on each use names its canonical type.
+    type json = string;
+
+    record agent-protocol-capability {
+        /// e.g. `openai-chat-completions`
+        protocol: string,
+        /// Tools known to speak this protocol, e.g. `cursor`.
+        agent-tools: list<string>,
+    }
+
+    record match-result {
+        matched: bool,
+        protocol: option<string>,
+    }
+
+    metadata: func() -> adapter-metadata;
+    healthcheck: func() -> adapter-health;
+    supported-agent-protocols: func() -> list<agent-protocol-capability>;
+
+    /// `request-head`: `{ method, path, headers }`, where `headers` is a
+    /// `protocol::HeaderDigest` and therefore carries no inbound credential.
+    match-inbound: func(request-head: json) -> match-result;
+
+    /// `envelope`: `protocol::AgentRequestEnvelope` -> `protocol::ChatRequest`.
+    /// Errors carry a `protocol::ErrorEnvelope`.
+    normalize-inbound: func(envelope: json) -> result<json, json>;
+
+    /// `envelope`: `protocol::AgentRequestEnvelope` -> `list<protocol::AgentHint>`.
+    ///
+    /// Hints are routing *input*. Returning one that names a provider or a
+    /// credential does not make the router honour it.
+    extract-agent-hint: func(envelope: json) -> result<json, json>;
+
+    /// `response`: `protocol::ChatResponse`, `context`: `AgentRenderContext`
+    /// -> `AgentResponseEnvelope`.
+    render-response: func(response: json, context: json) -> result<json, json>;
+
+    /// `event`: `protocol::StreamEvent` -> `AgentStreamChunk`.
+    ///
+    /// Must render incrementally. An adapter that buffers the whole stream to
+    /// render it fails the conformance suite's allocation bound.
+    render-stream-event: func(event: json, context: json) -> result<json, json>;
+
+    /// `error`: `protocol::ErrorEnvelope` -> `AgentResponseEnvelope`.
+    map-inbound-error: func(error: json, context: json) -> result<json, json>;
+}
+
+/// Southbound: translates the Canonical IR into one provider's HTTP dialect.
+interface provider-adapter {
+    use common.{adapter-metadata, adapter-health};
+
+    type json = string;
+
+    metadata: func() -> adapter-metadata;
+    healthcheck: func() -> adapter-health;
+
+    /// `provider-config` -> `list<protocol::ModelCapability>`.
+    model-capabilities: func(provider-config: json) -> result<json, json>;
+
+    /// `chat-request`: `protocol::ChatRequest` -> `protocol::HttpRequestDescriptor`.
+    ///
+    /// The descriptor names a credential with a `SecretRef` and cannot carry
+    /// one: `protocol::SafeHeaders` rejects credential headers, on construction
+    /// and on deserialization. The host injects the value and sends the request.
+    build-http-request: func(chat-request: json, provider-config: json) -> result<json, json>;
+
+    /// `response-parts`: `protocol::HttpResponseParts` -> `protocol::ChatResponse`.
+    parse-response: func(response-parts: json) -> result<json, json>;
+
+    /// `chunk`: `protocol::StreamChunk` -> `list<protocol::StreamEvent>`.
+    ///
+    /// A chunk is not guaranteed to be a whole SSE frame. Must not buffer the
+    /// body to await one.
+    parse-stream-chunk: func(chunk: json) -> result<json, json>;
+
+    /// `response-parts`: `protocol::HttpResponseParts` -> `protocol::ErrorEnvelope`.
+    ///
+    /// Must map onto the closed `protocol::ErrorCode` catalog: the router
+    /// branches on it to decide whether another upstream may be tried.
+    map-provider-error: func(response-parts: json) -> result<json, json>;
+}
+
+/// World name doubles as the manifest's `api_version`.
+world agent-adapter-v1 {
+    export agent-adapter;
+}
+
+/// Imports `host` so it can name credentials. Exports no way to read one.
+world provider-adapter-v1 {
+    import host;
+    export provider-adapter;
+}
