@@ -161,8 +161,10 @@ dependencies = [
 name = "token-station-conformance"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "token-station-plugin-api",
+ "token-station-protocol",
 ]
 
 [[package]]

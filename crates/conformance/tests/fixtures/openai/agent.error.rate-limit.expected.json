@@ -1,0 +1,7 @@
+{
+  "error": {
+    "message": "the upstream rate limited this request",
+    "type": "rate_limit",
+    "code": "rate_limit"
+  }
+}
