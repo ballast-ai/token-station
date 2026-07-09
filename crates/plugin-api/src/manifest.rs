@@ -33,11 +33,17 @@ impl AdapterKind {
     }
 }
 
-/// What an adapter claims it can do.
+/// Which part of the `v1` ABI surface an adapter implements.
 ///
-/// Closed, like the catalogs in `token-station-protocol`: the host dispatches on
-/// these, so an unrecognised capability is a version mismatch rather than
-/// something to ignore.
+/// Not a taxonomy of what models can do — that is `protocol::ModelCapability`,
+/// which is open and carries an `extensions` bag. This is the narrower claim
+/// "the host may call these functions on me, and I honour these IR fields":
+/// `chat`, `stream` and `agent_hint` name functions in the WIT world; `tool_call`
+/// and `json_schema` name `ChatRequest` fields the adapter promises to translate.
+///
+/// So the set is closed by construction, not by policy. A third party cannot
+/// implement a capability `v1` does not define, because `v1` defines no function
+/// or field to carry it. The set grows when the world does, in `-v2`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
@@ -45,8 +51,8 @@ pub enum Capability {
     Stream,
     ToolCall,
     JsonSchema,
-    /// Extracts `AgentHint`s. Meaningless for a provider adapter, which never
-    /// sees an inbound request.
+    /// Implements `extract-agent-hint`. Meaningless for a provider adapter,
+    /// which never sees an inbound request.
     AgentHint,
 }
 

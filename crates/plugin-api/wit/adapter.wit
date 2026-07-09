@@ -51,12 +51,22 @@ interface common {
 /// The adapter passes the *name* of a credential; the host resolves it. This is
 /// how an adapter can sign a request for an upstream that needs HMAC without
 /// ever holding the key.
+///
+/// Every function here returns something that is not a credential. There is no
+/// `oauth-token`: it would have to return either an access token, which is a
+/// credential, or a handle, which no IR type can carry. The host performs the
+/// OAuth exchange itself when it injects `protocol::Auth::OAuth`, so the adapter
+/// names the grant and never sees its result.
 interface host {
     /// `secret-ref` is a name declared in the adapter's manifest under
     /// `permissions.secrets`. Signing a name the manifest did not declare fails.
+    ///
+    /// The signature is not a credential, so the adapter may place it in an
+    /// ordinary header or the body. It may *not* place it in `authorization`:
+    /// `protocol::SafeHeaders` refuses credential headers. An upstream that
+    /// requires a signature there — AWS SigV4 — needs an `Auth` variant that
+    /// `v1` does not have, and waits for `-v2`.
     sign: func(secret-ref: string, payload: list<u8>, algorithm: string) -> result<list<u8>, string>;
-
-    oauth-token: func(secret-ref: string, scopes: list<string>) -> result<string, string>;
 }
 
 /// Northbound: translates an agent tool's protocol into the Canonical IR.
@@ -119,14 +129,28 @@ interface provider-adapter {
     metadata: func() -> adapter-metadata;
     healthcheck: func() -> adapter-health;
 
-    /// `provider-config` -> `list<protocol::ModelCapability>`.
+    /// `provider-config`: `protocol::ProviderConfig` ->
+    /// `list<protocol::ModelCapability>`.
+    ///
+    /// An adapter has no network, so it cannot ask a self-hosted upstream what
+    /// it serves. `provider-config.models` is where that upstream's operator
+    /// says so; the adapter may enrich it from what it knows of the provider.
     model-capabilities: func(provider-config: json) -> result<json, json>;
 
-    /// `chat-request`: `protocol::ChatRequest` -> `protocol::HttpRequestDescriptor`.
+    /// `chat-request`: `protocol::ChatRequest`,
+    /// `provider-config`: `protocol::ProviderConfig`
+    /// -> `protocol::HttpRequestDescriptor`.
     ///
-    /// The descriptor names a credential with a `SecretRef` and cannot carry
-    /// one: `protocol::SafeHeaders` rejects credential headers, on construction
-    /// and on deserialization. The host injects the value and sends the request.
+    /// The descriptor says which credential to attach and how to present it
+    /// (`protocol::Auth`), never what it is: `protocol::SafeHeaders` rejects
+    /// credential headers, on construction and on deserialization. The host
+    /// resolves the name, injects the value, and sends the request.
+    ///
+    /// The adapter also chooses the URL. Choosing a URL and naming a credential
+    /// are together an exfiltration primitive, so before the host resolves
+    /// anything it runs `protocol::ProviderConfig::authorize`, which refuses a
+    /// descriptor addressed outside `provider-config.base_url` or naming a
+    /// credential this upstream does not hold.
     build-http-request: func(chat-request: json, provider-config: json) -> result<json, json>;
 
     /// `response-parts`: `protocol::HttpResponseParts` -> `protocol::ChatResponse`.

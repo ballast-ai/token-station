@@ -12,5 +12,8 @@
     ],
     "stream": true
   },
-  "auth": "provider_api_key"
+  "auth": {
+    "scheme": "bearer",
+    "secret": "provider_api_key"
+  }
 }

