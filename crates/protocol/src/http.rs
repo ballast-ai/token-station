@@ -67,6 +67,149 @@ impl fmt::Display for SecretBoundaryError {
 
 impl Error for SecretBoundaryError {}
 
+/// A plugin chose a header the host's redaction does not cover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthPlacementError {
+    header: String,
+}
+
+impl AuthPlacementError {
+    #[must_use]
+    pub fn header(&self) -> &str {
+        &self.header
+    }
+}
+
+impl fmt::Display for AuthPlacementError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "header `{}` is not a credential header, so nothing downstream would redact the value the host writes into it",
+            self.header
+        )
+    }
+}
+
+impl Error for AuthPlacementError {}
+
+/// Wire form of [`Auth`]. Private, so the only way to build an [`Auth::Header`]
+/// is through the checking constructor below.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "scheme", rename_all = "snake_case")]
+enum AuthWire {
+    Bearer {
+        secret: SecretRef,
+    },
+    Header {
+        name: String,
+        secret: SecretRef,
+    },
+    Oauth {
+        secret: SecretRef,
+        scopes: Vec<String>,
+    },
+}
+
+/// How the host must present a credential the `provider-adapter` names.
+///
+/// The adapter picks the variant, because the upstream's dialect is exactly what
+/// an adapter exists to know. The host holds the value: it resolves the
+/// [`SecretRef`] and writes it in *after* the adapter has returned, so the plugin
+/// never observes a credential it just caused to be sent.
+///
+/// Closed, like [`crate::ErrorCode`]. The host has one code path per variant, so
+/// a variant it does not know is a version mismatch, not something to ignore. A
+/// dialect `v1` cannot express — a `SigV4` signature over the request body, which
+/// would need [`Auth`] to carry the output of the `host.sign` ABI call — goes to
+/// `-v2` rather than being approximated here.
+///
+/// There is deliberately no query-parameter variant. No `v1` provider needs one:
+/// the one that looks like it does, Gemini, accepts `x-goog-api-key`. Adding it
+/// would put a live credential in a URL, which is the field most likely to reach
+/// a log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "AuthWire", into = "AuthWire")]
+pub enum Auth {
+    /// `Authorization: Bearer <secret>`. OpenAI and most compatible upstreams.
+    Bearer { secret: SecretRef },
+    /// `<name>: <secret>`, e.g. `x-api-key` for Anthropic, `x-goog-api-key` for
+    /// Gemini. `name` must be a credential header.
+    Header { name: String, secret: SecretRef },
+    /// The host exchanges `secret` for an access token and presents it as a
+    /// bearer token.
+    ///
+    /// The exchange happens at injection time, inside the host. That is why
+    /// there is no `host.oauth_token` ABI call for the plugin to make: a plugin
+    /// that could ask for a token would hold one.
+    OAuth {
+        secret: SecretRef,
+        scopes: Vec<String>,
+    },
+}
+
+impl Auth {
+    #[must_use]
+    pub fn bearer(secret: SecretRef) -> Self {
+        Self::Bearer { secret }
+    }
+
+    /// Names the header the host writes the credential into.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthPlacementError`] unless `name` is a credential header.
+    /// [`SafeHeaders`] refuses those names to a plugin and [`crate::HeaderDigest`]
+    /// strips their values, so a name outside that catalog would be one the host
+    /// injects a secret into and nothing afterwards knows to hide.
+    pub fn header(name: impl Into<String>, secret: SecretRef) -> Result<Self, AuthPlacementError> {
+        let name = name.into();
+        if !is_credential_header(&name) {
+            return Err(AuthPlacementError { header: name });
+        }
+        Ok(Self::Header { name, secret })
+    }
+
+    #[must_use]
+    pub fn oauth(secret: SecretRef, scopes: impl IntoIterator<Item = String>) -> Self {
+        Self::OAuth {
+            secret,
+            scopes: scopes.into_iter().collect(),
+        }
+    }
+
+    /// Which credential the host must resolve.
+    #[must_use]
+    pub fn secret(&self) -> &SecretRef {
+        match self {
+            Self::Bearer { secret } | Self::Header { secret, .. } | Self::OAuth { secret, .. } => {
+                secret
+            }
+        }
+    }
+}
+
+impl TryFrom<AuthWire> for Auth {
+    type Error = AuthPlacementError;
+
+    fn try_from(wire: AuthWire) -> Result<Self, Self::Error> {
+        Ok(match wire {
+            AuthWire::Bearer { secret } => Self::Bearer { secret },
+            AuthWire::Header { name, secret } => Self::header(name, secret)?,
+            AuthWire::Oauth { secret, scopes } => Self::OAuth { secret, scopes },
+        })
+    }
+}
+
+impl From<Auth> for AuthWire {
+    fn from(auth: Auth) -> Self {
+        match auth {
+            Auth::Bearer { secret } => Self::Bearer { secret },
+            Auth::Header { name, secret } => Self::Header { name, secret },
+            Auth::OAuth { secret, scopes } => Self::Oauth { secret, scopes },
+        }
+    }
+}
+
 /// Outbound headers a `provider-adapter` is allowed to set.
 ///
 /// Rejects credential headers instead of dropping them. Dropping would let a
@@ -142,10 +285,17 @@ impl From<SafeHeaders> for BTreeMap<String, String> {
 
 /// The upstream request a `provider-adapter` wants the host to send.
 ///
-/// The adapter never sends it. The host resolves `auth`, injects the credential,
-/// applies its own timeout, size limits and retry budget, and only then opens a
-/// socket. That is what keeps billing, quota and audit un-bypassable: a plugin
-/// with no network access cannot route around them.
+/// The adapter never sends it. The host checks it against the upstream's
+/// [`crate::ProviderConfig`], resolves `auth`, injects the credential, applies
+/// its own timeout, size limits and retry budget, and only then opens a socket.
+/// That is what keeps billing, quota and audit un-bypassable: a plugin with no
+/// network access cannot route around them.
+///
+/// Note that `url` is chosen by the plugin while `auth` is honoured by the host.
+/// Those two together are an exfiltration primitive, and nothing in this type
+/// prevents it — [`crate::ProviderConfig::authorize`] is what does, by refusing a
+/// `url` outside the configured endpoint. A host that skips that check will send
+/// the operator's key wherever a plugin asks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HttpRequestDescriptor {
     pub method: HttpMethod,
@@ -154,10 +304,10 @@ pub struct HttpRequestDescriptor {
     pub headers: SafeHeaders,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<Value>,
-    /// Which credential the host should attach. `None` for unauthenticated
-    /// upstreams such as a local Ollama endpoint.
+    /// Which credential the host should attach, and how to present it. `None`
+    /// for unauthenticated upstreams such as a local Ollama endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth: Option<SecretRef>,
+    pub auth: Option<Auth>,
     #[serde(default, flatten)]
     pub extensions: Extensions,
 }
@@ -192,7 +342,56 @@ pub struct HttpResponseParts {
 
 #[cfg(test)]
 mod tests {
-    use super::{HttpMethod, HttpRequestDescriptor, SafeHeaders, SecretRef};
+    use super::{Auth, HttpMethod, HttpRequestDescriptor, SafeHeaders, SecretRef};
+
+    #[test]
+    fn auth_header_must_be_one_the_host_redacts() {
+        let anthropic = Auth::header("x-api-key", SecretRef::new("provider_api_key"))
+            .expect("a credential header is where a credential goes");
+        assert_eq!(anthropic.secret().as_str(), "provider_api_key");
+
+        let error = Auth::header("x-trace-id", SecretRef::new("provider_api_key"))
+            .expect_err("a header nothing redacts must be refused");
+        assert_eq!(error.header(), "x-trace-id");
+    }
+
+    #[test]
+    fn auth_header_placement_is_checked_on_deserialization() {
+        let smuggled: Result<Auth, _> =
+            serde_json::from_str(r#"{"scheme":"header","name":"x-trace-id","secret":"k"}"#);
+
+        assert!(
+            smuggled.is_err(),
+            "a fixture must not be able to place a credential where logs would keep it"
+        );
+    }
+
+    #[test]
+    fn auth_round_trips_every_variant() {
+        let cases = [
+            (
+                Auth::bearer(SecretRef::new("provider_api_key")),
+                r#"{"scheme":"bearer","secret":"provider_api_key"}"#,
+            ),
+            (
+                Auth::header("x-goog-api-key", SecretRef::new("gemini_key")).expect("valid"),
+                r#"{"scheme":"header","name":"x-goog-api-key","secret":"gemini_key"}"#,
+            ),
+            (
+                Auth::oauth(SecretRef::new("platform_token"), ["inference".to_owned()]),
+                r#"{"scheme":"oauth","secret":"platform_token","scopes":["inference"]}"#,
+            ),
+        ];
+
+        for (auth, expected) in cases {
+            let encoded = serde_json::to_string(&auth).expect("serializable auth");
+            assert_eq!(encoded, expected);
+            assert_eq!(
+                serde_json::from_str::<Auth>(&encoded).expect("valid auth"),
+                auth
+            );
+        }
+    }
 
     #[test]
     fn safe_headers_reject_a_credential_header() {
@@ -227,11 +426,14 @@ mod tests {
     #[test]
     fn descriptor_names_a_credential_without_holding_one() {
         let mut descriptor = HttpRequestDescriptor::new(HttpMethod::Post, "https://api.example/v1");
-        descriptor.auth = Some(SecretRef::new("provider_api_key"));
+        descriptor.auth = Some(Auth::bearer(SecretRef::new("provider_api_key")));
 
         let json = serde_json::to_value(&descriptor).expect("serializable descriptor");
 
-        assert_eq!(json["auth"], serde_json::json!("provider_api_key"));
+        assert_eq!(
+            json["auth"],
+            serde_json::json!({"scheme": "bearer", "secret": "provider_api_key"})
+        );
         assert_eq!(json["method"], serde_json::json!("POST"));
     }
 
@@ -240,7 +442,7 @@ mod tests {
         let mut descriptor = HttpRequestDescriptor::new(HttpMethod::Post, "https://api.example/v1");
         descriptor.headers =
             SafeHeaders::try_new([("content-type", "application/json")]).expect("safe headers");
-        descriptor.auth = Some(SecretRef::new("provider_api_key"));
+        descriptor.auth = Some(Auth::bearer(SecretRef::new("provider_api_key")));
         descriptor.body = Some(serde_json::json!({"model": "gpt-5.5"}));
 
         let encoded = serde_json::to_string(&descriptor).expect("serializable descriptor");

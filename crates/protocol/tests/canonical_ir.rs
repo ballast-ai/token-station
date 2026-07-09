@@ -11,8 +11,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use token_station_protocol::{
-    AgentRequestEnvelope, ChatRequest, ChatResponse, ErrorCode, ErrorEnvelope, FinishReason,
-    HttpMethod, HttpRequestDescriptor, HttpResponseParts, ModelCapability, Role, StreamEvent,
+    AgentRequestEnvelope, Auth, ChatRequest, ChatResponse, ErrorCode, ErrorEnvelope, FinishReason,
+    HttpMethod, HttpRequestDescriptor, HttpResponseParts, ModelCapability, ProviderConfig, Role,
+    StreamEvent,
 };
 
 /// Parses `fixture`, re-serializes it, and asserts nothing moved.
@@ -36,6 +37,7 @@ const CHAT_RESPONSE: &str = include_str!("fixtures/outbound.chat.response.tool-c
 const STREAM: &str = include_str!("fixtures/outbound.stream.tool-call.json");
 const RATE_LIMIT: &str = include_str!("fixtures/error.rate-limit.json");
 const CAPABILITY: &str = include_str!("fixtures/model.capability.json");
+const PROVIDER_CONFIG: &str = include_str!("fixtures/provider.config.json");
 
 #[test]
 fn inbound_envelope_expresses_an_openai_request_without_its_credential() {
@@ -75,11 +77,11 @@ fn outbound_provider_request_names_a_credential_and_carries_none() {
 
     assert_eq!(descriptor.method, HttpMethod::Post);
     assert_eq!(
-        descriptor
-            .auth
-            .as_ref()
-            .map(token_station_protocol::SecretRef::as_str),
-        Some("provider_api_key")
+        descriptor.auth,
+        Some(Auth::bearer(token_station_protocol::SecretRef::new(
+            "provider_api_key"
+        ))),
+        "the adapter says which credential and how to present it, never what it is"
     );
     assert_eq!(
         descriptor.headers.get("content-type"),
@@ -90,6 +92,52 @@ fn outbound_provider_request_names_a_credential_and_carries_none() {
     for (name, _) in descriptor.headers.iter() {
         assert_ne!(name.to_ascii_lowercase(), "authorization");
     }
+}
+
+#[test]
+fn provider_config_binds_an_upstream_without_naming_its_key() {
+    let config: ProviderConfig = assert_exact_round_trip(PROVIDER_CONFIG);
+
+    assert_eq!(config.provider, "openai-compatible");
+    assert_eq!(
+        config
+            .auth
+            .as_ref()
+            .map(token_station_protocol::SecretRef::as_str),
+        Some("provider_api_key"),
+        "the host names the credential slot; the adapter chooses how to present it"
+    );
+    assert_eq!(config.models[0].context_window, 400_000);
+
+    // `organization` is not modelled by v1 and must survive anyway.
+    assert_eq!(
+        config.extensions["organization"],
+        serde_json::json!("org-local")
+    );
+}
+
+/// The two halves of the boundary, exercised together on the fixtures the
+/// official OpenAI adapter is held to.
+///
+/// A provider adapter picks the URL *and* names the credential. Separately each
+/// is harmless; together they would send the operator's key anywhere the plugin
+/// liked. `authorize` is the only thing standing between those two facts, so it
+/// is asserted against the same fixture pair a real request flows through.
+#[test]
+fn a_descriptor_addressed_off_its_upstream_is_refused_the_credential() {
+    let config: ProviderConfig = serde_json::from_str(PROVIDER_CONFIG).expect("valid config");
+    let descriptor: HttpRequestDescriptor =
+        serde_json::from_str(PROVIDER_REQUEST).expect("valid descriptor");
+
+    assert_eq!(config.authorize(&descriptor), Ok(()));
+
+    let mut exfiltrating = descriptor;
+    exfiltrating.url = "https://attacker.example/collect".to_owned();
+
+    assert!(
+        config.authorize(&exfiltrating).is_err(),
+        "a plugin must not be able to choose where the host sends a credential"
+    );
 }
 
 #[test]
