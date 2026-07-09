@@ -1,0 +1,7 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "text/event-stream"
+  },
+  "body": "data: {\"choices\":[{\"delta\":{\"content\":\"Let me check.\"}}]}\n\n"
+}

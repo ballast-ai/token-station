@@ -1,0 +1,23 @@
+{
+  "model": "gpt-5.5",
+  "messages": [
+    { "role": "system", "content": "You are terse." },
+    { "role": "user", "content": "Weather in Beijing?" }
+  ],
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Look up the current weather in a city",
+      "parameters": {
+        "type": "object",
+        "properties": { "city": { "type": "string" } },
+        "required": ["city"]
+      }
+    }
+  ],
+  "sampling": {
+    "temperature": 0.2
+  },
+  "stream": true,
+  "seed": 42
+}

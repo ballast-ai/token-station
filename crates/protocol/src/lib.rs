@@ -1,48 +1,101 @@
-#![doc = "Canonical protocol types shared by token-station components."]
+//! Canonical protocol types shared by token-station components.
+//!
+//! The host understands only these types. Inbound agent protocols are
+//! normalized into them by an `agent-adapter`, and outbound provider requests
+//! are built from them by a `provider-adapter`. Adapters perform protocol
+//! translation only: routing, budget, fallback, billing and audit stay in the
+//! host, so nothing here can name a provider, a credential or a budget.
+//!
+//! Two boundaries are enforced by the type system rather than by convention:
+//!
+//! - [`HeaderDigest`] cannot hold the value of an authentication header, so an
+//!   `agent-adapter` never observes an inbound credential.
+//! - [`HttpRequestDescriptor`] carries a [`SecretRef`] and [`SafeHeaders`], so a
+//!   `provider-adapter` can name a credential but never spell one out. The host
+//!   injects the real value before the request leaves the process.
+//!
+//! Both survive deserialization, which is what makes them auditable: a fixture
+//! cannot smuggle a credential back in through the wire format.
+//!
+//! # Versioning
+//!
+//! These types are the `v1` ABI surface. Unknown JSON fields deserialize into
+//! [`Extensions`] rather than failing, so a `v1` peer keeps working when a newer
+//! peer adds a field. Enumerations are deliberately closed: an unknown variant
+//! is a version mismatch and should surface as an error instead of being
+//! silently coerced. Breaking changes go to `-v2`; they never mutate `v1` in
+//! place.
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentHint {
-    kind: String,
-}
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "IR types are re-exported at the crate root, where the module prefix is what disambiguates them"
+)]
 
-impl AgentHint {
-    #[must_use]
-    pub fn new(kind: impl Into<String>) -> Self {
-        Self { kind: kind.into() }
-    }
+mod capability;
+mod chat;
+mod envelope;
+mod error;
+mod hint;
+mod http;
+mod stream;
+mod usage;
 
-    #[must_use]
-    pub fn kind(&self) -> &str {
-        &self.kind
-    }
-}
+use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatRequest {
-    model: String,
-}
+pub use capability::ModelCapability;
+pub use chat::{
+    ChatRequest, ChatResponse, Choice, Content, ContentPart, FinishReason, ImageUrl, Message,
+    ResponseFormat, Role, Sampling, ToolCall, ToolDef,
+};
+pub use envelope::{AgentRequestEnvelope, HeaderDigest, Principal};
+pub use error::{ErrorCode, ErrorEnvelope};
+pub use hint::{AgentHint, HintKind};
+pub use http::{
+    HttpMethod, HttpRequestDescriptor, HttpResponseParts, SafeHeaders, SecretBoundaryError,
+    SecretRef,
+};
+pub use stream::{StreamChunk, StreamEvent};
+pub use usage::Usage;
 
-impl ChatRequest {
-    #[must_use]
-    pub fn new(model: impl Into<String>) -> Self {
-        Self {
-            model: model.into(),
-        }
-    }
+/// Forward-compatible bag for fields this ABI version does not model.
+///
+/// Unknown keys land here instead of failing deserialization, which is how a
+/// `v1` adapter tolerates a newer peer. Advanced capabilities live here until
+/// they are promoted into a `-v2` ABI.
+///
+/// Ordering is stable because conformance fixtures must serialize
+/// deterministically.
+pub type Extensions = BTreeMap<String, serde_json::Value>;
 
-    #[must_use]
-    pub fn model(&self) -> &str {
-        &self.model
-    }
+/// Header names whose values must never reach a plugin, nor leave inside a
+/// plugin-authored request.
+///
+/// Compared lowercase. Single source of truth for both the inbound redaction in
+/// [`HeaderDigest`] and the outbound rejection in [`SafeHeaders`].
+pub(crate) const CREDENTIAL_HEADERS: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "api-key",
+    "x-goog-api-key",
+    "cookie",
+    "set-cookie",
+];
+
+pub(crate) fn is_credential_header(name: &str) -> bool {
+    CREDENTIAL_HEADERS
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(name))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentHint, ChatRequest};
+    use super::is_credential_header;
 
     #[test]
-    fn keeps_basic_protocol_fields() {
-        assert_eq!(AgentHint::new("code-review").kind(), "code-review");
-        assert_eq!(ChatRequest::new("auto").model(), "auto");
+    fn credential_header_match_ignores_case() {
+        assert!(is_credential_header("Authorization"));
+        assert!(is_credential_header("X-Api-Key"));
+        assert!(!is_credential_header("content-type"));
     }
 }
