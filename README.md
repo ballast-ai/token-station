@@ -18,6 +18,7 @@ token-station 是面向 AI Agent 工具和 LLM 模型供应商的智能模型路
 - [代码仓库规划](docs/architecture/代码仓库规划.md)
 - [双端 adapter 插件架构](docs/architecture/protocol-provider-adapter插件架构.md)
 - [个人模式本地客户端概要设计](docs/architecture/个人模式本地客户端概要设计.md)
+- [CLI 命令行交互设计](docs/architecture/cli命令行交互设计.md)
 - [数据库设计 V1 基线与 V2 增量](docs/architecture/数据库设计-V1基线与V2增量.md)
 
 ## 本地检查
@@ -27,4 +28,3 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
-
