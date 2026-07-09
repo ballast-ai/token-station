@@ -1,0 +1,25 @@
+{
+  "protocol": "openai-chat-completions",
+  "agent_tool": "claude-code",
+  "headers": {
+    "names": ["authorization", "content-type", "x-agent-step"],
+    "values": {
+      "content-type": "application/json",
+      "x-agent-step": "planning"
+    }
+  },
+  "principal": {
+    "subject": "local"
+  },
+  "hints": [
+    {
+      "kind": "step_type",
+      "value": "planning"
+    }
+  ],
+  "body": {
+    "model": "auto",
+    "messages": [{ "role": "user", "content": "Weather in Beijing?" }],
+    "stream": true
+  }
+}
