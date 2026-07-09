@@ -1,0 +1,18 @@
+{
+  "name": "agent-openai",
+  "version": "1.0.0",
+  "kind": "agent-adapter",
+  "api_version": "agent-adapter-v1",
+  "agent_protocols": ["openai-chat-completions"],
+  "agent_tools": ["generic-openai-sdk", "cursor", "continue"],
+  "capabilities": ["chat", "stream", "tool_call", "json_schema", "agent_hint"],
+  "permissions": {
+    "network": false,
+    "filesystem": false,
+    "secrets": []
+  },
+  "conformance": {
+    "required_suite": "agent-protocol-v1",
+    "fixtures": "fixtures/"
+  }
+}
