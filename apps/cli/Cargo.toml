@@ -1,0 +1,15 @@
+[package]
+name = "token-station-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+token-station-protocol = { path = "../../crates/protocol" }
+token-station-router-core = { path = "../../crates/router-core" }
+
+[lints]
+workspace = true
+

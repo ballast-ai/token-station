@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/cli",
+    "crates/conformance",
+    "crates/metrics",
+    "crates/plugin-api",
+    "crates/plugin-runtime",
+    "crates/protocol",
+    "crates/router-core",
+]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/ballast-ai/token-station"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+
