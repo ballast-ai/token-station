@@ -9,6 +9,9 @@ rust-version.workspace = true
 [dependencies]
 token-station-plugin-api = { path = "../plugin-api" }
 
+[dev-dependencies]
+serde_json = { workspace = true }
+
 [lints]
 workspace = true
 

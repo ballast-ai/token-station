@@ -1,236 +1,113 @@
-#![doc = "Stable adapter plugin API surface and manifest types."]
+//! Stable adapter plugin ABI: the WIT worlds, and the `manifest.json` schema.
+//!
+//! # What crosses the boundary
+//!
+//! Adapter functions take and return JSON documents, not WIT records. The
+//! Canonical IR is defined once, in `token-station-protocol`, where exact
+//! `parse -> serialize` fixtures pin its wire format. Mirroring it into WIT
+//! would create a second definition to keep in step, and WIT cannot express the
+//! open JSON the IR carries: `ToolDef::parameters`, the raw inbound body, and
+//! every `extensions` bag.
+//!
+//! That is why this crate does not depend on `token-station-protocol`. It knows
+//! the *names* of the documents that cross the boundary, not their contents.
+//! The cost of the choice is one serialization per call, and type errors that
+//! surface at run time rather than at build time; the conformance suite is what
+//! catches those.
+//!
+//! # Versioning
+//!
+//! [`AdapterKind::expected_api_version`] returns the WIT `world` an adapter must
+//! be built against, and the manifest must name the same one. A breaking change
+//! ships a `-v2` world alongside `-v1`; it never edits `-v1` in place, because
+//! installed plugins are compiled artifacts that cannot be migrated.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdapterKind {
-    Agent,
-    Provider,
-}
+mod manifest;
 
-impl AdapterKind {
-    #[must_use]
-    pub const fn expected_api_version(self) -> &'static str {
-        match self {
-            Self::Agent => "agent-adapter-v1",
-            Self::Provider => "provider-adapter-v1",
-        }
-    }
-}
+pub use manifest::{
+    AdapterKind, AdapterManifest, AdapterMetadata, AdapterPermissions, Capability, ConformanceSpec,
+    ManifestError,
+};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdapterMetadata {
-    name: String,
-    kind: AdapterKind,
-    api_version: String,
-}
-
-impl AdapterMetadata {
-    #[must_use]
-    pub fn new(name: impl Into<String>, kind: AdapterKind, api_version: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            kind,
-            api_version: api_version.into(),
-        }
-    }
-
-    #[must_use]
-    pub fn api_version(&self) -> &str {
-        &self.api_version
-    }
-
-    #[must_use]
-    pub fn kind(&self) -> AdapterKind {
-        self.kind
-    }
-
-    #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AdapterPermissions {
-    network: bool,
-    filesystem: bool,
-    secrets: Vec<String>,
-}
-
-impl AdapterPermissions {
-    #[must_use]
-    pub fn new<I, S>(network: bool, filesystem: bool, secrets: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        Self {
-            network,
-            filesystem,
-            secrets: secrets.into_iter().map(Into::into).collect(),
-        }
-    }
-
-    #[must_use]
-    pub const fn network(&self) -> bool {
-        self.network
-    }
-
-    #[must_use]
-    pub const fn filesystem(&self) -> bool {
-        self.filesystem
-    }
-
-    #[must_use]
-    pub fn secrets(&self) -> &[String] {
-        &self.secrets
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdapterManifest {
-    metadata: AdapterMetadata,
-    permissions: AdapterPermissions,
-}
-
-impl AdapterManifest {
-    #[must_use]
-    pub fn new(metadata: AdapterMetadata, permissions: AdapterPermissions) -> Self {
-        Self {
-            metadata,
-            permissions,
-        }
-    }
-
-    #[must_use]
-    pub const fn metadata(&self) -> &AdapterMetadata {
-        &self.metadata
-    }
-
-    #[must_use]
-    pub const fn permissions(&self) -> &AdapterPermissions {
-        &self.permissions
-    }
-
-    /// Validates that this manifest can be accepted by the host runtime.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ManifestError`] when the manifest is missing required identity
-    /// fields, declares an API version that does not match its adapter kind, or
-    /// requests permissions that the default sandbox denies.
-    pub fn validate(&self) -> Result<(), ManifestError> {
-        if self.metadata.name().is_empty() {
-            return Err(ManifestError::MissingName);
-        }
-
-        if self.metadata.api_version() != self.metadata.kind().expected_api_version() {
-            return Err(ManifestError::ApiVersionDoesNotMatchKind);
-        }
-
-        if self.permissions.network() {
-            return Err(ManifestError::NetworkPermissionDenied);
-        }
-
-        if self.permissions.filesystem() {
-            return Err(ManifestError::FilesystemPermissionDenied);
-        }
-
-        if self.metadata.kind() == AdapterKind::Agent && !self.permissions.secrets().is_empty() {
-            return Err(ManifestError::AgentAdapterCannotRequestSecrets);
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManifestError {
-    MissingName,
-    ApiVersionDoesNotMatchKind,
-    NetworkPermissionDenied,
-    FilesystemPermissionDenied,
-    AgentAdapterCannotRequestSecrets,
-}
+/// The adapter ABI, as WIT source.
+///
+/// Embedded so a host can hand it to plugin authors and to `wit-bindgen` without
+/// depending on this crate's source layout. Its worlds are named by
+/// [`AdapterKind::expected_api_version`], and a test in this crate asserts the
+/// two never drift apart.
+pub const ADAPTER_WIT: &str = include_str!("../wit/adapter.wit");
 
 #[cfg(test)]
 mod tests {
-    use super::{AdapterKind, AdapterManifest, AdapterMetadata, AdapterPermissions, ManifestError};
+    use super::{ADAPTER_WIT, AdapterKind};
+    use wit_parser::Resolve;
 
-    #[test]
-    fn metadata_keeps_adapter_kind() {
-        let metadata = AdapterMetadata::new("agent-openai", AdapterKind::Agent, "agent-adapter-v1");
-
-        assert_eq!(metadata.name(), "agent-openai");
-        assert_eq!(metadata.kind(), AdapterKind::Agent);
-        assert_eq!(metadata.api_version(), "agent-adapter-v1");
+    fn resolve() -> Resolve {
+        let mut resolve = Resolve::new();
+        resolve
+            .push_str("adapter.wit", ADAPTER_WIT)
+            .expect("wit/adapter.wit must parse");
+        resolve
     }
 
     #[test]
-    fn accepts_provider_manifest_with_secret_refs() {
-        let manifest = AdapterManifest::new(
-            AdapterMetadata::new(
-                "provider-openai-compatible",
-                AdapterKind::Provider,
-                "provider-adapter-v1",
-            ),
-            AdapterPermissions::new(false, false, ["provider_api_key"]),
-        );
-
-        assert_eq!(manifest.validate(), Ok(()));
+    fn wit_source_parses() {
+        let _ = resolve();
     }
 
     #[test]
-    fn rejects_agent_manifest_that_requests_secrets() {
-        let manifest = AdapterManifest::new(
-            AdapterMetadata::new("agent-openai", AdapterKind::Agent, "agent-adapter-v1"),
-            AdapterPermissions::new(false, false, ["provider_api_key"]),
-        );
+    fn every_adapter_kind_has_a_world_named_after_its_api_version() {
+        let resolve = resolve();
 
-        assert_eq!(
-            manifest.validate(),
-            Err(ManifestError::AgentAdapterCannotRequestSecrets)
-        );
+        for kind in [AdapterKind::Agent, AdapterKind::Provider] {
+            let expected = kind.expected_api_version();
+            assert!(
+                resolve.worlds.iter().any(|(_, w)| w.name == expected),
+                "wit/adapter.wit declares no world named `{expected}`"
+            );
+        }
     }
 
     #[test]
-    fn rejects_network_and_filesystem_permissions() {
-        let network_manifest = AdapterManifest::new(
-            AdapterMetadata::new(
-                "provider-openai-compatible",
-                AdapterKind::Provider,
-                "provider-adapter-v1",
-            ),
-            AdapterPermissions::new(true, false, ["provider_api_key"]),
-        );
-        let filesystem_manifest = AdapterManifest::new(
-            AdapterMetadata::new(
-                "provider-openai-compatible",
-                AdapterKind::Provider,
-                "provider-adapter-v1",
-            ),
-            AdapterPermissions::new(false, true, ["provider_api_key"]),
-        );
+    fn no_world_reaches_the_network_or_the_file_system() {
+        let resolve = resolve();
 
-        assert_eq!(
-            network_manifest.validate(),
-            Err(ManifestError::NetworkPermissionDenied)
-        );
-        assert_eq!(
-            filesystem_manifest.validate(),
-            Err(ManifestError::FilesystemPermissionDenied)
-        );
+        for (_, world) in &resolve.worlds {
+            for (key, _) in &world.imports {
+                let name = resolve.name_world_key(key);
+                assert!(
+                    !name.contains("wasi:sockets") && !name.contains("wasi:filesystem"),
+                    "world `{}` imports `{name}`; adapters have no network and no file system",
+                    world.name
+                );
+            }
+        }
     }
 
     #[test]
-    fn rejects_api_version_that_does_not_match_adapter_kind() {
-        let manifest = AdapterManifest::new(
-            AdapterMetadata::new("agent-openai", AdapterKind::Agent, "provider-adapter-v1"),
-            AdapterPermissions::default(),
-        );
+    fn only_the_provider_world_may_name_a_credential() {
+        let resolve = resolve();
 
-        assert_eq!(
-            manifest.validate(),
-            Err(ManifestError::ApiVersionDoesNotMatchKind)
+        let imports_host = |world_name: &str| {
+            resolve
+                .worlds
+                .iter()
+                .find(|(_, w)| w.name == world_name)
+                .map(|(_, w)| {
+                    w.imports
+                        .keys()
+                        .any(|key| resolve.name_world_key(key).contains("host"))
+                })
+                .expect("world exists")
+        };
+
+        assert!(
+            imports_host(AdapterKind::Provider.expected_api_version()),
+            "a provider adapter signs upstream requests, so it names credentials via `host`"
+        );
+        assert!(
+            !imports_host(AdapterKind::Agent.expected_api_version()),
+            "an agent adapter never touches a credential"
         );
     }
 }
