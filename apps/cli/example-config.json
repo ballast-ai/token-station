@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "server": { "listen": "127.0.0.1:8787" },
+  "plugins": {
+    "dir": "plugins-dist",
+    "agent": "agent-openai",
+    "providers": {
+      "openai-compatible": "provider-openai-compatible"
+    }
+  },
+  "upstreams": {
+    "openai_personal": {
+      "provider": "openai-compatible",
+      "base_url": "https://api.openai.com/v1",
+      "auth": { "slot": "provider_api_key", "env": "OPENAI_API_KEY" },
+      "models": [
+        {
+          "model": "gpt-5.5",
+          "tool": true,
+          "vision": true,
+          "json_schema": true,
+          "context_window": 400000
+        }
+      ]
+    },
+    "ollama_local": {
+      "provider": "openai-compatible",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "models": [
+        {
+          "model": "llama3.3",
+          "tool": true,
+          "context_window": 128000
+        }
+      ]
+    }
+  },
+  "router": {
+    "version": 1,
+    "pools": {
+      "cheap": [
+        { "upstream": "ollama_local", "model": "llama3.3" }
+      ],
+      "sota": [
+        { "upstream": "openai_personal", "model": "gpt-5.5" }
+      ]
+    },
+    "rules": [
+      { "id": "long-context", "when": { "estimated_input_tokens_at_least": 32000 }, "route_to": "sota" },
+      { "id": "tool-calls", "when": { "requires_tools": true }, "route_to": "sota" }
+    ],
+    "hint_routes": [
+      { "kind": "step_type", "value": "planning", "route_to": "sota" },
+      { "kind": "step_type", "value": "summarize", "route_to": "cheap" }
+    ],
+    "heuristic": {
+      "weights": {
+        "tokens_per_point": 100,
+        "per_tool": 20,
+        "json_schema": 10,
+        "image": 15,
+        "per_code_block": 8,
+        "per_extra_turn": 3
+      },
+      "threshold": 40,
+      "above": "sota",
+      "below": "cheap"
+    },
+    "default_pool": "cheap",
+    "assumed_context_window": 8192
+  }
+}

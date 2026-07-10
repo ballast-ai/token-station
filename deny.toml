@@ -19,6 +19,10 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     # encoding_rs is `(Apache-2.0 OR MIT) AND BSD-3-Clause`; the AND is unavoidable.
     "BSD-3-Clause",
+    # License for webpki-roots, Mozilla's root-certificate dataset used by rustls.
+    "CDLA-Permissive-2.0",
+    # rustls-webpki and untrusted; ring is `Apache-2.0 AND ISC`, so this satisfies the AND.
+    "ISC",
     "MIT",
     # unicode-ident under proc-macro2, syn, and serde_derive, plus the ICU family.
     "Unicode-3.0",

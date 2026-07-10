@@ -1,160 +1,287 @@
-//! The local client's configuration source: a file on disk.
+//! The local client's configuration: one JSON file describing the server, the
+//! plugins, the upstreams, and the routing table.
 //!
-//! The other implementation of [`ConfigSource`] in this repository holds its
-//! configuration in memory, and the one that matters most — the server
-//! gateway's, reading a database — lives in the closed repository. None of them
-//! shares any code with the others, and that is the point: what they share is
-//! the document's shape, its validation, and what happens when a load fails, all
-//! of which live in `router-core` where neither line can fork them.
+//! The routing section is `router-core`'s `RouterConfig`, embedded verbatim —
+//! the shape, its validation and its failure semantics live in that crate,
+//! where neither the client nor the server gateway can fork them.
+//!
+//! # What is never in this file
+//!
+//! Credentials. An upstream's `auth` names a slot and says where the *value*
+//! lives — an environment variable or a file — never what it is. The interim
+//! sources exist until `C1#4` puts the OS keychain in front of them; the shape
+//! (resolve at request time, by slot name) is already the keychain's.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use token_station_router_core::{ConfigSource, RouterConfig};
+use serde::{Deserialize, Serialize};
+use token_station_protocol::{ModelCapability, ProviderEndpoint};
+use token_station_router_core::RouterConfig;
 
-/// Reads the routing configuration from a JSON file.
+/// The whole client configuration file.
 ///
-/// JSON rather than TOML only because it costs no dependency today. The format
-/// is not part of any promise: `RouterConfig` is the schema, and a `serde`
-/// front-end is a swap.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileConfigSource {
-    path: PathBuf,
+/// `deny_unknown_fields` for the same reason `RouterConfig` has it: a
+/// misspelled key must fail loudly at load, not deserialize into a default
+/// that silently serves.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientConfig {
+    pub version: u32,
+    pub server: ServerConfig,
+    pub plugins: PluginsConfig,
+    /// Keyed by upstream reference name — the same names the router's pools
+    /// use, validated to the same credential-proof shape by `UpstreamRef`.
+    pub upstreams: BTreeMap<String, UpstreamConfig>,
+    pub router: RouterConfig,
 }
 
-impl FileConfigSource {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerConfig {
+    /// e.g. `127.0.0.1:8787`. The client binds loopback by design; a config
+    /// that says otherwise is refused at startup, not warned about.
+    pub listen: String,
 }
 
-impl ConfigSource for FileConfigSource {
-    type Error = FileConfigError;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginsConfig {
+    /// Directory holding plugin packages, one subdirectory each
+    /// (`manifest.json` + `adapter.wasm`).
+    pub dir: PathBuf,
+    /// The agent adapter package that owns the inbound protocol.
+    pub agent: String,
+    /// Provider name (as upstreams declare it) -> plugin package name.
+    pub providers: BTreeMap<String, String>,
+}
 
-    fn load(&self) -> Result<RouterConfig, Self::Error> {
-        let source = fs::read_to_string(&self.path).map_err(|error| FileConfigError {
-            path: self.path.clone(),
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamConfig {
+    /// Which provider dialect this upstream speaks, e.g. `openai-compatible`.
+    /// Must have a plugin mapping in [`PluginsConfig::providers`].
+    pub provider: String,
+    /// Validated by `protocol::ProviderEndpoint`: no userinfo, no query — the
+    /// two places an API key gets pasted into a URL.
+    pub base_url: ProviderEndpoint,
+    /// Absent for unauthenticated upstreams such as a local Ollama.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthConfig>,
+    /// What this upstream serves. The provider adapter may refine it; with no
+    /// network of its own it cannot replace it.
+    pub models: Vec<ModelCapability>,
+}
+
+/// Where a credential's value lives. Never the value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthConfig {
+    /// The slot name the provider adapter will see, e.g. `provider_api_key`.
+    pub slot: String,
+    /// Read from this environment variable at request time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+    /// Read from this file (trimmed) at request time. For operators who do not
+    /// want long-lived env vars; mind the file's permissions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+}
+
+impl ClientConfig {
+    /// Reads and structurally validates a configuration file.
+    ///
+    /// Routability of the embedded router section is *not* checked here — that
+    /// is `Router::new`'s job, and the caller does it when building the
+    /// gateway, so the two error channels stay distinct: an unreadable file and
+    /// an unroutable table need different fixes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] naming the file and what disqualified it.
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        let source = fs::read_to_string(path).map_err(|error| ConfigError {
+            path: path.to_path_buf(),
             detail: error.to_string(),
         })?;
-
-        serde_json::from_str(&source).map_err(|error| FileConfigError {
-            path: self.path.clone(),
+        let config: Self = serde_json::from_str(&source).map_err(|error| ConfigError {
+            path: path.to_path_buf(),
             detail: error.to_string(),
-        })
+        })?;
+        config.validate().map_err(|detail| ConfigError {
+            path: path.to_path_buf(),
+            detail,
+        })?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.version != 1 {
+            return Err(format!("config version {} is not 1", self.version));
+        }
+
+        // The product promise is a loopback proxy. Binding anything else is a
+        // different product with different security properties.
+        let listen: std::net::SocketAddr = self
+            .server
+            .listen
+            .parse()
+            .map_err(|error| format!("server.listen `{}`: {error}", self.server.listen))?;
+        if !listen.ip().is_loopback() {
+            return Err(format!(
+                "server.listen `{listen}` is not a loopback address; the local client only \
+                 serves 127.0.0.1"
+            ));
+        }
+
+        for (name, upstream) in &self.upstreams {
+            token_station_router_core::UpstreamRef::new(name.clone())
+                .map_err(|error| error.to_string())?;
+            if !self.plugins.providers.contains_key(&upstream.provider) {
+                return Err(format!(
+                    "upstream `{name}` speaks `{}`, but plugins.providers maps no plugin for it",
+                    upstream.provider
+                ));
+            }
+            if let Some(auth) = &upstream.auth {
+                match (&auth.env, &auth.file) {
+                    (Some(_), None) | (None, Some(_)) => {}
+                    (Some(_), Some(_)) => {
+                        return Err(format!(
+                            "upstream `{name}` auth declares both env and file; pick one"
+                        ));
+                    }
+                    (None, None) => {
+                        return Err(format!(
+                            "upstream `{name}` auth names slot `{}` but no source; add env or file",
+                            auth.slot
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Every pool member must name a configured upstream. Router::new
+        // validates the table's internal coherence; this is the cross-check
+        // against the world outside the table.
+        for (pool, members) in &self.router.pools {
+            for member in members {
+                if !self.upstreams.contains_key(member.upstream.as_str()) {
+                    return Err(format!(
+                        "pool `{pool}` routes to upstream `{}`, which is not configured",
+                        member.upstream
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
-/// The file could not be read, or is not a routing configuration.
-///
-/// One variant, deliberately: the operator's next action is the same either way
-/// — open that path and look. Whether the configuration is *routable* is a
-/// different question, answered by `router-core` with a reason of its own.
+/// The file could not be read, parsed, or structurally validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileConfigError {
+pub struct ConfigError {
     path: PathBuf,
     detail: String,
 }
 
-impl fmt::Display for FileConfigError {
+impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.path.display(), self.detail)
     }
 }
 
-impl Error for FileConfigError {}
+impl Error for ConfigError {}
 
 #[cfg(test)]
 mod tests {
-    use super::FileConfigSource;
+    use super::ClientConfig;
     use std::fs;
     use std::path::PathBuf;
-    use token_station_router_core::{ConfigCache, ConfigSource};
 
     fn scratch(name: &str, contents: &str) -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("token-station-{}-{name}.json", std::process::id()));
-        fs::write(&path, contents).expect("the temp directory is writable");
+        let path = std::env::temp_dir().join(format!(
+            "token-station-cfg-{}-{name}.json",
+            std::process::id()
+        ));
+        fs::write(&path, contents).expect("temp dir is writable");
         path
     }
 
-    #[test]
-    fn a_missing_file_names_the_path_it_looked_at() {
-        let source = FileConfigSource::new("/nonexistent/router.json");
-
-        let error = source.load().expect_err("no such file").to_string();
-
-        assert!(error.contains("/nonexistent/router.json"), "{error}");
+    fn example() -> serde_json::Value {
+        serde_json::from_str(crate::EXAMPLE_CONFIG).expect("the shipped example parses")
     }
 
     #[test]
-    fn a_file_that_is_not_json_is_refused() {
-        let path = scratch("garbage", "pools = { }");
-        let source = FileConfigSource::new(&path);
+    fn the_shipped_example_config_loads() {
+        let path = scratch("example", crate::EXAMPLE_CONFIG);
+        let config = ClientConfig::load(&path).expect("the example must stay loadable");
 
-        assert!(source.load().is_err());
+        assert_eq!(config.plugins.agent, "agent-openai");
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_non_loopback_listen_address_is_refused() {
+        let mut broken = example();
+        broken["server"]["listen"] = serde_json::json!("0.0.0.0:8787");
+        let path = scratch("public", &broken.to_string());
+
+        let error = ClientConfig::load(&path).expect_err("0.0.0.0 is a different product");
+        assert!(error.to_string().contains("loopback"), "{error}");
 
         fs::remove_file(path).ok();
     }
 
     #[test]
-    fn a_misspelled_field_is_refused_rather_than_ignored() {
-        // `deny_unknown_fields` in `RouterConfig`. A silently dropped
-        // `default_pool` would leave the router serving something nobody wrote.
-        let path = scratch(
-            "typo",
-            r#"{"version":1,"pools":{"cheap":[{"upstream":"ollama_local","model":"llama3.3"}]},"default_pool":"cheap","defualt_pool":"sota"}"#,
-        );
-        let source = FileConfigSource::new(&path);
+    fn an_upstream_with_no_plugin_for_its_provider_is_refused() {
+        let mut broken = example();
+        broken["upstreams"]["openai_personal"]["provider"] = serde_json::json!("anthropic");
+        let path = scratch("no-plugin", &broken.to_string());
 
-        let error = source.load().expect_err("unknown field").to_string();
-        assert!(error.contains("defualt_pool"), "{error}");
+        let error = ClientConfig::load(&path).expect_err("nothing maps `anthropic`");
+        assert!(error.to_string().contains("anthropic"), "{error}");
 
         fs::remove_file(path).ok();
     }
 
     #[test]
-    fn a_credential_pasted_into_an_upstream_name_is_refused_at_load() {
-        let path = scratch(
-            "credential",
-            r#"{"version":1,"pools":{"cheap":[{"upstream":"sk-live-abc123","model":"gpt-5.5"}]},"default_pool":"cheap"}"#,
-        );
-        let source = FileConfigSource::new(&path);
+    fn a_pool_naming_an_unconfigured_upstream_is_refused() {
+        let mut broken = example();
+        broken["router"]["pools"]["sota"][0]["upstream"] = serde_json::json!("nowhere");
+        let path = scratch("ghost-upstream", &broken.to_string());
 
-        assert!(
-            source.load().is_err(),
-            "an upstream reference name cannot be a key"
-        );
+        let error = ClientConfig::load(&path).expect_err("no such upstream");
+        assert!(error.to_string().contains("nowhere"), "{error}");
 
         fs::remove_file(path).ok();
     }
 
     #[test]
-    fn a_well_formed_file_produces_a_router() {
-        let path = scratch("good", crate::EXAMPLE_CONFIG);
-        let cache = ConfigCache::load(FileConfigSource::new(&path)).expect("the example routes");
+    fn auth_must_name_exactly_one_source() {
+        let mut broken = example();
+        broken["upstreams"]["openai_personal"]["auth"] =
+            serde_json::json!({ "slot": "provider_api_key" });
+        let path = scratch("no-source", &broken.to_string());
 
-        assert_eq!(cache.current().config().default_pool, "cheap");
+        let error = ClientConfig::load(&path).expect_err("slot with no source");
+        assert!(error.to_string().contains("no source"), "{error}");
 
         fs::remove_file(path).ok();
     }
 
     #[test]
-    fn an_unroutable_file_is_reported_as_invalid_not_as_unreadable() {
-        // Parses fine; names a pool that does not exist. The distinction matters
-        // to whoever has to fix it: retrying will not help.
-        let path = scratch(
-            "unroutable",
-            r#"{"version":1,"pools":{"cheap":[{"upstream":"ollama_local","model":"llama3.3"}]},"default_pool":"sota"}"#,
-        );
+    fn a_key_pasted_into_a_base_url_is_refused_by_the_endpoint_type() {
+        let mut broken = example();
+        broken["upstreams"]["openai_personal"]["base_url"] =
+            serde_json::json!("https://api.openai.com/v1?api-key=sk-live-abc");
+        let path = scratch("key-in-url", &broken.to_string());
 
-        let error = ConfigCache::load(FileConfigSource::new(&path)).expect_err("no pool `sota`");
-
-        assert!(
-            matches!(error, token_station_router_core::CacheError::Invalid(_)),
-            "{error}"
-        );
+        assert!(ClientConfig::load(&path).is_err());
 
         fs::remove_file(path).ok();
     }
