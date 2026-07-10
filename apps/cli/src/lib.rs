@@ -24,6 +24,7 @@ pub mod secrets;
 pub mod server;
 pub mod stats;
 pub mod store;
+pub mod upgrade;
 pub mod virtual_key;
 
 /// The example configuration shipped with the binary, kept loadable by tests.

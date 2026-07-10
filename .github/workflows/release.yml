@@ -1,0 +1,80 @@
+# 发布流水线（C1#7）。推 v* tag 触发：四平台构建 → 确定性自证 → 草稿 release。
+#
+# 这条流水线里没有、也永远不会有签名私钥。它产出未签名的 manifest.json；
+# 维护者在离线环境跑 `ts-release sign` 得到 manifest.json.sig，上传后再把
+# 草稿发布出去——完整步骤见 docs/release/可复现构建与发布验证.md。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, runner: macos-14 }
+          - { target: x86_64-apple-darwin, runner: macos-14 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      # bsdtar 做不了确定性归档（无 --sort/--mtime）；配方要求 GNU tar。
+      - if: runner.os == 'macOS'
+        run: brew install gnu-tar
+      - run: scripts/build-release.sh ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # 同一配方从零重建一遍，字节必须一致——每次发布都把「可复现」自证一遍，
+  # 而不是只在文档里声称。
+  reproducibility:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Build twice from clean trees, compare bytes
+        run: |
+          scripts/build-release.sh x86_64-unknown-linux-gnu
+          sha256sum dist/*.tar.gz | tee first.sum
+          rm -rf dist target plugins/official/agent-openai/target plugins/official/provider-openai-compatible/target
+          scripts/build-release.sh x86_64-unknown-linux-gnu
+          sha256sum -c first.sum
+
+  publish:
+    needs: [build, reproducibility]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Manifest and checksums (unsigned here by design)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cargo run --locked -p token-station-release --bin ts-release -- \
+            manifest --version "$VERSION" --out dist/manifest.json dist/*.tar.gz
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+          cat dist/manifest.json
+      - name: Draft release (published only after the signature is attached)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --title "token-station-cli $GITHUB_REF_NAME" \
+            --notes "Draft. Awaiting offline signature (manifest.json.sig) per docs/release/可复现构建与发布验证.md." \
+            dist/*.tar.gz dist/manifest.json dist/SHA256SUMS
