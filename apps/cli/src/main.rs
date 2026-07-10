@@ -2,8 +2,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use token_station_cli::config::ClientConfig;
+use token_station_cli::filelog::{FileLog, Recorders};
 use token_station_cli::gateway::Gateway;
 use token_station_cli::server;
+use token_station_cli::store::SqliteStore;
+use token_station_metrics::Recorder;
 
 fn main() -> ExitCode {
     match run() {
@@ -32,7 +35,15 @@ fn run() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let listen = config.server.listen.clone();
 
-    let gateway = Arc::new(Gateway::new(&config)?);
+    // The file log is always written; the metrics store is on unless the
+    // operator turned it off. Both hold the same content-free record.
+    let mut sinks: Vec<Box<dyn Recorder>> = vec![Box::new(FileLog::open(&config.data.dir)?)];
+    if config.data.metrics {
+        sinks.push(Box::new(SqliteStore::open(
+            &config.data.dir.join("metrics.sqlite"),
+        )?));
+    }
+    let gateway = Arc::new(Gateway::new(&config, Arc::new(Recorders(sinks)))?);
 
     eprintln!(
         "token-station listening on http://{listen} — {} upstream(s), {} model(s) in catalog",
