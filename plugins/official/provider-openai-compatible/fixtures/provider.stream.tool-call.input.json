@@ -1,0 +1,10 @@
+{
+  "chunks": [
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let me check.\"}}]}\n\n",
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\"\"}}]}}]}\n\n",
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\": \\\"Beijing\\\"}\"}}]}}]}\n\n",
+    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":33,\"completion_tokens\":32}}\n\n",
+    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+    "data: [DONE]\n\n"
+  ]
+}
