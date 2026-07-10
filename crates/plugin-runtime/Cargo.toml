@@ -4,12 +4,26 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-rust-version.workspace = true
+# 高于 workspace 地板：wasmtime 46 的 MSRV。地板不随之抬高，因为要被第三方
+# 低门槛依赖的 crate（protocol / plugin-api / conformance）都不在 wasmtime 后面。
+rust-version = "1.94"
 publish.workspace = true
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+token-station-conformance = { path = "../conformance" }
 token-station-plugin-api = { path = "../plugin-api" }
+token-station-protocol = { path = "../protocol" }
+wasmtime = { version = "46", default-features = false, features = [
+    "runtime",
+    "component-model",
+    "cranelift",
+    # 测试用手写 WAT 构造「import 了 wasi:sockets 的组件」来证明拒收路径；
+    # 生产加载的是二进制 .wasm，不经过 wat。
+    "wat",
+] }
+wasmtime-wasi = "46"
 
 [lints]
 workspace = true
-
