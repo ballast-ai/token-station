@@ -8,3 +8,4 @@ plugins/official/*/target/
 *.log
 *.tmp
 
+dist/

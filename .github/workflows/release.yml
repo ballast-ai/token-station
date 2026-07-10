@@ -1,0 +1,80 @@
+# Release workflow (C1#7). A v* tag starts four-platform builds, reproducibility proof, and a draft release.
+#
+# This pipeline does not and will never contain the signing private key. It produces unsigned manifest.json.
+# A maintainer runs `ts-release sign` offline to create manifest.json.sig. After upload,
+# publish the draft. See the reproducible build and release verification guide for all steps.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, runner: macos-14 }
+          - { target: x86_64-apple-darwin, runner: macos-14 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      # bsdtar cannot create deterministic archives because it has no `--sort` or `--mtime`. The recipe requires GNU tar.
+      - if: runner.os == 'macOS'
+        run: brew install gnu-tar
+      - run: scripts/build-release.sh ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # Rebuild from zero with the same recipe. The bytes must match. Every release proves reproducibility.
+  # instead of only claiming it in documentation.
+  reproducibility:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Build twice from clean trees, compare bytes
+        run: |
+          scripts/build-release.sh x86_64-unknown-linux-gnu
+          sha256sum dist/*.tar.gz | tee first.sum
+          rm -rf dist target plugins/official/agent-openai/target plugins/official/provider-openai-compatible/target
+          scripts/build-release.sh x86_64-unknown-linux-gnu
+          sha256sum -c first.sum
+
+  publish:
+    needs: [build, reproducibility]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Manifest and checksums (unsigned here by design)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cargo run --locked -p token-station-release --bin ts-release -- \
+            manifest --version "$VERSION" --out dist/manifest.json dist/*.tar.gz
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+          cat dist/manifest.json
+      - name: Draft release (published only after the signature is attached)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --title "token-station-cli $GITHUB_REF_NAME" \
+            --notes "Draft. Awaiting offline signature (manifest.json.sig) per docs/release/可复现构建与发布验证.md." \
+            dist/*.tar.gz dist/manifest.json dist/SHA256SUMS
