@@ -1,0 +1,44 @@
+# cargo-deny 门禁（C0#6）。CI 在每个 PR 上运行 `cargo deny check`。
+#
+# 这个仓是 Apache-2.0 的开核开源仓，将来会被第三方以 crate 形式依赖（conformance
+# 要作为独立发布物被插件仓固定依赖，见架构 §9.1）。所以 license 走显式允许清单：
+# 新依赖带来清单外的 license 时，CI 拒绝，由人决定是扩清单还是换依赖——而不是
+# 事后在发布检查里发现。
+
+[graph]
+# 所有 target 都检查。客户端要发 mac/win/linux 三平台，只检查本机 target 会漏掉
+# 平台特定依赖（将来 keyring、TLS 栈都是平台特定的）。
+all-features = true
+
+[licenses]
+# 与 Apache-2.0 项目相容、且当前依赖树实际出现过的集合。刻意小：
+# 加一条是显式决定，不是默认。
+allow = [
+    "Apache-2.0",
+    "MIT",
+    # unicode-ident（proc-macro2 → syn → serde_derive 全链路的底座）
+    "Unicode-3.0",
+    # foldhash（hashbrown 的默认 hasher，wit-parser 的传递依赖）
+    "Zlib",
+]
+# license 字段缺失或无法解析时按低置信度拒绝，而不是猜。
+confidence-threshold = 0.9
+
+[bans]
+# 同一 crate 出现多个版本先警告不阻断：传递依赖的重复版本常常不受我们控制，
+# 阻断会让无关 PR 因为上游发版而红。二进制体积敏感时再收紧。
+multiple-versions = "warn"
+# 通配符版本依赖拒绝——workspace 内部的 path 依赖除外（它们没有版本号是正常的）。
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[advisories]
+# RustSec 通告。有漏洞即红；yanked 说明上游自己都不想让人用。
+# unmaintained 用 workspace 口径：只报直接依赖，传递依赖的失修由 bans/升级处理。
+unmaintained = "workspace"
+yanked = "deny"
+
+[sources]
+# 只信 crates.io。git 依赖意味着不可复现的信任链，与可复现构建（C1#7）冲突。
+unknown-registry = "deny"
+unknown-git = "deny"
