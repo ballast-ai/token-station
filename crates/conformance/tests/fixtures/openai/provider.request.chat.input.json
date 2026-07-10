@@ -1,0 +1,34 @@
+{
+  "provider_config": {
+    "provider": "openai-compatible",
+    "base_url": "https://api.openai.com/v1",
+    "auth": "provider_api_key",
+    "models": [
+      {
+        "model": "gpt-5.5",
+        "tool": true,
+        "vision": true,
+        "json_schema": true,
+        "context_window": 400000,
+        "supported_parameters": [
+          "stop",
+          "temperature",
+          "top_p"
+        ]
+      }
+    ]
+  },
+  "chat_request": {
+    "model": "gpt-5.5",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      }
+    ],
+    "sampling": {
+      "temperature": 0.2
+    },
+    "stream": true
+  }
+}

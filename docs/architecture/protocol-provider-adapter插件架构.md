@@ -106,10 +106,12 @@ adapter-openai-client/
   manifest.json
   adapter.wasm
   fixtures/
-    inbound.chat.input.json
-    inbound.chat.expected.json
-    outbound.stream.render.input.json
-    outbound.stream.render.expected.json
+    agent.normalize.chat.input.json
+    agent.normalize.chat.expected.json
+    agent.hint.step-header.{input,expected}.json
+    agent.render.tool-call.{input,expected}.json
+    agent.stream.delta.{input,expected}.json
+    agent.error.rate-limit.{input,expected}.json
   README.md
   signature.sig
 
@@ -117,15 +119,25 @@ adapter-openai-provider/
   manifest.json
   adapter.wasm
   fixtures/
-    provider.chat.input.json
-    provider.chat.expected.json
-    provider.stream.tool-call.input.json
-    provider.stream.tool-call.expected.json
-    provider.error.rate-limit.input.json
-    provider.error.rate-limit.expected.json
+    provider.capabilities.declared.{input,expected}.json
+    provider.request.chat.{input,expected}.json
+    provider.response.tool-call.{input,expected}.json
+    provider.stream.tool-call.{input,expected}.json
+    provider.error.rate-limit.{input,expected}.json
+    provider.error.rejected-credential.{input,expected}.json
   README.md
   signature.sig
 ```
+
+fixture 文件名是 `<kind>.<family>.<case>.{input,expected}.json`：
+
+- `kind` ∈ {`agent`, `provider`}，与 suite 对应；双角色包共用一个 `fixtures/` 目录时，另一个 role 的文件被**跳过**而不是报错；
+- `family` 决定输入喂给哪个 ABI 函数（provider：`capabilities` / `request` / `response` / `stream` / `error`；agent：`normalize` / `hint` / `render` / `stream` / `error`）；
+- `case` 必填，哪怕这个 family 只有一个用例——否则加第二个用例就要改第一个的名字，而 fixture 名会出现在比包本身活得更久的 conformance 报告里。
+
+**每个 family 至少一个用例**，否则 `Check::Coverage` 拒包：不这么要求的话，一个插件只要什么都不提交就能通过。此外 provider 包**必须**有一个 401/403 用例，否则「拒绝的凭证不得可重试」那道门根本不会跑（见 §七）。
+
+fixture 的输入是 Canonical IR，不是 provider 的原始 wire format。一个能装凭证的 fixture 就是绕过类型系统的通道，所以 `HeaderDigest` / `SafeHeaders` / `ProviderEndpoint` 的反序列化侧校验在这里同样生效。
 
 `agent-adapter` manifest 示例：
 
@@ -281,15 +293,27 @@ host.sign(secret_ref, payload, algorithm) -> signature
 
 验收项：
 
-| 类别 | `agent-adapter` 检查 | `provider-adapter` 检查 |
-|------|----------------------|--------------------------|
-| ABI | `agent-adapter-v1` 兼容、必需函数存在 | `provider-adapter-v1` 兼容、必需函数存在 |
-| manifest | agent_protocols/agent_tools/capability/权限声明/签名 | provider/capability/权限声明/签名 |
-| 请求转换 | Agent 原始请求 → Canonical IR + AgentHint | Canonical IR → HTTP descriptor，不含密钥明文 |
-| 响应转换 | Canonical response/stream → 入口协议响应/流式 chunk | Provider body/stream chunk → Canonical response/stream |
-| 错误映射 | 稳定错误目录 → 入口协议错误 shape | rate_limit/auth/content_policy/capability/capacity 等语义错误 |
-| 安全 | 禁止网络、禁止文件、内存和执行时间限制 | 禁止网络、禁止文件、内存和执行时间限制 |
-| 稳定性 | 同一 fixture 输出 deterministic；未知字段不得 panic | 同一 fixture 输出 deterministic；未知字段不得 panic |
+| 类别 | `agent-adapter` 检查 | `provider-adapter` 检查 | 由谁执行 |
+|------|----------------------|--------------------------|----------|
+| ABI | `agent-adapter-v1` 兼容、必需函数存在 | `provider-adapter-v1` 兼容、必需函数存在 | runtime 加载时（component 导出了这个 world 就算过，fixture 表达不了） |
+| manifest | agent_protocols/agent_tools/capability/权限声明/签名 | provider/capability/权限声明/签名 | `accepts_manifest` |
+| 身份 | `metadata()` 必须等于 manifest 声明 | 同左 | `reported_identity_matches` |
+| 请求转换 | Agent 原始请求 → Canonical IR + AgentHint | Canonical IR → HTTP descriptor，不含密钥明文 | `FixtureMatch` + `EndpointConfinement` |
+| 响应转换 | Canonical response/stream → 入口协议响应/流式 chunk | Provider body/stream chunk → Canonical response/stream | `FixtureMatch` + `StreamIncrementality` |
+| 错误映射 | 稳定错误目录 → 入口协议错误 shape | rate_limit/auth/content_policy/capability/capacity 等语义错误 | `FixtureMatch` + `AuthErrorsAreNotRetriable` |
+| 安全 | 禁止网络、禁止文件、内存和执行时间限制 | 禁止网络、禁止文件、内存和执行时间限制 | **runtime 的沙箱，不是 fixture**（见下） |
+| 稳定性 | 同一 fixture 输出 deterministic；未知字段不得 panic | 同左 | `Determinism` + `UnknownFieldTolerance` |
+| 覆盖 | 每个 family 至少一个用例 | 同左，且必须含 401/403 用例 | `Coverage` |
+
+三条 fixture 比对之外的门，各自防住一类 fixture 比对防不住的东西：
+
+- **`EndpointConfinement`**：provider 插件同时决定「请求发去哪」和「附哪个凭证」。它对着**插件实际构造出的** descriptor 跑 `ProviderConfig::authorize`，而不是对着 fixture 里的期望值——一个 fixture 对得上却发去别处的插件，和一个 fixture 对不上却老实待在上游内的插件，必须在报告里区分得开。
+- **`StreamIncrementality`**：socket 上来的 chunk 不是完整 SSE frame。把 fixture 的 body 重新拼起来、在**每个字符边界**切一刀、每次都用全新 parser 重放，都必须得到同一串事件。一个假设「每个 chunk 是一整帧」的插件能通过所有 fixture，然后在生产里由网络决定的切分点上悄悄丢事件。
+- **`AuthErrorsAreNotRetriable`**：401/403 不得映射成可重试码。否则一把被拒的 key 会被路由在用户配置的每个 provider 上重放一遍，把一个账号问题变成几个。**这道门自带一条覆盖要求**：包里没有 401/403 用例，这道门就没跑过，于是「没跑过」本身算失败。
+
+`安全` 那一行不在 fixture 里。禁网络、禁文件系统、内存与执行时间上限，是 runtime 构造的沙箱的性质，不是可以「问插件要一个答案」的东西。`conformance` 不假装能测它——`plugin-runtime` 负责，A1 交付。
+
+`conformance` 面向一对 trait（`AgentAdapter` / `ProviderAdapter`）而非 wasmtime。因此：这套门在 runtime 存在之前就能写完并被证伪；第三方插件作者可以先用原生构建在自己 CI 里跑同一套门，不必先搭 WASM 工具链；`crates/conformance` 不依赖 wasmtime。
 
 插件安装流程：
 

@@ -153,6 +153,7 @@ dependencies = [
 name = "token-station-cli"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "token-station-protocol",
  "token-station-router-core",
 ]
@@ -161,8 +162,10 @@ dependencies = [
 name = "token-station-conformance"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "token-station-plugin-api",
+ "token-station-protocol",
 ]
 
 [[package]]
@@ -197,6 +200,8 @@ dependencies = [
 name = "token-station-router-core"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "token-station-protocol",
 ]
 
