@@ -17,3 +17,27 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # 本地门禁一直在跑 doc -D warnings，CI 缺了它就只是个约定。
+      - run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # license 允许清单、RustSec 通告、依赖来源。配置在 deny.toml。
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # 与 deny 的 advisories 有重叠，仍然分开跑：audit 只读 Cargo.lock，不需要
+  # 构建图，deny 的图构建坏掉时它仍在把关；两者的失败信号也各自更可读。
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
