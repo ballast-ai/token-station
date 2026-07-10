@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+serde_json = { workspace = true }
 token-station-protocol = { path = "../../crates/protocol" }
 token-station-router-core = { path = "../../crates/router-core" }
 
