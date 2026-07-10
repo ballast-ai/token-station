@@ -18,6 +18,7 @@ token-station-conformance = { path = "../../crates/conformance" }
 token-station-metrics = { path = "../../crates/metrics" }
 token-station-plugin-runtime = { path = "../../crates/plugin-runtime" }
 token-station-protocol = { path = "../../crates/protocol" }
+token-station-release = { path = "../../crates/release" }
 token-station-router-core = { path = "../../crates/router-core" }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "signal"] }
 tokio-stream = "0.1.18"

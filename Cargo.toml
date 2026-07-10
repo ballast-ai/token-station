@@ -7,6 +7,7 @@ members = [
     "crates/plugin-api",
     "crates/plugin-runtime",
     "crates/protocol",
+    "crates/release",
     "crates/router-core",
 ]
 # WASM guest 测试件：目标是 wasm32-wasip2，不能进主 workspace 的构建图。
@@ -39,3 +40,10 @@ unsafe_code = "forbid"
 all = "warn"
 pedantic = "warn"
 
+
+# 发布产物的确定性与体积：单编译单元 + thin LTO + 去符号。
+# 完整配方（工具链钉版、路径重映射、确定性打包）在 scripts/build-release.sh。
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
