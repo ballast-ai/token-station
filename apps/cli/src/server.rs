@@ -21,11 +21,20 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::gateway::{Gateway, Reply};
+use crate::virtual_key;
 
 /// How many rendered SSE chunks may sit between the worker and a slow client
 /// before the worker blocks — which in turn stops reading the upstream:
 /// backpressure end to end.
 const STREAM_BACKLOG: usize = 32;
+
+/// Everything a handler needs: the data plane, and the door key.
+#[derive(Clone)]
+pub struct AppState {
+    pub gateway: Arc<Gateway>,
+    /// `None` when the operator turned inbound auth off.
+    pub virtual_key: Option<Arc<str>>,
+}
 
 /// Serves until `ctrl_c`.
 ///
@@ -35,11 +44,11 @@ const STREAM_BACKLOG: usize = 32;
 /// # Errors
 ///
 /// Only from the accept loop itself; per-request failures are responses.
-pub async fn serve(gateway: Arc<Gateway>, listener: TcpListener) -> std::io::Result<()> {
+pub async fn serve(state: AppState, listener: TcpListener) -> std::io::Result<()> {
     let app = Router::new()
         .route("/v1/chat/completions", post(chat))
         .route("/v1/models", get(models))
-        .with_state(gateway);
+        .with_state(state);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
@@ -48,15 +57,45 @@ pub async fn serve(gateway: Arc<Gateway>, listener: TcpListener) -> std::io::Res
         .await
 }
 
-async fn models(State(gateway): State<Arc<Gateway>>) -> Response {
+/// The inbound gate. Loopback keeps the network out; this keeps out every
+/// other process on the machine that can open a socket to 127.0.0.1.
+fn admitted(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(expected) = &state.virtual_key else {
+        return true; // The operator switched auth off.
+    };
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|presented| virtual_key::matches(presented, expected))
+}
+
+fn unauthorized() -> Response {
     Response::builder()
-        .status(StatusCode::OK)
+        .status(StatusCode::UNAUTHORIZED)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(gateway.models().to_owned()))
+        .body(Body::from(
+            r#"{"error":{"message":"missing or invalid local virtual key","type":"auth","code":"auth"}}"#,
+        ))
         .expect("a literal response builds")
 }
 
-async fn chat(State(gateway): State<Arc<Gateway>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admitted(&state, &headers) {
+        return unauthorized();
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(state.gateway.models().to_owned()))
+        .expect("a literal response builds")
+}
+
+async fn chat(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    if !admitted(&state, &headers) {
+        return unauthorized();
+    }
+    let gateway = Arc::clone(&state.gateway);
     // Owned copies for the blocking thread. Values that are not UTF-8 keep
     // their name and lose their value — same rule HeaderDigest applies.
     let headers: Vec<(String, String)> = headers
