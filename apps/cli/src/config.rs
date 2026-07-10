@@ -110,6 +110,11 @@ pub struct ServerConfig {
     /// e.g. `127.0.0.1:8787`. The client binds loopback by design; a config
     /// that says otherwise is refused at startup, not warned about.
     pub listen: String,
+    /// Require the local virtual key on every endpoint. On by default
+    /// (authentication on by default): loopback is a network boundary, not a boundary against
+    /// other processes on this machine.
+    #[serde(default = "default_true")]
+    pub auth: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,11 +152,15 @@ pub struct UpstreamConfig {
 pub struct AuthConfig {
     /// The slot name the provider adapter will see, e.g. `provider_api_key`.
     pub slot: String,
+    /// Read from the OS keychain, where `token-station-cli key set` put it.
+    /// The preferred source: survives reboots, never sits in a file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keyring: bool,
     /// Read from this environment variable at request time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
-    /// Read from this file (trimmed) at request time. For operators who do not
-    /// want long-lived env vars; mind the file's permissions.
+    /// Read from this file (trimmed) at request time. The degraded path for
+    /// hosts without a keychain; mind the file's permissions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<PathBuf>,
 }
@@ -212,19 +221,14 @@ impl ClientConfig {
                 ));
             }
             if let Some(auth) = &upstream.auth {
-                match (&auth.env, &auth.file) {
-                    (Some(_), None) | (None, Some(_)) => {}
-                    (Some(_), Some(_)) => {
-                        return Err(format!(
-                            "upstream `{name}` auth declares both env and file; pick one"
-                        ));
-                    }
-                    (None, None) => {
-                        return Err(format!(
-                            "upstream `{name}` auth names slot `{}` but no source; add env or file",
-                            auth.slot
-                        ));
-                    }
+                let sources = usize::from(auth.keyring)
+                    + usize::from(auth.env.is_some())
+                    + usize::from(auth.file.is_some());
+                if sources != 1 {
+                    return Err(format!(
+                        "upstream `{name}` auth for slot `{}` must name exactly one source                          (keyring / env / file), found {sources}",
+                        auth.slot
+                    ));
                 }
             }
         }
@@ -334,7 +338,7 @@ mod tests {
         let path = scratch("no-source", &broken.to_string());
 
         let error = ClientConfig::load(&path).expect_err("slot with no source");
-        assert!(error.to_string().contains("no source"), "{error}");
+        assert!(error.to_string().contains("exactly one source"), "{error}");
 
         fs::remove_file(path).ok();
     }
