@@ -9,11 +9,48 @@ use std::collections::BTreeMap;
 
 use crate::config::{AuthConfig, ClientConfig};
 
+/// The keychain service every entry lives under; the user is
+/// `<upstream>/<slot>`.
+pub const KEYRING_SERVICE: &str = "token-station";
+
 /// Where each slot's value lives.
 #[derive(Debug, Clone)]
 enum Source {
+    Keyring,
     Env(String),
     File(std::path::PathBuf),
+}
+
+/// The keychain entry for one upstream's slot.
+///
+/// # Errors
+///
+/// The platform keychain's own message; it never contains a value.
+fn keyring_entry(upstream: &str, slot: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYRING_SERVICE, &format!("{upstream}/{slot}"))
+        .map_err(|error| format!("keychain entry for `{upstream}/{slot}`: {error}"))
+}
+
+/// Writes a credential into the OS keychain (`key set`).
+///
+/// # Errors
+///
+/// The platform keychain's message, value-free.
+pub fn keyring_set(upstream: &str, slot: &str, value: &str) -> Result<(), String> {
+    keyring_entry(upstream, slot)?
+        .set_password(value)
+        .map_err(|error| format!("keychain write for `{upstream}/{slot}`: {error}"))
+}
+
+/// Deletes a credential from the OS keychain (`key remove`).
+///
+/// # Errors
+///
+/// The platform keychain's message, value-free.
+pub fn keyring_remove(upstream: &str, slot: &str) -> Result<(), String> {
+    keyring_entry(upstream, slot)?
+        .delete_credential()
+        .map_err(|error| format!("keychain delete for `{upstream}/{slot}`: {error}"))
 }
 
 /// Resolves credential slots for every configured upstream.
@@ -30,12 +67,22 @@ impl SecretStore {
     pub fn from_config(config: &ClientConfig) -> Self {
         let mut sources = BTreeMap::new();
         for (upstream, entry) in &config.upstreams {
-            if let Some(AuthConfig { slot, env, file }) = &entry.auth {
-                let source = match (env, file) {
-                    (Some(name), _) => Source::Env(name.clone()),
-                    (_, Some(path)) => Source::File(path.clone()),
-                    // Refused by config validation before this runs.
-                    (None, None) => continue,
+            if let Some(AuthConfig {
+                slot,
+                keyring,
+                env,
+                file,
+            }) = &entry.auth
+            {
+                let source = if *keyring {
+                    Source::Keyring
+                } else {
+                    match (env, file) {
+                        (Some(name), _) => Source::Env(name.clone()),
+                        (_, Some(path)) => Source::File(path.clone()),
+                        // Refused by config validation before this runs.
+                        (None, None) => continue,
+                    }
                 };
                 sources.insert((upstream.clone(), slot.clone()), source);
             }
@@ -58,6 +105,11 @@ impl SecretStore {
             })?;
 
         let value = match source {
+            Source::Keyring => keyring_entry(upstream, slot)?
+                .get_password()
+                .map_err(|error| {
+                    format!("secret `{slot}`: not in the OS keychain (run `key set`): {error}")
+                }),
             Source::Env(name) => std::env::var(name)
                 .map_err(|_| format!("secret `{slot}`: environment variable `{name}` is not set")),
             Source::File(path) => std::fs::read_to_string(path).map_err(|error| {
@@ -122,6 +174,40 @@ mod tests {
         assert!(error.contains("empty"), "{error}");
 
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_missing_keychain_entry_points_the_operator_at_key_set() {
+        // The mock backend gives each Entry an independent store, so it can
+        // prove the missing-entry path and the message, not a shared
+        // round-trip — that one is `keychain_round_trip_on_a_real_keychain`.
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+
+        let mut config: serde_json::Value =
+            serde_json::from_str(crate::EXAMPLE_CONFIG).expect("example parses");
+        config["upstreams"]["openai_personal"]["auth"] =
+            serde_json::json!({ "slot": "provider_api_key", "keyring": true });
+        let config: crate::config::ClientConfig =
+            serde_json::from_value(config).expect("keyring auth parses");
+        let store = SecretStore::from_config(&config);
+
+        let missing = store
+            .resolve("openai_personal", "provider_api_key")
+            .expect_err("nothing set");
+        assert!(missing.contains("key set"), "{missing}");
+        assert!(!missing.contains("sk-"), "no value material in errors");
+    }
+
+    #[test]
+    #[ignore = "needs a real OS keychain; run locally with --ignored"]
+    fn keychain_round_trip_on_a_real_keychain() {
+        super::keyring_set("ts_test_upstream", "provider_api_key", "sk-test-abc").expect("sets");
+
+        let entry = super::keyring_entry("ts_test_upstream", "provider_api_key").expect("entry");
+        assert_eq!(entry.get_password().expect("round-trips"), "sk-test-abc");
+
+        super::keyring_remove("ts_test_upstream", "provider_api_key").expect("removes");
+        assert!(entry.get_password().is_err());
     }
 
     #[test]
