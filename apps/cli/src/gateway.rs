@@ -32,7 +32,9 @@ use token_station_protocol::{
     AgentRequestEnvelope, Auth, ChatRequest, ErrorCode, ErrorEnvelope, HeaderDigest, HttpMethod,
     HttpRequestDescriptor, HttpResponseParts, Principal, ProviderConfig, SecretRef, StreamChunk,
 };
-use token_station_router_core::{Candidate, Decision, Health, Router, UpstreamModel};
+use token_station_router_core::{
+    Candidate, Decision, HealthPolicy, HealthTracker, Router, UpstreamModel, UpstreamRef,
+};
 
 use crate::config::ClientConfig;
 use crate::secrets::SecretStore;
@@ -59,7 +61,10 @@ pub struct Gateway {
     protocol: String,
     router: Router,
     upstreams: BTreeMap<String, Upstream>,
-    candidates: Vec<Candidate>,
+    /// What each upstream serves; health is applied per request from the
+    /// tracker, because it changes and this does not.
+    catalog: Vec<(UpstreamModel, token_station_protocol::ModelCapability)>,
+    health: std::sync::Mutex<HealthTracker>,
     secrets: SecretStore,
     http: ureq::Agent,
     recorder: Arc<dyn Recorder>,
@@ -117,8 +122,8 @@ impl Gateway {
         }
 
         let mut upstreams = BTreeMap::new();
-        let mut candidates = Vec::new();
-        let mut catalog: Vec<Value> = Vec::new();
+        let mut catalog = Vec::new();
+        let mut models_document: Vec<Value> = Vec::new();
         let mut seen_models = std::collections::BTreeSet::new();
 
         for (name, entry) in &config.upstreams {
@@ -142,14 +147,12 @@ impl Gateway {
             let reference = token_station_router_core::UpstreamRef::new(name.clone())
                 .expect("config validation checked the shape");
             for capability in &capabilities {
-                candidates.push(Candidate::new(
+                catalog.push((
                     UpstreamModel::new(reference.clone(), capability.model.clone()),
                     capability.clone(),
-                    // Everyone healthy until C1#2 wires the checker.
-                    Health::Healthy,
                 ));
                 if seen_models.insert(capability.model.clone()) {
-                    catalog.push(json!({
+                    models_document.push(json!({
                         "id": capability.model,
                         "object": "model",
                         "owned_by": name,
@@ -173,7 +176,11 @@ impl Gateway {
             protocol,
             router,
             upstreams,
-            candidates,
+            catalog,
+            health: std::sync::Mutex::new(HealthTracker::new(HealthPolicy {
+                eject_after: config.health.eject_after,
+                cooldown: Duration::from_millis(config.health.cooldown_ms),
+            })),
             secrets: SecretStore::from_config(config),
             recorder,
             http: ureq::Agent::new_with_config(
@@ -184,7 +191,7 @@ impl Gateway {
                     .http_status_as_error(false)
                     .build(),
             ),
-            models_document: json!({ "object": "list", "data": catalog }).to_string(),
+            models_document: json!({ "object": "list", "data": models_document }).to_string(),
         })
     }
 
@@ -197,7 +204,39 @@ impl Gateway {
     /// How many distinct models the catalog advertises.
     #[must_use]
     pub fn catalog_size(&self) -> usize {
-        self.candidates.len()
+        self.catalog.len()
+    }
+
+    /// The routing candidates as of this instant: the static catalog with the
+    /// tracker's current verdict applied.
+    fn candidates(&self, now: std::time::Instant) -> Vec<Candidate> {
+        let health = self.health.lock().expect("health lock");
+        self.catalog
+            .iter()
+            .map(|(target, capability)| {
+                Candidate::new(
+                    target.clone(),
+                    capability.clone(),
+                    health.health_of(&target.upstream, now),
+                )
+            })
+            .collect()
+    }
+
+    /// Feeds one attempt's outcome to the tracker; logs a transition.
+    fn observe(&self, upstream: &UpstreamRef, outcome: Result<(), &ErrorEnvelope>) {
+        let mut health = self.health.lock().expect("health lock");
+        match outcome {
+            Ok(()) => health.observe_success(upstream),
+            Err(envelope) => {
+                if health.observe_failure(upstream, envelope.code, std::time::Instant::now()) {
+                    eprintln!(
+                        "upstream {upstream} ejected from rotation ({:?})",
+                        envelope.code
+                    );
+                }
+            }
+        }
     }
 
     /// `POST /v1/chat/completions`, start to finish.
@@ -278,9 +317,10 @@ impl Gateway {
         record.requested_model.clone_from(&request.model);
         record.stream = request.stream;
 
+        let candidates = self.candidates(std::time::Instant::now());
         let decision = self
             .router
-            .route(&request, &hints, &self.candidates)
+            .route(&request, &hints, &candidates)
             .map_err(|no_route| {
                 ErrorEnvelope::new(no_route.error_code(), 503, no_route.to_string())
             })?;
@@ -317,10 +357,12 @@ impl Gateway {
             }
             match self.try_upstream(request, target, emit, record) {
                 Ok(()) => {
+                    self.observe(&target.upstream, Ok(()));
                     record.status = 200;
                     return Ok(());
                 }
                 Err(error) => {
+                    self.observe(&target.upstream, Err(&error));
                     let retriable = error.code.is_retriable_elsewhere();
                     eprintln!(
                         "upstream {target} failed: {} ({:?})",

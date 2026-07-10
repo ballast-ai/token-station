@@ -605,3 +605,171 @@ fn switching_metrics_off_leaves_the_file_log_only() {
         "the file log is always written: {log}"
     );
 }
+
+/// A second proxy builder: two upstreams in one pool, aggressive cooldown.
+fn start_proxy_two(
+    primary: &MockUpstream,
+    fallback: &MockUpstream,
+    key_file: &Path,
+) -> (String, PathBuf) {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-proxy-two-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let upstream = |mock: &MockUpstream| {
+        json!({
+            "provider": "openai-compatible",
+            "base_url": mock.base_url(),
+            "auth": { "slot": "provider_api_key", "file": key_file },
+            "models": [ { "model": "gpt-5.5", "tool": true, "context_window": 400_000 } ]
+        })
+    };
+    let config = json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "health": { "eject_after": 3, "cooldown_ms": 500 },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agent": "agent-openai",
+            "providers": { "openai-compatible": "provider-openai-compatible" }
+        },
+        "upstreams": {
+            "mock_primary": upstream(primary),
+            "mock_fallback": upstream(fallback)
+        },
+        "router": {
+            "version": 1,
+            "pools": { "main": [
+                { "upstream": "mock_primary", "model": "gpt-5.5" },
+                { "upstream": "mock_fallback", "model": "gpt-5.5" }
+            ]},
+            "default_pool": "main"
+        }
+    });
+    let config: ClientConfig = serde_json::from_value(config).expect("test config parses");
+    let recorder = Arc::new(token_station_cli::filelog::Recorders(vec![Box::new(
+        token_station_cli::filelog::FileLog::open(&config.data.dir).expect("log opens"),
+    )]));
+    let gateway = Arc::new(Gateway::new(&config, recorder).expect("gateway assembles"));
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let address = listener.local_addr().expect("bound");
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tokio builds");
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("listener converts");
+            server::serve(gateway, listener).await.expect("server runs");
+        });
+    });
+    (format!("http://{address}"), data_dir)
+}
+
+#[test]
+fn a_failing_upstream_is_ejected_bypassed_probed_and_restored() {
+    let ok = json!({
+        "id": "chatcmpl-1", "model": "gpt-5.5",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "ok" }, "finish_reason": "stop" }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    })
+    .to_string();
+    let boom =
+        json!({ "error": { "message": "upstream exploded", "type": "server_error" } }).to_string();
+
+    // Primary: three failures, then healthy again (what the probe will find).
+    let primary = MockUpstream::start(vec![
+        vec![http_json(503, &boom)],
+        vec![http_json(503, &boom)],
+        vec![http_json(503, &boom)],
+        vec![http_json(200, &ok)],
+    ]);
+    // Fallback: serves, until its fifth answer fails once — which is what
+    // forces the router down to the degraded primary.
+    let fallback = MockUpstream::start(vec![
+        vec![http_json(200, &ok)],
+        vec![http_json(200, &ok)],
+        vec![http_json(200, &ok)],
+        vec![http_json(200, &ok)],
+        vec![http_json(503, &boom)],
+        vec![http_json(200, &ok)],
+    ]);
+    let key = key_file("health", "sk-test-key-abc");
+    let (proxy, _data_dir) = start_proxy_two(&primary, &fallback, &key);
+    let ask = || {
+        post_chat(
+            &proxy,
+            &json!({ "model": "auto", "messages": [{ "role": "user", "content": "hi" }] }),
+            None,
+        )
+    };
+
+    // Three requests: primary fails each time, fallback answers each time.
+    for round in 1..=3 {
+        let (status, body) = ask();
+        assert_eq!(status, 200, "round {round}: fallback serves: {body}");
+    }
+    assert_eq!(primary.hits(), 3);
+    assert_eq!(fallback.hits(), 3);
+
+    // Ejected: the fourth request must not even knock on the primary.
+    let (status, _) = ask();
+    assert_eq!(status, 200);
+    assert_eq!(primary.hits(), 3, "an ejected upstream receives no traffic");
+    assert_eq!(fallback.hits(), 4);
+
+    // Past the cooldown the primary is on probation: preferred candidates
+    // first, so it is probed exactly when the fallback lets us down.
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    let (status, body) = ask();
+    assert_eq!(status, 200, "the probe answered: {body}");
+    assert_eq!(
+        fallback.hits(),
+        5,
+        "the healthy fallback was still tried first"
+    );
+    assert_eq!(primary.hits(), 4, "the degraded primary took the probe");
+
+    // The probe succeeded, so the primary is fully back: config order wins.
+    let (status, _) = ask();
+    assert_eq!(status, 200);
+    assert_eq!(
+        primary.hits(),
+        5,
+        "a recovered upstream leads its pool again"
+    );
+    assert_eq!(fallback.hits(), 5);
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn auth_failures_never_eject_an_upstream() {
+    let refusal = json!({ "error": { "message": "Incorrect API key provided" } }).to_string();
+    let mock = MockUpstream::start(vec![vec![http_json(401, &refusal)]]);
+    let key = key_file("auth-noeject", "sk-wrong-key");
+    let (proxy, _data_dir) = start_proxy(&mock, &key);
+
+    for _ in 0..5 {
+        let (status, _) = post_chat(
+            &proxy,
+            &json!({ "model": "auto", "messages": [{ "role": "user", "content": "hi" }] }),
+            None,
+        );
+        assert_eq!(status, 401);
+    }
+
+    assert_eq!(
+        mock.hits(),
+        5,
+        "a misconfigured key must keep surfacing as 401, not become a fake outage"
+    );
+
+    std::fs::remove_file(key).ok();
+}
