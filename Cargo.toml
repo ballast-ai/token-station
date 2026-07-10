@@ -7,6 +7,7 @@ members = [
     "crates/plugin-api",
     "crates/plugin-runtime",
     "crates/protocol",
+    "crates/release",
     "crates/router-core",
 ]
 # WASM guest test fixture targeting wasm32-wasip2. Keep it out of the main
@@ -39,3 +40,10 @@ unsafe_code = "forbid"
 all = "warn"
 pedantic = "warn"
 
+
+# Release determinism and size: one codegen unit, thin LTO, and stripped symbols.
+# See scripts/build-release.sh for toolchain pinning, path remapping, and deterministic packaging.
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

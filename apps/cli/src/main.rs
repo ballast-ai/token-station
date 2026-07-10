@@ -14,7 +14,7 @@ use token_station_cli::config::ClientConfig;
 use token_station_cli::filelog::{FileLog, Recorders};
 use token_station_cli::gateway::Gateway;
 use token_station_cli::store::SqliteStore;
-use token_station_cli::{manage, secrets, server, stats, virtual_key};
+use token_station_cli::{manage, secrets, server, stats, upgrade, virtual_key};
 use token_station_metrics::Recorder;
 
 #[derive(Parser)]
@@ -50,6 +50,16 @@ enum Command {
     Rule(RuleCommand),
     /// Aggregate the local metrics store: volume, errors, latency, tokens.
     Stats(StatsArgs),
+    /// Check for a newer release (anonymously); download only on explicit
+    /// confirmation, and only if the signed manifest verifies.
+    Upgrade {
+        /// Skip the confirmation prompt (still verifies before keeping).
+        #[arg(long)]
+        yes: bool,
+        /// Check and report only; never download.
+        #[arg(long, conflicts_with = "yes")]
+        check_only: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -228,7 +238,54 @@ fn run(cli: Cli) -> Result<(), String> {
             print!("{}", stats::render(&report, group_by));
             Ok(())
         }
+        Command::Upgrade { yes, check_only } => upgrade_command(yes, check_only),
     }
+}
+
+fn upgrade_command(yes: bool, check_only: bool) -> Result<(), String> {
+    let release = upgrade::check(upgrade::DEFAULT_ENDPOINT)?;
+    if !upgrade::is_newer(upgrade::CURRENT_VERSION, &release.tag_name) {
+        println!(
+            "up to date: {} (latest release is {})",
+            upgrade::CURRENT_VERSION,
+            release.tag_name
+        );
+        return Ok(());
+    }
+
+    println!(
+        "new release {} (this build is {}): {}",
+        release.tag_name,
+        upgrade::CURRENT_VERSION,
+        release.html_url
+    );
+    if check_only {
+        return Ok(());
+    }
+
+    // Require explicit upgrade confirmation; nothing downloads without human approval.
+    if !yes {
+        eprint!("download and verify {}? [y/N] ", release.tag_name);
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .map_err(|error| format!("stdin: {error}"))?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            println!("not downloading");
+            return Ok(());
+        }
+    }
+
+    let path = upgrade::download_and_verify(
+        &release,
+        Path::new("."),
+        upgrade::OFFICIAL_RELEASE_PUBKEY_HEX,
+    )?;
+    println!(
+        "verified against the signed manifest: {}\nunpack it and replace this binary when ready — nothing was installed",
+        path.display()
+    );
+    Ok(())
 }
 
 fn load(path: &Path) -> Result<ClientConfig, String> {
