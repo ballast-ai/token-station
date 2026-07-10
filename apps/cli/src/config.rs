@@ -40,6 +40,38 @@ pub struct ClientConfig {
     /// Where the request log and metrics store live. Optional; defaults apply.
     #[serde(default)]
     pub data: DataConfig,
+    /// When an upstream is taken out of rotation. Optional; defaults apply.
+    #[serde(default)]
+    pub health: HealthConfig,
+}
+
+/// The client's ejection policy (C1#2's simplified health check).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HealthConfig {
+    /// Consecutive countable failures before an upstream is ejected.
+    #[serde(default = "default_eject_after")]
+    pub eject_after: u32,
+    /// How long an ejected upstream stays out of rotation.
+    #[serde(default = "default_cooldown_ms")]
+    pub cooldown_ms: u64,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            eject_after: default_eject_after(),
+            cooldown_ms: default_cooldown_ms(),
+        }
+    }
+}
+
+const fn default_eject_after() -> u32 {
+    3
+}
+
+const fn default_cooldown_ms() -> u64 {
+    30_000
 }
 
 /// The local data layer: file log always, metrics store by default.
