@@ -10,6 +10,8 @@
 //!   "the host resolved a credential".
 //! - [`config`] / [`secrets`] — one JSON file; credential *locations*, never
 //!   values.
+//! - [`manage`] / [`stats`] — the CLI management surface: pure edits of the
+//!   config file, and read-only aggregation of the metrics store.
 //!
 //! A library crate so the integration tests can stand the whole server up
 //! in-process against a mock upstream; `main.rs` is a thin argument parser.
@@ -17,8 +19,10 @@
 pub mod config;
 pub mod filelog;
 pub mod gateway;
+pub mod manage;
 pub mod secrets;
 pub mod server;
+pub mod stats;
 pub mod store;
 pub mod virtual_key;
 

@@ -192,6 +192,38 @@ impl ClientConfig {
         Ok(config)
     }
 
+    /// Validates and atomically writes this configuration to `path`.
+    ///
+    /// Written as a sibling temp file then renamed, so a crash mid-write can
+    /// never leave a half-written file where a loadable config used to be.
+    /// An invalid config writes nothing at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] naming the file: either this config fails the
+    /// same validation [`ClientConfig::load`] applies, or the filesystem
+    /// refused the write.
+    pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        let fail = |detail: String| ConfigError {
+            path: path.to_path_buf(),
+            detail,
+        };
+        self.validate().map_err(fail)?;
+
+        let mut rendered =
+            serde_json::to_string_pretty(self).map_err(|error| fail(error.to_string()))?;
+        rendered.push('\n');
+
+        let file_name = path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(|| fail("path has no file name".to_owned()))?;
+        let temp = path.with_file_name(format!(".{file_name}.tmp"));
+        fs::write(&temp, rendered).map_err(|error| fail(error.to_string()))?;
+        fs::rename(&temp, path).map_err(|error| fail(error.to_string()))?;
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.version != 1 {
             return Err(format!("config version {} is not 1", self.version));
