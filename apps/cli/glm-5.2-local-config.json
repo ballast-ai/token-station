@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "server": { "listen": "127.0.0.1:8787" },
+  "plugins": {
+    "dir": "plugins-dist",
+    "agent": "agent-openai",
+    "providers": {
+      "openai-compatible": "provider-openai-compatible"
+    }
+  },
+  "upstreams": {
+    "glm": {
+      "provider": "openai-compatible",
+      "base_url": "https://api.z.ai/api/coding/paas/v4",
+      "auth": { "slot": "provider_api_key", "env": "GLM_API_KEY" },
+      "models": [
+        {
+          "model": "glm-5.2",
+          "tool": true,
+          "context_window": 128000
+        }
+      ]
+    }
+  },
+  "router": {
+    "version": 1,
+    "pools": {
+      "glm": [
+        { "upstream": "glm", "model": "glm-5.2" }
+      ]
+    },
+    "rules": [],
+    "hint_routes": [],
+    "heuristic": {
+      "weights": {
+        "tokens_per_point": 100,
+        "per_tool": 20,
+        "json_schema": 10,
+        "image": 15,
+        "per_code_block": 8,
+        "per_extra_turn": 3
+      },
+      "threshold": 40,
+      "above": "glm",
+      "below": "glm"
+    },
+    "default_pool": "glm",
+    "assumed_context_window": 8192
+  }
+}
