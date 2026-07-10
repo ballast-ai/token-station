@@ -43,6 +43,9 @@ use crate::secrets::SecretStore;
 const MAX_INBOUND_BODY: usize = 10 * 1024 * 1024;
 const MAX_UPSTREAM_BODY: u64 = 32 * 1024 * 1024;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(120);
+/// `upstream test` answers "is it alive"; it should not take the data plane's
+/// word-count-sized timeout to say no.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// One socket read's worth of stream body, fed to the parser as-is — split
 /// points are the network's, which is exactly what conformance drilled the
 /// parser on.
@@ -76,6 +79,14 @@ pub struct Gateway {
 pub struct JsonReply {
     pub status: u16,
     pub body: String,
+}
+
+/// One `upstream test` probe: which model was asked, and either how fast it
+/// answered or why it did not (a value-free, operator-facing reason).
+#[derive(Debug)]
+pub struct ProbeOutcome {
+    pub model: String,
+    pub latency_ms: Result<u64, String>,
 }
 
 /// What the blocking worker sends the async facade, in order: exactly one
@@ -205,6 +216,117 @@ impl Gateway {
     #[must_use]
     pub fn catalog_size(&self) -> usize {
         self.catalog.len()
+    }
+
+    /// `upstream test <name>`: one minimal real completion per declared model.
+    ///
+    /// Runs the production southbound path — provider adapter, exfiltration
+    /// gate, credential injection — but neither the agent plugin nor the
+    /// router, because what is under test is the upstream, not the routing
+    /// table. Nothing is recorded and no health state is fed: a probe is
+    /// operator diagnostics the operator explicitly asked for, not served
+    /// traffic.
+    ///
+    /// # Errors
+    ///
+    /// An unknown upstream or model — per-model failures are data, returned
+    /// inside [`ProbeOutcome`], so one dead model does not hide the others.
+    pub fn probe(
+        &self,
+        upstream_name: &str,
+        only_model: Option<&str>,
+    ) -> Result<Vec<ProbeOutcome>, String> {
+        let upstream = self.upstreams.get(upstream_name).ok_or_else(|| {
+            format!(
+                "no upstream `{upstream_name}`; configured: {}",
+                self.upstreams
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+
+        let mut models: Vec<&str> = self
+            .catalog
+            .iter()
+            .filter(|(target, _)| target.upstream.as_str() == upstream_name)
+            .map(|(target, _)| target.model.as_str())
+            .collect();
+        if let Some(only) = only_model {
+            if !models.contains(&only) {
+                return Err(format!(
+                    "upstream `{upstream_name}` does not serve `{only}`; it serves: {}",
+                    models.join(", ")
+                ));
+            }
+            models = vec![only];
+        }
+        if models.is_empty() {
+            return Err(format!("upstream `{upstream_name}` declares no models"));
+        }
+
+        let http = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(PROBE_TIMEOUT))
+                .http_status_as_error(false)
+                .build(),
+        );
+
+        Ok(models
+            .into_iter()
+            .map(|model| ProbeOutcome {
+                model: model.to_owned(),
+                latency_ms: self.probe_model(upstream_name, upstream, model, &http),
+            })
+            .collect())
+    }
+
+    /// One probe exchange. The error string is operator-facing and, like every
+    /// error out of this module, value-free.
+    fn probe_model(
+        &self,
+        upstream_name: &str,
+        upstream: &Upstream,
+        model: &str,
+        http: &ureq::Agent,
+    ) -> Result<u64, String> {
+        let mut request = ChatRequest::new(
+            model,
+            vec![token_station_protocol::Message::text(
+                token_station_protocol::Role::User,
+                "ping",
+            )],
+        );
+        request.sampling.max_output_tokens = Some(1);
+
+        let describe =
+            |envelope: ErrorEnvelope| format!("{} ({:?})", envelope.message, envelope.code);
+
+        let descriptor = upstream
+            .plugin
+            .build_http_request(&request, &upstream.config)
+            .map_err(describe)?;
+        upstream
+            .config
+            .authorize(&descriptor)
+            .map_err(|refusal| refusal.to_string())?;
+
+        let clock = std::time::Instant::now();
+        let response = self
+            .send_with(http, &descriptor, upstream_name)
+            .map_err(describe)?;
+        let status = response.status;
+        let parts: HttpResponseParts = response.into();
+        if status >= 400 {
+            let envelope = upstream
+                .plugin
+                .map_provider_error(&parts)
+                .map_err(describe)?;
+            return Err(format!("HTTP {status}: {}", describe(envelope)));
+        }
+        upstream.plugin.parse_response(&parts).map_err(describe)?;
+        Ok(u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX))
     }
 
     /// The routing candidates as of this instant: the static catalog with the
@@ -447,6 +569,17 @@ impl Gateway {
         descriptor: &HttpRequestDescriptor,
         upstream_name: &str,
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
+        self.send_with(&self.http, descriptor, upstream_name)
+    }
+
+    /// [`Gateway::send`] over a caller-chosen agent — the probe path brings
+    /// its own, with a timeout sized for diagnostics rather than generation.
+    fn send_with(
+        &self,
+        http: &ureq::Agent,
+        descriptor: &HttpRequestDescriptor,
+        upstream_name: &str,
+    ) -> Result<UpstreamResponse, ErrorEnvelope> {
         let auth_header = descriptor
             .auth
             .as_ref()
@@ -455,7 +588,7 @@ impl Gateway {
 
         let sent = match descriptor.method {
             HttpMethod::Get => {
-                let mut request = self.http.get(&descriptor.url);
+                let mut request = http.get(&descriptor.url);
                 for (name, value) in descriptor.headers.iter() {
                     request = request.header(name, value);
                 }
@@ -465,7 +598,7 @@ impl Gateway {
                 request.call()
             }
             HttpMethod::Post => {
-                let mut request = self.http.post(&descriptor.url);
+                let mut request = http.post(&descriptor.url);
                 for (name, value) in descriptor.headers.iter() {
                     request = request.header(name, value);
                 }

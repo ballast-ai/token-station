@@ -804,6 +804,99 @@ fn auth_failures_never_eject_an_upstream() {
     std::fs::remove_file(key).ok();
 }
 
+// -- `upstream test`, the probe ------------------------------------------------------
+
+/// A gateway with no server around it: `upstream test` runs exactly this.
+fn probe_gateway(upstream: &MockUpstream, key_file: &Path) -> Gateway {
+    let config = json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agent": "agent-openai",
+            "providers": { "openai-compatible": "provider-openai-compatible" }
+        },
+        "upstreams": {
+            "mock_primary": {
+                "provider": "openai-compatible",
+                "base_url": upstream.base_url(),
+                "auth": { "slot": "provider_api_key", "file": key_file },
+                "models": [ { "model": "gpt-5.5", "tool": true, "context_window": 400_000 } ]
+            }
+        },
+        "router": {
+            "version": 1,
+            "pools": { "main": [ { "upstream": "mock_primary", "model": "gpt-5.5" } ] },
+            "default_pool": "main"
+        }
+    });
+    let config: ClientConfig = serde_json::from_value(config).expect("test config parses");
+    Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder)).expect("gateway assembles")
+}
+
+#[test]
+fn an_upstream_probe_runs_the_real_southbound_path() {
+    let answer = json!({
+        "id": "chatcmpl-1", "model": "gpt-5.5",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "p" }, "finish_reason": "length" }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("probe-ok", "sk-test-key-abc\n");
+    let gateway = probe_gateway(&mock, &key);
+
+    let outcomes = gateway.probe("mock_primary", None).expect("probes");
+    assert_eq!(outcomes.len(), 1, "one probe per declared model");
+    assert_eq!(outcomes[0].model, "gpt-5.5");
+    assert!(
+        outcomes[0].latency_ms.is_ok(),
+        "{:?}",
+        outcomes[0].latency_ms
+    );
+
+    // The probe went over the real wire: plugin-built path, injected
+    // credential, and a one-token budget so aliveness costs almost nothing.
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/v1/chat/completions");
+    assert_eq!(
+        seen[0].authorization.as_deref(),
+        Some("Bearer sk-test-key-abc")
+    );
+    assert_eq!(seen[0].body["model"], json!("gpt-5.5"));
+    assert_eq!(seen[0].body["max_tokens"], json!(1));
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn a_failed_probe_names_the_refusal_and_never_the_key() {
+    let refusal = json!({ "error": { "message": "Incorrect API key provided", "type": "invalid_request_error" } });
+    let mock = MockUpstream::start(vec![vec![http_json(401, &refusal.to_string())]]);
+    let key = key_file("probe-refused", "sk-live-topsecret");
+    let gateway = probe_gateway(&mock, &key);
+
+    let outcomes = gateway
+        .probe("mock_primary", None)
+        .expect("a refusal is an outcome, not a probe error");
+    let reason = outcomes[0].latency_ms.as_ref().expect_err("401 must fail");
+    assert!(reason.contains("401"), "{reason}");
+    assert!(!reason.contains("topsecret"), "value-free errors: {reason}");
+
+    // The refusals that are probe errors: nothing was asked over the wire.
+    let error = gateway
+        .probe("nowhere", None)
+        .expect_err("unknown upstream");
+    assert!(error.contains("mock_primary"), "{error}");
+    let error = gateway
+        .probe("mock_primary", Some("gpt-9"))
+        .expect_err("undeclared model");
+    assert!(error.contains("gpt-5.5"), "{error}");
+    assert_eq!(mock.hits(), 1, "only the real probe reached the upstream");
+
+    std::fs::remove_file(key).ok();
+}
+
 #[test]
 fn without_the_virtual_key_the_door_stays_shut() {
     let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
