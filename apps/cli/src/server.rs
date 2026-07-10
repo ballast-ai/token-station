@@ -1,0 +1,117 @@
+//! The async facade: axum frames the HTTP, the gateway does the work.
+//!
+//! Every request body is handed to the synchronous pipeline on a blocking
+//! thread; replies come back over a channel. The first message decides the
+//! response shape — a whole JSON reply, or the start of an SSE stream whose
+//! chunks follow on the same channel. Async stops here; nothing below this
+//! module awaits.
+
+use std::convert::Infallible;
+use std::sync::Arc;
+
+use axum::Router;
+use axum::body::{Body, Bytes};
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::Response;
+use axum::routing::{get, post};
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
+
+use crate::gateway::{Gateway, Reply};
+
+/// How many rendered SSE chunks may sit between the worker and a slow client
+/// before the worker blocks — which in turn stops reading the upstream:
+/// backpressure end to end.
+const STREAM_BACKLOG: usize = 32;
+
+/// Serves until `ctrl_c`.
+///
+/// Takes the already-bound listener rather than an address so the caller (and
+/// the tests) decide the port and learn it before anything serves.
+///
+/// # Errors
+///
+/// Only from the accept loop itself; per-request failures are responses.
+pub async fn serve(gateway: Arc<Gateway>, listener: TcpListener) -> std::io::Result<()> {
+    let app = Router::new()
+        .route("/v1/chat/completions", post(chat))
+        .route("/v1/models", get(models))
+        .with_state(gateway);
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
+}
+
+async fn models(State(gateway): State<Arc<Gateway>>) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(gateway.models().to_owned()))
+        .expect("a literal response builds")
+}
+
+async fn chat(State(gateway): State<Arc<Gateway>>, headers: HeaderMap, body: Bytes) -> Response {
+    // Owned copies for the blocking thread. Values that are not UTF-8 keep
+    // their name and lose their value — same rule HeaderDigest applies.
+    let headers: Vec<(String, String)> = headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                value.to_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+
+    let (tx, mut rx) = mpsc::channel::<Reply>(STREAM_BACKLOG);
+
+    // The pipeline owns its thread for the whole exchange; `blocking_send`
+    // makes a slow reader slow the upstream read down, not buffer it.
+    let worker = tokio::task::spawn_blocking(move || {
+        gateway.chat(&headers, &body, &mut |reply| {
+            tx.blocking_send(reply).is_ok()
+        });
+    });
+
+    let first = rx.recv().await;
+    match first {
+        Some(Reply::BeginJson(reply)) => {
+            drop(worker);
+            Response::builder()
+                .status(StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(reply.body))
+                .expect("a rendered response builds")
+        }
+        Some(Reply::BeginStream) => {
+            let chunks = ReceiverStream::new(rx).map(|reply| {
+                Ok::<Bytes, Infallible>(match reply {
+                    Reply::Chunk(data) => Bytes::from(data),
+                    // A second Begin* would be a pipeline bug; starve it
+                    // rather than corrupt the stream.
+                    Reply::BeginJson(_) | Reply::BeginStream => Bytes::new(),
+                })
+            });
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .header(header::CACHE_CONTROL, "no-cache")
+                .body(Body::from_stream(chunks))
+                .expect("a stream response builds")
+        }
+        // The worker died before answering; its panic is in the logs.
+        Some(Reply::Chunk(_)) | None => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"error":{"message":"the request pipeline failed to answer","type":"internal"}}"#,
+            ))
+            .expect("a literal response builds"),
+    }
+}

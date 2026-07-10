@@ -19,6 +19,10 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     # encoding_rs 是 `(Apache-2.0 OR MIT) AND BSD-3-Clause`——AND 绕不开
     "BSD-3-Clause",
+    # webpki-roots（Mozilla 根证书数据集）的许可，rustls 生态标配
+    "CDLA-Permissive-2.0",
+    # rustls-webpki / untrusted；ring 是 `Apache-2.0 AND ISC`，此项补齐 AND
+    "ISC",
     "MIT",
     # unicode-ident（proc-macro2 → syn → serde_derive 全链路的底座）与 icu 系列
     "Unicode-3.0",
