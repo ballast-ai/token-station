@@ -15,12 +15,19 @@ all-features = true
 # dependency tree. Every addition must be an explicit decision.
 allow = [
     "Apache-2.0",
+    # The wasmtime family used by plugin-runtime offers only this license.
+    "Apache-2.0 WITH LLVM-exception",
+    # encoding_rs is `(Apache-2.0 OR MIT) AND BSD-3-Clause`; the AND is unavoidable.
+    "BSD-3-Clause",
     "MIT",
-    # unicode-ident, the base of the proc-macro2 -> syn -> serde_derive chain
+    # unicode-ident under proc-macro2, syn, and serde_derive, plus the ICU family.
     "Unicode-3.0",
     # foldhash, the default hashbrown hasher and a transitive wit-parser dependency.
     "Zlib",
 ]
+# Deliberately excluded: r-efi offers `MIT OR Apache-2.0 OR LGPL-2.1-or-later`,
+# and mach2 offers `BSD-2-Clause OR MIT OR Apache-2.0`. cargo-deny can select an
+# already allowed option, so LGPL and BSD-2-Clause need not be added. Reject
 # missing or unparseable license fields as low confidence instead of guessing.
 confidence-threshold = 0.9
 

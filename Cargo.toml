@@ -9,6 +9,9 @@ members = [
     "crates/protocol",
     "crates/router-core",
 ]
+# WASM guest test fixture targeting wasm32-wasip2. Keep it out of the main
+# workspace build graph; plugin-runtime tests build it in a cargo subprocess.
+exclude = ["crates/plugin-runtime/tests/guests/test-provider"]
 
 [workspace.package]
 edition = "2024"
