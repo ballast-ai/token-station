@@ -15,6 +15,11 @@ edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/ballast-ai/token-station"
 rust-version = "1.85"
+# Path dependencies without versions cannot pass `cargo publish`; this merely
+# states that fact so cargo-deny can allow workspace-internal dependencies. When
+# conformance becomes an independent release artifact under architecture section
+# 9.1, flip this flag and add dependency versions so wildcard checks begin then.
+publish = false
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

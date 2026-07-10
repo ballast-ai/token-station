@@ -1,0 +1,44 @@
+# cargo-deny gate (C0#6). CI runs `cargo deny check` on every PR.
+#
+# This Apache-2.0 open-core repository will be consumed by third-party crates;
+# conformance will become a pinned plugin dependency under architecture section
+# 9.1. Use an explicit license allowlist so CI rejects new licenses and a person
+# chooses whether to extend the list or replace the dependency before release.
+
+[graph]
+# Check all targets. The client ships on macOS, Windows, and Linux, so host-only
+# checks would miss platform-specific dependencies such as keyrings and TLS stacks.
+all-features = true
+
+[licenses]
+# Deliberately small set of Apache-2.0-compatible licenses present in the current
+# dependency tree. Every addition must be an explicit decision.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    # unicode-ident, the base of the proc-macro2 -> syn -> serde_derive chain
+    "Unicode-3.0",
+    # foldhash, the default hashbrown hasher and a transitive wit-parser dependency.
+    "Zlib",
+]
+# missing or unparseable license fields as low confidence instead of guessing.
+confidence-threshold = 0.9
+
+[bans]
+# Warn but do not block duplicate crate versions because transitive duplication
+# is often outside our control and upstream releases should not break unrelated PRs.
+multiple-versions = "warn"
+# Reject wildcard versions except workspace-internal path dependencies, which normally have no version.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[advisories]
+# RustSec advisories fail on vulnerabilities or yanked releases. Report
+# unmaintained direct dependencies only; handle transitive ones through bans and upgrades.
+unmaintained = "workspace"
+yanked = "deny"
+
+[sources]
+# Trust crates.io only. Git dependencies create a non-reproducible trust chain that conflicts with C1#7.
+unknown-registry = "deny"
+unknown-git = "deny"
