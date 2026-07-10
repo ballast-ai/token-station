@@ -53,6 +53,7 @@
 mod config;
 mod decision;
 mod features;
+mod health;
 mod route;
 mod source;
 
@@ -66,5 +67,6 @@ pub use decision::{
     DecidedBy, Decision, InvalidUpstreamRef, NoRoute, UnmetRequirement, UpstreamModel, UpstreamRef,
 };
 pub use features::{RequestFeatures, estimate_tokens};
+pub use health::{HealthPolicy, HealthTracker};
 pub use route::{Candidate, Health, Router};
 pub use source::{CacheError, ConfigCache, ConfigSource, StaticConfigSource};
