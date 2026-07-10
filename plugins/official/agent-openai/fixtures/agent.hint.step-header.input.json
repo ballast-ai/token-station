@@ -1,0 +1,46 @@
+{
+  "protocol": "openai-chat-completions",
+  "agent_tool": "claude-code",
+  "headers": {
+    "names": [
+      "authorization",
+      "content-type",
+      "x-agent-step"
+    ],
+    "values": {
+      "content-type": "application/json",
+      "x-agent-step": "planning"
+    }
+  },
+  "principal": {
+    "subject": "local"
+  },
+  "body": {
+    "model": "gpt-5.5",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Weather in Beijing?"
+      }
+    ],
+    "stream": true,
+    "temperature": 0.2,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Look up the weather in a city",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}
