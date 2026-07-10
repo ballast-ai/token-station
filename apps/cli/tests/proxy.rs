@@ -193,11 +193,23 @@ fn http_json(status: u16, body: &str) -> Vec<u8> {
 
 // -- the proxy under test ----------------------------------------------------------
 
-/// Starts the whole server against `upstream`, returns its base URL.
-fn start_proxy(upstream: &MockUpstream, key_file: &Path) -> String {
+/// Starts the whole server against `upstream`; returns its base URL and the
+/// data directory (request log + metrics store) it writes into.
+fn start_proxy(upstream: &MockUpstream, key_file: &Path) -> (String, PathBuf) {
+    start_proxy_with(upstream, key_file, true)
+}
+
+fn start_proxy_with(upstream: &MockUpstream, key_file: &Path, metrics: bool) -> (String, PathBuf) {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-proxy-data-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
     let config = json!({
         "version": 1,
         "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": metrics },
         "plugins": {
             "dir": plugins_dir(),
             "agent": "agent-openai",
@@ -223,7 +235,18 @@ fn start_proxy(upstream: &MockUpstream, key_file: &Path) -> String {
         }
     });
     let config: ClientConfig = serde_json::from_value(config).expect("test config parses");
-    let gateway = Arc::new(Gateway::new(&config).expect("gateway assembles"));
+
+    let mut sinks: Vec<Box<dyn token_station_metrics::Recorder>> = vec![Box::new(
+        token_station_cli::filelog::FileLog::open(&config.data.dir).expect("log opens"),
+    )];
+    if config.data.metrics {
+        sinks.push(Box::new(
+            token_station_cli::store::SqliteStore::open(&config.data.dir.join("metrics.sqlite"))
+                .expect("store opens"),
+        ));
+    }
+    let recorder = Arc::new(token_station_cli::filelog::Recorders(sinks));
+    let gateway = Arc::new(Gateway::new(&config, recorder).expect("gateway assembles"));
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
     listener.set_nonblocking(true).expect("nonblocking");
@@ -241,7 +264,31 @@ fn start_proxy(upstream: &MockUpstream, key_file: &Path) -> String {
         });
     });
 
-    format!("http://{address}")
+    (format!("http://{address}"), data_dir)
+}
+
+/// One row out of the metrics store, as (column -> debug-rendered value).
+fn last_row(data_dir: &Path) -> std::collections::BTreeMap<String, String> {
+    let db = rusqlite::Connection::open(data_dir.join("metrics.sqlite")).expect("db opens");
+    db.query_row(
+        "SELECT * FROM requests ORDER BY id DESC LIMIT 1",
+        [],
+        |row| {
+            let mut out = std::collections::BTreeMap::new();
+            for (index, name) in row.as_ref().column_names().iter().enumerate() {
+                let value: rusqlite::types::Value = row.get(index)?;
+                out.insert((*name).to_owned(), format!("{value:?}"));
+            }
+            Ok(out)
+        },
+    )
+    .expect("a row exists")
+}
+
+/// Metrics writes race the HTTP response (the record lands after the last
+/// byte); give the recorder a moment.
+fn settle() {
+    std::thread::sleep(std::time::Duration::from_millis(300));
 }
 
 fn key_file(name: &str, contents: &str) -> PathBuf {
@@ -282,7 +329,7 @@ fn a_chat_completion_round_trips_with_the_credential_injected() {
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let key = key_file("roundtrip", "sk-test-key-abc\n");
-    let proxy = start_proxy(&mock, &key);
+    let (proxy, data_dir) = start_proxy(&mock, &key);
 
     let (status, body) = post_chat(
         &proxy,
@@ -314,6 +361,23 @@ fn a_chat_completion_round_trips_with_the_credential_injected() {
         "routing replaced `auto`"
     );
 
+    // And what the exchange left behind: one row, decision and usage included.
+    settle();
+    let row = last_row(&data_dir);
+    assert_eq!(row["status"], "Integer(200)");
+    assert_eq!(row["requested_model"], "Text(\"auto\")");
+    assert_eq!(row["upstream"], "Text(\"mock_primary\")");
+    assert_eq!(row["model"], "Text(\"gpt-5.5\")");
+    assert_eq!(row["tier"], "Text(\"default\")");
+    assert_eq!(row["attempts"], "Integer(1)");
+    assert_eq!(row["input_tokens"], "Integer(9)");
+    assert_eq!(row["output_tokens"], "Integer(3)");
+    assert_eq!(row["cost_micros"], "Null", "no pricing table until C2#4");
+    assert!(
+        data_dir.join("requests.log").exists(),
+        "the file log is always written"
+    );
+
     std::fs::remove_file(key).ok();
 }
 
@@ -325,6 +389,7 @@ fn a_streaming_completion_survives_awkward_tcp_split_points() {
     let sse = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
         "data: [DONE]\n\n"
     );
@@ -342,7 +407,7 @@ fn a_streaming_completion_survives_awkward_tcp_split_points() {
     ];
     let mock = MockUpstream::start(vec![segments]);
     let key = key_file("stream", "sk-test-key-abc");
-    let proxy = start_proxy(&mock, &key);
+    let (proxy, data_dir) = start_proxy(&mock, &key);
 
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
@@ -376,6 +441,13 @@ fn a_streaming_completion_survives_awkward_tcp_split_points() {
     assert!(body.contains(r#""content":"lo""#), "{body}");
     assert!(body.contains("data: [DONE]"), "{body}");
 
+    // The usage event inside the stream reached the metrics row.
+    settle();
+    let row = last_row(&data_dir);
+    assert_eq!(row["stream"], "Integer(1)");
+    assert_eq!(row["input_tokens"], "Integer(7)");
+    assert_eq!(row["output_tokens"], "Integer(2)");
+
     std::fs::remove_file(key).ok();
 }
 
@@ -383,7 +455,7 @@ fn a_streaming_completion_survives_awkward_tcp_split_points() {
 fn the_models_catalog_aggregates_configured_upstreams() {
     let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
     let key = key_file("models", "sk-test-key-abc");
-    let proxy = start_proxy(&mock, &key);
+    let (proxy, _data_dir) = start_proxy(&mock, &key);
 
     let response = ureq::get(format!("{proxy}/v1/models"))
         .call()
@@ -409,7 +481,7 @@ fn an_upstream_401_is_mapped_not_retried_and_never_leaks_the_key() {
     let refusal = json!({ "error": { "message": "Incorrect API key provided", "type": "invalid_request_error" } });
     let mock = MockUpstream::start(vec![vec![http_json(401, &refusal.to_string())]]);
     let key = key_file("refused", "sk-live-topsecret");
-    let proxy = start_proxy(&mock, &key);
+    let (proxy, data_dir) = start_proxy(&mock, &key);
 
     let (status, body) = post_chat(
         &proxy,
@@ -426,6 +498,12 @@ fn an_upstream_401_is_mapped_not_retried_and_never_leaks_the_key() {
     );
     assert_eq!(mock.hits(), 1, "an auth failure is not retried anywhere");
 
+    settle();
+    let row = last_row(&data_dir);
+    assert_eq!(row["status"], "Integer(401)");
+    assert_eq!(row["error_code"], "Text(\"auth\")");
+    assert_eq!(row["attempts"], "Integer(1)");
+
     std::fs::remove_file(key).ok();
 }
 
@@ -433,7 +511,7 @@ fn an_upstream_401_is_mapped_not_retried_and_never_leaks_the_key() {
 fn a_request_the_pool_cannot_serve_is_refused_with_the_reason() {
     let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
     let key = key_file("capability", "sk-test-key-abc");
-    let proxy = start_proxy(&mock, &key);
+    let (proxy, _data_dir) = start_proxy(&mock, &key);
 
     // The only model has no vision; an image request has nowhere to go.
     let (status, body) = post_chat(
@@ -452,4 +530,78 @@ fn a_request_the_pool_cannot_serve_is_refused_with_the_reason() {
     assert_eq!(mock.hits(), 0, "nothing capable, so nothing was sent");
 
     std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn nothing_the_caller_wrote_reaches_disk() {
+    // The canary rides in message content, a tool definition and a hint header
+    // — everything except the model name, which is classified metadata. After
+    // the exchange, the *raw bytes* of both sinks must not contain it.
+    const CANARY: &str = "DATA-LAYER-CONTENT-CANARY-9f3a";
+
+    let answer = json!({
+        "id": "chatcmpl-1", "model": "gpt-5.5",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "ok" }, "finish_reason": "stop" }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("canary", "sk-test-key-abc");
+    let (proxy, data_dir) = start_proxy(&mock, &key);
+
+    let (status, _) = post_chat(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "messages": [{ "role": "user", "content": format!("please keep {CANARY} secret") }],
+            "tools": [{ "type": "function", "function": {
+                "name": "get_weather",
+                "description": CANARY,
+                "parameters": { "secret": CANARY }
+            }}]
+        }),
+        Some(("x-agent-step", CANARY)),
+    );
+    assert_eq!(status, 200);
+
+    settle();
+    for artifact in ["metrics.sqlite", "requests.log"] {
+        let bytes = std::fs::read(data_dir.join(artifact)).expect("artifact exists");
+        let haystack = String::from_utf8_lossy(&bytes);
+        assert!(
+            !haystack.contains(CANARY),
+            "`{artifact}` holds caller content"
+        );
+    }
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn switching_metrics_off_leaves_the_file_log_only() {
+    let answer = json!({
+        "id": "chatcmpl-1", "model": "gpt-5.5",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "ok" }, "finish_reason": "stop" }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("no-metrics", "sk-test-key-abc");
+    let (proxy, data_dir) = start_proxy_with(&mock, &key, false);
+
+    let (status, _) = post_chat(
+        &proxy,
+        &json!({ "model": "auto", "messages": [{ "role": "user", "content": "hi" }] }),
+        None,
+    );
+    assert_eq!(status, 200);
+
+    settle();
+    assert!(
+        !data_dir.join("metrics.sqlite").exists(),
+        "metrics off means no store is even created"
+    );
+    let log = std::fs::read_to_string(data_dir.join("requests.log")).expect("log exists");
+    assert!(
+        log.contains("\"status\":200"),
+        "the file log is always written: {log}"
+    );
 }
