@@ -20,6 +20,7 @@ pub mod gateway;
 pub mod secrets;
 pub mod server;
 pub mod store;
+pub mod virtual_key;
 
 /// The example configuration shipped with the binary, kept loadable by tests.
 pub const EXAMPLE_CONFIG: &str = include_str!("../example-config.json");
