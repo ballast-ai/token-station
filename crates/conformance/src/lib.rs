@@ -1,14 +1,43 @@
-//! Conformance runner primitives for adapter plugin validation.
+//! Conformance runner: the whole of what stands between a third-party `.wasm`
+//! and the request path.
 //!
 //! Runs in three places, per the adapter architecture: a plugin's own CI, an
 //! instance installing a plugin, and an instance upgrading or canarying one. A
 //! package that fails is stored as a draft and never enters the runtime
-//! registry, so these checks are the whole of what stands between a third-party
-//! `.wasm` and the request path.
+//! registry, which is why a [`Report`] names every check that ran and why
+//! [`Check`] is a closed enumeration: the registry has to record *what* it
+//! refused a package for, and act on that record later.
 //!
-//! This crate currently implements the manifest and identity gates. The fixture
-//! gates — request and response translation, error mapping, determinism, and the
-//! sandbox bounds — arrive with the WASM runtime.
+//! # Three gates, in order
+//!
+//! 1. [`accepts_manifest`] — everything decidable before loading any code.
+//! 2. [`reported_identity_matches`] — the loaded adapter is the package that was
+//!    vetted.
+//! 3. [`run_agent_suite`] / [`run_provider_suite`] — the adapter translates what
+//!    it claims to, deterministically, and stays inside its boundaries.
+//!
+//! # Why this crate does not know about WASM
+//!
+//! The suite is written against [`AgentAdapter`] and [`ProviderAdapter`], not
+//! against a component instance. `plugin-runtime` implements those traits over a
+//! WASM component; a plugin author implements them over a native build and runs
+//! the same suite in their own CI without a WASM toolchain. The seam is also why
+//! these gates exist and are tested before any runtime does.
+//!
+//! What that seam cannot carry is the architecture's security row — no network, no
+//! file system, bounded memory and time. Those are properties of the sandbox the
+//! runtime constructs, not answers an adapter can be asked for, and no fixture
+//! here pretends to check them.
+
+mod adapter;
+mod fixture;
+mod report;
+mod suite;
+
+pub use adapter::{AdapterResult, AgentAdapter, ProviderAdapter, StreamParser};
+pub use fixture::{AgentFamily, Case, Family, FixtureError, FixturePack, ProviderFamily};
+pub use report::{Check, Outcome, Report, Verdict};
+pub use suite::{run_agent_suite, run_provider_suite};
 
 use token_station_plugin_api::{AdapterManifest, AdapterMetadata, ManifestError};
 

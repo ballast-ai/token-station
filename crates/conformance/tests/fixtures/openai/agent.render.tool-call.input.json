@@ -1,0 +1,32 @@
+{
+  "context": {
+    "protocol": "openai-chat-completions"
+  },
+  "response": {
+    "id": "chatcmpl-1",
+    "model": "gpt-5.5",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "name": "get_weather",
+              "arguments": "{\"city\": \"Beijing\"}"
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "input_tokens": 33,
+      "output_tokens": 32,
+      "cache_read_tokens": 32,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0
+    }
+  }
+}

@@ -7,11 +7,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-token-station-plugin-api = { path = "../plugin-api" }
-
-[dev-dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
+token-station-plugin-api = { path = "../plugin-api" }
+token-station-protocol = { path = "../protocol" }
 
 [lints]
 workspace = true
-
