@@ -9,6 +9,9 @@ members = [
     "crates/protocol",
     "crates/router-core",
 ]
+# WASM guest 测试件：目标是 wasm32-wasip2，不能进主 workspace 的构建图。
+# plugin-runtime 的测试用子进程 cargo 构建它。
+exclude = ["crates/plugin-runtime/tests/guests/test-provider"]
 
 [workspace.package]
 edition = "2024"

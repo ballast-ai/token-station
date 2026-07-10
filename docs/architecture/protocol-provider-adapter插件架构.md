@@ -311,7 +311,13 @@ host.sign(secret_ref, payload, algorithm) -> signature
 - **`StreamIncrementality`**：socket 上来的 chunk 不是完整 SSE frame。把 fixture 的 body 重新拼起来、在**每个字符边界**切一刀、每次都用全新 parser 重放，都必须得到同一串事件。一个假设「每个 chunk 是一整帧」的插件能通过所有 fixture，然后在生产里由网络决定的切分点上悄悄丢事件。
 - **`AuthErrorsAreNotRetriable`**：401/403 不得映射成可重试码。否则一把被拒的 key 会被路由在用户配置的每个 provider 上重放一遍，把一个账号问题变成几个。**这道门自带一条覆盖要求**：包里没有 401/403 用例，这道门就没跑过，于是「没跑过」本身算失败。
 
-`安全` 那一行不在 fixture 里。禁网络、禁文件系统、内存与执行时间上限，是 runtime 构造的沙箱的性质，不是可以「问插件要一个答案」的东西。`conformance` 不假装能测它——`plugin-runtime` 负责，A1 交付。
+`安全` 那一行不在 fixture 里。禁网络、禁文件系统、内存与执行时间上限，是 runtime 构造的沙箱的性质，不是可以「问插件要一个答案」的东西。`conformance` 不假装能测它——`plugin-runtime` 负责（A1 已交付）：
+
+- **网络**：component 若 import `wasi:sockets/*` 或 `wasi:http/*`，加载即拒（`LoadError::ForbiddenImport`），而不是给一个空实现——空实现意味着「真的断掉了吗」要在每次 wasmtime 升级时重新审计，拒收让这个问题不存在。std 编出来的 guest 会 import 其余 WASI 接口，由锁死的实现满足：无预打开目录、无环境变量、无继承 stdio。
+- **内存**：每个 store 一个上限（默认 64 MiB），guest 越限分配在 guest 内失败并 trap。
+- **执行时间**：每次调用一个 deadline（epoch interruption，后台 ticker 推进），死循环在 deadline 处 trap。
+- 三种 trap（超时 / 越限 / panic）对调用方是同一件事：一个没有作答的 adapter，统一映射为 `internal` 的 `ErrorEnvelope`；宿主不 panic，插件句柄可继续使用。
+- 以上由真实的 `wasm32-wasip2` 组件测试驱动（`plugin-runtime/tests/guests/test-provider`，一个按输入指令故意 hang / 狂分配 / panic 的 guest），不是 mock。
 
 `conformance` 面向一对 trait（`AgentAdapter` / `ProviderAdapter`）而非 wasmtime。因此：这套门在 runtime 存在之前就能写完并被证伪；第三方插件作者可以先用原生构建在自己 CI 里跑同一套门，不必先搭 WASM 工具链；`crates/conformance` 不依赖 wasmtime。
 

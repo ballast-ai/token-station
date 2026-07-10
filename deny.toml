@@ -15,12 +15,19 @@ all-features = true
 # 加一条是显式决定，不是默认。
 allow = [
     "Apache-2.0",
+    # wasmtime 全家（plugin-runtime 的 WASM 引擎）只提供这一种
+    "Apache-2.0 WITH LLVM-exception",
+    # encoding_rs 是 `(Apache-2.0 OR MIT) AND BSD-3-Clause`——AND 绕不开
+    "BSD-3-Clause",
     "MIT",
-    # unicode-ident（proc-macro2 → syn → serde_derive 全链路的底座）
+    # unicode-ident（proc-macro2 → syn → serde_derive 全链路的底座）与 icu 系列
     "Unicode-3.0",
     # foldhash（hashbrown 的默认 hasher，wit-parser 的传递依赖）
     "Zlib",
 ]
+# 刻意不放行的：r-efi 是 `MIT OR Apache-2.0 OR LGPL-2.1-or-later`，mach2 是
+# `BSD-2-Clause OR MIT OR Apache-2.0`——双许可里已有允许项，cargo-deny 会选中
+# 允许的那份，无需把 LGPL / BSD-2-Clause 加进清单。
 # license 字段缺失或无法解析时按低置信度拒绝，而不是猜。
 confidence-threshold = 0.9
 

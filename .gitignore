@@ -1,4 +1,6 @@
 /target/
+# WASM guest 测试件（workspace 之外，自带 target）
+crates/plugin-runtime/tests/guests/*/target/
 /.idea/
 /.vscode/
 .DS_Store
