@@ -1,15 +1,162 @@
+//! The command line: `serve` plus the management surface (C1#6).
+//!
+//! Parsing lives here; every operation lives in the library (`manage`,
+//! `stats`, `gateway`), where the tests bite it. Command results go to
+//! stdout; operational chatter and errors go to stderr, so `stats | column`
+//! composes.
+
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use clap::{Parser, Subcommand, ValueEnum};
 use token_station_cli::config::ClientConfig;
 use token_station_cli::filelog::{FileLog, Recorders};
 use token_station_cli::gateway::Gateway;
 use token_station_cli::store::SqliteStore;
-use token_station_cli::{secrets, server, virtual_key};
+use token_station_cli::{manage, secrets, server, stats, virtual_key};
 use token_station_metrics::Recorder;
 
+#[derive(Parser)]
+#[command(
+    name = "token-station-cli",
+    version,
+    about = "A loopback LLM proxy: local routing, BYOK, content never leaves your machine"
+)]
+struct Cli {
+    /// The configuration file every command reads (and the editing ones
+    /// rewrite atomically).
+    #[arg(long, global = true, default_value = "token-station.json")]
+    config: PathBuf,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the loopback proxy.
+    Serve,
+    /// Store or delete upstream credentials in the OS keychain.
+    #[command(subcommand)]
+    Key(KeyCommand),
+    /// List, add, remove, or probe the configured upstreams.
+    #[command(subcommand)]
+    Upstream(UpstreamCommand),
+    /// Flip switches, or edit the whole file behind validation.
+    #[command(subcommand)]
+    Config(ConfigCommand),
+    /// Inspect the routing table.
+    #[command(subcommand)]
+    Rule(RuleCommand),
+    /// Aggregate the local metrics store: volume, errors, latency, tokens.
+    Stats(StatsArgs),
+}
+
+#[derive(Subcommand)]
+enum KeyCommand {
+    /// Store a credential (the value is read from stdin, never from argv).
+    Set { upstream: String, slot: String },
+    /// Delete a credential.
+    Remove { upstream: String, slot: String },
+}
+
+#[derive(Subcommand)]
+enum UpstreamCommand {
+    /// The configured upstreams, their auth sources and models.
+    List,
+    /// Add an upstream to the configuration file.
+    Add {
+        /// Reference name, as pools will cite it (e.g. `openai_personal`).
+        name: String,
+        /// Provider dialect; must have a plugin mapping in plugins.providers.
+        #[arg(long)]
+        provider: String,
+        /// Base URL. No credentials in it — refused otherwise.
+        #[arg(long)]
+        base_url: String,
+        /// Repeatable: `<model>[,tool][,vision][,json-schema][,ctx=N]`.
+        #[arg(long = "model", required = true)]
+        models: Vec<String>,
+        /// Where the credential lives: `keyring` | `env:<VAR>` | `file:<PATH>`.
+        /// Omit for open upstreams such as a local Ollama.
+        #[arg(long)]
+        auth: Option<String>,
+        /// Credential slot name the provider adapter resolves.
+        #[arg(long, default_value = "provider_api_key")]
+        slot: String,
+        /// Also append the models to this pool, so routing can reach them.
+        #[arg(long)]
+        pool: Option<String>,
+    },
+    /// Remove an upstream (refused while a pool still routes to it).
+    Remove { name: String },
+    /// Probe an upstream: one minimal real completion per declared model.
+    Test {
+        name: String,
+        /// Probe only this model.
+        #[arg(long)]
+        model: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Flip a switch: `server.auth` or `data.metrics`.
+    Set {
+        switch: String,
+        /// `on` or `off`.
+        #[arg(value_parser = parse_on_off, action = clap::ArgAction::Set)]
+        value: bool,
+    },
+    /// Open the file in $VISUAL/$EDITOR; applied only if the result validates.
+    Edit,
+}
+
+#[derive(Subcommand)]
+enum RuleCommand {
+    /// The routing table, layer by layer, in evaluation order.
+    List,
+}
+
+#[derive(clap::Args)]
+struct StatsArgs {
+    /// Window: `all`, `<N>h`, or `<N>d`.
+    #[arg(long, default_value = "24h")]
+    since: String,
+    /// Group by one dimension instead of totals only.
+    #[arg(long, value_enum)]
+    by: Option<GroupByArg>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum GroupByArg {
+    Upstream,
+    Model,
+    Pool,
+    Status,
+}
+
+impl From<GroupByArg> for stats::GroupBy {
+    fn from(by: GroupByArg) -> Self {
+        match by {
+            GroupByArg::Upstream => Self::Upstream,
+            GroupByArg::Model => Self::Model,
+            GroupByArg::Pool => Self::Pool,
+            GroupByArg::Status => Self::Status,
+        }
+    }
+}
+
+fn parse_on_off(raw: &str) -> Result<bool, String> {
+    match raw {
+        "on" | "true" => Ok(true),
+        "off" | "false" => Ok(false),
+        _ => Err(format!("`{raw}` is not on/off")),
+    }
+}
+
 fn main() -> ExitCode {
-    match run() {
+    match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("{message}");
@@ -18,21 +165,95 @@ fn main() -> ExitCode {
     }
 }
 
-const USAGE: &str = "usage: token-station-cli serve [--config <path>]
-       token-station-cli key set <upstream> <slot>      (reads the key from stdin)
-       token-station-cli key remove <upstream> <slot>";
+fn run(cli: Cli) -> Result<(), String> {
+    match cli.command {
+        Command::Serve => serve(&cli.config),
+        Command::Key(command) => key(&command),
+        Command::Upstream(UpstreamCommand::List) => {
+            let config = load(&cli.config)?;
+            print!("{}", manage::upstream_list(&config));
+            Ok(())
+        }
+        Command::Upstream(UpstreamCommand::Add {
+            name,
+            provider,
+            base_url,
+            models,
+            auth,
+            slot,
+            pool,
+        }) => mutate(&cli.config, |config| {
+            manage::upstream_add(
+                config,
+                &manage::AddUpstream {
+                    name: &name,
+                    provider: &provider,
+                    base_url: &base_url,
+                    models: &models,
+                    auth: auth.as_deref(),
+                    slot: &slot,
+                    pool: pool.as_deref(),
+                },
+            )
+        }),
+        Command::Upstream(UpstreamCommand::Remove { name }) => {
+            mutate(&cli.config, |config| manage::upstream_remove(config, &name))
+        }
+        Command::Upstream(UpstreamCommand::Test { name, model }) => {
+            probe(&cli.config, &name, model.as_deref())
+        }
+        Command::Config(ConfigCommand::Set { switch, value }) => mutate(&cli.config, |config| {
+            manage::set_switch(config, &switch, value)
+        }),
+        Command::Config(ConfigCommand::Edit) => {
+            let editor = std::env::var("VISUAL")
+                .or_else(|_| std::env::var("EDITOR"))
+                .map_err(|_| "config edit needs $VISUAL or $EDITOR set".to_owned())?;
+            let summary = manage::edit(&cli.config, &editor)?;
+            println!("{summary}");
+            eprintln!("note: a running `serve` applies configuration changes on restart");
+            Ok(())
+        }
+        Command::Rule(RuleCommand::List) => {
+            let config = load(&cli.config)?;
+            print!("{}", manage::rule_list(&config));
+            Ok(())
+        }
+        Command::Stats(args) => {
+            let config = load(&cli.config)?;
+            let window = stats::parse_since(&args.since)?;
+            let cutoff = window.map(|window| now_ms().saturating_sub(window));
+            let group_by = args.by.map(stats::GroupBy::from);
+            let report = stats::collect(&config.data.dir.join("metrics.sqlite"), cutoff, group_by)?;
+            print!("{}", stats::render(&report, group_by));
+            Ok(())
+        }
+    }
+}
 
-fn run() -> Result<(), String> {
-    // Hand-rolled until C1#6 builds the real management surface.
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+fn load(path: &Path) -> Result<ClientConfig, String> {
+    ClientConfig::load(path).map_err(|error| error.to_string())
+}
 
-    let config_path = match words.as_slice() {
-        ["serve"] => "token-station.json".to_owned(),
-        ["serve", "--config", path] => (*path).to_owned(),
+/// Load → edit → validate-and-save, atomically: a refused edit leaves the
+/// file byte-for-byte as it was.
+fn mutate(
+    path: &Path,
+    edit: impl FnOnce(&mut ClientConfig) -> Result<String, String>,
+) -> Result<(), String> {
+    let mut config = load(path)?;
+    let summary = edit(&mut config)?;
+    config.save(path).map_err(|error| error.to_string())?;
+    println!("{summary}");
+    eprintln!("note: a running `serve` applies configuration changes on restart");
+    Ok(())
+}
+
+fn key(command: &KeyCommand) -> Result<(), String> {
+    match command {
         // `key set` reads from stdin: a key in argv is a key in `ps` output
         // and shell history.
-        ["key", "set", upstream, slot] => {
+        KeyCommand::Set { upstream, slot } => {
             eprintln!("paste the key for {upstream}/{slot}, then press Enter:");
             let mut line = String::new();
             std::io::stdin()
@@ -44,18 +265,42 @@ fn run() -> Result<(), String> {
             }
             secrets::keyring_set(upstream, slot, value)?;
             eprintln!("stored in the OS keychain as {upstream}/{slot}");
-            return Ok(());
+            Ok(())
         }
-        ["key", "remove", upstream, slot] => {
+        KeyCommand::Remove { upstream, slot } => {
             secrets::keyring_remove(upstream, slot)?;
             eprintln!("removed {upstream}/{slot} from the OS keychain");
-            return Ok(());
+            Ok(())
         }
-        _ => return Err(USAGE.to_owned()),
-    };
+    }
+}
 
-    let config = ClientConfig::load(std::path::Path::new(&config_path))
-        .map_err(|error| error.to_string())?;
+fn probe(config_path: &Path, name: &str, model: Option<&str>) -> Result<(), String> {
+    let config = load(config_path)?;
+    // No recorder: a probe is operator diagnostics, not served traffic, and it
+    // must not skew `stats`.
+    let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder))?;
+
+    let outcomes = gateway.probe(name, model)?;
+    let mut failed = 0usize;
+    for outcome in &outcomes {
+        match &outcome.latency_ms {
+            Ok(latency) => println!("{}: ok ({latency} ms)", outcome.model),
+            Err(reason) => {
+                failed += 1;
+                println!("{}: FAIL — {reason}", outcome.model);
+            }
+        }
+    }
+    if failed > 0 {
+        Err(format!("{failed} of {} probe(s) failed", outcomes.len()))
+    } else {
+        Ok(())
+    }
+}
+
+fn serve(config_path: &Path) -> Result<(), String> {
+    let config = load(config_path)?;
     let listen = config.server.listen.clone();
 
     // The file log is always written; the metrics store is on unless the
@@ -112,4 +357,24 @@ fn run() -> Result<(), String> {
         .await
         .map_err(|error| format!("server: {error}"))
     })
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |epoch| {
+            u64::try_from(epoch.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    /// clap's own coherence check: conflicting flags, broken defaults and the
+    /// like fail here instead of at first use in the field.
+    #[test]
+    fn the_command_tree_is_coherent() {
+        super::Cli::command().debug_assert();
+    }
 }
