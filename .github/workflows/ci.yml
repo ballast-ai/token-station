@@ -17,3 +17,27 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The local gate always runs doc -D warnings. Without it in CI, the rule is only a convention.
+      - run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # Allowed licenses, RustSec advisories, and dependency sources. Configuration is in deny.toml.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # This overlaps the deny advisories but runs separately. audit reads only Cargo.lock and does not need
+  # build graph. It still enforces the rule when deny graph construction fails. The two failure signals are also clearer.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
