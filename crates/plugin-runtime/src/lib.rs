@@ -40,9 +40,13 @@
 //! [`SecretSigner`] implementation never even learns that an undeclared name
 //! was asked for.
 
+mod agent;
 mod bindings;
+mod loader;
 mod provider;
 mod runtime;
 
-pub use provider::{LoadError, NoSecrets, ProviderPlugin, SecretSigner};
+pub use agent::AgentPlugin;
+pub use loader::LoadError;
+pub use provider::{NoSecrets, ProviderPlugin, SecretSigner};
 pub use runtime::{PluginRuntime, RuntimeLimits};

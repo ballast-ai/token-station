@@ -11,7 +11,11 @@ members = [
 ]
 # WASM guest test fixture targeting wasm32-wasip2. Keep it out of the main
 # workspace build graph; plugin-runtime tests build it in a cargo subprocess.
-exclude = ["crates/plugin-runtime/tests/guests/test-provider"]
+exclude = [
+    "crates/plugin-runtime/tests/guests/test-provider",
+    "plugins/official/agent-openai",
+    "plugins/official/provider-openai-compatible",
+]
 
 [workspace.package]
 edition = "2024"

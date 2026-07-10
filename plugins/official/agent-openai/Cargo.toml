@@ -1,0 +1,21 @@
+# The official OpenAI-compatible inbound agent adapter, compiled to a
+# `wasm32-wasip2` component. Standalone (not a workspace member): the main
+# workspace must stay buildable without a wasm toolchain.
+[package]
+name = "agent-openai"
+version = "1.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = "1"
+serde_json = "1"
+# The Canonical IR, used as types rather than re-derived by hand: the plugin
+# and the host agree on the wire format because they compile the same structs.
+token-station-protocol = { path = "../../../crates/protocol" }
+wit-bindgen = "0.59"
