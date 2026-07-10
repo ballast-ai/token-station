@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use token_station_conformance::{AgentAdapter, ProviderAdapter};
+use token_station_metrics::{Recorder, RequestRecord, RoutingRecord};
 use token_station_plugin_runtime::{AgentPlugin, NoSecrets, PluginRuntime, ProviderPlugin};
 use token_station_protocol::{
     AgentRequestEnvelope, Auth, ChatRequest, ErrorCode, ErrorEnvelope, HeaderDigest, HttpMethod,
@@ -61,6 +62,7 @@ pub struct Gateway {
     candidates: Vec<Candidate>,
     secrets: SecretStore,
     http: ureq::Agent,
+    recorder: Arc<dyn Recorder>,
     /// `/v1/models`, rendered once: it changes only with the config.
     models_document: String,
 }
@@ -92,7 +94,7 @@ impl Gateway {
     ///
     /// Never for a [`ClientConfig`] that came through [`ClientConfig::load`]:
     /// the `expect`s below restate what its validation already proved.
-    pub fn new(config: &ClientConfig) -> Result<Self, String> {
+    pub fn new(config: &ClientConfig, recorder: Arc<dyn Recorder>) -> Result<Self, String> {
         let runtime = PluginRuntime::new(token_station_plugin_runtime::RuntimeLimits::default())
             .map_err(|error| format!("wasm engine: {error}"))?;
 
@@ -173,6 +175,7 @@ impl Gateway {
             upstreams,
             candidates,
             secrets: SecretStore::from_config(config),
+            recorder,
             http: ureq::Agent::new_with_config(
                 ureq::Agent::config_builder()
                     .timeout_global(Some(UPSTREAM_TIMEOUT))
@@ -202,17 +205,33 @@ impl Gateway {
     /// `emit` receives exactly one `Reply::Begin*`; streaming chunks follow if
     /// the exchange streams. When `emit` returns `false` (client gone) the
     /// exchange stops and the upstream connection drops with it.
+    ///
+    /// Exactly one [`RequestRecord`] lands per call, whatever the exit path —
+    /// including the ones the caller never sees finish.
     pub fn chat(
         &self,
         headers: &[(String, String)],
         body: &[u8],
         emit: &mut dyn FnMut(Reply) -> bool,
     ) {
-        let reply = self.chat_inner(headers, body, emit);
+        let clock = std::time::Instant::now();
+        let started_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |epoch| {
+                u64::try_from(epoch.as_millis()).unwrap_or(u64::MAX)
+            });
+        let mut record = RequestRecord::begin(started_at_ms, self.protocol.clone());
+
+        let reply = self.chat_inner(headers, body, emit, &mut record);
         if let Err(refusal) = reply {
+            record.status = refusal.http_status;
+            record.error_code = Some(refusal.code);
             let rendered = self.render_error(&refusal);
             emit(Reply::BeginJson(rendered));
         }
+
+        record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.recorder.record(&record);
     }
 
     /// The pipeline. Returns `Err` only before anything was emitted, so the
@@ -222,6 +241,7 @@ impl Gateway {
         headers: &[(String, String)],
         body: &[u8],
         emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
     ) -> Result<(), ErrorEnvelope> {
         if body.len() > MAX_INBOUND_BODY {
             return Err(ErrorEnvelope::new(
@@ -255,6 +275,8 @@ impl Gateway {
 
         let request = self.agent.normalize_inbound(&envelope)?;
         let hints = self.agent.extract_agent_hint(&envelope)?;
+        record.requested_model.clone_from(&request.model);
+        record.stream = request.stream;
 
         let decision = self
             .router
@@ -269,8 +291,9 @@ impl Gateway {
             decision.decided_by,
             decision.fallbacks.len()
         );
+        record.routing = Some(RoutingRecord::from(&decision));
 
-        self.dispatch(&request, &decision, emit)
+        self.dispatch(&request, &decision, emit, record)
     }
 
     /// Tries the decision's targets in order; moves on only while the error
@@ -280,12 +303,23 @@ impl Gateway {
         request: &ChatRequest,
         decision: &Decision,
         emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
     ) -> Result<(), ErrorEnvelope> {
         let mut last_error = None;
 
         for target in std::iter::once(&decision.chosen).chain(&decision.fallbacks) {
-            match self.try_upstream(request, target, emit) {
-                Ok(()) => return Ok(()),
+            record.attempts += 1;
+            if let Some(routing) = record.routing.as_mut() {
+                // The record names who actually served (or last refused), not
+                // only who was chosen first.
+                target.upstream.as_str().clone_into(&mut routing.upstream);
+                routing.model.clone_from(&target.model);
+            }
+            match self.try_upstream(request, target, emit, record) {
+                Ok(()) => {
+                    record.status = 200;
+                    return Ok(());
+                }
                 Err(error) => {
                     let retriable = error.code.is_retriable_elsewhere();
                     eprintln!(
@@ -311,6 +345,7 @@ impl Gateway {
         request: &ChatRequest,
         target: &UpstreamModel,
         emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
     ) -> Result<(), ErrorEnvelope> {
         let upstream = self
             .upstreams
@@ -347,10 +382,11 @@ impl Gateway {
         }
 
         if request.stream {
-            self.relay_stream(upstream, response, emit)
+            self.relay_stream(upstream, response, emit, record)
         } else {
             let parts: HttpResponseParts = response.into();
             let chat_response = upstream.plugin.parse_response(&parts)?;
+            record.usage = Some(chat_response.usage);
             let rendered = self.agent.render_response(&chat_response, &Value::Null)?;
             emit(Reply::BeginJson(JsonReply {
                 status: 200,
@@ -461,6 +497,7 @@ impl Gateway {
         upstream: &Upstream,
         response: UpstreamResponse,
         emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
     ) -> Result<(), ErrorEnvelope> {
         let mut parser = upstream.plugin.stream_parser();
         let mut reader = response.reader;
@@ -476,12 +513,14 @@ impl Gateway {
                 Ok(read) => read,
                 Err(error) => {
                     // Mid-stream failure: already committed to SSE, so it goes
-                    // out as a rendered error event rather than a status code.
+                    // out as a rendered error event rather than a status code —
+                    // and into the record, where status 200 alone would lie.
                     let envelope = ErrorEnvelope::new(
                         ErrorCode::UpstreamUnavailable,
                         502,
                         format!("upstream stream broke: {error}"),
                     );
+                    record.error_code = Some(envelope.code);
                     let rendered = self.render_stream_error(&envelope);
                     emit(Reply::Chunk(rendered));
                     return Ok(());
@@ -492,6 +531,7 @@ impl Gateway {
             let events = match parser.parse_chunk(&StreamChunk { data }) {
                 Ok(events) => events,
                 Err(envelope) => {
+                    record.error_code = Some(envelope.code);
                     let rendered = self.render_stream_error(&envelope);
                     emit(Reply::Chunk(rendered));
                     return Ok(());
@@ -499,6 +539,9 @@ impl Gateway {
             };
 
             for event in events {
+                if let token_station_protocol::StreamEvent::Usage { usage } = &event {
+                    record.usage = Some(*usage);
+                }
                 let chunk = self.agent.render_stream_event(&event, &Value::Null)?;
                 let data = chunk
                     .get("data")

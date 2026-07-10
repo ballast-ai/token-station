@@ -37,6 +37,39 @@ pub struct ClientConfig {
     /// use, validated to the same credential-proof shape by `UpstreamRef`.
     pub upstreams: BTreeMap<String, UpstreamConfig>,
     pub router: RouterConfig,
+    /// Where the request log and metrics store live. Optional; defaults apply.
+    #[serde(default)]
+    pub data: DataConfig,
+}
+
+/// The local data layer: file log always, metrics store by default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataConfig {
+    /// Holds `requests.log` (+ rotations) and `metrics.sqlite`.
+    #[serde(default = "default_data_dir")]
+    pub dir: PathBuf,
+    /// The metrics store is on by default and local-only; turning it off
+    /// leaves the file log, which is always written.
+    #[serde(default = "default_true")]
+    pub metrics: bool,
+}
+
+impl Default for DataConfig {
+    fn default() -> Self {
+        Self {
+            dir: default_data_dir(),
+            metrics: true,
+        }
+    }
+}
+
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("token-station-data")
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
