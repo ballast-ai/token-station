@@ -1,0 +1,8 @@
+[
+  {
+    "data": "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"
+  },
+  {
+    "data": "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+  }
+]

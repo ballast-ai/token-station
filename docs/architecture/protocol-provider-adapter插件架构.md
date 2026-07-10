@@ -392,7 +392,7 @@ crates/server-plugin-policy    # license、租户 scope、审计
 实现原则：
 
 - `plugin-api` 与 `protocol` 的 breaking change 必须走 `agent-adapter-v2` / `provider-adapter-v2`，不能原地改 ABI。
-- 官方插件也走同一套 conformance，不允许使用内部私有接口绕过。
+- 官方插件也走同一套 conformance，不允许使用内部私有接口绕过。（A2 起为既成事实：`plugins/official/*` 的 `.wasm` 由 `plugin-runtime` 的集成测试装载并跑全套 suite，`crates/plugin-runtime/tests/official_plugins.rs`。）
 - 社区客户端可从本地目录加载插件；平台/企业版从服务端 registry 加载签名插件。
 
 ### 9.1 插件项目边界与拆仓策略

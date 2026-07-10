@@ -11,7 +11,11 @@ members = [
 ]
 # WASM guest 测试件：目标是 wasm32-wasip2，不能进主 workspace 的构建图。
 # plugin-runtime 的测试用子进程 cargo 构建它。
-exclude = ["crates/plugin-runtime/tests/guests/test-provider"]
+exclude = [
+    "crates/plugin-runtime/tests/guests/test-provider",
+    "plugins/official/agent-openai",
+    "plugins/official/provider-openai-compatible",
+]
 
 [workspace.package]
 edition = "2024"

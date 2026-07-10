@@ -1,0 +1,16 @@
+{
+  "context": {
+    "protocol": "openai-chat-completions"
+  },
+  "events": [
+    {
+      "type": "delta",
+      "index": 0,
+      "content": "hi"
+    },
+    {
+      "type": "done",
+      "finish_reason": "stop"
+    }
+  ]
+}

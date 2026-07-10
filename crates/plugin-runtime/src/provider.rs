@@ -1,25 +1,24 @@
-use std::collections::BTreeSet;
-use std::error::Error;
 use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use token_station_conformance::{
-    AdapterResult, ProviderAdapter, StreamParser, accepts_manifest, reported_identity_matches,
+    AdapterResult, ProviderAdapter, StreamParser, reported_identity_matches,
 };
-use token_station_plugin_api::{AdapterKind, AdapterManifest, AdapterMetadata, ManifestError};
+use token_station_plugin_api::{AdapterKind, AdapterManifest, AdapterMetadata};
 use token_station_protocol::{
-    ChatRequest, ChatResponse, ErrorCode, ErrorEnvelope, HttpRequestDescriptor, HttpResponseParts,
+    ChatRequest, ChatResponse, ErrorEnvelope, HttpRequestDescriptor, HttpResponseParts,
     ModelCapability, ProviderConfig, StreamChunk, StreamEvent,
 };
-use wasmtime::component::{Component, Linker, ResourceTable};
-use wasmtime::{Store, StoreLimits, StoreLimitsBuilder};
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime::Store;
+use wasmtime::component::{Component, Linker};
 
-use crate::bindings::ProviderAdapterV1;
-use crate::bindings::token_station::adapter::common as wit_common;
-use crate::bindings::token_station::adapter::host as wit_host;
+use crate::bindings::provider::ProviderAdapterV1;
+use crate::bindings::provider::token_station::adapter::common as wit_common;
+use crate::bindings::provider::token_station::adapter::host as wit_host;
+use crate::loader::{
+    Ctx, LoadError, from_json, parse_error_envelope, read_package, to_json, trap_envelope,
+};
 use crate::runtime::PluginRuntime;
 
 /// Resolves a *declared* credential name into a signature.
@@ -45,46 +44,6 @@ impl SecretSigner for NoSecrets {
     }
 }
 
-/// Everything one store carries: the locked-down WASI, the resource limits,
-/// and the credential boundary for `host.sign`.
-struct Ctx {
-    wasi: WasiCtx,
-    table: ResourceTable,
-    limits: StoreLimits,
-    /// The manifest's `permissions.secrets`, the only names `sign` may see.
-    declared_secrets: BTreeSet<String>,
-    signer: Arc<dyn SecretSigner + Sync>,
-}
-
-impl Ctx {
-    fn new(
-        memory_bytes: usize,
-        declared_secrets: BTreeSet<String>,
-        signer: Arc<dyn SecretSigner + Sync>,
-    ) -> Self {
-        // No preopened directories, no environment, no arguments, no inherited
-        // stdio: WASI is provided so a std-compiled guest can instantiate, and
-        // it opens onto nothing.
-        let wasi = WasiCtxBuilder::new().build();
-        Self {
-            wasi,
-            table: ResourceTable::new(),
-            limits: StoreLimitsBuilder::new().memory_size(memory_bytes).build(),
-            declared_secrets,
-            signer,
-        }
-    }
-}
-
-impl WasiView for Ctx {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.wasi,
-            table: &mut self.table,
-        }
-    }
-}
-
 impl wit_host::Host for Ctx {
     fn sign(
         &mut self,
@@ -101,77 +60,6 @@ impl wit_host::Host for Ctx {
         self.signer.sign(&secret_ref, &payload, &algorithm)
     }
 }
-
-/// Why a plugin package was refused at load.
-///
-/// Ordered like the gates: a package that fails early is reported for the
-/// early failure, so a broken manifest is not reported as a sandbox violation.
-#[derive(Debug)]
-pub enum LoadError {
-    /// The package directory, `manifest.json` or `adapter.wasm` could not be
-    /// read.
-    Unreadable { path: PathBuf, detail: String },
-    /// `manifest.json` is not a manifest.
-    ManifestSyntax(serde_json::Error),
-    /// The manifest gate refused it.
-    Manifest(ManifestError),
-    /// This loader loads provider adapters; the manifest declares something
-    /// else.
-    WrongKind(AdapterKind),
-    /// The bytes are not a WASM component, or do not export the
-    /// `provider-adapter-v1` world.
-    NotAnAdapter(wasmtime::Error),
-    /// The component imports an interface the sandbox will never provide.
-    ForbiddenImport(String),
-    /// The identity gate refused it: `metadata()` disagrees with the manifest.
-    IdentityMismatch {
-        declared: Box<AdapterMetadata>,
-        reported: Box<AdapterMetadata>,
-    },
-    /// The adapter trapped or failed while being probed at load.
-    Probe(wasmtime::Error),
-}
-
-impl fmt::Display for LoadError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unreadable { path, detail } => {
-                write!(f, "cannot read `{}`: {detail}", path.display())
-            }
-            Self::ManifestSyntax(detail) => write!(f, "manifest.json is not a manifest: {detail}"),
-            Self::Manifest(error) => write!(f, "manifest refused: {error}"),
-            Self::WrongKind(kind) => write!(
-                f,
-                "expected a provider adapter, the manifest declares {kind:?}"
-            ),
-            Self::NotAnAdapter(error) => {
-                write!(f, "not a provider-adapter-v1 component: {error}")
-            }
-            Self::ForbiddenImport(name) => write!(
-                f,
-                "component imports `{name}`; adapters have no network, the host makes every request"
-            ),
-            Self::IdentityMismatch { declared, reported } => write!(
-                f,
-                "adapter reports {}/{} but its manifest declares {}/{}; \
-                 the package is not what it claims to be",
-                reported.name, reported.version, declared.name, declared.version
-            ),
-            Self::Probe(error) => write!(f, "adapter failed while being probed at load: {error}"),
-        }
-    }
-}
-
-impl Error for LoadError {}
-
-/// Interface prefixes the sandbox refuses outright instead of stubbing out.
-///
-/// The rest of WASI gets a locked-down implementation because a std-compiled
-/// guest imports it whether its author wanted to or not. The network is
-/// different: no protocol adapter has any business even *asking*, and an empty
-/// implementation would leave "did we actually cut this off" to be re-audited
-/// on every wasmtime upgrade. Refusing the import makes the question moot.
-const FORBIDDEN_IMPORT_PREFIXES: &[&str] = &["wasi:sockets/", "wasi:http/"];
 
 /// A loaded, gated provider adapter.
 ///
@@ -209,28 +97,7 @@ impl ProviderPlugin {
     ) -> Result<Self, LoadError> {
         let signer: Arc<dyn SecretSigner + Sync> = Arc::new(signer);
 
-        // Gate 1: the manifest, before any code is read.
-        let manifest_path = dir.join("manifest.json");
-        let manifest_source =
-            fs::read_to_string(&manifest_path).map_err(|error| LoadError::Unreadable {
-                path: manifest_path,
-                detail: error.to_string(),
-            })?;
-        let manifest: AdapterManifest =
-            serde_json::from_str(&manifest_source).map_err(LoadError::ManifestSyntax)?;
-        accepts_manifest(&manifest).map_err(LoadError::Manifest)?;
-        if manifest.kind != AdapterKind::Provider {
-            return Err(LoadError::WrongKind(manifest.kind));
-        }
-
-        // Gate 2: the compiled component and its imports.
-        let wasm_path = dir.join("adapter.wasm");
-        let wasm = fs::read(&wasm_path).map_err(|error| LoadError::Unreadable {
-            path: wasm_path,
-            detail: error.to_string(),
-        })?;
-        let component = Component::new(runtime.engine(), &wasm).map_err(LoadError::NotAnAdapter)?;
-        refuse_forbidden_imports(runtime, &component)?;
+        let (manifest, component) = read_package(runtime, dir, AdapterKind::Provider, &[])?;
 
         let mut linker: Linker<Ctx> = Linker::new(runtime.engine());
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(LoadError::NotAnAdapter)?;
@@ -287,21 +154,6 @@ impl ProviderPlugin {
     }
 }
 
-fn refuse_forbidden_imports(
-    runtime: &PluginRuntime,
-    component: &Component,
-) -> Result<(), LoadError> {
-    for (name, _) in component.component_type().imports(runtime.engine()) {
-        if FORBIDDEN_IMPORT_PREFIXES
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
-        {
-            return Err(LoadError::ForbiddenImport(name.to_owned()));
-        }
-    }
-    Ok(())
-}
-
 /// Builds one instance with its own locked-down store.
 fn instantiate(
     runtime: &PluginRuntime,
@@ -334,7 +186,7 @@ impl InstanceHandle {
     }
 }
 
-fn convert_metadata(wit: wit_common::AdapterMetadata) -> AdapterMetadata {
+pub(crate) fn convert_metadata(wit: wit_common::AdapterMetadata) -> AdapterMetadata {
     AdapterMetadata::new(
         wit.name,
         wit.version,
@@ -344,47 +196,6 @@ fn convert_metadata(wit: wit_common::AdapterMetadata) -> AdapterMetadata {
         },
         wit.api_version,
     )
-}
-
-/// The guest's error side is a `protocol::ErrorEnvelope` as JSON. A guest that
-/// returns something else on its error channel gets an `internal` envelope
-/// quoting it, so the failure is still attributed to the adapter.
-fn parse_error_envelope(error_json: &str) -> ErrorEnvelope {
-    serde_json::from_str(error_json).unwrap_or_else(|_| {
-        ErrorEnvelope::new(
-            ErrorCode::Internal,
-            500,
-            format!("adapter returned a malformed error: {error_json}"),
-        )
-    })
-}
-
-fn trap_envelope(trap: &wasmtime::Error) -> ErrorEnvelope {
-    ErrorEnvelope::new(
-        ErrorCode::Internal,
-        500,
-        format!("adapter did not answer: {trap}"),
-    )
-}
-
-fn to_json<T: serde::Serialize>(value: &T) -> AdapterResult<String> {
-    serde_json::to_string(value).map_err(|error| {
-        ErrorEnvelope::new(
-            ErrorCode::Internal,
-            500,
-            format!("could not serialize the canonical form: {error}"),
-        )
-    })
-}
-
-fn from_json<T: for<'de> serde::Deserialize<'de>>(json: &str) -> AdapterResult<T> {
-    serde_json::from_str(json).map_err(|error| {
-        ErrorEnvelope::new(
-            ErrorCode::Internal,
-            500,
-            format!("adapter returned JSON that is not the canonical form: {error}"),
-        )
-    })
 }
 
 impl ProviderAdapter for ProviderPlugin {
