@@ -8,9 +8,16 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+axum = "0.8.9"
+serde = { workspace = true }
 serde_json = { workspace = true }
+token-station-conformance = { path = "../../crates/conformance" }
+token-station-plugin-runtime = { path = "../../crates/plugin-runtime" }
 token-station-protocol = { path = "../../crates/protocol" }
 token-station-router-core = { path = "../../crates/router-core" }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "signal"] }
+tokio-stream = "0.1.18"
+ureq = "3.3.0"
 
 [lints]
 workspace = true
