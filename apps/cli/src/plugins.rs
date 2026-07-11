@@ -23,15 +23,29 @@
 //! cannot hijack `openai-compatible`, and a shipped layout that carries both
 //! the embedded copy and a `plugins-dist/` copy of the same package must
 //! start, so the loser is noted in `plugin list` instead of refused.
+//!
+//! # Trust (architecture section 12.3, stage B2)
+//!
+//! Dropping a package into the directory registers it in the catalog, but is
+//! not enough to receive traffic. A discovered package binds its dialects
+//! only when one of three things vouches for it: it is builtin (shipped
+//! inside the signed binary), `plugin install` ran the conformance suite on
+//! it and left a [`Receipts`] entry matching its current `adapter.wasm`
+//! hash, or the operator wrote it down — an explicit `plugins.providers`
+//! entry, or `plugins.allow_unsigned = true` for the whole directory.
+//! Receipts live in the data directory, not the package directory, so a
+//! downloaded package cannot ship its own approval.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use token_station_plugin_api::{AdapterKind, AdapterManifest};
+use token_station_release::sha256_file;
 
-use crate::config::PluginsConfig;
+use crate::config::{ClientConfig, PluginsConfig};
 
 /// The builtin tier's raw material. With the feature off the slice is empty
 /// and everything below degrades to pure directory discovery.
@@ -85,6 +99,71 @@ impl PackageSource {
 pub struct DiscoveredPackage {
     pub manifest: AdapterManifest,
     pub source: PackageSource,
+    /// Builtin, or carries a conformance receipt matching its current
+    /// `adapter.wasm`. Unverified packages are catalogued but bind no
+    /// dialects unless the operator vouches (see the module docs).
+    pub verified: bool,
+}
+
+/// What `plugin install` records after a package passes its conformance
+/// suite: the hash the approval applies to. A changed `adapter.wasm`
+/// invalidates the receipt — approval follows bytes, not names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Receipt {
+    pub sha256: String,
+    pub suite: String,
+}
+
+/// The conformance receipts, one per installed package, stored under the
+/// data directory (`plugin-receipts.json`).
+#[derive(Debug)]
+pub struct Receipts {
+    path: PathBuf,
+    entries: BTreeMap<String, Receipt>,
+}
+
+impl Receipts {
+    /// Reads the receipt file; a missing file is an empty store, which is
+    /// every installation that never ran `plugin install`.
+    ///
+    /// # Errors
+    ///
+    /// The file exists but cannot be read or parsed — corrupt approvals must
+    /// not silently degrade to "nothing is approved".
+    pub fn load(data_dir: &Path) -> Result<Self, String> {
+        let path = data_dir.join("plugin-receipts.json");
+        let entries = match fs::read_to_string(&path) {
+            Ok(source) => serde_json::from_str(&source)
+                .map_err(|error| format!("{}: {error}", path.display()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        };
+        Ok(Self { path, entries })
+    }
+
+    fn matches(&self, package: &str, sha256: &str) -> bool {
+        self.entries
+            .get(package)
+            .is_some_and(|receipt| receipt.sha256 == sha256)
+    }
+
+    fn record(&mut self, package: String, receipt: Receipt) {
+        self.entries.insert(package, receipt);
+    }
+
+    fn forget(&mut self, package: &str) {
+        self.entries.remove(package);
+    }
+
+    fn save(&self) -> Result<(), String> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+        }
+        let mut rendered = serde_json::to_string_pretty(&self.entries)
+            .map_err(|error| format!("receipts: {error}"))?;
+        rendered.push('\n');
+        fs::write(&self.path, rendered).map_err(|error| format!("{}: {error}", self.path.display()))
+    }
 }
 
 /// Which tier bound a dialect.
@@ -112,8 +191,9 @@ pub struct PluginRegistry {
     plugins_dir: PathBuf,
     packages: Vec<DiscoveredPackage>,
     providers: BTreeMap<String, ProviderBinding>,
-    /// Same-dialect losers to the builtin tier, kept for `plugin list`.
-    shadowed: Vec<String>,
+    /// What the merge declined to bind and why — builtin shadowing, missing
+    /// receipts — kept for `plugin list`.
+    notes: Vec<String>,
 }
 
 impl PluginRegistry {
@@ -130,18 +210,29 @@ impl PluginRegistry {
     /// invalid manifest (named by path), or a same-tier dialect conflict
     /// (naming both claimants). Loud by design — a package that cannot be
     /// described must not silently drop out of the catalog.
-    pub fn discover(plugins: &PluginsConfig) -> Result<Self, String> {
+    pub fn discover(plugins: &PluginsConfig, receipts: &Receipts) -> Result<Self, String> {
         let mut packages = builtin_packages()?;
-        packages.extend(scan(&plugins.dir)?);
-        let (mut providers, mut shadowed) = bind_declared_dialects(&packages)?;
-        merge_explicit_entries(plugins, &packages, &mut providers, &mut shadowed)?;
+        packages.extend(scan(&plugins.dir, receipts)?);
+        let (mut providers, mut notes) = bind_declared_dialects(&packages, plugins.allow_unsigned)?;
+        merge_explicit_entries(plugins, &packages, &mut providers, &mut notes)?;
 
         Ok(Self {
             plugins_dir: plugins.dir.clone(),
             packages,
             providers,
-            shadowed,
+            notes,
         })
+    }
+
+    /// [`PluginRegistry::discover`] with the receipts a config's data
+    /// directory holds — the composition every caller wants.
+    ///
+    /// # Errors
+    ///
+    /// As [`Receipts::load`] and [`PluginRegistry::discover`].
+    pub fn for_config(config: &ClientConfig) -> Result<Self, String> {
+        let receipts = Receipts::load(&config.data.dir)?;
+        Self::discover(&config.plugins, &receipts)
     }
 
     /// The binding serving `dialect`, if any plugin speaks it.
@@ -174,8 +265,18 @@ impl PluginRegistry {
             )
     }
 
+    /// Finds a package by the name `plugin info/remove` would use: builtin
+    /// manifest name or local directory name.
+    #[must_use]
+    pub fn package(&self, name: &str) -> Option<&DiscoveredPackage> {
+        self.packages.iter().find(|package| match &package.source {
+            PackageSource::Builtin { .. } => package.manifest.name == name,
+            PackageSource::Dir(dir) => package_dir_name(dir) == name,
+        })
+    }
+
     /// The `plugin list` rendering: dialects first (they are what an operator
-    /// configures against), then the known packages, then what got shadowed.
+    /// configures against), then the known packages, then what got declined.
     #[must_use]
     pub fn render_list(&self) -> String {
         let mut out = String::new();
@@ -216,14 +317,19 @@ impl PluginRegistry {
                 PackageSource::Builtin { .. } => manifest.name.clone(),
                 PackageSource::Dir(dir) => package_dir_name(dir),
             };
+            let trust = if package.verified {
+                "verified"
+            } else {
+                "unverified"
+            };
             let _ = writeln!(
                 out,
-                "  {name} {} {kind} ({}) — {bindings}",
+                "  {name} {} {kind} ({}) [{trust}] — {bindings}",
                 manifest.version,
                 package.source.describe(),
             );
         }
-        for note in &self.shadowed {
+        for note in &self.notes {
             let _ = writeln!(out, "note: {note}");
         }
         out
@@ -253,20 +359,35 @@ fn builtin_packages() -> Result<Vec<DiscoveredPackage>, String> {
                 manifest_source: package.manifest_source,
                 wasm: package.wasm,
             },
+            verified: true,
         });
     }
     Ok(packages)
 }
 
 /// Binds every dialect the given packages' manifests declare. Builtin wins
-/// across tiers (noted); a same-tier double claim is refused.
+/// across tiers (noted); a same-tier double claim is refused; an unverified
+/// package binds nothing unless the operator set `allow_unsigned` (noted).
 fn bind_declared_dialects(
     packages: &[DiscoveredPackage],
+    allow_unsigned: bool,
 ) -> Result<(BTreeMap<String, ProviderBinding>, Vec<String>), String> {
     let mut providers: BTreeMap<String, ProviderBinding> = BTreeMap::new();
     let mut shadowed = Vec::new();
     for package in packages {
         if package.manifest.kind != AdapterKind::Provider {
+            continue;
+        }
+        if !package.verified && !allow_unsigned {
+            if let PackageSource::Dir(dir) = &package.source {
+                shadowed.push(format!(
+                    "package `{}` has no conformance receipt; its dialects [{}] are not served \
+                     — run `plugin install {}`, or set plugins.allow_unsigned",
+                    package_dir_name(dir),
+                    package.manifest.providers.join(", "),
+                    dir.display(),
+                ));
+            }
             continue;
         }
         let (name, origin) = match &package.source {
@@ -338,10 +459,13 @@ fn merge_explicit_entries(
                 // The named package may have been scanned and simply not
                 // declare this dialect — that is a lie in the config, not a
                 // package to load and find out.
-                let scanned_but_silent = packages.iter().any(
+                // (A scanned package that does declare it reached here only
+                // because it lacks a receipt; the hand-written entry is the
+                // operator vouching, so it binds below.)
+                let scanned = packages.iter().find(
                     |candidate| matches!(&candidate.source, PackageSource::Dir(d) if *d == dir),
                 );
-                if scanned_but_silent {
+                if scanned.is_some_and(|found| !found.manifest.providers.contains(dialect)) {
                     return Err(format!(
                         "plugins.providers maps `{dialect}` to `{package}`, but its manifest ({}) \
                          does not declare that dialect",
@@ -362,8 +486,9 @@ fn merge_explicit_entries(
     Ok(())
 }
 
-/// Reads every `<dir>/<package>/manifest.json`, in name order.
-fn scan(dir: &Path) -> Result<Vec<DiscoveredPackage>, String> {
+/// Reads every `<dir>/<package>/manifest.json`, in name order, checking each
+/// package's `adapter.wasm` against the receipt store.
+fn scan(dir: &Path, receipts: &Receipts) -> Result<Vec<DiscoveredPackage>, String> {
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -385,9 +510,14 @@ fn scan(dir: &Path) -> Result<Vec<DiscoveredPackage>, String> {
         manifest
             .validate()
             .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+        // Approval follows bytes: a receipt for a different (or absent)
+        // adapter.wasm vouches for nothing.
+        let verified = sha256_file(&package_dir.join("adapter.wasm"))
+            .is_ok_and(|sha256| receipts.matches(&package_dir_name(&package_dir), &sha256));
         packages.push(DiscoveredPackage {
             manifest,
             source: PackageSource::Dir(package_dir),
+            verified,
         });
     }
     Ok(packages)
@@ -398,6 +528,225 @@ fn package_dir_name(dir: &Path) -> String {
         || dir.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     )
+}
+
+/// `plugin install`: the explicit confirmation that turns a package on disk
+/// into one that may serve traffic. Manifest gate, full conformance suite,
+/// copy into `plugins.dir` under the manifest's name, receipt.
+///
+/// # Errors
+///
+/// Whatever refused the package first: an unreadable or invalid manifest, a
+/// dialect another package already provides, a failing conformance check
+/// (the report names each failure), or the filesystem.
+pub fn install(config: &ClientConfig, source: &Path) -> Result<String, String> {
+    let manifest_path = source.join("manifest.json");
+    let manifest_source = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+    let manifest: AdapterManifest = serde_json::from_str(&manifest_source)
+        .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+    token_station_conformance::accepts_manifest(&manifest)
+        .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
+
+    let name = manifest.name.clone();
+    let dest = config.plugins.dir.join(&name);
+    if dest.exists() {
+        return Err(format!(
+            "{} already exists; `plugin remove {name}` first",
+            dest.display()
+        ));
+    }
+
+    let mut receipts = Receipts::load(&config.data.dir)?;
+    let registry = PluginRegistry::discover(&config.plugins, &receipts)?;
+    for dialect in &manifest.providers {
+        if let Some(existing) = registry.provider_binding(dialect) {
+            return Err(format!(
+                "dialect `{dialect}` is already provided by `{}` ({}); two providers for one \
+                 dialect is a conflict",
+                existing.package,
+                existing.source.describe(),
+            ));
+        }
+    }
+
+    let report = run_conformance(source, &manifest)?;
+    if !report.is_passing() {
+        return Err(format!("conformance refused the package:\n{report}"));
+    }
+
+    if let Err(error) = copy_package(source, &dest, &manifest.conformance.fixtures) {
+        // A half-copied package must not sit where discovery scans.
+        let _ = fs::remove_dir_all(&dest);
+        return Err(error);
+    }
+    let sha256 = sha256_file(&dest.join("adapter.wasm"))
+        .map_err(|error| format!("{}: {error}", dest.join("adapter.wasm").display()))?;
+    receipts.record(
+        name.clone(),
+        Receipt {
+            sha256,
+            suite: report.suite().to_owned(),
+        },
+    );
+    receipts.save()?;
+
+    Ok(format!(
+        "installed `{name}` {} into {} — {} passed, receipt recorded",
+        manifest.version,
+        dest.display(),
+        report.suite(),
+    ))
+}
+
+/// `plugin remove`: deletes an installed package and its receipt. Refused
+/// while a configured upstream still resolves through it.
+///
+/// # Errors
+///
+/// No such package, an upstream still depends on it, or the filesystem.
+pub fn remove(config: &ClientConfig, name: &str) -> Result<String, String> {
+    let dir = config.plugins.dir.join(name);
+    if !dir.join("manifest.json").is_file() {
+        return Err(format!(
+            "no installed package at {}; `plugin list` shows what exists",
+            dir.display()
+        ));
+    }
+
+    let registry = PluginRegistry::for_config(config)?;
+    for (upstream, entry) in &config.upstreams {
+        let serves_through_this = registry
+            .provider_binding(&entry.provider)
+            .is_some_and(|binding| matches!(&binding.source, PackageSource::Dir(d) if *d == dir));
+        if serves_through_this {
+            return Err(format!(
+                "upstream `{upstream}` still speaks `{}` through `{name}`; \
+                 `upstream remove {upstream}` first",
+                entry.provider
+            ));
+        }
+    }
+
+    fs::remove_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    let mut receipts = Receipts::load(&config.data.dir)?;
+    receipts.forget(name);
+    receipts.save()?;
+    Ok(format!("removed `{name}` ({})", dir.display()))
+}
+
+/// `plugin info`: one package, in full — for the operator deciding whether
+/// to trust, install or remove it.
+///
+/// # Errors
+///
+/// No package by that name.
+pub fn info(config: &ClientConfig, name: &str) -> Result<String, String> {
+    let registry = PluginRegistry::for_config(config)?;
+    let package = registry
+        .package(name)
+        .ok_or_else(|| format!("no package named `{name}`; `plugin list` shows what exists"))?;
+    let manifest = &package.manifest;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "name: {}", manifest.name);
+    let _ = writeln!(out, "version: {}", manifest.version);
+    let _ = writeln!(out, "api: {}", manifest.api_version);
+    let _ = writeln!(out, "source: {}", package.source.describe());
+    let _ = writeln!(
+        out,
+        "trust: {}",
+        if package.verified {
+            "verified"
+        } else {
+            "unverified — `plugin install` it to run conformance"
+        }
+    );
+    match manifest.kind {
+        AdapterKind::Provider => {
+            let _ = writeln!(out, "kind: provider-adapter");
+            let _ = writeln!(out, "providers: {}", manifest.providers.join(", "));
+            let _ = writeln!(
+                out,
+                "secrets: {}",
+                if manifest.permissions.secrets.is_empty() {
+                    "none".to_owned()
+                } else {
+                    manifest.permissions.secrets.join(", ")
+                }
+            );
+        }
+        AdapterKind::Agent => {
+            let _ = writeln!(out, "kind: agent-adapter");
+            let _ = writeln!(out, "protocols: {}", manifest.agent_protocols.join(", "));
+        }
+    }
+    let _ = writeln!(out, "suite: {}", manifest.conformance.required_suite);
+    if let PackageSource::Dir(dir) = &package.source {
+        if let Ok(sha256) = sha256_file(&dir.join("adapter.wasm")) {
+            let _ = writeln!(out, "adapter.wasm sha256: {sha256}");
+        }
+    }
+    Ok(out)
+}
+
+/// Loads the package from its source directory and runs the suite its
+/// manifest requires — the same gates and the same fixtures a third party
+/// ran in their CI.
+fn run_conformance(
+    source: &Path,
+    manifest: &AdapterManifest,
+) -> Result<token_station_conformance::Report, String> {
+    use token_station_conformance::{FixturePack, run_agent_suite, run_provider_suite};
+    use token_station_plugin_runtime::{
+        AgentPlugin, NoSecrets, PluginRuntime, ProviderPlugin, RuntimeLimits,
+    };
+
+    let runtime = PluginRuntime::new(RuntimeLimits::default())
+        .map_err(|error| format!("wasm engine: {error}"))?;
+    let fixtures = source.join(&manifest.conformance.fixtures);
+    let fixture_failure = |error| format!("{}: {error}", fixtures.display());
+    let load_failure = |error| format!("{}: {error}", source.display());
+
+    match manifest.kind {
+        AdapterKind::Provider => {
+            let plugin = ProviderPlugin::load(&runtime, source, NoSecrets).map_err(load_failure)?;
+            let pack = FixturePack::load(&fixtures).map_err(fixture_failure)?;
+            Ok(run_provider_suite(&plugin, &pack))
+        }
+        AdapterKind::Agent => {
+            let plugin = AgentPlugin::load(&runtime, source).map_err(load_failure)?;
+            let pack = FixturePack::load(&fixtures).map_err(fixture_failure)?;
+            Ok(run_agent_suite(&plugin, &pack))
+        }
+    }
+}
+
+/// Copies what the runtime and future re-verification need: the manifest,
+/// the component, and the fixtures the suite ran on.
+fn copy_package(source: &Path, dest: &Path, fixtures_rel: &str) -> Result<(), String> {
+    fs::create_dir_all(dest).map_err(|error| format!("{}: {error}", dest.display()))?;
+    for file in ["manifest.json", "adapter.wasm"] {
+        fs::copy(source.join(file), dest.join(file))
+            .map_err(|error| format!("{}: {error}", source.join(file).display()))?;
+    }
+    copy_dir(&source.join(fixtures_rel), &dest.join(fixtures_rel))
+}
+
+fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|error| format!("{}: {error}", to.display()))?;
+    let entries = fs::read_dir(from).map_err(|error| format!("{}: {error}", from.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("{}: {error}", from.display()))?;
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), &target)
+                .map_err(|error| format!("{}: {error}", entry.path().display()))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -454,6 +803,9 @@ mod tests {
         dir
     }
 
+    /// The dev-mode config most tests want: unsigned packages allowed, so a
+    /// manifest-only package (no wasm, no receipt) still binds. The trust
+    /// gate itself is exercised by the `*_receipt_*` tests below.
     fn plugins(dir: PathBuf, providers: &[(&str, &str)]) -> PluginsConfig {
         PluginsConfig {
             dir,
@@ -462,7 +814,15 @@ mod tests {
                 .iter()
                 .map(|(dialect, package)| ((*dialect).to_owned(), (*package).to_owned()))
                 .collect::<BTreeMap<_, _>>(),
+            allow_unsigned: true,
         }
+    }
+
+    /// Discovery with an empty receipt store (no data dir).
+    fn discover(config: &PluginsConfig) -> Result<PluginRegistry, String> {
+        let receipts = super::Receipts::load(Path::new("/nonexistent-token-station-data"))
+            .expect("a missing receipt file is an empty store");
+        PluginRegistry::discover(config, &receipts)
     }
 
     fn dialect_dir<'registry>(
@@ -487,8 +847,7 @@ mod tests {
         );
         write_package(&dir, "agent-openai", &agent_manifest("agent-openai"));
 
-        let registry =
-            PluginRegistry::discover(&plugins(dir.clone(), &[])).expect("both manifests are valid");
+        let registry = discover(&plugins(dir.clone(), &[])).expect("both manifests are valid");
 
         // `contains`, not equality: the builtin tier adds its own dialects
         // when the release feature is on.
@@ -512,7 +871,7 @@ mod tests {
         write_package(&dir, "provider-a", &provider_manifest("provider-a", &["x"]));
         write_package(&dir, "provider-b", &provider_manifest("provider-b", &["x"]));
 
-        let error = PluginRegistry::discover(&plugins(dir.clone(), &[]))
+        let error = discover(&plugins(dir.clone(), &[]))
             .expect_err("the same dialect twice is a conflict, not a race");
         assert!(
             error.contains("provider-a") && error.contains("provider-b"),
@@ -526,7 +885,7 @@ mod tests {
         let dir = scratch("redundant");
         write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
 
-        let registry = PluginRegistry::discover(&plugins(dir.clone(), &[("x", "provider-x")]))
+        let registry = discover(&plugins(dir.clone(), &[("x", "provider-x")]))
             .expect("agreement is not a conflict");
         assert!(registry.provider_dialects().contains(&"x"));
         fs::remove_dir_all(dir).ok();
@@ -537,7 +896,7 @@ mod tests {
         let dir = scratch("disagree");
         write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
 
-        let error = PluginRegistry::discover(&plugins(dir.clone(), &[("x", "provider-other")]))
+        let error = discover(&plugins(dir.clone(), &[("x", "provider-other")]))
             .expect_err("two answers for one dialect");
         assert!(error.contains("provider-x"), "{error}");
         fs::remove_dir_all(dir).ok();
@@ -548,7 +907,7 @@ mod tests {
         let dir = scratch("lie");
         write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
 
-        let error = PluginRegistry::discover(&plugins(dir.clone(), &[("y", "provider-x")]))
+        let error = discover(&plugins(dir.clone(), &[("y", "provider-x")]))
             .expect_err("the manifest does not declare `y`");
         assert!(error.contains("does not declare"), "{error}");
         fs::remove_dir_all(dir).ok();
@@ -558,7 +917,7 @@ mod tests {
     fn an_explicit_entry_for_an_absent_package_is_kept_for_the_loader_to_report() {
         let dir = scratch("absent");
 
-        let registry = PluginRegistry::discover(&plugins(dir.clone(), &[("x", "provider-x")]))
+        let registry = discover(&plugins(dir.clone(), &[("x", "provider-x")]))
             .expect("pre-discovery configs keep working");
         assert_eq!(
             dialect_dir(&registry, "x"),
@@ -573,7 +932,7 @@ mod tests {
         let dir = scratch("broken");
         write_package(&dir, "provider-x", "{ not json");
 
-        let error = PluginRegistry::discover(&plugins(dir.clone(), &[]))
+        let error = discover(&plugins(dir.clone(), &[]))
             .expect_err("an undescribable package must not drop out silently");
         assert!(error.contains("manifest.json"), "{error}");
         fs::remove_dir_all(dir).ok();
@@ -582,16 +941,15 @@ mod tests {
     #[test]
     fn a_missing_plugins_dir_yields_the_explicit_entries_only() {
         let dir = std::env::temp_dir().join("token-station-plugins-nowhere");
-        let registry = PluginRegistry::discover(&plugins(dir, &[("x", "provider-x")]))
-            .expect("a missing dir is not an error");
+        let registry =
+            discover(&plugins(dir, &[("x", "provider-x")])).expect("a missing dir is not an error");
         assert!(registry.provider_dialects().contains(&"x"));
     }
 
     #[test]
     fn an_agent_package_with_no_builtin_resolves_to_its_directory() {
         let dir = scratch("agent-dir");
-        let registry =
-            PluginRegistry::discover(&plugins(dir.clone(), &[])).expect("empty dir is fine");
+        let registry = discover(&plugins(dir.clone(), &[])).expect("empty dir is fine");
         // A name no builtin carries, so this holds with the feature on or off.
         match registry.agent_source("agent-custom") {
             PackageSource::Dir(resolved) => assert_eq!(resolved, dir.join("agent-custom")),
@@ -599,6 +957,72 @@ mod tests {
                 panic!("no builtin package is named agent-custom")
             }
         }
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn an_unverified_package_binds_nothing_by_default() {
+        let dir = scratch("trust-gate");
+        write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
+        fs::write(dir.join("provider-x/adapter.wasm"), b"not really wasm")
+            .expect("temp dir is writable");
+        let mut config = plugins(dir.clone(), &[]);
+        config.allow_unsigned = false;
+
+        let registry = discover(&config).expect("unverified is a note, not an error");
+        assert!(
+            registry.provider_binding("x").is_none(),
+            "no receipt, no traffic"
+        );
+        assert!(registry.render_list().contains("no conformance receipt"));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_receipt_matching_the_wasm_binds_and_a_stale_one_does_not() {
+        let dir = scratch("receipts");
+        write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
+        let wasm = dir.join("provider-x/adapter.wasm");
+        fs::write(&wasm, b"component bytes").expect("temp dir is writable");
+
+        let data = dir.join("data");
+        let mut receipts = super::Receipts::load(&data).expect("missing file is empty");
+        receipts.record(
+            "provider-x".to_owned(),
+            super::Receipt {
+                sha256: super::sha256_file(&wasm).expect("the file just got written"),
+                suite: "provider-protocol-v1".to_owned(),
+            },
+        );
+        receipts.save().expect("data dir is writable");
+
+        let mut config = plugins(dir.clone(), &[]);
+        config.allow_unsigned = false;
+        let reloaded = super::Receipts::load(&data).expect("round-trips");
+        let registry = PluginRegistry::discover(&config, &reloaded).expect("a receipt vouches");
+        assert!(registry.provider_binding("x").is_some());
+        assert!(registry.package("provider-x").expect("catalogued").verified);
+
+        // The wasm changes; the approval must not follow the name.
+        fs::write(&wasm, b"different bytes").expect("temp dir is writable");
+        let registry =
+            PluginRegistry::discover(&config, &reloaded).expect("stale is a note, not an error");
+        assert!(
+            registry.provider_binding("x").is_none(),
+            "approval follows bytes"
+        );
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn an_explicit_entry_vouches_for_an_unverified_package() {
+        let dir = scratch("vouch");
+        write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
+        let mut config = plugins(dir.clone(), &[("x", "provider-x")]);
+        config.allow_unsigned = false;
+
+        let registry = discover(&config).expect("the hand-written entry is the confirmation");
+        assert!(registry.provider_binding("x").is_some());
         fs::remove_dir_all(dir).ok();
     }
 
@@ -615,7 +1039,7 @@ mod tests {
             &provider_manifest("provider-imposter", &["openai-compatible"]),
         );
 
-        let registry = PluginRegistry::discover(&plugins(dir.clone(), &[]))
+        let registry = discover(&plugins(dir.clone(), &[]))
             .expect("a builtin conflict is shadowed, not refused");
         let binding = registry
             .provider_binding("openai-compatible")
