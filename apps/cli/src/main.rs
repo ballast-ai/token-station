@@ -130,6 +130,15 @@ enum ConfigCommand {
 enum PluginCommand {
     /// Discovered packages, plus the dialect registry `upstream add` checks.
     List,
+    /// Admit a package: run its conformance suite, copy it into the plugins
+    /// directory, record the approval. The path holds manifest.json,
+    /// adapter.wasm and fixtures/.
+    Install { path: PathBuf },
+    /// Delete an installed package and its approval (refused while an
+    /// upstream still routes through it).
+    Remove { name: String },
+    /// One package in full: identity, trust, dialects, declared secrets.
+    Info { name: String },
 }
 
 #[derive(Subcommand)]
@@ -205,7 +214,7 @@ fn run(cli: Cli) -> Result<(), String> {
         }) => mutate(&cli.config, |config| {
             // Refuse an unresolvable dialect now, at the terminal where the
             // operator can act on it — not at the next `serve`.
-            let registry = plugins::PluginRegistry::discover(&config.plugins)?;
+            let registry = plugins::PluginRegistry::for_config(config)?;
             if registry.provider_binding(&provider).is_none() {
                 return Err(format!(
                     "no plugin provides dialect `{provider}`; available: [{}] (scanned {})",
@@ -246,8 +255,24 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Plugin(PluginCommand::List) => {
             let config = load(&cli.config)?;
-            let registry = plugins::PluginRegistry::discover(&config.plugins)?;
+            let registry = plugins::PluginRegistry::for_config(&config)?;
             print!("{}", registry.render_list());
+            Ok(())
+        }
+        Command::Plugin(PluginCommand::Install { path }) => {
+            let config = load(&cli.config)?;
+            println!("{}", plugins::install(&config, &path)?);
+            eprintln!("note: a running `serve` applies plugin changes on restart");
+            Ok(())
+        }
+        Command::Plugin(PluginCommand::Remove { name }) => {
+            let config = load(&cli.config)?;
+            println!("{}", plugins::remove(&config, &name)?);
+            Ok(())
+        }
+        Command::Plugin(PluginCommand::Info { name }) => {
+            let config = load(&cli.config)?;
+            print!("{}", plugins::info(&config, &name)?);
             Ok(())
         }
         Command::Rule(RuleCommand::List) => {
