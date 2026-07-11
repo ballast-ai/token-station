@@ -124,12 +124,33 @@ impl Gateway {
             .cloned()
             .ok_or("agent plugin declares no protocol")?;
 
+        // Resolve dialects through the discovery registry, and load only the
+        // packages configured upstreams actually speak — a broken package no
+        // upstream uses is `plugin list`'s business, not startup's.
+        let registry = crate::plugins::PluginRegistry::discover(&config.plugins)?;
         let mut provider_plugins: BTreeMap<String, Arc<ProviderPlugin>> = BTreeMap::new();
-        for (provider, package) in &config.plugins.providers {
+        for (name, entry) in &config.upstreams {
+            if provider_plugins.contains_key(&entry.provider) {
+                continue;
+            }
+            let package_dir = registry.provider_dir(&entry.provider).ok_or_else(|| {
+                format!(
+                    "upstream `{name}` speaks `{}`, but no plugin provides that dialect; \
+                     available: [{}] (scanned {})",
+                    entry.provider,
+                    registry.provider_dialects().join(", "),
+                    config.plugins.dir.display(),
+                )
+            })?;
             let plugin =
-                ProviderPlugin::load(&runtime, &config.plugins.dir.join(package), NoSecrets)
-                    .map_err(|error| format!("provider plugin `{package}`: {error}"))?;
-            provider_plugins.insert(provider.clone(), Arc::new(plugin));
+                ProviderPlugin::load(&runtime, package_dir, NoSecrets).map_err(|error| {
+                    format!(
+                        "provider plugin for `{}` ({}): {error}",
+                        entry.provider,
+                        package_dir.display(),
+                    )
+                })?;
+            provider_plugins.insert(entry.provider.clone(), Arc::new(plugin));
         }
 
         let mut upstreams = BTreeMap::new();
@@ -141,7 +162,7 @@ impl Gateway {
             let plugin = Arc::clone(
                 provider_plugins
                     .get(&entry.provider)
-                    .expect("config validation checked the mapping"),
+                    .expect("the loop above loaded a plugin for every configured dialect"),
             );
 
             let mut provider_config =

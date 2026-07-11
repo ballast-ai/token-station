@@ -20,6 +20,7 @@ pub mod config;
 pub mod filelog;
 pub mod gateway;
 pub mod manage;
+pub mod plugins;
 pub mod secrets;
 pub mod server;
 pub mod stats;

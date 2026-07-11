@@ -14,7 +14,7 @@ use token_station_cli::config::ClientConfig;
 use token_station_cli::filelog::{FileLog, Recorders};
 use token_station_cli::gateway::Gateway;
 use token_station_cli::store::SqliteStore;
-use token_station_cli::{manage, secrets, server, stats, upgrade, virtual_key};
+use token_station_cli::{manage, plugins, secrets, server, stats, upgrade, virtual_key};
 use token_station_metrics::Recorder;
 
 #[derive(Parser)]
@@ -45,6 +45,9 @@ enum Command {
     /// Flip switches, or edit the whole file behind validation.
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// Inspect the plugin packages and the provider dialects they register.
+    #[command(subcommand)]
+    Plugin(PluginCommand),
     /// Inspect the routing table.
     #[command(subcommand)]
     Rule(RuleCommand),
@@ -78,7 +81,8 @@ enum UpstreamCommand {
     Add {
         /// Reference name, as pools will cite it (e.g. `openai_personal`).
         name: String,
-        /// Provider dialect; must have a plugin mapping in plugins.providers.
+        /// Provider dialect; a discovered plugin package must provide it
+        /// (`plugin list` shows what does).
         #[arg(long)]
         provider: String,
         /// Base URL. No credentials in it — refused otherwise.
@@ -120,6 +124,12 @@ enum ConfigCommand {
     },
     /// Open the file in $VISUAL/$EDITOR; applied only if the result validates.
     Edit,
+}
+
+#[derive(Subcommand)]
+enum PluginCommand {
+    /// Discovered packages, plus the dialect registry `upstream add` checks.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -193,6 +203,16 @@ fn run(cli: Cli) -> Result<(), String> {
             slot,
             pool,
         }) => mutate(&cli.config, |config| {
+            // Refuse an unresolvable dialect now, at the terminal where the
+            // operator can act on it — not at the next `serve`.
+            let registry = plugins::PluginRegistry::discover(&config.plugins)?;
+            if registry.provider_dir(&provider).is_none() {
+                return Err(format!(
+                    "no plugin provides dialect `{provider}`; available: [{}] (scanned {})",
+                    registry.provider_dialects().join(", "),
+                    config.plugins.dir.display(),
+                ));
+            }
             manage::upstream_add(
                 config,
                 &manage::AddUpstream {
@@ -222,6 +242,12 @@ fn run(cli: Cli) -> Result<(), String> {
             let summary = manage::edit(&cli.config, &editor)?;
             println!("{summary}");
             eprintln!("note: a running `serve` applies configuration changes on restart");
+            Ok(())
+        }
+        Command::Plugin(PluginCommand::List) => {
+            let config = load(&cli.config)?;
+            let registry = plugins::PluginRegistry::discover(&config.plugins)?;
+            print!("{}", registry.render_list(&config.plugins.dir));
             Ok(())
         }
         Command::Rule(RuleCommand::List) => {
