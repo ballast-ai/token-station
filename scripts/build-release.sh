@@ -17,6 +17,12 @@
 #
 # Artifacts go to dist/ as one tar.gz with the CLI binary and two official plugin packages.
 # packages, example configuration, and LICENSE.
+#
+# Official binaries embed official plugins at the builtin tier (architecture §12.1). First build two WASM plugins,
+# Then build the CLI with `--features builtin-plugins` and TOKEN_STATION_PLUGINS_DIST.
+# `include_bytes!` embeds plugin bytes in the binary, so the bare binary needs no installation. The tarball still includes
+# plugins-dist/ copy. The registry selects builtin for duplicate dialects, so duplicates are harmless. Plugin builds
+# This must occur before the CLI build. The binary embeds file contents, not paths, so reproducibility is unchanged.
 
 set -euo pipefail
 
@@ -35,9 +41,6 @@ export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap
 rustup toolchain install "$RELEASE_TOOLCHAIN" --profile minimal >/dev/null
 rustup target add --toolchain "$RELEASE_TOOLCHAIN" "$TARGET" wasm32-wasip2 >/dev/null
 
-echo "building token-station-cli ${VERSION} for ${TARGET} (rust ${RELEASE_TOOLCHAIN})" >&2
-cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target "$TARGET" -p token-station-cli
-
 for plugin in agent-openai provider-openai-compatible; do
   (cd "plugins/official/${plugin}" \
     && cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target wasm32-wasip2)
@@ -48,13 +51,19 @@ STAGE="dist/${NAME}"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/plugins-dist"
 
-cp "target/${TARGET}/release/token-station-cli" "$STAGE/"
 for plugin in agent-openai provider-openai-compatible; do
   mkdir -p "$STAGE/plugins-dist/${plugin}"
   cp "plugins/official/${plugin}/manifest.json" "$STAGE/plugins-dist/${plugin}/"
   cp "plugins/official/${plugin}/target/wasm32-wasip2/release/${plugin//-/_}.wasm" \
      "$STAGE/plugins-dist/${plugin}/adapter.wasm"
 done
+
+echo "building token-station-cli ${VERSION} for ${TARGET} (rust ${RELEASE_TOOLCHAIN})" >&2
+TOKEN_STATION_PLUGINS_DIST="${ROOT}/${STAGE}/plugins-dist" \
+  cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target "$TARGET" \
+  -p token-station-cli --features builtin-plugins
+
+cp "target/${TARGET}/release/token-station-cli" "$STAGE/"
 cp apps/cli/example-config.json LICENSE "$STAGE/"
 
 # Deterministic archives require GNU tar; on macOS use Homebrew gtar because bsdtar lacks --sort and --mtime.

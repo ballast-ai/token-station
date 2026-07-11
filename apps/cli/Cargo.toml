@@ -16,6 +16,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 token-station-conformance = { path = "../../crates/conformance" }
 token-station-metrics = { path = "../../crates/metrics" }
+token-station-plugin-api = { path = "../../crates/plugin-api" }
 token-station-plugin-runtime = { path = "../../crates/plugin-runtime" }
 token-station-protocol = { path = "../../crates/protocol" }
 token-station-release = { path = "../../crates/release" }
@@ -34,6 +35,13 @@ keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+
+[features]
+# The builtin plugin tier (architecture section 12.1): the release pipeline embeds the
+# official adapter packages via TOKEN_STATION_PLUGINS_DIST (see build.rs).
+# An artifact-assembly switch, not a product tier — those are forbidden at
+# compile time.
+builtin-plugins = []
 
 [lints]
 workspace = true

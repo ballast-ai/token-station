@@ -14,8 +14,8 @@ use wasmtime::component::{Component, Linker};
 use crate::bindings::agent::AgentAdapterV1;
 use crate::bindings::agent::token_station::adapter::common as wit_common;
 use crate::loader::{
-    Ctx, FORBIDDEN_FOR_AGENTS, LoadError, from_json, parse_error_envelope, read_package, to_json,
-    trap_envelope,
+    Ctx, FORBIDDEN_FOR_AGENTS, LoadError, from_json, parse_error_envelope, parse_package,
+    read_package, to_json, trap_envelope,
 };
 use crate::provider::NoSecrets;
 use crate::runtime::PluginRuntime;
@@ -47,14 +47,43 @@ impl AgentPlugin {
     pub fn load(runtime: &PluginRuntime, dir: &Path) -> Result<Self, LoadError> {
         let (manifest, component) =
             read_package(runtime, dir, AdapterKind::Agent, FORBIDDEN_FOR_AGENTS)?;
+        Self::admit(runtime, manifest, &component)
+    }
 
+    /// [`AgentPlugin::load`] for a package compiled into the host (the builtin
+    /// tier): same gates, same order, no filesystem.
+    ///
+    /// # Errors
+    ///
+    /// The first [`LoadError`] encountered, in gate order.
+    pub fn load_embedded(
+        runtime: &PluginRuntime,
+        manifest_source: &str,
+        wasm: &[u8],
+    ) -> Result<Self, LoadError> {
+        let (manifest, component) = parse_package(
+            runtime,
+            manifest_source,
+            wasm,
+            AdapterKind::Agent,
+            FORBIDDEN_FOR_AGENTS,
+        )?;
+        Self::admit(runtime, manifest, &component)
+    }
+
+    /// Gate 3 onward, shared by both load paths.
+    fn admit(
+        runtime: &PluginRuntime,
+        manifest: AdapterManifest,
+        component: &Component,
+    ) -> Result<Self, LoadError> {
         // WASI only. The `host` interface is deliberately not linked: even a
         // component that slipped past the import scan would fail to
         // instantiate, because nothing offers it.
         let mut linker: Linker<Ctx> = Linker::new(runtime.engine());
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(LoadError::NotAnAdapter)?;
 
-        let mut handle = instantiate(runtime, &component, &linker).map_err(LoadError::Probe)?;
+        let mut handle = instantiate(runtime, component, &linker).map_err(LoadError::Probe)?;
         let reported = handle.call_metadata(runtime).map_err(LoadError::Probe)?;
         if !reported_identity_matches(&reported, &manifest) {
             return Err(LoadError::IdentityMismatch {

@@ -121,11 +121,16 @@ pub struct ServerConfig {
 #[serde(deny_unknown_fields)]
 pub struct PluginsConfig {
     /// Directory holding plugin packages, one subdirectory each
-    /// (`manifest.json` + `adapter.wasm`).
+    /// (`manifest.json` + `adapter.wasm`). Scanned at startup: every provider
+    /// dialect a discovered manifest declares registers itself
+    /// (`crate::plugins::PluginRegistry`).
     pub dir: PathBuf,
     /// The agent adapter package that owns the inbound protocol.
     pub agent: String,
-    /// Provider name (as upstreams declare it) -> plugin package name.
+    /// Explicit provider dialect -> plugin package name entries. Optional
+    /// since discovery: an entry may pre-declare a package not yet in `dir`,
+    /// but may not contradict a discovered manifest.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, String>,
 }
 
@@ -133,7 +138,10 @@ pub struct PluginsConfig {
 #[serde(deny_unknown_fields)]
 pub struct UpstreamConfig {
     /// Which provider dialect this upstream speaks, e.g. `openai-compatible`.
-    /// Must have a plugin mapping in [`PluginsConfig::providers`].
+    /// Must resolve in the plugin registry — a manifest under
+    /// [`PluginsConfig::dir`] or an explicit [`PluginsConfig::providers`]
+    /// entry. Checked where the registry exists (`upstream add`, gateway
+    /// startup), not here: validation stays filesystem-free.
     pub provider: String,
     /// Validated by `protocol::ProviderEndpoint`: no userinfo, no query — the
     /// two places an API key gets pasted into a URL.
@@ -246,12 +254,6 @@ impl ClientConfig {
         for (name, upstream) in &self.upstreams {
             token_station_router_core::UpstreamRef::new(name.clone())
                 .map_err(|error| error.to_string())?;
-            if !self.plugins.providers.contains_key(&upstream.provider) {
-                return Err(format!(
-                    "upstream `{name}` speaks `{}`, but plugins.providers maps no plugin for it",
-                    upstream.provider
-                ));
-            }
             if let Some(auth) = &upstream.auth {
                 let sources = usize::from(auth.keyring)
                     + usize::from(auth.env.is_some())
@@ -339,14 +341,28 @@ mod tests {
     }
 
     #[test]
-    fn an_upstream_with_no_plugin_for_its_provider_is_refused() {
-        let mut broken = example();
-        broken["upstreams"]["openai_personal"]["provider"] = serde_json::json!("anthropic");
-        let path = scratch("no-plugin", &broken.to_string());
+    fn an_unmapped_provider_dialect_is_the_registry_s_problem_not_validation_s() {
+        // Since discovery (B0), whether a dialect resolves depends on what is
+        // on disk; `upstream add` and gateway startup check the registry.
+        // Validation staying filesystem-free means this config *loads*.
+        let mut moved = example();
+        moved["upstreams"]["openai_personal"]["provider"] = serde_json::json!("anthropic");
+        let path = scratch("unmapped-dialect", &moved.to_string());
 
-        let error = ClientConfig::load(&path).expect_err("nothing maps `anthropic`");
-        assert!(error.to_string().contains("anthropic"), "{error}");
+        ClientConfig::load(&path).expect("resolution is deferred to the plugin registry");
+        fs::remove_file(path).ok();
+    }
 
+    #[test]
+    fn the_explicit_providers_map_is_optional() {
+        let mut minimal = example();
+        minimal["plugins"]
+            .as_object_mut()
+            .expect("plugins is an object")
+            .remove("providers");
+        let path = scratch("no-providers-map", &minimal.to_string());
+
+        ClientConfig::load(&path).expect("discovery makes the map optional");
         fs::remove_file(path).ok();
     }
 
