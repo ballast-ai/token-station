@@ -69,7 +69,7 @@ C1（最小可用客户端）已完成：流式代理、四层路由、上游健
 多数 BYOK 供应商）今天即可用；Anthropic / Gemini 原生 adapter 按社区反馈
 排期。
 
-设计文档在 [docs/](docs/)。
+面向用户的文档在 [docs/](docs/)：发布验证与打包见 [docs/release/](docs/release/)，上手指南见 [docs/guides/](docs/guides/)。
 
 ## 许可
 
