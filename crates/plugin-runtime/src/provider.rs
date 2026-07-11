@@ -17,7 +17,8 @@ use crate::bindings::provider::ProviderAdapterV1;
 use crate::bindings::provider::token_station::adapter::common as wit_common;
 use crate::bindings::provider::token_station::adapter::host as wit_host;
 use crate::loader::{
-    Ctx, LoadError, from_json, parse_error_envelope, read_package, to_json, trap_envelope,
+    Ctx, LoadError, from_json, parse_error_envelope, parse_package, read_package, to_json,
+    trap_envelope,
 };
 use crate::runtime::PluginRuntime;
 
@@ -95,10 +96,35 @@ impl ProviderPlugin {
         dir: &Path,
         signer: impl SecretSigner + Sync,
     ) -> Result<Self, LoadError> {
-        let signer: Arc<dyn SecretSigner + Sync> = Arc::new(signer);
-
         let (manifest, component) = read_package(runtime, dir, AdapterKind::Provider, &[])?;
+        Self::admit(runtime, manifest, component, Arc::new(signer))
+    }
 
+    /// [`ProviderPlugin::load`] for a package compiled into the host (the
+    /// builtin tier): same gates, same order, no filesystem.
+    ///
+    /// # Errors
+    ///
+    /// The first [`LoadError`] encountered, in gate order.
+    pub fn load_embedded(
+        runtime: &PluginRuntime,
+        manifest_source: &str,
+        wasm: &[u8],
+        signer: impl SecretSigner + Sync,
+    ) -> Result<Self, LoadError> {
+        let (manifest, component) =
+            parse_package(runtime, manifest_source, wasm, AdapterKind::Provider, &[])?;
+        Self::admit(runtime, manifest, component, Arc::new(signer))
+    }
+
+    /// Gate 3 onward, shared by both load paths: link, instantiate, and check
+    /// the reported identity against the manifest.
+    fn admit(
+        runtime: &PluginRuntime,
+        manifest: AdapterManifest,
+        component: Component,
+        signer: Arc<dyn SecretSigner + Sync>,
+    ) -> Result<Self, LoadError> {
         let mut linker: Linker<Ctx> = Linker::new(runtime.engine());
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(LoadError::NotAnAdapter)?;
         wit_host::add_to_linker::<Ctx, wasmtime::component::HasSelf<Ctx>>(&mut linker, |ctx| ctx)
