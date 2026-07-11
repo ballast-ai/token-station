@@ -17,6 +17,12 @@
 #
 # 产物落在 dist/：一个 tar.gz，内含 CLI 二进制、两个官方插件包
 # （manifest.json + adapter.wasm）、示例配置与 LICENSE。
+#
+# 官方二进制内嵌官方插件（builtin 层，架构 §12.1）：先构建两个 WASM 插件，
+# 再以 --features builtin-plugins + TOKEN_STATION_PLUGINS_DIST 构建 CLI，
+# include_bytes! 把插件字节编进二进制——裸二进制零安装即可用。tarball 仍附带
+# plugins-dist/ 副本（registry 对同方言取 builtin，重复无害）。插件构建
+# 因此必须先于 CLI 构建；嵌入的是文件内容而非路径，不影响可复现性。
 
 set -euo pipefail
 
@@ -35,9 +41,6 @@ export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap
 rustup toolchain install "$RELEASE_TOOLCHAIN" --profile minimal >/dev/null
 rustup target add --toolchain "$RELEASE_TOOLCHAIN" "$TARGET" wasm32-wasip2 >/dev/null
 
-echo "building token-station-cli ${VERSION} for ${TARGET} (rust ${RELEASE_TOOLCHAIN})" >&2
-cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target "$TARGET" -p token-station-cli
-
 for plugin in agent-openai provider-openai-compatible; do
   (cd "plugins/official/${plugin}" \
     && cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target wasm32-wasip2)
@@ -48,13 +51,19 @@ STAGE="dist/${NAME}"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/plugins-dist"
 
-cp "target/${TARGET}/release/token-station-cli" "$STAGE/"
 for plugin in agent-openai provider-openai-compatible; do
   mkdir -p "$STAGE/plugins-dist/${plugin}"
   cp "plugins/official/${plugin}/manifest.json" "$STAGE/plugins-dist/${plugin}/"
   cp "plugins/official/${plugin}/target/wasm32-wasip2/release/${plugin//-/_}.wasm" \
      "$STAGE/plugins-dist/${plugin}/adapter.wasm"
 done
+
+echo "building token-station-cli ${VERSION} for ${TARGET} (rust ${RELEASE_TOOLCHAIN})" >&2
+TOKEN_STATION_PLUGINS_DIST="${ROOT}/${STAGE}/plugins-dist" \
+  cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target "$TARGET" \
+  -p token-station-cli --features builtin-plugins
+
+cp "target/${TARGET}/release/token-station-cli" "$STAGE/"
 cp apps/cli/example-config.json LICENSE "$STAGE/"
 
 # 确定性归档需要 GNU tar；macOS 上是 brew 的 gtar（bsdtar 无 --sort/--mtime）。

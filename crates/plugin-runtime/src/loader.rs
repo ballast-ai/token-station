@@ -160,19 +160,55 @@ pub(crate) fn read_package(
             path: manifest_path,
             detail: error.to_string(),
         })?;
-    let manifest: AdapterManifest =
-        serde_json::from_str(&manifest_source).map_err(LoadError::ManifestSyntax)?;
-    accepts_manifest(&manifest).map_err(LoadError::Manifest)?;
-    if manifest.kind != expected_kind {
-        return Err(LoadError::WrongKind(manifest.kind));
-    }
+    let manifest = gate_manifest(&manifest_source, expected_kind)?;
 
     let wasm_path = dir.join("adapter.wasm");
     let wasm = fs::read(&wasm_path).map_err(|error| LoadError::Unreadable {
         path: wasm_path,
         detail: error.to_string(),
     })?;
-    let component = Component::new(runtime.engine(), &wasm).map_err(LoadError::NotAnAdapter)?;
+    let component = gate_component(runtime, &wasm, extra_forbidden)?;
+
+    Ok((manifest, component))
+}
+
+/// The filesystem-free twin of [`read_package`]: same gates, same order, for
+/// package bytes that were compiled in (the builtin tier) rather than read
+/// from a directory. Builtin packages earn no shortcut — an embedded component
+/// that imports the network is refused exactly like a downloaded one.
+pub(crate) fn parse_package(
+    runtime: &PluginRuntime,
+    manifest_source: &str,
+    wasm: &[u8],
+    expected_kind: AdapterKind,
+    extra_forbidden: &[&str],
+) -> Result<(AdapterManifest, Component), LoadError> {
+    let manifest = gate_manifest(manifest_source, expected_kind)?;
+    let component = gate_component(runtime, wasm, extra_forbidden)?;
+    Ok((manifest, component))
+}
+
+/// Gate 1: the manifest, judged before any wasm is even opened.
+fn gate_manifest(
+    manifest_source: &str,
+    expected_kind: AdapterKind,
+) -> Result<AdapterManifest, LoadError> {
+    let manifest: AdapterManifest =
+        serde_json::from_str(manifest_source).map_err(LoadError::ManifestSyntax)?;
+    accepts_manifest(&manifest).map_err(LoadError::Manifest)?;
+    if manifest.kind != expected_kind {
+        return Err(LoadError::WrongKind(manifest.kind));
+    }
+    Ok(manifest)
+}
+
+/// Gate 2: the compiled component and its imports.
+fn gate_component(
+    runtime: &PluginRuntime,
+    wasm: &[u8],
+    extra_forbidden: &[&str],
+) -> Result<Component, LoadError> {
+    let component = Component::new(runtime.engine(), wasm).map_err(LoadError::NotAnAdapter)?;
 
     for (name, _) in component.component_type().imports(runtime.engine()) {
         let refused = FORBIDDEN_EVERYWHERE
@@ -184,7 +220,7 @@ pub(crate) fn read_package(
         }
     }
 
-    Ok((manifest, component))
+    Ok(component)
 }
 
 /// The guest's error side is a `protocol::ErrorEnvelope` as JSON. A guest that
