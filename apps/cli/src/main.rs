@@ -206,7 +206,7 @@ fn run(cli: Cli) -> Result<(), String> {
             // Refuse an unresolvable dialect now, at the terminal where the
             // operator can act on it — not at the next `serve`.
             let registry = plugins::PluginRegistry::discover(&config.plugins)?;
-            if registry.provider_dir(&provider).is_none() {
+            if registry.provider_binding(&provider).is_none() {
                 return Err(format!(
                     "no plugin provides dialect `{provider}`; available: [{}] (scanned {})",
                     registry.provider_dialects().join(", "),
@@ -247,7 +247,7 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Plugin(PluginCommand::List) => {
             let config = load(&cli.config)?;
             let registry = plugins::PluginRegistry::discover(&config.plugins)?;
-            print!("{}", registry.render_list(&config.plugins.dir));
+            print!("{}", registry.render_list());
             Ok(())
         }
         Command::Rule(RuleCommand::List) => {
