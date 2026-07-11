@@ -129,9 +129,15 @@ pub struct PluginsConfig {
     pub agent: String,
     /// Explicit provider dialect -> plugin package name entries. Optional
     /// since discovery: an entry may pre-declare a package not yet in `dir`,
-    /// but may not contradict a discovered manifest.
+    /// but may not contradict a discovered manifest. Writing an entry here is
+    /// operator intent, so it binds without a conformance receipt.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, String>,
+    /// Serve traffic through discovered packages that never passed
+    /// `plugin install`'s conformance run. Off by default: dropping a file
+    /// into the plugins directory must not be enough to receive requests.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_unsigned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

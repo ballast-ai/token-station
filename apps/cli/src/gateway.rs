@@ -160,7 +160,7 @@ impl Gateway {
         // directory. Only packages configured upstreams actually speak are
         // loaded — a broken package no upstream uses is `plugin list`'s
         // business, not startup's.
-        let registry = crate::plugins::PluginRegistry::discover(&config.plugins)?;
+        let registry = crate::plugins::PluginRegistry::for_config(config)?;
 
         let agent = match registry.agent_source(&config.plugins.agent) {
             crate::plugins::PackageSource::Builtin {
