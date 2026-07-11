@@ -692,8 +692,9 @@ pub fn info(config: &ClientConfig, name: &str) -> Result<String, String> {
 
 /// Loads the package from its source directory and runs the suite its
 /// manifest requires — the same gates and the same fixtures a third party
-/// ran in their CI.
-fn run_conformance(
+/// ran in their CI. `plugin test` (scaffold) shares it, which is the point:
+/// there is exactly one suite.
+pub(crate) fn run_conformance(
     source: &Path,
     manifest: &AdapterManifest,
 ) -> Result<token_station_conformance::Report, String> {
