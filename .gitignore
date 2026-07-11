@@ -9,3 +9,6 @@ plugins/official/*/target/
 *.tmp
 
 dist/
+
+# 私有文档仓的本地软链，不入库
+/all_docs
