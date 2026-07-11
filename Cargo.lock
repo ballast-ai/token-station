@@ -2540,6 +2540,7 @@ dependencies = [
  "serde_json",
  "token-station-conformance",
  "token-station-metrics",
+ "token-station-plugin-api",
  "token-station-plugin-runtime",
  "token-station-protocol",
  "token-station-release",
