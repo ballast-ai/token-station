@@ -561,12 +561,19 @@ pub fn install(config: &ClientConfig, source: &Path) -> Result<String, String> {
     let registry = PluginRegistry::discover(&config.plugins, &receipts)?;
     for dialect in &manifest.providers {
         if let Some(existing) = registry.provider_binding(dialect) {
-            return Err(format!(
-                "dialect `{dialect}` is already provided by `{}` ({}); two providers for one \
-                 dialect is a conflict",
-                existing.package,
-                existing.source.describe(),
-            ));
+            // A binding under this package's own name is agreement, not a
+            // conflict: a `plugins.providers` entry may pre-declare a package
+            // before it is installed (discovery already treats the two
+            // agreeing as redundant), and this install is that package
+            // arriving. An on-disk package by this name was refused above.
+            if existing.package != name {
+                return Err(format!(
+                    "dialect `{dialect}` is already provided by `{}` ({}); two providers for \
+                     one dialect is a conflict",
+                    existing.package,
+                    existing.source.describe(),
+                ));
+            }
         }
     }
 
