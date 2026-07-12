@@ -108,6 +108,38 @@ fn install_admits_serve_follows_and_tampering_revokes() {
 }
 
 #[test]
+fn install_accepts_the_package_a_configured_entry_predeclares() {
+    // The shipped example config pre-declares `openai-compatible ->
+    // provider-openai-compatible` before the package exists on disk
+    // (`plugins.providers` documents that as intent, not presence). Installing
+    // the very package the entry names is that intent being fulfilled — it
+    // must admit, not report a conflict with itself.
+    let mut config = config("predeclared");
+    config.plugins.providers.insert(
+        "openai-compatible".to_owned(),
+        "provider-openai-compatible".to_owned(),
+    );
+
+    let summary = plugins::install(&config, source_package()).expect("agreement is not a conflict");
+    assert!(summary.contains("provider-protocol-v1"), "{summary}");
+    let registry = PluginRegistry::for_config(&config).expect("registry builds");
+    assert!(registry.provider_binding("openai-compatible").is_some());
+}
+
+#[test]
+fn install_refuses_a_dialect_a_different_package_already_claims() {
+    let mut config = config("claimed");
+    config.plugins.providers.insert(
+        "openai-compatible".to_owned(),
+        "provider-somebody-else".to_owned(),
+    );
+
+    let error = plugins::install(&config, source_package())
+        .expect_err("two providers for one dialect stays a conflict");
+    assert!(error.contains("provider-somebody-else"), "{error}");
+}
+
+#[test]
 fn remove_deletes_the_package_unless_an_upstream_depends_on_it() {
     let mut config = config("remove");
     plugins::install(&config, source_package()).expect("the official plugin passes");
