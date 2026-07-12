@@ -93,6 +93,12 @@ pub struct Match {
     /// Matches the model the caller asked for, exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_model: Option<String>,
+    /// At least this many reasoning-marker hits (crate lexicon, both
+    /// languages). This is where V1's "2+ markers force the reasoning tier"
+    /// special case now lives: as an operator-visible rule, not a hidden
+    /// branch inside the score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_markers_at_least: Option<u32>,
     /// Any one of these, case-insensitive, anywhere in the message text.
     ///
     /// This predicate reads the prompt. That is fine and it is local — what it
@@ -112,6 +118,7 @@ impl Match {
             && self.requires_json_schema.is_none()
             && self.requires_vision.is_none()
             && self.requested_model.is_none()
+            && self.reasoning_markers_at_least.is_none()
             && self.keywords_any.is_empty()
     }
 
@@ -137,6 +144,9 @@ impl Match {
                 .requested_model
                 .as_ref()
                 .is_some_and(|model| request.model != *model)
+            || self
+                .reasoning_markers_at_least
+                .is_some_and(|floor| features.reasoning_marker_count < floor)
             || (!self.keywords_any.is_empty() && !mentions_any(request, &self.keywords_any));
 
         !refuted
@@ -191,6 +201,23 @@ pub struct Heuristic {
     pub above: String,
     /// Where everything else goes.
     pub below: String,
+    /// Multi-tier banding (V2-P2-3). Checked in order, first band whose
+    /// `at_least <= score` wins; validation demands strictly descending
+    /// `at_least` so the order on disk IS the precedence. Empty = the binary
+    /// above/below split — every pre-0.2 profile keeps its behavior. A band
+    /// list ending in `at_least = 0` never falls through; one that does not
+    /// falls back to the binary split.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bands: Vec<Band>,
+}
+
+/// One tier of a banded heuristic: scores of at least `at_least` land in
+/// `pool` (unless a higher band already claimed them).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Band {
+    pub at_least: u32,
+    pub pool: String,
 }
 
 impl Heuristic {
@@ -223,7 +250,70 @@ impl Heuristic {
         if features.has_images {
             score = score.saturating_add(weights.image);
         }
-        score
+        score = score.saturating_add(
+            features
+                .reasoning_marker_count
+                .saturating_mul(weights.per_reasoning_marker),
+        );
+        score = score.saturating_add(
+            features
+                .technical_term_count
+                .saturating_mul(weights.per_technical_term),
+        );
+        score = score.saturating_add(
+            features
+                .code_keyword_count
+                .saturating_mul(weights.per_code_keyword),
+        );
+        score = score.saturating_add(
+            features
+                .math_term_count
+                .saturating_mul(weights.per_math_term),
+        );
+        score = score.saturating_add(
+            features
+                .creative_term_count
+                .saturating_mul(weights.per_creative_term),
+        );
+        score = score.saturating_add(
+            features
+                .multi_step_signal
+                .saturating_mul(weights.per_multi_step_point),
+        );
+        score = score.saturating_add(features.question_count.saturating_mul(weights.per_question));
+        if features.system_format_hint {
+            score = score.saturating_add(weights.system_format);
+        }
+        if weights.max_output_tokens_per_point > 0 {
+            score = score.saturating_add(
+                features
+                    .requested_max_output_tokens
+                    .unwrap_or(0)
+                    .saturating_div(weights.max_output_tokens_per_point),
+            );
+        }
+        // The one subtractive dimension, last, saturating at zero: easy-talk
+        // hits discount the total but can never make it negative.
+        score.saturating_sub(
+            features
+                .simple_indicator_count
+                .saturating_mul(weights.per_simple_indicator),
+        )
+    }
+
+    /// The pool this score lands in, and the floor of the tier it hit (which
+    /// is what `DecidedBy::Heuristic.threshold` records).
+    pub(crate) fn select(&self, score: u32) -> (&str, u32) {
+        for band in &self.bands {
+            if score >= band.at_least {
+                return (&band.pool, band.at_least);
+            }
+        }
+        if score >= self.threshold {
+            (&self.above, self.threshold)
+        } else {
+            (&self.below, self.threshold)
+        }
     }
 }
 
@@ -238,6 +328,37 @@ pub struct Weights {
     pub per_code_block: u32,
     /// Conversation depth: charged per turn after the first.
     pub per_extra_turn: u32,
+    /// Dims 2–10 of the ported V1 complexity algorithm (V2-P2-3). All default
+    /// to 0, which reproduces the pre-0.2 six-dimension score exactly — an
+    /// existing profile keeps routing byte-for-byte the same until its
+    /// operator opts in.
+    #[serde(default)]
+    pub per_reasoning_marker: u32,
+    #[serde(default)]
+    pub per_technical_term: u32,
+    /// SUBTRACTS. Hits on the easy-request vocabulary argue the request down;
+    /// the score saturates at zero rather than going negative.
+    #[serde(default)]
+    pub per_simple_indicator: u32,
+    #[serde(default)]
+    pub per_code_keyword: u32,
+    #[serde(default)]
+    pub per_math_term: u32,
+    #[serde(default)]
+    pub per_creative_term: u32,
+    /// Charged per point of `multi_step_signal` (0, 6, or 10).
+    #[serde(default)]
+    pub per_multi_step_point: u32,
+    #[serde(default)]
+    pub per_question: u32,
+    /// Flat bonus when structured-output vocabulary appears in system text.
+    #[serde(default)]
+    pub system_format: u32,
+    /// One point per this many requested max output tokens (0 = dimension
+    /// off). V1's ">100K `max_tokens` escalates" special case, expressed as a
+    /// weight instead of a branch.
+    #[serde(default)]
+    pub max_output_tokens_per_point: u32,
 }
 
 impl RouterConfig {
@@ -302,6 +423,17 @@ impl RouterConfig {
             }
             self.require_pool(&heuristic.above, "heuristic.above")?;
             self.require_pool(&heuristic.below, "heuristic.below")?;
+            for pair in heuristic.bands.windows(2) {
+                if pair[0].at_least <= pair[1].at_least {
+                    return Err(ConfigError::BandsNotDescending {
+                        first: pair[0].at_least,
+                        second: pair[1].at_least,
+                    });
+                }
+            }
+            for band in &heuristic.bands {
+                self.require_pool(&band.pool, "heuristic.bands")?;
+            }
         }
 
         Ok(())
@@ -344,6 +476,12 @@ pub enum ConfigError {
         value: String,
     },
     TokensPerPointIsZero,
+    /// Band order on disk is the precedence order; an ascending or equal pair
+    /// means a band that can never fire.
+    BandsNotDescending {
+        first: u32,
+        second: u32,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -380,6 +518,11 @@ impl fmt::Display for ConfigError {
             Self::TokensPerPointIsZero => {
                 f.write_str("heuristic.weights.tokens_per_point of 0 would divide by zero")
             }
+            Self::BandsNotDescending { first, second } => write!(
+                f,
+                "heuristic.bands must be strictly descending by at_least; \
+                 {first} is followed by {second}, which could never fire"
+            ),
         }
     }
 }
@@ -392,6 +535,211 @@ mod tests {
     use crate::RequestFeatures;
     use crate::test_support::{config, upstream_model};
     use token_station_protocol::{ChatRequest, HintKind, Message, Role};
+
+    #[test]
+    fn ported_weights_score_and_simple_talk_subtracts_saturating_at_zero() {
+        let heuristic = Heuristic {
+            weights: Weights {
+                tokens_per_point: 1000,
+                per_tool: 0,
+                json_schema: 0,
+                image: 0,
+                per_code_block: 0,
+                per_extra_turn: 0,
+                per_reasoning_marker: 6,
+                per_technical_term: 4,
+                per_simple_indicator: 4,
+                per_code_keyword: 2,
+                per_math_term: 3,
+                per_creative_term: 2,
+                per_multi_step_point: 1,
+                per_question: 1,
+                system_format: 3,
+                max_output_tokens_per_point: 10_000,
+            },
+            threshold: 15,
+            above: "sota".to_owned(),
+            below: "cheap".to_owned(),
+            bands: Vec::new(),
+        };
+
+        let features = RequestFeatures {
+            reasoning_marker_count: 2,                  // 12
+            technical_term_count: 1,                    // 4
+            math_term_count: 1,                         // 3
+            multi_step_signal: 6,                       // 6
+            question_count: 2,                          // 2
+            system_format_hint: true,                   // 3
+            requested_max_output_tokens: Some(100_000), // 10
+            simple_indicator_count: 3,                  // -12
+            ..RequestFeatures::default()
+        };
+        assert_eq!(heuristic.score(&features), 12 + 4 + 3 + 6 + 2 + 3 + 10 - 12);
+
+        // All-easy talk cannot go negative.
+        let easy = RequestFeatures {
+            simple_indicator_count: 10,
+            ..RequestFeatures::default()
+        };
+        assert_eq!(heuristic.score(&easy), 0);
+    }
+
+    #[test]
+    fn six_dimension_profiles_keep_their_exact_pre_port_score() {
+        // A pre-0.2 weights document (six fields, no bands) must deserialize
+        // and produce the same score it always did.
+        let heuristic: Heuristic = serde_json::from_str(
+            r#"{
+                "weights": {
+                    "tokens_per_point": 100, "per_tool": 20, "json_schema": 10,
+                    "image": 15, "per_code_block": 8, "per_extra_turn": 3
+                },
+                "threshold": 40, "above": "sota", "below": "cheap"
+            }"#,
+        )
+        .expect("a pre-0.2 heuristic document still parses");
+        assert!(heuristic.bands.is_empty());
+
+        let features = RequestFeatures {
+            estimated_input_tokens: 2_000, // 20
+            tool_count: 1,                 // 20
+            code_block_count: 1,           // 8
+            message_count: 3,              // 6
+            // Ported counts present but every ported weight defaulted to 0.
+            reasoning_marker_count: 9,
+            simple_indicator_count: 9,
+            ..RequestFeatures::default()
+        };
+        assert_eq!(heuristic.score(&features), 54);
+        assert_eq!(heuristic.select(54), ("sota", 40));
+        assert_eq!(heuristic.select(39), ("cheap", 40));
+    }
+
+    #[test]
+    fn bands_pick_the_first_tier_the_score_reaches() {
+        let mut config = config();
+        config.pools.insert(
+            "medium".to_owned(),
+            vec![upstream_model("openai_personal", "gpt-5.4-mini")],
+        );
+        config.pools.insert(
+            "reasoning".to_owned(),
+            vec![upstream_model("anthropic_personal", "claude-opus-4-8")],
+        );
+        let heuristic = Heuristic {
+            weights: base_weights(),
+            threshold: 15,
+            above: "sota".to_owned(),
+            below: "cheap".to_owned(),
+            bands: vec![
+                super::Band {
+                    at_least: 35,
+                    pool: "reasoning".to_owned(),
+                },
+                super::Band {
+                    at_least: 15,
+                    pool: "sota".to_owned(),
+                },
+                super::Band {
+                    at_least: 5,
+                    pool: "medium".to_owned(),
+                },
+                super::Band {
+                    at_least: 0,
+                    pool: "cheap".to_owned(),
+                },
+            ],
+        };
+        config.heuristic = Some(heuristic.clone());
+        config
+            .validate()
+            .expect("descending bands over known pools");
+
+        assert_eq!(heuristic.select(40), ("reasoning", 35));
+        assert_eq!(heuristic.select(15), ("sota", 15));
+        assert_eq!(heuristic.select(7), ("medium", 5));
+        assert_eq!(heuristic.select(0), ("cheap", 0));
+    }
+
+    #[test]
+    fn ascending_or_equal_bands_and_unknown_band_pools_are_refused() {
+        let mut config = config();
+        config.heuristic = Some(Heuristic {
+            weights: base_weights(),
+            threshold: 15,
+            above: "sota".to_owned(),
+            below: "cheap".to_owned(),
+            bands: vec![
+                super::Band {
+                    at_least: 10,
+                    pool: "cheap".to_owned(),
+                },
+                super::Band {
+                    at_least: 20,
+                    pool: "sota".to_owned(),
+                },
+            ],
+        });
+        assert_eq!(
+            config.validate(),
+            Err(ConfigError::BandsNotDescending {
+                first: 10,
+                second: 20
+            })
+        );
+
+        config.heuristic = Some(Heuristic {
+            weights: base_weights(),
+            threshold: 15,
+            above: "sota".to_owned(),
+            below: "cheap".to_owned(),
+            bands: vec![super::Band {
+                at_least: 0,
+                pool: "gpu-farm".to_owned(),
+            }],
+        });
+        assert_eq!(
+            config.validate(),
+            Err(ConfigError::UnknownPool {
+                pool: "gpu-farm".to_owned(),
+                referenced_by: "heuristic.bands".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_rule_can_force_a_pool_on_reasoning_markers() {
+        // V1's "2+ reasoning markers force the reasoning tier", now spelled
+        // as an operator rule instead of a branch inside the score.
+        let matcher = Match {
+            reasoning_markers_at_least: Some(2),
+            ..Match::default()
+        };
+        assert!(!matcher.is_empty());
+
+        let features = RequestFeatures {
+            reasoning_marker_count: 2,
+            ..RequestFeatures::default()
+        };
+        let request = ChatRequest::new("auto", Vec::new());
+        assert!(matcher.matches(&features, &request));
+
+        let features = RequestFeatures {
+            reasoning_marker_count: 1,
+            ..RequestFeatures::default()
+        };
+        assert!(!matcher.matches(&features, &request));
+    }
+
+    fn base_weights() -> Weights {
+        serde_json::from_str(
+            r#"{
+                "tokens_per_point": 100, "per_tool": 20, "json_schema": 10,
+                "image": 15, "per_code_block": 8, "per_extra_turn": 3
+            }"#,
+        )
+        .expect("six-field weights parse")
+    }
 
     #[test]
     fn a_rule_with_no_predicates_is_refused() {
@@ -574,10 +922,21 @@ mod tests {
                 image: 5,
                 per_code_block: 5,
                 per_extra_turn: 5,
+                per_reasoning_marker: 0,
+                per_technical_term: 0,
+                per_simple_indicator: 0,
+                per_code_keyword: 0,
+                per_math_term: 0,
+                per_creative_term: 0,
+                per_multi_step_point: 0,
+                per_question: 0,
+                system_format: 0,
+                max_output_tokens_per_point: 0,
             },
             threshold: 10,
             above: "sota".to_owned(),
             below: "cheap".to_owned(),
+            bands: Vec::new(),
         };
         let features = RequestFeatures {
             estimated_input_tokens: 1_000,

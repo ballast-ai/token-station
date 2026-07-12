@@ -54,6 +54,7 @@ mod config;
 mod decision;
 mod features;
 mod health;
+mod lexicon;
 mod route;
 mod source;
 
@@ -61,7 +62,7 @@ mod source;
 mod test_support;
 
 pub use config::{
-    CONFIG_VERSION, ConfigError, Heuristic, HintRoute, Match, RouterConfig, Rule, Weights,
+    Band, CONFIG_VERSION, ConfigError, Heuristic, HintRoute, Match, RouterConfig, Rule, Weights,
 };
 pub use decision::{
     DecidedBy, Decision, InvalidUpstreamRef, NoRoute, UnmetRequirement, UpstreamModel, UpstreamRef,

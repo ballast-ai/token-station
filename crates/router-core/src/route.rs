@@ -159,18 +159,11 @@ impl Router {
 
         if let Some(heuristic) = &self.config.heuristic {
             let score = heuristic.score(features);
-            let pool = if score >= heuristic.threshold {
-                &heuristic.above
-            } else {
-                &heuristic.below
-            };
-            return (
-                pool,
-                DecidedBy::Heuristic {
-                    score,
-                    threshold: heuristic.threshold,
-                },
-            );
+            // `threshold` in the record is the floor of the tier that fired —
+            // the band's `at_least` under banding, the single threshold under
+            // the binary split.
+            let (pool, threshold) = heuristic.select(score);
+            return (pool, DecidedBy::Heuristic { score, threshold });
         }
 
         (&self.config.default_pool, DecidedBy::Default)
