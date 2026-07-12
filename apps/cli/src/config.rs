@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use token_station_protocol::{ModelCapability, ProviderEndpoint};
-use token_station_router_core::RouterConfig;
+use token_station_router_core::{ConfigSource, RouterConfig};
 
 /// The whole client configuration file.
 ///
@@ -306,6 +306,33 @@ impl fmt::Display for ConfigError {
 
 impl Error for ConfigError {}
 
+/// The client's half of the [`ConfigSource`] pair: the server gateway reads a
+/// database, this reads the operator's config file and hands the embedded
+/// router section to a [`ConfigCache`](token_station_router_core::ConfigCache).
+///
+/// Loading re-reads the whole [`ClientConfig`], so the file's structural
+/// validation runs on every refresh — a reload can never smuggle in a router
+/// section from a file the client would refuse to start on.
+#[derive(Debug, Clone)]
+pub struct FileRouterSource {
+    path: PathBuf,
+}
+
+impl FileRouterSource {
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+impl ConfigSource for FileRouterSource {
+    type Error = ConfigError;
+
+    fn load(&self) -> Result<RouterConfig, ConfigError> {
+        ClientConfig::load(&self.path).map(|config| config.router)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ClientConfig;
@@ -323,6 +350,42 @@ mod tests {
 
     fn example() -> serde_json::Value {
         serde_json::from_str(crate::EXAMPLE_CONFIG).expect("the shipped example parses")
+    }
+
+    #[test]
+    fn the_file_router_source_reloads_and_survives_a_lost_file() {
+        use std::sync::Arc;
+        use token_station_router_core::{CacheError, ConfigCache};
+
+        let path = scratch("file-source", crate::EXAMPLE_CONFIG);
+        let mut cache = ConfigCache::load(super::FileRouterSource::new(&path))
+            .expect("the example's router section is routable");
+
+        // An edit is picked up by refresh: a new router replaces the old one.
+        let before = Arc::clone(cache.current());
+        let mut edited = example();
+        edited["router"]["default_pool"] = serde_json::json!("sota");
+        fs::write(&path, edited.to_string()).expect("temp dir is writable");
+        cache.refresh().expect("the edited file is still valid");
+        assert!(!Arc::ptr_eq(&before, cache.current()));
+
+        // A file lost mid-flight fails the refresh and changes nothing: the
+        // last configuration that validated keeps serving.
+        let serving = Arc::clone(cache.current());
+        fs::remove_file(&path).ok();
+        let error = cache.refresh().expect_err("the file is gone");
+        assert!(matches!(error, CacheError::Source(_)), "{error}");
+        assert!(Arc::ptr_eq(&serving, cache.current()));
+    }
+
+    #[test]
+    fn the_file_router_source_fails_the_first_load_loudly() {
+        use token_station_router_core::{CacheError, ConfigCache};
+
+        let missing = std::env::temp_dir().join("token-station-cfg-never-written.json");
+        let error = ConfigCache::load(super::FileRouterSource::new(&missing))
+            .expect_err("starting with no configuration is fatal");
+        assert!(matches!(error, CacheError::Source(_)), "{error}");
     }
 
     #[test]
