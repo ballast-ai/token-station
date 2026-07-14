@@ -76,9 +76,11 @@ surface, and this release engineering. OpenAI-compatible upstreams (including
 Ollama, vLLM, and most BYOK providers) work today; native Anthropic/Gemini
 adapters are next, guided by community feedback.
 
-User-facing docs live under [docs/](docs/): release verification and
-packaging ([docs/release/](docs/release/)) plus getting-started guides
-([docs/guides/](docs/guides/)), currently in Chinese.
+User-facing docs live under [docs/](docs/), currently in Chinese: product
+docs for users ([docs/product/](docs/product/)), contributor docs for anyone
+maintaining, developing, or testing it ([docs/contributing/](docs/contributing/)),
+plus getting-started guides ([docs/guides/](docs/guides/)) and release
+verification and packaging ([docs/release/](docs/release/)).
 
 ## License
 
