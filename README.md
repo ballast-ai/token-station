@@ -16,7 +16,7 @@ IDE / agent ──▶ 127.0.0.1:8787 ──▶ rules → hints → heuristic →
                (your key)         (your key)        (your Ollama)
 ```
 
-## Why this exists
+## Why this exists 
 
 Model routing usually means a cloud gateway reading your traffic. token-station
 takes the opposite bet: **routing is a local decision**. The router, the rules,
