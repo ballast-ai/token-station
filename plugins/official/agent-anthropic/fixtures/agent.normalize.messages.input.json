@@ -1,0 +1,80 @@
+{
+  "protocol": "anthropic-messages",
+  "agent_tool": "claude-code",
+  "headers": {
+    "names": ["authorization", "anthropic-version", "content-type"],
+    "values": {
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json"
+    }
+  },
+  "principal": {"subject": "local"},
+  "body": {
+    "model": "routed-model",
+    "max_tokens": 1024,
+    "system": [
+      {"type": "text", "text": "You are a coding assistant."}
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "Weather in Beijing?"},
+          {
+            "type": "image",
+            "source": {
+              "type": "base64",
+              "media_type": "image/png",
+              "data": "aGVsbG8="
+            }
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {"type": "text", "text": "I'll check."},
+          {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "get_weather",
+            "input": {"city": "Beijing", "unit": "c"}
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "content": "20 C",
+            "is_error": false
+          },
+          {"type": "text", "text": "Thanks"}
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "name": "get_weather",
+        "description": "Look up the weather in a city",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "city": {"type": "string"},
+            "unit": {"type": "string"}
+          },
+          "required": ["city"]
+        }
+      }
+    ],
+    "temperature": 0.2,
+    "top_p": 0.9,
+    "stop_sequences": ["END"],
+    "stream": true,
+    "metadata": {"user_id": "local-user"},
+    "tool_choice": {"type": "auto"},
+    "future_field": {"kept": true}
+  }
+}

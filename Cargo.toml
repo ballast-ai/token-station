@@ -14,6 +14,7 @@ members = [
 # workspace build graph; plugin-runtime tests build it in a cargo subprocess.
 exclude = [
     "crates/plugin-runtime/tests/guests/test-provider",
+    "plugins/official/agent-anthropic",
     "plugins/official/agent-openai",
     "plugins/official/provider-openai-compatible",
 ]

@@ -1,0 +1,23 @@
+{
+  "id": "msg_1",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {"type": "text", "text": "I'll check."},
+    {
+      "type": "tool_use",
+      "id": "toolu_1",
+      "name": "get_weather",
+      "input": {"city": "Beijing"}
+    }
+  ],
+  "model": "routed-model",
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 33,
+    "output_tokens": 20,
+    "cache_read_input_tokens": 5,
+    "cache_creation_input_tokens": 2
+  }
+}
