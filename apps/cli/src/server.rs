@@ -12,7 +12,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::Response;
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
@@ -47,6 +47,7 @@ pub struct AppState {
 pub async fn serve(state: AppState, listener: TcpListener) -> std::io::Result<()> {
     let app = Router::new()
         .route("/v1/chat/completions", post(chat))
+        .route("/v1/messages", post(chat))
         .route("/v1/models", get(models))
         .with_state(state);
 
@@ -70,19 +71,22 @@ fn admitted(state: &AppState, headers: &HeaderMap) -> bool {
         .is_some_and(|presented| virtual_key::matches(presented, expected))
 }
 
-fn unauthorized() -> Response {
+fn unauthorized(path: &str) -> Response {
+    let body = if path == "/v1/messages" {
+        r#"{"type":"error","error":{"type":"authentication_error","message":"missing or invalid local virtual key"}}"#
+    } else {
+        r#"{"error":{"message":"missing or invalid local virtual key","type":"auth","code":"auth"}}"#
+    };
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            r#"{"error":{"message":"missing or invalid local virtual key","type":"auth","code":"auth"}}"#,
-        ))
+        .body(Body::from(body))
         .expect("a literal response builds")
 }
 
 async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !admitted(&state, &headers) {
-        return unauthorized();
+        return unauthorized("/v1/models");
     }
     Response::builder()
         .status(StatusCode::OK)
@@ -91,9 +95,14 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
         .expect("a literal response builds")
 }
 
-async fn chat(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+async fn chat(
+    State(state): State<AppState>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if !admitted(&state, &headers) {
-        return unauthorized();
+        return unauthorized(uri.path());
     }
     let gateway = Arc::clone(&state.gateway);
     // Owned copies for the blocking thread. Values that are not UTF-8 keep
@@ -112,8 +121,9 @@ async fn chat(State(state): State<AppState>, headers: HeaderMap, body: Bytes) ->
 
     // The pipeline owns its thread for the whole exchange; `blocking_send`
     // makes a slow reader slow the upstream read down, not buffer it.
+    let path = uri.path().to_owned();
     let worker = tokio::task::spawn_blocking(move || {
-        gateway.chat(&headers, &body, &mut |reply| {
+        gateway.chat("POST", &path, &headers, &body, &mut |reply| {
             tx.blocking_send(reply).is_ok()
         });
     });

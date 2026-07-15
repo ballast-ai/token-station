@@ -18,7 +18,7 @@ use token_station_conformance::{
 use token_station_plugin_runtime::{
     AgentPlugin, LoadError, NoSecrets, PluginRuntime, ProviderPlugin, RuntimeLimits,
 };
-use token_station_protocol::{ErrorCode, ErrorEnvelope, FinishReason, StreamEvent};
+use token_station_protocol::{ErrorCode, ErrorEnvelope, FinishReason, HeaderDigest, StreamEvent};
 
 fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -191,6 +191,33 @@ fn anthropic_stream_state_is_isolated_and_cleaned_by_stream_id() {
             .unwrap()
             .contains("message_start")
     );
+}
+
+#[test]
+fn anthropic_match_inbound_owns_only_post_messages() {
+    let plugin = AgentPlugin::load(&runtime(), anthropic_agent_package()).expect("loads clean");
+    let headers = HeaderDigest::redacting([
+        ("authorization", "Bearer local-secret"),
+        ("anthropic-version", "2023-06-01"),
+    ]);
+
+    let matched = plugin
+        .match_inbound("POST", "/v1/messages?beta=true", &headers)
+        .expect("match call succeeds");
+    assert!(matched.matched);
+    assert_eq!(matched.protocol.as_deref(), Some("anthropic-messages"));
+
+    for (method, path) in [
+        ("GET", "/v1/messages"),
+        ("POST", "/v1/messages/count_tokens"),
+        ("POST", "/v1/chat/completions"),
+    ] {
+        let result = plugin
+            .match_inbound(method, path, &headers)
+            .expect("match call succeeds");
+        assert!(!result.matched, "{method} {path}");
+        assert_eq!(result.protocol, None, "{method} {path}");
+    }
 }
 
 #[test]

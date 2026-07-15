@@ -1,5 +1,6 @@
 # 按架构 §9.1：每个官方插件是独立审计边界，独立 CODEOWNERS 行。
 # 目前唯一维护者；插件有专属 owner 时改这里。
 * @actly
+/plugins/official/agent-anthropic/ @actly
 /plugins/official/agent-openai/ @actly
 /plugins/official/provider-openai-compatible/ @actly

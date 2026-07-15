@@ -33,7 +33,11 @@ fn plugins_dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("ts-proxy-plugins-{}", std::process::id()));
-        for plugin in ["agent-openai", "provider-openai-compatible"] {
+        for plugin in [
+            "agent-openai",
+            "agent-anthropic",
+            "provider-openai-compatible",
+        ] {
             let source = repo_root().join("plugins/official").join(plugin);
             let status = Command::new("cargo")
                 .args(["build", "--target", "wasm32-wasip2"])
@@ -207,6 +211,15 @@ fn start_proxy(upstream: &MockUpstream, key_file: &Path) -> Proxy {
 }
 
 fn start_proxy_with(upstream: &MockUpstream, key_file: &Path, metrics: bool) -> Proxy {
+    start_proxy_with_agent(upstream, key_file, metrics, "agent-openai")
+}
+
+fn start_proxy_with_agent(
+    upstream: &MockUpstream,
+    key_file: &Path,
+    metrics: bool,
+    agent_plugin: &str,
+) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
         "ts-proxy-data-{}-{}",
@@ -219,7 +232,7 @@ fn start_proxy_with(upstream: &MockUpstream, key_file: &Path, metrics: bool) -> 
         "data": { "dir": data_dir, "metrics": metrics },
         "plugins": {
             "dir": plugins_dir(),
-            "agent": "agent-openai",
+            "agent": agent_plugin,
             "providers": { "openai-compatible": "provider-openai-compatible" }
         },
         "upstreams": {
@@ -335,6 +348,34 @@ fn post_chat(proxy: &Proxy, body: &Value, hint: Option<(&str, &str)>) -> (u16, S
     (status, body)
 }
 
+fn send_messages(proxy: &Proxy, body: &Value, token: &str) -> (u16, Option<String>, String) {
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    let response = agent
+        .post(format!("{}/v1/messages?beta=true", proxy.url))
+        .header("authorization", &format!("Bearer {token}"))
+        .header("anthropic-version", "2023-06-01")
+        .header("x-claude-code-session-id", "session-test")
+        .send(&body.to_string())
+        .expect("the proxy answers");
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let body = response.into_body().read_to_string().expect("body reads");
+    (status, content_type, body)
+}
+
+fn post_messages(proxy: &Proxy, body: &Value, token: &str) -> (u16, String) {
+    let (status, _, body) = send_messages(proxy, body, token);
+    (status, body)
+}
+
 // -- the tests -----------------------------------------------------------------------
 
 #[test]
@@ -399,6 +440,173 @@ fn a_chat_completion_round_trips_with_the_credential_injected() {
         proxy.data_dir.join("requests.log").exists(),
         "the file log is always written"
     );
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn an_anthropic_message_round_trips_through_the_same_provider_pipeline() {
+    let upstream_answer = json!({
+        "id": "chatcmpl-88",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "42."},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 3}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("anthropic-roundtrip", "sk-test-key-abc\n");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, content_type, body) = send_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 128,
+            "system": "You are concise.",
+            "messages": [{"role": "user", "content": "what is six times seven"}]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(content_type.as_deref(), Some("application/json"));
+    let body: Value = serde_json::from_str(&body).expect("the reply is JSON");
+    assert_eq!(body["type"], json!("message"));
+    assert_eq!(body["role"], json!("assistant"));
+    assert_eq!(body["content"][0]["type"], json!("text"));
+    assert_eq!(body["content"][0]["text"], json!("42."));
+    assert_eq!(body["stop_reason"], json!("end_turn"));
+    assert_eq!(body["usage"]["input_tokens"], json!(11));
+
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/v1/chat/completions");
+    assert_eq!(seen[0].body["model"], json!("gpt-5.5"));
+    assert_eq!(seen[0].body["messages"][0]["role"], json!("system"));
+    assert_eq!(seen[0].body["messages"][1]["role"], json!("user"));
+
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["protocol"], "Text(\"anthropic-messages\")");
+    assert_eq!(row["status"], "Integer(200)");
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn anthropic_local_auth_and_protocol_mismatch_fail_before_upstream() {
+    let mock = MockUpstream::start(Vec::new());
+    let key = key_file("anthropic-local-auth", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+    let request = json!({
+        "model": "auto",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+
+    let (status, body) = post_messages(&proxy, &request, "wrong-local-key");
+    assert_eq!(status, 401, "{body}");
+    let error: Value = serde_json::from_str(&body).expect("Anthropic error JSON");
+    assert_eq!(error["type"], json!("error"));
+    assert_eq!(error["error"]["type"], json!("authentication_error"));
+
+    let (status, body) = post_chat(
+        &proxy,
+        &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+        None,
+    );
+    assert_eq!(status, 404, "{body}");
+    let error: Value = serde_json::from_str(&body).expect("Anthropic error JSON");
+    assert_eq!(error["error"]["type"], json!("invalid_request_error"));
+    assert_eq!(mock.hits(), 0, "both refusals happen before routing");
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn an_anthropic_stream_is_incremental_and_protocol_shaped() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let head = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        sse.len()
+    );
+    let raw = [head.as_bytes(), sse.as_bytes()].concat();
+    let segments = vec![
+        raw[..17].to_vec(),
+        raw[17..89].to_vec(),
+        raw[89..151].to_vec(),
+        raw[151..].to_vec(),
+    ];
+    let mock = MockUpstream::start(vec![segments]);
+    let key = key_file("anthropic-stream", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, content_type, body) = send_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 128,
+            "stream": true,
+            "messages": [{"role": "user", "content": "hi"}]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(content_type.as_deref(), Some("text/event-stream"));
+    assert_eq!(body.matches("event: message_start").count(), 1, "{body}");
+    assert!(
+        body.contains(r#""text":"Hel","type":"text_delta""#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#""text":"lo","type":"text_delta""#),
+        "{body}"
+    );
+    assert!(body.contains("event: message_stop"), "{body}");
+
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["protocol"], "Text(\"anthropic-messages\")");
+    assert_eq!(row["stream"], "Integer(1)");
+    assert_eq!(row["input_tokens"], "Integer(7)");
+    assert_eq!(row["output_tokens"], "Integer(2)");
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn an_upstream_auth_failure_is_rendered_as_anthropic() {
+    let refusal = json!({"error": {"message": "Incorrect API key provided"}}).to_string();
+    let mock = MockUpstream::start(vec![vec![http_json(401, &refusal)]]);
+    let key = key_file("anthropic-upstream-auth", "sk-live-topsecret");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, body) = post_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(status, 401, "{body}");
+    let error: Value = serde_json::from_str(&body).expect("Anthropic error JSON");
+    assert_eq!(error["type"], json!("error"));
+    assert_eq!(error["error"]["type"], json!("authentication_error"));
+    assert!(!body.contains("topsecret"));
+    assert_eq!(mock.hits(), 1);
 
     std::fs::remove_file(key).ok();
 }

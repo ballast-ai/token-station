@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -50,6 +51,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// points are the network's, which is exactly what conformance drilled the
 /// parser on.
 const STREAM_READ: usize = 8 * 1024;
+static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
 /// One configured upstream, resolved and ready to serve.
 struct Upstream {
@@ -408,7 +410,7 @@ impl Gateway {
         }
     }
 
-    /// `POST /v1/chat/completions`, start to finish.
+    /// One admitted inference request, start to finish.
     ///
     /// `emit` receives exactly one `Reply::Begin*`; streaming chunks follow if
     /// the exchange streams. When `emit` returns `false` (client gone) the
@@ -418,6 +420,8 @@ impl Gateway {
     /// including the ones the caller never sees finish.
     pub fn chat(
         &self,
+        method: &str,
+        path: &str,
         headers: &[(String, String)],
         body: &[u8],
         emit: &mut dyn FnMut(Reply) -> bool,
@@ -430,7 +434,7 @@ impl Gateway {
             });
         let mut record = RequestRecord::begin(started_at_ms, self.protocol.clone());
 
-        let reply = self.chat_inner(headers, body, emit, &mut record);
+        let reply = self.chat_inner(method, path, headers, body, emit, &mut record);
         if let Err(refusal) = reply {
             record.status = refusal.http_status;
             record.error_code = Some(refusal.code);
@@ -446,11 +450,38 @@ impl Gateway {
     /// caller can still shape a whole error response.
     fn chat_inner(
         &self,
+        method: &str,
+        path: &str,
         headers: &[(String, String)],
         body: &[u8],
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(), ErrorEnvelope> {
+        let header_digest = HeaderDigest::redacting(headers.iter().cloned());
+        let inbound_match = self.agent.match_inbound(method, path, &header_digest)?;
+        if !inbound_match.matched {
+            return Err(ErrorEnvelope::new(
+                ErrorCode::InvalidRequest,
+                404,
+                "the configured agent adapter does not handle this endpoint",
+            ));
+        }
+        let protocol = inbound_match.protocol.ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorCode::Internal,
+                500,
+                "agent adapter matched the endpoint without naming a protocol",
+            )
+        })?;
+        if !self.agent.manifest().agent_protocols.contains(&protocol) {
+            return Err(ErrorEnvelope::new(
+                ErrorCode::Internal,
+                500,
+                "agent adapter matched an undeclared protocol",
+            ));
+        }
+        record.protocol.clone_from(&protocol);
+
         if body.len() > MAX_INBOUND_BODY {
             return Err(ErrorEnvelope::new(
                 ErrorCode::InvalidRequest,
@@ -469,9 +500,11 @@ impl Gateway {
         // The envelope an agent adapter is allowed to see: headers already
         // redacted, principal already decided. (Inbound auth itself is C1#4.)
         let envelope = AgentRequestEnvelope {
-            protocol: self.protocol.clone(),
-            agent_tool: None,
-            headers: HeaderDigest::redacting(headers.iter().cloned()),
+            protocol: protocol.clone(),
+            agent_tool: (protocol == "anthropic-messages"
+                && header_digest.contains("x-claude-code-session-id"))
+            .then(|| "claude-code".to_owned()),
+            headers: header_digest,
             principal: Principal {
                 subject: "local".to_owned(),
                 tenant: None,
@@ -593,12 +626,27 @@ impl Gateway {
         }
 
         if request.stream {
-            self.relay_stream(upstream, response, emit, record)
+            let sequence = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
+            let render_context = json!({
+                "protocol": record.protocol,
+                "stream_id": format!("stream-{sequence}"),
+                "response_id": format!("msg_token_station_{sequence}"),
+                "model": target.model,
+            });
+            self.relay_stream(upstream, response, &render_context, emit, record);
+            Ok(())
         } else {
             let parts: HttpResponseParts = response.into();
             let chat_response = upstream.plugin.parse_response(&parts)?;
             record.usage = Some(chat_response.usage);
-            let rendered = self.agent.render_response(&chat_response, &Value::Null)?;
+            let render_context = json!({
+                "protocol": record.protocol,
+                "response_id": chat_response.id,
+                "model": chat_response.model,
+            });
+            let rendered = self
+                .agent
+                .render_response(&chat_response, &render_context)?;
             emit(Reply::BeginJson(JsonReply {
                 status: 200,
                 body: rendered.to_string(),
@@ -718,14 +766,15 @@ impl Gateway {
         &self,
         upstream: &Upstream,
         response: UpstreamResponse,
+        render_context: &Value,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
-    ) -> Result<(), ErrorEnvelope> {
+    ) {
         let mut parser = upstream.plugin.stream_parser();
         let mut reader = response.reader;
 
         if !emit(Reply::BeginStream) {
-            return Ok(());
+            return;
         }
 
         let mut buffer = [0u8; STREAM_READ];
@@ -743,9 +792,9 @@ impl Gateway {
                         format!("upstream stream broke: {error}"),
                     );
                     record.error_code = Some(envelope.code);
-                    let rendered = self.render_stream_error(&envelope);
+                    let rendered = self.render_stream_error(&envelope, render_context);
                     emit(Reply::Chunk(rendered));
-                    return Ok(());
+                    return;
                 }
             };
 
@@ -754,9 +803,9 @@ impl Gateway {
                 Ok(events) => events,
                 Err(envelope) => {
                     record.error_code = Some(envelope.code);
-                    let rendered = self.render_stream_error(&envelope);
+                    let rendered = self.render_stream_error(&envelope, render_context);
                     emit(Reply::Chunk(rendered));
-                    return Ok(());
+                    return;
                 }
             };
 
@@ -764,19 +813,31 @@ impl Gateway {
                 if let token_station_protocol::StreamEvent::Usage { usage } = &event {
                     record.usage = Some(*usage);
                 }
-                let chunk = self.agent.render_stream_event(&event, &Value::Null)?;
+                let chunk = match self.agent.render_stream_event(&event, render_context) {
+                    Ok(chunk) => chunk,
+                    Err(envelope) => {
+                        record.error_code = Some(envelope.code);
+                        let rendered = self.render_stream_error(&envelope, render_context);
+                        emit(Reply::Chunk(rendered));
+                        return;
+                    }
+                };
                 let data = chunk
                     .get("data")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
                 if !emit(Reply::Chunk(data)) {
-                    return Ok(()); // Client hung up; drop the upstream too.
+                    self.clear_stream_state(render_context);
+                    return; // Client hung up; drop the upstream too.
                 }
             }
         }
 
-        Ok(())
+        // A well-formed provider stream emits Done/Error, both of which clean
+        // adapter state. EOF without either is still terminal from the host's
+        // perspective, so discard any partial renderer state as well.
+        self.clear_stream_state(render_context);
     }
 
     /// An error, rendered the way this deployment's inbound protocol spells it.
@@ -797,15 +858,32 @@ impl Gateway {
         }
     }
 
-    fn render_stream_error(&self, envelope: &ErrorEnvelope) -> String {
-        let body = self
-            .agent
-            .map_inbound_error(envelope, &Value::Null)
-            .map_or_else(
-                |_| json!({"error": {"message": envelope.message}}).to_string(),
-                |value| value.to_string(),
-            );
-        format!("data: {body}\n\n")
+    fn render_stream_error(&self, envelope: &ErrorEnvelope, context: &Value) -> String {
+        self.agent
+            .render_stream_event(
+                &token_station_protocol::StreamEvent::Error {
+                    error: envelope.clone(),
+                },
+                context,
+            )
+            .ok()
+            .and_then(|chunk| chunk.get("data").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_else(|| {
+                let body = self.agent.map_inbound_error(envelope, context).map_or_else(
+                    |_| json!({"error": {"message": envelope.message}}).to_string(),
+                    |value| value.to_string(),
+                );
+                format!("data: {body}\n\n")
+            })
+    }
+
+    fn clear_stream_state(&self, context: &Value) {
+        let _ = self.agent.render_stream_event(
+            &token_station_protocol::StreamEvent::Error {
+                error: ErrorEnvelope::new(ErrorCode::Internal, 499, "client disconnected"),
+            },
+            context,
+        );
     }
 }
 
