@@ -96,27 +96,47 @@ export TS_VIRTUAL_KEY="$(tr -d '\r\n' < token-station-e2e/data/virtual-key)"
 ```bash
 ANTHROPIC_BASE_URL='http://127.0.0.1:8787' \
 ANTHROPIC_AUTH_TOKEN="$TS_VIRTUAL_KEY" \
-ANTHROPIC_MODEL='deepseek-v4-flash' \
+ANTHROPIC_MODEL='claude-3-5-haiku-20241022' \
 MAX_THINKING_TOKENS=0 \
 CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 \
 CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 \
-claude --model deepseek-v4-flash
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+claude --model claude-3-5-haiku-20241022 \
+  --safe-mode \
+  --setting-sources project
 ```
 
 `ANTHROPIC_AUTH_TOKEN` 会作为 Bearer token 发给本地代理。不要把
 `DEEPSEEK_API_KEY` 传给 Claude Code；它只应存在于 token-station 服务进程。
+
+这里的 `claude-3-5-haiku-20241022` 是 Claude Code 侧的协议兼容标识，不是实际
+上游。token-station 的路由仍会选择配置中的
+`deepseek/deepseek-v4-flash`。当前 Claude Code 会把不认识的网关模型名当作新
+Claude 模型并自动附加 `thinking: {"type":"adaptive"}`；而 Canonical IR 尚不能
+无损承载该字段，所以不能直接把 Claude Code 的 `--model` 设为
+`deepseek-v4-flash`。
+
+`--setting-sources project` 用于排除用户级 `~/.claude/settings.json` 中可能已有的
+`env.ANTHROPIC_BASE_URL` / `env.ANTHROPIC_AUTH_TOKEN`。这些 settings 环境项可能
+覆盖当前 shell 的同名变量。若项目级 settings 也配置了这些变量，应先移除冲突，
+或在一个没有此类配置的目录完成验收。`--safe-mode` 让首次连通测试不加载个人
+插件、hooks 和 MCP；确认连通后可按需去掉。
 
 ## 5. 当前兼容边界
 
 - 已实现普通文本、system、图片块、工具定义、`tool_use` / `tool_result`、
   Anthropic SSE、usage 和 Anthropic 错误格式。
 - Canonical IR 当前不能无损表达 `thinking` / `redacted_thinking`。适配器会明确
-  返回能力错误，不会静默丢弃。因此本配方关闭 adaptive thinking 和实验 beta。
+  返回能力错误，不会静默丢弃。因此本配方关闭实验 beta，并使用不会触发
+  adaptive thinking 的 Claude Code 兼容模型标识。
 - `/v1/messages/count_tokens` 尚未实现。Claude Code 会退回本地 token 估算；
   该端点在 Claude Code 网关协议中本来就是可选项。
 - 当前 DeepSeek OpenAI 格式公开模型为 `deepseek-v4-flash` 和
-  `deepseek-v4-pro`。样例使用 flash；切换 pro 只需更新配置中的 model 和启动
-  Claude Code 时的 `--model`，不需要改 Rust 代码。
+  `deepseek-v4-pro`。样例使用 flash；切换 pro 只需更新配置中的 upstream model
+  和 router pool，Claude Code 侧继续使用上述兼容标识，不需要改 Rust 代码。
+- Claude Code 自己的 `modelUsage` 会按兼容标识展示上下文和价格，不能作为实际
+  DeepSeek 计费依据；真实 upstream/model/token 用量以 token-station 的
+  `requests.log`、metrics 和 DeepSeek 账单为准。
 - 图片能进入 Canonical IR，但样例没有为 DeepSeek 声明 `vision: true`，因此
   路由不会把需要视觉能力的请求发给该上游。
 
