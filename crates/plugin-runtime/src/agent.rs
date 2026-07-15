@@ -6,7 +6,7 @@ use serde_json::Value;
 use token_station_conformance::{AdapterResult, AgentAdapter, reported_identity_matches};
 use token_station_plugin_api::{AdapterKind, AdapterManifest, AdapterMetadata};
 use token_station_protocol::{
-    AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, ErrorEnvelope,
+    AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, ErrorEnvelope, HeaderDigest,
 };
 use wasmtime::Store;
 use wasmtime::component::{Component, Linker};
@@ -31,6 +31,13 @@ pub struct AgentPlugin {
     runtime: PluginRuntime,
     manifest: AdapterManifest,
     main: Mutex<InstanceHandle>,
+}
+
+/// The admitted agent adapter's verdict for one HTTP request head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundMatch {
+    pub matched: bool,
+    pub protocol: Option<String>,
 }
 
 struct InstanceHandle {
@@ -103,6 +110,35 @@ impl AgentPlugin {
     #[must_use]
     pub fn manifest(&self) -> &AdapterManifest {
         &self.manifest
+    }
+
+    /// Asks the guest whether it owns this request before any body is
+    /// normalized. Header values have already passed through
+    /// [`HeaderDigest`], so credentials cannot cross the boundary.
+    ///
+    /// # Errors
+    ///
+    /// A serialization failure or a guest trap, normalized like every other
+    /// agent call.
+    pub fn match_inbound(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &HeaderDigest,
+    ) -> AdapterResult<InboundMatch> {
+        let request_head = to_json(&serde_json::json!({
+            "method": method,
+            "path": path,
+            "headers": headers,
+        }))?;
+        let (matched, protocol) = self.call(|handle| {
+            let result = handle
+                .instance
+                .token_station_adapter_agent_adapter()
+                .call_match_inbound(&mut handle.store, &request_head)?;
+            Ok(Ok((result.matched, result.protocol)))
+        })?;
+        Ok(InboundMatch { matched, protocol })
     }
 
     fn call<T>(
