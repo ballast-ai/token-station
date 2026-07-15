@@ -85,21 +85,29 @@ Inject this configuration only into the current Claude Code process:
 ```bash
 ANTHROPIC_BASE_URL='http://127.0.0.1:8787' \
 ANTHROPIC_AUTH_TOKEN="$TS_VIRTUAL_KEY" \
-ANTHROPIC_MODEL='deepseek-v4-flash' \
+ANTHROPIC_MODEL='claude-3-5-haiku-20241022' \
 MAX_THINKING_TOKENS=0 \
 CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 \
 CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 \
-claude --model deepseek-v4-flash
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+claude --model claude-3-5-haiku-20241022 \
+  --safe-mode \
+  --setting-sources project
 ```
 
 `ANTHROPIC_AUTH_TOKEN` is sent to the local proxy as a Bearer token. Do not give `DEEPSEEK_API_KEY` to Claude Code. It must exist only in the Token Station service process.
 
+`claude-3-5-haiku-20241022` is a protocol-compatible identifier for Claude Code. It is not the actual upstream. Token Station still selects `deepseek/deepseek-v4-flash` from the configuration. Claude Code treats an unknown gateway model name as a new Claude model and adds `thinking: {"type":"adaptive"}`. Canonical IR cannot preserve this field. Therefore, do not set Claude Code `--model` to `deepseek-v4-flash`.
+
+`--setting-sources project` excludes values from the user-level `~/.claude/settings.json`. Existing `env.ANTHROPIC_BASE_URL` or `env.ANTHROPIC_AUTH_TOKEN` values in that file can override the same shell variables. Remove conflicts from project settings, or run the test in a directory without these settings. `--safe-mode` excludes personal plugins, hooks, and MCP during the first connection test. Remove it later if required.
+
 ## 5. Current compatibility limits
 
 - Text, system messages, image blocks, tool definitions, `tool_use`, `tool_result`, Anthropic SSE, usage, and Anthropic errors are implemented.
-- Canonical IR cannot preserve `thinking` or `redacted_thinking`. The adapter returns a capability error and does not silently drop these fields. This procedure disables adaptive thinking and experimental beta behavior.
+- Canonical IR cannot preserve `thinking` or `redacted_thinking`. The adapter returns a capability error and does not silently drop these fields. This procedure disables experimental beta behavior and uses a Claude Code compatibility identifier that does not trigger adaptive thinking.
 - `/v1/messages/count_tokens` is not implemented. Claude Code falls back to a local token estimate. This endpoint is optional in the Claude Code gateway protocol.
-- The current public DeepSeek models in OpenAI format are `deepseek-v4-flash` and `deepseek-v4-pro`. The sample uses flash. To use pro, update the model in the configuration and Claude Code `--model`. No Rust change is required.
+- The current public DeepSeek models in OpenAI format are `deepseek-v4-flash` and `deepseek-v4-pro`. The sample uses flash. To use pro, update the upstream model and router pool. Continue to use the compatibility identifier in Claude Code. No Rust change is required.
+- Claude Code `modelUsage` shows context and pricing for the compatibility identifier. Do not use it as DeepSeek billing data. Use the Token Station `requests.log`, metrics, and DeepSeek bill for actual upstream, model, and token usage.
 - Images enter Canonical IR, but the sample does not declare `vision: true` for DeepSeek. The router does not send vision requests to this upstream.
 
 ## 6. Add other model providers
