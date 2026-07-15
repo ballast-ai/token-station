@@ -9,6 +9,9 @@ wit_bindgen::generate!({
     world: "agent-adapter-v1",
 });
 
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+
 use exports::token_station::adapter::agent_adapter::{AdapterHealth, AdapterMetadata, Guest};
 use serde_json::{json, Map, Value};
 use token_station::adapter::common::{AdapterKind, HealthStatus};
@@ -407,8 +410,94 @@ fn anthropic_error_type(code: ErrorCode) -> &'static str {
     }
 }
 
-fn stream_context(context: &Value) -> (&str, &str) {
-    let id = context
+const MAX_ACTIVE_STREAMS: usize = 1024;
+const MAX_BLOCKS_PER_STREAM: u32 = 256;
+
+#[derive(Debug)]
+struct ToolBlock {
+    content_index: u32,
+    id: String,
+    name: String,
+}
+
+#[derive(Debug)]
+struct StreamState {
+    response_id: String,
+    model: String,
+    input_tokens: u64,
+    started: bool,
+    next_block_index: u32,
+    text_blocks: BTreeMap<u32, u32>,
+    tool_blocks: BTreeMap<u32, ToolBlock>,
+    open_blocks: BTreeSet<u32>,
+    output_tokens: u64,
+}
+
+impl StreamState {
+    fn new(response_id: &str, model: &str, input_tokens: u64) -> Self {
+        Self {
+            response_id: response_id.to_owned(),
+            model: model.to_owned(),
+            input_tokens,
+            started: false,
+            next_block_index: 0,
+            text_blocks: BTreeMap::new(),
+            tool_blocks: BTreeMap::new(),
+            open_blocks: BTreeSet::new(),
+            output_tokens: 0,
+        }
+    }
+
+    fn allocate_block(&mut self) -> Result<u32, String> {
+        if self.next_block_index >= MAX_BLOCKS_PER_STREAM {
+            return Err(capability(format!(
+                "stream exceeds the {MAX_BLOCKS_PER_STREAM}-block safety limit"
+            )));
+        }
+        let index = self.next_block_index;
+        self.next_block_index += 1;
+        self.open_blocks.insert(index);
+        Ok(index)
+    }
+
+    fn ensure_started(&mut self, rendered: &mut String) -> Result<(), String> {
+        if self.started {
+            return Ok(());
+        }
+        rendered.push_str(&sse(
+            "message_start",
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": self.response_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": self.model,
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": {"input_tokens": self.input_tokens, "output_tokens": 0}
+                }
+            }),
+        )?);
+        self.started = true;
+        Ok(())
+    }
+}
+
+thread_local! {
+    static STREAM_STATES: RefCell<BTreeMap<String, StreamState>> = const {
+        RefCell::new(BTreeMap::new())
+    };
+}
+
+fn stream_context(context: &Value) -> Result<(&str, &str, &str, u64), String> {
+    let stream_id = context
+        .get("stream_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid("stream render context declares no stream_id"))?;
+    let response_id = context
         .get("response_id")
         .or_else(|| context.get("id"))
         .and_then(Value::as_str)
@@ -417,7 +506,11 @@ fn stream_context(context: &Value) -> (&str, &str) {
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    (id, model)
+    let input_tokens = context
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    Ok((stream_id, response_id, model, input_tokens))
 }
 
 fn sse(event: &str, data: Value) -> Result<String, String> {
@@ -579,108 +672,191 @@ impl Guest for AnthropicClient {
     fn render_stream_event(event: String, context: String) -> Result<String, String> {
         let event: StreamEvent = parse_input(&event)?;
         let context: Value = parse_input(&context)?;
-        let (id, model) = stream_context(&context);
-        let data = match event {
-            StreamEvent::Delta { index, content } => {
-                let mut rendered = sse(
-                    "message_start",
-                    json!({
-                        "type": "message_start",
-                        "message": {
-                            "id": id,
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [],
-                            "model": model,
-                            "stop_reason": null,
-                            "stop_sequence": null,
-                            "usage": {"input_tokens": 0, "output_tokens": 0}
-                        }
-                    }),
-                )?;
-                rendered.push_str(&sse(
-                    "content_block_start",
-                    json!({
-                        "type": "content_block_start",
-                        "index": index,
-                        "content_block": {"type": "text", "text": ""}
-                    }),
-                )?);
-                rendered.push_str(&sse(
-                    "content_block_delta",
-                    json!({
-                        "type": "content_block_delta",
-                        "index": index,
-                        "delta": {"type": "text_delta", "text": content}
-                    }),
-                )?);
-                rendered
-            }
-            StreamEvent::ToolCallDelta {
-                index,
-                id,
-                name,
-                arguments_delta,
-            } => {
-                let mut rendered = String::new();
-                if let (Some(id), Some(name)) = (id, name) {
-                    rendered.push_str(&sse(
-                        "content_block_start",
-                        json!({
-                            "type": "content_block_start",
-                            "index": index,
-                            "content_block": {"type": "tool_use", "id": id, "name": name, "input": {}}
-                        }),
-                    )?);
-                }
-                rendered.push_str(&sse(
-                    "content_block_delta",
-                    json!({
-                        "type": "content_block_delta",
-                        "index": index,
-                        "delta": {"type": "input_json_delta", "partial_json": arguments_delta}
-                    }),
-                )?);
-                rendered
-            }
-            StreamEvent::Usage { usage } => sse(
-                "message_delta",
-                json!({
-                    "type": "message_delta",
-                    "delta": {"stop_reason": null, "stop_sequence": null},
-                    "usage": {"output_tokens": usage.output_tokens}
-                }),
-            )?,
-            StreamEvent::Done { finish_reason } => {
-                let mut rendered = sse(
-                    "content_block_stop",
-                    json!({"type": "content_block_stop", "index": 0}),
-                )?;
-                rendered.push_str(&sse(
-                    "message_delta",
-                    json!({
-                        "type": "message_delta",
-                        "delta": {
-                            "stop_reason": finish_reason_to_anthropic(finish_reason),
-                            "stop_sequence": null
-                        },
-                        "usage": {"output_tokens": 0}
-                    }),
-                )?);
-                rendered.push_str(&sse("message_stop", json!({"type": "message_stop"}))?);
-                rendered
-            }
-            StreamEvent::Error { error } => {
-                let error_type = anthropic_error_type(error.code);
-                sse(
+        let (stream_id, response_id, model, input_tokens) = stream_context(&context)?;
+        let data = STREAM_STATES.with(|states| {
+            let mut states = states.borrow_mut();
+
+            if let StreamEvent::Error { error } = &event {
+                states.remove(stream_id);
+                return sse(
                     "error",
                     json!({
                         "type": "error",
-                        "error": {"type": error_type, "message": error.message}
+                        "error": {
+                            "type": anthropic_error_type(error.code),
+                            "message": error.message
+                        }
                     }),
-                )?
+                );
             }
-        };
+
+            if !states.contains_key(stream_id) {
+                if states.len() >= MAX_ACTIVE_STREAMS {
+                    return Err(capability(format!(
+                        "adapter reached the {MAX_ACTIVE_STREAMS}-stream safety limit"
+                    )));
+                }
+                states.insert(
+                    stream_id.to_owned(),
+                    StreamState::new(response_id, model, input_tokens),
+                );
+            }
+
+            if let Some(state) = states.get(stream_id) {
+                if state.response_id != response_id || state.model != model {
+                    states.remove(stream_id);
+                    return Err(invalid(
+                        "stream render context changed response_id or model mid-stream",
+                    ));
+                }
+            }
+
+            let result = match event {
+                StreamEvent::Delta { index, content } => {
+                    let state = states.get_mut(stream_id).expect("state inserted above");
+                    let mut rendered = String::new();
+                    state.ensure_started(&mut rendered)?;
+                    let block_index = match state.text_blocks.get(&index) {
+                        Some(block_index) => *block_index,
+                        None => {
+                            let block_index = state.allocate_block()?;
+                            state.text_blocks.insert(index, block_index);
+                            rendered.push_str(&sse(
+                                "content_block_start",
+                                json!({
+                                    "type": "content_block_start",
+                                    "index": block_index,
+                                    "content_block": {"type": "text", "text": ""}
+                                }),
+                            )?);
+                            block_index
+                        }
+                    };
+                    rendered.push_str(&sse(
+                        "content_block_delta",
+                        json!({
+                            "type": "content_block_delta",
+                            "index": block_index,
+                            "delta": {"type": "text_delta", "text": content}
+                        }),
+                    )?);
+                    Ok(rendered)
+                }
+                StreamEvent::ToolCallDelta {
+                    index,
+                    id,
+                    name,
+                    arguments_delta,
+                } => {
+                    let state = states.get_mut(stream_id).expect("state inserted above");
+                    let mut rendered = String::new();
+                    state.ensure_started(&mut rendered)?;
+
+                    if !state.tool_blocks.contains_key(&index) {
+                        let first_id = id
+                            .as_deref()
+                            .ok_or_else(|| {
+                                invalid("first tool-call stream fragment declares no id")
+                            })?
+                            .to_owned();
+                        let first_name = name
+                            .as_deref()
+                            .ok_or_else(|| {
+                                invalid("first tool-call stream fragment declares no name")
+                            })?
+                            .to_owned();
+                        let content_index = state.allocate_block()?;
+                        rendered.push_str(&sse(
+                            "content_block_start",
+                            json!({
+                                "type": "content_block_start",
+                                "index": content_index,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": first_id,
+                                    "name": first_name,
+                                    "input": {}
+                                }
+                            }),
+                        )?);
+                        state.tool_blocks.insert(
+                            index,
+                            ToolBlock {
+                                content_index,
+                                id: first_id,
+                                name: first_name,
+                            },
+                        );
+                    }
+
+                    let block = state.tool_blocks.get(&index).expect("tool block inserted");
+                    if id.as_deref().is_some_and(|id| id != block.id)
+                        || name.as_deref().is_some_and(|name| name != block.name)
+                    {
+                        return Err(invalid(
+                            "tool-call identity changed between stream fragments",
+                        ));
+                    }
+                    rendered.push_str(&sse(
+                        "content_block_delta",
+                        json!({
+                            "type": "content_block_delta",
+                            "index": block.content_index,
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": arguments_delta
+                            }
+                        }),
+                    )?);
+                    Ok(rendered)
+                }
+                StreamEvent::Usage { usage } => {
+                    let state = states.get_mut(stream_id).expect("state inserted above");
+                    let mut rendered = String::new();
+                    state.ensure_started(&mut rendered)?;
+                    state.output_tokens = usage.output_tokens;
+                    rendered.push_str(&sse(
+                        "message_delta",
+                        json!({
+                            "type": "message_delta",
+                            "delta": {"stop_reason": null, "stop_sequence": null},
+                            "usage": {"output_tokens": state.output_tokens}
+                        }),
+                    )?);
+                    Ok(rendered)
+                }
+                StreamEvent::Done { finish_reason } => {
+                    let mut state = states.remove(stream_id).expect("state inserted above");
+                    let mut rendered = String::new();
+                    state.ensure_started(&mut rendered)?;
+                    for block_index in &state.open_blocks {
+                        rendered.push_str(&sse(
+                            "content_block_stop",
+                            json!({"type": "content_block_stop", "index": block_index}),
+                        )?);
+                    }
+                    rendered.push_str(&sse(
+                        "message_delta",
+                        json!({
+                            "type": "message_delta",
+                            "delta": {
+                                "stop_reason": finish_reason_to_anthropic(finish_reason),
+                                "stop_sequence": null
+                            },
+                            "usage": {"output_tokens": state.output_tokens}
+                        }),
+                    )?);
+                    rendered.push_str(&sse("message_stop", json!({"type": "message_stop"}))?);
+                    Ok(rendered)
+                }
+                StreamEvent::Error { .. } => unreachable!("error handled before state creation"),
+            };
+
+            if result.is_err() {
+                states.remove(stream_id);
+            }
+            result
+        })?;
         to_output(&json!({"data": data}))
     }
 

@@ -13,11 +13,12 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use token_station_conformance::{
-    AgentFamily, FixturePack, ProviderFamily, run_agent_suite, run_provider_suite,
+    AgentAdapter, AgentFamily, FixturePack, ProviderFamily, run_agent_suite, run_provider_suite,
 };
 use token_station_plugin_runtime::{
     AgentPlugin, LoadError, NoSecrets, PluginRuntime, ProviderPlugin, RuntimeLimits,
 };
+use token_station_protocol::{ErrorCode, ErrorEnvelope, FinishReason, StreamEvent};
 
 fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -66,6 +67,11 @@ fn agent_package() -> &'static Path {
     DIR.get_or_init(|| build_package("agent-openai"))
 }
 
+fn anthropic_agent_package() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| build_package("agent-anthropic"))
+}
+
 fn runtime() -> PluginRuntime {
     PluginRuntime::new(RuntimeLimits {
         memory_bytes: 64 * 1024 * 1024,
@@ -103,6 +109,88 @@ fn the_official_agent_adapter_passes_the_full_suite_as_wasm() {
 
     assert!(report.is_passing(), "{report}");
     assert_eq!(report.suite(), plugin.manifest().conformance.required_suite);
+}
+
+#[test]
+fn the_official_anthropic_agent_adapter_passes_the_full_suite_as_wasm() {
+    let plugin = AgentPlugin::load(&runtime(), anthropic_agent_package()).expect("loads clean");
+
+    let fixtures = repo_root().join("plugins/official/agent-anthropic/fixtures");
+    let pack: FixturePack<AgentFamily> =
+        FixturePack::load(&fixtures).expect("the shipped pack loads");
+
+    let report = run_agent_suite(&plugin, &pack);
+
+    assert!(report.is_passing(), "{report}");
+    assert_eq!(report.suite(), plugin.manifest().conformance.required_suite);
+}
+
+#[test]
+fn anthropic_stream_state_is_isolated_and_cleaned_by_stream_id() {
+    let plugin = AgentPlugin::load(&runtime(), anthropic_agent_package()).expect("loads clean");
+    let context = |stream_id: &str, response_id: &str| {
+        serde_json::json!({
+            "protocol": "anthropic-messages",
+            "stream_id": stream_id,
+            "response_id": response_id,
+            "model": "routed-model"
+        })
+    };
+    let delta = |content: &str| StreamEvent::Delta {
+        index: 0,
+        content: content.to_owned(),
+    };
+
+    let a_first = plugin
+        .render_stream_event(&delta("a1"), &context("stream-a", "msg-a"))
+        .expect("stream A starts");
+    let b_first = plugin
+        .render_stream_event(&delta("b1"), &context("stream-b", "msg-b"))
+        .expect("stream B starts");
+    let a_second = plugin
+        .render_stream_event(&delta("a2"), &context("stream-a", "msg-a"))
+        .expect("stream A resumes");
+
+    assert!(a_first["data"].as_str().unwrap().contains("message_start"));
+    assert!(b_first["data"].as_str().unwrap().contains("message_start"));
+    assert!(!a_second["data"].as_str().unwrap().contains("message_start"));
+    assert!(a_second["data"].as_str().unwrap().contains("a2"));
+
+    plugin
+        .render_stream_event(
+            &StreamEvent::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+            &context("stream-a", "msg-a"),
+        )
+        .expect("done cleans stream A");
+    plugin
+        .render_stream_event(
+            &StreamEvent::Error {
+                error: ErrorEnvelope::new(ErrorCode::UpstreamUnavailable, 502, "unavailable"),
+            },
+            &context("stream-b", "msg-b"),
+        )
+        .expect("error cleans stream B");
+
+    let a_restarted = plugin
+        .render_stream_event(&delta("a3"), &context("stream-a", "msg-a-2"))
+        .expect("stream A can restart after done");
+    let b_restarted = plugin
+        .render_stream_event(&delta("b2"), &context("stream-b", "msg-b-2"))
+        .expect("stream B can restart after error");
+    assert!(
+        a_restarted["data"]
+            .as_str()
+            .unwrap()
+            .contains("message_start")
+    );
+    assert!(
+        b_restarted["data"]
+            .as_str()
+            .unwrap()
+            .contains("message_start")
+    );
 }
 
 #[test]

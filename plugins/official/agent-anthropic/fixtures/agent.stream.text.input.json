@@ -1,6 +1,7 @@
 {
   "context": {
     "protocol": "anthropic-messages",
+    "stream_id": "stream-text",
     "response_id": "msg_stream_1",
     "model": "routed-model"
   },

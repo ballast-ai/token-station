@@ -1,0 +1,17 @@
+{
+  "protocol": "anthropic-messages",
+  "agent_tool": "claude-code",
+  "headers": {
+    "names": ["authorization", "content-type", "x-agent-step"],
+    "values": {
+      "content-type": "application/json",
+      "x-agent-step": "planning"
+    }
+  },
+  "principal": {"subject": "local"},
+  "body": {
+    "model": "routed-model",
+    "max_tokens": 128,
+    "messages": [{"role": "user", "content": "plan the change"}]
+  }
+}
