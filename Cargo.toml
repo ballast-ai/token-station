@@ -14,6 +14,7 @@ members = [
 # plugin-runtime 的测试用子进程 cargo 构建它。
 exclude = [
     "crates/plugin-runtime/tests/guests/test-provider",
+    "plugins/official/agent-anthropic",
     "plugins/official/agent-openai",
     "plugins/official/provider-openai-compatible",
 ]

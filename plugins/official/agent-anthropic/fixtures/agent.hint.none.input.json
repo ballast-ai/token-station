@@ -1,0 +1,14 @@
+{
+  "protocol": "anthropic-messages",
+  "agent_tool": "claude-code",
+  "headers": {
+    "names": ["authorization", "content-type"],
+    "values": {"content-type": "application/json"}
+  },
+  "principal": {"subject": "local"},
+  "body": {
+    "model": "routed-model",
+    "max_tokens": 128,
+    "messages": [{"role": "user", "content": "hello"}]
+  }
+}
