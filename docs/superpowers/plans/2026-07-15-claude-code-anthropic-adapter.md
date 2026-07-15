@@ -125,11 +125,12 @@ feat: 接入 Anthropic Messages 网关入口
 ### 验证与提交
 
 ```bash
-cargo run -p token-station-cli -- --config apps/cli/claude-code-deepseek-config.json config validate
+cargo run -p token-station-cli -- --config apps/cli/claude-code-deepseek-config.json upstream list
+cargo run -p token-station-cli -- --config apps/cli/claude-code-deepseek-config.json rule list
 rg -n "DeepSeek|deepseek" apps crates plugins/official/agent-anthropic
 ```
 
-第二条命令在 Rust/adapter 逻辑中应无厂商专属命中。
+第三条命令在 Rust/adapter 逻辑中应无厂商专属分支；配置样例本身会命中。
 
 ```text
 docs: 新增 Claude Code 与 DeepSeek 接入配方
