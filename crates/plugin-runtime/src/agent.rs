@@ -6,7 +6,7 @@ use serde_json::Value;
 use token_station_conformance::{AdapterResult, AgentAdapter, reported_identity_matches};
 use token_station_plugin_api::{AdapterKind, AdapterManifest, AdapterMetadata};
 use token_station_protocol::{
-    AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, ErrorEnvelope, HeaderDigest,
+    AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, ErrorEnvelope,
 };
 use wasmtime::Store;
 use wasmtime::component::{Component, Linker};
@@ -33,16 +33,19 @@ pub struct AgentPlugin {
     main: Mutex<InstanceHandle>,
 }
 
-/// The admitted agent adapter's verdict for one HTTP request head.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InboundMatch {
-    pub matched: bool,
-    pub protocol: Option<String>,
-}
-
 struct InstanceHandle {
     store: Store<Ctx>,
     instance: AgentAdapterV1,
+}
+
+/// The host-facing result of [`AgentPlugin::match_inbound`]: whether the
+/// adapter claims the request, and — when it speaks several — which protocol
+/// it matched as. `protocol` is `None` when the adapter did not name one; the
+/// gateway then falls back to the adapter's manifest protocol.
+#[derive(Debug, Clone)]
+pub struct MatchOutcome {
+    pub matched: bool,
+    pub protocol: Option<String>,
 }
 
 impl AgentPlugin {
@@ -112,33 +115,38 @@ impl AgentPlugin {
         &self.manifest
     }
 
-    /// Asks the guest whether it owns this request before any body is
-    /// normalized. Header values have already passed through
-    /// [`HeaderDigest`], so credentials cannot cross the boundary.
+    /// `match_inbound`: does this adapter claim the given request? The host
+    /// asks every loaded agent this — with a redacted `request-head`
+    /// (`{ method, path, headers }`, headers already a `HeaderDigest`) — and
+    /// dispatches to the first that says yes. It is *not* in the
+    /// [`AgentAdapter`] trait: the conformance harness drills translation, not
+    /// the host's multiplexing, so this stays an inherent method over the
+    /// generated binding.
     ///
     /// # Errors
     ///
-    /// A serialization failure or a guest trap, normalized like every other
-    /// agent call.
-    pub fn match_inbound(
-        &self,
-        method: &str,
-        path: &str,
-        headers: &HeaderDigest,
-    ) -> AdapterResult<InboundMatch> {
-        let request_head = to_json(&serde_json::json!({
-            "method": method,
-            "path": path,
-            "headers": headers,
-        }))?;
-        let (matched, protocol) = self.call(|handle| {
-            let result = handle
-                .instance
-                .token_station_adapter_agent_adapter()
-                .call_match_inbound(&mut handle.store, &request_head)?;
-            Ok(Ok((result.matched, result.protocol)))
-        })?;
-        Ok(InboundMatch { matched, protocol })
+    /// A trap in the guest. The gateway treats an erroring adapter as "did not
+    /// match" so one broken adapter cannot veto the others.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous adapter call poisoned the shared instance lock.
+    pub fn match_inbound(&self, request_head: &Value) -> AdapterResult<MatchOutcome> {
+        let head_json = to_json(request_head)?;
+        let mut guard = self.main.lock().expect("a poisoned adapter stays poisoned");
+        let handle: &mut InstanceHandle = &mut guard;
+        handle
+            .store
+            .set_epoch_deadline(self.runtime.deadline_ticks());
+        let result = handle
+            .instance
+            .token_station_adapter_agent_adapter()
+            .call_match_inbound(&mut handle.store, &head_json)
+            .map_err(|trap| trap_envelope(&trap))?;
+        Ok(MatchOutcome {
+            matched: result.matched,
+            protocol: result.protocol,
+        })
     }
 
     fn call<T>(

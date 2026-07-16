@@ -981,7 +981,8 @@ fn anthropic_local_auth_and_protocol_mismatch_fail_before_upstream() {
     );
     assert_eq!(status, 404, "{body}");
     let error: Value = serde_json::from_str(&body).expect("Anthropic error JSON");
-    assert_eq!(error["error"]["type"], json!("invalid_request_error"));
+    assert_eq!(error["error"]["type"], json!("invalid_request"));
+    assert_eq!(error["error"]["code"], json!("invalid_request"));
     assert_eq!(mock.hits(), 0, "both refusals happen before routing");
 
     std::fs::remove_file(key).ok();
