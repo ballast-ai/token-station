@@ -38,6 +38,16 @@ struct InstanceHandle {
     instance: AgentAdapterV1,
 }
 
+/// The host-facing result of [`AgentPlugin::match_inbound`]: whether the
+/// adapter claims the request, and — when it speaks several — which protocol
+/// it matched as. `protocol` is `None` when the adapter did not name one; the
+/// gateway then falls back to the adapter's manifest protocol.
+#[derive(Debug, Clone)]
+pub struct MatchOutcome {
+    pub matched: bool,
+    pub protocol: Option<String>,
+}
+
 impl AgentPlugin {
     /// Loads `manifest.json` and `adapter.wasm` from `dir` and runs the gates.
     ///
@@ -103,6 +113,36 @@ impl AgentPlugin {
     #[must_use]
     pub fn manifest(&self) -> &AdapterManifest {
         &self.manifest
+    }
+
+    /// `match_inbound`: does this adapter claim the given request? The host
+    /// asks every loaded agent this — with a redacted `request-head`
+    /// (`{ method, path, headers }`, headers already a `HeaderDigest`) — and
+    /// dispatches to the first that says yes. It is *not* in the
+    /// [`AgentAdapter`] trait: the conformance harness drills translation, not
+    /// the host's multiplexing, so this stays an inherent method over the
+    /// generated binding.
+    ///
+    /// # Errors
+    ///
+    /// A trap in the guest. The gateway treats an erroring adapter as "did not
+    /// match" so one broken adapter cannot veto the others.
+    pub fn match_inbound(&self, request_head: &Value) -> AdapterResult<MatchOutcome> {
+        let head_json = to_json(request_head)?;
+        let mut guard = self.main.lock().expect("a poisoned adapter stays poisoned");
+        let handle: &mut InstanceHandle = &mut guard;
+        handle
+            .store
+            .set_epoch_deadline(self.runtime.deadline_ticks());
+        let result = handle
+            .instance
+            .token_station_adapter_agent_adapter()
+            .call_match_inbound(&mut handle.store, &head_json)
+            .map_err(|trap| trap_envelope(&trap))?;
+        Ok(MatchOutcome {
+            matched: result.matched,
+            protocol: result.protocol,
+        })
     }
 
     fn call<T>(

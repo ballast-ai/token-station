@@ -817,7 +817,8 @@ mod tests {
     fn plugins(dir: PathBuf, providers: &[(&str, &str)]) -> PluginsConfig {
         PluginsConfig {
             dir,
-            agent: "agent-openai".to_owned(),
+            agent: None,
+            agents: vec!["agent-openai".to_owned()],
             providers: providers
                 .iter()
                 .map(|(dialect, package)| ((*dialect).to_owned(), (*package).to_owned()))
