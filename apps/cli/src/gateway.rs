@@ -501,9 +501,13 @@ impl Gateway {
         // redacted, principal already decided. (Inbound auth itself is C1#4.)
         let envelope = AgentRequestEnvelope {
             protocol: protocol.clone(),
-            agent_tool: (protocol == "anthropic-messages"
-                && header_digest.contains("x-claude-code-session-id"))
-            .then(|| "claude-code".to_owned()),
+            agent_tool: match protocol.as_str() {
+                "openai-responses" => Some("codex".to_owned()),
+                "anthropic-messages" if header_digest.contains("x-claude-code-session-id") => {
+                    Some("claude-code".to_owned())
+                }
+                _ => None,
+            },
             headers: header_digest,
             principal: Principal {
                 subject: "local".to_owned(),

@@ -398,6 +398,49 @@ mod tests {
     }
 
     #[test]
+    fn the_m4_agent_configs_load_and_use_isolated_runtime_paths() {
+        let cases = [
+            (
+                "codex",
+                include_str!("../codex-deepseek-config.json"),
+                "127.0.0.1:8791",
+                "agent-openai-responses",
+            ),
+            (
+                "opencode",
+                include_str!("../opencode-deepseek-config.json"),
+                "127.0.0.1:8792",
+                "agent-openai",
+            ),
+            (
+                "openclaw",
+                include_str!("../openclaw-deepseek-config.json"),
+                "127.0.0.1:8793",
+                "agent-openai",
+            ),
+        ];
+
+        for (name, source, listen, agent) in cases {
+            let path = scratch(name, source);
+            let config = ClientConfig::load(&path).expect("the M4 config must stay loadable");
+
+            assert_eq!(config.server.listen, listen);
+            assert_ne!(config.server.listen, "127.0.0.1:8787");
+            assert_eq!(config.plugins.agent, agent);
+            assert_eq!(
+                config.plugins.dir,
+                PathBuf::from("token-station-m4/plugins")
+            );
+            assert_eq!(
+                config.data.dir,
+                PathBuf::from(format!("token-station-m4/{name}/data"))
+            );
+
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
     fn a_non_loopback_listen_address_is_refused() {
         let mut broken = example();
         broken["server"]["listen"] = serde_json::json!("0.0.0.0:8787");

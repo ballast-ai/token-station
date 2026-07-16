@@ -1,0 +1,34 @@
+{
+  "context": {
+    "protocol": "openai-responses",
+    "response_id": "resp_1",
+    "model": "routed-model"
+  },
+  "response": {
+    "id": "chatcmpl-1",
+    "model": "provider-model",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "name": "read_marker",
+              "arguments": "{\"path\":\"marker.txt\"}"
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "input_tokens": 10,
+      "output_tokens": 4,
+      "cache_read_tokens": 3,
+      "cache_write_tokens": 1,
+      "reasoning_tokens": 2
+    }
+  }
+}

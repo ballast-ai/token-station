@@ -1,0 +1,13 @@
+{
+  "protocol": "openai-responses",
+  "agent_tool": "codex",
+  "headers": {
+    "names": ["content-type", "x-agent-step"],
+    "values": {
+      "content-type": "application/json",
+      "x-agent-step": "edit"
+    }
+  },
+  "principal": {"subject": "local"},
+  "body": {"model": "auto", "input": "edit", "stream": true}
+}

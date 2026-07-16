@@ -18,7 +18,7 @@ jobs:
           components: rustfmt, clippy
           # plugin-runtime 的测试把 tests/guests/* 编成真实的 WASM 组件
           targets: wasm32-wasip2
-      # wasmtime+tokio+sqlite 全量重编 ~7 分钟；缓存能砍掉大半。三个 WASM
+      # wasmtime+tokio+sqlite 全量重编 ~7 分钟；缓存能砍掉大半。五个 WASM
       # guest 是 workspace 排除的独立 crate（测试子进程构建、各有 target），
       # 得逐个列进来才吃得到缓存。
       - uses: Swatinem/rust-cache@v2
@@ -26,7 +26,9 @@ jobs:
           cache-on-failure: true
           workspaces: |
             .
+            plugins/official/agent-anthropic
             plugins/official/agent-openai
+            plugins/official/agent-openai-responses
             plugins/official/provider-openai-compatible
             crates/plugin-runtime/tests/guests/test-provider
       - run: cargo fmt --check

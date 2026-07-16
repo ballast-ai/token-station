@@ -1,6 +1,7 @@
 /target/
 /plugins-dist/
 /token-station-data/
+/token-station-m4/
 /token-station-e2e/
 # WASM guest 测试件（workspace 之外，自带 target）
 crates/plugin-runtime/tests/guests/*/target/

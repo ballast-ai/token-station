@@ -3,4 +3,5 @@
 * @actly
 /plugins/official/agent-anthropic/ @actly
 /plugins/official/agent-openai/ @actly
+/plugins/official/agent-openai-responses/ @actly
 /plugins/official/provider-openai-compatible/ @actly

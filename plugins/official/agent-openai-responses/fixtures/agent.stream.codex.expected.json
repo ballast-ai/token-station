@@ -1,0 +1,15 @@
+[
+  {
+    "data": "event: response.created\ndata: {\"response\":{\"created_at\":0,\"id\":\"resp_stream_1\",\"model\":\"routed-model\",\"object\":\"response\",\"output\":[],\"status\":\"in_progress\"},\"type\":\"response.created\"}\n\nevent: response.output_item.added\ndata: {\"item\":{\"content\":[],\"id\":\"msg_resp_stream_1_0\",\"role\":\"assistant\",\"status\":\"in_progress\",\"type\":\"message\"},\"output_index\":0,\"type\":\"response.output_item.added\"}\n\nevent: response.content_part.added\ndata: {\"content_index\":0,\"item_id\":\"msg_resp_stream_1_0\",\"output_index\":0,\"part\":{\"annotations\":[],\"text\":\"\",\"type\":\"output_text\"},\"type\":\"response.content_part.added\"}\n\nevent: response.output_text.delta\ndata: {\"content_index\":0,\"delta\":\"M4\",\"item_id\":\"msg_resp_stream_1_0\",\"output_index\":0,\"type\":\"response.output_text.delta\"}\n\n"
+  },
+  {
+    "data": "event: response.output_item.added\ndata: {\"item\":{\"arguments\":\"\",\"call_id\":\"call_1\",\"id\":\"fc_call_1\",\"name\":\"read_marker\",\"status\":\"in_progress\",\"type\":\"function_call\"},\"output_index\":0,\"type\":\"response.output_item.added\"}\n\nevent: response.function_call_arguments.delta\ndata: {\"delta\":\"{\\\"path\\\":\",\"item_id\":\"fc_call_1\",\"output_index\":0,\"type\":\"response.function_call_arguments.delta\"}\n\n"
+  },
+  {
+    "data": "event: response.function_call_arguments.delta\ndata: {\"delta\":\"\\\"marker.txt\\\"}\",\"item_id\":\"fc_call_1\",\"output_index\":0,\"type\":\"response.function_call_arguments.delta\"}\n\n"
+  },
+  {"data": ""},
+  {
+    "data": "event: response.output_item.done\ndata: {\"item\":{\"content\":[{\"text\":\"M4\",\"type\":\"output_text\"}],\"id\":\"msg_resp_stream_1_0\",\"role\":\"assistant\",\"status\":\"completed\",\"type\":\"message\"},\"output_index\":0,\"type\":\"response.output_item.done\"}\n\nevent: response.output_item.done\ndata: {\"item\":{\"arguments\":\"{\\\"path\\\":\\\"marker.txt\\\"}\",\"call_id\":\"call_1\",\"id\":\"fc_call_1\",\"name\":\"read_marker\",\"status\":\"completed\",\"type\":\"function_call\"},\"output_index\":0,\"type\":\"response.output_item.done\"}\n\nevent: response.completed\ndata: {\"response\":{\"created_at\":0,\"error\":null,\"id\":\"resp_stream_1\",\"incomplete_details\":null,\"instructions\":null,\"model\":\"routed-model\",\"object\":\"response\",\"output\":[{\"content\":[{\"text\":\"M4\",\"type\":\"output_text\"}],\"id\":\"msg_resp_stream_1_0\",\"role\":\"assistant\",\"status\":\"completed\",\"type\":\"message\"},{\"arguments\":\"{\\\"path\\\":\\\"marker.txt\\\"}\",\"call_id\":\"call_1\",\"id\":\"fc_call_1\",\"name\":\"read_marker\",\"status\":\"completed\",\"type\":\"function_call\"}],\"parallel_tool_calls\":true,\"status\":\"completed\",\"tool_choice\":\"auto\",\"tools\":[],\"usage\":{\"input_tokens\":8,\"input_tokens_details\":{\"cache_write_tokens\":0,\"cached_tokens\":2},\"output_tokens\":3,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":11}},\"type\":\"response.completed\"}\n\n"
+  }
+]
