@@ -62,6 +62,14 @@ mod builtin {
             wasm: include_bytes!(env!("TS_BUILTIN_AGENT_OPENAI_WASM")),
         },
         Package {
+            manifest_source: include_str!(env!("TS_BUILTIN_AGENT_ANTHROPIC_MANIFEST")),
+            wasm: include_bytes!(env!("TS_BUILTIN_AGENT_ANTHROPIC_WASM")),
+        },
+        Package {
+            manifest_source: include_str!(env!("TS_BUILTIN_AGENT_OPENAI_RESPONSES_MANIFEST")),
+            wasm: include_bytes!(env!("TS_BUILTIN_AGENT_OPENAI_RESPONSES_WASM")),
+        },
+        Package {
             manifest_source: include_str!(env!("TS_BUILTIN_PROVIDER_OPENAI_MANIFEST")),
             wasm: include_bytes!(env!("TS_BUILTIN_PROVIDER_OPENAI_WASM")),
         },

@@ -15,10 +15,10 @@
 #   GNU tar uses `--format=ustar`, fixed order, owner, and timestamp, plus `gzip -n`.
 #     Remove nondeterminism from the archive layer.
 #
-# Artifacts go to dist/ as one tar.gz with the CLI binary and two official plugin packages.
+# Output goes to dist/: a tar.gz containing the CLI binary, four official plugin
 # packages, example configuration, and LICENSE.
 #
-# Official binaries embed official plugins at the builtin tier (architecture §12.1). First build two WASM plugins,
+# Official binaries embed official plugins at the builtin tier (architecture §12.1). First build four WASM plugins,
 # Then build the CLI with `--features builtin-plugins` and TOKEN_STATION_PLUGINS_DIST.
 # `include_bytes!` embeds plugin bytes in the binary, so the bare binary needs no installation. The tarball still includes
 # plugins-dist/ copy. The registry selects builtin for duplicate dialects, so duplicates are harmless. Plugin builds
@@ -41,7 +41,7 @@ export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap
 rustup toolchain install "$RELEASE_TOOLCHAIN" --profile minimal >/dev/null
 rustup target add --toolchain "$RELEASE_TOOLCHAIN" "$TARGET" wasm32-wasip2 >/dev/null
 
-for plugin in agent-openai provider-openai-compatible; do
+for plugin in agent-openai agent-anthropic agent-openai-responses provider-openai-compatible; do
   (cd "plugins/official/${plugin}" \
     && cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target wasm32-wasip2)
 done
@@ -51,7 +51,7 @@ STAGE="dist/${NAME}"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/plugins-dist"
 
-for plugin in agent-openai provider-openai-compatible; do
+for plugin in agent-openai agent-anthropic agent-openai-responses provider-openai-compatible; do
   mkdir -p "$STAGE/plugins-dist/${plugin}"
   cp "plugins/official/${plugin}/manifest.json" "$STAGE/plugins-dist/${plugin}/"
   cp "plugins/official/${plugin}/target/wasm32-wasip2/release/${plugin//-/_}.wasm" \

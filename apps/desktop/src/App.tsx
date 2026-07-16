@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   StateView,
   TierSlot,
@@ -47,6 +47,8 @@ function App() {
   const [msg, setMsg] = useState<string>("");
   const [err, setErr] = useState<string>("");
   const [tab, setTab] = useState<Tab>("home");
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
 
   // Add-provider form
   const [presetId, setPresetId] = useState<string>("");
@@ -57,12 +59,22 @@ function App() {
   const [customModel, setCustomModel] = useState("");
   const [extraModels, setExtraModels] = useState<string[]>([]);
 
-  const refresh = async () => setState(await getState());
+  const refresh = async () => {
+    setErr("");
+    try {
+      setState(await getState());
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
   useEffect(() => {
     refresh();
   }, []);
 
   const run = async (fn: () => Promise<StateView | string>, okMsg?: string) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
     setErr("");
     setMsg("");
     try {
@@ -72,6 +84,9 @@ function App() {
       if (okMsg) setMsg(okMsg);
     } catch (e) {
       setErr(String(e));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
     }
   };
 
@@ -131,7 +146,18 @@ function App() {
     }, "供应商已添加");
   };
 
-  if (!state) return <div className="loading">加载中…</div>;
+  if (!state) {
+    return (
+      <div className="loading">
+        {err ? (
+          <>
+            <div className="banner err">{err}</div>
+            <button className="btn" disabled={busy} onClick={refresh}>重试</button>
+          </>
+        ) : "加载中…"}
+      </div>
+    );
+  }
 
   const { providers, tiers, serve, config_error } = state;
 
@@ -153,11 +179,11 @@ function App() {
           {serve.running ? `运行中 · ${serve.listen}` : "已停止"}
         </div>
         {serve.running ? (
-          <button className="btn" onClick={() => run(() => serveStop())}>
+          <button className="btn" disabled={busy} onClick={() => run(() => serveStop())}>
             停止
           </button>
         ) : (
-          <button className="btn primary" onClick={() => run(() => serveStart())}>
+          <button className="btn primary" disabled={busy} onClick={() => run(() => serveStart())}>
             启动代理
           </button>
         )}
@@ -166,6 +192,7 @@ function App() {
             <button
               key={a.kind}
               className={`agent ${serve.running ? "ready" : "idle"}`}
+              disabled={busy}
               title={serve.running ? `接入 ${a.label}` : "点此会提示先启动代理"}
               onClick={() => run(() => connectAgent(a.kind))}
             >
@@ -235,7 +262,7 @@ function App() {
                   <div className="tier-label">{label}</div>
                   <div className="tier-hint">{hint}</div>
                 </div>
-                <select className="select" value={t.upstream ?? ""} onChange={(e) => onTierProvider(slot, e.target.value)}>
+                <select className="select" disabled={busy} value={t.upstream ?? ""} onChange={(e) => onTierProvider(slot, e.target.value)}>
                   <option value="">— 未选 —</option>
                   {providers.map((p) => (
                     <option key={p.name} value={p.name}>
@@ -246,7 +273,7 @@ function App() {
                 <select
                   className="select"
                   value={t.model ?? ""}
-                  disabled={!t.upstream}
+                  disabled={busy || !t.upstream}
                   onChange={(e) => run(() => setTier(slot, t.upstream!, e.target.value))}
                 >
                   <option value="">— 模型 —</option>
@@ -262,7 +289,7 @@ function App() {
         </div>
 
         <div className="panel-foot">
-          <button className="btn primary" onClick={() => run(() => saveConfig(), "已保存并校验")}>
+          <button className="btn primary" disabled={busy} onClick={() => run(() => saveConfig(), "已保存并校验")}>
             保存并应用
           </button>
           {providers.length === 0 && <span className="foot-hint">先在下面添加供应商,再给三档各选一个模型</span>}
@@ -294,7 +321,7 @@ function App() {
               </div>
               <div className="provider-side">
                 <span className={`auth ${p.has_auth ? "yes" : "no"}`}>{p.has_auth ? "🔒 已配 Key" : "无鉴权"}</span>
-                <button className="btn tiny danger" onClick={() => run(() => removeProvider(p.name))}>
+                <button className="btn tiny danger" disabled={busy} onClick={() => run(() => removeProvider(p.name))}>
                   删除
                 </button>
               </div>
@@ -359,7 +386,7 @@ function App() {
                 ) : (
                   <span className="url-tag">本地模型 · 免 Key</span>
                 )}
-                <button className="btn primary" onClick={onAddProvider}>
+                <button className="btn primary" disabled={busy} onClick={onAddProvider}>
                   添加
                 </button>
                 <button className="btn" onClick={resetForm}>
