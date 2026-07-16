@@ -129,4 +129,5 @@ Logs must not contain prompts, responses, upstream keys, or the virtual key. Aft
 
 - Text input, message input, image URLs, function tools, function calls and outputs, Responses SSE, usage, and Responses errors are covered.
 - Reasoning items, computer or hosted tools, file-ID images, and the complete Responses event set are not supported. The adapter returns a capability error and does not silently drop fields.
+- Structured Responses output is not supported. When `text.format.type` is `json_schema` or `json_object`, the adapter returns `unsupported_capability` before routing or an upstream request.
 - This procedure proves the main Codex text and local function-tool path. It does not prove full compatibility with all Responses capabilities.

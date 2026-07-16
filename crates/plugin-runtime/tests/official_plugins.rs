@@ -18,7 +18,10 @@ use token_station_conformance::{
 use token_station_plugin_runtime::{
     AgentPlugin, LoadError, NoSecrets, PluginRuntime, ProviderPlugin, RuntimeLimits,
 };
-use token_station_protocol::{ErrorCode, ErrorEnvelope, FinishReason, HeaderDigest, StreamEvent};
+use token_station_protocol::{
+    AgentRequestEnvelope, ErrorCode, ErrorEnvelope, Extensions, FinishReason, HeaderDigest,
+    Principal, StreamEvent,
+};
 
 fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -87,6 +90,21 @@ fn runtime() -> PluginRuntime {
     .expect("engine builds")
 }
 
+fn envelope(protocol: &str, body: serde_json::Value) -> AgentRequestEnvelope {
+    AgentRequestEnvelope {
+        protocol: protocol.to_owned(),
+        agent_tool: None,
+        headers: HeaderDigest::default(),
+        principal: Principal {
+            subject: "local".to_owned(),
+            tenant: None,
+        },
+        hints: Vec::new(),
+        body,
+        extensions: Extensions::new(),
+    }
+}
+
 #[test]
 fn the_official_provider_adapter_passes_the_full_suite_as_wasm() {
     let plugin =
@@ -142,6 +160,84 @@ fn the_official_anthropic_agent_adapter_passes_the_full_suite_as_wasm() {
 
     assert!(report.is_passing(), "{report}");
     assert_eq!(report.suite(), plugin.manifest().conformance.required_suite);
+}
+
+#[test]
+fn responses_structured_output_is_rejected_by_the_real_wasm() {
+    let plugin = AgentPlugin::load(&runtime(), responses_agent_package()).expect("loads clean");
+    let request = |format: serde_json::Value| {
+        envelope(
+            "openai-responses",
+            serde_json::json!({
+                "model": "auto",
+                "input": "return one value",
+                "text": {"format": format}
+            }),
+        )
+    };
+
+    let plain = plugin
+        .normalize_inbound(&request(serde_json::json!({"type": "text"})))
+        .expect("plain text remains supported");
+    assert_eq!(plain.response_format, None);
+
+    for format in [
+        serde_json::json!({"type": "json_schema", "name": "answer", "schema": {"type": "object"}}),
+        serde_json::json!({"type": "json_object"}),
+        serde_json::json!({"type": "future_structured_format"}),
+    ] {
+        let error = plugin
+            .normalize_inbound(&request(format))
+            .expect_err("structured output must not be downgraded to text");
+        assert_eq!(error.code, ErrorCode::Capability);
+        assert_eq!(error.http_status, 400);
+    }
+
+    for format in [serde_json::json!({}), serde_json::json!("json_schema")] {
+        let invalid = plugin
+            .normalize_inbound(&request(format))
+            .expect_err("a malformed format is refused");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+    }
+}
+
+#[test]
+fn chat_completions_structured_output_is_rejected_by_the_real_wasm() {
+    let plugin = AgentPlugin::load(&runtime(), agent_package()).expect("loads clean");
+    let request = |format: serde_json::Value| {
+        envelope(
+            "openai-chat-completions",
+            serde_json::json!({
+                "model": "auto",
+                "messages": [{"role": "user", "content": "return one value"}],
+                "response_format": format
+            }),
+        )
+    };
+
+    let plain = plugin
+        .normalize_inbound(&request(serde_json::json!({"type": "text"})))
+        .expect("plain text remains supported");
+    assert_eq!(plain.response_format, None);
+
+    for format in [
+        serde_json::json!({"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object"}}}),
+        serde_json::json!({"type": "json_object"}),
+        serde_json::json!({"type": "future_structured_format"}),
+    ] {
+        let error = plugin
+            .normalize_inbound(&request(format))
+            .expect_err("structured output must not be downgraded to text");
+        assert_eq!(error.code, ErrorCode::Capability);
+        assert_eq!(error.http_status, 400);
+    }
+
+    for format in [serde_json::json!({}), serde_json::json!("json_schema")] {
+        let invalid = plugin
+            .normalize_inbound(&request(format))
+            .expect_err("a malformed format is refused");
+        assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+    }
 }
 
 #[test]

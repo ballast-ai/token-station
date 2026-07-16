@@ -480,6 +480,37 @@ fn a_chat_completion_round_trips_with_the_credential_injected() {
 }
 
 #[test]
+fn chat_completions_structured_output_fails_before_the_upstream() {
+    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
+    let key = key_file("chat-structured-output", "sk-test-key-abc");
+    let proxy = start_proxy(&mock, &key);
+
+    let (status, body) = post_chat(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "return JSON"}],
+            "response_format": {"type": "json_object"}
+        }),
+        None,
+    );
+
+    assert_eq!(status, 400, "{body}");
+    let body: Value = serde_json::from_str(&body).expect("the refusal is JSON");
+    assert_eq!(body["error"]["code"], json!("capability"));
+    assert_eq!(mock.hits(), 0, "the adapter must reject before routing");
+
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(400)");
+    assert_eq!(row["error_code"], "Text(\"capability\")");
+    assert_eq!(row["attempts"], "Integer(0)");
+    assert_eq!(row["upstream"], "Null");
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn a_responses_request_round_trips_through_the_existing_provider_pipeline() {
     let upstream_answer = json!({
         "id": "chatcmpl-responses-1",
@@ -545,6 +576,46 @@ fn a_responses_request_round_trips_through_the_existing_provider_pipeline() {
     assert_eq!(row["protocol"], "Text(\"openai-responses\")");
     assert_eq!(row["input_tokens"], "Integer(7)");
     assert_eq!(row["output_tokens"], "Integer(2)");
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn responses_structured_output_fails_before_the_upstream() {
+    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
+    let key = key_file("responses-structured-output", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-openai-responses");
+    let token = proxy.virtual_key.clone();
+
+    let (status, content_type, body) = send_responses(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "input": "return JSON",
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "answer",
+                    "schema": {"type": "object"},
+                    "strict": true
+                }
+            }
+        }),
+        &token,
+    );
+
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(content_type.as_deref(), Some("application/json"));
+    let body: Value = serde_json::from_str(&body).expect("the refusal is JSON");
+    assert_eq!(body["error"]["code"], json!("unsupported_capability"));
+    assert_eq!(mock.hits(), 0, "the adapter must reject before routing");
+
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(400)");
+    assert_eq!(row["error_code"], "Text(\"capability\")");
+    assert_eq!(row["attempts"], "Integer(0)");
+    assert_eq!(row["upstream"], "Null");
 
     std::fs::remove_file(key).ok();
 }

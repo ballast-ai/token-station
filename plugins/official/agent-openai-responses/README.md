@@ -17,3 +17,7 @@ Supported in M4:
 Reasoning content, computer calls, hosted web search, and other output item
 types are rejected explicitly until the Canonical IR has an approved
 representation.
+
+Structured output (`text.format.type` set to `json_schema` or `json_object`)
+is also rejected explicitly. The adapter does not advertise `json_schema` and
+never downgrades a structured-output request to ordinary text.

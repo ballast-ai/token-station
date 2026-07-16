@@ -120,6 +120,9 @@ All listed paths belong to this procedure. Do not delete the user's
 ## 4. Current boundaries
 
 - This procedure covers the OpenAI Chat Completions text stream and the local function-tool path.
+- Structured output is not supported. If `response_format.type` is `json_schema`
+  or `json_object`, the adapter returns a capability error before the router
+  or upstream receives the request.
 - OpenClaw gateway, remote channels, MCP, browser access, and user-level skills are outside acceptance.
 - `reasoning: false` is a model declaration. It does not mean that Responses
   reasoning is implemented. This Agent uses `agent-openai`, not

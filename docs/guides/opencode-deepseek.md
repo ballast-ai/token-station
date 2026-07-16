@@ -124,6 +124,9 @@ shell when the test is complete. Delete
 
 - Coverage includes Chat Completions text, streaming deltas, function tools,
   tool results, usage, and errors.
+- Structured output is not supported. If `response_format.type` is `json_schema`
+  or `json_object`, the adapter returns a capability error before the router
+  or upstream receives the request.
 - OpenCode plugins, MCP, LSP, and user configuration are outside this procedure.
   Tests isolate or disable them.
 - The provider configuration uses the official OpenCode
