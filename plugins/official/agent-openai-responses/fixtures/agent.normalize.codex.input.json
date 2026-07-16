@@ -28,6 +28,13 @@
         "arguments": "{\"path\":\"marker.txt\"}"
       },
       {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {"type": "output_text", "text": "Reading the marker."}
+        ]
+      },
+      {
         "type": "function_call_output",
         "call_id": "call_1",
         "output": "M4_OK"

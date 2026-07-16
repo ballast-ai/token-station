@@ -17,6 +17,9 @@
     },
     {
       "role": "assistant",
+      "content": [
+        {"type": "text", "text": "Reading the marker."}
+      ],
       "tool_calls": [
         {
           "id": "call_1",

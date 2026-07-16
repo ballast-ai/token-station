@@ -228,24 +228,79 @@ fn function_output_item(item: &Value) -> Result<Message, String> {
     })
 }
 
+fn merge_content(target: &mut Option<Content>, incoming: Option<Content>) {
+    let Some(incoming) = incoming else {
+        return;
+    };
+    let Some(existing) = target.take() else {
+        *target = Some(incoming);
+        return;
+    };
+
+    *target = Some(match (existing, incoming) {
+        (Content::Text(mut left), Content::Text(right)) => {
+            if !left.is_empty() && !right.is_empty() {
+                left.push('\n');
+            }
+            left.push_str(&right);
+            Content::Text(left)
+        }
+        (Content::Parts(mut left), Content::Parts(right)) => {
+            left.extend(right);
+            Content::Parts(left)
+        }
+        (Content::Text(left), Content::Parts(mut right)) => {
+            right.insert(0, ContentPart::Text { text: left });
+            Content::Parts(right)
+        }
+        (Content::Parts(mut left), Content::Text(right)) => {
+            left.push(ContentPart::Text { text: right });
+            Content::Parts(left)
+        }
+    });
+}
+
+fn coalesce_assistant_messages(messages: Vec<Message>) -> Vec<Message> {
+    let mut coalesced: Vec<Message> = Vec::with_capacity(messages.len());
+    for mut message in messages {
+        if message.role == Role::Assistant
+            && coalesced
+                .last()
+                .is_some_and(|previous| previous.role == Role::Assistant)
+        {
+            let previous = coalesced
+                .last_mut()
+                .expect("the preceding assistant message was just checked");
+            merge_content(&mut previous.content, message.content.take());
+            previous.tool_calls.append(&mut message.tool_calls);
+        } else {
+            coalesced.push(message);
+        }
+    }
+    coalesced
+}
+
 fn input_messages(input: &Value) -> Result<Vec<Message>, String> {
     match input {
         Value::String(text) => Ok(vec![Message::text(Role::User, text)]),
-        Value::Array(items) => items
-            .iter()
-            .map(|item| match item.get("type").and_then(Value::as_str) {
-                Some("message") | None if item.get("role").is_some() => message_item(item),
-                Some("function_call") => function_call_item(item),
-                Some("function_call_output") => function_output_item(item),
-                Some("reasoning") => Err(capability(
-                    "Responses reasoning items require an approved Canonical IR extension",
-                )),
-                Some(kind) => Err(capability(format!(
-                    "unsupported Responses input item {kind}"
-                ))),
-                None => Err(invalid("input item declares no type")),
-            })
-            .collect(),
+        Value::Array(items) => {
+            let messages = items
+                .iter()
+                .map(|item| match item.get("type").and_then(Value::as_str) {
+                    Some("message") | None if item.get("role").is_some() => message_item(item),
+                    Some("function_call") => function_call_item(item),
+                    Some("function_call_output") => function_output_item(item),
+                    Some("reasoning") => Err(capability(
+                        "Responses reasoning items require an approved Canonical IR extension",
+                    )),
+                    Some(kind) => Err(capability(format!(
+                        "unsupported Responses input item {kind}"
+                    ))),
+                    None => Err(invalid("input item declares no type")),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(coalesce_assistant_messages(messages))
+        }
         _ => Err(invalid("input must be a string or an array of input items")),
     }
 }

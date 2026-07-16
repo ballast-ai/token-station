@@ -9,6 +9,8 @@
 //! draft remains a serde_json::Value and materializes as ClientConfig only when
 //! saving or starting. Failed validation is reported to the user without writing.
 
+mod model_catalog;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -23,6 +25,8 @@ use token_station_cli::plugins::{PluginRegistry, Receipts};
 use token_station_cli::store::SqliteStore;
 use token_station_cli::{secrets, server, stats, upgrade, virtual_key};
 use token_station_metrics::Recorder;
+
+use model_catalog::ModelDiscoveryView;
 
 /// Pool names for the three tier slots shown as the panel's high, middle, and low rows.
 const TIER_HIGH: &str = "tier_high";
@@ -569,6 +573,160 @@ fn add_provider(
     Ok(inner.snapshot())
 }
 
+fn resolve_discovery_key(
+    inner: &AppInner,
+    name: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<Option<String>, String> {
+    inner.ensure_editable()?;
+    let explicit = api_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned);
+    if explicit.is_some() {
+        return Ok(explicit);
+    }
+    if let Some(upstream) = inner.draft["upstreams"].get(name) {
+        let configured_base = upstream["base_url"]
+            .as_str()
+            .unwrap_or_default()
+            .trim_end_matches('/');
+        if configured_base != base_url {
+            return Err("使用已保存 Key 刷新时，Base URL 必须与供应商配置一致".to_owned());
+        }
+        return match upstream["auth"]["slot"].as_str() {
+            Some(slot) => {
+                let config = inner.materialize()?;
+                secrets::SecretStore::from_config(&config)
+                    .resolve(name, slot)
+                    .map(Some)
+            }
+            None => Ok(None),
+        };
+    }
+    Ok(None)
+}
+
+/// Fetch the provider’s current model catalog. Run the network request on a blocking worker so it does not block the Tauri UI.
+/// When using a saved key, require the request URL to match the provider configuration so credentials cannot be forwarded to an arbitrary address.
+#[tauri::command]
+async fn discover_provider_models(
+    state: State<'_, AppStateManaged>,
+    name: String,
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<ModelDiscoveryView, String> {
+    let name = name.trim().to_owned();
+    let base_url = base_url.trim().trim_end_matches('/').to_owned();
+    if name.is_empty() {
+        return Err("请先填写供应商名称".to_owned());
+    }
+    if !(base_url.starts_with("https://") || base_url.starts_with("http://")) {
+        return Err("Base URL 必须使用 http:// 或 https://".to_owned());
+    }
+
+    let (data_dir, resolved_key) = {
+        let inner = state.0.lock().unwrap();
+        let resolved = resolve_discovery_key(&inner, &name, &base_url, api_key.as_deref())?;
+        (inner.data_dir(), resolved)
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        model_catalog::discover_with_cache(&data_dir, &name, &base_url, resolved_key.as_deref())
+    })
+    .await
+    .map_err(|error| format!("模型目录任务异常结束：{error}"))?
+}
+
+/// Update an existing provider's model set while protecting models referenced by routing tiers.
+fn replace_provider_models(
+    inner: &mut AppInner,
+    name: &str,
+    models: Vec<String>,
+) -> Result<(), String> {
+    inner.ensure_editable()?;
+    let mut normalized: Vec<String> = models
+        .into_iter()
+        .map(|model| model.trim().to_owned())
+        .filter(|model| !model.is_empty())
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+    if normalized.is_empty() {
+        return Err("至少保留一个模型".to_owned());
+    }
+
+    let upstream = inner.draft["upstreams"]
+        .get(name)
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("供应商 `{name}` 不存在"))?;
+    let blocked: Vec<&str> = [(TIER_HIGH, "上档"), (TIER_MID, "中档"), (TIER_LOW, "下档")]
+        .into_iter()
+        .filter_map(|(pool, label)| {
+            let member = inner.draft["router"]["pools"][pool]
+                .as_array()
+                .and_then(|members| members.first());
+            let refers_to_provider = member
+                .and_then(|item| item["upstream"].as_str())
+                .is_some_and(|upstream| upstream == name);
+            let retained = member
+                .and_then(|item| item["model"].as_str())
+                .is_some_and(|model| normalized.iter().any(|candidate| candidate == model));
+            (refers_to_provider && !retained).then_some(label)
+        })
+        .collect();
+    if !blocked.is_empty() {
+        return Err(format!(
+            "不能移除 {} 正在使用的模型，请先调整对应档位",
+            blocked.join("、")
+        ));
+    }
+
+    let existing: std::collections::BTreeMap<String, Value> = upstream["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            item["model"]
+                .as_str()
+                .map(|model| (model.to_owned(), item.clone()))
+        })
+        .collect();
+    let model_objects: Vec<Value> = normalized
+        .into_iter()
+        .map(|model| {
+            existing.get(&model).cloned().unwrap_or_else(
+                || json!({ "model": model, "tool": true, "context_window": 128000 }),
+            )
+        })
+        .collect();
+
+    let previous = inner.draft["upstreams"][name]["models"].clone();
+    inner.draft["upstreams"][name]["models"] = json!(model_objects);
+    let save = inner.materialize().and_then(|config| {
+        config
+            .save(&inner.config_path)
+            .map_err(|error| error.to_string())
+    });
+    if let Err(error) = save {
+        inner.draft["upstreams"][name]["models"] = previous;
+        return Err(format!("保存供应商模型失败：{error}"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn update_provider_models(
+    state: State<'_, AppStateManaged>,
+    name: String,
+    models: Vec<String>,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    replace_provider_models(&mut inner, name.trim(), models)?;
+    Ok(inner.snapshot())
+}
+
 #[tauri::command]
 fn remove_provider(state: State<'_, AppStateManaged>, name: String) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
@@ -808,12 +966,21 @@ fn connect_cc_at(
             .ok_or_else(|| "Claude Code settings.json 的 env 必须是对象".to_string())?;
         env.insert("ANTHROPIC_BASE_URL".into(), json!(base));
         env.insert("ANTHROPIC_AUTH_TOKEN".into(), json!(token));
+        env.insert("MAX_THINKING_TOKENS".into(), json!("0"));
+        env.insert("CLAUDE_CODE_DISABLE_THINKING".into(), json!("1"));
+        env.insert("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING".into(), json!("1"));
+        env.insert("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS".into(), json!("1"));
+        env.insert(
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
+            json!("1"),
+        );
     }
     let rendered = serde_json::to_string_pretty(&settings)
         .map_err(|error| format!("序列化 settings.json 失败：{error}"))?;
     write_config(&path, &rendered, "Claude Code settings.json")?;
     Ok(format!(
         "Claude Code 已指向 {base}(~/.claude/settings.json,已备份)。\
+         已关闭当前 Canonical IR 暂不支持的 thinking/beta；\
          使用 /v1/messages，经 agent-anthropic 入站适配器转发。"
     ))
 }
@@ -1139,6 +1306,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_state,
             add_provider,
+            discover_provider_models,
+            update_provider_models,
             remove_provider,
             set_tier,
             save_config,
@@ -1219,6 +1388,120 @@ mod tests {
     }
 
     #[test]
+    fn provider_model_updates_preserve_metadata_and_protect_routing_references() {
+        let root = scratch_home("model-update");
+        let mut draft = template(&root);
+        draft["upstreams"]["moonshot"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.moonshot.cn/v1",
+            "models": [
+                {
+                    "model": "moonshot-v1-8k",
+                    "tool": false,
+                    "context_window": 8192
+                }
+            ]
+        });
+        draft["router"]["pools"][TIER_LOW] =
+            json!([{ "upstream": "moonshot", "model": "moonshot-v1-8k" }]);
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft,
+            load_error: None,
+            server: None,
+        };
+        inner.rebuild_routing();
+
+        let error = replace_provider_models(&mut inner, "moonshot", vec!["kimi-k2.6".to_owned()])
+            .expect_err("the routed model cannot be removed");
+        assert!(error.contains("下档"), "{error}");
+
+        replace_provider_models(
+            &mut inner,
+            "moonshot",
+            vec![
+                "moonshot-v1-8k".to_owned(),
+                "kimi-k2.6".to_owned(),
+                "kimi-k2.6".to_owned(),
+            ],
+        )
+        .expect("retaining the routed model is valid");
+        let models = inner.draft["upstreams"]["moonshot"]["models"]
+            .as_array()
+            .unwrap();
+        assert_eq!(models.len(), 2);
+        let retained = models
+            .iter()
+            .find(|model| model["model"] == json!("moonshot-v1-8k"))
+            .unwrap();
+        assert_eq!(retained["tool"], json!(false));
+        assert_eq!(retained["context_window"], json!(8192));
+        assert!(std::fs::read_to_string(&inner.config_path)
+            .unwrap()
+            .contains("kimi-k2.6"));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn provider_model_updates_respect_broken_config_read_only_protection() {
+        let root = scratch_home("model-update-read-only");
+        let mut draft = template(&root);
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "keep"}]
+        });
+        let before = draft.clone();
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft,
+            load_error: Some("只读保护".to_owned()),
+            server: None,
+        };
+
+        let error = replace_provider_models(&mut inner, "provider", vec!["replacement".to_owned()])
+            .expect_err("read-only protection blocks model writes");
+        assert!(error.contains("只读保护"), "{error}");
+        assert_eq!(inner.draft, before);
+        assert!(!inner.config_path.exists());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stored_discovery_credentials_cannot_be_redirected_to_another_base_url() {
+        let root = scratch_home("model-discovery-url-binding");
+        let mut draft = template(&root);
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://trusted.example/v1",
+            "auth": {"slot": "provider_api_key", "keyring": true},
+            "models": [{"model": "model"}]
+        });
+        let inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft,
+            load_error: None,
+            server: None,
+        };
+
+        let error = resolve_discovery_key(&inner, "provider", "https://attacker.example/v1", None)
+            .expect_err("a stored credential is bound to its configured URL");
+        assert!(error.contains("Base URL 必须与供应商配置一致"), "{error}");
+
+        let one_time = resolve_discovery_key(
+            &inner,
+            "new-provider",
+            "https://new.example/v1",
+            Some("one-time-secret"),
+        )
+        .expect("an explicit one-time key is accepted");
+        assert_eq!(one_time.as_deref(), Some("one-time-secret"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn codex_connection_uses_responses_and_preserves_the_existing_config() {
         let home = scratch_home("codex");
         let dir = home.join(".codex");
@@ -1283,6 +1566,16 @@ mod tests {
         assert_eq!(
             settings["env"]["ANTHROPIC_AUTH_TOKEN"],
             json!("local-test-key")
+        );
+        assert_eq!(settings["env"]["MAX_THINKING_TOKENS"], json!("0"));
+        assert_eq!(settings["env"]["CLAUDE_CODE_DISABLE_THINKING"], json!("1"));
+        assert_eq!(
+            settings["env"]["CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"],
+            json!("1")
+        );
+        assert_eq!(
+            settings["env"]["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"],
+            json!("1")
         );
         assert_eq!(
             std::fs::read_to_string(backup_path(&path)).unwrap(),
