@@ -413,7 +413,14 @@ fn sse(kind: &str, payload: Value) -> Result<String, String> {
 }
 
 #[derive(Clone)]
+struct TextStream {
+    output_index: u32,
+    content: String,
+}
+
+#[derive(Clone)]
 struct ToolStream {
+    output_index: u32,
     call_id: String,
     name: String,
     arguments: String,
@@ -422,8 +429,9 @@ struct ToolStream {
 struct StreamState {
     response_id: String,
     model: String,
-    text: BTreeMap<u32, String>,
+    text: BTreeMap<u32, TextStream>,
     tools: BTreeMap<u32, ToolStream>,
+    next_output_index: u32,
     usage: Usage,
 }
 
@@ -434,8 +442,17 @@ impl StreamState {
             model,
             text: BTreeMap::new(),
             tools: BTreeMap::new(),
+            next_output_index: 0,
             usage: Usage::default(),
         }
+    }
+
+    fn allocate_output_index(&mut self) -> Result<u32, String> {
+        let output_index = self.next_output_index;
+        self.next_output_index = output_index
+            .checked_add(1)
+            .ok_or_else(|| internal("Responses stream produced too many output items"))?;
+        Ok(output_index)
     }
 }
 
@@ -489,26 +506,18 @@ fn started_event(state: &StreamState) -> Result<String, String> {
 
 fn stream_done(state: StreamState, finish_reason: Option<FinishReason>) -> Result<String, String> {
     let mut rendered = String::new();
-    let mut output = Vec::new();
+    let mut completed = Vec::with_capacity(state.text.len() + state.tools.len());
     for (index, text) in state.text {
         let item = json!({
             "type": "message",
             "id": format!("msg_{}_{}", state.response_id, index),
             "status": "completed",
             "role": "assistant",
-            "content": [{"type": "output_text", "text": text}]
+            "content": [{"type": "output_text", "text": text.content}]
         });
-        rendered.push_str(&sse(
-            "response.output_item.done",
-            json!({
-                "type": "response.output_item.done",
-                "output_index": index,
-                "item": item
-            }),
-        )?);
-        output.push(item);
+        completed.push((text.output_index, item));
     }
-    for (index, call) in state.tools {
+    for (_, call) in state.tools {
         let item = json!({
             "type": "function_call",
             "id": format!("fc_{}", call.call_id),
@@ -517,12 +526,18 @@ fn stream_done(state: StreamState, finish_reason: Option<FinishReason>) -> Resul
             "name": call.name,
             "arguments": call.arguments
         });
+        completed.push((call.output_index, item));
+    }
+    completed.sort_by_key(|(output_index, _)| *output_index);
+
+    let mut output = Vec::with_capacity(completed.len());
+    for (output_index, item) in completed {
         rendered.push_str(&sse(
             "response.output_item.done",
             json!({
                 "type": "response.output_item.done",
-                "output_index": index,
-                "item": item
+                "output_index": output_index,
+                "item": item.clone()
             }),
         )?);
         output.push(item);
@@ -724,11 +739,12 @@ impl Guest for ResponsesClient {
                 StreamEvent::Delta { index, content } => {
                     let item_id = format!("msg_{}_{}", state.response_id, index);
                     if !state.text.contains_key(&index) {
+                        let output_index = state.allocate_output_index()?;
                         rendered.push_str(&sse(
                             "response.output_item.added",
                             json!({
                                 "type": "response.output_item.added",
-                                "output_index": index,
+                                "output_index": output_index,
                                 "item": {
                                     "type": "message",
                                     "id": item_id,
@@ -743,7 +759,7 @@ impl Guest for ResponsesClient {
                             json!({
                                 "type": "response.content_part.added",
                                 "item_id": item_id,
-                                "output_index": index,
+                                "output_index": output_index,
                                 "content_index": 0,
                                 "part": {
                                     "type": "output_text",
@@ -752,14 +768,22 @@ impl Guest for ResponsesClient {
                                 }
                             }),
                         )?);
+                        state.text.insert(
+                            index,
+                            TextStream {
+                                output_index,
+                                content: String::new(),
+                            },
+                        );
                     }
-                    state.text.entry(index).or_default().push_str(&content);
+                    let text = state.text.get_mut(&index).expect("text inserted");
+                    text.content.push_str(&content);
                     rendered.push_str(&sse(
                         "response.output_text.delta",
                         json!({
                             "type": "response.output_text.delta",
                             "item_id": item_id,
-                            "output_index": index,
+                            "output_index": text.output_index,
                             "content_index": 0,
                             "delta": content
                         }),
@@ -771,23 +795,25 @@ impl Guest for ResponsesClient {
                     name,
                     arguments_delta,
                 } => {
-                    if let std::collections::btree_map::Entry::Vacant(entry) =
-                        state.tools.entry(index)
-                    {
+                    if !state.tools.contains_key(&index) {
+                        let call_id = id.clone().ok_or_else(|| {
+                            invalid("first tool-call stream fragment declares no id")
+                        })?;
+                        let call_name = name.clone().ok_or_else(|| {
+                            invalid("first tool-call stream fragment declares no name")
+                        })?;
+                        let output_index = state.allocate_output_index()?;
                         let call = ToolStream {
-                            call_id: id.clone().ok_or_else(|| {
-                                invalid("first tool-call stream fragment declares no id")
-                            })?,
-                            name: name.clone().ok_or_else(|| {
-                                invalid("first tool-call stream fragment declares no name")
-                            })?,
+                            output_index,
+                            call_id,
+                            name: call_name,
                             arguments: String::new(),
                         };
                         rendered.push_str(&sse(
                             "response.output_item.added",
                             json!({
                                 "type": "response.output_item.added",
-                                "output_index": index,
+                                "output_index": output_index,
                                 "item": {
                                     "type": "function_call",
                                     "id": format!("fc_{}", call.call_id),
@@ -798,7 +824,7 @@ impl Guest for ResponsesClient {
                                 }
                             }),
                         )?);
-                        entry.insert(call);
+                        state.tools.insert(index, call);
                     }
                     let call = state.tools.get_mut(&index).expect("tool inserted");
                     if id.as_deref().is_some_and(|id| id != call.call_id)
@@ -814,7 +840,7 @@ impl Guest for ResponsesClient {
                         json!({
                             "type": "response.function_call_arguments.delta",
                             "item_id": format!("fc_{}", call.call_id),
-                            "output_index": index,
+                            "output_index": call.output_index,
                             "delta": arguments_delta
                         }),
                     )?);
