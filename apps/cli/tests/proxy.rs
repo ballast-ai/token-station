@@ -731,6 +731,17 @@ fn a_responses_stream_is_incremental_and_protocol_shaped() {
     std::fs::remove_file(key).ok();
 }
 
+fn assert_responses_tool_follow_up(body: &Value) {
+    assert_eq!(
+        body["messages"][1]["tool_calls"][0]["id"],
+        json!("call_marker")
+    );
+    assert_eq!(body["messages"][1]["content"], json!("Reading the marker."));
+    assert_eq!(body["messages"][2]["role"], json!("tool"));
+    assert_eq!(body["messages"][2]["tool_call_id"], json!("call_marker"));
+    assert_eq!(body["messages"][2]["content"], json!("TOOL_RESULT_OK"));
+}
+
 #[test]
 fn responses_function_call_and_output_complete_a_second_turn() {
     let tool_answer = json!({
@@ -801,6 +812,11 @@ fn responses_function_call_and_output_complete_a_second_turn() {
                     "arguments": "{\"path\":\"marker.txt\"}"
                 },
                 {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "Reading the marker."
+                },
+                {
                     "type": "function_call_output",
                     "call_id": "call_marker",
                     "output": "TOOL_RESULT_OK"
@@ -820,19 +836,7 @@ fn responses_function_call_and_output_complete_a_second_turn() {
 
     let seen = mock.seen();
     assert_eq!(seen.len(), 2);
-    assert_eq!(
-        seen[1].body["messages"][1]["tool_calls"][0]["id"],
-        json!("call_marker")
-    );
-    assert_eq!(seen[1].body["messages"][2]["role"], json!("tool"));
-    assert_eq!(
-        seen[1].body["messages"][2]["tool_call_id"],
-        json!("call_marker")
-    );
-    assert_eq!(
-        seen[1].body["messages"][2]["content"],
-        json!("TOOL_RESULT_OK")
-    );
+    assert_responses_tool_follow_up(&seen[1].body);
 
     std::fs::remove_file(key).ok();
 }
