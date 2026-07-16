@@ -404,6 +404,41 @@ fn a_chat_completion_round_trips_with_the_credential_injected() {
 }
 
 #[test]
+fn a_path_no_inbound_adapter_claims_is_refused_before_routing() {
+    // The `match_inbound` no-match branch. agent-openai owns only the OpenAI
+    // chat path; a request to Anthropic's `/v1/messages` is claimed by nothing
+    // loaded, so the gateway refuses it before any upstream is tried. Once the
+    // agent-anthropic adapter lands and joins `plugins.agents`, this same path
+    // gets claimed — that is how a second inbound protocol turns on.
+    let mock = MockUpstream::start(vec![]);
+    let key = key_file("nomatch", "sk-test-key-abc\n");
+    let proxy = start_proxy(&mock, &key);
+
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    let response = agent
+        .post(format!("{}/v1/messages", proxy.url))
+        .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+        .send(&json!({ "model": "auto", "messages": [] }).to_string())
+        .expect("the proxy answers");
+    let status = response.status().as_u16();
+    let body = response.into_body().read_to_string().expect("body reads");
+
+    assert_eq!(status, 404, "{body}");
+    assert!(
+        body.contains("no inbound adapter claims"),
+        "the refusal names the reason: {body}"
+    );
+    // Nothing was routed: the upstream saw no request.
+    assert!(mock.seen().is_empty(), "an unclaimed path must not reach an upstream");
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn a_streaming_completion_survives_awkward_tcp_split_points() {
     // SSE frames deliberately split mid-frame and mid-multibyte-boundary: the
     // proxy's reader must hand the pieces to the stream parser as they come,
