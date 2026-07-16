@@ -19,3 +19,13 @@ dist/
 
 # plugin build 把 adapter.wasm 放到 manifest 旁以便直接 install——产物不入库。
 plugins/official/*/adapter.wasm
+
+# 插件构建产物（与 adapter.wasm 同类;用 plugin build 生成，不入库）
+/plugins-dist/
+
+# 运行时数据（含虚拟 key / 指标库 / 请求日志——绝不入库）
+/token-station-data/
+
+# 本地 demo 配置（个人上游 / 凭证槽引用，不入公共仓）
+/deepseek-*.json
+/apps/cli/glm-*.json

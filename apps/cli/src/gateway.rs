@@ -59,11 +59,19 @@ struct Upstream {
     plugin: Arc<ProviderPlugin>,
 }
 
+/// One loaded inbound adapter and the protocol its manifest declares. The
+/// gateway holds several and asks each `match_inbound` which claims a request.
+struct LoadedAgent {
+    plugin: AgentPlugin,
+    protocol: String,
+}
+
 /// The assembled data plane.
 pub struct Gateway {
-    agent: AgentPlugin,
-    /// The inbound protocol this deployment serves, from the agent manifest.
-    protocol: String,
+    /// Inbound adapters in match-priority order. Each request is dispatched to
+    /// the first whose `match_inbound` claims it — that is `match_inbound`, the
+    /// multi-inbound multiplexing, done here in the host orchestrator.
+    agents: Vec<LoadedAgent>,
     router: Router,
     upstreams: BTreeMap<String, Upstream>,
     /// What each upstream serves; health is applied per request from the
@@ -164,20 +172,29 @@ impl Gateway {
         // business, not startup's.
         let registry = crate::plugins::PluginRegistry::for_config(config)?;
 
-        let agent = match registry.agent_source(&config.plugins.agent) {
-            crate::plugins::PackageSource::Builtin {
-                manifest_source,
-                wasm,
-            } => AgentPlugin::load_embedded(&runtime, manifest_source, wasm),
-            crate::plugins::PackageSource::Dir(dir) => AgentPlugin::load(&runtime, &dir),
+        // Load every configured inbound adapter. Order is match priority: the
+        // first whose match_inbound claims a request serves it.
+        let mut agents = Vec::new();
+        for package in config.plugins.effective_agents() {
+            let plugin = match registry.agent_source(&package) {
+                crate::plugins::PackageSource::Builtin {
+                    manifest_source,
+                    wasm,
+                } => AgentPlugin::load_embedded(&runtime, manifest_source, wasm),
+                crate::plugins::PackageSource::Dir(dir) => AgentPlugin::load(&runtime, &dir),
+            }
+            .map_err(|error| format!("agent plugin `{package}`: {error}"))?;
+            let protocol = plugin
+                .manifest()
+                .agent_protocols
+                .first()
+                .cloned()
+                .ok_or_else(|| format!("agent plugin `{package}` declares no protocol"))?;
+            agents.push(LoadedAgent { plugin, protocol });
         }
-        .map_err(|error| format!("agent plugin `{}`: {error}", config.plugins.agent))?;
-        let protocol = agent
-            .manifest()
-            .agent_protocols
-            .first()
-            .cloned()
-            .ok_or("agent plugin declares no protocol")?;
+        if agents.is_empty() {
+            return Err("no agent adapters configured (plugins.agents is empty)".to_owned());
+        }
 
         let provider_plugins = load_provider_plugins(&runtime, &registry, config)?;
 
@@ -232,8 +249,7 @@ impl Gateway {
         let router = Router::new(config.router.clone()).map_err(|error| error.to_string())?;
 
         Ok(Self {
-            agent,
-            protocol,
+            agents,
             router,
             upstreams,
             catalog,
@@ -410,7 +426,7 @@ impl Gateway {
         }
     }
 
-    /// One admitted inference request, start to finish.
+    /// `POST /v1/chat/completions`, start to finish.
     ///
     /// `emit` receives exactly one `Reply::Begin*`; streaming chunks follow if
     /// the exchange streams. When `emit` returns `false` (client gone) the
@@ -432,56 +448,85 @@ impl Gateway {
             .map_or(0, |epoch| {
                 u64::try_from(epoch.as_millis()).unwrap_or(u64::MAX)
             });
-        let mut record = RequestRecord::begin(started_at_ms, self.protocol.clone());
 
-        let reply = self.chat_inner(method, path, headers, body, emit, &mut record);
-        if let Err(refusal) = reply {
+        // Ask each inbound adapter which claims this request. The winner's
+        // protocol tags the record; no winner is a request in a dialect nothing
+        // here serves, and no adapter exists to phrase the refusal in.
+        let selected = self.select_agent(method, path, headers);
+        let protocol = selected.map_or_else(String::new, |agent| agent.protocol.clone());
+        let mut record = RequestRecord::begin(started_at_ms, protocol);
+
+        if let Some(agent) = selected {
+            if let Err(refusal) = self.chat_inner(agent, headers, body, emit, &mut record) {
+                record.status = refusal.http_status;
+                record.error_code = Some(refusal.code);
+                let rendered = Self::render_error(agent, &refusal);
+                emit(Reply::BeginJson(rendered));
+            }
+        } else {
+            let refusal = ErrorEnvelope::new(
+                ErrorCode::InvalidRequest,
+                404,
+                format!("no inbound adapter claims {method} {path}"),
+            );
             record.status = refusal.http_status;
             record.error_code = Some(refusal.code);
-            let rendered = self.render_error(&refusal);
-            emit(Reply::BeginJson(rendered));
+            emit(Reply::BeginJson(JsonReply {
+                status: refusal.http_status,
+                body: json!({
+                    "error": {
+                        "message": refusal.message,
+                        "type": "invalid_request",
+                        "code": "invalid_request"
+                    }
+                })
+                .to_string(),
+            }));
         }
 
         record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.recorder.record(&record);
     }
 
+    /// The `match_inbound` step: the first loaded adapter that claims
+    /// `{ method, path, headers }` wins. Headers are redacted to a
+    /// `HeaderDigest` before an adapter ever sees them, exactly as the request
+    /// envelope is. An adapter that traps while matching is logged and skipped,
+    /// so one broken adapter cannot veto the rest.
+    fn select_agent(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+    ) -> Option<&LoadedAgent> {
+        let request_head = json!({
+            "method": method,
+            "path": path,
+            "headers": HeaderDigest::redacting(headers.iter().cloned()),
+        });
+        for agent in &self.agents {
+            match agent.plugin.match_inbound(&request_head) {
+                Ok(outcome) if outcome.matched => return Some(agent),
+                Ok(_) => {}
+                Err(envelope) => eprintln!(
+                    "agent `{}` match_inbound errored, skipping: {} ({:?})",
+                    agent.protocol, envelope.message, envelope.code
+                ),
+            }
+        }
+        None
+    }
+
     /// The pipeline. Returns `Err` only before anything was emitted, so the
     /// caller can still shape a whole error response.
     fn chat_inner(
         &self,
-        method: &str,
-        path: &str,
+        agent: &LoadedAgent,
         headers: &[(String, String)],
         body: &[u8],
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(), ErrorEnvelope> {
-        let header_digest = HeaderDigest::redacting(headers.iter().cloned());
-        let inbound_match = self.agent.match_inbound(method, path, &header_digest)?;
-        if !inbound_match.matched {
-            return Err(ErrorEnvelope::new(
-                ErrorCode::InvalidRequest,
-                404,
-                "the configured agent adapter does not handle this endpoint",
-            ));
-        }
-        let protocol = inbound_match.protocol.ok_or_else(|| {
-            ErrorEnvelope::new(
-                ErrorCode::Internal,
-                500,
-                "agent adapter matched the endpoint without naming a protocol",
-            )
-        })?;
-        if !self.agent.manifest().agent_protocols.contains(&protocol) {
-            return Err(ErrorEnvelope::new(
-                ErrorCode::Internal,
-                500,
-                "agent adapter matched an undeclared protocol",
-            ));
-        }
-        record.protocol.clone_from(&protocol);
-
         if body.len() > MAX_INBOUND_BODY {
             return Err(ErrorEnvelope::new(
                 ErrorCode::InvalidRequest,
@@ -499,9 +544,10 @@ impl Gateway {
 
         // The envelope an agent adapter is allowed to see: headers already
         // redacted, principal already decided. (Inbound auth itself is C1#4.)
+        let header_digest = HeaderDigest::redacting(headers.iter().cloned());
         let envelope = AgentRequestEnvelope {
-            protocol: protocol.clone(),
-            agent_tool: match protocol.as_str() {
+            protocol: agent.protocol.clone(),
+            agent_tool: match agent.protocol.as_str() {
                 "openai-responses" => Some("codex".to_owned()),
                 "anthropic-messages" if header_digest.contains("x-claude-code-session-id") => {
                     Some("claude-code".to_owned())
@@ -518,8 +564,8 @@ impl Gateway {
             extensions: token_station_protocol::Extensions::new(),
         };
 
-        let request = self.agent.normalize_inbound(&envelope)?;
-        let hints = self.agent.extract_agent_hint(&envelope)?;
+        let request = agent.plugin.normalize_inbound(&envelope)?;
+        let hints = agent.plugin.extract_agent_hint(&envelope)?;
         record.requested_model.clone_from(&request.model);
         record.stream = request.stream;
 
@@ -539,13 +585,14 @@ impl Gateway {
         );
         record.routing = Some(RoutingRecord::from(&decision));
 
-        self.dispatch(&request, &decision, emit, record)
+        self.dispatch(agent, &request, &decision, emit, record)
     }
 
     /// Tries the decision's targets in order; moves on only while the error
     /// says another upstream is worth trying, and only before first byte out.
     fn dispatch(
         &self,
+        agent: &LoadedAgent,
         request: &ChatRequest,
         decision: &Decision,
         emit: &mut dyn FnMut(Reply) -> bool,
@@ -561,7 +608,7 @@ impl Gateway {
                 target.upstream.as_str().clone_into(&mut routing.upstream);
                 routing.model.clone_from(&target.model);
             }
-            match self.try_upstream(request, target, emit, record) {
+            match self.try_upstream(agent, request, target, emit, record) {
                 Ok(()) => {
                     self.observe(&target.upstream, Ok(()));
                     record.status = 200;
@@ -590,6 +637,7 @@ impl Gateway {
     /// One upstream attempt: build, authorize, inject, send, translate back.
     fn try_upstream(
         &self,
+        agent: &LoadedAgent,
         request: &ChatRequest,
         target: &UpstreamModel,
         emit: &mut dyn FnMut(Reply) -> bool,
@@ -637,7 +685,7 @@ impl Gateway {
                 "response_id": format!("msg_token_station_{sequence}"),
                 "model": target.model,
             });
-            self.relay_stream(upstream, response, &render_context, emit, record);
+            Self::relay_stream(agent, upstream, response, &render_context, emit, record);
             Ok(())
         } else {
             let parts: HttpResponseParts = response.into();
@@ -648,8 +696,8 @@ impl Gateway {
                 "response_id": chat_response.id,
                 "model": chat_response.model,
             });
-            let rendered = self
-                .agent
+            let rendered = agent
+                .plugin
                 .render_response(&chat_response, &render_context)?;
             emit(Reply::BeginJson(JsonReply {
                 status: 200,
@@ -767,7 +815,7 @@ impl Gateway {
     /// Streams the upstream body through the parse/render pair, chunk by
     /// chunk, with the split points the network chose.
     fn relay_stream(
-        &self,
+        agent: &LoadedAgent,
         upstream: &Upstream,
         response: UpstreamResponse,
         render_context: &Value,
@@ -796,8 +844,9 @@ impl Gateway {
                         format!("upstream stream broke: {error}"),
                     );
                     record.error_code = Some(envelope.code);
-                    let rendered = self.render_stream_error(&envelope, render_context);
+                    let rendered = Self::render_stream_error(agent, &envelope, render_context);
                     emit(Reply::Chunk(rendered));
+                    Self::clear_stream_state(agent, render_context);
                     return;
                 }
             };
@@ -807,8 +856,9 @@ impl Gateway {
                 Ok(events) => events,
                 Err(envelope) => {
                     record.error_code = Some(envelope.code);
-                    let rendered = self.render_stream_error(&envelope, render_context);
+                    let rendered = Self::render_stream_error(agent, &envelope, render_context);
                     emit(Reply::Chunk(rendered));
+                    Self::clear_stream_state(agent, render_context);
                     return;
                 }
             };
@@ -817,12 +867,13 @@ impl Gateway {
                 if let token_station_protocol::StreamEvent::Usage { usage } = &event {
                     record.usage = Some(*usage);
                 }
-                let chunk = match self.agent.render_stream_event(&event, render_context) {
+                let chunk = match agent.plugin.render_stream_event(&event, render_context) {
                     Ok(chunk) => chunk,
                     Err(envelope) => {
                         record.error_code = Some(envelope.code);
-                        let rendered = self.render_stream_error(&envelope, render_context);
+                        let rendered = Self::render_stream_error(agent, &envelope, render_context);
                         emit(Reply::Chunk(rendered));
+                        Self::clear_stream_state(agent, render_context);
                         return;
                     }
                 };
@@ -832,22 +883,19 @@ impl Gateway {
                     .unwrap_or_default()
                     .to_owned();
                 if !emit(Reply::Chunk(data)) {
-                    self.clear_stream_state(render_context);
+                    Self::clear_stream_state(agent, render_context);
                     return; // Client hung up; drop the upstream too.
                 }
             }
         }
 
-        // A well-formed provider stream emits Done/Error, both of which clean
-        // adapter state. EOF without either is still terminal from the host's
-        // perspective, so discard any partial renderer state as well.
-        self.clear_stream_state(render_context);
+        Self::clear_stream_state(agent, render_context);
     }
 
-    /// An error, rendered the way this deployment's inbound protocol spells it.
-    fn render_error(&self, envelope: &ErrorEnvelope) -> JsonReply {
-        let body = self
-            .agent
+    /// An error, rendered the way the matched inbound protocol spells it.
+    fn render_error(agent: &LoadedAgent, envelope: &ErrorEnvelope) -> JsonReply {
+        let body = agent
+            .plugin
             .map_inbound_error(envelope, &Value::Null)
             .map_or_else(
                 |_| {
@@ -862,8 +910,13 @@ impl Gateway {
         }
     }
 
-    fn render_stream_error(&self, envelope: &ErrorEnvelope, context: &Value) -> String {
-        self.agent
+    fn render_stream_error(
+        agent: &LoadedAgent,
+        envelope: &ErrorEnvelope,
+        context: &Value,
+    ) -> String {
+        agent
+            .plugin
             .render_stream_event(
                 &token_station_protocol::StreamEvent::Error {
                     error: envelope.clone(),
@@ -873,16 +926,19 @@ impl Gateway {
             .ok()
             .and_then(|chunk| chunk.get("data").and_then(Value::as_str).map(str::to_owned))
             .unwrap_or_else(|| {
-                let body = self.agent.map_inbound_error(envelope, context).map_or_else(
-                    |_| json!({"error": {"message": envelope.message}}).to_string(),
-                    |value| value.to_string(),
-                );
+                let body = agent
+                    .plugin
+                    .map_inbound_error(envelope, context)
+                    .map_or_else(
+                        |_| json!({"error": {"message": envelope.message}}).to_string(),
+                        |value| value.to_string(),
+                    );
                 format!("data: {body}\n\n")
             })
     }
 
-    fn clear_stream_state(&self, context: &Value) {
-        let _ = self.agent.render_stream_event(
+    fn clear_stream_state(agent: &LoadedAgent, context: &Value) {
+        let _ = agent.plugin.render_stream_event(
             &token_station_protocol::StreamEvent::Error {
                 error: ErrorEnvelope::new(ErrorCode::Internal, 499, "client disconnected"),
             },

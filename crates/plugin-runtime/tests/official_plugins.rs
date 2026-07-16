@@ -12,6 +12,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use serde_json::json;
 use token_station_conformance::{
     AgentAdapter, AgentFamily, FixturePack, ProviderFamily, run_agent_suite, run_provider_suite,
 };
@@ -577,7 +578,11 @@ fn anthropic_match_inbound_owns_only_post_messages() {
     ]);
 
     let matched = plugin
-        .match_inbound("POST", "/v1/messages?beta=true", &headers)
+        .match_inbound(&json!({
+            "method": "POST",
+            "path": "/v1/messages?beta=true",
+            "headers": headers
+        }))
         .expect("match call succeeds");
     assert!(matched.matched);
     assert_eq!(matched.protocol.as_deref(), Some("anthropic-messages"));
@@ -588,7 +593,7 @@ fn anthropic_match_inbound_owns_only_post_messages() {
         ("POST", "/v1/chat/completions"),
     ] {
         let result = plugin
-            .match_inbound(method, path, &headers)
+            .match_inbound(&json!({ "method": method, "path": path, "headers": headers }))
             .expect("match call succeeds");
         assert!(!result.matched, "{method} {path}");
         assert_eq!(result.protocol, None, "{method} {path}");
@@ -601,7 +606,11 @@ fn responses_match_inbound_owns_only_post_responses() {
     let headers = HeaderDigest::redacting([("authorization", "Bearer local-secret")]);
 
     let matched = plugin
-        .match_inbound("POST", "/v1/responses?include=usage", &headers)
+        .match_inbound(&json!({
+            "method": "POST",
+            "path": "/v1/responses?include=usage",
+            "headers": headers
+        }))
         .expect("match call succeeds");
     assert!(matched.matched);
     assert_eq!(matched.protocol.as_deref(), Some("openai-responses"));
@@ -612,7 +621,7 @@ fn responses_match_inbound_owns_only_post_responses() {
         ("POST", "/v1/responses/input_tokens"),
     ] {
         let result = plugin
-            .match_inbound(method, path, &headers)
+            .match_inbound(&json!({ "method": method, "path": path, "headers": headers }))
             .expect("match call succeeds");
         assert!(!result.matched, "{method} {path}");
         assert_eq!(result.protocol, None, "{method} {path}");

@@ -12,9 +12,9 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::get;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -45,11 +45,14 @@ pub struct AppState {
 ///
 /// Only from the accept loop itself; per-request failures are responses.
 pub async fn serve(state: AppState, listener: TcpListener) -> std::io::Result<()> {
+    // `/v1/models` stays an explicit GET; everything else is a fallback so any
+    // inbound path an adapter might claim (OpenAI `/v1/chat/completions`,
+    // Anthropic `/v1/messages`, …) reaches the gateway, which asks each
+    // adapter's `match_inbound` who owns it. The host enumerates no protocol
+    // paths — adding an inbound protocol is zero change here.
     let app = Router::new()
-        .route("/v1/chat/completions", post(chat))
-        .route("/v1/responses", post(chat))
-        .route("/v1/messages", post(chat))
         .route("/v1/models", get(models))
+        .fallback(chat)
         .with_state(state);
 
     axum::serve(listener, app)
@@ -104,6 +107,7 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
 
 async fn chat(
     State(state): State<AppState>,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
@@ -112,6 +116,10 @@ async fn chat(
         return unauthorized(uri.path());
     }
     let gateway = Arc::clone(&state.gateway);
+    // The method and path feed the gateway's `match_inbound` step, which picks
+    // the inbound adapter. Owned copies cross into the blocking thread.
+    let method = method.as_str().to_owned();
+    let path = uri.path().to_owned();
     // Owned copies for the blocking thread. Values that are not UTF-8 keep
     // their name and lose their value — same rule HeaderDigest applies.
     let headers: Vec<(String, String)> = headers
@@ -128,9 +136,8 @@ async fn chat(
 
     // The pipeline owns its thread for the whole exchange; `blocking_send`
     // makes a slow reader slow the upstream read down, not buffer it.
-    let path = uri.path().to_owned();
     let worker = tokio::task::spawn_blocking(move || {
-        gateway.chat("POST", &path, &headers, &body, &mut |reply| {
+        gateway.chat(&method, &path, &headers, &body, &mut |reply| {
             tx.blocking_send(reply).is_ok()
         });
     });
