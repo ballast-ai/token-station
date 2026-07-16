@@ -105,6 +105,20 @@ fn envelope(protocol: &str, body: serde_json::Value) -> AgentRequestEnvelope {
     }
 }
 
+fn response_sse_events(rendered: &serde_json::Value) -> Vec<serde_json::Value> {
+    rendered["data"]
+        .as_str()
+        .expect("rendered Responses data is a string")
+        .split("\n\n")
+        .filter_map(|frame| {
+            frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .map(|data| serde_json::from_str(data).expect("Responses SSE data is JSON"))
+        })
+        .collect()
+}
+
 #[test]
 fn the_official_provider_adapter_passes_the_full_suite_as_wasm() {
     let plugin =
@@ -390,6 +404,168 @@ fn responses_stream_state_is_isolated_and_cleaned_by_stream_id() {
             .unwrap()
             .contains("response.created")
     );
+}
+
+#[test]
+fn responses_stream_assigns_global_output_indices_by_first_appearance() {
+    let plugin = AgentPlugin::load(&runtime(), responses_agent_package()).expect("loads clean");
+    let context = |stream_id: &str| {
+        serde_json::json!({
+            "protocol": "openai-responses",
+            "stream_id": stream_id,
+            "response_id": format!("resp-{stream_id}"),
+            "model": "routed-model"
+        })
+    };
+    let text = |content: &str| StreamEvent::Delta {
+        index: 0,
+        content: content.to_owned(),
+    };
+    let tool =
+        |index, id: Option<&str>, name: Option<&str>, arguments: &str| StreamEvent::ToolCallDelta {
+            index,
+            id: id.map(str::to_owned),
+            name: name.map(str::to_owned),
+            arguments_delta: arguments.to_owned(),
+        };
+
+    let text_first = response_sse_events(
+        &plugin
+            .render_stream_event(&text("before "), &context("text-first"))
+            .expect("text starts"),
+    );
+    assert_eq!(text_first[1]["output_index"], serde_json::json!(0));
+    assert_eq!(text_first[2]["output_index"], serde_json::json!(0));
+    assert_eq!(text_first[3]["output_index"], serde_json::json!(0));
+
+    let first_tool = response_sse_events(
+        &plugin
+            .render_stream_event(
+                &tool(0, Some("call-0"), Some("read_zero"), "{"),
+                &context("text-first"),
+            )
+            .expect("first tool starts"),
+    );
+    assert_eq!(first_tool[0]["output_index"], serde_json::json!(1));
+    assert_eq!(first_tool[1]["output_index"], serde_json::json!(1));
+
+    let resumed_text = response_sse_events(
+        &plugin
+            .render_stream_event(&text("after"), &context("text-first"))
+            .expect("text resumes"),
+    );
+    assert_eq!(resumed_text[0]["output_index"], serde_json::json!(0));
+
+    let second_tool = response_sse_events(
+        &plugin
+            .render_stream_event(
+                &tool(1, Some("call-1"), Some("read_one"), "{}"),
+                &context("text-first"),
+            )
+            .expect("second tool starts"),
+    );
+    assert_eq!(second_tool[0]["output_index"], serde_json::json!(2));
+    assert_eq!(second_tool[1]["output_index"], serde_json::json!(2));
+
+    let continued_tool = response_sse_events(
+        &plugin
+            .render_stream_event(&tool(0, None, None, "}"), &context("text-first"))
+            .expect("first tool continues"),
+    );
+    assert_eq!(continued_tool[0]["output_index"], serde_json::json!(1));
+
+    let completed = response_sse_events(
+        &plugin
+            .render_stream_event(
+                &StreamEvent::Done {
+                    finish_reason: Some(FinishReason::ToolCalls),
+                },
+                &context("text-first"),
+            )
+            .expect("stream completes"),
+    );
+    let done_indices: Vec<_> = completed
+        .iter()
+        .filter(|event| event["type"] == "response.output_item.done")
+        .map(|event| event["output_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(done_indices, vec![0, 1, 2]);
+    let final_output = completed
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("completed event")["response"]["output"]
+        .as_array()
+        .expect("final output is an array");
+    let final_types: Vec<_> = final_output
+        .iter()
+        .map(|item| item["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        final_types,
+        vec!["message", "function_call", "function_call"]
+    );
+}
+
+#[test]
+fn responses_stream_keeps_tool_first_output_order() {
+    let plugin = AgentPlugin::load(&runtime(), responses_agent_package()).expect("loads clean");
+    let context = serde_json::json!({
+        "protocol": "openai-responses",
+        "stream_id": "tool-first",
+        "response_id": "resp-tool-first",
+        "model": "routed-model"
+    });
+    let tool_first = response_sse_events(
+        &plugin
+            .render_stream_event(
+                &StreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("call-first".to_owned()),
+                    name: Some("read_first".to_owned()),
+                    arguments_delta: "{}".to_owned(),
+                },
+                &context,
+            )
+            .expect("tool-first stream starts"),
+    );
+    assert_eq!(tool_first[1]["output_index"], serde_json::json!(0));
+    let later_text = response_sse_events(
+        &plugin
+            .render_stream_event(
+                &StreamEvent::Delta {
+                    index: 0,
+                    content: "later".to_owned(),
+                },
+                &context,
+            )
+            .expect("text follows tool"),
+    );
+    assert_eq!(later_text[0]["output_index"], serde_json::json!(1));
+
+    let tool_first_completed = response_sse_events(
+        &plugin
+            .render_stream_event(
+                &StreamEvent::Done {
+                    finish_reason: Some(FinishReason::ToolCalls),
+                },
+                &context,
+            )
+            .expect("tool-first stream completes"),
+    );
+    let tool_first_done_indices: Vec<_> = tool_first_completed
+        .iter()
+        .filter(|event| event["type"] == "response.output_item.done")
+        .map(|event| event["output_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(tool_first_done_indices, vec![0, 1]);
+    let tool_first_output = tool_first_completed
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("tool-first completed event")["response"]["output"]
+        .as_array()
+        .expect("tool-first output is an array");
+    assert_eq!(tool_first_output[0]["type"], "function_call");
+    assert_eq!(tool_first_output[1]["type"], "message");
 }
 
 #[test]

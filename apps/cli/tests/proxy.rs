@@ -398,6 +398,17 @@ fn send_responses(proxy: &Proxy, body: &Value, token: &str) -> (u16, Option<Stri
     (status, content_type, body)
 }
 
+fn responses_sse_events(body: &str) -> Vec<Value> {
+    body.split("\n\n")
+        .filter_map(|frame| {
+            frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .map(|data| serde_json::from_str(data).expect("Responses SSE data is JSON"))
+        })
+        .collect()
+}
+
 fn read_marker_tool() -> Value {
     json!({
         "type": "function",
@@ -624,9 +635,11 @@ fn responses_structured_output_fails_before_the_upstream() {
 fn a_responses_stream_is_incremental_and_protocol_shaped() {
     let sse = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"M4_\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_stream\",\"function\":{\"name\":\"read_marker\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"STREAM_OK\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"marker.txt\\\"}\"}}]}}]}\n\n",
         "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
-        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
         "data: [DONE]\n\n"
     );
     let header = format!(
@@ -667,6 +680,46 @@ fn a_responses_stream_is_incremental_and_protocol_shaped() {
     assert!(body.contains("event: response.output_item.done"), "{body}");
     assert!(body.contains("M4_STREAM_OK"), "{body}");
     assert!(body.contains("event: response.completed"), "{body}");
+
+    let events = responses_sse_events(&body);
+    let added: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "response.output_item.added")
+        .map(|event| {
+            (
+                event["output_index"].as_u64().unwrap(),
+                event["item"]["type"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(added, vec![(0, "message"), (1, "function_call")]);
+    let function_delta_indices: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "response.function_call_arguments.delta")
+        .map(|event| event["output_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(function_delta_indices, vec![1, 1]);
+    let text_delta_indices: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "response.output_text.delta")
+        .map(|event| event["output_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(text_delta_indices, vec![0, 0]);
+    let done_indices: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "response.output_item.done")
+        .map(|event| event["output_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(done_indices, vec![0, 1]);
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("completed event");
+    assert_eq!(completed["response"]["output"][0]["type"], json!("message"));
+    assert_eq!(
+        completed["response"]["output"][1]["type"],
+        json!("function_call")
+    );
 
     settle();
     let row = last_row(&proxy.data_dir);
