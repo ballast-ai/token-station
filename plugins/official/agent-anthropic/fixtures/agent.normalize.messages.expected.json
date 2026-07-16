@@ -18,6 +18,10 @@
       ]
     },
     {
+      "role": "system",
+      "content": "The following skills are available."
+    },
+    {
       "role": "assistant",
       "content": [
         {"type": "text", "text": "I'll check."}

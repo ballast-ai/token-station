@@ -290,6 +290,11 @@ fn parse_messages(body: &Value) -> Result<Vec<Message>, String> {
             .and_then(Value::as_str)
             .ok_or_else(|| invalid("message declares no role"))?;
         match (role, raw.get("content")) {
+            ("system", Some(content)) => {
+                let message = system_message(content)?
+                    .ok_or_else(|| invalid("system message declares no content"))?;
+                messages.push(message);
+            }
             ("user", Some(Value::String(text))) => {
                 messages.push(Message::text(Role::User, text));
             }
@@ -302,7 +307,7 @@ fn parse_messages(body: &Value) -> Result<Vec<Message>, String> {
             ("assistant", Some(Value::Array(blocks))) => {
                 messages.push(parse_assistant_blocks(blocks)?);
             }
-            ("user" | "assistant", _) => {
+            ("system" | "user" | "assistant", _) => {
                 return Err(invalid("message content must be a string or block array"));
             }
             _ => return Err(invalid(format!("unknown Anthropic message role `{role}`"))),
