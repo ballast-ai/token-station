@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "server": { "listen": "127.0.0.1:8787", "auth": true },
+  "data": {
+    "dir": "token-station-e2e/kimi/data",
+    "metrics": true
+  },
+  "plugins": {
+    "dir": "token-station-e2e/plugins",
+    "agent": "agent-anthropic",
+    "providers": {
+      "openai-compatible": "provider-openai-compatible"
+    }
+  },
+  "upstreams": {
+    "kimi": {
+      "provider": "openai-compatible",
+      "base_url": "https://api.moonshot.cn/v1",
+      "auth": {
+        "slot": "provider_api_key",
+        "keyring": true
+      },
+      "models": [
+        {
+          "model": "kimi-k2.7-code",
+          "tool": true,
+          "context_window": 262144,
+          "supported_parameters": [
+            "max_tokens",
+            "stop",
+            "temperature",
+            "top_p"
+          ]
+        }
+      ]
+    }
+  },
+  "router": {
+    "version": 1,
+    "pools": {
+      "default": [
+        {
+          "upstream": "kimi",
+          "model": "kimi-k2.7-code"
+        }
+      ]
+    },
+    "rules": [],
+    "hint_routes": [],
+    "default_pool": "default",
+    "assumed_context_window": 262144
+  }
+}
