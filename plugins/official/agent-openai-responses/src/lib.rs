@@ -67,6 +67,35 @@ fn as_u32(value: &Value, field: &str) -> Result<u32, String> {
         .ok_or_else(|| invalid(format!("{field} must be an unsigned 32-bit integer")))
 }
 
+fn validate_text_format(body: &Value) -> Result<(), String> {
+    let Some(text) = body.get("text").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let text = text
+        .as_object()
+        .ok_or_else(|| invalid("text must be an object"))?;
+    let Some(format) = text.get("format").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let format = format
+        .as_object()
+        .ok_or_else(|| invalid("text.format must be an object"))?;
+    let kind = format
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("text.format declares no string type"))?;
+
+    match kind {
+        "text" => Ok(()),
+        "json_schema" | "json_object" => Err(capability(
+            "Responses structured output requires an approved Canonical IR/provider mapping",
+        )),
+        kind => Err(capability(format!(
+            "unsupported Responses text.format type {kind}"
+        ))),
+    }
+}
+
 fn image_part(block: &Value) -> Result<ContentPart, String> {
     if block.get("file_id").is_some_and(|value| !value.is_null()) {
         return Err(capability(
@@ -575,6 +604,7 @@ impl Guest for ResponsesClient {
     fn normalize_inbound(envelope: String) -> Result<String, String> {
         let envelope: AgentRequestEnvelope = parse_input(&envelope)?;
         let body = &envelope.body;
+        validate_text_format(body)?;
         let model = body
             .get("model")
             .and_then(Value::as_str)

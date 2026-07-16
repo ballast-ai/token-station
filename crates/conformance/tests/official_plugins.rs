@@ -54,6 +54,19 @@ fn official_provider_adapter_passes_the_manifest_gate() {
 }
 
 #[test]
+fn openai_agent_manifests_do_not_overclaim_structured_output() {
+    for source in [AGENT_OPENAI, AGENT_OPENAI_RESPONSES] {
+        let manifest = parse(source);
+
+        assert!(
+            !manifest.capabilities.contains(&Capability::JsonSchema),
+            "{} does not translate structured output into Canonical IR",
+            manifest.name
+        );
+    }
+}
+
+#[test]
 fn manifest_name_matches_the_directory_that_holds_it() {
     // The registry keys packages by name; a package whose directory says one
     // thing and whose manifest says another cannot be located again after

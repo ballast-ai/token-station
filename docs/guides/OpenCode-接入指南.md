@@ -113,6 +113,8 @@ rg -n 'OPENCODE_M4_OK|intentionally-wrong|sk-' \
 ## 4. 当前边界
 
 - 已覆盖 Chat Completions 文本、流式增量、function tool、tool result、usage 和错误。
+- 结构化输出暂不支持；`response_format.type` 为 `json_schema` 或 `json_object` 时
+  返回 capability 错误，不会进入 router 或上游。
 - OpenCode 的插件、MCP、LSP 和用户配置不在本配方验收范围，测试时均隔离或关闭。
 - provider 配置使用 OpenCode 官方 `@ai-sdk/openai-compatible` 接口；不修改
   token-station 的路由或 provider 适配器。

@@ -146,5 +146,7 @@ rg -n 'CODEX_M4_OK|intentionally-wrong|sk-' \
   Responses SSE、usage 和 Responses 错误。
 - reasoning item、computer/hosted tool、file-id 图片及 Responses 完整事件全集尚未
   支持；遇到这些输入会明确报能力错误，不会静默丢字段。
+- Responses 结构化输出暂不支持；`text.format.type` 为 `json_schema` 或
+  `json_object` 时返回 `unsupported_capability`，不会进入 router 或上游。
 - 本配方只证明 Codex 的文本与本地 function tool 主链，不等于“完整兼容所有
   Responses 能力”。

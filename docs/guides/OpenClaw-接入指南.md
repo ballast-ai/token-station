@@ -113,6 +113,8 @@ rm -rf /tmp/token-station-m4-openclaw-state \
 ## 4. 当前边界
 
 - 本配方覆盖 OpenAI Chat Completions 文本流和本地 function tool 主链。
+- 结构化输出暂不支持；`response_format.type` 为 `json_schema` 或 `json_object` 时
+  返回 capability 错误，不会进入 router 或上游。
 - OpenClaw gateway、远程 channel、MCP、浏览器和用户级 skills 不在验收范围。
 - `reasoning: false` 是模型声明，不代表 Responses reasoning 已实现；该 Agent 走的
   是 `agent-openai`，不是 `agent-openai-responses`。

@@ -5,7 +5,7 @@
   "api_version": "agent-adapter-v1",
   "agent_protocols": ["openai-responses"],
   "agent_tools": ["codex"],
-  "capabilities": ["chat", "stream", "tool_call", "json_schema", "agent_hint"],
+  "capabilities": ["chat", "stream", "tool_call", "agent_hint"],
   "permissions": {
     "network": false,
     "filesystem": false,

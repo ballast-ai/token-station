@@ -164,6 +164,7 @@ network/filesystem 禁用且 secrets 为空。
 现有 IR 能表达 Codex M4 主链路需要的文本、图片、function tools、usage 和错误。
 以下 Responses item 目前不能完整无损表达：
 
+- `text.format` 的 JSON Schema / JSON Object 结构化输出约束。
 - reasoning summary/content 文本本身（reasoning token 计数已可表达）。
 - computer call、hosted web search 等服务端工具 item。
 - 其他不是 message/function call 的新 output item。
@@ -177,6 +178,7 @@ M4 不修改 `crates/protocol`，不声称完整支持 Responses API 所有 item
 |---|---|
 | 本地 virtual key 缺失/错误 | Responses 形状的 401，不进入 adapter |
 | JSON 非法或必填字段缺失 | Responses `invalid_request_error` |
+| JSON Schema / JSON Object 结构化输出 | 明确 capability error，不进入路由或上游 |
 | 关键 item 不可表达 | 明确 capability/invalid request，不静默丢失 |
 | 上游鉴权失败 | Responses error 形状且保留 401/403 |
 | 上游限流 | Responses error 形状且保留 429 |

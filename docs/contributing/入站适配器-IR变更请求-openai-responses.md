@@ -28,6 +28,7 @@ usage 和错误回传。
 
 以下 Responses 语义没有稳定的一一对应表示：
 
+- `text.format` 的 `json_schema` / `json_object` 结构化输出约束；
 - reasoning output item 的 summary、content、encrypted_content；
 - computer call / computer call output；
 - hosted web search、file search、image generation 等服务端工具 item；
@@ -52,4 +53,5 @@ usage 和错误回传。
 - `crates/protocol` 必须保持零差异。
 - adapter 对未知普通字段保持前向兼容。
 - adapter 对未知关键 item/tool 类型明确失败。
+- adapter 对结构化输出明确返回 capability 错误，不声明 `json_schema`。
 - 验收报告只能声称支持本文件第 1 节子集，不声称完整兼容 Responses API。

@@ -24,7 +24,7 @@
         {
           "model": "deepseek-v4-flash",
           "tool": true,
-          "json_schema": true,
+          "json_schema": false,
           "context_window": 1000000,
           "supported_parameters": ["max_tokens", "stop", "temperature", "top_p"]
         }
