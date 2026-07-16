@@ -24,7 +24,7 @@ A provider must meet these minimum requirements:
 
 If the provider meets these requirements, add only the upstream configuration, model capabilities, and credential. Do not modify Rust. Add a separate `provider-*` plugin only when the request, authentication, streaming, or tool protocol differs. If Canonical IR cannot express required semantics, submit a change request before you modify `crates/protocol`.
 
-## 2. Initial test configurations
+## 2. Initial and alternative test configurations
 
 | Test sample | Configuration | Current test model |
 |---|---|---|
@@ -32,8 +32,15 @@ If the provider meets these requirements, add only the upstream configuration, m
 | Kimi | [`claude-code-kimi-config.json`](../../apps/cli/claude-code-kimi-config.json) | `kimi-k2.7-code` |
 | MiniMax | [`claude-code-minimax-config.json`](../../apps/cli/claude-code-minimax-config.json) | `MiniMax-M3` |
 | GLM | [`claude-code-glm-config.json`](../../apps/cli/claude-code-glm-config.json) | `glm-5.2` |
+| Kimi alternative | [`claude-code-kimi-moonshot-v1-config.json`](../../apps/cli/claude-code-kimi-moonshot-v1-config.json) | `moonshot-v1-128k` |
+| MiniMax alternative | [`claude-code-minimax-m2.5-config.json`](../../apps/cli/claude-code-minimax-m2.5-config.json) | `MiniMax-M2.5` |
 
-All four configurations contain one upstream and one default pool. `rules` and `hint_routes` are empty. They test provider protocol compatibility, not multi-model routing policy.
+All six configurations contain one upstream and one default pool. `rules` and `hint_routes` are empty. They test provider protocol compatibility, not multi-model routing policy.
+
+Alternative configurations use separate data directories to preserve metrics for the original and alternative models. Acceptance tests found these results:
+
+- Kimi `moonshot-v1-128k` completes text and tool round trips. `kimi-k2.7-code` requires `reasoning_content`, so the second tool round fails with the current IR.
+- MiniMax `MiniMax-M3` and `MiniMax-M2.5` both complete tool round trips. Through the OpenAI-compatible API, both put `<think>` in normal text. Changing models does not separate reasoning content.
 
 Provider model aliases can change. Before an acceptance test, check the official model catalog again. Record the test date, requested model, and actual upstream model.
 
@@ -116,6 +123,13 @@ Then send one real minimal completion to each provider:
   --config apps/cli/claude-code-glm-config.json \
   upstream test glm --model glm-5.2
 
+./target/release/token-station-cli \
+  --config apps/cli/claude-code-kimi-moonshot-v1-config.json \
+  upstream test kimi --model moonshot-v1-128k
+
+./target/release/token-station-cli \
+  --config apps/cli/claude-code-minimax-m2.5-config.json \
+  upstream test minimax --model MiniMax-M2.5
 ```
 
 `upstream test` calls a real API and can incur a small charge. Standard metered keys and plan keys, such as Coding Plan or Token Plan, can use different endpoints. For a 401 or 404 response, first check the key type and region. Do not immediately classify the provider as incompatible.
@@ -136,6 +150,8 @@ token-station-e2e/qwen/data
 token-station-e2e/kimi/data
 token-station-e2e/minimax/data
 token-station-e2e/glm/data
+token-station-e2e/kimi-moonshot-v1/data
+token-station-e2e/minimax-m2.5/data
 ```
 
 The first start creates a local virtual key. It authenticates Claude Code to the local proxy. It is not an upstream API key. Set its file mode to `0600`.
