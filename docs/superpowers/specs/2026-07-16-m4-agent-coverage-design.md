@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-在不修改 Codex、OpenCode、OpenClaw 和 Aider 自身业务逻辑的前提下，
+在不修改 Codex、OpenCode 和 OpenClaw 自身业务逻辑的前提下，
 使它们能通过独立配置连接本地 token-station，并完成真实端到端验收。
 
 本设计对应
@@ -29,10 +29,9 @@ M4 的完成标准不是“有配置文档”，而是每个目标 Agent 都完�
 | Codex | OpenAI Responses | `POST /v1/responses` | 新增 `agent-openai-responses` |
 | OpenCode | OpenAI Chat Completions | `POST /v1/chat/completions` | 复用 `agent-openai` |
 | OpenClaw | OpenAI Chat Completions | `POST /v1/chat/completions` | 复用 `agent-openai` |
-| Aider | OpenAI Chat Completions | `POST /v1/chat/completions` | 复用 `agent-openai` |
 
-Aider 作为需求中“自行调研补充的主流 Agent”。它使用可自动化验收的
-CLI 交互，且无需增加新入站协议。
+本轮 M4 范围按用户确认只包含上述三个 Agent。需求中“自行调研补充的主流
+Agent”仅保留为后续候选调研要求，不并入本轮实现和验收范围。
 
 需求文档中的 `openclow` 按用户已确认的官方项目名 **OpenClaw** 执行。
 
@@ -45,11 +44,9 @@ CLI 交互，且无需增加新入站协议。
   `/v1/chat/completions`，`options.baseURL` 可指向本地代理。
 - OpenClaw 官方配置契约允许用 `models.providers.*.api="openai-completions"`
   和 `baseUrl` 指向自定义入口。
-- Aider 官方 OpenAI-compatible 文档支持 `--openai-api-base` /
-  `AIDER_OPENAI_API_BASE`，模型元数据声明 `/v1/chat/completions`。
 
-本机当前已有 Codex `0.144.2` 和 OpenClaw `2026.6.11`；OpenCode 和 Aider 尚未安装。
-后两者的 E2E 工具在进入实施后按官方方式安装到临时隔离位置并锁定验收版本，
+本机当前已有 Codex `0.144.2` 和 OpenClaw `2026.6.11`；OpenCode 尚未安装。
+OpenCode 的 E2E 工具在进入实施后按官方方式安装到临时隔离位置并锁定验收版本，
 不做全局安装。
 
 ### 2.3 不扩展为单进程多协议
@@ -57,7 +54,7 @@ CLI 交互，且无需增加新入站协议。
 当前运行配置一次只绑定一个 `plugins.agent`。M4 保持该边界：
 
 - Codex 实例加载 `agent-openai-responses`。
-- OpenCode、OpenClaw 和 Aider 实例加载 `agent-openai`。
+- OpenCode 和 OpenClaw 实例加载 `agent-openai`。
 - Claude Code 继续由独立实例加载 `agent-anthropic`。
 
 用户可以按需切换配置，或者用不同端口启动多个隔离实例。本轮不修改
@@ -80,7 +77,7 @@ Codex
   -> Responses JSON / SSE
 ```
 
-### 3.2 OpenCode / OpenClaw / Aider
+### 3.2 OpenCode / OpenClaw
 
 ```text
 Agent
@@ -196,7 +193,7 @@ M4 不修改 `crates/protocol`，不声称完整支持 Responses API 所有 item
 - 不占用当前 `8787` 端口。
 - 每个验收实例使用独立端口、临时配置和独立数据目录。
 - Codex 使用临时 `CODEX_HOME`。
-- OpenCode、OpenClaw 和 Aider 使用各自的临时配置入口。
+- OpenCode 和 OpenClaw 使用各自的临时配置入口。
 - 不修改用户全局 Agent 配置、shell profile 或现有环境变量。
 - 凭证只从启动验收进程的临时 shell 环境解析，不回显、不记录、不入库。
 
@@ -238,7 +235,7 @@ M4 不修改 `crates/protocol`，不声称完整支持 Responses API 所有 item
 ### 7.4 真实 Agent / 模型 E2E
 
 使用同一可用的真实上游基线（首选已验证的 DeepSeek 链路），分别验证
-Codex、OpenCode、OpenClaw 和 Aider。每项必须保存：
+Codex、OpenCode 和 OpenClaw。每项必须保存：
 
 - Agent 版本。
 - 脱敏后的启动与配置方式。
@@ -258,8 +255,8 @@ Codex、OpenCode、OpenClaw 和 Aider。每项必须保存：
 | WASM 宿主 | `crates/plugin-runtime/src/agent.rs` | 复用现有 ABI；仅在实际缺透传时改动 | runtime tests | 待核实 |
 | 插件发现 | plugin catalog/build/package 入口 | 确认新官方 adapter 可发现与构建 | discovery/package tests | 待核实 |
 | 审计边界 | `.github/CODEOWNERS` | 增加新 adapter 独立行 | CODEOWNERS diff | 必须修改 |
-| 调用方 | Codex/OpenCode/OpenClaw/Aider 临时配置 | 指向隔离实例 | 真实 E2E | 必须交付 |
-| 文档 | 协议盘点、四份接入指南、M4 验收报告 | 更新可执行配方与证据 | doc links/commands | 必须修改 |
+| 调用方 | Codex/OpenCode/OpenClaw 临时配置 | 指向隔离实例 | 真实 E2E | 必须交付 |
+| 文档 | 协议盘点、三份接入指南、M4 验收报告 | 更新可执行配方与证据 | doc links/commands | 必须修改 |
 | IR | `crates/protocol` | 不改；缺口走变更请求 | red-line diff | 明确不在范围 |
 | 路由 | `crates/router-core` | 不改 | red-line diff | 明确不在范围 |
 | 出站 | provider adapters | 不改 | red-line diff | 明确不在范围 |
@@ -273,13 +270,13 @@ Codex、OpenCode、OpenClaw 和 Aider。每项必须保存：
 4. 实现流式、工具分片和状态清理。
 5. 最小化接入 `/v1/responses` 宿主链路并跑全量回归。
 6. 用独立端口/配置跑假上游 E2E。
-7. 分别完成 Codex、OpenCode、OpenClaw、Aider 真实 E2E。
+7. 分别完成 Codex、OpenCode、OpenClaw 真实 E2E。
 8. 产出接入指南和 M4 验收报告，审计红线、凭证与运行环境隔离。
 
 ## 10. 交付物
 
 - `agent-openai-responses` 适配器及五族 fixtures。
-- Codex、OpenCode、OpenClaw、Aider 四份接入指南。
+- Codex、OpenCode、OpenClaw 三份接入指南。
 - 更新后的首批 Agent 协议盘点。
 - Responses reasoning/hosted-tool 等缺口的 IR 变更请求。
 - M4 验收报告，分开记录一致性、假上游、真实 E2E 和已知限制。
