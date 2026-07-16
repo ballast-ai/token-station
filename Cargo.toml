@@ -16,6 +16,7 @@ exclude = [
     "crates/plugin-runtime/tests/guests/test-provider",
     "plugins/official/agent-anthropic",
     "plugins/official/agent-openai",
+    "plugins/official/agent-openai-responses",
     "plugins/official/provider-openai-compatible",
 ]
 

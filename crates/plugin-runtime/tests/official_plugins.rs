@@ -72,6 +72,11 @@ fn anthropic_agent_package() -> &'static Path {
     DIR.get_or_init(|| build_package("agent-anthropic"))
 }
 
+fn responses_agent_package() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| build_package("agent-openai-responses"))
+}
+
 fn runtime() -> PluginRuntime {
     PluginRuntime::new(RuntimeLimits {
         memory_bytes: 64 * 1024 * 1024,
@@ -102,6 +107,20 @@ fn the_official_agent_adapter_passes_the_full_suite_as_wasm() {
     let plugin = AgentPlugin::load(&runtime(), agent_package()).expect("loads clean");
 
     let fixtures = repo_root().join("plugins/official/agent-openai/fixtures");
+    let pack: FixturePack<AgentFamily> =
+        FixturePack::load(&fixtures).expect("the shipped pack loads");
+
+    let report = run_agent_suite(&plugin, &pack);
+
+    assert!(report.is_passing(), "{report}");
+    assert_eq!(report.suite(), plugin.manifest().conformance.required_suite);
+}
+
+#[test]
+fn the_official_responses_agent_adapter_passes_the_full_suite_as_wasm() {
+    let plugin = AgentPlugin::load(&runtime(), responses_agent_package()).expect("loads clean");
+
+    let fixtures = repo_root().join("plugins/official/agent-openai-responses/fixtures");
     let pack: FixturePack<AgentFamily> =
         FixturePack::load(&fixtures).expect("the shipped pack loads");
 
@@ -194,6 +213,90 @@ fn anthropic_stream_state_is_isolated_and_cleaned_by_stream_id() {
 }
 
 #[test]
+fn responses_stream_state_is_isolated_and_cleaned_by_stream_id() {
+    let plugin = AgentPlugin::load(&runtime(), responses_agent_package()).expect("loads clean");
+    let context = |stream_id: &str, response_id: &str| {
+        serde_json::json!({
+            "protocol": "openai-responses",
+            "stream_id": stream_id,
+            "response_id": response_id,
+            "model": "routed-model"
+        })
+    };
+    let delta = |content: &str| StreamEvent::Delta {
+        index: 0,
+        content: content.to_owned(),
+    };
+
+    let a_first = plugin
+        .render_stream_event(&delta("a1"), &context("stream-a", "resp-a"))
+        .expect("stream A starts");
+    let b_first = plugin
+        .render_stream_event(&delta("b1"), &context("stream-b", "resp-b"))
+        .expect("stream B starts");
+    let a_second = plugin
+        .render_stream_event(&delta("a2"), &context("stream-a", "resp-a"))
+        .expect("stream A resumes");
+
+    assert!(
+        a_first["data"]
+            .as_str()
+            .unwrap()
+            .contains("response.created")
+    );
+    assert!(
+        b_first["data"]
+            .as_str()
+            .unwrap()
+            .contains("response.created")
+    );
+    assert!(
+        !a_second["data"]
+            .as_str()
+            .unwrap()
+            .contains("response.created")
+    );
+
+    let a_done = plugin
+        .render_stream_event(
+            &StreamEvent::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+            &context("stream-a", "resp-a"),
+        )
+        .expect("done cleans stream A");
+    assert!(a_done["data"].as_str().unwrap().contains("a1a2"));
+
+    plugin
+        .render_stream_event(
+            &StreamEvent::Error {
+                error: ErrorEnvelope::new(ErrorCode::UpstreamUnavailable, 502, "unavailable"),
+            },
+            &context("stream-b", "resp-b"),
+        )
+        .expect("error cleans stream B");
+
+    let a_restarted = plugin
+        .render_stream_event(&delta("a3"), &context("stream-a", "resp-a-2"))
+        .expect("stream A restarts");
+    let b_restarted = plugin
+        .render_stream_event(&delta("b2"), &context("stream-b", "resp-b-2"))
+        .expect("stream B restarts");
+    assert!(
+        a_restarted["data"]
+            .as_str()
+            .unwrap()
+            .contains("response.created")
+    );
+    assert!(
+        b_restarted["data"]
+            .as_str()
+            .unwrap()
+            .contains("response.created")
+    );
+}
+
+#[test]
 fn anthropic_match_inbound_owns_only_post_messages() {
     let plugin = AgentPlugin::load(&runtime(), anthropic_agent_package()).expect("loads clean");
     let headers = HeaderDigest::redacting([
@@ -211,6 +314,30 @@ fn anthropic_match_inbound_owns_only_post_messages() {
         ("GET", "/v1/messages"),
         ("POST", "/v1/messages/count_tokens"),
         ("POST", "/v1/chat/completions"),
+    ] {
+        let result = plugin
+            .match_inbound(method, path, &headers)
+            .expect("match call succeeds");
+        assert!(!result.matched, "{method} {path}");
+        assert_eq!(result.protocol, None, "{method} {path}");
+    }
+}
+
+#[test]
+fn responses_match_inbound_owns_only_post_responses() {
+    let plugin = AgentPlugin::load(&runtime(), responses_agent_package()).expect("loads clean");
+    let headers = HeaderDigest::redacting([("authorization", "Bearer local-secret")]);
+
+    let matched = plugin
+        .match_inbound("POST", "/v1/responses?include=usage", &headers)
+        .expect("match call succeeds");
+    assert!(matched.matched);
+    assert_eq!(matched.protocol.as_deref(), Some("openai-responses"));
+
+    for (method, path) in [
+        ("GET", "/v1/responses"),
+        ("POST", "/v1/chat/completions"),
+        ("POST", "/v1/responses/input_tokens"),
     ] {
         let result = plugin
             .match_inbound(method, path, &headers)

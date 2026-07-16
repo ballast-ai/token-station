@@ -1,0 +1,9 @@
+{
+  "context": {"protocol": "openai-responses"},
+  "error": {
+    "code": "rate_limit",
+    "http_status": 429,
+    "message": "the upstream rate limited this request",
+    "retry_after_ms": 2000
+  }
+}

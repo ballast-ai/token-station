@@ -47,6 +47,7 @@ pub struct AppState {
 pub async fn serve(state: AppState, listener: TcpListener) -> std::io::Result<()> {
     let app = Router::new()
         .route("/v1/chat/completions", post(chat))
+        .route("/v1/responses", post(chat))
         .route("/v1/messages", post(chat))
         .route("/v1/models", get(models))
         .with_state(state);
@@ -72,10 +73,16 @@ fn admitted(state: &AppState, headers: &HeaderMap) -> bool {
 }
 
 fn unauthorized(path: &str) -> Response {
-    let body = if path == "/v1/messages" {
-        r#"{"type":"error","error":{"type":"authentication_error","message":"missing or invalid local virtual key"}}"#
-    } else {
-        r#"{"error":{"message":"missing or invalid local virtual key","type":"auth","code":"auth"}}"#
+    let body = match path {
+        "/v1/messages" => {
+            r#"{"type":"error","error":{"type":"authentication_error","message":"missing or invalid local virtual key"}}"#
+        }
+        "/v1/responses" => {
+            r#"{"error":{"type":"error","code":"authentication_error","message":"missing or invalid local virtual key"}}"#
+        }
+        _ => {
+            r#"{"error":{"message":"missing or invalid local virtual key","type":"auth","code":"auth"}}"#
+        }
     };
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
