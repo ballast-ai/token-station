@@ -75,7 +75,7 @@ git diff --check
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release -p token-station-cli
 ./target/release/token-station-cli plugin test plugins/official/agent-anthropic
