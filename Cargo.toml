@@ -16,6 +16,10 @@ exclude = [
     "crates/plugin-runtime/tests/guests/test-provider",
     "plugins/official/agent-openai",
     "plugins/official/provider-openai-compatible",
+    # Deliberately exclude the Tauri desktop app from the strict workspace so its
+    # large GUI dependency tree does not enter clippy-pedantic or cargo-deny gates.
+    # Its path dependency on token-station-cli reuses the core without a fork.
+    "apps/desktop/src-tauri",
 ]
 
 [workspace.package]

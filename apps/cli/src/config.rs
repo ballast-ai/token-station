@@ -125,8 +125,17 @@ pub struct PluginsConfig {
     /// dialect a discovered manifest declares registers itself
     /// (`crate::plugins::PluginRegistry`).
     pub dir: PathBuf,
-    /// The agent adapter package that owns the inbound protocol.
-    pub agent: String,
+    /// Deprecated single-adapter alias, kept so configs written before `agents`
+    /// still load. Folded into [`PluginsConfig::effective_agents`] only when
+    /// `agents` is empty. New configs should use `agents`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The agent adapter packages that own the inbound protocols, in
+    /// match-priority order. More than one = several inbound protocols served
+    /// at once (e.g. OpenAI + Anthropic); each request is dispatched to the
+    /// first adapter whose `match_inbound` claims it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
     /// Explicit provider dialect -> plugin package name entries. Optional
     /// since discovery: an entry may pre-declare a package not yet in `dir`,
     /// but may not contradict a discovered manifest. Writing an entry here is
@@ -138,6 +147,21 @@ pub struct PluginsConfig {
     /// into the plugins directory must not be enough to receive requests.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_unsigned: bool,
+}
+
+impl PluginsConfig {
+    /// The agent adapter packages to load, in match-priority order. Prefers the
+    /// `agents` list; falls back to the deprecated single `agent` alias so old
+    /// configs keep working. Empty only for a config that names neither, which
+    /// [`ClientConfig::validate`] rejects.
+    #[must_use]
+    pub fn effective_agents(&self) -> Vec<String> {
+        if self.agents.is_empty() {
+            self.agent.iter().cloned().collect()
+        } else {
+            self.agents.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -241,6 +265,14 @@ impl ClientConfig {
     fn validate(&self) -> Result<(), String> {
         if self.version != 1 {
             return Err(format!("config version {} is not 1", self.version));
+        }
+
+        if self.plugins.effective_agents().is_empty() {
+            return Err(
+                "plugins.agents must name at least one agent adapter (or the deprecated \
+                 plugins.agent)"
+                    .to_owned(),
+            );
         }
 
         // The product promise is a loopback proxy. Binding anything else is a
@@ -393,7 +425,7 @@ mod tests {
         let path = scratch("example", crate::EXAMPLE_CONFIG);
         let config = ClientConfig::load(&path).expect("the example must stay loadable");
 
-        assert_eq!(config.plugins.agent, "agent-openai");
+        assert_eq!(config.plugins.effective_agents(), ["agent-openai"]);
         fs::remove_file(path).ok();
     }
 
