@@ -28,7 +28,7 @@ Claude Code
 鉴权、流式或工具协议才需要独立 `provider-*` 插件；Canonical IR 无法表达的关键语义
 必须先提交变更请求，不能直接修改 `crates/protocol`。
 
-## 2. 首轮测试配置
+## 2. 首轮与替代测试配置
 
 | 测试样本 | 配置 | 当前拟测模型 |
 |---|---|---|
@@ -36,9 +36,18 @@ Claude Code
 | Kimi | [`claude-code-kimi-config.json`](../../apps/cli/claude-code-kimi-config.json) | `kimi-k2.7-code` |
 | MiniMax | [`claude-code-minimax-config.json`](../../apps/cli/claude-code-minimax-config.json) | `MiniMax-M3` |
 | GLM | [`claude-code-glm-config.json`](../../apps/cli/claude-code-glm-config.json) | `glm-5.2` |
+| Kimi 替代 | [`claude-code-kimi-moonshot-v1-config.json`](../../apps/cli/claude-code-kimi-moonshot-v1-config.json) | `moonshot-v1-128k` |
+| MiniMax 替代 | [`claude-code-minimax-m2.5-config.json`](../../apps/cli/claude-code-minimax-m2.5-config.json) | `MiniMax-M2.5` |
 
-四份配置都只有一个 upstream 和一个 default pool，`rules` / `hint_routes` 为空。
+六份配置都只有一个 upstream 和一个 default pool，`rules` / `hint_routes` 为空。
 因此它们验证的是供应商协议兼容性，不是多模型路由策略。
+
+替代配置使用独立数据目录，用于保留原模型与替代模型的 metrics。真实验收表明：
+
+- Kimi `moonshot-v1-128k` 可以完成文本和工具闭环；`kimi-k2.7-code` 因强制要求
+  回传 `reasoning_content`，当前 IR 下工具第二轮失败；
+- MiniMax `MiniMax-M3` 与 `MiniMax-M2.5` 均能完成工具闭环，但通过 OpenAI-compatible
+  接口时都会把 `<think>` 放入普通文本，换模型不能解决思考内容分层。
 
 模型别名可能随厂商更新。执行真实验收前应再次核对官方模型目录，并在验收记录中
 保存测试日期、请求模型和上游实际返回模型。
@@ -124,6 +133,14 @@ done
 ./target/release/token-station-cli \
   --config apps/cli/claude-code-glm-config.json \
   upstream test glm --model glm-5.2
+
+./target/release/token-station-cli \
+  --config apps/cli/claude-code-kimi-moonshot-v1-config.json \
+  upstream test kimi --model moonshot-v1-128k
+
+./target/release/token-station-cli \
+  --config apps/cli/claude-code-minimax-m2.5-config.json \
+  upstream test minimax --model MiniMax-M2.5
 ```
 
 `upstream test` 会调用真实 API，可能产生少量费用。标准按量 Key 与 Coding Plan、
@@ -146,6 +163,8 @@ token-station-e2e/qwen/data
 token-station-e2e/kimi/data
 token-station-e2e/minimax/data
 token-station-e2e/glm/data
+token-station-e2e/kimi-moonshot-v1/data
+token-station-e2e/minimax-m2.5/data
 ```
 
 首次启动会生成本地 virtual key。它只用于 Claude Code 到本机代理的鉴权，不是上游
