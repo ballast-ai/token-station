@@ -7,11 +7,14 @@
 
 ## 1. 结论
 
-token-station 应分别学习两个参考项目解决不同边界问题的方法：
+token-station 应同时学习两个参考项目，并按子系统设置不同的研究重点，而不是把学习来源做成前后端互斥分工：
 
-- 前半段 Agent 接入侧学习 cc-Switch，重点研究多 Agent 配置发现、导入、投影、原子写入、回填、冲突检测、回滚和恢复。
-- 后半段模型供应侧学习 OpenRouter，重点研究模型目录、能力元数据、协议归一、Provider Endpoint 建模、参数兼容、供应级路由、fallback、成本和可观测性。
+- Agent 接入侧重点学习 cc-Switch 的多 Agent 配置发现、导入、投影、原子写入、回填、冲突检测、回滚和恢复，同时学习 OpenRouter 的统一 API 契约、协议兼容、参数能力表达和错误语义。
+- 模型供应侧重点学习 OpenRouter 的模型目录、能力元数据、协议归一、Provider Endpoint 建模、参数兼容、供应级路由、fallback、成本和可观测性，同时学习 cc-Switch 的 Provider 配置档案、状态切换、配置所有权和安全恢复机制。
+- 路由、配置治理、兼容性和可观测性等横切能力，可以同时参考两个项目，再根据 token-station 的本地网关约束重新组合。
 - token-station 继续保留自己的核心差异：本地部署、密钥本地保管、Canonical IR、WASM Adapter、本地可解释任务路由和内容零落盘。
+
+这里的“重点”只表示研究优先级和篇幅权重，不表示某一侧只能学习一个项目，也不表示某项能力归属于单一参考来源。
 
 cc-Switch 与 OpenRouter 都只是研究样本，不是 token-station 的依赖、组件、服务或运行时节点。本设计不要求：
 
@@ -74,6 +77,21 @@ Agent / IDE
 4. 不在本阶段引入黑盒 LLM 热路径分类器。
 5. 不在本阶段覆盖图片生成、音频生成、视频生成和 Embeddings 全协议。
 6. 不通过任意 JSON 透传规避 Canonical IR 的语义评审。
+
+### 3.3 交叉学习原则
+
+两个参考项目按“主参考 + 补充参考”使用：
+
+| token-station 子系统 | 主参考重点 | 补充参考重点 |
+|---|---|---|
+| Agent Registry / Connector | cc-Switch 的 Agent 类型、配置生命周期、原子投影与恢复 | OpenRouter 的稳定公共契约、兼容性说明和错误表达 |
+| Agent Adapter / Canonical IR | OpenRouter 的统一 API、参数能力和响应归一 | cc-Switch 的多 Agent 分类与差异显式化 |
+| 任务级模型路由 | OpenRouter 的模型能力、fallback 与可解释选择 | cc-Switch 的模型选择配置和用户可控切换经验 |
+| Provider Registry / Endpoint Router | OpenRouter 的 Model、Provider、Endpoint、Deployment 分层 | cc-Switch 的 Provider 配置档案、当前状态和安全切换机制 |
+| 配置治理与恢复 | cc-Switch 的 SSOT、Live Projection、快照和冲突检测 | OpenRouter 的 Provider 偏好、约束与策略表达 |
+| 可观测性与运维 | OpenRouter 的成本、延迟、吞吐和尝试链路 | cc-Switch 的本地状态可见性和可恢复操作 |
+
+该矩阵用于确定调研先后，不限制后续从任一项目补充机制。任何借鉴都必须先转换为 token-station 自己的领域模型、接口和验收规则。
 
 ## 4. 对 cc-Switch 的学习范围
 
@@ -142,7 +160,13 @@ token-station 需要知道：
 
 Agent 主配置写入成功后，MCP 等附属投影失败不应把主操作描述成完全失败。应返回 `success + warnings`，并允许附属投影后续自愈。
 
-### 4.3 不学习的部分
+#### 4.2.8 对模型供应侧的补充价值
+
+cc-Switch 的优势虽然集中在本地 Agent 配置，但它对 Provider 配置档案、当前激活状态、写入前回填、所有权和恢复的处理，也可以补充 token-station 的供应侧管理控制面。
+
+可借鉴的不是“通过改 Agent 配置切换厂商”，而是 Provider Registry 在新增、编辑、启用、停用和迁移 Endpoint 配置时，也应具备预览、校验、快照、原子提交、冲突检测和回滚能力。
+
+### 4.3 不照搬的产品边界
 
 token-station 不照搬以下 cc-Switch 产品边界：
 
@@ -259,7 +283,13 @@ Endpoint 元数据应能表达：
 
 这些字段属于候选过滤条件，不应只作为 UI 说明。
 
-### 5.3 不学习的部分
+#### 5.2.8 对 Agent 接入侧的补充价值
+
+OpenRouter 的统一接口不只对后端供应聚合有参考价值，也能补充 token-station 的 Agent 入站设计。不同 Agent 即使最终进入同一个 Canonical IR，也需要稳定的路径、鉴权、模型标识、参数支持、流事件和错误契约。
+
+因此 Agent Adapter 可以学习 OpenRouter 的兼容性边界表达方式：明确哪些参数完整支持、哪些会降级、哪些必须拒绝，并把能力协商和错误归一做成可测试契约。这里学习的是统一 API 的设计方法，不是让 Agent 连接 OpenRouter。
+
+### 5.3 不照搬的产品边界
 
 token-station 不照搬以下 OpenRouter 产品边界：
 
@@ -272,7 +302,7 @@ token-station 不照搬以下 OpenRouter 产品边界：
 
 ## 6. token-station 目标架构
 
-目标运行时只包含 token-station 自己实现的组件：
+目标运行时只包含 token-station 自己实现的组件。各层可以同时吸收两个参考项目的机制，但参考项目本身不进入运行时：
 
 ```text
 ┌───────────────────────────────────────────────────────────────┐
@@ -512,7 +542,11 @@ Deployment A 失败
 
 ## 10. 分阶段路线
 
+以下阶段按 token-station 的依赖顺序拆分，不代表学习来源被阶段隔离。每个阶段都可以同时调研 cc-Switch 与 OpenRouter，只是 Agent 配置阶段以 cc-Switch 为主，模型供应阶段以 OpenRouter 为主。
+
 ### 阶段 A：Agent Connector 基座
+
+学习侧重：cc-Switch 为主；OpenRouter 的公共 API 契约和错误表达为补充。
 
 交付：
 
@@ -528,6 +562,8 @@ Deployment A 失败
 
 ### 阶段 B：Canonical Capability 与 Catalog
 
+学习侧重：OpenRouter 的能力目录为主；cc-Switch 的类型注册和配置差异显式化为补充。
+
 交付：
 
 - 扩展 ModelCapability；
@@ -540,6 +576,8 @@ Deployment A 失败
 阶段完成标准：不再给所有新模型统一猜测 `tool=true` 和 128K 上下文。
 
 ### 阶段 C：Provider、Endpoint、Deployment
+
+学习侧重：OpenRouter 的供应分层和 Endpoint 路由为主；cc-Switch 的 Provider 配置生命周期和安全切换为补充。
 
 交付：
 
@@ -554,6 +592,8 @@ Deployment A 失败
 
 ### 阶段 D：协议语义扩展
 
+学习侧重：OpenRouter 的参数与协议兼容为主；cc-Switch 的多 Agent 分类和配置约束为补充。
+
 交付：
 
 - `tool_choice`；
@@ -566,6 +606,8 @@ Deployment A 失败
 阶段完成标准：Router 宣称的能力与实际出站请求、响应语义一致。
 
 ### 阶段 E：成本、性能与隐私策略
+
+学习侧重：OpenRouter 的供应观测和策略元数据为主；cc-Switch 的本地状态可见性、操作反馈和恢复体验为补充。
 
 交付：
 
@@ -611,7 +653,7 @@ Deployment A 失败
 
 ### 决策 1：参考项目不进入运行时
 
-cc-Switch 与 OpenRouter 只用于架构学习。所有目标能力由 token-station 自研，并接受自己的测试、隐私和兼容性约束。
+cc-Switch 与 OpenRouter 都用于全局架构学习，不按前后端设排他边界；Agent 侧侧重 cc-Switch，模型供应侧侧重 OpenRouter。所有目标能力仍由 token-station 自研，并接受自己的测试、隐私和兼容性约束。
 
 ### 决策 2：Connector 与 Adapter 分离
 
