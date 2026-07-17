@@ -4969,6 +4969,7 @@ dependencies = [
  "token-station-router-core",
  "tokio",
  "toml 0.8.2",
+ "ureq",
 ]
 
 [[package]]

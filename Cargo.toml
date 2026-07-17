@@ -14,7 +14,9 @@ members = [
 # plugin-runtime 的测试用子进程 cargo 构建它。
 exclude = [
     "crates/plugin-runtime/tests/guests/test-provider",
+    "plugins/official/agent-anthropic",
     "plugins/official/agent-openai",
+    "plugins/official/agent-openai-responses",
     "plugins/official/provider-openai-compatible",
     # 桌面 app（Tauri）刻意排除在严格 workspace 之外：它庞大的 GUI 依赖树不进
     # clippy-pedantic / cargo-deny 门禁。它 path 依赖 token-station-cli，复用内核

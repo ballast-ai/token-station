@@ -1,0 +1,34 @@
+{
+  "context": {
+    "protocol": "anthropic-messages",
+    "stream_id": "stream-tool",
+    "response_id": "msg_stream_tool",
+    "model": "routed-model"
+  },
+  "events": [
+    {"type": "delta", "index": 0, "content": "checking"},
+    {
+      "type": "tool_call_delta",
+      "index": 0,
+      "id": "toolu_1",
+      "name": "get_weather",
+      "arguments_delta": "{\"city\":\"Bei"
+    },
+    {
+      "type": "tool_call_delta",
+      "index": 0,
+      "arguments_delta": "jing\"}"
+    },
+    {
+      "type": "usage",
+      "usage": {
+        "input_tokens": 7,
+        "output_tokens": 12,
+        "cache_read_tokens": 3,
+        "cache_write_tokens": 2,
+        "reasoning_tokens": 0
+      }
+    },
+    {"type": "done", "finish_reason": "tool_calls"}
+  ]
+}

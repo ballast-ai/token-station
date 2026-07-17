@@ -15,10 +15,10 @@
 #   - GNU tar --format=ustar + 固定排序/属主/时间戳 + gzip -n，
 #     消除归档层的非确定性。
 #
-# 产物落在 dist/：一个 tar.gz，内含 CLI 二进制、两个官方插件包
+# 产物落在 dist/：一个 tar.gz，内含 CLI 二进制、四个官方插件包
 # （manifest.json + adapter.wasm）、示例配置与 LICENSE。
 #
-# 官方二进制内嵌官方插件（builtin 层，架构 §12.1）：先构建两个 WASM 插件，
+# 官方二进制内嵌官方插件（builtin 层，架构 §12.1）：先构建四个 WASM 插件，
 # 再以 --features builtin-plugins + TOKEN_STATION_PLUGINS_DIST 构建 CLI，
 # include_bytes! 把插件字节编进二进制——裸二进制零安装即可用。tarball 仍附带
 # plugins-dist/ 副本（registry 对同方言取 builtin，重复无害）。插件构建
@@ -41,7 +41,7 @@ export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap
 rustup toolchain install "$RELEASE_TOOLCHAIN" --profile minimal >/dev/null
 rustup target add --toolchain "$RELEASE_TOOLCHAIN" "$TARGET" wasm32-wasip2 >/dev/null
 
-for plugin in agent-openai provider-openai-compatible; do
+for plugin in agent-openai agent-anthropic agent-openai-responses provider-openai-compatible; do
   (cd "plugins/official/${plugin}" \
     && cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target wasm32-wasip2)
 done
@@ -51,7 +51,7 @@ STAGE="dist/${NAME}"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/plugins-dist"
 
-for plugin in agent-openai provider-openai-compatible; do
+for plugin in agent-openai agent-anthropic agent-openai-responses provider-openai-compatible; do
   mkdir -p "$STAGE/plugins-dist/${plugin}"
   cp "plugins/official/${plugin}/manifest.json" "$STAGE/plugins-dist/${plugin}/"
   cp "plugins/official/${plugin}/target/wasm32-wasip2/release/${plugin//-/_}.wasm" \

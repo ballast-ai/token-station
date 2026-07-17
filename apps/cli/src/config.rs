@@ -153,7 +153,7 @@ impl PluginsConfig {
     /// The agent adapter packages to load, in match-priority order. Prefers the
     /// `agents` list; falls back to the deprecated single `agent` alias so old
     /// configs keep working. Empty only for a config that names neither, which
-    /// [`ClientConfig::validate`] rejects.
+    /// `ClientConfig::validate` rejects.
     #[must_use]
     pub fn effective_agents(&self) -> Vec<String> {
         if self.agents.is_empty() {
@@ -427,6 +427,49 @@ mod tests {
 
         assert_eq!(config.plugins.effective_agents(), ["agent-openai"]);
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn the_m4_agent_configs_load_and_use_isolated_runtime_paths() {
+        let cases = [
+            (
+                "codex",
+                include_str!("../codex-deepseek-config.json"),
+                "127.0.0.1:8791",
+                "agent-openai-responses",
+            ),
+            (
+                "opencode",
+                include_str!("../opencode-deepseek-config.json"),
+                "127.0.0.1:8792",
+                "agent-openai",
+            ),
+            (
+                "openclaw",
+                include_str!("../openclaw-deepseek-config.json"),
+                "127.0.0.1:8793",
+                "agent-openai",
+            ),
+        ];
+
+        for (name, source, listen, agent) in cases {
+            let path = scratch(name, source);
+            let config = ClientConfig::load(&path).expect("the M4 config must stay loadable");
+
+            assert_eq!(config.server.listen, listen);
+            assert_ne!(config.server.listen, "127.0.0.1:8787");
+            assert_eq!(config.plugins.agent.as_deref(), Some(agent));
+            assert_eq!(
+                config.plugins.dir,
+                PathBuf::from("token-station-m4/plugins")
+            );
+            assert_eq!(
+                config.data.dir,
+                PathBuf::from(format!("token-station-m4/{name}/data"))
+            );
+
+            fs::remove_file(path).ok();
+        }
     }
 
     #[test]

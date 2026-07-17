@@ -13,6 +13,13 @@ export interface ProviderView {
   has_auth: boolean;
 }
 
+export interface ModelDiscoveryView {
+  models: string[];
+  source: "live" | "cache" | "none";
+  fetched_at_ms: number | null;
+  warning: string | null;
+}
+
 export interface ServeView {
   running: boolean;
   listen: string;
@@ -105,6 +112,20 @@ export const addProvider = (
 
 export const removeProvider = (name: string) =>
   invoke<StateView>("remove_provider", { name });
+
+export const discoverProviderModels = (
+  name: string,
+  base_url: string,
+  api_key: string | null,
+) =>
+  invoke<ModelDiscoveryView>("discover_provider_models", {
+    name,
+    baseUrl: base_url,
+    apiKey: api_key,
+  });
+
+export const updateProviderModels = (name: string, models: string[]) =>
+  invoke<StateView>("update_provider_models", { name, models });
 
 export const setTier = (
   slot: TierSlot,

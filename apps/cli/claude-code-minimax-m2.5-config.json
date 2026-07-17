@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "server": { "listen": "127.0.0.1:8787", "auth": true },
+  "data": {
+    "dir": "token-station-e2e/minimax-m2.5/data",
+    "metrics": true
+  },
+  "plugins": {
+    "dir": "token-station-e2e/plugins",
+    "agent": "agent-anthropic",
+    "providers": {
+      "openai-compatible": "provider-openai-compatible"
+    }
+  },
+  "upstreams": {
+    "minimax": {
+      "provider": "openai-compatible",
+      "base_url": "https://api.minimaxi.com/v1",
+      "auth": {
+        "slot": "provider_api_key",
+        "keyring": true
+      },
+      "models": [
+        {
+          "model": "MiniMax-M2.5",
+          "tool": true,
+          "context_window": 204800,
+          "supported_parameters": [
+            "max_tokens",
+            "stop",
+            "temperature",
+            "top_p"
+          ]
+        }
+      ]
+    }
+  },
+  "router": {
+    "version": 1,
+    "pools": {
+      "default": [
+        {
+          "upstream": "minimax",
+          "model": "MiniMax-M2.5"
+        }
+      ]
+    },
+    "rules": [],
+    "hint_routes": [],
+    "default_pool": "default",
+    "assumed_context_window": 204800
+  }
+}

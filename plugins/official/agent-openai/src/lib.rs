@@ -15,7 +15,7 @@ wit_bindgen::generate!({
 });
 
 use exports::token_station::adapter::agent_adapter::{AdapterHealth, AdapterMetadata, Guest};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
@@ -49,6 +49,10 @@ fn internal(detail: impl std::fmt::Display) -> String {
 
 fn invalid(detail: &str) -> String {
     fail(&ErrorEnvelope::new(ErrorCode::InvalidRequest, 400, detail))
+}
+
+fn capability(detail: impl Into<String>) -> String {
+    fail(&ErrorEnvelope::new(ErrorCode::Capability, 400, detail))
 }
 
 fn parse_input<T: for<'de> serde::Deserialize<'de>>(input: &str) -> Result<T, String> {
@@ -102,6 +106,29 @@ fn content_to_json(content: Option<&Content>) -> Value {
     }
 }
 
+fn validate_response_format(body: &Value) -> Result<(), String> {
+    let Some(format) = body.get("response_format").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let format = format
+        .as_object()
+        .ok_or_else(|| invalid("response_format must be an object"))?;
+    let kind = format
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("response_format declares no string type"))?;
+
+    match kind {
+        "text" => Ok(()),
+        "json_schema" | "json_object" => Err(capability(
+            "Chat Completions structured output requires an approved Canonical IR/provider mapping",
+        )),
+        kind => Err(capability(format!(
+            "unsupported Chat Completions response_format type {kind}"
+        ))),
+    }
+}
+
 impl Guest for OpenAiClient {
     fn metadata() -> AdapterMetadata {
         AdapterMetadata {
@@ -119,7 +146,8 @@ impl Guest for OpenAiClient {
         }
     }
 
-    fn supported_agent_protocols() -> Vec<exports::token_station::adapter::agent_adapter::AgentProtocolCapability> {
+    fn supported_agent_protocols(
+    ) -> Vec<exports::token_station::adapter::agent_adapter::AgentProtocolCapability> {
         vec![
             exports::token_station::adapter::agent_adapter::AgentProtocolCapability {
                 protocol: "openai-chat-completions".to_owned(),
@@ -132,7 +160,9 @@ impl Guest for OpenAiClient {
         ]
     }
 
-    fn match_inbound(request_head: String) -> exports::token_station::adapter::agent_adapter::MatchResult {
+    fn match_inbound(
+        request_head: String,
+    ) -> exports::token_station::adapter::agent_adapter::MatchResult {
         // `{ method, path, headers }`; this adapter owns the OpenAI paths.
         let head: Value = serde_json::from_str(&request_head).unwrap_or(Value::Null);
         let path = head["path"].as_str().unwrap_or_default();
@@ -147,6 +177,7 @@ impl Guest for OpenAiClient {
     fn normalize_inbound(envelope: String) -> Result<String, String> {
         let envelope: AgentRequestEnvelope = parse_input(&envelope)?;
         let body = &envelope.body;
+        validate_response_format(body)?;
 
         let model = body["model"]
             .as_str()

@@ -14,8 +14,8 @@ fn main() {
 
     let dist = std::env::var("TOKEN_STATION_PLUGINS_DIST").expect(
         "the `builtin-plugins` feature needs TOKEN_STATION_PLUGINS_DIST pointing at a directory \
-         holding agent-openai/ and provider-openai-compatible/ (manifest.json + adapter.wasm \
-         each) — scripts/build-release.sh assembles one",
+         holding all official agent/provider packages (manifest.json + adapter.wasm each) \
+         — scripts/build-release.sh assembles one",
     );
     let dist = Path::new(&dist)
         .canonicalize()
@@ -23,6 +23,8 @@ fn main() {
 
     for (stem, package) in [
         ("AGENT_OPENAI", "agent-openai"),
+        ("AGENT_ANTHROPIC", "agent-anthropic"),
+        ("AGENT_OPENAI_RESPONSES", "agent-openai-responses"),
         ("PROVIDER_OPENAI", "provider-openai-compatible"),
     ] {
         for (kind, file) in [("MANIFEST", "manifest.json"), ("WASM", "adapter.wasm")] {

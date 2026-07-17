@@ -1,8 +1,11 @@
 # 桌面 app 设计与交接
 
 - 部件:`apps/desktop`（Tauri + React 桌面客户端）
-- 状态:v1 能力子页面 + 多入站编排已落地;CC 端到端待 `agent-anthropic`
+- 状态:v1 能力子页面 + 多入站编排 + 三类 Agent 接入已落地
 - 读者:要维护 / 扩展这个桌面 app 的人。先读 [架构总览.md](架构总览.md) 了解内核。
+
+Agent 接入的用户操作、配置改写、请求链路、恢复与扩展方法见
+[桌面App-Agent接入机制.md](桌面App-Agent接入机制.md)。
 
 ---
 
@@ -127,17 +130,18 @@ token-station 的内核是一个本地回环 LLM 代理二进制（`apps/cli`）
    其 manifest 协议）。每请求 `select_agent(method, path, headers)` 逐个问各适配器的
    `match_inbound`（headers 已脱敏成 `HeaderDigest`），**首个 `matched` 者服务**;
    无人认领 → 404「no inbound adapter claims …」。其余管线一字不动。
-4. **`apps/cli/src/server.rs`** —— 单路由改为 `/v1/models` GET + **POST 兜底
+4. **`apps/cli/src/server.rs`** —— 单路由改为 `/v1/models` GET + **兜底
    （fallback）**。宿主不枚举协议路径,新协议路径**零改 server**——认领与否由适配器
    自己的 `match_inbound` 决定。
 
 **匹配优先级 = `agents` 列表顺序。** agent-openai 的匹配逻辑是
 `path.ends_with("/chat/completions")`。
 
-**边界:** 「CC 与 OpenAI 同时跑」的端到端还差 **`agent-anthropic` 适配器**——那是
-入站侧工作流的 **FR-2**（见 [入站适配器-需求与实现路线.md](入站适配器-需求与实现路线.md)），
-现在没有。它一旦进 `plugins.agents`:①`/v1/messages` 被认领 → Anthropic 入站生效;
-②下述 CC 安全闸自动解封。宿主这边**即插即用、不需再改代码**。
+当前桌面模板的 `plugins.agents` 已按 `agent-openai`、`agent-anthropic`、
+`agent-openai-responses` 顺序启用 Chat Completions、Anthropic Messages 和 Responses。
+旧式仅含 `plugins.agent = "agent-openai"` 的桌面配置会先在内存中迁移为这三项，保存后才
+写盘。三套 Adapter 的能力边界见
+[桌面App-Agent接入机制.md](桌面App-Agent接入机制.md)。
 
 ---
 
@@ -151,15 +155,15 @@ token-station 的内核是一个本地回环 LLM 代理二进制（`apps/cli`）
   `ANTHROPIC_AUTH_TOKEN`。
 
 **⚠️ CC 接入的安全闸——务必理解:** 写 `~/.claude/settings.json` 是**全局**的,会连带
-劫持**本机上正在运行的每一个 Claude Code**,包括**用来开发 token-station 的那个会话**。
-而 CC 走 Anthropic 协议,在 `agent-anthropic` 未就位、上游只有 OpenAI 系时,接入只会把
-请求导向一个应答不了 Anthropic 的代理 → 掐断正在用的 CC。
+改变**本机上正在运行的每一个 Claude Code**的后续请求目标,包括**用来开发
+token-station 的那个会话**。当前桌面模板已包含 `agent-anthropic`，但自定义配置仍可能
+移除或改名该 Adapter。
 
-因此 `connect_cc` 有前置闸:`anthropic_inbound_ready()` 检查配置里（`agent` 与
-`agents` 两处适配器名）是否已挂上含 `anthropic` 的入站适配器,**没就位就直接拒绝、
+因此 `connect_cc` 仍有前置闸:`anthropic_inbound_ready()` 检查配置里（`agent` 与
+`agents` 两处适配器名）是否已挂上名称含 `anthropic` 的入站适配器,**未满足就直接拒绝、
 完全不碰 settings.json**。判据落在写文件那一步（不是灰按钮），任何入口都拦得住。
-`agent-anthropic` 进 `agents` 列表后自动解封。备份:接入前存
-`~/.claude/settings.json.token-station.bak`（可逆）。
+原文件存在时，接入前写
+`~/.claude/settings.json.token-station.bak`；重复接入会用最近一次写入前的内容覆盖该备份。
 
 **长期待办:** 改回 scoped 启动（派生带 env 的 CC 子进程,不写全局配置）。
 
@@ -203,7 +207,6 @@ npm run tauri dev        # 起 vite + 编译 Tauri 后端 + 开窗口
 
 ## 10. 尚未做 / 依赖
 
-- **CC 端到端** 等入站侧 `agent-anthropic`（FR-2）。宿主多路复用已就绪。
 - **成本仪表** `cost_micros` 现恒空,等定价表（内核 C2#4）。用量页已按「—」显示。
 - **产品护城河**（难度分类器 + 评测中心）是**另起的并行仓库**,不在本 app 范围;
   校准好的权重/切点将来回灌到三档面板的默认值。设计见 `docs/design/评测中心设计.md`。
