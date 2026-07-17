@@ -146,12 +146,63 @@ export const connectAgent = (kind: AgentKind) =>
 export const setSettings = (auth: boolean, metrics: boolean) =>
   invoke<StateView>("set_settings", { auth, metrics });
 
+// ---------------------------------------------------------------------------
+// Read-only data plane: prefer local HTTP `/admin/*` so the same frontend can run without the Tauri shell
+// (direct browser development and a future remote console). In the Tauri shell, IPC is the fallback if the proxy is stopped or the request fails
+// IPC keeps the usage and routing-table pages available when the proxy is stopped. It reads drafts and the local database. This matches
+// Behavior matches the state before the change. Privileged operations, including connect_agent, configuration writes, and secrets, use IPC only and never HTTP.
+
+const IN_TAURI = "__TAURI_INTERNALS__" in window;
+
+let adminBase: string | null = null;
+let adminKey: string | null = null;
+
+/** Synchronize the data-plane endpoint whenever App.tsx refreshes state. */
+export function setAdminEndpoint(serve: ServeView) {
+  adminBase = serve.running ? `http://${serve.listen}` : null;
+  adminKey = serve.virtual_key;
+}
+
+// Browser-only mode without a Tauri shell cannot call get_state. Read the endpoint from localStorage,
+// Default local host and port. Usage: localStorage.setItem("ts_listen","127.0.0.1:8787");
+// Refresh the page after `localStorage.setItem("ts_key","<virtual key>")`.
+if (!IN_TAURI) {
+  adminBase = `http://${localStorage.getItem("ts_listen") ?? "127.0.0.1:8787"}`;
+  adminKey = localStorage.getItem("ts_key");
+}
+
+async function dataGet<T>(path: string, ipcFallback: () => Promise<T>): Promise<T> {
+  if (adminBase) {
+    try {
+      const response = await fetch(adminBase + path, {
+        headers: adminKey ? { authorization: `Bearer ${adminKey}` } : {},
+      });
+      if (response.ok) return (await response.json()) as T;
+      // Fall back to IPC for non-2xx responses such as an invalid key; browser-only mode throws.
+    } catch {
+      // Fall back after network failures, such as when the proxy has just stopped.
+    }
+  }
+  if (IN_TAURI) return ipcFallback();
+  throw new Error(
+    "无法连接本地代理:请确认 token-station serve 已启动,并在 localStorage 配置 ts_listen / ts_key",
+  );
+}
+
 export const getStats = (since: string, by: string | null) =>
-  invoke<StatsView>("get_stats", { since, by });
+  dataGet<StatsView>(
+    `/admin/stats?since=${since}${by ? `&by=${by}` : ""}`,
+    () => invoke<StatsView>("get_stats", { since, by }),
+  );
 
+// Note the semantic difference: HTTP returns the active routing table. IPC fallback returns the editable draft.
+// Use runtime state while the proxy runs. This is the correct data-plane fact.
 export const getRouterTable = () =>
-  invoke<RouterTableView>("get_router_table");
+  dataGet<RouterTableView>("/admin/router-table", () =>
+    invoke<RouterTableView>("get_router_table"),
+  );
 
-export const getPlugins = () => invoke<PluginsView>("get_plugins");
+export const getPlugins = () =>
+  dataGet<PluginsView>("/admin/plugins", () => invoke<PluginsView>("get_plugins"));
 
 export const checkUpgrade = () => invoke<UpgradeView>("check_upgrade");

@@ -13,6 +13,7 @@ import {
   connectAgent,
   discoverProviderModels,
   ModelDiscoveryView,
+  setAdminEndpoint,
 } from "./api";
 import { PROVIDER_CATALOG, CUSTOM_ID, ProviderPreset } from "./catalog";
 import ModelPicker, { CatalogStatus } from "./components/ModelPicker";
@@ -78,6 +79,10 @@ function App() {
   useEffect(() => {
     refresh();
   }, []);
+  // Synchronize the data-plane endpoint after every state write, including serve start and stop. Data pages prefer local HTTP.
+  useEffect(() => {
+    if (state) setAdminEndpoint(state.serve);
+  }, [state]);
 
   const run = async (fn: () => Promise<StateView | string>, okMsg?: string) => {
     if (busyRef.current) return;
