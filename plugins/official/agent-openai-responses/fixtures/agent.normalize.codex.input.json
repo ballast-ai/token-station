@@ -56,7 +56,10 @@
     "max_output_tokens": 256,
     "temperature": 0.2,
     "top_p": 0.9,
-    "parallel_tool_calls": false,
+    "parallel_tool_calls": true,
+    "tool_choice": "auto",
+    "previous_response_id": null,
+    "reasoning": {},
     "stream": true
   }
 }

@@ -28,6 +28,10 @@ const DIRECT_REQUEST_FIELDS: &[&str] = &[
     "temperature",
     "top_p",
     "stream",
+    "previous_response_id",
+    "tool_choice",
+    "parallel_tool_calls",
+    "reasoning",
 ];
 
 fn fail(envelope: &ErrorEnvelope) -> String {
@@ -94,6 +98,56 @@ fn validate_text_format(body: &Value) -> Result<(), String> {
             "unsupported Responses text.format type {kind}"
         ))),
     }
+}
+
+fn validate_semantic_options(body: &Value) -> Result<(), String> {
+    if body
+        .get("previous_response_id")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(capability(
+            "Responses previous_response_id requires stateful response chaining that Canonical IR does not represent",
+        ));
+    }
+
+    match body.get("tool_choice") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(choice)) if choice == "auto" => {}
+        Some(Value::String(choice)) => {
+            return Err(capability(format!(
+                "Responses tool_choice {choice} cannot be preserved by Canonical IR"
+            )));
+        }
+        Some(Value::Object(_)) => {
+            return Err(capability(
+                "Responses forced tool_choice cannot be preserved by Canonical IR",
+            ));
+        }
+        Some(_) => return Err(invalid("tool_choice must be a string or object")),
+    }
+
+    match body.get("parallel_tool_calls") {
+        None | Some(Value::Null | Value::Bool(true)) => {}
+        Some(Value::Bool(false)) => {
+            return Err(capability(
+                "Responses parallel_tool_calls=false cannot be preserved by Canonical IR",
+            ));
+        }
+        Some(_) => return Err(invalid("parallel_tool_calls must be a boolean")),
+    }
+
+    match body.get("reasoning") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(reasoning)) if reasoning.values().all(Value::is_null) => {}
+        Some(Value::Object(_)) => {
+            return Err(capability(
+                "Responses reasoning options require an approved Canonical IR/provider mapping",
+            ));
+        }
+        Some(_) => return Err(invalid("reasoning must be an object")),
+    }
+
+    Ok(())
 }
 
 fn image_part(block: &Value) -> Result<ContentPart, String> {
@@ -675,6 +729,7 @@ impl Guest for ResponsesClient {
         let envelope: AgentRequestEnvelope = parse_input(&envelope)?;
         let body = &envelope.body;
         validate_text_format(body)?;
+        validate_semantic_options(body)?;
         let model = body
             .get("model")
             .and_then(Value::as_str)

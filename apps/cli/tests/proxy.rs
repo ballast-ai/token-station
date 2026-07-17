@@ -221,6 +221,15 @@ fn start_proxy_with_agent(
     metrics: bool,
     agent_plugin: &str,
 ) -> Proxy {
+    start_proxy_with_agents(upstream, key_file, metrics, &[agent_plugin])
+}
+
+fn start_proxy_with_agents(
+    upstream: &MockUpstream,
+    key_file: &Path,
+    metrics: bool,
+    agent_plugins: &[&str],
+) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
         "ts-proxy-data-{}-{}",
@@ -233,7 +242,7 @@ fn start_proxy_with_agent(
         "data": { "dir": data_dir, "metrics": metrics },
         "plugins": {
             "dir": plugins_dir(),
-            "agent": agent_plugin,
+            "agents": agent_plugins,
             "providers": { "openai-compatible": "provider-openai-compatible" }
         },
         "upstreams": {
@@ -319,6 +328,12 @@ fn last_row(data_dir: &Path) -> std::collections::BTreeMap<String, String> {
     .expect("a row exists")
 }
 
+fn request_count(data_dir: &Path) -> i64 {
+    let db = rusqlite::Connection::open(data_dir.join("metrics.sqlite")).expect("db opens");
+    db.query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))
+        .expect("request count reads")
+}
+
 /// Metrics writes race the HTTP response (the record lands after the last
 /// byte); give the recorder a moment.
 fn settle() {
@@ -398,13 +413,13 @@ fn send_responses(proxy: &Proxy, body: &Value, token: &str) -> (u16, Option<Stri
     (status, content_type, body)
 }
 
-fn responses_sse_events(body: &str) -> Vec<Value> {
+fn sse_events(body: &str) -> Vec<Value> {
     body.split("\n\n")
         .filter_map(|frame| {
             frame
                 .lines()
                 .find_map(|line| line.strip_prefix("data: "))
-                .map(|data| serde_json::from_str(data).expect("Responses SSE data is JSON"))
+                .map(|data| serde_json::from_str(data).expect("SSE data is JSON"))
         })
         .collect()
 }
@@ -491,6 +506,53 @@ fn a_chat_completion_round_trips_with_the_credential_injected() {
 }
 
 #[test]
+fn all_three_inbound_agents_coexist_in_declared_match_order() {
+    let upstream_answer = json!({
+        "id": "chatcmpl-shared",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "OK"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("three-inbound-agents", "sk-test-key-abc");
+    let proxy = start_proxy_with_agents(
+        &mock,
+        &key,
+        true,
+        &["agent-openai", "agent-anthropic", "agent-openai-responses"],
+    );
+
+    let (chat_status, _) = post_chat(
+        &proxy,
+        &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+        None,
+    );
+    let token = proxy.virtual_key.clone();
+    let (responses_status, _, _) =
+        send_responses(&proxy, &json!({"model": "auto", "input": "hi"}), &token);
+    let (messages_status, _) = post_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}]
+        }),
+        &token,
+    );
+
+    assert_eq!(
+        (chat_status, responses_status, messages_status),
+        (200, 200, 200)
+    );
+    assert_eq!(mock.hits(), 3);
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn chat_completions_structured_output_fails_before_the_upstream() {
     let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
     let key = key_file("chat-structured-output", "sk-test-key-abc");
@@ -549,7 +611,11 @@ fn a_responses_request_round_trips_through_the_existing_provider_pipeline() {
             "model": "auto",
             "instructions": "Answer with the marker.",
             "input": "Return M4_OK.",
-            "stream": false
+            "stream": false,
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
+            "previous_response_id": null,
+            "reasoning": {}
         }),
         &token,
     );
@@ -632,14 +698,45 @@ fn responses_structured_output_fails_before_the_upstream() {
 }
 
 #[test]
+fn responses_semantic_options_fail_before_the_upstream_when_the_ir_cannot_preserve_them() {
+    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
+    let key = key_file("responses-semantic-options", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-openai-responses");
+    let token = proxy.virtual_key.clone();
+
+    for unsupported in [
+        json!({"previous_response_id": "resp_previous"}),
+        json!({"tool_choice": "required"}),
+        json!({"parallel_tool_calls": false}),
+        json!({"reasoning": {"effort": "high"}}),
+    ] {
+        let mut request = json!({"model": "auto", "input": "hi"});
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(unsupported.as_object().unwrap().clone());
+
+        let (status, content_type, body) = send_responses(&proxy, &request, &token);
+
+        assert_eq!(status, 400, "request={request} body={body}");
+        assert_eq!(content_type.as_deref(), Some("application/json"));
+        let body: Value = serde_json::from_str(&body).expect("the refusal is JSON");
+        assert_eq!(body["error"]["code"], json!("unsupported_capability"));
+    }
+
+    assert_eq!(mock.hits(), 0, "semantic refusals happen before routing");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn a_responses_stream_is_incremental_and_protocol_shaped() {
     let sse = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"M4_\"}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_stream\",\"function\":{\"name\":\"read_marker\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"STREAM_OK\"}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"marker.txt\\\"}\"}}]}}]}\n\n",
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
         "data: [DONE]\n\n"
     );
     let header = format!(
@@ -681,7 +778,7 @@ fn a_responses_stream_is_incremental_and_protocol_shaped() {
     assert!(body.contains("M4_STREAM_OK"), "{body}");
     assert!(body.contains("event: response.completed"), "{body}");
 
-    let events = responses_sse_events(&body);
+    let events = sse_events(&body);
     let added: Vec<_> = events
         .iter()
         .filter(|event| event["type"] == "response.output_item.added")
@@ -931,6 +1028,8 @@ fn an_anthropic_message_round_trips_through_the_same_provider_pipeline() {
             "model": "auto",
             "max_tokens": 128,
             "system": "You are concise.",
+            "thinking": {"type": "disabled"},
+            "tool_choice": {"type": "auto"},
             "messages": [{"role": "user", "content": "what is six times seven"}]
         }),
         &proxy.virtual_key,
@@ -962,6 +1061,41 @@ fn an_anthropic_message_round_trips_through_the_same_provider_pipeline() {
 }
 
 #[test]
+fn anthropic_forced_tool_choice_fails_before_the_upstream() {
+    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
+    let key = key_file("anthropic-tool-choice", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    for tool_choice in [
+        json!({"type": "any"}),
+        json!({"type": "tool", "name": "read_marker"}),
+    ] {
+        let (status, body) = post_messages(
+            &proxy,
+            &json!({
+                "model": "auto",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "read the marker"}],
+                "tools": [{
+                    "name": "read_marker",
+                    "description": "read a marker",
+                    "input_schema": {"type": "object"}
+                }],
+                "tool_choice": tool_choice
+            }),
+            &proxy.virtual_key,
+        );
+
+        assert_eq!(status, 400, "body={body}");
+        let body: Value = serde_json::from_str(&body).expect("Anthropic error JSON");
+        assert_eq!(body["error"]["type"], json!("invalid_request_error"));
+    }
+
+    assert_eq!(mock.hits(), 0, "tool choice is rejected before routing");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn anthropic_local_auth_and_protocol_mismatch_fail_before_upstream() {
     let mock = MockUpstream::start(Vec::new());
     let key = key_file("anthropic-local-auth", "sk-test-key-abc");
@@ -977,6 +1111,8 @@ fn anthropic_local_auth_and_protocol_mismatch_fail_before_upstream() {
     let error: Value = serde_json::from_str(&body).expect("Anthropic error JSON");
     assert_eq!(error["type"], json!("error"));
     assert_eq!(error["error"]["type"], json!("authentication_error"));
+    settle();
+    assert_eq!(request_count(&proxy.data_dir), 0, "the 401 is not recorded");
 
     let (status, body) = post_chat(
         &proxy,
@@ -997,8 +1133,8 @@ fn an_anthropic_stream_is_incremental_and_protocol_shaped() {
     let sse = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\n",
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":3,\"cache_write_tokens\":2},\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\n",
         "data: [DONE]\n\n"
     );
     let head = format!(
@@ -1039,6 +1175,19 @@ fn an_anthropic_stream_is_incremental_and_protocol_shaped() {
         "{body}"
     );
     assert!(body.contains("event: message_stop"), "{body}");
+    let usage = sse_events(&body)
+        .into_iter()
+        .filter(|event| event["type"] == "message_delta")
+        .find_map(|event| event.get("usage").cloned())
+        .expect("a message_delta carries cumulative usage");
+    assert_eq!(usage["input_tokens"], json!(7));
+    assert_eq!(usage["output_tokens"], json!(2));
+    assert_eq!(usage["cache_read_input_tokens"], json!(3));
+    assert_eq!(usage["cache_creation_input_tokens"], json!(2));
+
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].body["stream_options"]["include_usage"], json!(true));
 
     settle();
     let row = last_row(&proxy.data_dir);

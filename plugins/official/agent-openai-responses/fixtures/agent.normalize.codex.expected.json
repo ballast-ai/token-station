@@ -50,6 +50,5 @@
     "top_p": 0.9,
     "max_output_tokens": 256
   },
-  "stream": true,
-  "parallel_tool_calls": false
+  "stream": true
 }

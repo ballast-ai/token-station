@@ -42,8 +42,48 @@ fn finish_reason(raw: Option<&str>) -> Option<FinishReason> {
     }
 }
 
+#[derive(Default)]
+struct PendingFinish {
+    seen: bool,
+    reason: Option<FinishReason>,
+}
+
+impl PendingFinish {
+    fn record(&mut self, raw: &str) {
+        self.seen = true;
+        self.reason = finish_reason(Some(raw));
+    }
+
+    fn take_done(&mut self) -> Option<StreamEvent> {
+        if !self.seen {
+            return None;
+        }
+        self.seen = false;
+        Some(StreamEvent::Done {
+            finish_reason: self.reason.take(),
+        })
+    }
+}
+
 fn index_of(value: &Value) -> u32 {
     u32::try_from(value.as_u64().unwrap_or(0)).unwrap_or(0)
+}
+
+fn usage_of(raw: &Value) -> Usage {
+    Usage {
+        input_tokens: raw["prompt_tokens"].as_u64().unwrap_or(0),
+        output_tokens: raw["completion_tokens"].as_u64().unwrap_or(0),
+        cache_read_tokens: raw["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .or_else(|| raw["prompt_cache_hit_tokens"].as_u64())
+            .unwrap_or(0),
+        cache_write_tokens: raw["prompt_tokens_details"]["cache_write_tokens"]
+            .as_u64()
+            .unwrap_or(0),
+        reasoning_tokens: raw["completion_tokens_details"]["reasoning_tokens"]
+            .as_u64()
+            .unwrap_or(0),
+    }
 }
 
 /// A `Message` in the OpenAI request dialect.
@@ -94,6 +134,7 @@ impl OpenAiCompatible {
         );
         if request.stream {
             body.insert("stream".to_owned(), json!(true));
+            body.insert("stream_options".to_owned(), json!({"include_usage": true}));
         }
         if let Some(temperature) = request.sampling.temperature {
             body.insert("temperature".to_owned(), json!(temperature));
@@ -200,22 +241,12 @@ impl ProviderAdapter for OpenAiCompatible {
             });
         }
 
-        let usage = &raw["usage"];
+        let usage = usage_of(&raw["usage"]);
         Ok(ChatResponse {
             id: raw["id"].as_str().unwrap_or_default().to_owned(),
             model: raw["model"].as_str().unwrap_or_default().to_owned(),
             choices,
-            usage: Usage {
-                input_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
-                output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
-                cache_read_tokens: usage["prompt_tokens_details"]["cached_tokens"]
-                    .as_u64()
-                    .unwrap_or(0),
-                cache_write_tokens: 0,
-                reasoning_tokens: usage["completion_tokens_details"]["reasoning_tokens"]
-                    .as_u64()
-                    .unwrap_or(0),
-            },
+            usage,
             extensions: Extensions::new(),
         })
     }
@@ -268,6 +299,7 @@ impl ProviderAdapter for OpenAiCompatible {
 #[derive(Default)]
 struct SseParser {
     buffer: String,
+    pending_finish: PendingFinish,
 }
 
 impl StreamParser for SseParser {
@@ -283,6 +315,9 @@ impl StreamParser for SseParser {
                 continue;
             };
             if payload == "[DONE]" {
+                if let Some(done) = self.pending_finish.take_done() {
+                    events.push(done);
+                }
                 continue;
             }
             let raw: Value = serde_json::from_str(payload).map_err(internal)?;
@@ -311,20 +346,17 @@ impl StreamParser for SseParser {
                     });
                 }
                 if let Some(reason) = choice["finish_reason"].as_str() {
-                    events.push(StreamEvent::Done {
-                        finish_reason: finish_reason(Some(reason)),
-                    });
+                    self.pending_finish.record(reason);
                 }
             }
 
             if let Some(usage) = raw.get("usage").filter(|usage| !usage.is_null()) {
                 events.push(StreamEvent::Usage {
-                    usage: Usage {
-                        input_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
-                        output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
-                        ..Usage::default()
-                    },
+                    usage: usage_of(usage),
                 });
+                if let Some(done) = self.pending_finish.take_done() {
+                    events.push(done);
+                }
             }
         }
         Ok(events)
@@ -369,9 +401,8 @@ impl ProviderAdapter for Nondeterministic {
     }
 }
 
-/// Assumes every chunk is a whole frame. Passes every fixture, because the
-/// fixture's chunking is whole frames — and corrupts the stream in production,
-/// where the split points come from the network.
+/// Assumes every chunk is a self-contained stream. It loses both partial frames
+/// and finish state that must survive until a later usage or `[DONE]` frame.
 struct AssumesWholeFrames;
 
 struct FrameAtATime;
@@ -671,10 +702,13 @@ fn a_nondeterministic_adapter_is_caught_even_though_it_matches_the_fixture() {
 }
 
 #[test]
-fn an_adapter_that_assumes_whole_frames_is_caught_even_though_it_matches_the_fixture() {
+fn an_adapter_that_assumes_whole_frames_is_caught_by_fixture_and_incrementality() {
     let report = run_provider_suite(&AssumesWholeFrames, &pack());
 
-    assert_eq!(failed_checks(&report), vec![Check::StreamIncrementality]);
+    assert_eq!(
+        failed_checks(&report),
+        vec![Check::FixtureMatch, Check::StreamIncrementality]
+    );
 }
 
 #[test]
@@ -684,7 +718,10 @@ fn an_adapter_that_silently_drops_a_split_frame_is_caught() {
     // whether the parser succeeded.
     let report = run_provider_suite(&DropsPartialFrames, &pack());
 
-    assert_eq!(failed_checks(&report), vec![Check::StreamIncrementality]);
+    assert_eq!(
+        failed_checks(&report),
+        vec![Check::FixtureMatch, Check::StreamIncrementality]
+    );
     assert!(
         report
             .failures()

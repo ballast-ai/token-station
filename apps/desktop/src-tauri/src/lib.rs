@@ -103,11 +103,15 @@ fn template(root: &std::path::Path) -> Value {
 /// Upgrade the CLI-era single Chat inbound configuration to the desktop three-inbound draft, and anchor relative runtime directories to
 /// Repository root that contains the configuration file. Change only the in-memory draft; do not touch the original file until the user saves.
 fn prepare_desktop_draft(mut draft: Value, root: &std::path::Path) -> Value {
-    let legacy_openai_only = draft["plugins"]["agents"]
-        .as_array()
-        .is_none_or(Vec::is_empty)
+    let agents = draft["plugins"]["agents"].as_array();
+    let legacy_alias = agents.is_none_or(Vec::is_empty)
         && draft["plugins"]["agent"].as_str() == Some("agent-openai");
-    if legacy_openai_only {
+    let legacy_desktop_list = agents.is_some_and(|agents| {
+        agents.len() == 1
+            && agents[0].as_str() == Some("agent-openai")
+            && draft["plugins"]["agent"].is_null()
+    });
+    if legacy_alias || legacy_desktop_list {
         if let Some(plugins) = draft["plugins"].as_object_mut() {
             plugins.remove("agent");
         }
@@ -914,12 +918,20 @@ fn write_config(path: &std::path::Path, rendered: &str, label: &str) -> Result<(
 /// Determine whether the `plugins` configuration includes an inbound adapter that supports Anthropic. Inspect the `agents` list
 /// and the two adapter names in the deprecated single `agent` string. Do not inspect providers to avoid false positives. agent-anthropic
 /// Once it enters the configuration, the CC safety gate unlocks automatically.
-fn anthropic_inbound_ready(plugins: &Value) -> bool {
-    let hits = |v: &Value| v.as_str().is_some_and(|s| s.contains("anthropic"));
+fn inbound_adapter_ready(plugins: &Value, expected: &str) -> bool {
+    let hits = |value: &Value| value.as_str() == Some(expected);
     let in_list = plugins["agents"]
         .as_array()
         .is_some_and(|arr| arr.iter().any(hits));
     in_list || hits(&plugins["agent"])
+}
+
+fn anthropic_inbound_ready(plugins: &Value) -> bool {
+    inbound_adapter_ready(plugins, "agent-anthropic")
+}
+
+fn responses_inbound_ready(plugins: &Value) -> bool {
+    inbound_adapter_ready(plugins, "agent-openai-responses")
 }
 
 /// Display inbound adapters from the comma-joined agents list, falling back to the single agent value.
@@ -992,7 +1004,18 @@ fn connect_cc(base: &str, token: &str, anthropic_inbound_ready: bool) -> Result<
 /// Codex: write `~/.codex/config.toml` and add a model_provider that points to this proxy
 /// (`wire_api = "responses"`, which maps to gateway `/v1/responses`). The Codex key uses
 /// environment variable, so return a one-line export instruction.
-fn connect_codex_at(home: &std::path::Path, openai_base: &str) -> Result<String, String> {
+fn connect_codex_at(
+    home: &std::path::Path,
+    openai_base: &str,
+    responses_inbound_ready: bool,
+) -> Result<String, String> {
+    if !responses_inbound_ready {
+        return Err(
+            "暂不能接入 Codex：网关未加载 agent-openai-responses，/v1/responses \
+             无入站适配器。本次未修改 ~/.codex/config.toml。"
+                .to_string(),
+        );
+    }
     let dir = home.join(".codex");
     std::fs::create_dir_all(&dir).map_err(|e| format!("建 ~/.codex 失败: {e}"))?;
     let path = dir.join("config.toml");
@@ -1051,8 +1074,8 @@ fn connect_codex_at(home: &std::path::Path, openai_base: &str) -> Result<String,
     ))
 }
 
-fn connect_codex(openai_base: &str) -> Result<String, String> {
-    connect_codex_at(&home_dir()?, openai_base)
+fn connect_codex(openai_base: &str, responses_inbound_ready: bool) -> Result<String, String> {
+    connect_codex_at(&home_dir()?, openai_base, responses_inbound_ready)
 }
 
 /// opencode: write `~/.config/opencode/opencode.json` and add an OpenAI-compatible custom
@@ -1099,7 +1122,7 @@ fn connect_opencode(openai_base: &str, token: &str) -> Result<String, String> {
 /// Connect an agent. Each agent writes its own configuration file, so they do not conflict and can connect and run at the same time.
 #[tauri::command]
 fn connect_agent(state: State<'_, AppStateManaged>, kind: String) -> Result<String, String> {
-    let (listen, token, anthropic_inbound_ready) = {
+    let (listen, token, anthropic_inbound_ready, responses_inbound_ready) = {
         let inner = state.0.lock().unwrap();
         inner.ensure_editable()?;
         let sv = inner.serve_view();
@@ -1109,19 +1132,20 @@ fn connect_agent(state: State<'_, AppStateManaged>, kind: String) -> Result<Stri
         // Check whether inbound adapters include an Anthropic-capable adapter. Support both plugins.agent and
         // The plugins.agents list after match_inbound. Check adapter names only in these two locations, not the complete
         // plugins. This prevents packages named anthropic-* under providers from being accepted incorrectly.
-        let ready = anthropic_inbound_ready(&inner.draft["plugins"]);
+        let anthropic_ready = anthropic_inbound_ready(&inner.draft["plugins"]);
+        let responses_ready = responses_inbound_ready(&inner.draft["plugins"]);
         let client_token = sv
             .virtual_key
             .clone()
             .unwrap_or_else(|| "token-station-no-auth".to_string());
-        (sv.listen, client_token, ready)
+        (sv.listen, client_token, anthropic_ready, responses_ready)
     };
     let anthropic_base = format!("http://{listen}");
     let openai_base = format!("http://{listen}/v1");
 
     match kind.as_str() {
         "cc" => connect_cc(&anthropic_base, &token, anthropic_inbound_ready),
-        "codex" => connect_codex(&openai_base),
+        "codex" => connect_codex(&openai_base, responses_inbound_ready),
         "opencode" => connect_opencode(&openai_base, &token),
         other => Err(format!("未知 agent `{other}`")),
     }
@@ -1374,6 +1398,33 @@ mod tests {
     }
 
     #[test]
+    fn a_desktop_v1_agent_list_is_migrated_to_every_supported_inbound_protocol() {
+        let root = scratch_home("desktop-v1-agents");
+        let mut draft = template(&root);
+        draft["plugins"]["agents"] = json!(["agent-openai"]);
+
+        let prepared = prepare_desktop_draft(draft, &root);
+
+        assert_eq!(prepared["plugins"]["agents"], json!(DESKTOP_AGENTS));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn inbound_readiness_requires_exact_adapter_names() {
+        let plugins = json!({
+            "agents": ["agent-anthropic-proxy", "agent-openai-responses-beta"]
+        });
+        assert!(!anthropic_inbound_ready(&plugins));
+        assert!(!responses_inbound_ready(&plugins));
+
+        let plugins = json!({
+            "agents": ["agent-anthropic", "agent-openai-responses"]
+        });
+        assert!(anthropic_inbound_ready(&plugins));
+        assert!(responses_inbound_ready(&plugins));
+    }
+
+    #[test]
     fn a_broken_existing_config_enters_read_only_protection_without_overwrite() {
         let root = scratch_home("broken-config");
         let path = root.join("token-station.json");
@@ -1510,7 +1561,7 @@ mod tests {
         let original = "[features]\napps = false\n";
         std::fs::write(&path, original).unwrap();
 
-        connect_codex_at(&home, "http://127.0.0.1:8787/v1").unwrap();
+        connect_codex_at(&home, "http://127.0.0.1:8787/v1", true).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         let config: toml::Value = toml::from_str(&text).unwrap();
@@ -1536,9 +1587,28 @@ mod tests {
         let original = "this = [is not valid";
         std::fs::write(&path, original).unwrap();
 
-        let error = connect_codex_at(&home, "http://127.0.0.1:8787/v1").unwrap_err();
+        let error =
+            connect_codex_at(&home, "http://127.0.0.1:8787/v1", true).unwrap_err();
 
         assert!(error.contains("不合法"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(!backup_path(&path).exists());
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn codex_connection_refuses_before_writing_when_responses_inbound_is_missing() {
+        let home = scratch_home("codex-missing-responses");
+        let dir = home.join(".codex");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let original = "model = \"existing\"\nmodel_provider = \"existing-provider\"\n";
+        std::fs::write(&path, original).unwrap();
+
+        let error =
+            connect_codex_at(&home, "http://127.0.0.1:8787/v1", false).unwrap_err();
+
+        assert!(error.contains("agent-openai-responses"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         assert!(!backup_path(&path).exists());
         std::fs::remove_dir_all(home).ok();

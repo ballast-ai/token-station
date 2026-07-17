@@ -18,7 +18,7 @@ use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
     ErrorEnvelope, Extensions, FinishReason, HintKind, ImageUrl, Message, Role, Sampling,
-    StreamEvent, ToolCall, ToolDef,
+    StreamEvent, ToolCall, ToolDef, Usage,
 };
 
 struct AnthropicClient;
@@ -33,6 +33,8 @@ const KNOWN_REQUEST_FIELDS: &[&str] = &[
     "temperature",
     "top_p",
     "stream",
+    "thinking",
+    "tool_choice",
 ];
 
 fn fail(envelope: &ErrorEnvelope) -> String {
@@ -55,6 +57,57 @@ fn invalid(detail: impl Into<String>) -> String {
 
 fn capability(detail: impl Into<String>) -> String {
     fail(&ErrorEnvelope::new(ErrorCode::Capability, 400, detail))
+}
+
+fn validate_thinking(body: &Value) -> Result<(), String> {
+    match body.get("thinking") {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Object(config)) => match config.get("type").and_then(Value::as_str) {
+            Some("disabled") => Ok(()),
+            Some(_) => Err(capability(
+                "Anthropic thinking requires an approved Canonical IR extension",
+            )),
+            None => Err(invalid("thinking declares no string type")),
+        },
+        Some(_) => Err(invalid("thinking must be an object")),
+    }
+}
+
+fn validate_tool_choice(body: &Value) -> Result<(), String> {
+    let Some(choice) = body.get("tool_choice").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let choice = choice
+        .as_object()
+        .ok_or_else(|| invalid("tool_choice must be an object"))?;
+    let kind = choice
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("tool_choice declares no string type"))?;
+
+    if choice
+        .get("disable_parallel_tool_use")
+        .is_some_and(|value| value == &Value::Bool(true))
+    {
+        return Err(capability(
+            "Anthropic tool_choice cannot disable parallel tool use through Canonical IR",
+        ));
+    }
+    if choice
+        .get("disable_parallel_tool_use")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(invalid(
+            "tool_choice.disable_parallel_tool_use must be a boolean",
+        ));
+    }
+
+    match kind {
+        "auto" => Ok(()),
+        _ => Err(capability(format!(
+            "Anthropic tool_choice type {kind} cannot be preserved by Canonical IR"
+        ))),
+    }
 }
 
 fn parse_input<T: for<'de> serde::Deserialize<'de>>(input: &str) -> Result<T, String> {
@@ -429,13 +482,12 @@ struct ToolBlock {
 struct StreamState {
     response_id: String,
     model: String,
-    input_tokens: u64,
+    usage: Usage,
     started: bool,
     next_block_index: u32,
     text_blocks: BTreeMap<u32, u32>,
     tool_blocks: BTreeMap<u32, ToolBlock>,
     open_blocks: BTreeSet<u32>,
-    output_tokens: u64,
 }
 
 impl StreamState {
@@ -443,13 +495,15 @@ impl StreamState {
         Self {
             response_id: response_id.to_owned(),
             model: model.to_owned(),
-            input_tokens,
+            usage: Usage {
+                input_tokens,
+                ..Usage::default()
+            },
             started: false,
             next_block_index: 0,
             text_blocks: BTreeMap::new(),
             tool_blocks: BTreeMap::new(),
             open_blocks: BTreeSet::new(),
-            output_tokens: 0,
         }
     }
 
@@ -481,13 +535,22 @@ impl StreamState {
                     "model": self.model,
                     "stop_reason": null,
                     "stop_sequence": null,
-                    "usage": {"input_tokens": self.input_tokens, "output_tokens": 0}
+                    "usage": {"input_tokens": self.usage.input_tokens, "output_tokens": 0}
                 }
             }),
         )?);
         self.started = true;
         Ok(())
     }
+}
+
+fn stream_usage(usage: Usage) -> Value {
+    json!({
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_read_input_tokens": usage.cache_read_tokens,
+        "cache_creation_input_tokens": usage.cache_write_tokens,
+    })
 }
 
 thread_local! {
@@ -576,11 +639,8 @@ impl Guest for AnthropicClient {
     fn normalize_inbound(envelope: String) -> Result<String, String> {
         let envelope: AgentRequestEnvelope = parse_input(&envelope)?;
         let body = &envelope.body;
-        if body.get("thinking").is_some() {
-            return Err(capability(
-                "Anthropic thinking requires an approved Canonical IR extension",
-            ));
-        }
+        validate_thinking(body)?;
+        validate_tool_choice(body)?;
         let model = body
             .get("model")
             .and_then(Value::as_str)
@@ -819,13 +879,13 @@ impl Guest for AnthropicClient {
                     let state = states.get_mut(stream_id).expect("state inserted above");
                     let mut rendered = String::new();
                     state.ensure_started(&mut rendered)?;
-                    state.output_tokens = usage.output_tokens;
+                    state.usage = usage;
                     rendered.push_str(&sse(
                         "message_delta",
                         json!({
                             "type": "message_delta",
                             "delta": {"stop_reason": null, "stop_sequence": null},
-                            "usage": {"output_tokens": state.output_tokens}
+                            "usage": stream_usage(state.usage)
                         }),
                     )?);
                     Ok(rendered)
@@ -848,7 +908,7 @@ impl Guest for AnthropicClient {
                                 "stop_reason": finish_reason_to_anthropic(finish_reason),
                                 "stop_sequence": null
                             },
-                            "usage": {"output_tokens": state.output_tokens}
+                            "usage": stream_usage(state.usage)
                         }),
                     )?);
                     rendered.push_str(&sse("message_stop", json!({"type": "message_stop"}))?);

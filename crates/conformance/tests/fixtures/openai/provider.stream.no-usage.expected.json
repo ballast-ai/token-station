@@ -1,0 +1,11 @@
+[
+  {
+    "type": "delta",
+    "index": 0,
+    "content": "ok"
+  },
+  {
+    "type": "done",
+    "finish_reason": "stop"
+  }
+]
