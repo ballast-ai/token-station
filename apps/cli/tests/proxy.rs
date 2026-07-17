@@ -285,6 +285,11 @@ fn start_proxy_with_agents(
     let state = server::AppState {
         gateway,
         virtual_key: Some(Arc::from(virtual_key.as_str())),
+        admin: Arc::new(token_station_cli::admin::AdminContext {
+            data_dir: config.data.dir.clone(),
+            router: config.router.clone(),
+            plugins: config.plugins.clone(),
+        }),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
@@ -1502,6 +1507,11 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
     let state = server::AppState {
         gateway,
         virtual_key: Some(Arc::from(virtual_key.as_str())),
+        admin: Arc::new(token_station_cli::admin::AdminContext {
+            data_dir: config.data.dir.clone(),
+            router: config.router.clone(),
+            plugins: config.plugins.clone(),
+        }),
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
@@ -1763,4 +1773,161 @@ fn without_the_virtual_key_the_door_stays_shut() {
     );
 
     std::fs::remove_file(key).ok();
+}
+
+// ---------------------------------------------------------------------------
+// `/admin/*` — the read-only data plane behind the same virtual-key gate.
+
+fn admin_get(
+    proxy: &Proxy,
+    path: &str,
+    token: Option<&str>,
+    origin: Option<&str>,
+) -> (u16, Option<String>, String) {
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    let mut request = agent.get(format!("{}{path}", proxy.url));
+    if let Some(token) = token {
+        request = request.header("authorization", &format!("Bearer {token}"));
+    }
+    if let Some(origin) = origin {
+        request = request.header("origin", origin);
+    }
+    let response = request.call().expect("the proxy answers");
+    let status = response.status().as_u16();
+    let allow_origin = response
+        .headers()
+        .get("access-control-allow-origin")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let body = response.into_body().read_to_string().expect("body reads");
+    (status, allow_origin, body)
+}
+
+#[test]
+fn admin_data_plane_sits_behind_the_virtual_key() {
+    let upstream = MockUpstream::start(vec![]);
+    let key_file = key_file("admin-auth", "sk-admin-auth");
+    let proxy = start_proxy(&upstream, &key_file);
+
+    let (status, _, _) = admin_get(&proxy, "/admin/router-table", None, None);
+    assert_eq!(status, 401, "no key, no data");
+    let (status, _, _) = admin_get(&proxy, "/admin/stats?since=all", Some("wrong-key"), None);
+    assert_eq!(status, 401, "a wrong key is a missing key");
+    assert_eq!(
+        upstream.hits(),
+        0,
+        "admin traffic never reaches an upstream"
+    );
+}
+
+#[test]
+fn admin_data_plane_serves_the_running_views() {
+    let upstream = MockUpstream::start(vec![]);
+    let key_file = key_file("admin-views", "sk-admin-views");
+    let proxy = start_proxy(&upstream, &key_file);
+
+    let (status, _, body) = admin_get(
+        &proxy,
+        "/admin/router-table",
+        Some(&proxy.virtual_key),
+        None,
+    );
+    assert_eq!(status, 200);
+    let table: Value = serde_json::from_str(&body).expect("router table is JSON");
+    assert_eq!(table["default_pool"], "main");
+    assert_eq!(table["pools"][0]["upstream"], "mock_primary");
+    assert_eq!(table["pools"][0]["model"], "gpt-5.5");
+
+    let (status, _, body) = admin_get(
+        &proxy,
+        "/admin/stats?since=all",
+        Some(&proxy.virtual_key),
+        None,
+    );
+    assert_eq!(status, 200);
+    let stats_view: Value = serde_json::from_str(&body).expect("stats are JSON");
+    assert!(
+        stats_view["total"]["requests"].is_u64(),
+        "stats carry totals: {stats_view}"
+    );
+
+    let (status, _, body) = admin_get(
+        &proxy,
+        "/admin/stats?since=nonsense",
+        Some(&proxy.virtual_key),
+        None,
+    );
+    assert_eq!(status, 400, "a bad window is the caller's error: {body}");
+
+    let (status, _, body) = admin_get(&proxy, "/admin/plugins", Some(&proxy.virtual_key), None);
+    assert_eq!(status, 200);
+    let plugins: Value = serde_json::from_str(&body).expect("plugins view is JSON");
+    assert!(
+        plugins["listing"].is_string(),
+        "plugins carry the listing: {plugins}"
+    );
+}
+
+#[test]
+fn admin_cors_echoes_loopback_origins_only() {
+    let upstream = MockUpstream::start(vec![]);
+    let key_file = key_file("admin-cors", "sk-admin-cors");
+    let proxy = start_proxy(&upstream, &key_file);
+
+    let (status, allow, _) = admin_get(
+        &proxy,
+        "/admin/router-table",
+        Some(&proxy.virtual_key),
+        Some("http://localhost:5173"),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(
+        allow.as_deref(),
+        Some("http://localhost:5173"),
+        "dev origin is echoed"
+    );
+
+    let (status, allow, _) = admin_get(
+        &proxy,
+        "/admin/router-table",
+        Some(&proxy.virtual_key),
+        Some("https://evil.example"),
+    );
+    assert_eq!(status, 200, "CORS is a browser contract, not auth");
+    assert_eq!(allow, None, "a web origin gets no CORS allowance");
+}
+
+#[test]
+fn admin_preflight_answers_without_auth_but_stays_loopback() {
+    let upstream = MockUpstream::start(vec![]);
+    let key_file = key_file("admin-preflight", "sk-admin-preflight");
+    let proxy = start_proxy(&upstream, &key_file);
+
+    // Browsers send preflights without Authorization; raw HTTP because ureq
+    // has no OPTIONS verb.
+    let host = proxy.url.strip_prefix("http://").expect("http url");
+    let mut stream = TcpStream::connect(host).expect("loopback connects");
+    write!(
+        stream,
+        "OPTIONS /admin/stats HTTP/1.1\r\nHost: {host}\r\nOrigin: http://127.0.0.1:5173\r\nConnection: close\r\n\r\n"
+    )
+    .expect("request writes");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("response reads");
+    assert!(
+        response.starts_with("HTTP/1.1 204"),
+        "preflight is 204: {response}"
+    );
+    assert!(
+        response
+            .to_ascii_lowercase()
+            .contains("access-control-allow-origin: http://127.0.0.1:5173"),
+        "preflight carries the loopback allowance: {response}"
+    );
 }

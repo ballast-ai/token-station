@@ -146,12 +146,63 @@ export const connectAgent = (kind: AgentKind) =>
 export const setSettings = (auth: boolean, metrics: boolean) =>
   invoke<StateView>("set_settings", { auth, metrics });
 
+// ---------------------------------------------------------------------------
+// 数据面(只读):优先走本地 HTTP `/admin/*`,让同一份前端脱离 Tauri 壳也能跑
+// (浏览器直连 dev、将来远程管理台)。代理没起或请求失败时,在 Tauri 壳内回退
+// IPC——这样「代理已停止」时用量/路由表页仍然可用(读草稿与本地库),行为与
+// 改造前一致。特权操作(connect_agent / 写配置 / 密钥)只走 IPC,永不上 HTTP。
+
+const IN_TAURI = "__TAURI_INTERNALS__" in window;
+
+let adminBase: string | null = null;
+let adminKey: string | null = null;
+
+/** App 每次刷新状态时同步数据面端点(App.tsx 调用)。 */
+export function setAdminEndpoint(serve: ServeView) {
+  adminBase = serve.running ? `http://${serve.listen}` : null;
+  adminKey = serve.virtual_key;
+}
+
+// 纯浏览器模式(无 Tauri 壳)没有 get_state 可问:从 localStorage 取端点,
+// 默认本机默认端口。用法:localStorage.setItem("ts_listen","127.0.0.1:8787");
+// localStorage.setItem("ts_key","<虚拟key>") 后刷新页面。
+if (!IN_TAURI) {
+  adminBase = `http://${localStorage.getItem("ts_listen") ?? "127.0.0.1:8787"}`;
+  adminKey = localStorage.getItem("ts_key");
+}
+
+async function dataGet<T>(path: string, ipcFallback: () => Promise<T>): Promise<T> {
+  if (adminBase) {
+    try {
+      const response = await fetch(adminBase + path, {
+        headers: adminKey ? { authorization: `Bearer ${adminKey}` } : {},
+      });
+      if (response.ok) return (await response.json()) as T;
+      // 非 2xx(如 key 失效)也回退 IPC;纯浏览器下直接报错。
+    } catch {
+      // 网络失败(代理刚停等):走回退。
+    }
+  }
+  if (IN_TAURI) return ipcFallback();
+  throw new Error(
+    "无法连接本地代理:请确认 token-station serve 已启动,并在 localStorage 配置 ts_listen / ts_key",
+  );
+}
+
 export const getStats = (since: string, by: string | null) =>
-  invoke<StatsView>("get_stats", { since, by });
+  dataGet<StatsView>(
+    `/admin/stats?since=${since}${by ? `&by=${by}` : ""}`,
+    () => invoke<StatsView>("get_stats", { since, by }),
+  );
 
+// 注意语义差:HTTP 返回**运行中**配置的路由表,IPC 回退返回可编辑草稿。
+// 代理运行时以运行态为准,正是数据面该报告的事实。
 export const getRouterTable = () =>
-  invoke<RouterTableView>("get_router_table");
+  dataGet<RouterTableView>("/admin/router-table", () =>
+    invoke<RouterTableView>("get_router_table"),
+  );
 
-export const getPlugins = () => invoke<PluginsView>("get_plugins");
+export const getPlugins = () =>
+  dataGet<PluginsView>("/admin/plugins", () => invoke<PluginsView>("get_plugins"));
 
 export const checkUpgrade = () => invoke<UpgradeView>("check_upgrade");
