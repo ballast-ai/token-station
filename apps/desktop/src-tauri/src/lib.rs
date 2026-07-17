@@ -829,6 +829,11 @@ fn serve_start(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
     let app_state = server::AppState {
         gateway,
         virtual_key: key.clone().map(Arc::from),
+        admin: Arc::new(token_station_cli::admin::AdminContext {
+            data_dir: config.data.dir.clone(),
+            router: config.router.clone(),
+            plugins: config.plugins.clone(),
+        }),
     };
     runtime.spawn(async move {
         let _ = server::serve(app_state, listener).await;

@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::admin::AdminContext;
 use crate::gateway::{Gateway, Reply};
 use crate::virtual_key;
 
@@ -34,6 +35,8 @@ pub struct AppState {
     pub gateway: Arc<Gateway>,
     /// `None` when the operator turned inbound auth off.
     pub virtual_key: Option<Arc<str>>,
+    /// The read-only `/admin/*` data plane: a snapshot of the running config.
+    pub admin: Arc<AdminContext>,
 }
 
 /// Serves until `ctrl_c`.
@@ -52,6 +55,19 @@ pub async fn serve(state: AppState, listener: TcpListener) -> std::io::Result<()
     // paths — adding an inbound protocol is zero change here.
     let app = Router::new()
         .route("/v1/models", get(models))
+        // The read-only data plane. Explicit routes, not a nest: three
+        // endpoints is a surface small enough to enumerate, and enumerating
+        // them keeps `/admin/anything-else` falling through to the gateway's
+        // 404 rather than growing an implicit namespace.
+        .route("/admin/stats", get(admin_stats).options(admin_preflight))
+        .route(
+            "/admin/router-table",
+            get(admin_router_table).options(admin_preflight),
+        )
+        .route(
+            "/admin/plugins",
+            get(admin_plugins).options(admin_preflight),
+        )
         .fallback(chat)
         .with_state(state);
 
@@ -103,6 +119,100 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(state.gateway.models().to_owned()))
         .expect("a literal response builds")
+}
+
+/// The CORS allowance for `/admin/*`: echo the origin back — but only a
+/// loopback one. The data plane exists for local UIs (a browser running the
+/// frontend dev server, the desktop shell); a web origin never qualifies, so
+/// anything else gets no CORS headers and the browser refuses the response.
+fn loopback_origin(headers: &HeaderMap) -> Option<String> {
+    let origin = headers.get(header::ORIGIN)?.to_str().ok()?;
+    let host = origin.strip_prefix("http://")?;
+    let host = host.rsplit_once(':').map_or(host, |(name, _port)| name);
+    (host == "localhost" || host == "127.0.0.1").then(|| origin.to_owned())
+}
+
+fn with_cors(mut response: Response, origin: Option<String>) -> Response {
+    if let Some(origin) = origin {
+        if let Ok(value) = origin.parse() {
+            let headers = response.headers_mut();
+            headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+            headers.insert(
+                header::ACCESS_CONTROL_ALLOW_HEADERS,
+                header::HeaderValue::from_static("authorization"),
+            );
+        }
+    }
+    response
+}
+
+/// Answers the browser's preflight before auth on purpose: a preflight
+/// carries no `Authorization` header by design, exposes no data, and refusing
+/// it would only break the browser path while any non-browser client skips
+/// preflights entirely.
+async fn admin_preflight(headers: HeaderMap) -> Response {
+    let response = Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .expect("a literal response builds");
+    with_cors(response, loopback_origin(&headers))
+}
+
+fn admin_reply(result: Result<serde_json::Value, String>, origin: Option<String>) -> Response {
+    let response = match result {
+        Ok(view) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(view.to_string()))
+            .expect("a json body builds"),
+        Err(detail) => Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({"error": {"message": detail, "type": "invalid_request"}})
+                    .to_string(),
+            ))
+            .expect("a json body builds"),
+    };
+    with_cors(response, origin)
+}
+
+async fn admin_stats(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> Response {
+    if !admitted(&state, &headers) {
+        return with_cors(unauthorized("/admin/stats"), loopback_origin(&headers));
+    }
+    // `since` and `by` are single tokens (`all`, `24h`, `upstream`, …), so a
+    // split on `&`/`=` is a full parser here — no percent-decoding to get wrong.
+    let mut since = "all".to_owned();
+    let mut by = None;
+    for pair in uri.query().unwrap_or_default().split('&') {
+        match pair.split_once('=') {
+            Some(("since", value)) if !value.is_empty() => value.clone_into(&mut since),
+            Some(("by", value)) if !value.is_empty() => by = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+    admin_reply(
+        state.admin.stats(&since, by.as_deref()),
+        loopback_origin(&headers),
+    )
+}
+
+async fn admin_router_table(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admitted(&state, &headers) {
+        return with_cors(
+            unauthorized("/admin/router-table"),
+            loopback_origin(&headers),
+        );
+    }
+    admin_reply(Ok(state.admin.router_table()), loopback_origin(&headers))
+}
+
+async fn admin_plugins(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admitted(&state, &headers) {
+        return with_cors(unauthorized("/admin/plugins"), loopback_origin(&headers));
+    }
+    admin_reply(state.admin.plugins(), loopback_origin(&headers))
 }
 
 async fn chat(
