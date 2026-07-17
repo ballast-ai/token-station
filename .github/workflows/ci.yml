@@ -18,7 +18,7 @@ jobs:
           components: rustfmt, clippy
           # plugin-runtime tests compile tests/guests/* into real WASM components.
           targets: wasm32-wasip2
-      # A full wasmtime, tokio, and sqlite rebuild takes about seven minutes. The cache removes most of it. Three WASM
+      # A full wasmtime, tokio, and sqlite rebuild takes about seven minutes. The cache removes most of it. Five WASM
       # The guest is an independent crate excluded from the workspace. Tests build it in a subprocess with a separate target.
       # Each item must be listed to use the cache.
       - uses: Swatinem/rust-cache@v2
@@ -26,7 +26,9 @@ jobs:
           cache-on-failure: true
           workspaces: |
             .
+            plugins/official/agent-anthropic
             plugins/official/agent-openai
+            plugins/official/agent-openai-responses
             plugins/official/provider-openai-compatible
             crates/plugin-runtime/tests/guests/test-provider
       - run: cargo fmt --check

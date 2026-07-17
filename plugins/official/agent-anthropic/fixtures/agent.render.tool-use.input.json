@@ -1,0 +1,31 @@
+{
+  "context": {"protocol": "anthropic-messages"},
+  "response": {
+    "id": "msg_1",
+    "model": "routed-model",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "I'll check.",
+          "tool_calls": [
+            {
+              "id": "toolu_1",
+              "name": "get_weather",
+              "arguments": "{\"city\":\"Beijing\"}"
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "input_tokens": 33,
+      "output_tokens": 20,
+      "cache_read_tokens": 5,
+      "cache_write_tokens": 2,
+      "reasoning_tokens": 0
+    }
+  }
+}

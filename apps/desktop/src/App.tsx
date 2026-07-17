@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   StateView,
   TierSlot,
@@ -11,8 +11,12 @@ import {
   serveStart,
   serveStop,
   connectAgent,
+  discoverProviderModels,
+  ModelDiscoveryView,
 } from "./api";
 import { PROVIDER_CATALOG, CUSTOM_ID, ProviderPreset } from "./catalog";
+import ModelPicker, { CatalogStatus } from "./components/ModelPicker";
+import ProviderModelManager from "./components/ProviderModelManager";
 import RouterTable from "./pages/RouterTable";
 import Stats from "./pages/Stats";
 import Plugins from "./pages/Plugins";
@@ -47,6 +51,8 @@ function App() {
   const [msg, setMsg] = useState<string>("");
   const [err, setErr] = useState<string>("");
   const [tab, setTab] = useState<Tab>("home");
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
 
   // Add-provider form
   const [presetId, setPresetId] = useState<string>("");
@@ -54,15 +60,29 @@ function App() {
   const [url, setUrl] = useState("");
   const [key, setKey] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
-  const [customModel, setCustomModel] = useState("");
   const [extraModels, setExtraModels] = useState<string[]>([]);
+  const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
+  const [discovery, setDiscovery] = useState<ModelDiscoveryView | null>(null);
+  const [discovering, setDiscovering] = useState(false);
+  const [autoDiscoveryDone, setAutoDiscoveryDone] = useState(false);
+  const [managedProvider, setManagedProvider] = useState<string | null>(null);
 
-  const refresh = async () => setState(await getState());
+  const refresh = async () => {
+    setErr("");
+    try {
+      setState(await getState());
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
   useEffect(() => {
     refresh();
   }, []);
 
   const run = async (fn: () => Promise<StateView | string>, okMsg?: string) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
     setErr("");
     setMsg("");
     try {
@@ -72,6 +92,9 @@ function App() {
       if (okMsg) setMsg(okMsg);
     } catch (e) {
       setErr(String(e));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
     }
   };
 
@@ -82,7 +105,25 @@ function App() {
   const isCustom = presetId === CUSTOM_ID;
   const needsKey = isCustom ? true : preset?.needsKey ?? true;
   const catalogModels = preset?.models ?? [];
-  const allModels = [...catalogModels, ...extraModels];
+  const allModels = [...new Set([...catalogModels, ...discoveredModels, ...extraModels])];
+
+  const addCatalogStatus: CatalogStatus = discovering
+    ? { label: "正在获取…", tone: "loading" }
+    : discovery?.source === "live"
+      ? {
+          label: `已同步 ${discovery.models.length} 个`,
+          tone: "live",
+          warning: discovery.warning,
+        }
+      : discovery?.source === "cache"
+        ? {
+            label: `使用缓存 · ${discovery.models.length} 个`,
+            tone: "cache",
+            warning: discovery.warning,
+          }
+        : discovery
+          ? { label: "获取失败", tone: "error", warning: discovery.warning }
+          : { label: `内置建议 · ${catalogModels.length} 个`, tone: "idle" };
 
   const onPreset = (id: string) => {
     setPresetId(id);
@@ -97,18 +138,45 @@ function App() {
       setPicked([]);
     }
     setExtraModels([]);
-    setCustomModel("");
+    setDiscoveredModels([]);
+    setDiscovery(null);
+    setAutoDiscoveryDone(false);
   };
 
   const toggleModel = (m: string) =>
     setPicked((s) => (s.includes(m) ? s.filter((x) => x !== m) : [...s, m]));
 
-  const addCustomModel = () => {
-    const m = customModel.trim();
-    if (!m) return;
-    if (!allModels.includes(m)) setExtraModels((s) => [...s, m]);
-    setPicked((s) => (s.includes(m) ? s : [...s, m]));
-    setCustomModel("");
+  const discoverNewProviderModels = async () => {
+    if (discovering || busy) return;
+    if (!name.trim() || !url.trim()) {
+      setDiscovery({
+        models: [],
+        source: "none",
+        fetched_at_ms: null,
+        warning: "请先填写供应商名称和 Base URL",
+      });
+      return;
+    }
+    if (needsKey && !key.trim()) {
+      setDiscovery({
+        models: [],
+        source: "none",
+        fetched_at_ms: null,
+        warning: "填写 API Key 后才能读取该厂商的模型目录",
+      });
+      return;
+    }
+    setDiscovering(true);
+    setErr("");
+    try {
+      const result = await discoverProviderModels(name.trim(), url.trim(), needsKey ? key : null);
+      setDiscovery(result);
+      setDiscoveredModels((current) => [...new Set([...current, ...result.models])]);
+    } catch (caught) {
+      setDiscovery({ models: [], source: "none", fetched_at_ms: null, warning: String(caught) });
+    } finally {
+      setDiscovering(false);
+    }
   };
 
   const resetForm = () => {
@@ -118,7 +186,9 @@ function App() {
     setKey("");
     setPicked([]);
     setExtraModels([]);
-    setCustomModel("");
+    setDiscoveredModels([]);
+    setDiscovery(null);
+    setAutoDiscoveryDone(false);
   };
 
   const onAddProvider = () => {
@@ -131,7 +201,18 @@ function App() {
     }, "供应商已添加");
   };
 
-  if (!state) return <div className="loading">加载中…</div>;
+  if (!state) {
+    return (
+      <div className="loading">
+        {err ? (
+          <>
+            <div className="banner err">{err}</div>
+            <button className="btn" disabled={busy} onClick={refresh}>重试</button>
+          </>
+        ) : "加载中…"}
+      </div>
+    );
+  }
 
   const { providers, tiers, serve, config_error } = state;
 
@@ -153,11 +234,11 @@ function App() {
           {serve.running ? `运行中 · ${serve.listen}` : "已停止"}
         </div>
         {serve.running ? (
-          <button className="btn" onClick={() => run(() => serveStop())}>
+          <button className="btn" disabled={busy} onClick={() => run(() => serveStop())}>
             停止
           </button>
         ) : (
-          <button className="btn primary" onClick={() => run(() => serveStart())}>
+          <button className="btn primary" disabled={busy} onClick={() => run(() => serveStart())}>
             启动代理
           </button>
         )}
@@ -166,6 +247,7 @@ function App() {
             <button
               key={a.kind}
               className={`agent ${serve.running ? "ready" : "idle"}`}
+              disabled={busy}
               title={serve.running ? `接入 ${a.label}` : "点此会提示先启动代理"}
               onClick={() => run(() => connectAgent(a.kind))}
             >
@@ -235,7 +317,7 @@ function App() {
                   <div className="tier-label">{label}</div>
                   <div className="tier-hint">{hint}</div>
                 </div>
-                <select className="select" value={t.upstream ?? ""} onChange={(e) => onTierProvider(slot, e.target.value)}>
+                <select className="select" disabled={busy} value={t.upstream ?? ""} onChange={(e) => onTierProvider(slot, e.target.value)}>
                   <option value="">— 未选 —</option>
                   {providers.map((p) => (
                     <option key={p.name} value={p.name}>
@@ -246,7 +328,7 @@ function App() {
                 <select
                   className="select"
                   value={t.model ?? ""}
-                  disabled={!t.upstream}
+                  disabled={busy || !t.upstream}
                   onChange={(e) => run(() => setTier(slot, t.upstream!, e.target.value))}
                 >
                   <option value="">— 模型 —</option>
@@ -262,7 +344,7 @@ function App() {
         </div>
 
         <div className="panel-foot">
-          <button className="btn primary" onClick={() => run(() => saveConfig(), "已保存并校验")}>
+          <button className="btn primary" disabled={busy} onClick={() => run(() => saveConfig(), "已保存并校验")}>
             保存并应用
           </button>
           {providers.length === 0 && <span className="foot-hint">先在下面添加供应商,再给三档各选一个模型</span>}
@@ -280,24 +362,47 @@ function App() {
         <div className="provider-list">
           {providers.length === 0 && <div className="empty">还没有供应商,在下面选一个添加。</div>}
           {providers.map((p) => (
-            <div className="provider-card" key={p.name}>
-              <div className="provider-main">
-                <div className="provider-name">{p.name}</div>
-                <div className="provider-url">{p.base_url}</div>
-                <div className="provider-models">
-                  {p.models.map((m) => (
-                    <span className="chip" key={m}>
-                      {m}
-                    </span>
-                  ))}
+            <div className={`provider-card ${managedProvider === p.name ? "expanded" : ""}`} key={p.name}>
+              <div className="provider-card-head">
+                <div className="provider-main">
+                  <div className="provider-name">{p.name}</div>
+                  <div className="provider-url">{p.base_url}</div>
+                  <div className="provider-models">
+                    {p.models.map((m) => (
+                      <span className="chip" key={m}>
+                        {m}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <div className="provider-side">
+                  <span className={`auth ${p.has_auth ? "yes" : "no"}`}>
+                    {p.has_auth ? "● Key 已就绪" : "○ 无鉴权"}
+                  </span>
+                  <button
+                    className="btn tiny"
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setManagedProvider((current) => (current === p.name ? null : p.name))}
+                  >
+                    {managedProvider === p.name ? "收起" : "管理模型"}
+                  </button>
+                  <button className="btn tiny danger" disabled={busy} onClick={() => run(() => removeProvider(p.name))}>
+                    删除
+                  </button>
                 </div>
               </div>
-              <div className="provider-side">
-                <span className={`auth ${p.has_auth ? "yes" : "no"}`}>{p.has_auth ? "🔒 已配 Key" : "无鉴权"}</span>
-                <button className="btn tiny danger" onClick={() => run(() => removeProvider(p.name))}>
-                  删除
-                </button>
-              </div>
+              {managedProvider === p.name && (
+                <ProviderModelManager
+                  provider={p}
+                  serveRunning={serve.running}
+                  disabled={busy}
+                  onSaved={(next) => {
+                    setState(next);
+                    setMsg(`${p.name} 的模型已保存`);
+                  }}
+                />
+              )}
             </div>
           ))}
         </div>
@@ -305,7 +410,12 @@ function App() {
         {/* Add provider: preset-driven */}
         <div className="add-panel">
           <div className="add-row">
-            <select className="select grow" value={presetId} onChange={(e) => onPreset(e.target.value)}>
+            <select
+              className="select grow"
+              value={presetId}
+              disabled={busy || discovering}
+              onChange={(e) => onPreset(e.target.value)}
+            >
               <option value="">— 选择供应商 —</option>
               {PROVIDER_CATALOG.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -317,8 +427,30 @@ function App() {
 
             {isCustom ? (
               <>
-                <input className="input" placeholder="名称" value={name} onChange={(e) => setName(e.target.value)} />
-                <input className="input grow" placeholder="Base URL" value={url} onChange={(e) => setUrl(e.target.value)} />
+                <input
+                  className="input"
+                  placeholder="名称"
+                  value={name}
+                  disabled={busy || discovering}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    setDiscovery(null);
+                    setDiscoveredModels([]);
+                    setAutoDiscoveryDone(false);
+                  }}
+                />
+                <input
+                  className="input grow"
+                  placeholder="Base URL"
+                  value={url}
+                  disabled={busy || discovering}
+                  onChange={(e) => {
+                    setUrl(e.target.value);
+                    setDiscovery(null);
+                    setDiscoveredModels([]);
+                    setAutoDiscoveryDone(false);
+                  }}
+                />
               </>
             ) : (
               preset && <span className="url-tag">{url}</span>
@@ -327,25 +459,19 @@ function App() {
 
           {presetId && (
             <>
-              <div className="model-pick">
-                <span className="pick-label">模型:</span>
-                {allModels.map((m) => (
-                  <button
-                    key={m}
-                    className={`model-chip ${picked.includes(m) ? "on" : ""}`}
-                    onClick={() => toggleModel(m)}
-                  >
-                    {m}
-                  </button>
-                ))}
-                <input
-                  className="input tinyw"
-                  placeholder="+ 自定义模型"
-                  value={customModel}
-                  onChange={(e) => setCustomModel(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && addCustomModel()}
-                />
-              </div>
+              <ModelPicker
+                models={allModels}
+                selected={picked}
+                status={addCatalogStatus}
+                refreshing={discovering}
+                disabled={busy}
+                onRefresh={discoverNewProviderModels}
+                onToggle={toggleModel}
+                onAdd={(model) => {
+                  if (!allModels.includes(model)) setExtraModels((current) => [...current, model]);
+                  if (!picked.includes(model)) setPicked((current) => [...current, model]);
+                }}
+              />
 
               <div className="add-row">
                 {needsKey ? (
@@ -354,15 +480,25 @@ function App() {
                     type="password"
                     placeholder="API Key"
                     value={key}
-                    onChange={(e) => setKey(e.target.value)}
+                    disabled={busy || discovering}
+                    onChange={(e) => {
+                      setKey(e.target.value);
+                      setAutoDiscoveryDone(false);
+                    }}
+                    onBlur={() => {
+                      if (!autoDiscoveryDone && key.trim()) {
+                        setAutoDiscoveryDone(true);
+                        void discoverNewProviderModels();
+                      }
+                    }}
                   />
                 ) : (
                   <span className="url-tag">本地模型 · 免 Key</span>
                 )}
-                <button className="btn primary" onClick={onAddProvider}>
+                <button className="btn primary" disabled={busy || discovering} onClick={onAddProvider}>
                   添加
                 </button>
-                <button className="btn" onClick={resetForm}>
+                <button className="btn" disabled={busy || discovering} onClick={resetForm}>
                   取消
                 </button>
               </div>

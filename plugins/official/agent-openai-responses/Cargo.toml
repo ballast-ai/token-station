@@ -1,0 +1,18 @@
+# The official OpenAI Responses inbound agent adapter. It is a standalone
+# wasm32-wasip2 guest so the main workspace does not require a WASM toolchain.
+[package]
+name = "agent-openai-responses"
+version = "1.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = "1"
+serde_json = "1"
+token-station-protocol = { path = "../../../crates/protocol" }
+wit-bindgen = "0.59"

@@ -75,19 +75,28 @@ fn admitted(state: &AppState, headers: &HeaderMap) -> bool {
         .is_some_and(|presented| virtual_key::matches(presented, expected))
 }
 
-fn unauthorized() -> Response {
+fn unauthorized(path: &str) -> Response {
+    let body = match path {
+        "/v1/messages" => {
+            r#"{"type":"error","error":{"type":"authentication_error","message":"missing or invalid local virtual key"}}"#
+        }
+        "/v1/responses" => {
+            r#"{"error":{"type":"error","code":"authentication_error","message":"missing or invalid local virtual key"}}"#
+        }
+        _ => {
+            r#"{"error":{"message":"missing or invalid local virtual key","type":"auth","code":"auth"}}"#
+        }
+    };
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            r#"{"error":{"message":"missing or invalid local virtual key","type":"auth","code":"auth"}}"#,
-        ))
+        .body(Body::from(body))
         .expect("a literal response builds")
 }
 
 async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !admitted(&state, &headers) {
-        return unauthorized();
+        return unauthorized("/v1/models");
     }
     Response::builder()
         .status(StatusCode::OK)
@@ -104,7 +113,7 @@ async fn chat(
     body: Bytes,
 ) -> Response {
     if !admitted(&state, &headers) {
-        return unauthorized();
+        return unauthorized(uri.path());
     }
     let gateway = Arc::clone(&state.gateway);
     // The method and path feed the gateway's `match_inbound` step, which picks

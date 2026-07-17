@@ -1,0 +1,12 @@
+{
+  "context": {
+    "protocol": "anthropic-messages",
+    "stream_id": "stream-text",
+    "response_id": "msg_stream_1",
+    "model": "routed-model"
+  },
+  "events": [
+    {"type": "delta", "index": 0, "content": "hi"},
+    {"type": "done", "finish_reason": "stop"}
+  ]
+}

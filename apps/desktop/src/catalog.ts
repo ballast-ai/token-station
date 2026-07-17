@@ -15,7 +15,7 @@ export const PROVIDER_CATALOG: ProviderPreset[] = [
     id: "deepseek",
     label: "DeepSeek",
     baseUrl: "https://api.deepseek.com/v1",
-    models: ["deepseek-chat", "deepseek-reasoner"],
+    models: ["deepseek-v4-flash", "deepseek-v4-pro"],
     needsKey: true,
   },
   {
@@ -44,14 +44,14 @@ export const PROVIDER_CATALOG: ProviderPreset[] = [
     id: "kimi",
     label: "Moonshot Kimi",
     baseUrl: "https://api.moonshot.cn/v1",
-    models: ["kimi-k2-0711-preview", "moonshot-v1-128k", "moonshot-v1-32k", "moonshot-v1-8k"],
+    models: ["kimi-k2.6", "moonshot-v1-128k", "moonshot-v1-32k", "moonshot-v1-8k"],
     needsKey: true,
   },
   {
     id: "qwen",
     label: "阿里 Qwen(百炼)",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    models: ["qwen-max", "qwen-plus", "qwen-turbo", "qwen3-coder-plus"],
+    models: ["qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash", "qwen3-coder-plus"],
     needsKey: true,
   },
   {

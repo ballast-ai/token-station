@@ -18,7 +18,7 @@ wit_bindgen::generate!({
 });
 
 use exports::token_station::adapter::provider_adapter::{AdapterHealth, AdapterMetadata, Guest};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     Auth, ChatRequest, ChatResponse, Choice, Content, ErrorCode, ErrorEnvelope, Extensions,
@@ -26,11 +26,49 @@ use token_station_protocol::{
     Role, SafeHeaders, StreamChunk, StreamEvent, ToolCall, Usage,
 };
 
-/// The unparsed tail of the stream this instance is holding.
+/// The unparsed tail and finish reason of the stream this instance is holding.
 ///
 /// Instance state on purpose: the host instantiates one component per stream,
-/// so this buffer only ever sees one provider's body.
-static STREAM_TAIL: Mutex<String> = Mutex::new(String::new());
+/// so this state only ever sees one provider's body.
+#[derive(Default)]
+struct ProviderStreamState {
+    tail: String,
+    pending_finish: PendingFinish,
+}
+
+/// Tracks finish arrival separately from its canonical mapping. Compatible
+/// providers may add finish strings we do not know yet; those still close the
+/// stream with `Done { finish_reason: None }`.
+#[derive(Default)]
+struct PendingFinish {
+    seen: bool,
+    reason: Option<FinishReason>,
+}
+
+impl PendingFinish {
+    fn record(&mut self, raw: &str) {
+        self.seen = true;
+        self.reason = finish_reason(Some(raw));
+    }
+
+    fn take_done(&mut self) -> Option<StreamEvent> {
+        if !self.seen {
+            return None;
+        }
+        self.seen = false;
+        Some(StreamEvent::Done {
+            finish_reason: self.reason.take(),
+        })
+    }
+}
+
+static STREAM_STATE: Mutex<ProviderStreamState> = Mutex::new(ProviderStreamState {
+    tail: String::new(),
+    pending_finish: PendingFinish {
+        seen: false,
+        reason: None,
+    },
+});
 
 struct OpenAiCompatible;
 
@@ -38,8 +76,9 @@ struct OpenAiCompatible;
 
 /// The error channel carries a `protocol::ErrorEnvelope`, serialized.
 fn fail(envelope: &ErrorEnvelope) -> String {
-    serde_json::to_string(envelope)
-        .unwrap_or_else(|_| r#"{"code":"internal","http_status":500,"message":"unserializable error"}"#.to_owned())
+    serde_json::to_string(envelope).unwrap_or_else(|_| {
+        r#"{"code":"internal","http_status":500,"message":"unserializable error"}"#.to_owned()
+    })
 }
 
 fn internal(detail: impl std::fmt::Display) -> String {
@@ -119,6 +158,7 @@ fn body_of(request: &ChatRequest) -> Value {
     );
     if request.stream {
         body.insert("stream".to_owned(), json!(true));
+        body.insert("stream_options".to_owned(), json!({"include_usage": true}));
     }
     if let Some(temperature) = request.sampling.temperature {
         body.insert("temperature".to_owned(), json!(temperature));
@@ -152,8 +192,30 @@ fn body_of(request: &ChatRequest) -> Value {
     Value::Object(body)
 }
 
-/// One complete SSE frame's worth of events.
-fn events_of_frame(payload: &str) -> Result<Vec<StreamEvent>, String> {
+fn usage_of(raw: &Value) -> Usage {
+    Usage {
+        input_tokens: raw["prompt_tokens"].as_u64().unwrap_or(0),
+        output_tokens: raw["completion_tokens"].as_u64().unwrap_or(0),
+        cache_read_tokens: raw["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .or_else(|| raw["prompt_cache_hit_tokens"].as_u64())
+            .unwrap_or(0),
+        cache_write_tokens: raw["prompt_tokens_details"]["cache_write_tokens"]
+            .as_u64()
+            .unwrap_or(0),
+        reasoning_tokens: raw["completion_tokens_details"]["reasoning_tokens"]
+            .as_u64()
+            .unwrap_or(0),
+    }
+}
+
+/// One complete SSE frame's worth of events. A finish reason is held until
+/// cumulative usage arrives (or the provider emits `[DONE]`) so downstream
+/// adapters never close their stream before the final accounting event.
+fn events_of_frame(
+    payload: &str,
+    pending_finish: &mut PendingFinish,
+) -> Result<Vec<StreamEvent>, String> {
     let raw: Value = serde_json::from_str(payload).map_err(internal)?;
     let mut events = Vec::new();
 
@@ -181,20 +243,17 @@ fn events_of_frame(payload: &str) -> Result<Vec<StreamEvent>, String> {
             });
         }
         if let Some(reason) = choice["finish_reason"].as_str() {
-            events.push(StreamEvent::Done {
-                finish_reason: finish_reason(Some(reason)),
-            });
+            pending_finish.record(reason);
         }
     }
 
     if let Some(usage) = raw.get("usage").filter(|usage| !usage.is_null()) {
         events.push(StreamEvent::Usage {
-            usage: Usage {
-                input_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
-                output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
-                ..Usage::default()
-            },
+            usage: usage_of(usage),
         });
+        if let Some(done) = pending_finish.take_done() {
+            events.push(done);
+        }
     }
     Ok(events)
 }
@@ -279,22 +338,12 @@ impl Guest for OpenAiCompatible {
             });
         }
 
-        let usage = &raw["usage"];
+        let usage = usage_of(&raw["usage"]);
         to_output(&ChatResponse {
             id: raw["id"].as_str().unwrap_or_default().to_owned(),
             model: raw["model"].as_str().unwrap_or_default().to_owned(),
             choices,
-            usage: Usage {
-                input_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
-                output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
-                cache_read_tokens: usage["prompt_tokens_details"]["cached_tokens"]
-                    .as_u64()
-                    .unwrap_or(0),
-                cache_write_tokens: 0,
-                reasoning_tokens: usage["completion_tokens_details"]["reasoning_tokens"]
-                    .as_u64()
-                    .unwrap_or(0),
-            },
+            usage,
             extensions: Extensions::new(),
         })
     }
@@ -302,21 +351,25 @@ impl Guest for OpenAiCompatible {
     fn parse_stream_chunk(chunk: String) -> Result<String, String> {
         let chunk: StreamChunk = parse_input(&chunk)?;
 
-        let mut tail = STREAM_TAIL.lock().expect("single-threaded guest");
-        tail.push_str(&chunk.data);
+        let mut state = STREAM_STATE.lock().expect("single-threaded guest");
+        state.tail.push_str(&chunk.data);
 
         let mut events = Vec::new();
-        while let Some(end) = tail.find("\n\n") {
-            let frame = tail[..end].to_owned();
-            tail.drain(..end + 2);
+        while let Some(end) = state.tail.find("\n\n") {
+            let frame = state.tail[..end].to_owned();
+            state.tail.drain(..end + 2);
 
             let Some(payload) = frame.strip_prefix("data: ") else {
                 continue;
             };
             if payload == "[DONE]" {
+                if let Some(done) = state.pending_finish.take_done() {
+                    events.push(done);
+                }
                 continue;
             }
-            events.extend(events_of_frame(payload)?);
+            let ProviderStreamState { pending_finish, .. } = &mut *state;
+            events.extend(events_of_frame(payload, pending_finish)?);
         }
         to_output(&events)
     }

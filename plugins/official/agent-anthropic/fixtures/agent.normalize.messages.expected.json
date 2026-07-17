@@ -1,0 +1,73 @@
+{
+  "model": "routed-model",
+  "messages": [
+    {
+      "role": "system",
+      "content": [
+        {"type": "text", "text": "You are a coding assistant."}
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Weather in Beijing?"},
+        {
+          "type": "image_url",
+          "image_url": {"url": "data:image/png;base64,aGVsbG8="}
+        }
+      ]
+    },
+    {
+      "role": "system",
+      "content": "The following skills are available."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {"type": "text", "text": "I'll check."}
+      ],
+      "tool_calls": [
+        {
+          "id": "toolu_1",
+          "name": "get_weather",
+          "arguments": "{\"city\":\"Beijing\",\"unit\":\"c\"}"
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "20 C",
+      "tool_call_id": "toolu_1",
+      "anthropic_tool_result_is_error": false
+    },
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Thanks"}
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Look up the weather in a city",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {"type": "string"},
+          "unit": {"type": "string"}
+        },
+        "required": ["city"]
+      }
+    }
+  ],
+  "sampling": {
+    "temperature": 0.2,
+    "top_p": 0.9,
+    "max_output_tokens": 1024,
+    "stop": ["END"]
+  },
+  "stream": true,
+  "future_field": {"kept": true},
+  "metadata": {"user_id": "local-user"}
+}

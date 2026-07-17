@@ -13,3 +13,8 @@ component that imports `token-station:adapter/host`.
   into the runtime and runs all gates.
 - The implementation has the same structure as the native reference in the
   conformance tests. The fixture package requires equal output from both.
+
+The adapter currently supports plain text output only. It returns an explicit
+capability error when `response_format.type` is `json_schema` or
+`json_object`. The manifest does not declare `json_schema`, and the adapter
+does not silently downgrade a structured-output request to plain text.

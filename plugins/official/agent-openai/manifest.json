@@ -5,7 +5,7 @@
   "api_version": "agent-adapter-v1",
   "agent_protocols": ["openai-chat-completions"],
   "agent_tools": ["generic-openai-sdk", "cursor", "continue"],
-  "capabilities": ["chat", "stream", "tool_call", "json_schema", "agent_hint"],
+  "capabilities": ["chat", "stream", "tool_call", "agent_hint"],
   "permissions": {
     "network": false,
     "filesystem": false,

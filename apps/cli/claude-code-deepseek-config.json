@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "server": { "listen": "127.0.0.1:8787", "auth": true },
+  "data": {
+    "dir": "token-station-e2e/data",
+    "metrics": true
+  },
+  "plugins": {
+    "dir": "token-station-e2e/plugins",
+    "agent": "agent-anthropic",
+    "providers": {
+      "openai-compatible": "provider-openai-compatible"
+    }
+  },
+  "upstreams": {
+    "deepseek": {
+      "provider": "openai-compatible",
+      "base_url": "https://api.deepseek.com",
+      "auth": {
+        "slot": "provider_api_key",
+        "env": "DEEPSEEK_API_KEY"
+      },
+      "models": [
+        {
+          "model": "deepseek-v4-flash",
+          "tool": true,
+          "json_schema": true,
+          "context_window": 1000000,
+          "supported_parameters": [
+            "max_tokens",
+            "stop",
+            "temperature",
+            "top_p"
+          ]
+        }
+      ]
+    }
+  },
+  "router": {
+    "version": 1,
+    "pools": {
+      "default": [
+        {
+          "upstream": "deepseek",
+          "model": "deepseek-v4-flash"
+        }
+      ]
+    },
+    "rules": [],
+    "hint_routes": [],
+    "default_pool": "default",
+    "assumed_context_window": 1000000
+  }
+}

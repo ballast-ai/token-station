@@ -127,6 +127,10 @@ impl AgentPlugin {
     ///
     /// A trap in the guest. The gateway treats an erroring adapter as "did not
     /// match" so one broken adapter cannot veto the others.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous adapter call poisoned the shared instance lock.
     pub fn match_inbound(&self, request_head: &Value) -> AdapterResult<MatchOutcome> {
         let head_json = to_json(request_head)?;
         let mut guard = self.main.lock().expect("a poisoned adapter stays poisoned");
