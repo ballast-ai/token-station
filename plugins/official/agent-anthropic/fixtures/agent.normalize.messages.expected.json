@@ -69,6 +69,5 @@
   },
   "stream": true,
   "future_field": {"kept": true},
-  "metadata": {"user_id": "local-user"},
-  "tool_choice": {"type": "auto"}
+  "metadata": {"user_id": "local-user"}
 }
