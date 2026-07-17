@@ -13,6 +13,7 @@ import {
   connectAgent,
   discoverProviderModels,
   ModelDiscoveryView,
+  setAdminEndpoint,
 } from "./api";
 import { PROVIDER_CATALOG, CUSTOM_ID, ProviderPreset } from "./catalog";
 import ModelPicker, { CatalogStatus } from "./components/ModelPicker";
@@ -78,6 +79,10 @@ function App() {
   useEffect(() => {
     refresh();
   }, []);
+  // 每次状态回写(含 serve 起停)都同步数据面端点,数据页优先走本地 HTTP。
+  useEffect(() => {
+    if (state) setAdminEndpoint(state.serve);
+  }, [state]);
 
   const run = async (fn: () => Promise<StateView | string>, okMsg?: string) => {
     if (busyRef.current) return;
