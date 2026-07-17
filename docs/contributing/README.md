@@ -12,6 +12,8 @@
   agent 适配器需求、ABI 契约、实现路线。
 - [桌面app-设计与交接.md](桌面app-设计与交接.md) —— `apps/desktop`(Tauri GUI)的
   架构、三档面板、v1 子页面、多入站编排与 CC 安全闸。
+- [桌面App-Agent接入机制.md](桌面App-Agent接入机制.md) —— Claude Code、Codex、
+  OpenCode 的一键配置链路、请求链路、风险恢复与新 Agent 扩展方法。
 
 ## 30 秒速览
 
