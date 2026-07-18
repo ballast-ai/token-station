@@ -454,16 +454,15 @@ impl Gateway {
         let protocol = selected.map_or_else(String::new, |agent| agent.protocol.clone());
         let mut record = RequestRecord::begin(started_at_ms, protocol);
 
-        match selected {
-            Some(agent) => {
-                if let Err(refusal) = self.chat_inner(agent, headers, body, emit, &mut record) {
-                    record.status = refusal.http_status;
-                    record.error_code = Some(refusal.code);
-                    let rendered = self.render_error(agent, &refusal);
-                    emit(Reply::BeginJson(rendered));
-                }
+        if let Some(agent) = selected {
+            if let Err(refusal) = self.chat_inner(agent, headers, body, emit, &mut record) {
+                record.status = refusal.http_status;
+                record.error_code = Some(refusal.code);
+                let rendered = Self::render_error(agent, &refusal);
+                emit(Reply::BeginJson(rendered));
             }
-            None => {
+        } else {
+            {
                 let refusal = ErrorEnvelope::new(
                     ErrorCode::InvalidRequest,
                     404,
@@ -668,7 +667,7 @@ impl Gateway {
         }
 
         if request.stream {
-            self.relay_stream(agent, upstream, response, emit, record)
+            Self::relay_stream(agent, upstream, response, emit, record)
         } else {
             let parts: HttpResponseParts = response.into();
             let chat_response = upstream.plugin.parse_response(&parts)?;
@@ -790,7 +789,6 @@ impl Gateway {
     /// Streams the upstream body through the parse/render pair, chunk by
     /// chunk, with the split points the network chose.
     fn relay_stream(
-        &self,
         agent: &LoadedAgent,
         upstream: &Upstream,
         response: UpstreamResponse,
@@ -819,7 +817,7 @@ impl Gateway {
                         format!("upstream stream broke: {error}"),
                     );
                     record.error_code = Some(envelope.code);
-                    let rendered = self.render_stream_error(agent, &envelope);
+                    let rendered = Self::render_stream_error(agent, &envelope);
                     emit(Reply::Chunk(rendered));
                     return Ok(());
                 }
@@ -830,7 +828,7 @@ impl Gateway {
                 Ok(events) => events,
                 Err(envelope) => {
                     record.error_code = Some(envelope.code);
-                    let rendered = self.render_stream_error(agent, &envelope);
+                    let rendered = Self::render_stream_error(agent, &envelope);
                     emit(Reply::Chunk(rendered));
                     return Ok(());
                 }
@@ -856,7 +854,7 @@ impl Gateway {
     }
 
     /// An error, rendered the way the matched inbound protocol spells it.
-    fn render_error(&self, agent: &LoadedAgent, envelope: &ErrorEnvelope) -> JsonReply {
+    fn render_error(agent: &LoadedAgent, envelope: &ErrorEnvelope) -> JsonReply {
         let body = agent
             .plugin
             .map_inbound_error(envelope, &Value::Null)
@@ -873,7 +871,7 @@ impl Gateway {
         }
     }
 
-    fn render_stream_error(&self, agent: &LoadedAgent, envelope: &ErrorEnvelope) -> String {
+    fn render_stream_error(agent: &LoadedAgent, envelope: &ErrorEnvelope) -> String {
         let body = agent
             .plugin
             .map_inbound_error(envelope, &Value::Null)
