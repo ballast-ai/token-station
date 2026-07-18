@@ -294,6 +294,7 @@ impl Guest for OpenAiCompatible {
                 reasoning_tokens: usage["completion_tokens_details"]["reasoning_tokens"]
                     .as_u64()
                     .unwrap_or(0),
+                ..Usage::default()
             },
             extensions: Extensions::new(),
         })
