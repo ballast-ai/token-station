@@ -433,7 +433,10 @@ fn a_path_no_inbound_adapter_claims_is_refused_before_routing() {
         "the refusal names the reason: {body}"
     );
     // Nothing was routed: the upstream saw no request.
-    assert!(mock.seen().is_empty(), "an unclaimed path must not reach an upstream");
+    assert!(
+        mock.seen().is_empty(),
+        "an unclaimed path must not reach an upstream"
+    );
 
     std::fs::remove_file(key).ok();
 }
