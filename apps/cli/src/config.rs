@@ -153,7 +153,7 @@ impl PluginsConfig {
     /// The agent adapter packages to load, in match-priority order. Prefers the
     /// `agents` list; falls back to the deprecated single `agent` alias so old
     /// configs keep working. Empty only for a config that names neither, which
-    /// [`ClientConfig::validate`] rejects.
+    /// `ClientConfig::validate` rejects.
     #[must_use]
     pub fn effective_agents(&self) -> Vec<String> {
         if self.agents.is_empty() {
