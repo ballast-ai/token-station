@@ -34,8 +34,12 @@ pub enum StreamEvent {
         name: Option<String>,
         arguments_delta: String,
     },
-    /// Final token accounting. Most providers emit this once, just before
-    /// `done`.
+    /// Token accounting. Most providers emit this once, just before `done` —
+    /// but a stream may legitimately carry it **more than once** (Anthropic
+    /// reports input-side buckets in `message_start` and the final output
+    /// count in `message_delta`). Consumers fold repeated reports with
+    /// [`crate::Usage::absorb`]: field-wise, last-nonzero-wins, so a zero in
+    /// a later report never erases an earlier nonzero bucket.
     Usage { usage: Usage },
     Done {
         #[serde(default, skip_serializing_if = "Option::is_none")]
