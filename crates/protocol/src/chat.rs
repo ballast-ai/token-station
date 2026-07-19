@@ -18,8 +18,30 @@ pub enum Role {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
-    Text { text: String },
-    ImageUrl { image_url: ImageUrl },
+    Text {
+        text: String,
+    },
+    ImageUrl {
+        image_url: ImageUrl,
+    },
+    /// A model reasoning block (Anthropic `thinking`). `signature` is the
+    /// provider's verification ticket for replaying the block on a later
+    /// turn — adapters must round-trip it untouched.
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    /// An encrypted reasoning block (Anthropic `redacted_thinking`): opaque,
+    /// but must survive a round trip byte-for-byte at the value level.
+    RedactedThinking {
+        data: String,
+    },
+    /// Any part whose `type` this crate does not model. The raw object is
+    /// preserved verbatim so translation never silently drops content
+    /// (0.3.0; known tags above always win during deserialization).
+    #[serde(untagged)]
+    Unknown(Value),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +140,24 @@ impl Message {
     }
 }
 
+/// How the caller constrains tool selection.
+///
+/// String forms (`"auto"`/`"none"`/`"required"`) are canonical; provider
+/// object forms (OpenAI `{"type":"function",…}`, Anthropic
+/// `{"type":"tool",…}`) ride in [`ToolChoice::Other`] verbatim — adapters
+/// translate at the wire boundary. Anthropic's `"any"` normalizes to
+/// [`ToolChoice::Required`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoice {
+    Auto,
+    None,
+    Required,
+    /// A provider-specific object form, preserved verbatim.
+    #[serde(untagged)]
+    Other(Value),
+}
+
 /// A normalized chat request, the only request shape the router sees.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -129,6 +169,11 @@ pub struct ChatRequest {
     pub tools: Vec<ToolDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat>,
+    /// Promoted from `extensions` in 0.3.0. The wire shape is unchanged —
+    /// `extensions` is flattened, so `tool_choice` was already a top-level
+    /// key; it is merely typed now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
     #[serde(default)]
     pub sampling: Sampling,
     #[serde(default)]
@@ -145,6 +190,7 @@ impl ChatRequest {
             messages,
             tools: Vec::new(),
             response_format: None,
+            tool_choice: None,
             sampling: Sampling::default(),
             stream: false,
             extensions: Extensions::new(),
@@ -153,13 +199,26 @@ impl ChatRequest {
 }
 
 /// Why generation stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not `Copy` since 0.3.0: [`FinishReason::Other`] carries the raw wire
+/// string so unknown reasons survive translation instead of collapsing
+/// into a known variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishReason {
     Stop,
     Length,
     ToolCalls,
     ContentFilter,
+    /// The model hit one of the caller's stop sequences (Anthropic
+    /// `stop_sequence`). Which one is reported in [`Choice::stop_sequence`]
+    /// (or `StreamEvent::Done`), not here — the reason and the matched
+    /// string arrive at different times in a stream.
+    StopSequence,
+    /// A reason this crate does not model, preserved verbatim (0.3.0).
+    /// Known values above always win during deserialization.
+    #[serde(untagged)]
+    Other(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -168,6 +227,10 @@ pub struct Choice {
     pub message: Message,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<FinishReason>,
+    /// The stop sequence that fired, verbatim. Populated iff `finish_reason`
+    /// is [`FinishReason::StopSequence`] and the provider reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_sequence: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,7 +248,10 @@ pub struct ChatResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatRequest, Content, ContentPart, Message, Role, ToolCall};
+    use super::{
+        ChatRequest, Choice, Content, ContentPart, FinishReason, Message, Role, ToolCall,
+        ToolChoice,
+    };
 
     #[test]
     fn text_content_stays_a_bare_string_on_the_wire() {
@@ -231,6 +297,96 @@ mod tests {
                 .expect("valid call");
 
         assert_eq!(round_tripped.arguments, r#"{"city": "Beijing"}"#);
+    }
+
+    // 0.3.0 (G2/G3) wire contract
+
+    #[test]
+    fn thinking_and_redacted_blocks_round_trip() {
+        let parts = vec![
+            ContentPart::Thinking {
+                thinking: "let me see".to_owned(),
+                signature: Some("EqQBCg".to_owned()),
+            },
+            ContentPart::RedactedThinking {
+                data: "opaque-blob".to_owned(),
+            },
+        ];
+        let json = serde_json::to_value(&parts).expect("serializable parts");
+        assert_eq!(json[0]["type"], serde_json::json!("thinking"));
+        assert_eq!(json[0]["signature"], serde_json::json!("EqQBCg"));
+        assert_eq!(json[1]["type"], serde_json::json!("redacted_thinking"));
+
+        let back: Vec<ContentPart> = serde_json::from_value(json).expect("valid parts");
+        assert_eq!(back, parts);
+    }
+
+    #[test]
+    fn unknown_part_survives_verbatim_and_known_tags_win() {
+        // Round-trip the full object for unknown types without loss.
+        let raw = serde_json::json!({"type": "audio", "audio_url": "https://x/a.mp3"});
+        let part: ContentPart = serde_json::from_value(raw.clone()).expect("valid part");
+        assert_eq!(part, ContentPart::Unknown(raw.clone()));
+        assert_eq!(serde_json::to_value(&part).expect("serializable part"), raw);
+
+        // Known tags always take precedence over the Unknown fallback.
+        let known: ContentPart =
+            serde_json::from_value(serde_json::json!({"type": "text", "text": "hi"}))
+                .expect("valid part");
+        assert!(matches!(known, ContentPart::Text { .. }));
+    }
+
+    #[test]
+    fn unknown_finish_reason_survives_verbatim_and_known_values_win() {
+        let other: FinishReason = serde_json::from_str(r#""model_yawned""#).expect("valid reason");
+        assert_eq!(other, FinishReason::Other("model_yawned".to_owned()));
+        assert_eq!(
+            serde_json::to_string(&other).expect("serializable reason"),
+            r#""model_yawned""#
+        );
+
+        let known: FinishReason = serde_json::from_str(r#""stop""#).expect("valid reason");
+        assert_eq!(known, FinishReason::Stop);
+    }
+
+    #[test]
+    fn stop_sequence_slot_rides_the_choice() {
+        let choice = Choice {
+            index: 0,
+            message: Message::text(Role::Assistant, "…"),
+            finish_reason: Some(FinishReason::StopSequence),
+            stop_sequence: Some("\n\nHuman:".to_owned()),
+        };
+        let json = serde_json::to_value(&choice).expect("serializable choice");
+        assert_eq!(json["finish_reason"], serde_json::json!("stop_sequence"));
+        assert_eq!(json["stop_sequence"], serde_json::json!("\n\nHuman:"));
+
+        // Omit defaults from the wire so 0.2.x JSON remains forward-compatible.
+        let old: Choice = serde_json::from_value(
+            serde_json::json!({"index": 0, "message": {"role": "assistant"}}),
+        )
+        .expect("0.2.x choice parses");
+        assert_eq!(old.stop_sequence, None);
+    }
+
+    #[test]
+    fn tool_choice_is_typed_but_wire_shape_is_unchanged() {
+        // String form: preserve the same flattened top-level key and value used by 0.2.x extensions.
+        let request: ChatRequest =
+            serde_json::from_str(r#"{"model":"auto","messages":[],"tool_choice":"required"}"#)
+                .expect("valid request");
+        assert_eq!(request.tool_choice, Some(ToolChoice::Required));
+        assert!(!request.extensions.contains_key("tool_choice"));
+        let json = serde_json::to_value(&request).expect("serializable request");
+        assert_eq!(json["tool_choice"], serde_json::json!("required"));
+
+        // Preserve object form without reshaping or dropping provider-specific data.
+        let obj = serde_json::json!({"type": "function", "function": {"name": "f"}});
+        let request: ChatRequest = serde_json::from_value(serde_json::json!({
+            "model": "auto", "messages": [], "tool_choice": obj.clone(),
+        }))
+        .expect("valid request");
+        assert_eq!(request.tool_choice, Some(ToolChoice::Other(obj)));
     }
 
     #[test]

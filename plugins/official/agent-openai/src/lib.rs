@@ -15,7 +15,7 @@ wit_bindgen::generate!({
 });
 
 use exports::token_station::adapter::agent_adapter::{AdapterHealth, AdapterMetadata, Guest};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
@@ -119,7 +119,8 @@ impl Guest for OpenAiClient {
         }
     }
 
-    fn supported_agent_protocols() -> Vec<exports::token_station::adapter::agent_adapter::AgentProtocolCapability> {
+    fn supported_agent_protocols(
+    ) -> Vec<exports::token_station::adapter::agent_adapter::AgentProtocolCapability> {
         vec![
             exports::token_station::adapter::agent_adapter::AgentProtocolCapability {
                 protocol: "openai-chat-completions".to_owned(),
@@ -132,7 +133,9 @@ impl Guest for OpenAiClient {
         ]
     }
 
-    fn match_inbound(request_head: String) -> exports::token_station::adapter::agent_adapter::MatchResult {
+    fn match_inbound(
+        request_head: String,
+    ) -> exports::token_station::adapter::agent_adapter::MatchResult {
         // `{ method, path, headers }`; this adapter owns the OpenAI paths.
         let head: Value = serde_json::from_str(&request_head).unwrap_or(Value::Null);
         let path = head["path"].as_str().unwrap_or_default();
@@ -200,6 +203,9 @@ impl Guest for OpenAiClient {
             messages,
             tools,
             response_format: None,
+            tool_choice: body
+                .get("tool_choice")
+                .map(|v| serde_json::from_value(v.clone()).expect("ToolChoice accepts any value")),
             sampling: Sampling {
                 temperature: body["temperature"].as_f64(),
                 top_p: body["top_p"].as_f64(),
@@ -316,7 +322,22 @@ impl Guest for OpenAiClient {
                 "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{}}}}}\n\n",
                 usage.input_tokens, usage.output_tokens
             ),
-            StreamEvent::Done { finish_reason } => {
+            // 0.3.0: reasoning deltas ride the openai-compat
+            // `delta.reasoning_content` slot; the signature fragment has no
+            // openai wire slot and renders nothing.
+            StreamEvent::ThinkingDelta {
+                index,
+                thinking_delta,
+            } => format!(
+                "data: {{\"choices\":[{{\"index\":{index},\"delta\":{{\"reasoning_content\":{}}}}}]}}\n\n",
+                serde_json::to_string(thinking_delta).map_err(internal)?
+            ),
+            StreamEvent::ThinkingSignatureDelta { .. } => String::new(),
+            StreamEvent::Done {
+                finish_reason,
+                // openai chat SSE has no stop-sequence slot to render into.
+                stop_sequence: _,
+            } => {
                 let reason = match finish_reason {
                     Some(reason) => serde_json::to_string(reason).map_err(internal)?,
                     None => "null".to_owned(),
