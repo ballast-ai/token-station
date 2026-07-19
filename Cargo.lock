@@ -2562,7 +2562,7 @@ dependencies = [
 
 [[package]]
 name = "token-station-metrics"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2594,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "token-station-protocol"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2614,7 +2614,7 @@ dependencies = [
 
 [[package]]
 name = "token-station-router-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",

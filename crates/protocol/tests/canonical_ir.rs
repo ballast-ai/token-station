@@ -211,7 +211,8 @@ fn outbound_stream_expresses_a_fragmented_tool_call() {
     assert!(matches!(
         events.last(),
         Some(StreamEvent::Done {
-            finish_reason: Some(FinishReason::ToolCalls)
+            finish_reason: Some(FinishReason::ToolCalls),
+            stop_sequence: None,
         })
     ));
 }
