@@ -145,6 +145,10 @@ impl AgentAdapter for OpenAiClient {
             messages,
             tools,
             response_format: None,
+            // ToolChoice::Other(Value) lets from_value cover the full value domain.
+            tool_choice: body
+                .get("tool_choice")
+                .map(|v| serde_json::from_value(v.clone()).expect("ToolChoice accepts any value")),
             sampling: Sampling {
                 temperature: body["temperature"].as_f64(),
                 top_p: body["top_p"].as_f64(),
@@ -248,11 +252,27 @@ impl AgentAdapter for OpenAiClient {
                      [{{\"index\":{index},{identity}\"function\":{{{function}}}}}]}}}}]}}\n\n"
                 )
             }
+            // 0.3.0: reasoning deltas ride the openai-compat
+            // `delta.reasoning_content` slot; the signature fragment has no
+            // openai wire slot and renders nothing (adapters for wires that
+            // carry it — anthropic `signature_delta` — must emit it).
+            StreamEvent::ThinkingDelta {
+                index,
+                thinking_delta,
+            } => format!(
+                "data: {{\"choices\":[{{\"index\":{index},\"delta\":{{\"reasoning_content\":{}}}}}]}}\n\n",
+                serde_json::to_string(thinking_delta).map_err(internal)?
+            ),
+            StreamEvent::ThinkingSignatureDelta { .. } => String::new(),
             StreamEvent::Usage { usage } => format!(
                 "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{}}}}}\n\n",
                 usage.input_tokens, usage.output_tokens
             ),
-            StreamEvent::Done { finish_reason } => {
+            StreamEvent::Done {
+                finish_reason,
+                // openai chat SSE has no stop-sequence slot to render into.
+                stop_sequence: _,
+            } => {
                 let reason = match finish_reason {
                     Some(reason) => serde_json::to_string(reason).map_err(internal)?,
                     None => "null".to_owned(),

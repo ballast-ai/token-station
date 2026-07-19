@@ -41,9 +41,19 @@ pub enum StreamEvent {
     /// [`crate::Usage::absorb`]: field-wise, last-nonzero-wins, so a zero in
     /// a later report never erases an earlier nonzero bucket.
     Usage { usage: Usage },
+    /// Incremental reasoning text for the choice at `index` (Anthropic
+    /// `thinking_delta`; OpenAI-compatible `reasoning_content` deltas).
+    ThinkingDelta { index: u32, thinking_delta: String },
+    /// The signature fragment closing a thinking block (Anthropic
+    /// `signature_delta`). Arrives after the block's text deltas.
+    ThinkingSignatureDelta { index: u32, signature_delta: String },
     Done {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         finish_reason: Option<FinishReason>,
+        /// The stop sequence that fired (see [`crate::Choice::stop_sequence`];
+        /// Anthropic reports it alongside `stop_reason` in `message_delta`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_sequence: Option<String>,
     },
     /// A mid-stream failure. The host stops the exchange when it sees this; an
     /// adapter must not keep emitting events afterwards.
@@ -100,8 +110,25 @@ mod tests {
                     ..Usage::default()
                 },
             },
+            StreamEvent::ThinkingDelta {
+                index: 0,
+                thinking_delta: "hmm ".to_owned(),
+            },
+            StreamEvent::ThinkingSignatureDelta {
+                index: 0,
+                signature_delta: "EqQBCg".to_owned(),
+            },
             StreamEvent::Done {
                 finish_reason: Some(FinishReason::Stop),
+                stop_sequence: None,
+            },
+            StreamEvent::Done {
+                finish_reason: Some(FinishReason::StopSequence),
+                stop_sequence: Some("\n\nHuman:".to_owned()),
+            },
+            StreamEvent::Done {
+                finish_reason: Some(FinishReason::Other("weird_reason".to_owned())),
+                stop_sequence: None,
             },
             StreamEvent::Error {
                 error: ErrorEnvelope::new(ErrorCode::RateLimit, 429, "slow down"),
