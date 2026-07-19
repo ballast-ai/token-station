@@ -18,12 +18,12 @@ wit_bindgen::generate!({
 });
 
 use exports::token_station::adapter::provider_adapter::{AdapterHealth, AdapterMetadata, Guest};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
-    Auth, ChatRequest, ChatResponse, Choice, Content, ErrorCode, ErrorEnvelope, Extensions,
-    FinishReason, HttpMethod, HttpRequestDescriptor, HttpResponseParts, Message, ProviderConfig,
-    Role, SafeHeaders, StreamChunk, StreamEvent, ToolCall, Usage,
+    Auth, ChatRequest, ChatResponse, Choice, Content, ContentPart, ErrorCode, ErrorEnvelope,
+    Extensions, FinishReason, HttpMethod, HttpRequestDescriptor, HttpResponseParts, Message,
+    ProviderConfig, Role, SafeHeaders, StreamChunk, StreamEvent, ToolCall, Usage,
 };
 
 /// The unparsed tail of the stream this instance is holding.
@@ -38,8 +38,9 @@ struct OpenAiCompatible;
 
 /// The error channel carries a `protocol::ErrorEnvelope`, serialized.
 fn fail(envelope: &ErrorEnvelope) -> String {
-    serde_json::to_string(envelope)
-        .unwrap_or_else(|_| r#"{"code":"internal","http_status":500,"message":"unserializable error"}"#.to_owned())
+    serde_json::to_string(envelope).unwrap_or_else(|_| {
+        r#"{"code":"internal","http_status":500,"message":"unserializable error"}"#.to_owned()
+    })
 }
 
 fn internal(detail: impl std::fmt::Display) -> String {
@@ -66,7 +67,8 @@ fn finish_reason(raw: Option<&str>) -> Option<FinishReason> {
         "length" => Some(FinishReason::Length),
         "tool_calls" => Some(FinishReason::ToolCalls),
         "content_filter" => Some(FinishReason::ContentFilter),
-        _ => None,
+        // 0.3.0: unknown reasons survive verbatim instead of vanishing.
+        other => Some(FinishReason::Other(other.to_owned())),
     }
 }
 
@@ -132,6 +134,9 @@ fn body_of(request: &ChatRequest) -> Value {
     if !request.sampling.stop.is_empty() {
         body.insert("stop".to_owned(), json!(request.sampling.stop));
     }
+    if let Some(tool_choice) = &request.tool_choice {
+        body.insert("tool_choice".to_owned(), json!(tool_choice));
+    }
     if !request.tools.is_empty() {
         let tools: Vec<Value> = request
             .tools
@@ -161,6 +166,12 @@ fn events_of_frame(payload: &str) -> Result<Vec<StreamEvent>, String> {
         let index = index_of(&choice["index"]);
         let delta = &choice["delta"];
 
+        if let Some(thinking) = delta["reasoning_content"].as_str() {
+            events.push(StreamEvent::ThinkingDelta {
+                index,
+                thinking_delta: thinking.to_owned(),
+            });
+        }
         if let Some(text) = delta["content"].as_str() {
             events.push(StreamEvent::Delta {
                 index,
@@ -183,6 +194,7 @@ fn events_of_frame(payload: &str) -> Result<Vec<StreamEvent>, String> {
         if let Some(reason) = choice["finish_reason"].as_str() {
             events.push(StreamEvent::Done {
                 finish_reason: finish_reason(Some(reason)),
+                stop_sequence: None,
             });
         }
     }
@@ -265,11 +277,33 @@ impl Guest for OpenAiCompatible {
 
             choices.push(Choice {
                 index: index_of(&choice["index"]),
+                // openai chat wire has no stop-sequence report slot.
+                stop_sequence: None,
                 message: Message {
                     role: Role::Assistant,
-                    content: message["content"]
-                        .as_str()
-                        .map(|text| Content::Text(text.to_owned())),
+                    // 0.3.0: a reasoning report lifts content into parts form
+                    // with the thinking block first (mirrors anthropic block
+                    // order); plain responses keep the bare-string shape.
+                    content: match (
+                        message["reasoning_content"]
+                            .as_str()
+                            .filter(|s| !s.is_empty()),
+                        message["content"].as_str(),
+                    ) {
+                        (Some(thinking), text) => Some(Content::Parts({
+                            let mut parts = vec![ContentPart::Thinking {
+                                thinking: thinking.to_owned(),
+                                signature: None,
+                            }];
+                            if let Some(text) = text.filter(|t| !t.is_empty()) {
+                                parts.push(ContentPart::Text {
+                                    text: text.to_owned(),
+                                });
+                            }
+                            parts
+                        })),
+                        (None, text) => text.map(|t| Content::Text(t.to_owned())),
+                    },
                     tool_calls,
                     tool_call_id: None,
                     name: None,

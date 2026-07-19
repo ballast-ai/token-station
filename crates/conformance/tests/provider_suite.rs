@@ -186,6 +186,8 @@ impl ProviderAdapter for OpenAiCompatible {
 
             choices.push(Choice {
                 index: index_of(&choice["index"]),
+                // openai chat wire has no stop-sequence report slot.
+                stop_sequence: None,
                 message: Message {
                     role: Role::Assistant,
                     content: message["content"]
@@ -314,6 +316,7 @@ impl StreamParser for SseParser {
                 if let Some(reason) = choice["finish_reason"].as_str() {
                     events.push(StreamEvent::Done {
                         finish_reason: finish_reason(Some(reason)),
+                        stop_sequence: None,
                     });
                 }
             }
