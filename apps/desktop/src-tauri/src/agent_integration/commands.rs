@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
@@ -355,7 +356,18 @@ pub struct AgentCommandState {
     ownership: FileOwnershipStore,
     token_key: hmac::Key,
     session: Mutex<CommandSession>,
+    scan_in_progress: AtomicBool,
     clock: SystemClock,
+}
+
+struct ScanInFlightGuard<'a> {
+    flag: &'a AtomicBool,
+}
+
+impl Drop for ScanInFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
 }
 
 impl AgentCommandState {
@@ -381,11 +393,31 @@ impl AgentCommandState {
             ownership,
             token_key: hmac::Key::new(hmac::HMAC_SHA256, &process_key),
             session: Mutex::new(CommandSession::default()),
+            scan_in_progress: AtomicBool::new(false),
             clock: SystemClock,
         })
     }
 
+    fn registry_metadata(&self) -> Vec<AgentUiMetadata> {
+        self.registry.ui_metadata()
+    }
+
+    fn begin_scan(&self) -> Result<ScanInFlightGuard<'_>, AgentCommandError> {
+        self.scan_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                AgentCommandError::boundary(
+                    "scan_in_progress",
+                    "Agent 扫描正在进行，请等待当前扫描完成",
+                )
+            })?;
+        Ok(ScanInFlightGuard {
+            flag: &self.scan_in_progress,
+        })
+    }
+
     fn scan(&self) -> Result<Vec<AgentView>, AgentCommandError> {
+        let _scan_guard = self.begin_scan()?;
         let snapshot = self.perform_scan()?;
         let views = self.views(&snapshot)?;
         self.session
@@ -415,6 +447,7 @@ impl AgentCommandState {
     }
 
     fn refresh_scan(&self) -> Result<(), AgentCommandError> {
+        let _scan_guard = self.begin_scan()?;
         let snapshot = self.perform_scan()?;
         self.session
             .lock()
@@ -1145,13 +1178,18 @@ fn runtime_from_app(state: &AppStateManaged) -> Result<AgentProxyRuntime, AgentC
 }
 
 #[tauri::command]
+pub(crate) fn list_agent_registry(state: State<'_, AgentCommandState>) -> Vec<AgentUiMetadata> {
+    state.registry_metadata()
+}
+
+#[tauri::command(async)]
 pub(crate) fn scan_agents(
     state: State<'_, AgentCommandState>,
 ) -> Result<Vec<AgentView>, AgentCommandError> {
     state.scan()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn plan_agent_connection(
     state: State<'_, AgentCommandState>,
     app_state: State<'_, AppStateManaged>,
@@ -1160,10 +1198,11 @@ pub(crate) fn plan_agent_connection(
     installation_path: String,
 ) -> Result<ConfigPlanView, AgentCommandError> {
     let runtime = runtime_from_app(&app_state)?;
+    state.refresh_scan()?;
     state.plan_connection(&agent_id, &installation_path, window.label(), &runtime)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn apply_agent_plan(
     state: State<'_, AgentCommandState>,
     app_state: State<'_, AppStateManaged>,
@@ -1186,13 +1225,14 @@ pub(crate) fn apply_agent_plan(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn plan_agent_disconnect(
     state: State<'_, AgentCommandState>,
     window: WebviewWindow,
     agent_id: String,
     installation_path: String,
 ) -> Result<ConfigPlanView, AgentCommandError> {
+    state.refresh_scan()?;
     state.plan_disconnect(&agent_id, &installation_path, window.label())
 }
 
@@ -1204,16 +1244,17 @@ pub(crate) fn list_agent_snapshots(
     state.list_snapshots(&agent_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn plan_snapshot_restore(
     state: State<'_, AgentCommandState>,
     window: WebviewWindow,
     snapshot_id: String,
 ) -> Result<ConfigPlanView, AgentCommandError> {
+    state.refresh_scan()?;
     state.plan_restore(&snapshot_id, window.label())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn apply_snapshot_restore(
     state: State<'_, AgentCommandState>,
     window: WebviewWindow,
@@ -1455,6 +1496,9 @@ mod tests {
     #[test]
     fn commands_installation_path_is_only_an_exact_scan_lookup_key() {
         let state = state("lookup");
+        let registry_metadata = state.registry_metadata();
+        assert_eq!(registry_metadata.len(), 5);
+        assert_eq!(registry_metadata[0].agent_id, "claude-code");
         let target = scratch("lookup-target").join("settings.json");
         let registry = AgentRegistry::builtin().unwrap();
         let snapshot = ScanSnapshot {
@@ -1491,6 +1535,21 @@ mod tests {
         assert!(views.iter().all(|view| {
             view.status == CompatibilityStatus::NotDetected && view.installations.is_empty()
         }));
+    }
+
+    #[test]
+    fn commands_display_scan_is_single_flight() {
+        let state = state("single-flight");
+        state
+            .scan_in_progress
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let error = match state.scan() {
+            Ok(_) => panic!("a duplicate scan must fail closed"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, "scan_in_progress");
     }
 
     #[test]

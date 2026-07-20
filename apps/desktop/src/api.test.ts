@@ -10,6 +10,7 @@ import {
   getRouterTable,
   getState,
   getStats,
+  listAgentRegistry,
   listAgentSnapshots,
   planAgentConnection,
   planAgentDisconnect,
@@ -48,6 +49,11 @@ beforeEach(() => {
 });
 
 describe("structured Agent IPC", () => {
+  it("lists Registry metadata without triggering discovery arguments", async () => {
+    await listAgentRegistry();
+    expect(invokeMock).toHaveBeenCalledWith("list_agent_registry");
+  });
+
   it("scans without renderer-controlled arguments", async () => {
     await scanAgents();
     expect(invokeMock).toHaveBeenCalledWith("scan_agents");

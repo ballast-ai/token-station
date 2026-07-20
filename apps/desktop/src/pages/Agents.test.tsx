@@ -3,7 +3,9 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  AgentPlanIntent,
   AgentStatus,
+  AgentUiMetadataView,
   AgentView,
   ConfigPlanView,
   SnapshotView,
@@ -138,14 +140,19 @@ const snapshot: SnapshotView = {
 let scans: AgentView[];
 let planned: ConfigPlanView;
 let snapshotRows: SnapshotView[];
+const rescanMock = vi.fn<() => void>();
+const operationAppliedMock = vi.fn<
+  (intent: AgentPlanIntent, agentId: string, installationPath: string) => void
+>();
 
 beforeEach(() => {
   scans = fiveAgents();
   planned = plan("connect");
   snapshotRows = [snapshot];
+  rescanMock.mockReset();
+  operationAppliedMock.mockReset();
   invokeMock.mockReset();
   invokeMock.mockImplementation(async (command) => {
-    if (command === "scan_agents") return scans;
     if (command === "plan_agent_connection" || command === "plan_agent_disconnect") return planned;
     if (command === "list_agent_snapshots") return snapshotRows;
     if (command === "plan_snapshot_restore") return planned;
@@ -166,7 +173,18 @@ beforeEach(() => {
 });
 
 async function renderReady(serveRunning = true) {
-  const result = render(<Agents serveRunning={serveRunning} />);
+  const result = render(
+    <Agents
+      serveRunning={serveRunning}
+      registry={fiveAgents().map((item) => item.metadata)}
+      agents={scans}
+      scanPhase="ready"
+      scanError=""
+      lastScanAtMs={1}
+      onRescan={rescanMock}
+      onOperationApplied={operationAppliedMock}
+    />,
+  );
   await screen.findByText("Claude Code");
   return result;
 }
@@ -220,20 +238,41 @@ describe("Agents page", () => {
     }
   });
 
-  it("shows loading, empty and scan error states without affecting the rest of the app", async () => {
-    let resolveScan!: (value: AgentView[]) => void;
-    invokeMock.mockImplementationOnce(
-      () => new Promise<AgentView[]>((resolve) => { resolveScan = resolve; }),
+  it("shows Registry rows while scanning and preserves cached rows on scan failure", async () => {
+    const registry: AgentUiMetadataView[] = fiveAgents().map((item) => item.metadata);
+    const { rerender } = render(
+      <Agents
+        serveRunning
+        registry={registry}
+        agents={[]}
+        scanPhase="scanning"
+        scanError=""
+        lastScanAtMs={null}
+        onRescan={rescanMock}
+        onOperationApplied={operationAppliedMock}
+      />,
     );
-    const { unmount } = render(<Agents serveRunning />);
-    expect(screen.getByText("正在只读扫描本机 Agent…")).toBeInTheDocument();
-    resolveScan([]);
-    await screen.findByText("Registry 没有可展示的 Agent。");
-    unmount();
+    expect(screen.getByText("后台扫描中")).toBeInTheDocument();
+    expect(screen.getByText("Claude Code")).toBeInTheDocument();
+    expect(screen.getAllByText("等待扫描").length).toBeGreaterThan(0);
 
-    invokeMock.mockRejectedValueOnce({ message: "扫描失败", code: "scan_failed" });
-    render(<Agents serveRunning />);
-    await screen.findByText(/扫描失败.*scan_failed/);
+    rerender(
+      <Agents
+        serveRunning
+        registry={registry}
+        agents={scans}
+        scanPhase="error"
+        scanError="扫描失败 · code=scan_failed"
+        lastScanAtMs={1}
+        onRescan={rescanMock}
+        onOperationApplied={operationAppliedMock}
+      />,
+    );
+    expect(screen.getByText(/扫描失败.*scan_failed/)).toBeInTheDocument();
+    expect(screen.getByText("Claude Code")).toBeInTheDocument();
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "重新扫描" }));
+    expect(rescanMock).toHaveBeenCalledTimes(1);
   });
 
   it("requires an exact multi-install selection before requesting a plan", async () => {
@@ -281,7 +320,12 @@ describe("Agents page", () => {
     await confirmEveryCheckbox(user);
     await user.click(screen.getByRole("button", { name: "确认并接入" }));
     await screen.findByText("Agent 已接入");
-    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents").length).toBeGreaterThan(1);
+    expect(operationAppliedMock).toHaveBeenCalledWith(
+      "connect" satisfies AgentPlanIntent,
+      "claude-code",
+      "/opt/claude-code",
+    );
+    expect(invokeMock.mock.calls.some(([command]) => command === "scan_agents")).toBe(false);
   });
 
   it("puts disconnect and snapshot restore behind the same second-confirmation boundary", async () => {

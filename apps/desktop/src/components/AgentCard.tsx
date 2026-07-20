@@ -23,6 +23,7 @@ interface AgentCardProps {
   agent: AgentView;
   selectedPath: string;
   expanded: boolean;
+  scanCompleted: boolean;
   busy: boolean;
   serveRunning: boolean;
   onToggle: () => void;
@@ -36,6 +37,7 @@ export default function AgentCard({
   agent,
   selectedPath,
   expanded,
+  scanCompleted,
   busy,
   serveRunning,
   onToggle,
@@ -50,8 +52,11 @@ export default function AgentCard({
   const status = selected?.connected
     ? "CONNECTED"
     : selected?.compatibility.status ?? agent.status;
-  const statusCopy = STATUS_COPY[status];
+  const statusCopy = scanCompleted
+    ? STATUS_COPY[status]
+    : { label: "等待扫描", tone: "quiet" };
   const canConnect =
+    scanCompleted &&
     !!selected &&
     !selected.connected &&
     agent.metadata.admission === "supported" &&
@@ -60,19 +65,24 @@ export default function AgentCard({
     );
   const version = selected?.discovery.version_normalized ?? selected?.discovery.version_raw;
   const reason =
-    selected?.compatibility.message ??
-    (agent.installations.length === 0
-      ? "本机未找到可运行入口。Token Station 不会自动安装或升级它。"
-      : "请选择一个安装实例后继续。");
-  const source = selected
-    ? selected.discovery.is_path_default
-      ? "PATH 默认"
-      : "已发现路径"
-    : agent.installations.length > 1
-      ? `检测到 ${agent.installations.length} 个`
-      : "未检测到";
-  const versionSummary =
-    version ?? (agent.installations.length > 1 ? "请选择安装实例" : "—");
+    !scanCompleted
+      ? "本次会话尚未完成首次扫描。"
+      : selected?.compatibility.message ??
+        (agent.installations.length === 0
+          ? "本机未找到可运行入口。Token Station 不会自动安装或升级它。"
+          : "请选择一个安装实例后继续。");
+  const source = !scanCompleted
+    ? "等待扫描"
+    : selected
+      ? selected.discovery.is_path_default
+        ? "PATH 默认"
+        : "已发现路径"
+      : agent.installations.length > 1
+        ? `检测到 ${agent.installations.length} 个`
+        : "未检测到";
+  const versionSummary = !scanCompleted
+    ? "—"
+    : version ?? (agent.installations.length > 1 ? "请选择安装实例" : "—");
   const detailsId = `agent-details-${agent.metadata.agent_id}`;
 
   return (
@@ -156,7 +166,7 @@ export default function AgentCard({
               </div>
               <div>
                 <dt>目录序列</dt>
-                <dd>seq {agent.catalog_sequence}</dd>
+                <dd>{scanCompleted ? `seq ${agent.catalog_sequence}` : "—"}</dd>
               </div>
               <div>
                 <dt>连接状态</dt>

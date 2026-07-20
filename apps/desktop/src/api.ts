@@ -270,6 +270,9 @@ export const saveConfig = () => invoke<StateView>("save_config");
 export const serveStart = () => invoke<StateView>("serve_start");
 export const serveStop = () => invoke<StateView>("serve_stop");
 
+export const listAgentRegistry = () =>
+  invoke<AgentUiMetadataView[]>("list_agent_registry");
+
 export const scanAgents = () => invoke<AgentView[]>("scan_agents");
 
 export const planAgentConnection = (agentId: AgentId, installationPath: string) =>
