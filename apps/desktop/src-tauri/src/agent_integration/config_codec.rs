@@ -8,7 +8,7 @@ use serde::de::{Error as DeError, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use toml_edit::{value as toml_value, Document, Item, Table};
-use yaml_edit::{path::YamlPath, Document as YamlEditDocument};
+use yaml_edit::Document as YamlEditDocument;
 
 use super::types::{ConfigPath, PatchKind, PatchOperation};
 
@@ -25,8 +25,7 @@ pub struct Json5Document {
 }
 
 pub struct LosslessYamlDocument {
-    document: YamlEditDocument,
-    leading: String,
+    rendered: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,9 +47,7 @@ pub fn parse_source_bytes(
             DocumentFormat::Json5 => empty_json5_document(),
             DocumentFormat::Toml => ConfigDocument::Toml(Box::new(Document::new())),
             DocumentFormat::Yaml => ConfigDocument::Yaml(LosslessYamlDocument {
-                document: YamlEditDocument::from_str("{}\n")
-                    .expect("static empty YAML mapping must parse"),
-                leading: String::new(),
+                rendered: "{}\n".to_string(),
             }),
         }),
         Some(bytes) => {
@@ -115,8 +112,7 @@ pub fn project_owned_paths(
             Ok(())
         }
         (ConfigDocument::Yaml(current), ConfigDocument::Yaml(baseline)) => {
-            let baseline_semantic =
-                strict_yaml_semantic(&baseline.document.to_string(), "YAML 基线")?;
+            let baseline_semantic = strict_yaml_semantic(&baseline.rendered, "YAML 基线")?;
             for path in owned_paths {
                 let value = json_value_at(&baseline_semantic, path).cloned();
                 let operation = PatchOperation {
@@ -508,8 +504,7 @@ fn apply_yaml_operation(
     operation: &PatchOperation,
 ) -> Result<(), String> {
     split_path(&operation.path)?;
-    let yaml_path = operation.path.segments.join(".");
-    let semantic = strict_yaml_semantic(&document.document.to_string(), "YAML patch")?;
+    let semantic = strict_yaml_semantic(&document.rendered, "YAML patch")?;
     match operation.operation {
         PatchKind::Add | PatchKind::Replace => {
             let value = operation
@@ -517,42 +512,34 @@ fn apply_yaml_operation(
                 .as_ref()
                 .ok_or_else(|| format!("配置路径 '{}' 缺少写入值", operation.path))?;
             if json_value_at(&semantic, &operation.path).is_none() {
-                let rendered = insert_missing_yaml_scalar(
-                    &document.document.to_string(),
-                    &operation.path,
-                    value,
-                )?;
-                strict_yaml_semantic(&rendered, "YAML patch")?;
-                let updated = YamlEditDocument::from_str(&rendered)
-                    .map_err(|_| "写入前复验 YAML patch YAML CST 解析失败".to_string())?;
-                if updated.as_mapping().is_none() {
-                    return Err("写入前复验 YAML patch 顶层不是对象".to_string());
-                }
-                document.document = updated;
+                let rendered =
+                    insert_missing_yaml_scalar(&document.rendered, &operation.path, value)?;
+                validate_yaml_rendered(&rendered, "YAML patch")?;
+                document.rendered = rendered;
                 return Ok(());
             }
-            match value {
-                Value::String(value) => document.document.set_path(&yaml_path, value.clone()),
-                Value::Bool(value) => document.document.set_path(&yaml_path, *value),
-                Value::Number(value) if value.is_i64() => document
-                    .document
-                    .set_path(&yaml_path, value.as_i64().expect("checked i64")),
-                _ => {
-                    return Err(format!("配置路径 '{}' 只允许 YAML 标量", operation.path));
-                }
-            }
+            let rendered =
+                replace_existing_yaml_scalar(&document.rendered, &operation.path, value)?;
+            validate_yaml_rendered(&rendered, "YAML patch")?;
+            document.rendered = rendered;
+            return Ok(());
         }
         PatchKind::Remove => {
-            document.document.remove_path(&yaml_path);
+            if json_value_at(&semantic, &operation.path).is_some() {
+                let rendered = remove_existing_yaml_scalar(&document.rendered, &operation.path)?;
+                validate_yaml_rendered(&rendered, "YAML patch")?;
+                document.rendered = rendered;
+            }
+            return Ok(());
         }
         PatchKind::Test => {
-            let semantic = strict_yaml_semantic(&document.document.to_string(), "YAML test")?;
+            let semantic = strict_yaml_semantic(&document.rendered, "YAML test")?;
             if json_value_at(&semantic, &operation.path) != operation.value.as_ref() {
                 return Err(format!("配置路径 '{}' 的前置值已变化", operation.path));
             }
         }
     }
-    strict_yaml_semantic(&document.document.to_string(), "YAML patch")?;
+    strict_yaml_semantic(&document.rendered, "YAML patch")?;
     Ok(())
 }
 
@@ -628,12 +615,212 @@ fn is_plain_yaml_key(key: &str) -> bool {
 }
 
 fn yaml_scalar(value: &Value, path: &ConfigPath) -> Result<String, String> {
-    match value {
-        Value::String(_) | Value::Bool(_) => serde_json::to_string(value)
-            .map_err(|_| format!("配置路径 '{}' 的 YAML 标量序列化失败", path)),
-        Value::Number(value) if value.is_i64() => Ok(value.to_string()),
-        _ => Err(format!("配置路径 '{}' 只允许 YAML 标量", path)),
+    if !matches!(value, Value::Null | Value::String(_) | Value::Bool(_)) && value.as_i64().is_none()
+    {
+        return Err(format!("配置路径 '{}' 只允许 YAML 标量", path));
     }
+    let rendered = serde_norway::to_string(value)
+        .map_err(|_| format!("配置路径 '{}' 的 YAML 标量序列化失败", path))?;
+    let scalar = rendered.strip_suffix('\n').unwrap_or(&rendered);
+    if scalar.contains(['\r', '\n']) {
+        return Err(format!("配置路径 '{}' 只允许单行 YAML 标量", path));
+    }
+    Ok(scalar.to_string())
+}
+
+fn replace_existing_yaml_scalar(
+    rendered: &str,
+    path: &ConfigPath,
+    value: &Value,
+) -> Result<String, String> {
+    let [root, child] = path.segments.as_slice() else {
+        return Err(format!(
+            "配置路径 '{}' 暂不支持安全地替换 YAML 嵌套字段",
+            path
+        ));
+    };
+    if !is_plain_yaml_key(root) || !is_plain_yaml_key(child) {
+        return Err(format!("配置路径 '{}' 包含不安全的 YAML 键", path));
+    }
+    let scalar = yaml_scalar(value, path)?;
+    let root_prefix = format!("{root}:");
+    let child_prefix = format!("{child}:");
+    let mut inside_root = false;
+    let mut direct_indent = None;
+    let mut replacement = None;
+
+    for (offset, line) in rendered.split_inclusive('\n').scan(0usize, |cursor, line| {
+        let offset = *cursor;
+        *cursor += line.len();
+        Some((offset, line))
+    }) {
+        let without_newline = line.trim_end_matches(['\r', '\n']);
+        let trimmed = without_newline.trim_start_matches(' ');
+        let indent = without_newline.len() - trimmed.len();
+
+        if !inside_root {
+            if indent == 0 {
+                if let Some(rest) = trimmed.strip_prefix(&root_prefix) {
+                    let suffix = rest.trim();
+                    if !suffix.is_empty() && !suffix.starts_with('#') {
+                        return Err(format!("配置路径 '{}' 的父级必须使用 YAML 块映射", path));
+                    }
+                    inside_root = true;
+                }
+            }
+            continue;
+        }
+
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if indent == 0 {
+            break;
+        }
+        let expected_indent = *direct_indent.get_or_insert(indent);
+        if indent != expected_indent {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix(&child_prefix) else {
+            continue;
+        };
+        if !rest.is_empty() && !rest.starts_with([' ', '\t']) {
+            continue;
+        }
+        let value_start = offset + indent + child_prefix.len();
+        let comment = yaml_inline_comment_start(rest);
+        let value_end = comment.map_or(offset + without_newline.len(), |index| value_start + index);
+        let existing = &rendered[value_start..value_end];
+        if matches!(existing.trim_start().chars().next(), Some('|' | '>')) {
+            return Err(format!("配置路径 '{}' 不能替换 YAML 块标量", path));
+        }
+        let replacement_text = if comment.is_some() {
+            format!(" {scalar} ")
+        } else {
+            format!(" {scalar}")
+        };
+        replacement = Some((value_start, value_end, replacement_text));
+        break;
+    }
+
+    let Some((start, end, replacement_text)) = replacement else {
+        return Err(format!("配置路径 '{}' 不是可安全替换的 YAML 块字段", path));
+    };
+    let mut updated = rendered.to_string();
+    updated.replace_range(start..end, &replacement_text);
+    Ok(updated)
+}
+
+fn yaml_inline_comment_start(value_and_comment: &str) -> Option<usize> {
+    let mut single_quoted = false;
+    let mut double_quoted = false;
+    let mut escaped = false;
+    let mut previous_whitespace = true;
+    let mut characters = value_and_comment.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        if double_quoted {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                double_quoted = false;
+            }
+            continue;
+        }
+        if single_quoted {
+            if character == '\'' {
+                if characters.peek().is_some_and(|(_, next)| *next == '\'') {
+                    characters.next();
+                } else {
+                    single_quoted = false;
+                }
+            }
+            continue;
+        }
+        match character {
+            '"' => double_quoted = true,
+            '\'' => single_quoted = true,
+            '#' if previous_whitespace => return Some(index),
+            _ => {}
+        }
+        previous_whitespace = character.is_whitespace();
+    }
+    None
+}
+
+fn remove_existing_yaml_scalar(rendered: &str, path: &ConfigPath) -> Result<String, String> {
+    let [root, child] = path.segments.as_slice() else {
+        return Err(format!(
+            "配置路径 '{}' 暂不支持安全地移除 YAML 嵌套字段",
+            path
+        ));
+    };
+    if !is_plain_yaml_key(root) || !is_plain_yaml_key(child) {
+        return Err(format!("配置路径 '{}' 包含不安全的 YAML 键", path));
+    }
+    let root_prefix = format!("{root}:");
+    let child_prefix = format!("{child}:");
+    let mut inside_root = false;
+    let mut direct_indent = None;
+    let mut removal = None;
+
+    for (offset, line) in rendered.split_inclusive('\n').scan(0usize, |cursor, line| {
+        let offset = *cursor;
+        *cursor += line.len();
+        Some((offset, line))
+    }) {
+        let without_newline = line.trim_end_matches(['\r', '\n']);
+        let trimmed = without_newline.trim_start_matches(' ');
+        let indent = without_newline.len() - trimmed.len();
+        if !inside_root {
+            if indent == 0 && trimmed.starts_with(&root_prefix) {
+                inside_root = true;
+            }
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if indent == 0 {
+            break;
+        }
+        let expected_indent = *direct_indent.get_or_insert(indent);
+        if indent != expected_indent {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix(&child_prefix) else {
+            continue;
+        };
+        if !rest.is_empty() && !rest.starts_with([' ', '\t']) {
+            continue;
+        }
+        if matches!(rest.trim_start().chars().next(), Some('|' | '>')) {
+            return Err(format!("配置路径 '{}' 不能移除 YAML 块标量", path));
+        }
+        removal = Some((offset, offset + line.len()));
+        break;
+    }
+
+    let Some((start, end)) = removal else {
+        return Err(format!("配置路径 '{}' 不是可安全移除的 YAML 块字段", path));
+    };
+    let mut updated = rendered.to_string();
+    updated.replace_range(start..end, "");
+    Ok(updated)
+}
+
+fn validate_yaml_rendered(rendered: &str, label: &str) -> Result<(), String> {
+    let semantic = strict_yaml_semantic(rendered, label)?;
+    if !semantic.is_object() {
+        return Err(format!("写入前复验 {label} 顶层不是对象"));
+    }
+    let document = YamlEditDocument::from_str(rendered)
+        .map_err(|_| format!("写入前复验 {label} YAML CST 解析失败"))?;
+    if document.as_mapping().is_none() {
+        return Err(format!("写入前复验 {label} 顶层不是对象"));
+    }
+    Ok(())
 }
 
 struct StrictYamlValue(Value);
@@ -790,7 +977,7 @@ pub fn render_document(document: &ConfigDocument, label: &str) -> Result<String,
             |context| format!("{}{}{}", context.wsc.0, document.value, context.wsc.1),
         )),
         ConfigDocument::Toml(document) => Ok(document.to_string()),
-        ConfigDocument::Yaml(document) => Ok(format!("{}{}", document.leading, document.document)),
+        ConfigDocument::Yaml(document) => Ok(document.rendered.clone()),
     }
 }
 
@@ -805,7 +992,7 @@ pub fn semantic_json(document: &ConfigDocument) -> Result<Value, String> {
             serde_json::to_value(value).map_err(|_| "TOML 语义转换失败".to_string())
         }
         ConfigDocument::Yaml(document) => {
-            strict_yaml_semantic(&document.document.to_string(), "YAML semantic projection")
+            strict_yaml_semantic(&document.rendered, "YAML semantic projection")
         }
     }
 }
@@ -862,30 +1049,12 @@ pub fn parse_rendered(
             if !semantic.is_object() {
                 return Err(format!("写入前复验 {label} 顶层不是对象"));
             }
-            let document = YamlEditDocument::from_str(rendered)
-                .map_err(|_| format!("写入前复验 {label} YAML CST 解析失败"))?;
-            if document.as_mapping().is_none() {
-                return Err(format!("写入前复验 {label} 顶层不是对象"));
-            }
+            validate_yaml_rendered(rendered, label)?;
             Ok(ConfigDocument::Yaml(LosslessYamlDocument {
-                document,
-                leading: yaml_leading_block(rendered),
+                rendered: rendered.to_string(),
             }))
         }
     }
-}
-
-fn yaml_leading_block(rendered: &str) -> String {
-    let mut leading = String::new();
-    for line in rendered.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        if trimmed.trim().is_empty() || trimmed.starts_with('#') {
-            leading.push_str(line);
-        } else {
-            break;
-        }
-    }
-    leading
 }
 
 fn validate_json5_value(value: &JSONValue) -> Result<(), String> {
