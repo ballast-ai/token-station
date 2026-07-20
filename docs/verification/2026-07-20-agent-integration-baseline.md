@@ -27,12 +27,11 @@
 ## 2. 仓库实施起点
 
 - 仓库：`/Users/liuwenhao/Desktop/公司/token-station`
-- 分支：`feat/claude-code-anthropic-adapter`
-- 实施起点提交：`b0c96a846d6db712c98248947cb3354c4bb7d157`
-- 起点提交说明：`docs: mark interface research approved`
-- `origin/HEAD`：`origin/main`
-- 与 `origin/main` 的共同祖先：`b0203217d2385ca6debb5e7783b433525ea493e5`
-- 相对 `origin/main`：落后 0、领先 52 个提交
+- 分支：`develop`
+- 实施起点提交：`69eb9f65571147ff878d0c97b9aeb52d30d7ab32`
+- 起点提交说明：`Merge pull request #33 from GlimpseEngine/codex/agent-api-research`
+- 上游分支：`origin/develop`
+- 相对 `origin/develop`：落后 0、领先 0 个提交
 
 本基线固定完整提交 SHA，不使用可能漂移的分支名或短 SHA。
 

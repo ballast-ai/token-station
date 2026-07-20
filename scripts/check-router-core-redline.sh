@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly FROZEN_BASE='b0c96a846d6db712c98248947cb3354c4bb7d157'
+readonly FROZEN_BASE='69eb9f65571147ff878d0c97b9aeb52d30d7ab32'
 readonly PROTECTED_PATH='crates/router-core/'
 readonly ZERO_SHA='0000000000000000000000000000000000000000'
 
