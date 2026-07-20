@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   addProvider,
@@ -12,6 +13,7 @@ import {
   getStats,
   listAgentRegistry,
   listAgentSnapshots,
+  listenServeState,
   planAgentConnection,
   planAgentDisconnect,
   planSnapshotRestore,
@@ -29,8 +31,12 @@ import {
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(),
+}));
 
 const invokeMock = vi.mocked(invoke);
+const listenMock = vi.mocked(listen);
 const forbiddenKeys = new Set([
   "patch",
   "patches",
@@ -46,6 +52,8 @@ const forbiddenKeys = new Set([
 beforeEach(() => {
   invokeMock.mockReset();
   invokeMock.mockResolvedValue(undefined);
+  listenMock.mockReset();
+  listenMock.mockResolvedValue(vi.fn());
 });
 
 describe("structured Agent IPC", () => {
@@ -118,6 +126,12 @@ describe("structured Agent IPC", () => {
 });
 
 describe("desktop API mapping and read-only HTTP data plane", () => {
+  it("subscribes to the stable proxy lifecycle event", async () => {
+    const handler = vi.fn();
+    await listenServeState(handler);
+    expect(listenMock).toHaveBeenCalledWith("serve-state-changed", expect.any(Function));
+  });
+
   it.each([
     ["get state", () => getState(), "get_state", undefined],
     ["add provider", () => addProvider("p", "https://p/v1", ["m"], "k"), "add_provider", { name: "p", baseUrl: "https://p/v1", models: ["m"], apiKey: "k" }],
@@ -146,7 +160,7 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
           : { dir: "/plugins", agent: "a", dialects: [], listing: "" };
       return new Response(JSON.stringify(body), { status: 200 });
     });
-    setAdminEndpoint({ running: true, listen: "127.0.0.1:9999", virtual_key: "virtual" });
+    setAdminEndpoint({ phase: "running", running: true, listen: "127.0.0.1:9999", virtual_key: "virtual", error: null });
 
     await getStats("24h", "model");
     await getRouterTable();
@@ -160,10 +174,13 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
 
   it("fails clearly in browser mode when HTTP is unavailable or stopped", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
-    setAdminEndpoint({ running: true, listen: "127.0.0.1:9999", virtual_key: null });
+    setAdminEndpoint({ phase: "running", running: true, listen: "127.0.0.1:9999", virtual_key: null, error: null });
     await expect(getStats("all", null)).rejects.toThrow("无法连接本地代理");
 
-    setAdminEndpoint({ running: false, listen: "127.0.0.1:9999", virtual_key: null });
+    setAdminEndpoint({ phase: "stopped", running: false, listen: "127.0.0.1:9999", virtual_key: null, error: null });
     await expect(getRouterTable()).rejects.toThrow("无法连接本地代理");
+
+    setAdminEndpoint({ phase: "starting", running: true, listen: "127.0.0.1:9999", virtual_key: "stale", error: null });
+    await expect(getPlugins()).rejects.toThrow("无法连接本地代理");
   });
 });

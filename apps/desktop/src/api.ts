@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export interface TierView {
   upstream: string | null;
@@ -20,10 +21,14 @@ export interface ModelDiscoveryView {
   warning: string | null;
 }
 
+export type ServePhase = "stopped" | "starting" | "stopping" | "running" | "error";
+
 export interface ServeView {
+  phase: ServePhase;
   running: boolean;
   listen: string;
   virtual_key: string | null;
+  error: string | null;
 }
 
 export type TierSlot = "high" | "mid" | "low";
@@ -270,6 +275,9 @@ export const saveConfig = () => invoke<StateView>("save_config");
 export const serveStart = () => invoke<StateView>("serve_start");
 export const serveStop = () => invoke<StateView>("serve_stop");
 
+export const listenServeState = (handler: (serve: ServeView) => void) =>
+  listen<ServeView>("serve-state-changed", (event) => handler(event.payload));
+
 export const listAgentRegistry = () =>
   invoke<AgentUiMetadataView[]>("list_agent_registry");
 
@@ -312,8 +320,8 @@ let adminKey: string | null = null;
 
 /** Synchronize the data-plane endpoint whenever App.tsx refreshes state. */
 export function setAdminEndpoint(serve: ServeView) {
-  adminBase = serve.running ? `http://${serve.listen}` : null;
-  adminKey = serve.virtual_key;
+  adminBase = serve.phase === "running" ? `http://${serve.listen}` : null;
+  adminKey = serve.phase === "running" ? serve.virtual_key : null;
 }
 
 // Browser-only mode without a Tauri shell cannot call get_state. Read the endpoint from localStorage,

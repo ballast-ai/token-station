@@ -3,6 +3,7 @@ import {
   AgentPlanIntent,
   AgentUiMetadataView,
   AgentView,
+  ServeView,
   StateView,
   TierSlot,
   getState,
@@ -14,6 +15,7 @@ import {
   serveStop,
   discoverProviderModels,
   listAgentRegistry,
+  listenServeState,
   ModelDiscoveryView,
   scanAgents,
   setAdminEndpoint,
@@ -69,7 +71,9 @@ function App() {
   const [err, setErr] = useState<string>("");
   const [tab, setTab] = useState<Tab>("home");
   const [busy, setBusy] = useState(false);
+  const [serveCommandBusy, setServeCommandBusy] = useState(false);
   const busyRef = useRef(false);
+  const pendingServeRef = useRef<ServeView | null>(null);
   const [agentRegistry, setAgentRegistry] = useState<AgentUiMetadataView[]>([]);
   const [agentScan, setAgentScan] = useState<AgentScanState>({
     phase: "idle",
@@ -134,7 +138,44 @@ function App() {
   }, []);
 
   useEffect(() => {
-    refresh();
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const loadAfterListener = async () => {
+      pendingServeRef.current = null;
+      try {
+        const next = await getState();
+        if (disposed) return;
+        const pendingServe = pendingServeRef.current;
+        setState(pendingServe ? { ...next, serve: pendingServe } : next);
+      } catch (caught) {
+        if (!disposed) setErr(String(caught));
+      }
+    };
+
+    void listenServeState((serve) => {
+      pendingServeRef.current = serve;
+      if (!disposed) {
+        setState((current) => (current ? { ...current, serve } : current));
+      }
+    })
+      .then((stopListening) => {
+        if (disposed) stopListening();
+        else {
+          unlisten = stopListening;
+          void loadAfterListener();
+        }
+      })
+      .catch((caught) => {
+        if (!disposed) {
+          setErr(`代理状态监听失败：${String(caught)}`);
+          void loadAfterListener();
+        }
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
   useEffect(() => {
     void listAgentRegistry()
@@ -169,6 +210,20 @@ function App() {
     } finally {
       busyRef.current = false;
       setBusy(false);
+    }
+  };
+
+  const runServeCommand = async (command: () => Promise<StateView>) => {
+    if (serveCommandBusy) return;
+    setServeCommandBusy(true);
+    setErr("");
+    setMsg("");
+    try {
+      setState(await command());
+    } catch (caught) {
+      setErr(String(caught));
+    } finally {
+      setServeCommandBusy(false);
     }
   };
 
@@ -289,6 +344,16 @@ function App() {
   }
 
   const { providers, tiers, serve, config_error } = state;
+  const serveStatus =
+    serve.phase === "running"
+      ? `运行中 · ${serve.listen}`
+      : serve.phase === "starting"
+        ? "正在启动"
+        : serve.phase === "stopping"
+          ? "正在停止"
+          : serve.phase === "error"
+            ? "启动失败"
+            : "已停止";
 
   const onTierProvider = (slot: TierSlot, upstream: string) => {
     if (!upstream) return run(() => setTier(slot, null, null));
@@ -339,15 +404,23 @@ function App() {
         <div className="brand">token-station</div>
         <div className={`serve-pill ${serve.running ? "on" : "off"}`}>
           <span className="dot" />
-          {serve.running ? `运行中 · ${serve.listen}` : "已停止"}
+          {serveStatus}
         </div>
-        {serve.running ? (
-          <button className="btn" disabled={busy} onClick={() => run(() => serveStop())}>
+        {serve.phase === "running" ? (
+          <button className="btn" disabled={busy || serveCommandBusy} onClick={() => runServeCommand(serveStop)}>
             停止
           </button>
+        ) : serve.phase === "starting" ? (
+          <button className="btn" disabled={serveCommandBusy} onClick={() => runServeCommand(serveStop)}>
+            取消启动
+          </button>
+        ) : serve.phase === "stopping" ? (
+          <button className="btn" disabled>
+            正在停止
+          </button>
         ) : (
-          <button className="btn primary" disabled={busy} onClick={() => run(() => serveStart())}>
-            启动代理
+          <button className="btn primary" disabled={busy || serveCommandBusy} onClick={() => runServeCommand(serveStart)}>
+            {serve.phase === "error" ? "重试启动" : "启动代理"}
           </button>
         )}
       </header>
@@ -364,6 +437,7 @@ function App() {
 
       {msg && <div className="banner ok">{msg}</div>}
       {err && <div className="banner err">{err}</div>}
+      {serve.phase === "error" && serve.error && <div className="banner err">{serve.error}</div>}
 
       <nav className="tabs">
         {TABS.map((t) => (

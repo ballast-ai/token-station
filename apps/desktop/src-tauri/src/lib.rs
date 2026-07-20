@@ -11,21 +11,18 @@
 
 pub mod agent_integration;
 mod model_catalog;
+mod serve_lifecycle;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 use token_station_cli::config::{ClientConfig, PluginsConfig};
-use token_station_cli::filelog::{FileLog, Recorders};
-use token_station_cli::gateway::Gateway;
 use token_station_cli::plugins::{PluginRegistry, Receipts};
-use token_station_cli::store::SqliteStore;
-use token_station_cli::{secrets, server, stats, upgrade, virtual_key};
-use token_station_metrics::Recorder;
+use token_station_cli::{secrets, stats, upgrade};
 
 use agent_integration::commands::{
     apply_agent_plan, apply_snapshot_restore, list_agent_registry, list_agent_snapshots,
@@ -33,6 +30,7 @@ use agent_integration::commands::{
     AgentCommandState,
 };
 use model_catalog::ModelDiscoveryView;
+use serve_lifecycle::{prepare_server, PreparedServer, RunningServer, StartFailure};
 
 /// Pool names for the three tier slots shown as the panel's high, middle, and low rows.
 const TIER_HIGH: &str = "tier_high";
@@ -48,11 +46,45 @@ const CUT_MID: u32 = 22;
 /// are mutually exclusive, so putting the general Chat Completions first does not consume Messages or Responses.
 const DESKTOP_AGENTS: [&str; 3] = ["agent-openai", "agent-anthropic", "agent-openai-responses"];
 
-/// Running serve instance. Stop it by shutting down this runtime; the listener then releases the port.
-struct RunningServer {
-    runtime: tokio::runtime::Runtime,
-    listen: String,
-    virtual_key: Option<String>,
+const SERVE_STATE_CHANGED_EVENT: &str = "serve-state-changed";
+
+enum ServerLifecycle {
+    Stopped {
+        generation: u64,
+    },
+    Starting {
+        generation: u64,
+        listen: String,
+    },
+    Stopping {
+        generation: u64,
+        listen: String,
+    },
+    Running {
+        generation: u64,
+        server: RunningServer,
+    },
+    Failed {
+        generation: u64,
+        listen: String,
+        error: String,
+    },
+}
+
+impl ServerLifecycle {
+    fn stopped() -> Self {
+        Self::Stopped { generation: 0 }
+    }
+
+    fn generation(&self) -> u64 {
+        match self {
+            Self::Stopped { generation }
+            | Self::Starting { generation, .. }
+            | Self::Stopping { generation, .. }
+            | Self::Running { generation, .. }
+            | Self::Failed { generation, .. } => *generation,
+        }
+    }
 }
 
 /// Global backend state protected by one lock; commands are short transactions.
@@ -64,8 +96,8 @@ struct AppInner {
     /// Preserve startup read or validation errors. Show a safe template but block
     /// writes so Save cannot silently overwrite the user's original file.
     load_error: Option<String>,
-    /// Currently running serve instance, if any.
-    server: Option<RunningServer>,
+    /// Authoritative proxy-service lifecycle state.
+    server: ServerLifecycle,
 }
 
 pub struct AppStateManaged(Mutex<AppInner>);
@@ -207,11 +239,23 @@ struct TierView {
     model: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ServePhase {
+    Stopped,
+    Starting,
+    Stopping,
+    Running,
+    Error,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct ServeView {
+    phase: ServePhase,
     running: bool,
     listen: String,
     virtual_key: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -439,18 +483,43 @@ impl AppInner {
 
     fn serve_view(&self) -> ServeView {
         match &self.server {
-            Some(s) => ServeView {
-                running: true,
-                listen: s.listen.clone(),
-                virtual_key: s.virtual_key.clone(),
-            },
-            None => ServeView {
+            ServerLifecycle::Stopped { .. } => ServeView {
+                phase: ServePhase::Stopped,
                 running: false,
                 listen: self.draft["server"]["listen"]
                     .as_str()
                     .unwrap_or("127.0.0.1:8787")
                     .to_string(),
                 virtual_key: None,
+                error: None,
+            },
+            ServerLifecycle::Starting { listen, .. } => ServeView {
+                phase: ServePhase::Starting,
+                running: false,
+                listen: listen.clone(),
+                virtual_key: None,
+                error: None,
+            },
+            ServerLifecycle::Stopping { listen, .. } => ServeView {
+                phase: ServePhase::Stopping,
+                running: false,
+                listen: listen.clone(),
+                virtual_key: None,
+                error: None,
+            },
+            ServerLifecycle::Running { server, .. } => ServeView {
+                phase: ServePhase::Running,
+                running: true,
+                listen: server.listen().to_string(),
+                virtual_key: server.virtual_key().map(str::to_string),
+                error: None,
+            },
+            ServerLifecycle::Failed { listen, error, .. } => ServeView {
+                phase: ServePhase::Error,
+                running: false,
+                listen: listen.clone(),
+                virtual_key: None,
+                error: Some(error.clone()),
             },
         }
     }
@@ -807,69 +876,205 @@ fn save_config(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
     Ok(inner.snapshot())
 }
 
-#[tauri::command]
-fn serve_start(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
-    let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    if inner.server.is_some() {
-        return Ok(inner.snapshot());
-    }
-    let config = inner.materialize()?;
+fn emit_serve_state<R: Runtime>(app: &AppHandle<R>, view: &ServeView) {
+    let _ = app.emit(SERVE_STATE_CHANGED_EVENT, view.clone());
+}
 
-    // recorder: always write file logs and gate the metrics database by its setting. Neither contains prompt content.
-    let mut sinks: Vec<Box<dyn Recorder>> = vec![Box::new(FileLog::open(&config.data.dir)?)];
-    if config.data.metrics {
-        sinks.push(Box::new(SqliteStore::open(
-            &config.data.dir.join("metrics.sqlite"),
-        )?));
+fn complete_serve_start<R: Runtime>(
+    app: &AppHandle<R>,
+    generation: u64,
+    result: Result<PreparedServer, StartFailure>,
+) {
+    match result {
+        Ok(prepared) => {
+            let mut prepared = Some(prepared);
+            let view = {
+                let state = app.state::<AppStateManaged>();
+                let mut inner = state.0.lock().unwrap();
+                match &inner.server {
+                    ServerLifecycle::Starting {
+                        generation: current,
+                        ..
+                    } if *current == generation => {
+                        let running = prepared
+                            .take()
+                            .expect("prepared server is present")
+                            .publish();
+                        inner.server = ServerLifecycle::Running {
+                            generation,
+                            server: running,
+                        };
+                        Some(inner.serve_view())
+                    }
+                    ServerLifecycle::Stopping {
+                        generation: current,
+                        ..
+                    } if *current == generation => {
+                        // Keep `Stopping` authoritative until the prepared listener
+                        // is dropped outside the mutex below.
+                        None
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(prepared) = prepared {
+                prepared.discard();
+                complete_serve_stop(app, generation);
+            }
+            if let Some(view) = view {
+                emit_serve_state(app, &view);
+            }
+        }
+        Err(failure) => {
+            let view = {
+                let state = app.state::<AppStateManaged>();
+                let mut inner = state.0.lock().unwrap();
+                match &inner.server {
+                    ServerLifecycle::Starting {
+                        generation: current,
+                        listen,
+                    } if *current == generation => {
+                        inner.server = ServerLifecycle::Failed {
+                            generation,
+                            listen: listen.clone(),
+                            error: failure.public_message(),
+                        };
+                        Some(inner.serve_view())
+                    }
+                    ServerLifecycle::Stopping {
+                        generation: current,
+                        ..
+                    } if *current == generation => {
+                        inner.server = ServerLifecycle::Stopped { generation };
+                        Some(inner.serve_view())
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(view) = view {
+                emit_serve_state(app, &view);
+            }
+        }
     }
-    let gateway = Arc::new(Gateway::new(&config, Arc::new(Recorders(sinks)))?);
+}
 
-    let key = if config.server.auth {
-        let (key, _created) = virtual_key::load_or_create(&config.data.dir)?;
-        Some(key)
-    } else {
-        None
+fn begin_serve_start<R, F>(
+    app: AppHandle<R>,
+    state: &AppStateManaged,
+    prepare: F,
+) -> Result<StateView, String>
+where
+    R: Runtime,
+    F: FnOnce(ClientConfig) -> Result<PreparedServer, StartFailure> + Send + 'static,
+{
+    let (config, generation, snapshot, serve_view) = {
+        let mut inner = state.0.lock().unwrap();
+        inner.ensure_editable()?;
+        match &inner.server {
+            ServerLifecycle::Starting { .. } | ServerLifecycle::Running { .. } => {
+                return Ok(inner.snapshot());
+            }
+            ServerLifecycle::Stopping { .. } => {
+                return Err(
+                    "startup_cleanup_in_progress: 上一次代理正在停止，请稍后重试".to_string(),
+                );
+            }
+            ServerLifecycle::Stopped { .. } | ServerLifecycle::Failed { .. } => {}
+        }
+        let config = inner.materialize()?;
+        let generation = inner
+            .server
+            .generation()
+            .checked_add(1)
+            .ok_or_else(|| "代理启动 generation 已耗尽，请重启 App".to_string())?;
+        let listen = config.server.listen.clone();
+        inner.server = ServerLifecycle::Starting { generation, listen };
+        let snapshot = inner.snapshot();
+        let serve_view = snapshot.serve.clone();
+        (config, generation, snapshot, serve_view)
     };
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("tokio runtime: {e}"))?;
-
-    let listen = config.server.listen.clone();
-    let listener = runtime
-        .block_on(async { tokio::net::TcpListener::bind(&listen).await })
-        .map_err(|e| format!("绑定 {listen} 失败: {e}"))?;
-
-    let app_state = server::AppState {
-        gateway,
-        virtual_key: key.clone().map(Arc::from),
-        admin: Arc::new(token_station_cli::admin::AdminContext {
-            data_dir: config.data.dir.clone(),
-            router: config.router.clone(),
-            plugins: config.plugins.clone(),
-        }),
-    };
-    runtime.spawn(async move {
-        let _ = server::serve(app_state, listener).await;
+    emit_serve_state(&app, &serve_view);
+    let completion_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = tauri::async_runtime::spawn_blocking(move || prepare(config))
+            .await
+            .unwrap_or_else(|error| Err(StartFailure::new("startup_task", error)));
+        complete_serve_start(&completion_app, generation, result);
     });
-
-    inner.server = Some(RunningServer {
-        runtime,
-        listen,
-        virtual_key: key,
-    });
-    Ok(inner.snapshot())
+    Ok(snapshot)
 }
 
 #[tauri::command]
-fn serve_stop(state: State<'_, AppStateManaged>) -> StateView {
-    let mut inner = state.0.lock().unwrap();
-    if let Some(s) = inner.server.take() {
-        s.runtime.shutdown_background();
+fn serve_start(app: AppHandle, state: State<'_, AppStateManaged>) -> Result<StateView, String> {
+    begin_serve_start(app, state.inner(), prepare_server)
+}
+
+fn complete_serve_stop<R: Runtime>(app: &AppHandle<R>, generation: u64) {
+    let view = {
+        let state = app.state::<AppStateManaged>();
+        let mut inner = state.0.lock().unwrap();
+        match &inner.server {
+            ServerLifecycle::Stopping {
+                generation: current,
+                ..
+            } if *current == generation => {
+                inner.server = ServerLifecycle::Stopped { generation };
+                Some(inner.serve_view())
+            }
+            _ => None,
+        }
+    };
+    if let Some(view) = view {
+        emit_serve_state(app, &view);
     }
-    inner.snapshot()
+}
+
+fn begin_serve_stop<R: Runtime>(app: AppHandle<R>, state: &AppStateManaged) -> StateView {
+    let (generation, snapshot, serve_view, running) = {
+        let mut inner = state.0.lock().unwrap();
+        let generation = inner.server.generation();
+        let current = std::mem::replace(&mut inner.server, ServerLifecycle::Stopped { generation });
+        let mut running = None;
+        let changed = match current {
+            ServerLifecycle::Running { server, .. } => {
+                let listen = server.listen().to_string();
+                inner.server = ServerLifecycle::Stopping { generation, listen };
+                running = Some(server);
+                true
+            }
+            ServerLifecycle::Starting { listen, .. } => {
+                inner.server = ServerLifecycle::Stopping { generation, listen };
+                true
+            }
+            ServerLifecycle::Stopping { listen, .. } => {
+                inner.server = ServerLifecycle::Stopping { generation, listen };
+                false
+            }
+            ServerLifecycle::Failed { .. } => true,
+            ServerLifecycle::Stopped { .. } => false,
+        };
+        let snapshot = inner.snapshot();
+        let serve_view = changed.then(|| snapshot.serve.clone());
+        (generation, snapshot, serve_view, running)
+    };
+
+    if let Some(serve_view) = serve_view {
+        emit_serve_state(&app, &serve_view);
+    }
+    if let Some(running) = running {
+        let completion_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = tauri::async_runtime::spawn_blocking(move || running.shutdown()).await;
+            complete_serve_stop(&completion_app, generation);
+        });
+    }
+    snapshot
+}
+
+#[tauri::command]
+fn serve_stop(app: AppHandle, state: State<'_, AppStateManaged>) -> StateView {
+    begin_serve_stop(app, state.inner())
 }
 
 /// Claude Code: write the env block to `~/.claude/settings.json` (embedded key; CC reads it directly, with no
@@ -1080,7 +1285,7 @@ pub fn run() {
         config_path,
         draft,
         load_error,
-        server: None,
+        server: ServerLifecycle::stopped(),
     }));
 
     tauri::Builder::default()
@@ -1132,6 +1337,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::{Duration, Instant};
     use tauri::Manager;
 
     fn scratch_home(label: &str) -> PathBuf {
@@ -1145,6 +1353,25 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).expect("scratch home is writable");
         path
+    }
+
+    fn wait_for_serve_phase<R: Runtime>(app: &tauri::App<R>, expected: ServePhase) -> StateView {
+        // Debug Wasmtime cold compilation can exceed ten seconds on CI. This is
+        // only a safety deadline; the loop still waits on the lifecycle condition.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let state = get_state(app.state());
+            if state.serve.phase == expected {
+                return state;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "serve phase did not reach {expected:?}; current={:?}, error={:?}",
+                state.serve.phase,
+                state.serve.error
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -1247,7 +1474,7 @@ mod tests {
             config_path: root.join("token-station.json"),
             draft,
             load_error: None,
-            server: None,
+            server: ServerLifecycle::stopped(),
         };
         inner.rebuild_routing();
 
@@ -1296,7 +1523,7 @@ mod tests {
             config_path: root.join("token-station.json"),
             draft,
             load_error: Some("只读保护".to_owned()),
-            server: None,
+            server: ServerLifecycle::stopped(),
         };
 
         let error = replace_provider_models(&mut inner, "provider", vec!["replacement".to_owned()])
@@ -1322,7 +1549,7 @@ mod tests {
             config_path: root.join("token-station.json"),
             draft,
             load_error: None,
-            server: None,
+            server: ServerLifecycle::stopped(),
         };
 
         let error = resolve_discovery_key(&inner, "provider", "https://attacker.example/v1", None)
@@ -1347,7 +1574,7 @@ mod tests {
             config_path: root.join("token-station.json"),
             draft: template(&root),
             load_error: None,
-            server: None,
+            server: ServerLifecycle::stopped(),
         };
         inner.draft["upstreams"]["deepseek"] = json!({
             "provider": "openai-compatible",
@@ -1385,7 +1612,7 @@ mod tests {
             config_path: root.join("token-station.json"),
             draft: template(&root),
             load_error: None,
-            server: None,
+            server: ServerLifecycle::stopped(),
         };
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
@@ -1411,6 +1638,117 @@ mod tests {
     }
 
     #[test]
+    fn startup_preparation_is_single_flight_lock_free_and_cancellable() {
+        let root = scratch_home("nonblocking-start");
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft: template(&repo_root()),
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+        };
+        inner.draft["data"]["dir"] = json!(root.join("data"));
+        inner.draft["server"]["listen"] = json!("127.0.0.1:0");
+        inner.draft["server"]["auth"] = json!(false);
+        inner.draft["data"]["metrics"] = json!(false);
+        inner.draft["upstreams"]["local"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "models": [{"model": "small"}]
+        });
+        inner
+            .set_tier_value(TIER_LOW, Some("local".into()), Some("small".into()))
+            .unwrap();
+
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let prepare_calls = Arc::new(AtomicUsize::new(0));
+        let calls_in_task = Arc::clone(&prepare_calls);
+
+        let starting = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            move |_config| {
+                calls_in_task.fetch_add(1, Ordering::SeqCst);
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Err(StartFailure::new("test_gate", "cancelled fixture"))
+            },
+        )
+        .unwrap();
+        assert_eq!(starting.serve.phase, ServePhase::Starting);
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("preparer starts in the background");
+
+        // get_state acquires the same AppInner mutex while preparation is blocked.
+        let visible = get_state(app.state());
+        assert_eq!(visible.serve.phase, ServePhase::Starting);
+
+        let duplicate_calls = Arc::new(AtomicUsize::new(0));
+        let duplicate_calls_in_task = Arc::clone(&duplicate_calls);
+        let duplicate = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            move |_config| {
+                duplicate_calls_in_task.fetch_add(1, Ordering::SeqCst);
+                Err(StartFailure::new("duplicate", "must not run"))
+            },
+        )
+        .unwrap();
+        assert_eq!(duplicate.serve.phase, ServePhase::Starting);
+        assert_eq!(duplicate_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
+
+        let stopping =
+            begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+        assert_eq!(stopping.serve.phase, ServePhase::Stopping);
+        release_tx.send(()).unwrap();
+        let stopped = wait_for_serve_phase(&app, ServePhase::Stopped);
+        assert!(!stopped.serve.running);
+        assert!(stopped.serve.error.is_none());
+
+        let retrying = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            |_config| Err(StartFailure::new("gateway_init", "fixture failure")),
+        )
+        .unwrap();
+        assert_eq!(retrying.serve.phase, ServePhase::Starting);
+        let failed = wait_for_serve_phase(&app, ServePhase::Error);
+        assert!(failed
+            .serve
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("gateway_init: fixture failure")));
+
+        let (retry_started_tx, retry_started_rx) = mpsc::channel();
+        let (retry_release_tx, retry_release_rx) = mpsc::channel();
+        let retry = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            move |_config| {
+                retry_started_tx.send(()).unwrap();
+                retry_release_rx.recv().unwrap();
+                Err(StartFailure::new("test_gate", "retry cancelled"))
+            },
+        )
+        .unwrap();
+        assert_eq!(retry.serve.phase, ServePhase::Starting);
+        retry_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("failed lifecycle can start a fresh generation");
+        let retry_stopping =
+            begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+        assert_eq!(retry_stopping.serve.phase, ServePhase::Stopping);
+        retry_release_tx.send(()).unwrap();
+        wait_for_serve_phase(&app, ServePhase::Stopped);
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views() {
         let root = scratch_home("command-lifecycle");
         let mut draft = template(&repo_root());
@@ -1421,7 +1759,7 @@ mod tests {
             config_path: root.join("token-station.json"),
             draft,
             load_error: None,
-            server: None,
+            server: ServerLifecycle::stopped(),
         }))));
 
         let initial = get_state(app.state());
@@ -1519,13 +1857,31 @@ mod tests {
         assert!(empty_stats.empty);
         assert_eq!(empty_stats.total.requests, 0);
 
-        let started = serve_start(app.state()).unwrap();
-        assert!(started.serve.running);
-        assert!(started.serve.virtual_key.is_none());
+        let started = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            prepare_server,
+        )
+        .unwrap();
+        assert_eq!(started.serve.phase, ServePhase::Starting);
+        let duplicate = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            prepare_server,
+        )
+        .unwrap();
+        assert!(matches!(
+            duplicate.serve.phase,
+            ServePhase::Starting | ServePhase::Running
+        ));
+        let running = wait_for_serve_phase(&app, ServePhase::Running);
+        assert!(running.serve.running);
+        assert!(running.serve.virtual_key.is_none());
         assert!(root.join("data").join("requests.log").exists());
-        let duplicate = serve_start(app.state()).unwrap();
-        assert!(duplicate.serve.running);
-        let stopped = serve_stop(app.state());
+        let stopping =
+            begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+        assert_eq!(stopping.serve.phase, ServePhase::Stopping);
+        let stopped = wait_for_serve_phase(&app, ServePhase::Stopped);
         assert!(!stopped.serve.running);
 
         let removed = remove_provider(app.state(), "local".to_string()).unwrap();
@@ -1568,7 +1924,7 @@ mod tests {
                 "router": {"pools": [], "rules": null, "hint_routes": null}
             }),
             load_error: None,
-            server: None,
+            server: ServerLifecycle::stopped(),
         };
         assert!(inner.upstreams().is_empty());
         assert_eq!(inner.pool_member("missing"), (None, None));
