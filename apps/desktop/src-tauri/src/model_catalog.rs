@@ -219,7 +219,10 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{fetch_models, parse_models, read_cached_entry, write_cache, CacheEntry};
+    use super::{
+        discover_with_cache, fetch_models, parse_models, read_cached_entry, status_message,
+        write_cache, CacheEntry,
+    };
     use serde_json::json;
     use std::io::{Read, Write};
 
@@ -360,6 +363,74 @@ mod tests {
 
         assert!(read_cached_entry(&dir, "moonshot", "https://api.moonshot.cn/v1").is_none());
 
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn discovery_prefers_live_then_falls_back_to_matching_cache_or_none() {
+        let dir = scratch("discovery-fallbacks");
+        let live_base = serve_once(200, r#"{"data":[{"id":"live-model"}]}"#);
+        let live = discover_with_cache(&dir, " fixture ", &format!("{live_base}/"), Some(" key "))
+            .expect("live discovery succeeds");
+        assert_eq!(live.models, ["live-model"]);
+        assert_eq!(live.source, "live");
+        assert!(live.fetched_at_ms.is_some());
+        assert!(live.warning.is_none());
+
+        let cached = discover_with_cache(&dir, "fixture", "http://127.0.0.1:9", None)
+            .expect("network failure uses the matching cache only when its URL matches");
+        assert_eq!(cached.source, "none");
+        assert!(cached.warning.is_some());
+        write_cache(
+            &dir,
+            "offline",
+            CacheEntry {
+                base_url: "http://127.0.0.1:9".to_owned(),
+                models: vec!["cached-model".to_owned()],
+                fetched_at_ms: 42,
+            },
+        )
+        .unwrap();
+        let cached = discover_with_cache(&dir, "offline", "http://127.0.0.1:9", None).unwrap();
+        assert_eq!(cached.models, ["cached-model"]);
+        assert_eq!(cached.source, "cache");
+        assert_eq!(cached.fetched_at_ms, Some(42));
+        assert!(discover_with_cache(&dir, "", "http://example.invalid", None).is_err());
+        assert!(discover_with_cache(&dir, "provider", "", None).is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn discovery_rejects_invalid_json_and_reports_status_and_cache_commit_failures() {
+        let invalid = serve_once(200, "not-json");
+        assert!(fetch_models(&invalid, None)
+            .unwrap_err()
+            .contains("有效 JSON"));
+        assert!(status_message(404).contains("/models"));
+        assert!(status_message(429).contains("频繁"));
+        assert!(status_message(503).contains("503"));
+
+        let dir = scratch("rename-failure");
+        std::fs::create_dir_all(dir.join("model-catalog-cache.json")).unwrap();
+        let error = write_cache(
+            &dir,
+            "fixture",
+            CacheEntry {
+                base_url: "https://example.invalid/v1".to_owned(),
+                models: vec!["model".to_owned()],
+                fetched_at_ms: 1,
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("保存模型缓存失败"));
+        assert_eq!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                .count(),
+            0
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 }

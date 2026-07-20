@@ -9,6 +9,7 @@
 //! draft remains a serde_json::Value and materializes as ClientConfig only when
 //! saving or starting. Failed validation is reported to the user without writing.
 
+pub mod agent_integration;
 mod model_catalog;
 
 use std::path::PathBuf;
@@ -16,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{Manager, State};
 
 use token_station_cli::config::{ClientConfig, PluginsConfig};
 use token_station_cli::filelog::{FileLog, Recorders};
@@ -26,6 +27,10 @@ use token_station_cli::store::SqliteStore;
 use token_station_cli::{secrets, server, stats, upgrade, virtual_key};
 use token_station_metrics::Recorder;
 
+use agent_integration::commands::{
+    apply_agent_plan, apply_snapshot_restore, list_agent_snapshots, plan_agent_connection,
+    plan_agent_disconnect, plan_snapshot_restore, scan_agents, AgentCommandState,
+};
 use model_catalog::ModelDiscoveryView;
 
 /// Pool names for the three tier slots shown as the panel's high, middle, and low rows.
@@ -63,6 +68,16 @@ struct AppInner {
 }
 
 pub struct AppStateManaged(Mutex<AppInner>);
+
+/// OS application cache root injected by Tauri. Agent compatibility data is
+/// kept outside the repository and is not created until a valid signed remote
+/// catalog is actually accepted.
+#[derive(Clone)]
+pub struct AgentIntegrationPaths {
+    pub compatibility_cache_dir: PathBuf,
+    pub snapshot_root: PathBuf,
+    pub ownership_root: PathBuf,
+}
 
 // ---- Path anchor (repository root during development. Packaging handles it separately) -------------------------------
 
@@ -856,68 +871,6 @@ fn serve_stop(state: State<'_, AppStateManaged>) -> StateView {
     inner.snapshot()
 }
 
-fn home_dir() -> Result<PathBuf, String> {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .map_err(|_| "读不到 HOME".to_string())
-}
-
-/// Read an optional JSON object configuration. If the file exists but is unreadable, contains invalid JSON, or has a non-object root,
-/// Return the original error. Do not fall back to an empty object and overwrite the user configuration.
-fn read_json_object(path: &std::path::Path, label: &str) -> Result<Value, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => {
-            let value: Value = serde_json::from_str(&text)
-                .map_err(|error| format!("{label} 不是合法 JSON（{}）：{error}", path.display()))?;
-            if value.is_object() {
-                Ok(value)
-            } else {
-                Err(format!("{label} 顶层必须是对象（{}）", path.display()))
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
-        Err(error) => Err(format!("读取 {label} 失败（{}）：{error}", path.display())),
-    }
-}
-
-fn backup_path(path: &std::path::Path) -> PathBuf {
-    path.with_extension(format!(
-        "{}.token-station.bak",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("bak")
-    ))
-}
-
-/// Create a reliable backup, then atomically replace the configuration with a same-directory temporary file and rename.
-fn write_config(path: &std::path::Path, rendered: &str, label: &str) -> Result<(), String> {
-    match std::fs::read(path) {
-        Ok(original) => {
-            let backup = backup_path(path);
-            std::fs::write(&backup, original)
-                .map_err(|error| format!("备份 {label} 失败（{}）：{error}", backup.display()))?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "读取 {label} 以备份失败（{}）：{error}",
-                path.display()
-            ))
-        }
-    }
-    let file_name = path
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .ok_or_else(|| format!("{label} 路径没有文件名：{}", path.display()))?;
-    let temporary = path.with_file_name(format!(".{file_name}.token-station.tmp"));
-    std::fs::write(&temporary, rendered).map_err(|error| {
-        format!(
-            "写 {label} 临时文件失败（{}）：{error}",
-            temporary.display()
-        )
-    })?;
-    std::fs::rename(&temporary, path)
-        .map_err(|error| format!("替换 {label} 失败（{}）：{error}", path.display()))
-}
-
 /// Claude Code: write the env block to `~/.claude/settings.json` (embedded key; CC reads it directly, with no
 /// manual export). CC uses the Anthropic protocol; end-to-end operation also requires the agent-anthropic adapter.
 /// Determine whether the `plugins` configuration includes an inbound adapter that supports Anthropic. Inspect the `agents` list
@@ -939,6 +892,10 @@ fn responses_inbound_ready(plugins: &Value) -> bool {
     inbound_adapter_ready(plugins, "agent-openai-responses")
 }
 
+fn openai_inbound_ready(plugins: &Value) -> bool {
+    inbound_adapter_ready(plugins, "agent-openai")
+}
+
 /// Display inbound adapters from the comma-joined agents list, falling back to the single agent value.
 fn agents_display(plugins: &Value) -> String {
     let list: Vec<&str> = plugins["agents"]
@@ -949,210 +906,6 @@ fn agents_display(plugins: &Value) -> String {
         plugins["agent"].as_str().unwrap_or_default().to_string()
     } else {
         list.join(", ")
-    }
-}
-
-fn connect_cc_at(
-    home: &std::path::Path,
-    base: &str,
-    token: &str,
-    anthropic_inbound_ready: bool,
-) -> Result<String, String> {
-    // Security gate: CC uses the Anthropic protocol. If the gateway inbound adapter does not support Anthropic
-    // (agent-anthropic is unavailable), connection only points ~/.claude/settings.json to a
-    // A proxy that cannot answer Anthropic requests also stops a running Claude Code instance, including development
-    // this token-station session). Reject before readiness and do not touch settings.json.
-    if !anthropic_inbound_ready {
-        return Err(
-            "暂不能接入 Claude Code:网关入站适配器(plugins.agent)还不支持 Anthropic \
-             协议,agent-anthropic 尚未就位。现在接入会把 ~/.claude/settings.json 指向一个\
-             无法应答 Anthropic 请求的代理,反而掐断你正在运行的 Claude Code。等 agent-anthropic \
-             入站适配器配好后再接。(Codex / opencode 走 OpenAI 协议,现在即可正常接入。)"
-                .to_string(),
-        );
-    }
-    let dir = home.join(".claude");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("建 ~/.claude 失败: {e}"))?;
-    let path = dir.join("settings.json");
-    let mut settings = read_json_object(&path, "Claude Code settings.json")?;
-    {
-        let obj = settings.as_object_mut().unwrap();
-        let env = obj.entry("env").or_insert_with(|| json!({}));
-        let env = env
-            .as_object_mut()
-            .ok_or_else(|| "Claude Code settings.json 的 env 必须是对象".to_string())?;
-        env.insert("ANTHROPIC_BASE_URL".into(), json!(base));
-        env.insert("ANTHROPIC_AUTH_TOKEN".into(), json!(token));
-        env.insert("MAX_THINKING_TOKENS".into(), json!("0"));
-        env.insert("CLAUDE_CODE_DISABLE_THINKING".into(), json!("1"));
-        env.insert("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING".into(), json!("1"));
-        env.insert("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS".into(), json!("1"));
-        env.insert(
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
-            json!("1"),
-        );
-    }
-    let rendered = serde_json::to_string_pretty(&settings)
-        .map_err(|error| format!("序列化 settings.json 失败：{error}"))?;
-    write_config(&path, &rendered, "Claude Code settings.json")?;
-    Ok(format!(
-        "Claude Code 已指向 {base}(~/.claude/settings.json,已备份)。\
-         已关闭当前 Canonical IR 暂不支持的 thinking/beta；\
-         使用 /v1/messages，经 agent-anthropic 入站适配器转发。"
-    ))
-}
-
-fn connect_cc(base: &str, token: &str, anthropic_inbound_ready: bool) -> Result<String, String> {
-    connect_cc_at(&home_dir()?, base, token, anthropic_inbound_ready)
-}
-
-/// Codex: write `~/.codex/config.toml` and add a model_provider that points to this proxy
-/// (`wire_api = "responses"`, which maps to gateway `/v1/responses`). The Codex key uses
-/// environment variable, so return a one-line export instruction.
-fn connect_codex_at(
-    home: &std::path::Path,
-    openai_base: &str,
-    responses_inbound_ready: bool,
-) -> Result<String, String> {
-    if !responses_inbound_ready {
-        return Err(
-            "暂不能接入 Codex：网关未加载 agent-openai-responses，/v1/responses \
-             无入站适配器。本次未修改 ~/.codex/config.toml。"
-                .to_string(),
-        );
-    }
-    let dir = home.join(".codex");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("建 ~/.codex 失败: {e}"))?;
-    let path = dir.join("config.toml");
-    let mut doc: toml::Value = match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text)
-            .map_err(|error| format!("Codex config.toml 不合法（{}）：{error}", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            toml::Value::Table(toml::map::Map::new())
-        }
-        Err(error) => {
-            return Err(format!(
-                "读取 Codex config.toml 失败（{}）：{error}",
-                path.display()
-            ))
-        }
-    };
-    let root = doc
-        .as_table_mut()
-        .ok_or_else(|| "config.toml 顶层不是表".to_string())?;
-
-    root.insert("model".into(), toml::Value::String("auto".into()));
-    root.insert(
-        "model_provider".into(),
-        toml::Value::String("tokenstation".into()),
-    );
-
-    let mut provider = toml::map::Map::new();
-    provider.insert("name".into(), toml::Value::String("token-station".into()));
-    provider.insert(
-        "base_url".into(),
-        toml::Value::String(openai_base.to_string()),
-    );
-    provider.insert("wire_api".into(), toml::Value::String("responses".into()));
-    provider.insert(
-        "env_key".into(),
-        toml::Value::String("TOKENSTATION_KEY".into()),
-    );
-    provider.insert("requires_openai_auth".into(), toml::Value::Boolean(false));
-    provider.insert("request_max_retries".into(), toml::Value::Integer(0));
-    provider.insert("stream_max_retries".into(), toml::Value::Integer(0));
-
-    let providers = root
-        .entry("model_providers".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    let providers = providers
-        .as_table_mut()
-        .ok_or_else(|| "Codex config.toml 的 model_providers 必须是表".to_string())?;
-    providers.insert("tokenstation".into(), toml::Value::Table(provider));
-
-    let text = toml::to_string_pretty(&doc).map_err(|e| format!("序列化 config.toml 失败: {e}"))?;
-    write_config(&path, &text, "Codex config.toml")?;
-    Ok(format!(
-        "Codex 已通过 Responses API 指向 {openai_base}(~/.codex/config.toml,已备份)。\
-         Codex 的 key 走环境变量,请在启动 Codex 的终端执行一次:\
-         export TOKENSTATION_KEY=<面板上的虚拟 Key>"
-    ))
-}
-
-fn connect_codex(openai_base: &str, responses_inbound_ready: bool) -> Result<String, String> {
-    connect_codex_at(&home_dir()?, openai_base, responses_inbound_ready)
-}
-
-/// opencode: write `~/.config/opencode/opencode.json` and add an OpenAI-compatible custom
-/// provider (embedded apiKey; no export required).
-fn connect_opencode_at(
-    home: &std::path::Path,
-    openai_base: &str,
-    token: &str,
-) -> Result<String, String> {
-    let dir = home.join(".config").join("opencode");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("建 ~/.config/opencode 失败: {e}"))?;
-    let path = dir.join("opencode.json");
-    let mut cfg = read_json_object(&path, "OpenCode opencode.json")?;
-    {
-        let obj = cfg.as_object_mut().unwrap();
-        let providers = obj.entry("provider").or_insert_with(|| json!({}));
-        let providers = providers
-            .as_object_mut()
-            .ok_or_else(|| "OpenCode opencode.json 的 provider 必须是对象".to_string())?;
-        providers.insert(
-            "tokenstation".into(),
-            json!({
-                "npm": "@ai-sdk/openai-compatible",
-                "name": "token-station",
-                "options": { "baseURL": openai_base, "apiKey": token },
-                "models": { "auto": { "name": "auto (智能路由)" } }
-            }),
-        );
-    }
-    let rendered = serde_json::to_string_pretty(&cfg)
-        .map_err(|error| format!("序列化 opencode.json 失败：{error}"))?;
-    write_config(&path, &rendered, "OpenCode opencode.json")?;
-    Ok(
-        "opencode 已加入 token-station provider(~/.config/opencode/opencode.json,已备份)。\
-         在 opencode 里选模型 tokenstation/auto 即可。"
-            .to_string(),
-    )
-}
-
-fn connect_opencode(openai_base: &str, token: &str) -> Result<String, String> {
-    connect_opencode_at(&home_dir()?, openai_base, token)
-}
-
-/// Connect an agent. Each agent writes its own configuration file, so they do not conflict and can connect and run at the same time.
-#[tauri::command]
-fn connect_agent(state: State<'_, AppStateManaged>, kind: String) -> Result<String, String> {
-    let (listen, token, anthropic_inbound_ready, responses_inbound_ready) = {
-        let inner = state.0.lock().unwrap();
-        inner.ensure_editable()?;
-        let sv = inner.serve_view();
-        if !sv.running {
-            return Err("请先启动代理(serve)再接入 agent".into());
-        }
-        // Check whether inbound adapters include an Anthropic-capable adapter. Support both plugins.agent and
-        // The plugins.agents list after match_inbound. Check adapter names only in these two locations, not the complete
-        // plugins. This prevents packages named anthropic-* under providers from being accepted incorrectly.
-        let anthropic_ready = anthropic_inbound_ready(&inner.draft["plugins"]);
-        let responses_ready = responses_inbound_ready(&inner.draft["plugins"]);
-        let client_token = sv
-            .virtual_key
-            .clone()
-            .unwrap_or_else(|| "token-station-no-auth".to_string());
-        (sv.listen, client_token, anthropic_ready, responses_ready)
-    };
-    let anthropic_base = format!("http://{listen}");
-    let openai_base = format!("http://{listen}/v1");
-
-    match kind.as_str() {
-        "cc" => connect_cc(&anthropic_base, &token, anthropic_inbound_ready),
-        "codex" => connect_codex(&openai_base, responses_inbound_ready),
-        "opencode" => connect_opencode(&openai_base, &token),
-        other => Err(format!("未知 agent `{other}`")),
     }
 }
 
@@ -1331,6 +1084,21 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let compatibility_cache_dir = app.path().app_cache_dir()?.join("agent-compatibility");
+            let agent_data_root = app.path().app_data_dir()?.join("agent-integration");
+            let paths = AgentIntegrationPaths {
+                compatibility_cache_dir,
+                snapshot_root: agent_data_root.join("snapshots"),
+                ownership_root: agent_data_root.join("ownership"),
+            };
+            let agent_commands = AgentCommandState::new(paths.clone()).map_err(|message| {
+                std::io::Error::other(format!("初始化 Agent IPC 失败：{message}"))
+            })?;
+            app.manage(paths);
+            app.manage(agent_commands);
+            Ok(())
+        })
         .manage(managed)
         .invoke_handler(tauri::generate_handler![
             get_state,
@@ -1342,7 +1110,13 @@ pub fn run() {
             save_config,
             serve_start,
             serve_stop,
-            connect_agent,
+            scan_agents,
+            plan_agent_connection,
+            apply_agent_plan,
+            plan_agent_disconnect,
+            list_agent_snapshots,
+            plan_snapshot_restore,
+            apply_snapshot_restore,
             set_settings,
             get_stats,
             get_router_table,
@@ -1356,6 +1130,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tauri::Manager;
 
     fn scratch_home(label: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -1417,16 +1192,22 @@ mod tests {
     #[test]
     fn inbound_readiness_requires_exact_adapter_names() {
         let plugins = json!({
-            "agents": ["agent-anthropic-proxy", "agent-openai-responses-beta"]
+            "agents": [
+                "agent-anthropic-proxy",
+                "agent-openai-responses-beta",
+                "agent-openai-compatible"
+            ]
         });
         assert!(!anthropic_inbound_ready(&plugins));
         assert!(!responses_inbound_ready(&plugins));
+        assert!(!openai_inbound_ready(&plugins));
 
         let plugins = json!({
-            "agents": ["agent-anthropic", "agent-openai-responses"]
+            "agents": ["agent-anthropic", "agent-openai-responses", "agent-openai"]
         });
         assert!(anthropic_inbound_ready(&plugins));
         assert!(responses_inbound_ready(&plugins));
+        assert!(openai_inbound_ready(&plugins));
     }
 
     #[test]
@@ -1558,147 +1339,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_connection_uses_responses_and_preserves_the_existing_config() {
-        let home = scratch_home("codex");
-        let dir = home.join(".codex");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        let original = "[features]\napps = false\n";
-        std::fs::write(&path, original).unwrap();
-
-        connect_codex_at(&home, "http://127.0.0.1:8787/v1", true).unwrap();
-
-        let text = std::fs::read_to_string(&path).unwrap();
-        let config: toml::Value = toml::from_str(&text).unwrap();
-        let provider = &config["model_providers"]["tokenstation"];
-        assert_eq!(provider["wire_api"].as_str(), Some("responses"));
-        assert_eq!(provider["requires_openai_auth"].as_bool(), Some(false));
-        assert_eq!(provider["request_max_retries"].as_integer(), Some(0));
-        assert_eq!(provider["stream_max_retries"].as_integer(), Some(0));
-        assert_eq!(config["features"]["apps"].as_bool(), Some(false));
-        assert_eq!(
-            std::fs::read_to_string(backup_path(&path)).unwrap(),
-            original
-        );
-        std::fs::remove_dir_all(home).ok();
-    }
-
-    #[test]
-    fn an_invalid_codex_config_is_never_replaced() {
-        let home = scratch_home("codex-invalid");
-        let dir = home.join(".codex");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        let original = "this = [is not valid";
-        std::fs::write(&path, original).unwrap();
-
-        let error =
-            connect_codex_at(&home, "http://127.0.0.1:8787/v1", true).unwrap_err();
-
-        assert!(error.contains("不合法"), "{error}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        assert!(!backup_path(&path).exists());
-        std::fs::remove_dir_all(home).ok();
-    }
-
-    #[test]
-    fn codex_connection_refuses_before_writing_when_responses_inbound_is_missing() {
-        let home = scratch_home("codex-missing-responses");
-        let dir = home.join(".codex");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        let original = "model = \"existing\"\nmodel_provider = \"existing-provider\"\n";
-        std::fs::write(&path, original).unwrap();
-
-        let error =
-            connect_codex_at(&home, "http://127.0.0.1:8787/v1", false).unwrap_err();
-
-        assert!(error.contains("agent-openai-responses"), "{error}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        assert!(!backup_path(&path).exists());
-        std::fs::remove_dir_all(home).ok();
-    }
-
-    #[test]
-    fn claude_connection_preserves_other_settings_and_creates_a_recovery_backup() {
-        let home = scratch_home("claude");
-        let dir = home.join(".claude");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("settings.json");
-        let original = r#"{"permissions":{"allow":["Read"]},"env":{"KEEP":"yes"}}"#;
-        std::fs::write(&path, original).unwrap();
-
-        connect_cc_at(&home, "http://127.0.0.1:8787", "local-test-key", true).unwrap();
-
-        let settings: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(settings["permissions"]["allow"], json!(["Read"]));
-        assert_eq!(settings["env"]["KEEP"], json!("yes"));
-        assert_eq!(
-            settings["env"]["ANTHROPIC_BASE_URL"],
-            json!("http://127.0.0.1:8787")
-        );
-        assert_eq!(
-            settings["env"]["ANTHROPIC_AUTH_TOKEN"],
-            json!("local-test-key")
-        );
-        assert_eq!(settings["env"]["MAX_THINKING_TOKENS"], json!("0"));
-        assert_eq!(settings["env"]["CLAUDE_CODE_DISABLE_THINKING"], json!("1"));
-        assert_eq!(
-            settings["env"]["CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"],
-            json!("1")
-        );
-        assert_eq!(
-            settings["env"]["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"],
-            json!("1")
-        );
-        assert_eq!(
-            std::fs::read_to_string(backup_path(&path)).unwrap(),
-            original
-        );
-        std::fs::remove_dir_all(home).ok();
-    }
-
-    #[test]
-    fn claude_safety_gate_and_invalid_json_leave_settings_untouched() {
-        let home = scratch_home("claude-invalid");
-        let dir = home.join(".claude");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("settings.json");
-        let original = "not-json";
-        std::fs::write(&path, original).unwrap();
-
-        let gated = connect_cc_at(&home, "http://127.0.0.1:8787", "key", false).unwrap_err();
-        assert!(gated.contains("暂不能接入"));
-        let invalid = connect_cc_at(&home, "http://127.0.0.1:8787", "key", true).unwrap_err();
-        assert!(invalid.contains("不是合法 JSON"), "{invalid}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        assert!(!backup_path(&path).exists());
-        std::fs::remove_dir_all(home).ok();
-    }
-
-    #[test]
-    fn opencode_connection_preserves_other_providers_and_is_idempotent() {
-        let home = scratch_home("opencode");
-        let dir = home.join(".config/opencode");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("opencode.json");
-        std::fs::write(&path, r#"{"provider":{"existing":{"name":"keep"}}}"#).unwrap();
-
-        connect_opencode_at(&home, "http://127.0.0.1:8787/v1", "local-key").unwrap();
-        connect_opencode_at(&home, "http://127.0.0.1:8787/v1", "local-key").unwrap();
-
-        let config: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(config["provider"]["existing"]["name"], json!("keep"));
-        assert_eq!(
-            config["provider"]["tokenstation"]["options"]["baseURL"],
-            json!("http://127.0.0.1:8787/v1")
-        );
-        assert_eq!(config["provider"].as_object().unwrap().len(), 2);
-        std::fs::remove_dir_all(home).ok();
-    }
-
-    #[test]
     fn tier_updates_refuse_unknown_provider_model_and_partial_values() {
         let root = scratch_home("tiers-invalid");
         let mut inner = AppInner {
@@ -1765,6 +1405,176 @@ mod tests {
             assert_eq!(bands.last().unwrap()["at_least"], json!(0));
         }
         assert_eq!(inner.draft["router"]["default_pool"], json!(TIER_LOW));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views() {
+        let root = scratch_home("command-lifecycle");
+        let mut draft = template(&repo_root());
+        draft["data"]["dir"] = json!(root.join("data"));
+        draft["server"]["listen"] = json!("127.0.0.1:0");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner {
+            config_path: root.join("token-station.json"),
+            draft,
+            load_error: None,
+            server: None,
+        }))));
+
+        let initial = get_state(app.state());
+        assert!(!initial.serve.running);
+        assert!(initial.providers.is_empty());
+        assert_eq!(initial.settings.listen, "127.0.0.1:0");
+
+        for (name, url, models) in [
+            ("local", "http://127.0.0.1:11434/v1", vec!["small", "large"]),
+            ("spare", "http://127.0.0.1:11435/v1", vec!["backup"]),
+        ] {
+            let view = add_provider(
+                app.state(),
+                name.to_string(),
+                url.to_string(),
+                models.into_iter().map(str::to_string).collect(),
+                None,
+            )
+            .unwrap();
+            assert!(view.providers.iter().any(|provider| provider.name == name));
+        }
+        assert!(add_provider(
+            app.state(),
+            " ".to_string(),
+            "http://127.0.0.1/v1".to_string(),
+            vec!["m".to_string()],
+            None,
+        )
+        .err()
+        .expect("blank provider is rejected")
+        .contains("不能为空"));
+        assert!(add_provider(
+            app.state(),
+            "empty".to_string(),
+            "http://127.0.0.1/v1".to_string(),
+            vec![" ".to_string()],
+            None,
+        )
+        .err()
+        .expect("blank model set is rejected")
+        .contains("至少填一个"));
+
+        set_tier(
+            app.state(),
+            "high".to_string(),
+            Some("local".to_string()),
+            Some("large".to_string()),
+        )
+        .unwrap();
+        set_tier(
+            app.state(),
+            "low".to_string(),
+            Some("local".to_string()),
+            Some("small".to_string()),
+        )
+        .unwrap();
+        assert!(set_tier(app.state(), "invalid".to_string(), None, None)
+            .err()
+            .expect("invalid tier is rejected")
+            .contains("未知档位"));
+
+        let saved = save_config(app.state()).unwrap();
+        assert!(saved.config_error.is_none());
+        assert!(root.join("token-station.json").is_file());
+        let router = get_router_table(app.state());
+        assert_eq!(router.default_pool, TIER_LOW);
+        assert_eq!(router.threshold, Some(CUT_MID));
+        assert_eq!(router.bands.len(), 2);
+        assert_eq!(router.pools.len(), 2);
+        assert_eq!(router.bands[0].upstream.as_deref(), Some("local"));
+
+        update_provider_models(
+            app.state(),
+            "local".to_string(),
+            vec![
+                "large".to_string(),
+                "small".to_string(),
+                "extra".to_string(),
+            ],
+        )
+        .unwrap();
+        let configured = set_settings(app.state(), false, false).unwrap();
+        assert!(!configured.settings.auth);
+        assert!(!configured.settings.metrics);
+
+        let plugins = get_plugins(app.state()).unwrap();
+        assert!(plugins.agent.contains("agent-openai"));
+        assert!(plugins
+            .dialects
+            .iter()
+            .any(|dialect| dialect == "openai-compatible"));
+        assert!(plugins.listing.contains("provider-openai-compatible"));
+
+        let empty_stats = get_stats(app.state(), "all".to_string(), None).unwrap();
+        assert!(empty_stats.empty);
+        assert_eq!(empty_stats.total.requests, 0);
+
+        let started = serve_start(app.state()).unwrap();
+        assert!(started.serve.running);
+        assert!(started.serve.virtual_key.is_none());
+        assert!(root.join("data").join("requests.log").exists());
+        let duplicate = serve_start(app.state()).unwrap();
+        assert!(duplicate.serve.running);
+        let stopped = serve_stop(app.state());
+        assert!(!stopped.serve.running);
+
+        let removed = remove_provider(app.state(), "local".to_string()).unwrap();
+        assert_eq!(removed.providers.len(), 1);
+        assert!(removed.tiers.values().all(|tier| tier.upstream.is_none()));
+        assert!(save_config(app.state())
+            .err()
+            .expect("empty routing config is rejected")
+            .contains("至少配置一档"));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn desktop_helpers_cover_empty_absolute_and_legacy_display_shapes() {
+        let root = scratch_home("helper-shapes");
+        let missing = root.join("missing.json");
+        let (draft, error) = load_draft(&missing, &root);
+        assert!(error.is_none());
+        assert_eq!(draft["server"]["auth"], json!(true));
+
+        let absolute = root.join("already-absolute");
+        let mut shapes = template(&root);
+        shapes["plugins"]["dir"] = json!(absolute.clone());
+        shapes["data"]["dir"] = json!(42);
+        let shapes = prepare_desktop_draft(shapes, &root);
+        assert_eq!(shapes["plugins"]["dir"], json!(absolute));
+        assert_eq!(shapes["data"]["dir"], json!(42));
+
+        assert_eq!(agents_display(&json!({"agent": "legacy"})), "legacy");
+        assert_eq!(agents_display(&json!({"agents": [1, null]})), "");
+        assert_eq!(pool_key("high").unwrap(), TIER_HIGH);
+        assert_eq!(pool_key("mid").unwrap(), TIER_MID);
+        assert_eq!(pool_key("low").unwrap(), TIER_LOW);
+
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft: json!({
+                "server": {}, "data": {}, "plugins": {}, "upstreams": [],
+                "router": {"pools": [], "rules": null, "hint_routes": null}
+            }),
+            load_error: None,
+            server: None,
+        };
+        assert!(inner.upstreams().is_empty());
+        assert_eq!(inner.pool_member("missing"), (None, None));
+        inner.rebuild_routing();
+        assert!(inner.draft["router"]["heuristic"].is_null());
+        assert_eq!(inner.serve_view().listen, "127.0.0.1:8787");
+        assert!(inner.config_error().is_some());
+
         std::fs::remove_dir_all(root).ok();
     }
 }
