@@ -28,8 +28,9 @@ use token_station_cli::{secrets, server, stats, upgrade, virtual_key};
 use token_station_metrics::Recorder;
 
 use agent_integration::commands::{
-    apply_agent_plan, apply_snapshot_restore, list_agent_snapshots, plan_agent_connection,
-    plan_agent_disconnect, plan_snapshot_restore, scan_agents, AgentCommandState,
+    apply_agent_plan, apply_snapshot_restore, list_agent_registry, list_agent_snapshots,
+    plan_agent_connection, plan_agent_disconnect, plan_snapshot_restore, scan_agents,
+    AgentCommandState,
 };
 use model_catalog::ModelDiscoveryView;
 
@@ -1110,6 +1111,7 @@ pub fn run() {
             save_config,
             serve_start,
             serve_stop,
+            list_agent_registry,
             scan_agents,
             plan_agent_connection,
             apply_agent_plan,

@@ -1,5 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AgentPlanIntent,
+  AgentUiMetadataView,
+  AgentView,
   StateView,
   TierSlot,
   getState,
@@ -10,7 +13,9 @@ import {
   serveStart,
   serveStop,
   discoverProviderModels,
+  listAgentRegistry,
   ModelDiscoveryView,
+  scanAgents,
   setAdminEndpoint,
 } from "./api";
 import { PROVIDER_CATALOG, CUSTOM_ID, ProviderPreset } from "./catalog";
@@ -25,6 +30,23 @@ import Agents from "./pages/Agents";
 import "./App.css";
 
 type Tab = "home" | "agents" | "router" | "stats" | "plugins" | "settings" | "about";
+type AgentScanPhase = "idle" | "scanning" | "ready" | "error";
+
+interface AgentScanState {
+  phase: AgentScanPhase;
+  agents: AgentView[];
+  lastSuccessAtMs: number | null;
+  error: string;
+}
+
+function agentErrorText(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    const value = error as { message?: unknown; code?: unknown };
+    return [value.message, value.code && `code=${value.code}`].filter(Boolean).map(String).join(" · ");
+  }
+  return String(error);
+}
 const TABS: { id: Tab; label: string }[] = [
   { id: "home", label: "主页" },
   { id: "agents", label: "Agents" },
@@ -48,6 +70,15 @@ function App() {
   const [tab, setTab] = useState<Tab>("home");
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
+  const [agentRegistry, setAgentRegistry] = useState<AgentUiMetadataView[]>([]);
+  const [agentScan, setAgentScan] = useState<AgentScanState>({
+    phase: "idle",
+    agents: [],
+    lastSuccessAtMs: null,
+    error: "",
+  });
+  const agentScanInFlightRef = useRef(false);
+  const agentScanGenerationRef = useRef(0);
 
   // Add-provider form
   const [presetId, setPresetId] = useState<string>("");
@@ -70,9 +101,53 @@ function App() {
       setErr(String(e));
     }
   };
+
+  const rescanAgents = useCallback(async () => {
+    if (agentScanInFlightRef.current) return;
+    agentScanInFlightRef.current = true;
+    const generation = ++agentScanGenerationRef.current;
+    setAgentScan((current) => ({ ...current, phase: "scanning", error: "" }));
+    try {
+      const agents = await scanAgents();
+      if (generation === agentScanGenerationRef.current) {
+        setAgentScan({ phase: "ready", agents, lastSuccessAtMs: Date.now(), error: "" });
+      }
+    } catch (caught) {
+      if (generation === agentScanGenerationRef.current) {
+        const value = caught as { code?: unknown } | null;
+        if (value?.code === "scan_in_progress") {
+          setAgentScan((current) => ({
+            ...current,
+            phase: current.lastSuccessAtMs == null ? "idle" : "ready",
+          }));
+        } else {
+          setAgentScan((current) => ({
+            ...current,
+            phase: "error",
+            error: agentErrorText(caught),
+          }));
+        }
+      }
+    } finally {
+      agentScanInFlightRef.current = false;
+    }
+  }, []);
+
   useEffect(() => {
     refresh();
   }, []);
+  useEffect(() => {
+    void listAgentRegistry()
+      .then(setAgentRegistry)
+      .catch((caught) =>
+        setAgentScan((current) => ({
+          ...current,
+          phase: "error",
+          error: `Registry 读取失败 · ${agentErrorText(caught)}`,
+        })),
+      );
+    void rescanAgents();
+  }, [rescanAgents]);
   // Synchronize the data-plane endpoint after every state write, including serve start and stop. Data pages prefer local HTTP.
   useEffect(() => {
     if (state) setAdminEndpoint(state.serve);
@@ -224,6 +299,40 @@ function App() {
   // Show a mild prompt only when a provider exists but configuration is incomplete. Do not show an error for a new empty state.
   const showHint = providers.length > 0 && !!config_error;
 
+  const recordAgentOperation = (
+    intent: AgentPlanIntent,
+    agentId: string,
+    installationPath: string,
+  ) => {
+    setAgentScan((current) => ({
+      ...current,
+      agents: current.agents.map((agent) => {
+        if (agent.metadata.agent_id !== agentId) return agent;
+        const installations = agent.installations.map((installation) =>
+          installation.discovery.canonical_path === installationPath
+            ? {
+                ...installation,
+                connected:
+                  intent === "connect"
+                    ? true
+                    : intent === "disconnect"
+                      ? false
+                      : installation.connected,
+              }
+            : installation,
+        );
+        const connected = installations.some((installation) => installation.connected);
+        return {
+          ...agent,
+          installations,
+          status: connected
+            ? "CONNECTED"
+            : installations[0]?.compatibility.status ?? "NOT_DETECTED",
+        };
+      }),
+    }));
+  };
+
   return (
     <div className="app">
       <header className="topbar">
@@ -273,7 +382,18 @@ function App() {
       </nav>
 
       {tab === "router" && <RouterTable />}
-      {tab === "agents" && <Agents serveRunning={serve.running} />}
+      {tab === "agents" && (
+        <Agents
+          serveRunning={serve.running}
+          registry={agentRegistry}
+          agents={agentScan.agents}
+          scanPhase={agentScan.phase}
+          scanError={agentScan.error}
+          lastScanAtMs={agentScan.lastSuccessAtMs}
+          onRescan={rescanAgents}
+          onOperationApplied={recordAgentOperation}
+        />
+      )}
       {tab === "stats" && <Stats />}
       {tab === "plugins" && <Plugins />}
       {tab === "settings" && (
