@@ -1,0 +1,10 @@
+# isolated Hermes validation fixture
+_config_version: 33
+model:
+  default: auto
+  provider: custom
+  base_url: http://127.0.0.1:8787/v1
+  api_key: vk-hermes-fixture
+  api_mode: chat_completions
+display:
+  skin: default

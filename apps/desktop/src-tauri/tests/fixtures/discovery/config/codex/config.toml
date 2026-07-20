@@ -1,0 +1,4 @@
+model = "existing"
+
+[model_providers.existing]
+env_key = "TS_SECRET_CODEX"

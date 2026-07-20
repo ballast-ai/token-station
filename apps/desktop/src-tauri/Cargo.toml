@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "token-station — 本地智能路由代理的桌面客户端"
 authors = ["token-station"]
 edition = "2021"
+license = "Apache-2.0"
+publish = false
 
 [lib]
 # The `_lib` suffix keeps the lib name distinct from the bin on Windows.
@@ -18,12 +20,36 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+json-five = "=0.3.1"
+serde_norway = "=0.9.42"
+yaml-edit = "=0.2.3"
 toml = "0.8"
+toml_edit = "=0.20.2"
 tokio = { version = "1", features = ["rt-multi-thread", "net"] }
 ureq = "3.3.0"
+semver = "=1.0.28"
+sha2 = "=0.10.9"
+command-group = { version = "=5.0.1", default-features = false }
+getrandom = "=0.4.3"
+ring = "=0.17.14"
+zeroize = "=1.9.0"
 
 # The kernel, reused as a library — routing / gateway / config / metrics /
 # keychain all come from here. No fork of any of it.
 token-station-cli = { path = "../../cli" }
 token-station-router-core = { path = "../../../crates/router-core" }
 token-station-metrics = { path = "../../../crates/metrics" }
+token-station-release = { path = "../../../crates/release" }
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem"] }
+keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }

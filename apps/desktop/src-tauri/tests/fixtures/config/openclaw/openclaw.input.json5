@@ -1,0 +1,16 @@
+// OpenClaw 2026.6.11 fixture — keep this comment
+{
+  gateway: { mode: 'local' }, // unknown Token Station field
+  channels: {
+    telegram: { enabled: false },
+  },
+  models: {
+    providers: {
+      existing: {
+        baseUrl: 'https://existing.invalid/v1',
+        api: 'openai-completions',
+        models: [{ id: 'keep', name: 'Keep Existing' }],
+      },
+    },
+  },
+}

@@ -1,0 +1,22 @@
+[
+  {
+    "platform": "macos",
+    "template": "${HOME}/.claude/settings.json",
+    "expected": "/Users/tester/.claude/settings.json"
+  },
+  {
+    "platform": "linux",
+    "template": "${HOME}/.config/opencode/opencode.json",
+    "expected": "/Users/tester/.config/opencode/opencode.json"
+  },
+  {
+    "platform": "wsl",
+    "template": "${HOME}/.openclaw/openclaw.json",
+    "expected": "/Users/tester/.openclaw/openclaw.json"
+  },
+  {
+    "platform": "windows",
+    "template": "${LOCALAPPDATA}/hermes/config.yaml",
+    "expected": "C:/Users/tester/AppData/Local/hermes/config.yaml"
+  }
+]
