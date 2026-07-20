@@ -34,6 +34,7 @@ function errorText(error: unknown): string {
 export default function Agents({ serveRunning }: AgentsProps) {
   const [agents, setAgents] = useState<AgentView[]>([]);
   const [selected, setSelected] = useState<Record<string, string>>({});
+  const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -51,6 +52,9 @@ export default function Agents({ serveRunning }: AgentsProps) {
     try {
       const next = await scanAgents();
       setAgents(next);
+      setExpandedAgentId((current) =>
+        current && next.some((agent) => agent.metadata.agent_id === current) ? current : null,
+      );
       setSelected((current) => {
         const reconciled = { ...current };
         for (const agent of next) {
@@ -74,6 +78,11 @@ export default function Agents({ serveRunning }: AgentsProps) {
   const counts = useMemo(
     () => ({
       detected: agents.filter((agent) => agent.installations.length > 0).length,
+      ready: agents.filter((agent) =>
+        agent.installations.some((installation) =>
+          ["DETECTED_VERIFIED", "DETECTED_INFERRED"].includes(installation.compatibility.status),
+        ),
+      ).length,
       connected: agents.filter((agent) => agent.status === "CONNECTED").length,
     }),
     [agents],
@@ -137,29 +146,23 @@ export default function Agents({ serveRunning }: AgentsProps) {
 
   return (
     <main className="agents-page">
-      <header className="agents-hero">
-        <div>
-          <span className="agents-eyebrow">LOCAL AGENT CONTROL PLANE</span>
-          <h1>Agent 接入站</h1>
-          <p>自动识别安装与版本；真正写配置前，先看证据、差异和恢复点。</p>
-        </div>
-        <div className="agents-summary" aria-label="Agent 扫描摘要">
-          <div><strong>{agents.length || 5}</strong><span>Registry</span></div>
-          <div><strong>{counts.detected}</strong><span>已检测</span></div>
-          <div><strong>{counts.connected}</strong><span>已接入</span></div>
+      <section className="agents-toolbar panel">
+        <header className="agents-heading">
+          <div>
+            <h1>Agent 管理</h1>
+            <p>自动发现本机客户端；修改配置前先预览差异并创建恢复点。</p>
+          </div>
           <button className="btn" type="button" disabled={loading || busy} onClick={() => void rescan()}>
             {loading ? "扫描中…" : "重新扫描"}
           </button>
+        </header>
+        <div className="agents-summary" aria-label="Agent 扫描摘要">
+          <span><strong>{counts.detected}</strong>已发现</span>
+          <span><strong>{counts.ready}</strong>可接入</span>
+          <span><strong>{counts.connected}</strong>已接入</span>
+          <span className="agents-readonly-state">只读扫描完成</span>
         </div>
-      </header>
-
-      <div className="agent-safety-strip">
-        <span>只读扫描</span><i />
-        <span>版本保护</span><i />
-        <span>差异确认</span><i />
-        <span>加密快照</span><i />
-        <span>原子写入</span>
-      </div>
+      </section>
 
       {!serveRunning && (
         <div className="agent-page-note">代理当前未启动：扫描与快照仍可用，接入按钮保持禁用。</div>
@@ -172,14 +175,26 @@ export default function Agents({ serveRunning }: AgentsProps) {
       ) : agents.length === 0 && !error ? (
         <div className="agent-page-empty">Registry 没有可展示的 Agent。</div>
       ) : (
-        <section className="agent-card-grid" aria-label="Agent 列表">
+        <section className="agent-list panel" role="list" aria-label="Agent 列表">
+          <div className="agent-list-head" aria-hidden="true">
+            <span>客户端</span>
+            <span>版本</span>
+            <span>安装来源</span>
+            <span>状态</span>
+          </div>
           {agents.map((agent) => (
             <AgentCard
               key={agent.metadata.agent_id}
               agent={agent}
               selectedPath={selected[agent.metadata.agent_id] ?? ""}
+              expanded={expandedAgentId === agent.metadata.agent_id}
               busy={busy}
               serveRunning={serveRunning}
+              onToggle={() =>
+                setExpandedAgentId((current) =>
+                  current === agent.metadata.agent_id ? null : agent.metadata.agent_id,
+                )
+              }
               onSelect={(path) => setSelected((current) => ({ ...current, [agent.metadata.agent_id]: path }))}
               onPlanConnect={(installation: AgentInstallationView) =>
                 void createPlan(() =>

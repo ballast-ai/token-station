@@ -175,15 +175,48 @@ async function confirmEveryCheckbox(user: ReturnType<typeof userEvent.setup>) {
   for (const checkbox of screen.getAllByRole("checkbox")) await user.click(checkbox);
 }
 
+async function expandAgent(user: ReturnType<typeof userEvent.setup>, id: string) {
+  const row = screen.getByTestId(`agent-${id}`);
+  const toggle = within(row).getByRole("button");
+  if (toggle.getAttribute("aria-expanded") !== "true") await user.click(toggle);
+  return row;
+}
+
 describe("Agents page", () => {
+  it("uses a compact list and keeps only one agent row expanded", async () => {
+    const user = userEvent.setup();
+    await renderReady();
+
+    expect(screen.getByRole("heading", { name: "Agent 管理" })).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Agent 列表" })).toBeInTheDocument();
+
+    const claude = screen.getByTestId("agent-claude-code");
+    const codex = screen.getByTestId("agent-codex");
+    const claudeToggle = within(claude).getByRole("button", { name: /Claude Code/ });
+    const codexToggle = within(codex).getByRole("button", { name: /Codex/ });
+
+    expect(claudeToggle).toHaveAttribute("aria-expanded", "false");
+    expect(within(claude).queryByRole("button", { name: "预览接入" })).not.toBeInTheDocument();
+
+    await user.click(claudeToggle);
+    expect(claudeToggle).toHaveAttribute("aria-expanded", "true");
+    expect(within(claude).getByRole("button", { name: "预览接入" })).toBeInTheDocument();
+
+    await user.click(codexToggle);
+    expect(claudeToggle).toHaveAttribute("aria-expanded", "false");
+    expect(codexToggle).toHaveAttribute("aria-expanded", "true");
+    expect(within(claude).queryByRole("button", { name: "预览接入" })).not.toBeInTheDocument();
+  });
+
   it("renders all five Registry agents and disables unknown, blocked and discovery-only actions", async () => {
+    const user = userEvent.setup();
     await renderReady();
     for (const name of ["Claude Code", "Codex", "OpenCode", "OpenClaw", "Hermes Agent"]) {
       expect(screen.getByText(name)).toBeInTheDocument();
     }
-    expect(within(screen.getByTestId("agent-claude-code")).getByRole("button", { name: "预览接入" })).toBeEnabled();
+    expect(within(await expandAgent(user, "claude-code")).getByRole("button", { name: "预览接入" })).toBeEnabled();
     for (const id of ["codex", "opencode", "openclaw", "nous-hermes-agent"]) {
-      expect(within(screen.getByTestId(`agent-${id}`)).getByRole("button", { name: "预览接入" })).toBeDisabled();
+      expect(within(await expandAgent(user, id)).getByRole("button", { name: "预览接入" })).toBeDisabled();
     }
   });
 
@@ -207,7 +240,7 @@ describe("Agents page", () => {
     const user = userEvent.setup();
     scans = [agent("claude-code", "Claude Code", "MULTIPLE_INSTALLATIONS", { paths: ["/opt/claude-a", "/opt/claude-b"] })];
     await renderReady();
-    const card = screen.getByTestId("agent-claude-code");
+    const card = await expandAgent(user, "claude-code");
     expect(within(card).getByRole("button", { name: "预览接入" })).toBeDisabled();
     await user.selectOptions(within(card).getByLabelText("Claude Code 安装实例"), "/opt/claude-b");
     await user.click(within(card).getByRole("button", { name: "预览接入" }));
@@ -222,7 +255,7 @@ describe("Agents page", () => {
   it("never applies before the diff is shown and every confirmation is checked; cancel is zero apply", async () => {
     const user = userEvent.setup();
     await renderReady();
-    await user.click(within(screen.getByTestId("agent-claude-code")).getByRole("button", { name: "预览接入" }));
+    await user.click(within(await expandAgent(user, "claude-code")).getByRole("button", { name: "预览接入" }));
     expect(await screen.findByText(/ANTHROPIC_AUTH_TOKEN/)).toBeInTheDocument();
     const apply = screen.getByRole("button", { name: "确认并接入" });
     expect(apply).toBeDisabled();
@@ -236,13 +269,14 @@ describe("Agents page", () => {
     const user = userEvent.setup();
     planned = plan("connect", Date.now() - 1);
     await renderReady();
-    await user.click(within(screen.getByTestId("agent-claude-code")).getByRole("button", { name: "预览接入" }));
+    const claude = await expandAgent(user, "claude-code");
+    await user.click(within(claude).getByRole("button", { name: "预览接入" }));
     expect(await screen.findByText("计划已过期")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "确认并接入" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "取消" }));
 
     planned = plan("connect");
-    await user.click(within(screen.getByTestId("agent-claude-code")).getByRole("button", { name: "预览接入" }));
+    await user.click(within(claude).getByRole("button", { name: "预览接入" }));
     await screen.findByRole("dialog");
     await confirmEveryCheckbox(user);
     await user.click(screen.getByRole("button", { name: "确认并接入" }));
@@ -255,14 +289,15 @@ describe("Agents page", () => {
     scans = [agent("claude-code", "Claude Code", "DETECTED_VERIFIED", { connected: true })];
     planned = plan("disconnect");
     await renderReady();
-    await user.click(screen.getByRole("button", { name: "预览断开" }));
+    const claude = await expandAgent(user, "claude-code");
+    await user.click(within(claude).getByRole("button", { name: "预览断开" }));
     expect(await screen.findByRole("button", { name: "确认并断开" })).toBeDisabled();
     await confirmEveryCheckbox(user);
     await user.click(screen.getByRole("button", { name: "确认并断开" }));
     await waitFor(() => expect(invokeMock.mock.calls.some(([command]) => command === "apply_agent_plan")).toBe(true));
 
     planned = plan("restore");
-    await user.click(screen.getByRole("button", { name: "快照" }));
+    await user.click(within(claude).getByRole("button", { name: "查看快照" }));
     await user.click(await screen.findByRole("button", { name: "预览恢复" }));
     expect(await screen.findByRole("button", { name: "确认并恢复" })).toBeDisabled();
     await confirmEveryCheckbox(user);

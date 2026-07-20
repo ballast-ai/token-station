@@ -44,7 +44,7 @@ describe("dynamic Agent navigation", () => {
     expect(container.querySelector(".agentbar")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Agents" }));
-    await screen.findByRole("heading", { name: "Agent 接入站" });
+    await screen.findByRole("heading", { name: "Agent 管理" });
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("scan_agents"));
   });
 
