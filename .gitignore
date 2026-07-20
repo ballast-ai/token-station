@@ -13,6 +13,7 @@ plugins/official/*/target/
 *.tmp
 
 dist/
+/apps/desktop/coverage/
 
 # 私有文档仓的本地软链，不入库
 /all_docs
