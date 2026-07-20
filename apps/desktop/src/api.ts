@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export interface TierView {
   upstream: string | null;
@@ -20,10 +21,14 @@ export interface ModelDiscoveryView {
   warning: string | null;
 }
 
+export type ServePhase = "stopped" | "starting" | "stopping" | "running" | "error";
+
 export interface ServeView {
+  phase: ServePhase;
   running: boolean;
   listen: string;
   virtual_key: string | null;
+  error: string | null;
 }
 
 export type TierSlot = "high" | "mid" | "low";
@@ -270,6 +275,9 @@ export const saveConfig = () => invoke<StateView>("save_config");
 export const serveStart = () => invoke<StateView>("serve_start");
 export const serveStop = () => invoke<StateView>("serve_stop");
 
+export const listenServeState = (handler: (serve: ServeView) => void) =>
+  listen<ServeView>("serve-state-changed", (event) => handler(event.payload));
+
 export const listAgentRegistry = () =>
   invoke<AgentUiMetadataView[]>("list_agent_registry");
 
@@ -312,8 +320,8 @@ let adminKey: string | null = null;
 
 /** App 每次刷新状态时同步数据面端点(App.tsx 调用)。 */
 export function setAdminEndpoint(serve: ServeView) {
-  adminBase = serve.running ? `http://${serve.listen}` : null;
-  adminKey = serve.virtual_key;
+  adminBase = serve.phase === "running" ? `http://${serve.listen}` : null;
+  adminKey = serve.phase === "running" ? serve.virtual_key : null;
 }
 
 // 纯浏览器模式(无 Tauri 壳)没有 get_state 可问:从 localStorage 取端点,

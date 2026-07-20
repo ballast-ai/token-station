@@ -2,7 +2,7 @@
 
 日期：2026-07-20
 
-状态：设计完成，等待用户审阅与执行确认
+状态：已完成本地实施，等待用户验收
 
 ## 1. 背景与根因
 
@@ -309,3 +309,14 @@ Agents 展开、只读浏览或错误查看。
 路径中的用户信息或任何凭据。若新鲜数据证明窗口已不阻塞但冷启动时长仍不可接受，
 再为 Wasmtime Engine 复用、组件缓存或安全预热另写 Spec；不得把这些优化顺带加入
 本阶段实现。
+
+## 14. 本地实施结果
+
+- `serve_start` 已改为轻量派发：先返回 `starting`，重型准备进入 Tauri 阻塞线程池。
+- 后端已实现 `stopped / starting / stopping / running / error` 五态、generation 单飞、
+  启动取消、锁外停止和 `serve-state-changed` 通知。
+- 前端已实现即时启动状态、取消、失败重试、事件恢复和仅在 `running` 时启用 Admin
+  Endpoint。
+- 本机 Debug 冷启动测量中，`gateway_init` 约 21 秒，其余已记录阶段接近 0 毫秒；
+  该耗时不再阻塞窗口，WASM 冷编译优化仍按本设计留待独立证据和独立 Spec。
+- Rust 测试、前端测试、生产构建、Clippy、格式和 router-core 红线检查已通过。

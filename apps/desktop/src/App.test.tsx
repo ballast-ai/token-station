@@ -1,12 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import type { AgentUiMetadataView, AgentView, StateView } from "./api";
+import type { AgentUiMetadataView, AgentView, ServeView, StateView } from "./api";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 const invokeMock = vi.mocked(invoke);
+const listenMock = vi.mocked(listen);
+
+function emitServeState(serve: ServeView) {
+  const eventHandler = listenMock.mock.calls[0]?.[1] as
+    | ((event: { payload: ServeView }) => void)
+    | undefined;
+  eventHandler?.({ payload: serve });
+}
 
 const stateFixture: StateView = {
   providers: [],
@@ -15,7 +25,7 @@ const stateFixture: StateView = {
     mid: { upstream: null, model: null },
     low: { upstream: null, model: null },
   },
-  serve: { running: false, listen: "127.0.0.1:8787", virtual_key: null },
+  serve: { phase: "stopped", running: false, listen: "127.0.0.1:8787", virtual_key: null, error: null },
   config_error: null,
   settings: {
     listen: "127.0.0.1:8787",
@@ -78,6 +88,8 @@ const scannedAgentFixture: AgentView = {
 };
 
 beforeEach(() => {
+  listenMock.mockReset();
+  listenMock.mockResolvedValue(vi.fn());
   invokeMock.mockImplementation(async (command) => {
     if (command === "get_state") return stateFixture;
     if (command === "list_agent_registry") return registryFixture;
@@ -113,7 +125,7 @@ describe("dynamic Agent navigation", () => {
   it("starts and stops the proxy and saves the editable configuration", async () => {
     const running = {
       ...stateFixture,
-      serve: { running: true, listen: "127.0.0.1:8787", virtual_key: "vk-test" },
+      serve: { phase: "running", running: true, listen: "127.0.0.1:8787", virtual_key: "vk-test", error: null },
     } satisfies StateView;
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state" || command === "serve_stop" || command === "save_config") {
@@ -132,6 +144,102 @@ describe("dynamic Agent navigation", () => {
     expect(await screen.findByRole("button", { name: "启动代理" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存并应用" }));
     expect(await screen.findByText("已保存并校验")).toBeInTheDocument();
+  });
+
+  it("shows startup progress without blocking navigation while the backend prepares", async () => {
+    const starting = {
+      ...stateFixture,
+      serve: { phase: "starting", running: false, listen: "127.0.0.1:8787", virtual_key: null, error: null },
+    } satisfies StateView;
+    const running = {
+      ...stateFixture,
+      serve: { phase: "running", running: true, listen: "127.0.0.1:8787", virtual_key: "vk-test", error: null },
+    } satisfies StateView;
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "serve_start") return starting;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "启动代理" }));
+
+    expect(screen.getByText("正在启动")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Agents" }));
+    expect(await screen.findByRole("heading", { name: "Agent 管理" })).toBeInTheDocument();
+
+    emitServeState(running.serve);
+    expect(await screen.findByText("vk-test")).toBeInTheDocument();
+  });
+
+  it("cancels an in-flight startup and waits for backend cleanup", async () => {
+    const starting = {
+      ...stateFixture,
+      serve: { phase: "starting", running: false, listen: "127.0.0.1:8787", virtual_key: null, error: null },
+    } satisfies StateView;
+    const stopping = {
+      ...stateFixture,
+      serve: { phase: "stopping", running: false, listen: "127.0.0.1:8787", virtual_key: null, error: null },
+    } satisfies StateView;
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "serve_start") return starting;
+      if (command === "serve_stop") return stopping;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "启动代理" }));
+    await user.click(await screen.findByRole("button", { name: "取消启动" }));
+    expect(await screen.findByRole("button", { name: "正在停止" })).toBeDisabled();
+
+    emitServeState(stateFixture.serve);
+    expect(await screen.findByRole("button", { name: "启动代理" })).toBeInTheDocument();
+  });
+
+  it("shows a retryable sanitized startup error from the backend event", async () => {
+    const starting = {
+      ...stateFixture,
+      serve: { phase: "starting", running: false, listen: "127.0.0.1:8787", virtual_key: null, error: null },
+    } satisfies StateView;
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "serve_start") return starting;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "启动代理" }));
+    emitServeState({
+      phase: "error",
+      running: false,
+      listen: "127.0.0.1:8787",
+      virtual_key: null,
+      error: "listen_bind: 地址已被占用",
+    });
+
+    expect(await screen.findByText("listen_bind: 地址已被占用")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重试启动" })).toBeInTheDocument();
+  });
+
+  it("unsubscribes from proxy lifecycle events when the App unmounts", async () => {
+    const unlisten = vi.fn();
+    listenMock.mockResolvedValue(unlisten);
+    const view = render(<App />);
+    await screen.findByText("token-station");
+
+    view.unmount();
+
+    expect(unlisten).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the last successful Agent result when a manual rescan fails", async () => {
