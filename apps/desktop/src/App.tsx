@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   StateView,
   TierSlot,
-  AgentKind,
   getState,
   addProvider,
   removeProvider,
@@ -10,7 +9,6 @@ import {
   saveConfig,
   serveStart,
   serveStop,
-  connectAgent,
   discoverProviderModels,
   ModelDiscoveryView,
   setAdminEndpoint,
@@ -23,11 +21,13 @@ import Stats from "./pages/Stats";
 import Plugins from "./pages/Plugins";
 import Settings from "./pages/Settings";
 import About from "./pages/About";
+import Agents from "./pages/Agents";
 import "./App.css";
 
-type Tab = "home" | "router" | "stats" | "plugins" | "settings" | "about";
+type Tab = "home" | "agents" | "router" | "stats" | "plugins" | "settings" | "about";
 const TABS: { id: Tab; label: string }[] = [
   { id: "home", label: "主页" },
+  { id: "agents", label: "Agents" },
   { id: "router", label: "路由表" },
   { id: "stats", label: "用量" },
   { id: "plugins", label: "插件" },
@@ -39,12 +39,6 @@ const TIER_META: { slot: TierSlot; label: string; hint: string }[] = [
   { slot: "high", label: "上档", hint: "最强模型 · 难任务升到这里" },
   { slot: "mid", label: "中档", hint: "中等复杂度" },
   { slot: "low", label: "下档", hint: "便宜快模型 · 简单任务兜底" },
-];
-
-const AGENTS: { kind: AgentKind; label: string; icon: string }[] = [
-  { kind: "cc", label: "Claude Code", icon: "🅰" },
-  { kind: "codex", label: "Codex", icon: "◎" },
-  { kind: "opencode", label: "opencode", icon: "▣" },
 ];
 
 function App() {
@@ -247,19 +241,6 @@ function App() {
             启动代理
           </button>
         )}
-        <div className="agentbar">
-          {AGENTS.map((a) => (
-            <button
-              key={a.kind}
-              className={`agent ${serve.running ? "ready" : "idle"}`}
-              disabled={busy}
-              title={serve.running ? `接入 ${a.label}` : "点此会提示先启动代理"}
-              onClick={() => run(() => connectAgent(a.kind))}
-            >
-              <span className="ai">{a.icon}</span> {a.label}
-            </button>
-          ))}
-        </div>
       </header>
 
       {serve.running && serve.virtual_key && (
@@ -292,6 +273,7 @@ function App() {
       </nav>
 
       {tab === "router" && <RouterTable />}
+      {tab === "agents" && <Agents serveRunning={serve.running} />}
       {tab === "stats" && <Stats />}
       {tab === "plugins" && <Plugins />}
       {tab === "settings" && (
