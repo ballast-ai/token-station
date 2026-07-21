@@ -59,6 +59,11 @@ pub struct ClientConfig {
     /// When an upstream is taken out of rotation. Optional; defaults apply.
     #[serde(default)]
     pub health: HealthConfig,
+    /// In-flight concurrency ceilings (global / per Agent / per Provider).
+    /// Optional; defaults to unlimited, so an unconfigured deployment is
+    /// unchanged.
+    #[serde(default)]
+    pub concurrency: crate::admission::Limits,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

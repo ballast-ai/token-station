@@ -247,7 +247,10 @@ mod tests {
         let during = now + Duration::from_secs(10);
         let after = now + Duration::from_secs(31);
 
-        assert_eq!(tracker.health_of(&target, MODEL, during), Health::Unavailable);
+        assert_eq!(
+            tracker.health_of(&target, MODEL, during),
+            Health::Unavailable
+        );
         assert_eq!(
             tracker.health_of(&target, MODEL, after),
             Health::Degraded,
@@ -299,7 +302,12 @@ mod tests {
             tracker.observe_failure(&target, MODEL, ErrorCode::Timeout, now);
         }
         // A straggler (e.g. an in-flight request) fails during cooldown.
-        tracker.observe_failure(&target, MODEL, ErrorCode::Timeout, now + Duration::from_secs(5));
+        tracker.observe_failure(
+            &target,
+            MODEL,
+            ErrorCode::Timeout,
+            now + Duration::from_secs(5),
+        );
 
         assert_eq!(
             tracker.health_of(&target, MODEL, now + Duration::from_secs(31)),
