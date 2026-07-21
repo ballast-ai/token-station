@@ -17,6 +17,7 @@
 //! in-process against a mock upstream; `main.rs` is a thin argument parser.
 
 pub mod admin;
+pub mod admission;
 pub mod cancel;
 pub mod config;
 pub mod filelog;

@@ -124,7 +124,9 @@ impl Router {
             self.extend_with_backups(&mut targets, pools, pool, candidates, &features);
         }
 
-        let (chosen, fallbacks) = targets.split_first().expect("rank returns a non-empty list");
+        let (chosen, fallbacks) = targets
+            .split_first()
+            .expect("rank returns a non-empty list");
 
         Ok(Decision {
             chosen: (*chosen).clone(),

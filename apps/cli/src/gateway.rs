@@ -38,6 +38,7 @@ use token_station_router_core::{
     Candidate, Decision, HealthPolicy, HealthTracker, Router, UpstreamModel, UpstreamRef,
 };
 
+use crate::admission::Admission;
 use crate::request_context::RequestContext;
 
 use crate::config::ClientConfig;
@@ -88,6 +89,8 @@ pub struct Gateway {
     /// tracker, because it changes and this does not.
     catalog: Vec<(UpstreamModel, token_station_protocol::ModelCapability)>,
     health: std::sync::Mutex<HealthTracker>,
+    /// In-flight concurrency ceilings, global / per Agent / per Provider.
+    admission: Admission,
     secrets: SecretStore,
     http: ureq::Agent,
     recorder: Arc<dyn Recorder>,
@@ -417,6 +420,7 @@ impl Gateway {
                 eject_after: config.health.eject_after,
                 cooldown: Duration::from_millis(config.health.cooldown_ms),
             })),
+            admission: Admission::new(config.concurrency),
             secrets: SecretStore::from_config(config),
             recorder,
             http: ureq::Agent::new_with_config(
@@ -632,7 +636,10 @@ impl Gateway {
         let describe =
             |envelope: ErrorEnvelope| format!("{} ({:?})", envelope.message, envelope.code);
 
-        let descriptor = match upstream.plugin.build_http_request(&request, &upstream.config) {
+        let descriptor = match upstream
+            .plugin
+            .build_http_request(&request, &upstream.config)
+        {
             Ok(descriptor) => descriptor,
             Err(envelope) => return (ProbeSignal::Transport(describe(envelope)), None),
         };
@@ -684,12 +691,8 @@ impl Gateway {
         match outcome {
             Ok(()) => health.observe_success(upstream, model),
             Err(envelope) => {
-                if health.observe_failure(
-                    upstream,
-                    model,
-                    envelope.code,
-                    std::time::Instant::now(),
-                ) {
+                if health.observe_failure(upstream, model, envelope.code, std::time::Instant::now())
+                {
                     eprintln!(
                         "upstream {upstream} model {model} ejected from rotation ({:?})",
                         envelope.code
@@ -725,6 +728,7 @@ impl Gateway {
     /// The normal request pipeline with a host-validated Agent routing scope.
     /// `None` is the backward-compatible, unnamespaced home route.
     #[allow(clippy::too_many_arguments)] // the request pipeline's real surface
+    #[allow(clippy::too_many_lines)] // admission + scope + dispatch, read top-down
     pub fn chat_scoped(
         &self,
         ctx: &RequestContext,
@@ -774,6 +778,19 @@ impl Gateway {
             }
         };
 
+        // Concurrency admission: take a global and a per-Agent permit, held for
+        // the whole exchange. Over a ceiling we refuse with 429 rather than pile
+        // another request onto the upstreams.
+        let Some(global_permit) = self.admission.enter_global() else {
+            self.refuse_concurrency(started_at_ms, &clock, emit);
+            return;
+        };
+        let Some(agent_permit) = self.admission.enter_agent(agent_id.unwrap_or("")) else {
+            self.refuse_concurrency(started_at_ms, &clock, emit);
+            return;
+        };
+        let _permits = (global_permit, agent_permit);
+
         // Ask each inbound adapter which claims this request. The winner's
         // protocol tags the record; no winner is a request in a dialect nothing
         // here serves, and no adapter exists to phrase the refusal in.
@@ -814,6 +831,38 @@ impl Gateway {
             }));
         }
 
+        record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.recorder.record(&record);
+    }
+
+    /// The response for a request turned away at a concurrency ceiling: a 429,
+    /// recorded like any other terminal outcome so the refusal is visible in
+    /// metrics rather than silent.
+    fn refuse_concurrency(
+        &self,
+        started_at_ms: u64,
+        clock: &std::time::Instant,
+        emit: &mut dyn FnMut(Reply) -> bool,
+    ) {
+        let refusal = ErrorEnvelope::new(
+            ErrorCode::RateLimit,
+            429,
+            "concurrency limit reached; retry shortly",
+        );
+        let mut record = RequestRecord::begin(started_at_ms, String::new());
+        record.status = refusal.http_status;
+        record.error_code = Some(refusal.code);
+        emit(Reply::BeginJson(JsonReply {
+            status: refusal.http_status,
+            body: json!({
+                "error": {
+                    "message": refusal.message,
+                    "type": "rate_limit_error",
+                    "code": "concurrency_limit"
+                }
+            })
+            .to_string(),
+        }));
         record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.recorder.record(&record);
     }
@@ -945,6 +994,18 @@ impl Gateway {
             if ctx.is_cancelled() {
                 return Ok((target.clone(), StreamOutcome::ClientCancelled));
             }
+            // Per-Provider admission, held across this attempt. A provider at
+            // its ceiling is skipped like a retriable failure — the next
+            // candidate gets a turn rather than the request queueing on a hot
+            // upstream.
+            let Some(_provider) = self.admission.enter_provider(target.upstream.as_str()) else {
+                last_error = Some(ErrorEnvelope::new(
+                    ErrorCode::Capacity,
+                    429,
+                    "provider concurrency limit reached",
+                ));
+                continue;
+            };
             record.attempts += 1;
             if let Some(routing) = record.routing.as_mut() {
                 // The record names who actually served (or last refused), not
@@ -1447,7 +1508,10 @@ mod layered_health_tests {
         let signal = ProbeSignal::Transport("dns: no such host".to_owned());
         assert_eq!(status_of(&signal, HealthLayer::Network), StageStatus::Fail);
         assert_eq!(status_of(&signal, HealthLayer::Http), StageStatus::Skipped);
-        assert_eq!(status_of(&signal, HealthLayer::Generation), StageStatus::Skipped);
+        assert_eq!(
+            status_of(&signal, HealthLayer::Generation),
+            StageStatus::Skipped
+        );
     }
 
     #[test]
@@ -1470,7 +1534,10 @@ mod layered_health_tests {
         };
         assert_eq!(status_of(&signal, HealthLayer::Auth), StageStatus::Pass);
         assert_eq!(status_of(&signal, HealthLayer::Model), StageStatus::Fail);
-        assert_eq!(status_of(&signal, HealthLayer::Generation), StageStatus::Skipped);
+        assert_eq!(
+            status_of(&signal, HealthLayer::Generation),
+            StageStatus::Skipped
+        );
     }
 
     #[test]
@@ -1487,7 +1554,10 @@ mod layered_health_tests {
     fn a_2xx_with_a_broken_body_fails_only_generation() {
         let signal = ProbeSignal::BadBody("not json".to_owned());
         assert_eq!(status_of(&signal, HealthLayer::Model), StageStatus::Pass);
-        assert_eq!(status_of(&signal, HealthLayer::Generation), StageStatus::Fail);
+        assert_eq!(
+            status_of(&signal, HealthLayer::Generation),
+            StageStatus::Fail
+        );
     }
 }
 
