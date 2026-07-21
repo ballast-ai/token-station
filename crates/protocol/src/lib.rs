@@ -65,7 +65,7 @@ pub use http::{
     SecretBoundaryError, SecretRef,
 };
 pub use provider::{DescriptorError, EndpointError, ProviderConfig, ProviderEndpoint};
-pub use stream::{StreamChunk, StreamEvent};
+pub use stream::{StreamChunk, StreamEvent, StreamOutcome};
 pub use usage::Usage;
 
 /// Forward-compatible bag for fields this ABI version does not model.
