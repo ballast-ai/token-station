@@ -8,7 +8,7 @@ describe("AddProviderPage", () => {
     const user = userEvent.setup();
     render(<AddProviderPage onCancel={vi.fn()} onAdded={vi.fn()} />);
 
-    await user.selectOptions(screen.getByLabelText("选择供应商"), "minimax-cn");
+    await user.selectOptions(screen.getByLabelText("选择供应商"), "minimax_cn");
 
     expect(screen.getByDisplayValue("https://api.minimaxi.com/v1")).toBeDisabled();
     expect(screen.getByText("中国开放平台；与国际站 Key 不通用。")).toBeInTheDocument();

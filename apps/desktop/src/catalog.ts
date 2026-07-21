@@ -34,7 +34,7 @@ export const PROVIDER_CATALOG: ProviderPreset[] = [
     needsKey: true,
   },
   {
-    id: "glm-cn",
+    id: "glm_cn",
     label: "智谱 GLM（中国）",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
     models: ["glm-5.2", "glm-5.1", "glm-5"],
@@ -50,7 +50,7 @@ export const PROVIDER_CATALOG: ProviderPreset[] = [
     note: "Z.AI 国际站通用按量 API。",
   },
   {
-    id: "glm-coding",
+    id: "glm_coding",
     label: "智谱 GLM（Coding Plan）",
     baseUrl: "https://api.z.ai/api/coding/paas/v4",
     models: ["glm-5.2", "glm-4.6"],
@@ -65,7 +65,7 @@ export const PROVIDER_CATALOG: ProviderPreset[] = [
     needsKey: true,
   },
   {
-    id: "kimi-global",
+    id: "kimi_global",
     label: "Moonshot Kimi（国际）",
     baseUrl: "https://api.moonshot.ai/v1",
     models: ["kimi-k3", "kimi-k2.6"],
@@ -80,7 +80,7 @@ export const PROVIDER_CATALOG: ProviderPreset[] = [
     needsKey: true,
   },
   {
-    id: "qwen-us",
+    id: "qwen_us",
     label: "阿里云百炼 Qwen（美国）",
     baseUrl: "https://dashscope-us.aliyuncs.com/compatible-mode/v1",
     models: ["qwen-plus"],
@@ -88,7 +88,7 @@ export const PROVIDER_CATALOG: ProviderPreset[] = [
     note: "仅适用于美国（弗吉尼亚）地域的 API Key；其他国际地域需要 Workspace ID，请使用自定义供应商。",
   },
   {
-    id: "minimax-cn",
+    id: "minimax_cn",
     label: "MiniMax（中国）",
     baseUrl: "https://api.minimaxi.com/v1",
     models: ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.5"],
@@ -96,7 +96,7 @@ export const PROVIDER_CATALOG: ProviderPreset[] = [
     note: "中国开放平台；与国际站 Key 不通用。",
   },
   {
-    id: "minimax-global",
+    id: "minimax_global",
     label: "MiniMax（国际）",
     baseUrl: "https://api.minimax.io/v1",
     models: ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.5"],
@@ -117,7 +117,7 @@ export const PROVIDER_CATALOG: ProviderPreset[] = [
     needsKey: true,
   },
   {
-    id: "nvidia-nim",
+    id: "nvidia_nim",
     label: "NVIDIA NIM",
     baseUrl: "https://integrate.api.nvidia.com/v1",
     models: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "meta/llama-3.3-70b-instruct"],
@@ -140,7 +140,7 @@ export const PROVIDER_CATALOG: ProviderPreset[] = [
     note: "xAI 已将 Chat Completions 标记为旧接口；本预设仅用于当前 OpenAI-compatible 兼容链路。",
   },
   {
-    id: "volcengine-ark",
+    id: "volcengine_ark",
     label: "火山方舟（中国标准 API）",
     baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
     models: ["doubao-seed-2-1-pro-260628"],
@@ -148,7 +148,7 @@ export const PROVIDER_CATALOG: ProviderPreset[] = [
     note: "中国区标准按量 API；与 Coding Plan 的 Key 和网关不同。",
   },
   {
-    id: "volcengine-ark-coding",
+    id: "volcengine_ark_coding",
     label: "火山方舟（Coding Plan）",
     baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
     models: ["ark-code-latest"],
@@ -156,7 +156,7 @@ export const PROVIDER_CATALOG: ProviderPreset[] = [
     note: "仅限火山方舟 Coding Plan。",
   },
   {
-    id: "byteplus-ark",
+    id: "byteplus_ark",
     label: "BytePlus ModelArk（标准 API）",
     baseUrl: "https://ark.ap-southeast.bytepluses.com/api/v3",
     models: ["seed-2-0-lite-260228", "seed-1-8-251228", "seed-1-6-250915"],
@@ -164,7 +164,7 @@ export const PROVIDER_CATALOG: ProviderPreset[] = [
     note: "BytePlus 国际站标准按量 API。",
   },
   {
-    id: "byteplus-ark-coding",
+    id: "byteplus_ark_coding",
     label: "BytePlus ModelArk（Coding Plan）",
     baseUrl: "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
     models: ["ark-code-latest"],
