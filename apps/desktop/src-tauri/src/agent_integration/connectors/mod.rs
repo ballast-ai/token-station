@@ -221,6 +221,11 @@ mod tests {
                 .any(|owned| { sensitive.segments.starts_with(&owned.segments) })));
             assert!(connector.validate_preconditions(&not_ready).is_err());
             assert!(connector.validate_preconditions(&good).is_ok());
+            if matches!(connector.connector_id(), "hermes-v1" | "openclaw-v1") {
+                assert!(connector.validate_preconditions(&missing_token).is_err());
+            } else {
+                assert!(connector.validate_preconditions(&missing_token).is_ok());
+            }
 
             let mut document =
                 parse_source_bytes(None, connector.format(), connector.label()).unwrap();

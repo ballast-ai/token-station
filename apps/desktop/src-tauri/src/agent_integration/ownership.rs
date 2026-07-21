@@ -375,6 +375,11 @@ mod tests {
         assert!(!bytes
             .windows(secret.len())
             .any(|window| window == secret.as_bytes()));
+        let duplicate = store
+            .commit(committed.clone(), None)
+            .err()
+            .expect("active ownership cannot be replaced without a revision");
+        assert!(duplicate.contains("active ownership"));
         let error = store
             .commit(committed.clone(), Some(0))
             .err()
@@ -382,8 +387,13 @@ mod tests {
         assert!(error.contains("revision"));
         let updated = store.commit(committed.clone(), Some(1)).unwrap();
         assert_eq!(updated.revision, 2);
+        let stale_remove = store
+            .remove(&updated.key(), 1)
+            .expect_err("stale removal cannot delete active ownership");
+        assert!(stale_remove.contains("revision"));
         store.remove(&updated.key(), 2).unwrap();
         assert!(store.load(&updated.key()).unwrap().is_none());
+        assert!(store.remove(&updated.key(), 2).is_err());
         std::fs::remove_dir_all(root).ok();
     }
 

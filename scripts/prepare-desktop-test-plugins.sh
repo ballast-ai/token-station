@@ -15,10 +15,10 @@ readonly plugins=(
 # resolves official adapters from the repository-level plugins-dist directory.
 for plugin in "${plugins[@]}"; do
   source="$root/plugins/official/$plugin"
-  cargo build --locked --manifest-path "$source/Cargo.toml" --target "$target"
+  cargo build --locked --release --manifest-path "$source/Cargo.toml" --target "$target"
   mkdir -p "$output/$plugin"
   cp "$source/manifest.json" "$output/$plugin/manifest.json"
-  cp "$source/target/$target/debug/${plugin//-/_}.wasm" \
+  cp "$source/target/$target/release/${plugin//-/_}.wasm" \
     "$output/$plugin/adapter.wasm"
 done
 
