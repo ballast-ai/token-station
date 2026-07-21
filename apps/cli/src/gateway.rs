@@ -66,6 +66,30 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 /// One logical request gets one id; the dispatch fallback sweep reuses it, so
 /// internal retries are one accounting unit, and a record written twice
 /// collapses to one row instead of double-counting.
+/// An outbound HTTP agent with an explicit, fail-closed egress policy (P1-6):
+///
+/// - **No redirects.** Following a 3xx could carry the `Authorization` header to
+///   a host the operator never chose; a redirect is surfaced as the response it
+///   is, not chased.
+/// - **No environment proxy.** `HTTP(S)_PROXY` is ignored, so traffic never
+///   silently detours through a middlebox the operator did not configure here.
+///
+/// Every upstream and probe request goes through one of these, so where a
+/// request (and its credential) can go is a property of the code, not the
+/// ambient environment.
+fn egress_agent(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            // The pipeline maps upstream errors itself; a non-2xx is an answer,
+            // not a transport failure.
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .proxy(None)
+            .build(),
+    )
+}
+
 fn begin_record(started_at_ms: u64, protocol: impl Into<String>) -> RequestRecord {
     let mut record = RequestRecord::begin(started_at_ms, protocol);
     record.request_id = format!(
@@ -440,14 +464,7 @@ impl Gateway {
             pricing: config.pricing.clone(),
             secrets: SecretStore::from_config(config),
             recorder,
-            http: ureq::Agent::new_with_config(
-                ureq::Agent::config_builder()
-                    .timeout_global(Some(UPSTREAM_TIMEOUT))
-                    // The pipeline maps upstream errors itself; a non-2xx is
-                    // an answer, not a transport failure.
-                    .http_status_as_error(false)
-                    .build(),
-            ),
+            http: egress_agent(UPSTREAM_TIMEOUT),
             models_document: json!({ "object": "list", "data": models_document }).to_string(),
         })
     }
@@ -512,12 +529,7 @@ impl Gateway {
             return Err(format!("upstream `{upstream_name}` declares no models"));
         }
 
-        let http = ureq::Agent::new_with_config(
-            ureq::Agent::config_builder()
-                .timeout_global(Some(PROBE_TIMEOUT))
-                .http_status_as_error(false)
-                .build(),
-        );
+        let http = egress_agent(PROBE_TIMEOUT);
 
         Ok(models
             .into_iter()
@@ -611,12 +623,7 @@ impl Gateway {
             return Err(format!("upstream `{upstream_name}` declares no models"));
         }
 
-        let http = ureq::Agent::new_with_config(
-            ureq::Agent::config_builder()
-                .timeout_global(Some(PROBE_TIMEOUT))
-                .http_status_as_error(false)
-                .build(),
-        );
+        let http = egress_agent(PROBE_TIMEOUT);
 
         Ok(models
             .into_iter()
