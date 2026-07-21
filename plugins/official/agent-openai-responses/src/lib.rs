@@ -671,11 +671,14 @@ fn error_code(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::InvalidRequest => "invalid_request",
         ErrorCode::Auth => "authentication_error",
+        ErrorCode::PaymentRequired => "insufficient_quota",
         ErrorCode::RateLimit => "rate_limit_exceeded",
         ErrorCode::Capacity => "server_overloaded",
         ErrorCode::Capability => "unsupported_capability",
+        ErrorCode::ContextLength => "context_length_exceeded",
         ErrorCode::ContentPolicy => "invalid_prompt",
-        ErrorCode::UpstreamUnavailable => "server_error",
+        ErrorCode::UpstreamUnavailable | ErrorCode::TransportTruncated => "server_error",
+        ErrorCode::ProviderProtocolError => "upstream_protocol_error",
         ErrorCode::Timeout => "timeout",
         ErrorCode::Internal => "internal_error",
     }

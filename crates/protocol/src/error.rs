@@ -17,6 +17,9 @@ pub enum ErrorCode {
     InvalidRequest,
     /// The credential is missing, wrong, or lacks permission.
     Auth,
+    /// The account is out of funds or the endpoint requires payment (HTTP 402).
+    /// A config/billing problem, not the upstream's health — not retriable.
+    PaymentRequired,
     /// The caller exceeded a rate limit. Retriable elsewhere.
     RateLimit,
     /// The upstream has no capacity right now. Retriable elsewhere.
@@ -28,6 +31,16 @@ pub enum ErrorCode {
     ContentPolicy,
     /// The upstream is unreachable or returned a transport-level failure.
     UpstreamUnavailable,
+    /// The connection dropped mid-body: an incomplete answer, not a complete
+    /// one. Retriable elsewhere, and a connection-level fault for health.
+    TransportTruncated,
+    /// The request exceeds the model's context window. The same request would
+    /// fail on any deployment of the model — not retriable elsewhere.
+    ContextLength,
+    /// The upstream answered 2xx but the body is not valid provider protocol
+    /// (e.g. an error object smuggled into a 200, or unparseable JSON). It
+    /// answered, so this is not treated as an outage.
+    ProviderProtocolError,
     /// The upstream did not answer within the host's budget.
     Timeout,
     /// Anything else, including adapter bugs.
@@ -43,7 +56,11 @@ impl ErrorCode {
     pub const fn is_retriable_elsewhere(self) -> bool {
         matches!(
             self,
-            Self::RateLimit | Self::Capacity | Self::UpstreamUnavailable | Self::Timeout
+            Self::RateLimit
+                | Self::Capacity
+                | Self::UpstreamUnavailable
+                | Self::TransportTruncated
+                | Self::Timeout
         )
     }
 }
@@ -100,6 +117,18 @@ mod tests {
         assert!(ErrorCode::Capacity.is_retriable_elsewhere());
         assert!(ErrorCode::UpstreamUnavailable.is_retriable_elsewhere());
         assert!(ErrorCode::Timeout.is_retriable_elsewhere());
+        // A dropped connection is an incomplete answer worth trying elsewhere.
+        assert!(ErrorCode::TransportTruncated.is_retriable_elsewhere());
+    }
+
+    #[test]
+    fn same_request_failures_are_not_retried_elsewhere() {
+        // A billing problem, an over-length request, or a malformed 2xx body
+        // would fail the same way (or is the upstream's answer) — not an outage
+        // another upstream would dodge.
+        assert!(!ErrorCode::PaymentRequired.is_retriable_elsewhere());
+        assert!(!ErrorCode::ContextLength.is_retriable_elsewhere());
+        assert!(!ErrorCode::ProviderProtocolError.is_retriable_elsewhere());
     }
 
     #[test]

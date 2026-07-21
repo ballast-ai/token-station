@@ -394,10 +394,14 @@ impl Guest for OpenAiCompatible {
         let message = match code {
             ErrorCode::InvalidRequest => "the upstream refused the request as malformed",
             ErrorCode::Auth => "the upstream rejected the credential",
+            ErrorCode::PaymentRequired => "the upstream requires payment or the account is out of funds",
             ErrorCode::RateLimit => "the upstream rate limited this request",
             ErrorCode::ContentPolicy => "the upstream refused on content-policy grounds",
+            ErrorCode::ContextLength => "the request exceeds the model's context window",
             ErrorCode::Timeout => "the upstream did not answer in time",
             ErrorCode::UpstreamUnavailable => "the upstream is unavailable",
+            ErrorCode::TransportTruncated => "the upstream connection dropped mid-response",
+            ErrorCode::ProviderProtocolError => "the upstream answered with an invalid body",
             ErrorCode::Capacity | ErrorCode::Capability | ErrorCode::Internal => {
                 "the upstream failed"
             }

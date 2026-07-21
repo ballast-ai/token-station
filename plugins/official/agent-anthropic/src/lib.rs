@@ -458,13 +458,18 @@ fn response_blocks(message: &Message) -> Result<Vec<Value>, String> {
 
 fn anthropic_error_type(code: ErrorCode) -> &'static str {
     match code {
-        ErrorCode::Auth => "authentication_error",
+        ErrorCode::Auth | ErrorCode::PaymentRequired => "authentication_error",
         ErrorCode::RateLimit => "rate_limit_error",
         ErrorCode::Capacity => "overloaded_error",
-        ErrorCode::InvalidRequest | ErrorCode::Capability | ErrorCode::ContentPolicy => {
-            "invalid_request_error"
-        }
-        ErrorCode::UpstreamUnavailable | ErrorCode::Timeout | ErrorCode::Internal => "api_error",
+        ErrorCode::InvalidRequest
+        | ErrorCode::Capability
+        | ErrorCode::ContentPolicy
+        | ErrorCode::ContextLength => "invalid_request_error",
+        ErrorCode::UpstreamUnavailable
+        | ErrorCode::TransportTruncated
+        | ErrorCode::ProviderProtocolError
+        | ErrorCode::Timeout
+        | ErrorCode::Internal => "api_error",
     }
 }
 

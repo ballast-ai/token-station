@@ -143,7 +143,10 @@ impl HealthTracker {
 fn counts_toward_ejection(code: ErrorCode) -> bool {
     matches!(
         code,
-        ErrorCode::Timeout | ErrorCode::UpstreamUnavailable | ErrorCode::Capacity
+        ErrorCode::Timeout
+            | ErrorCode::UpstreamUnavailable
+            | ErrorCode::TransportTruncated
+            | ErrorCode::Capacity
     )
 }
 
