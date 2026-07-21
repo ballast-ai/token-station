@@ -106,6 +106,8 @@ cc-Switch 将版本检测用于安装状态、版本展示和升级提示，不�
 用户点击试验性接入
 → UI 展示版本、安装路径、未经验证原因、快照与恢复说明
 → 用户明确确认风险
+→ UI 将已展示的规范化版本作为 expected version 请求计划
+→ 后端刷新扫描；版本不一致则拒绝并要求重新确认
 → 后端生成计划并执行完整只读投影预检
 → 计划包含 experimental_compatibility 确认要求
 → UI 提交计划令牌及 experimental_compatibility_confirmed=true
@@ -117,6 +119,8 @@ cc-Switch 将版本检测用于安装状态、版本展示和升级提示，不�
 
 用户取消确认时不调用计划命令，因此不会累积未消费的待确认计划。
 
+expected version 只用于与刷新后的服务端扫描结果做等值比较，不参与路径选择、Connector 选择或兼容性推断。Token Station 不负责下载、安装或升级 Agent；如果用户在外部改变 Agent 版本，旧确认不能授权新版本，必须重新扫描并展示当前版本。
+
 ### 7.2 IPC 确认参数
 
 `apply_agent_plan` 增加向后兼容的可选参数 `experimental_compatibility_confirmed`：
@@ -127,6 +131,13 @@ cc-Switch 将版本检测用于安装状态、版本展示和升级提示，不�
 - 普通安装实例、目标配置和字段 diff 的既有确认令牌语义保持不变。
 
 后端只在参数为 `true` 时，把 `ExperimentalCompatibility` 放入 `ConfirmedOperation.confirmations`。不得再根据计划中的 `required_confirmations` 自动声称用户已完成试验性确认。
+
+`plan_agent_connection` 对试验性接入增加可选的 `expected_version`：
+
+- UI 传入刚刚展示并由用户确认的规范化版本；
+- 后端完成刷新扫描后，必须与选中安装实例的 `version_normalized` 精确相等；
+- 不相等、缺失或过长时拒绝生成计划，不产生写入；
+- 已验证版本的现有调用可省略该参数。
 
 ### 7.3 应用时重新准入
 
@@ -187,6 +198,7 @@ cc-Switch 将版本检测用于安装状态、版本展示和升级提示，不�
 - 计划后变为 blocked：使用现有兼容或准入变化错误，不写配置；
 - 预检失败：使用 `read_only_preflight_failed` 或现有解析/前置条件错误，不生成可执行计划；
 - 用户取消：纯前端状态，不调用后端，不产生全局错误；
+- 用户确认后版本已变化：返回 `discovery_changed_before_plan`，要求重新扫描和确认，不生成计划；
 - 所有错误不得回显虚拟 Key、原配置内容、环境变量值或原始版本命令输出。
 
 ## 12. 测试与验收
@@ -197,18 +209,19 @@ cc-Switch 将版本检测用于安装状态、版本展示和升级提示，不�
 2. blocked 优先于 unknown；相同核心版本的预发布版本继续被 blocked。
 3. 无法解析版本、`discovery_only`、缺少目录条目和多 Connector 不获得 Connector 或接入动作。
 4. eligible unknown 预检成功时生成带 `ExperimentalCompatibility` 的计划。
-5. unknown 配置解析、Connector 前置条件或投影验证失败时不签发计划。
-6. `experimental_compatibility_confirmed` 缺失或为 `false` 时拒绝且保留计划；传 `true` 后允许继续。
-7. verified 计划不要求新参数，保持向后兼容。
-8. 应用前版本、指纹、Connector 或目录状态变化时拒绝；变为 blocked 时证明目标文件零写入。
-9. 快照、ownership、原子写入、写后验证和失败恢复矩阵继续通过。
+5. 计划请求的 expected version 与刷新扫描结果不一致时拒绝，防止旧确认授权新版本。
+6. unknown 配置解析、Connector 前置条件或投影验证失败时不签发计划。
+7. `experimental_compatibility_confirmed` 缺失或为 `false` 时拒绝且保留计划；传 `true` 后允许继续。
+8. verified 计划不要求新参数，保持向后兼容。
+9. 应用前版本、指纹、Connector 或目录状态变化时拒绝；变为 blocked 时证明目标文件零写入。
+10. 快照、ownership、原子写入、写后验证和失败恢复矩阵继续通过。
 
 ### 12.2 前端
 
 1. eligible unknown 显示“版本未经验证”和“试验性接入”。
 2. 非 eligible unknown 仍禁用接入。
 3. 用户取消确认时不调用计划或应用 IPC。
-4. 用户确认后先调用计划，再以 `experimental_compatibility_confirmed=true` 调用应用。
+4. 用户确认后携带 UI 已展示的 expected version 调用计划，再以 `experimental_compatibility_confirmed=true` 调用应用。
 5. verified 接入不显示试验性警告，现有流程不回归。
 6. 后端预检或应用拒绝时展示脱敏错误并恢复按钮状态。
 

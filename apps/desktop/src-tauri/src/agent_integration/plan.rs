@@ -177,7 +177,10 @@ pub fn build_connection_plan(
         ConfirmationKind::TargetConfig,
         ConfirmationKind::ConfigurationDiff,
     ];
-    if compatibility.status == CompatibilityStatus::DetectedInferred {
+    if matches!(
+        compatibility.status,
+        CompatibilityStatus::DetectedInferred | CompatibilityStatus::DetectedUnknown
+    ) {
         required_confirmations.push(ConfirmationKind::ExperimentalCompatibility);
     }
     let expires_at_ms = now_ms
@@ -502,6 +505,9 @@ fn validate_binding(
         CompatibilityStatus::DetectedInferred => compatibility
             .allowed_actions
             .contains(&AllowedAction::ConfirmExperimentalConnect),
+        CompatibilityStatus::DetectedUnknown => compatibility
+            .allowed_actions
+            .contains(&AllowedAction::ConfirmExperimentalConnect),
         _ => false,
     };
     if !allowed {
@@ -730,11 +736,58 @@ mod tests {
     }
 
     #[test]
-    fn plan_unknown_blocked_or_unselected_installations_cannot_be_executable() {
+    fn plan_experimental_unknown_is_confirmable_but_blocked_broken_or_unselected_are_rejected() {
         let target = Path::new("/tmp/token-station-plan/settings.json");
         let source = ConfigSource::missing();
+        let mut unknown = verified();
+        unknown.status = CompatibilityStatus::DetectedUnknown;
+        unknown.reason_code = ReasonCode::NoCompatibilityEntry;
+        unknown.allowed_actions = BTreeSet::from([AllowedAction::ConfirmExperimentalConnect]);
+        let experimental = build_connection_plan(
+            &ClaudeCodeConnector,
+            &discovery(target),
+            &unknown,
+            target,
+            &source,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787",
+                token: Some("hidden"),
+                adapter_ready: true,
+            },
+            1,
+            None,
+            10,
+            "02".repeat(16),
+        )
+        .expect("eligible unknown version should produce an experimental plan");
+        assert!(experimental
+            .view
+            .required_confirmations
+            .contains(&ConfirmationKind::ExperimentalCompatibility));
+
+        let mut unconfirmed_unknown = unknown.clone();
+        unconfirmed_unknown.allowed_actions.clear();
+        let error = build_connection_plan(
+            &ClaudeCodeConnector,
+            &discovery(target),
+            &unconfirmed_unknown,
+            target,
+            &source,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787",
+                token: Some("hidden"),
+                adapter_ready: true,
+            },
+            1,
+            None,
+            10,
+            "03".repeat(16),
+        )
+        .err()
+        .expect("unknown version without experimental permission is rejected");
+        assert!(error.contains("不允许"), "{error}");
+
         for status in [
-            CompatibilityStatus::DetectedUnknown,
             CompatibilityStatus::DetectedBlocked,
             CompatibilityStatus::InstalledBroken,
         ] {
@@ -754,7 +807,7 @@ mod tests {
                 1,
                 None,
                 10,
-                "02".repeat(16),
+                "04".repeat(16),
             )
             .err()
             .expect("unsafe state is rejected");
@@ -777,7 +830,7 @@ mod tests {
             1,
             None,
             10,
-            "03".repeat(16),
+            "05".repeat(16),
         )
         .is_err());
     }

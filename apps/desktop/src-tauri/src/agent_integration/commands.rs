@@ -40,7 +40,7 @@ use super::transaction::{
 };
 use super::types::{
     AgentUiMetadata, AllowedAction, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan,
-    DiscoveryRecord, PlanIntent, ReasonCode, SnapshotRecord,
+    ConfirmationKind, DiscoveryRecord, PlanIntent, ReasonCode, SnapshotRecord,
 };
 use crate::{
     anthropic_inbound_ready, openai_inbound_ready, responses_inbound_ready, AgentIntegrationPaths,
@@ -543,12 +543,35 @@ impl AgentCommandState {
         &self,
         agent_id: &str,
         installation_path: &str,
+        expected_version: Option<&str>,
         session_label: &str,
         runtime: &AgentProxyRuntime,
     ) -> Result<ConfigPlanView, AgentCommandError> {
         validate_session_label(session_label)?;
         let (record, mut decision, sequence, catalog_expiry) =
             self.selected(agent_id, installation_path)?;
+        let requires_expected_version = matches!(
+            decision.status,
+            CompatibilityStatus::DetectedInferred | CompatibilityStatus::DetectedUnknown
+        ) && decision
+            .allowed_actions
+            .contains(&AllowedAction::RunReadOnlyPreflight);
+        if requires_expected_version && expected_version.is_none() {
+            return Err(AgentCommandError::boundary(
+                "expected_version_required",
+                "试验性接入必须绑定用户已确认的 Agent 版本",
+            ));
+        }
+        if let Some(expected_version) = expected_version {
+            if expected_version.len() > 128
+                || record.version_normalized.as_deref() != Some(expected_version)
+            {
+                return Err(AgentCommandError::boundary(
+                    "discovery_changed_before_plan",
+                    "Agent 版本已变化，请重新扫描并确认当前版本",
+                ));
+            }
+        }
         if record.diagnostics.iter().any(|diagnostic| {
             matches!(
                 diagnostic.reason_code,
@@ -563,10 +586,16 @@ impl AgentCommandState {
                 "只读配置预检失败，禁止生成写入计划",
             ));
         }
-        if decision.status == CompatibilityStatus::DetectedInferred {
-            // The scanner already proved the exact structural fingerprint. The
-            // connector's source/projected validation below is the second,
-            // read-only preflight gate before experimental confirmation.
+        if matches!(
+            decision.status,
+            CompatibilityStatus::DetectedInferred | CompatibilityStatus::DetectedUnknown
+        ) && decision
+            .allowed_actions
+            .contains(&AllowedAction::RunReadOnlyPreflight)
+        {
+            // Discovery has supplied a unique connector binding. The connector's
+            // source/projected validation below is the second read-only preflight
+            // gate before inferred or unverified experimental confirmation.
             decision
                 .allowed_actions
                 .insert(AllowedAction::ConfirmExperimentalConnect);
@@ -858,6 +887,39 @@ impl AgentCommandState {
             .ok_or_else(|| AgentCommandError::boundary("unknown_operation", "计划不存在或已消费"))
     }
 
+    fn validate_experimental_confirmation(
+        &self,
+        operation_id: &str,
+        confirmed: bool,
+    ) -> Result<(), AgentCommandError> {
+        validate_operation_id(operation_id)?;
+        let now_ms = self.clock.now_ms();
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| AgentCommandError::boundary("state_poisoned", "Agent 会话状态不可用"))?;
+        prune_expired(&mut session.plans, now_ms);
+        let stored = session.plans.get(operation_id).ok_or_else(|| {
+            AgentCommandError::boundary(
+                "unknown_or_expired_operation",
+                "计划不存在、已过期或已消费",
+            )
+        })?;
+        if !confirmed
+            && stored
+                .prepared
+                .view
+                .required_confirmations
+                .contains(&ConfirmationKind::ExperimentalCompatibility)
+        {
+            return Err(AgentCommandError::boundary(
+                "experimental_confirmation_required",
+                "当前 Agent 版本未经验证，请确认试验性接入风险后重试",
+            ));
+        }
+        Ok(())
+    }
+
     fn take_plan(
         &self,
         operation_id: &str,
@@ -921,7 +983,12 @@ impl AgentCommandState {
         session_label: &str,
         expected_intents: &[PlanIntent],
         runtime: Option<&AgentProxyRuntime>,
+        experimental_compatibility_confirmed: bool,
     ) -> Result<TransactionOutcome, AgentCommandError> {
+        self.validate_experimental_confirmation(
+            operation_id,
+            experimental_compatibility_confirmed,
+        )?;
         self.refresh_scan()?;
         let taken = self.take_plan(
             operation_id,
@@ -953,16 +1020,21 @@ impl AgentCommandState {
                 "Connector 兼容绑定已变化，请重新预览",
             ));
         }
+        let mut confirmations = taken
+            .prepared
+            .view
+            .required_confirmations
+            .iter()
+            .copied()
+            .filter(|confirmation| *confirmation != ConfirmationKind::ExperimentalCompatibility)
+            .collect::<BTreeSet<_>>();
+        if experimental_compatibility_confirmed {
+            confirmations.insert(ConfirmationKind::ExperimentalCompatibility);
+        }
         let confirmation = ConfirmedOperation {
             operation_id: operation_id.to_string(),
             confirmed_at_ms: self.clock.now_ms(),
-            confirmations: taken
-                .prepared
-                .view
-                .required_confirmations
-                .iter()
-                .copied()
-                .collect::<BTreeSet<_>>(),
+            confirmations,
         };
         let admission = RuntimeAdmission {
             compatibility_sequence: sequence,
@@ -1207,10 +1279,17 @@ pub(crate) fn plan_agent_connection(
     window: WebviewWindow,
     agent_id: String,
     installation_path: String,
+    expected_version: Option<String>,
 ) -> Result<ConfigPlanView, AgentCommandError> {
     let runtime = runtime_from_app(&app_state)?;
     state.refresh_scan()?;
-    state.plan_connection(&agent_id, &installation_path, window.label(), &runtime)
+    state.plan_connection(
+        &agent_id,
+        &installation_path,
+        expected_version.as_deref(),
+        window.label(),
+        &runtime,
+    )
 }
 
 #[tauri::command(async)]
@@ -1220,6 +1299,7 @@ pub(crate) fn apply_agent_plan(
     window: WebviewWindow,
     operation_id: String,
     confirmation_token: String,
+    experimental_compatibility_confirmed: Option<bool>,
 ) -> Result<TransactionOutcome, AgentCommandError> {
     let intent = state.plan_intent(&operation_id)?;
     let runtime = if intent == PlanIntent::Connect {
@@ -1233,6 +1313,7 @@ pub(crate) fn apply_agent_plan(
         window.label(),
         &[PlanIntent::Connect, PlanIntent::Disconnect],
         runtime.as_ref(),
+        experimental_compatibility_confirmed.unwrap_or(false),
     )
 }
 
@@ -1278,6 +1359,7 @@ pub(crate) fn apply_snapshot_restore(
         window.label(),
         &[PlanIntent::Restore],
         None,
+        false,
     )
 }
 
@@ -1588,6 +1670,7 @@ mod tests {
                 "main",
                 &[PlanIntent::Connect],
                 Some(&runtime),
+                false,
             )
             .unwrap_err();
 
@@ -1597,6 +1680,39 @@ mod tests {
             PlanIntent::Connect
         );
         state.scan_in_progress.store(false, Ordering::Release);
+    }
+
+    #[test]
+    fn commands_experimental_confirmation_is_required_without_consuming_the_plan() {
+        let state = state("experimental-confirmation");
+        let target = scratch("experimental-confirmation-target").join("settings.json");
+        let mut prepared = prepared(&target, "vk-experimental", state.clock.now_ms());
+        prepared.view.compatibility_evidence.status = CompatibilityStatus::DetectedUnknown;
+        prepared
+            .view
+            .required_confirmations
+            .push(ConfirmationKind::ExperimentalCompatibility);
+        let plan = state
+            .issue_plan(
+                prepared,
+                &record(&target, false),
+                "main",
+                Some(runtime("vk-experimental").fingerprint()),
+            )
+            .unwrap();
+
+        let error = state
+            .validate_experimental_confirmation(&plan.plan.operation_id, false)
+            .unwrap_err();
+
+        assert_eq!(error.code, "experimental_confirmation_required");
+        assert_eq!(
+            state.plan_intent(&plan.plan.operation_id).unwrap(),
+            PlanIntent::Connect
+        );
+        assert!(state
+            .validate_experimental_confirmation(&plan.plan.operation_id, true)
+            .is_ok());
     }
 
     #[test]
@@ -1613,7 +1729,7 @@ mod tests {
     }
 
     #[test]
-    fn commands_plan_is_memory_only_and_blocked_or_unknown_versions_cannot_bypass_it() {
+    fn commands_plan_is_memory_only_blocked_is_rejected_and_unknown_is_experimental() {
         let state = state("plan-boundary");
         let target = scratch("plan-boundary-target").join("missing/settings.json");
         let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
@@ -1622,6 +1738,7 @@ mod tests {
             .plan_connection(
                 "claude-code",
                 "/opt/claude",
+                None,
                 "main",
                 &runtime("vk-plan-memory-only"),
             )
@@ -1648,7 +1765,13 @@ mod tests {
             });
         install_scan(&state, blocked_catalog, vec![record(&target, false)]);
         let blocked = state
-            .plan_connection("claude-code", "/opt/claude", "main", &runtime("vk-blocked"))
+            .plan_connection(
+                "claude-code",
+                "/opt/claude",
+                None,
+                "main",
+                &runtime("vk-blocked"),
+            )
             .err()
             .expect("blocked version cannot produce a plan");
         assert_eq!(blocked.code, "not_admitted");
@@ -1657,11 +1780,50 @@ mod tests {
         unknown_record.version_raw = Some("99.0.0".to_string());
         unknown_record.version_normalized = Some("99.0.0".to_string());
         install_scan(&state, catalog, vec![unknown_record]);
-        let unknown = state
-            .plan_connection("claude-code", "/opt/claude", "main", &runtime("vk-unknown"))
+        let missing = state
+            .plan_connection(
+                "claude-code",
+                "/opt/claude",
+                None,
+                "main",
+                &runtime("vk-missing-version"),
+            )
             .err()
-            .expect("unknown version cannot produce a plan");
-        assert_eq!(unknown.code, "not_admitted");
+            .expect("experimental planning requires the version shown to the user");
+        assert_eq!(missing.code, "expected_version_required");
+        let changed = state
+            .plan_connection(
+                "claude-code",
+                "/opt/claude",
+                Some("98.0.0"),
+                "main",
+                &runtime("vk-stale-confirmation"),
+            )
+            .err()
+            .expect("the confirmed version must still match before planning");
+        assert_eq!(changed.code, "discovery_changed_before_plan");
+        let unknown = state
+            .plan_connection(
+                "claude-code",
+                "/opt/claude",
+                Some("99.0.0"),
+                "main",
+                &runtime("vk-unknown"),
+            )
+            .expect("eligible unknown version should produce an experimental plan");
+        assert_eq!(
+            unknown.plan.compatibility_evidence.status,
+            CompatibilityStatus::DetectedUnknown
+        );
+        assert!(unknown
+            .plan
+            .required_confirmations
+            .contains(&ConfirmationKind::ExperimentalCompatibility));
+        assert!(unknown
+            .plan
+            .compatibility_evidence
+            .allowed_actions
+            .contains(&AllowedAction::ConfirmExperimentalConnect));
         assert!(!target.exists());
     }
 
@@ -1884,7 +2046,7 @@ mod tests {
         });
         install_scan(&state, catalog, vec![broken]);
         let error = state
-            .plan_connection("claude-code", "/opt/claude", "main", &runtime("vk"))
+            .plan_connection("claude-code", "/opt/claude", None, "main", &runtime("vk"))
             .err()
             .expect("preflight diagnostic blocks planning");
         assert_eq!(error.code, "read_only_preflight_failed");
@@ -1989,7 +2151,7 @@ mod tests {
 
         let runtime = runtime("vk-command-lifecycle");
         let connection = state
-            .plan_connection("claude-code", "/opt/claude", "main", &runtime)
+            .plan_connection("claude-code", "/opt/claude", None, "main", &runtime)
             .unwrap();
         let taken = state
             .take_plan(

@@ -923,21 +923,22 @@ fn sanitize_output(bytes: &[u8], limit: usize) -> Option<String> {
 }
 
 fn normalize_version(raw: &str) -> Option<String> {
-    for (start, character) in raw.char_indices() {
-        if !character.is_ascii_digit() {
-            continue;
-        }
-        let candidate: String = raw[start..]
-            .chars()
-            .take_while(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '+')
-            })
-            .collect();
-        if let Ok(version) = Version::parse(&candidate) {
-            return Some(version.to_string());
-        }
-    }
-    None
+    raw.split(|character: char| {
+        !character.is_ascii_alphanumeric() && !matches!(character, '.' | '-' | '+')
+    })
+    .filter_map(|token| {
+        let candidate = token
+            .strip_prefix('v')
+            .or_else(|| token.strip_prefix('V'))
+            .unwrap_or(token);
+        candidate
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_digit)
+            .then_some(candidate)
+    })
+    .find_map(|candidate| Version::parse(candidate).ok())
+    .map(|version| version.to_string())
 }
 
 struct ConfigInspection {
@@ -1646,6 +1647,7 @@ mod tests {
         ] {
             assert_eq!(normalize_version(raw).as_deref(), Some(expected));
         }
+        assert_eq!(normalize_version("claude 9.2.1.211"), None);
     }
 
     #[test]

@@ -93,6 +93,18 @@ const scannedClaude: AgentView = {
   catalog_warning: null,
 };
 
+function experimentalClaude(): AgentView {
+  const value = structuredClone(scannedClaude);
+  value.status = "DETECTED_UNKNOWN";
+  value.installations[0].discovery.version_raw = "2.1.210";
+  value.installations[0].discovery.version_normalized = "2.1.210";
+  value.installations[0].compatibility.status = "DETECTED_UNKNOWN";
+  value.installations[0].compatibility.reason_code = "NoCompatibilityEntry";
+  value.installations[0].compatibility.message = "版本未命中已验证范围";
+  value.installations[0].compatibility.allowed_actions = ["run_read_only_preflight"];
+  return value;
+}
+
 function navigation() {
   return within(screen.getByLabelText("主导航"));
 }
@@ -365,6 +377,48 @@ describe("desktop station navigation", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(await screen.findByText("Agent 已接入，无需再次确认")).toBeInTheDocument();
     expect(scans).toBe(2);
+  });
+
+  it("requires explicit confirmation for an unverified version and cancellation sends no IPC", async () => {
+    const user = userEvent.setup();
+    const running = stateFixture({ serve: { phase: "running", running: true, listen: "127.0.0.1:8787", virtual_key: "vk-test", error: null } });
+    const unknown = experimentalClaude();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return running;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [unknown];
+      if (command === "plan_agent_connection") return { operation_id: "op-experimental", confirmation_token: "token-experimental" };
+      if (command === "apply_agent_plan") return { operation_id: "op-experimental", maintenance_warning: null };
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await screen.findByLabelText("主导航");
+    await user.click(navigation().getByRole("button", { name: "Claude Code" }));
+    expect(await screen.findByText("版本未经验证")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "试验性接入" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "确认试验性接入" });
+    expect(within(dialog).getByText(/2\.1\.210/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/\/opt\/claude/)).toBeInTheDocument();
+    expect(invokeMock.mock.calls.some(([command]) => command === "plan_agent_connection")).toBe(false);
+
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(invokeMock.mock.calls.some(([command]) => command === "plan_agent_connection")).toBe(false);
+    expect(invokeMock.mock.calls.some(([command]) => command === "apply_agent_plan")).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "试验性接入" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "确认试验性接入" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
+      agentId: "claude-code",
+      installationPath: "/opt/claude",
+      expectedVersion: "2.1.210",
+    }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
+      operationId: "op-experimental",
+      confirmationToken: "token-experimental",
+      experimentalCompatibilityConfirmed: true,
+    }));
   });
 
   it("selects among multiple installations without displaying full paths", async () => {

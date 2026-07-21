@@ -383,6 +383,10 @@ pub fn evaluate_discovery(
             &[],
         );
     };
+    let experimental_connector_id = match descriptor.local_connector_ids.as_slice() {
+        [connector_id] => Some(connector_id.clone()),
+        _ => None,
+    };
     if let Some(blocked) = entry
         .blocked
         .iter()
@@ -412,6 +416,23 @@ pub fn evaluate_discovery(
             ],
         );
     }
+    if let Some(diagnostic) = discovery.diagnostics.iter().find(|diagnostic| {
+        matches!(
+            diagnostic.reason_code,
+            ReasonCode::ReadOnlyPreflightFailed
+                | ReasonCode::ConfigReadFailed
+                | ReasonCode::ConfigParseFailed
+                | ReasonCode::InvalidEnvironmentOverride
+        )
+    }) {
+        return decision(
+            CompatibilityStatus::DetectedUnknown,
+            diagnostic.reason_code,
+            "只读配置预检未通过，当前安装不能试验性接入".to_string(),
+            None,
+            &[],
+        );
+    }
     if let Some(inferred) = entry
         .inferred
         .iter()
@@ -429,17 +450,35 @@ pub fn evaluate_discovery(
         return decision(
             CompatibilityStatus::DetectedUnknown,
             ReasonCode::ConfigFingerprintChanged,
-            "版本可推定范围命中，但配置结构指纹已变化".to_string(),
-            None,
-            &[AllowedAction::RunReadOnlyPreflight],
+            if experimental_connector_id.is_some() {
+                "版本可推定范围命中，但配置结构指纹已变化；可在只读预检后试验性接入"
+            } else {
+                "版本可推定范围命中，但配置结构指纹已变化且 Connector 绑定不唯一"
+            }
+            .to_string(),
+            experimental_connector_id.clone(),
+            if experimental_connector_id.is_some() {
+                &[AllowedAction::RunReadOnlyPreflight]
+            } else {
+                &[]
+            },
         );
     }
     decision(
         CompatibilityStatus::DetectedUnknown,
         ReasonCode::NoCompatibilityEntry,
-        "版本未命中已验证、推定或阻断范围".to_string(),
-        None,
-        &[],
+        if experimental_connector_id.is_some() {
+            "版本未命中已验证、推定或阻断范围；可在只读预检后试验性接入"
+        } else {
+            "版本未命中兼容范围，且 Connector 绑定不唯一"
+        }
+        .to_string(),
+        experimental_connector_id.clone(),
+        if experimental_connector_id.is_some() {
+            &[AllowedAction::RunReadOnlyPreflight]
+        } else {
+            &[]
+        },
     )
 }
 
@@ -974,7 +1013,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_builtin_exact_versions_are_verified_and_new_versions_are_unknown() {
+    fn compatibility_builtin_exact_versions_are_verified_and_other_versions_are_experimental() {
         let registry = AgentRegistry::builtin().unwrap();
         let catalog = CompatibilityCatalog::builtin(&registry).unwrap();
         let descriptor = registry
@@ -988,16 +1027,26 @@ mod tests {
             descriptor,
             &discovery("codex", "0.145.0-alpha.18", None),
         );
-        let unknown =
-            evaluate_discovery(&catalog, descriptor, &discovery("codex", "0.146.0", None));
+        let newer = evaluate_discovery(&catalog, descriptor, &discovery("codex", "0.146.0", None));
+        let older = evaluate_discovery(&catalog, descriptor, &discovery("codex", "0.144.0", None));
 
         assert_eq!(verified.status, CompatibilityStatus::DetectedVerified);
         assert_eq!(verified.connector_id.as_deref(), Some("codex-v1"));
         assert!(verified
             .allowed_actions
             .contains(&AllowedAction::PreviewConnect));
-        assert_eq!(unknown.status, CompatibilityStatus::DetectedUnknown);
-        assert!(!unknown
+        for unknown in [&newer, &older] {
+            assert_eq!(unknown.status, CompatibilityStatus::DetectedUnknown);
+            assert_eq!(unknown.connector_id.as_deref(), Some("codex-v1"));
+            assert!(unknown
+                .allowed_actions
+                .contains(&AllowedAction::RunReadOnlyPreflight));
+            assert!(!unknown
+                .allowed_actions
+                .contains(&AllowedAction::PreviewConnect));
+        }
+
+        assert!(!newer
             .allowed_actions
             .contains(&AllowedAction::PreviewConnect));
 
@@ -1016,6 +1065,10 @@ mod tests {
         assert_eq!(verified.status, CompatibilityStatus::DetectedVerified);
         assert_eq!(verified.connector_id.as_deref(), Some("openclaw-v1"));
         assert_eq!(future.status, CompatibilityStatus::DetectedUnknown);
+        assert_eq!(future.connector_id.as_deref(), Some("openclaw-v1"));
+        assert!(future
+            .allowed_actions
+            .contains(&AllowedAction::RunReadOnlyPreflight));
         assert!(!future
             .allowed_actions
             .contains(&AllowedAction::PreviewConnect));
@@ -1038,9 +1091,73 @@ mod tests {
         assert_eq!(verified.status, CompatibilityStatus::DetectedVerified);
         assert_eq!(verified.connector_id.as_deref(), Some("hermes-v1"));
         assert_eq!(future.status, CompatibilityStatus::DetectedUnknown);
+        assert_eq!(future.connector_id.as_deref(), Some("hermes-v1"));
+        assert!(future
+            .allowed_actions
+            .contains(&AllowedAction::RunReadOnlyPreflight));
         assert!(!future
             .allowed_actions
             .contains(&AllowedAction::PreviewConnect));
+    }
+
+    #[test]
+    fn compatibility_unknown_requires_parseable_version_catalog_entry_and_unique_connector() {
+        let registry = AgentRegistry::builtin().unwrap();
+        let catalog = CompatibilityCatalog::builtin(&registry).unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "codex")
+            .unwrap();
+
+        let mut unparseable = discovery("codex", "not-semver", None);
+        unparseable.version_normalized = None;
+        let unparseable = evaluate_discovery(&catalog, descriptor, &unparseable);
+        assert_eq!(
+            unparseable.reason_code,
+            ReasonCode::VersionOutputUnparseable
+        );
+        assert_eq!(unparseable.connector_id, None);
+        assert!(!unparseable
+            .allowed_actions
+            .contains(&AllowedAction::RunReadOnlyPreflight));
+
+        let mut missing_entry = catalog.clone();
+        missing_entry
+            .entries
+            .retain(|entry| entry.agent_id != "codex");
+        let missing_entry = evaluate_discovery(
+            &missing_entry,
+            descriptor,
+            &discovery("codex", "0.146.0", None),
+        );
+        assert_eq!(missing_entry.reason_code, ReasonCode::NoCompatibilityEntry);
+        assert_eq!(missing_entry.connector_id, None);
+        assert!(!missing_entry
+            .allowed_actions
+            .contains(&AllowedAction::RunReadOnlyPreflight));
+
+        let mut failed_preflight = discovery("codex", "0.146.0", None);
+        failed_preflight.diagnostics.push(Diagnostic {
+            reason_code: ReasonCode::ConfigParseFailed,
+            message: "invalid config".to_string(),
+        });
+        let failed_preflight = evaluate_discovery(&catalog, descriptor, &failed_preflight);
+        assert_eq!(failed_preflight.reason_code, ReasonCode::ConfigParseFailed);
+        assert_eq!(failed_preflight.connector_id, None);
+        assert!(!failed_preflight
+            .allowed_actions
+            .contains(&AllowedAction::RunReadOnlyPreflight));
+
+        let mut ambiguous = descriptor.clone();
+        ambiguous.local_connector_ids.push("codex-v2".to_string());
+        let ambiguous =
+            evaluate_discovery(&catalog, &ambiguous, &discovery("codex", "0.146.0", None));
+        assert_eq!(ambiguous.status, CompatibilityStatus::DetectedUnknown);
+        assert_eq!(ambiguous.connector_id, None);
+        assert!(!ambiguous
+            .allowed_actions
+            .contains(&AllowedAction::RunReadOnlyPreflight));
     }
 
     #[test]
@@ -1118,6 +1235,10 @@ mod tests {
             ])
         );
         assert_eq!(changed.reason_code, ReasonCode::ConfigFingerprintChanged);
+        assert_eq!(changed.connector_id.as_deref(), Some("opencode-v1"));
+        assert!(changed
+            .allowed_actions
+            .contains(&AllowedAction::RunReadOnlyPreflight));
         assert_eq!(blocked.status, CompatibilityStatus::DetectedBlocked);
         assert_eq!(
             blocked_prerelease.status,
@@ -1132,7 +1253,12 @@ mod tests {
             ])
         );
         assert_eq!(next_minor.status, CompatibilityStatus::DetectedUnknown);
+        assert_eq!(next_minor.connector_id.as_deref(), Some("opencode-v1"));
+        assert!(next_minor
+            .allowed_actions
+            .contains(&AllowedAction::RunReadOnlyPreflight));
         assert_eq!(prerelease.status, CompatibilityStatus::DetectedUnknown);
+        assert_eq!(prerelease.connector_id.as_deref(), Some("opencode-v1"));
     }
 
     #[test]

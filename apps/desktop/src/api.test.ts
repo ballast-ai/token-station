@@ -116,6 +116,26 @@ describe("structured Agent IPC", () => {
     expect(Object.keys(sent).some((key) => forbiddenKeys.has(key))).toBe(false);
   });
 
+  it("sends explicit experimental compatibility confirmation only when accepted", async () => {
+    await applyAgentPlan("operation", "confirmation", true);
+
+    expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
+      operationId: "operation",
+      confirmationToken: "confirmation",
+      experimentalCompatibilityConfirmed: true,
+    });
+  });
+
+  it("binds an experimental plan request to the version shown to the user", async () => {
+    await planAgentConnection("claude-code", "/opt/claude", { expectedVersion: "2.1.210" });
+
+    expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
+      agentId: "claude-code",
+      installationPath: "/opt/claude",
+      expectedVersion: "2.1.210",
+    });
+  });
+
   it("does not expose arbitrary patch, target, config, or command parameters", () => {
     if (false) {
       // @ts-expect-error apply accepts no renderer-provided patch

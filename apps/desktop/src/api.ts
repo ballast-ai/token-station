@@ -307,11 +307,25 @@ export const listAgentRegistry = () =>
 
 export const scanAgents = () => invoke<AgentView[]>("scan_agents");
 
-export const planAgentConnection = (agentId: AgentId, installationPath: string) =>
-  invoke<ConfigPlanView>("plan_agent_connection", { agentId, installationPath });
+export const planAgentConnection = (
+  agentId: AgentId,
+  installationPath: string,
+  options?: { expectedVersion: string },
+) => invoke<ConfigPlanView>("plan_agent_connection", {
+  agentId,
+  installationPath,
+  ...(options ? options : {}),
+});
 
-export const applyAgentPlan = (operationId: string, confirmationToken: string) =>
-  invoke<AgentOperationView>("apply_agent_plan", { operationId, confirmationToken });
+export const applyAgentPlan = (
+  operationId: string,
+  confirmationToken: string,
+  experimentalCompatibilityConfirmed = false,
+) => invoke<AgentOperationView>("apply_agent_plan", {
+  operationId,
+  confirmationToken,
+  ...(experimentalCompatibilityConfirmed ? { experimentalCompatibilityConfirmed: true } : {}),
+});
 
 export const planAgentDisconnect = (agentId: AgentId, installationPath: string) =>
   invoke<ConfigPlanView>("plan_agent_disconnect", { agentId, installationPath });
