@@ -57,10 +57,14 @@ cp apps/cli/example-config.json token-station.json
 
 ## 验证官方二进制
 
-官方发布可复现且有签名：Ed25519 签名的 manifest 证明发布者，在发布 tag 上
-重建证明源码——`scripts/verify-release.sh` 替你做两道比对。签名私钥离线
-保管，公钥就在这份源码里。详见
-[docs/release/可复现构建与发布验证.md](docs/release/可复现构建与发布验证.md)。
+官方发布的设计目标是可复现且有签名：Ed25519 签名的 manifest 证明发布者，在
+发布 tag 上重建证明源码——`scripts/verify-release.sh` 替你做两道比对。
+
+签名私钥离线保管。**注意（预发布）**：本构建尚未内置发布公钥
+（`OFFICIAL_RELEASE_PUBKEY_HEX` 为空），因此 `upgrade` 会拒绝下载，不信任未
+经验证的二进制。在经审查的发布构建注入公钥之前，请按
+[docs/release/可复现构建与发布验证.md](docs/release/可复现构建与发布验证.md)
+手动验证官方二进制。注入公钥是发布的前置条件，不是可选步骤。
 
 ## 状态
 

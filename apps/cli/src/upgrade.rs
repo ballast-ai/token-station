@@ -192,7 +192,33 @@ fn http_get_string(url: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer, parse_version};
+    use super::{
+        OFFICIAL_RELEASE_PUBKEY_HEX, Release, download_and_verify, is_newer, parse_version,
+    };
+
+    #[test]
+    fn an_empty_release_key_fails_closed_before_any_download() {
+        let release = Release {
+            tag_name: "v9.9.9".to_owned(),
+            html_url: "https://example.invalid/release".to_owned(),
+            assets: Vec::new(),
+        };
+        let error = download_and_verify(&release, &std::env::temp_dir(), "")
+            .expect_err("an empty key must refuse, never accept an unsigned binary");
+        assert!(error.contains("no release public key"), "{error}");
+    }
+
+    #[test]
+    fn this_build_ships_no_release_key_so_upgrades_are_fail_closed() {
+        // Tripwire for the honesty fix: while the embedded key is empty, the
+        // README says so and `upgrade` refuses. If a reviewed release build ever
+        // injects a real key, this test fails — a deliberate reminder to restore
+        // the README claim that the public key is in the source tree.
+        assert!(
+            OFFICIAL_RELEASE_PUBKEY_HEX.is_empty(),
+            "a real key is embedded now — update README/README.zh-CN to match"
+        );
+    }
 
     #[test]
     fn version_comparison_is_numeric_not_lexicographic() {
