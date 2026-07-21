@@ -14,6 +14,7 @@ import {
   type TierSlot,
 } from "../api";
 import TierRouteEditor from "../components/TierRouteEditor";
+import InstallationPicker from "../components/InstallationPicker";
 
 interface AgentRoutePageProps {
   metadata: AgentUiMetadataView;
@@ -154,19 +155,20 @@ export default function AgentRoutePage({
           <div>
             <span className="eyebrow">AGENT ROUTE</span>
             <h1>{metadata.display_name}</h1>
-            <p>{installation?.discovery.canonical_path ?? "尚未发现安装路径"}</p>
           </div>
         </div>
         <div className="agent-connect-box">
           <span className={`status-chip ${status.tone}`}>{status.label}</span>
           <small>{status.detail}</small>
-          {agent && agent.installations.length > 1 && (
-            <select className="select compact-select" aria-label="Agent 安装实例" value={selectedPath} disabled={busy} onChange={(event) => setSelectedPath(event.target.value)}>
-              {agent.installations.map((item) => <option key={item.discovery.canonical_path} value={item.discovery.canonical_path}>{item.discovery.canonical_path}</option>)}
-            </select>
-          )}
+          <InstallationPicker
+            agentName={metadata.display_name}
+            installations={agent?.installations ?? []}
+            selectedPath={selectedPath}
+            disabled={busy}
+            onSelect={setSelectedPath}
+          />
           <button
-            className={`btn ${connected ? "" : "primary"}`}
+            className={`btn agent-primary-action ${connected ? "" : "primary"}`}
             type="button"
             disabled={busy || !canOperate}
             onClick={() => void applyConnection()}
