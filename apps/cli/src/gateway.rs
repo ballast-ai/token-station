@@ -60,6 +60,20 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// parser on.
 const STREAM_READ: usize = 8 * 1024;
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// A [`RequestRecord`] with a stable accounting id stamped on it at arrival.
+/// One logical request gets one id; the dispatch fallback sweep reuses it, so
+/// internal retries are one accounting unit, and a record written twice
+/// collapses to one row instead of double-counting.
+fn begin_record(started_at_ms: u64, protocol: impl Into<String>) -> RequestRecord {
+    let mut record = RequestRecord::begin(started_at_ms, protocol);
+    record.request_id = format!(
+        "req_{started_at_ms}_{}",
+        NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    record
+}
 
 /// One configured upstream, resolved and ready to serve.
 struct Upstream {
@@ -753,7 +767,7 @@ impl Gateway {
                 .get(agent_id)
                 .unwrap_or(&self.home_router),
             Some(agent_id) => {
-                let mut record = RequestRecord::begin(started_at_ms, String::new());
+                let mut record = begin_record(started_at_ms, String::new());
                 let refusal = ErrorEnvelope::new(
                     ErrorCode::InvalidRequest,
                     404,
@@ -796,7 +810,7 @@ impl Gateway {
         // here serves, and no adapter exists to phrase the refusal in.
         let selected = self.select_agent(method, path, headers);
         let protocol = selected.map_or_else(String::new, |agent| agent.protocol.clone());
-        let mut record = RequestRecord::begin(started_at_ms, protocol);
+        let mut record = begin_record(started_at_ms, protocol);
 
         if let Some(agent) = selected {
             match self.chat_inner(ctx, agent, router, headers, body, emit, &mut record) {
@@ -849,7 +863,7 @@ impl Gateway {
             429,
             "concurrency limit reached; retry shortly",
         );
-        let mut record = RequestRecord::begin(started_at_ms, String::new());
+        let mut record = begin_record(started_at_ms, String::new());
         record.status = refusal.http_status;
         record.error_code = Some(refusal.code);
         emit(Reply::BeginJson(JsonReply {

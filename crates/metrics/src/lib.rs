@@ -42,6 +42,12 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// Everything one request leaves behind. One per request, exactly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RequestRecord {
+    /// A stable per-request accounting id, assigned once at arrival. Internal
+    /// retries (the dispatch fallback sweep) share it, so a single logical
+    /// request is one accounting unit however many upstreams it touched; and a
+    /// record written twice (a rebuild of a derived table) collapses to one row
+    /// rather than double-counting.
+    pub request_id: String,
     /// Unix milliseconds, from the host clock, at request arrival.
     pub started_at_ms: u64,
     pub latency_ms: u64,
@@ -81,6 +87,7 @@ impl RequestRecord {
     #[must_use]
     pub fn begin(started_at_ms: u64, protocol: impl Into<String>) -> Self {
         Self {
+            request_id: String::new(),
             started_at_ms,
             latency_ms: 0,
             protocol: protocol.into(),
