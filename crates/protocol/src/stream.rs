@@ -46,6 +46,31 @@ pub enum StreamEvent {
     Error { error: ErrorEnvelope },
 }
 
+/// How one streaming exchange actually ended.
+///
+/// The reliability keystone: before this existed, a stream that broke after a
+/// half-sentence still returned `()` and the caller recorded HTTP 200. Only
+/// [`StreamOutcome::Complete`] is allowed to settle as success; every other
+/// variant is a distinct, non-lying terminal state that health, billing, the
+/// request record and the client all read from one `settle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamOutcome {
+    /// Upstream closed cleanly after a terminal event (`[DONE]` / finish reason
+    /// / `message_stop`). The only outcome that may be recorded as success.
+    Complete,
+    /// Already committed to the stream (BeginStream emitted, some output sent)
+    /// when the upstream broke, errored, or produced an unparseable frame — the
+    /// answer is incomplete. Never a success; never transparently replayed.
+    FailedAfterPartial,
+    /// Failed before a single output byte cleared the checkpoint. No content
+    /// reached the client, so a candidate may still be tried within budget.
+    FailedBeforeOutput,
+    /// The client hung up or a drain deadline fired: a deliberate cancellation,
+    /// not the upstream's fault. Not counted against upstream health.
+    ClientCancelled,
+}
+
 #[cfg(test)]
 mod tests {
     use super::StreamEvent;

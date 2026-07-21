@@ -32,6 +32,7 @@ use token_station_plugin_runtime::{AgentPlugin, NoSecrets, PluginRuntime, Provid
 use token_station_protocol::{
     AgentRequestEnvelope, Auth, ChatRequest, ErrorCode, ErrorEnvelope, HeaderDigest, HttpMethod,
     HttpRequestDescriptor, HttpResponseParts, Principal, ProviderConfig, SecretRef, StreamChunk,
+    StreamEvent, StreamOutcome,
 };
 use token_station_router_core::{
     Candidate, Decision, HealthPolicy, HealthTracker, Router, UpstreamModel, UpstreamRef,
@@ -515,11 +516,16 @@ impl Gateway {
         let mut record = RequestRecord::begin(started_at_ms, protocol);
 
         if let Some(agent) = selected {
-            if let Err(refusal) = self.chat_inner(agent, router, headers, body, emit, &mut record) {
-                record.status = refusal.http_status;
-                record.error_code = Some(refusal.code);
-                let rendered = Self::render_error(agent, &refusal);
-                emit(Reply::BeginJson(rendered));
+            match self.chat_inner(agent, router, headers, body, emit, &mut record) {
+                Ok((upstream, outcome)) => self.settle(&mut record, &upstream, outcome),
+                Err(refusal) => {
+                    // Failed before any upstream served — a whole error response
+                    // the client can still receive; no upstream health verdict.
+                    record.status = refusal.http_status;
+                    record.error_code = Some(refusal.code);
+                    let rendered = Self::render_error(agent, &refusal);
+                    emit(Reply::BeginJson(rendered));
+                }
             }
         } else {
             let refusal = ErrorEnvelope::new(
@@ -585,7 +591,7 @@ impl Gateway {
         body: &[u8],
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
-    ) -> Result<(), ErrorEnvelope> {
+    ) -> Result<(UpstreamRef, StreamOutcome), ErrorEnvelope> {
         if body.len() > MAX_INBOUND_BODY {
             return Err(ErrorEnvelope::new(
                 ErrorCode::InvalidRequest,
@@ -655,7 +661,7 @@ impl Gateway {
         decision: &Decision,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
-    ) -> Result<(), ErrorEnvelope> {
+    ) -> Result<(UpstreamRef, StreamOutcome), ErrorEnvelope> {
         let mut last_error = None;
 
         for target in std::iter::once(&decision.chosen).chain(&decision.fallbacks) {
@@ -667,11 +673,11 @@ impl Gateway {
                 routing.model.clone_from(&target.model);
             }
             match self.try_upstream(agent, request, target, emit, record) {
-                Ok(()) => {
-                    self.observe(&target.upstream, Ok(()));
-                    record.status = 200;
-                    return Ok(());
-                }
+                // The terminal health verdict and status are decided exactly
+                // once, in `settle`; here we only report who served and how the
+                // exchange ended. Per-attempt failures below still trip health so
+                // the fallback sweep can eject a bad upstream mid-flight.
+                Ok(outcome) => return Ok((target.upstream.clone(), outcome)),
                 Err(error) => {
                     self.observe(&target.upstream, Err(&error));
                     let retriable = error.code.is_retriable_elsewhere();
@@ -692,6 +698,31 @@ impl Gateway {
         }))
     }
 
+    /// The single place a finished exchange's status and upstream health are
+    /// written. Only [`StreamOutcome::Complete`] settles as success; every other
+    /// outcome records a truthful failure (or a client cancel that is nobody's
+    /// fault). Nothing outside this function may set `record.status = 200`.
+    fn settle(&self, record: &mut RequestRecord, upstream: &UpstreamRef, outcome: StreamOutcome) {
+        match outcome {
+            StreamOutcome::Complete => {
+                record.status = 200;
+                self.observe(upstream, Ok(()));
+            }
+            StreamOutcome::FailedAfterPartial | StreamOutcome::FailedBeforeOutput => {
+                let code = record.error_code.unwrap_or(ErrorCode::UpstreamUnavailable);
+                record.error_code = Some(code);
+                if record.status < 400 {
+                    record.status = 502;
+                }
+                self.observe(upstream, Err(&ErrorEnvelope::new(code, record.status, "")));
+            }
+            StreamOutcome::ClientCancelled => {
+                // A cancel is not the upstream's failure: no health penalty.
+                record.status = 499;
+            }
+        }
+    }
+
     /// One upstream attempt: build, authorize, inject, send, translate back.
     fn try_upstream(
         &self,
@@ -700,7 +731,7 @@ impl Gateway {
         target: &UpstreamModel,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
-    ) -> Result<(), ErrorEnvelope> {
+    ) -> Result<StreamOutcome, ErrorEnvelope> {
         let upstream = self
             .upstreams
             .get(target.upstream.as_str())
@@ -743,8 +774,14 @@ impl Gateway {
                 "response_id": format!("msg_token_station_{sequence}"),
                 "model": target.model,
             });
-            Self::relay_stream(agent, upstream, response, &render_context, emit, record);
-            Ok(())
+            Ok(Self::relay_stream(
+                agent,
+                upstream,
+                response,
+                &render_context,
+                emit,
+                record,
+            ))
         } else {
             let parts: HttpResponseParts = response.into();
             let chat_response = upstream.plugin.parse_response(&parts)?;
@@ -761,7 +798,8 @@ impl Gateway {
                 status: 200,
                 body: rendered.to_string(),
             }));
-            Ok(())
+            // A fully collected non-stream body is a complete exchange.
+            Ok(StreamOutcome::Complete)
         }
     }
 
@@ -879,13 +917,19 @@ impl Gateway {
         render_context: &Value,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
-    ) {
+    ) -> StreamOutcome {
         let mut parser = upstream.plugin.stream_parser();
         let mut reader = response.reader;
 
         if !emit(Reply::BeginStream) {
-            return;
+            return StreamOutcome::ClientCancelled;
         }
+
+        // `committed` flips once assistant output has left for the client; it
+        // decides whether a later break is FailedAfterPartial (a truncated
+        // answer) or FailedBeforeOutput (nothing sent, a candidate may retry).
+        let mut committed = false;
+        let mut saw_done = false;
 
         let mut buffer = [0u8; STREAM_READ];
         loop {
@@ -895,7 +939,7 @@ impl Gateway {
                 Err(error) => {
                     // Mid-stream failure: already committed to SSE, so it goes
                     // out as a rendered error event rather than a status code —
-                    // and into the record, where status 200 alone would lie.
+                    // and into the outcome, where status 200 alone would lie.
                     let envelope = ErrorEnvelope::new(
                         ErrorCode::UpstreamUnavailable,
                         502,
@@ -905,7 +949,7 @@ impl Gateway {
                     let rendered = Self::render_stream_error(agent, &envelope, render_context);
                     emit(Reply::Chunk(rendered));
                     Self::clear_stream_state(agent, render_context);
-                    return;
+                    return Self::stream_failure(committed);
                 }
             };
 
@@ -917,13 +961,25 @@ impl Gateway {
                     let rendered = Self::render_stream_error(agent, &envelope, render_context);
                     emit(Reply::Chunk(rendered));
                     Self::clear_stream_state(agent, render_context);
-                    return;
+                    return Self::stream_failure(committed);
                 }
             };
 
             for event in events {
-                if let token_station_protocol::StreamEvent::Usage { usage } = &event {
-                    record.usage = Some(*usage);
+                match &event {
+                    StreamEvent::Usage { usage } => record.usage = Some(*usage),
+                    StreamEvent::Done { .. } => saw_done = true,
+                    // An upstream error surfaced mid-stream is a failed exchange,
+                    // not a completed one: settle must not read it as success
+                    // even when bytes are already out.
+                    StreamEvent::Error { error } => {
+                        record.error_code = Some(error.code);
+                        let rendered = Self::render_stream_error(agent, error, render_context);
+                        emit(Reply::Chunk(rendered));
+                        Self::clear_stream_state(agent, render_context);
+                        return Self::stream_failure(committed);
+                    }
+                    _ => {}
                 }
                 let chunk = match agent.plugin.render_stream_event(&event, render_context) {
                     Ok(chunk) => chunk,
@@ -932,7 +988,7 @@ impl Gateway {
                         let rendered = Self::render_stream_error(agent, &envelope, render_context);
                         emit(Reply::Chunk(rendered));
                         Self::clear_stream_state(agent, render_context);
-                        return;
+                        return Self::stream_failure(committed);
                     }
                 };
                 let data = chunk
@@ -942,12 +998,35 @@ impl Gateway {
                     .to_owned();
                 if !emit(Reply::Chunk(data)) {
                     Self::clear_stream_state(agent, render_context);
-                    return; // Client hung up; drop the upstream too.
+                    return StreamOutcome::ClientCancelled; // Client hung up.
+                }
+                if matches!(
+                    event,
+                    StreamEvent::Delta { .. } | StreamEvent::ToolCallDelta { .. }
+                ) {
+                    committed = true;
                 }
             }
         }
 
         Self::clear_stream_state(agent, render_context);
+        // Clean EOF: a terminal `done` is the only honest success. A stream that
+        // stops without one left the answer half-said, whatever it already sent.
+        if saw_done {
+            StreamOutcome::Complete
+        } else {
+            Self::stream_failure(committed)
+        }
+    }
+
+    /// A broken stream maps to a pre/post-output failure so `settle` can decide
+    /// retriability without ever recording success.
+    const fn stream_failure(committed: bool) -> StreamOutcome {
+        if committed {
+            StreamOutcome::FailedAfterPartial
+        } else {
+            StreamOutcome::FailedBeforeOutput
+        }
     }
 
     /// An error, rendered the way the matched inbound protocol spells it.
