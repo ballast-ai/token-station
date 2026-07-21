@@ -19,6 +19,28 @@ use std::sync::Mutex;
 use rusqlite::Connection;
 use token_station_metrics::{Recorder, RequestRecord, SCHEMA_VERSION};
 
+/// One forward, idempotent step from schema `to - 1` to schema `to`.
+struct Migration {
+    to: u32,
+    sql: &'static str,
+}
+
+/// The ordered migration registry. An older store is brought up to
+/// [`SCHEMA_VERSION`] by applying every migration whose `to` it has not yet
+/// reached — never by re-creating the schema and losing the rows. Each step is
+/// idempotent (`IF NOT EXISTS`, additive `ALTER`) and stamps `user_version` as
+/// it lands, so an interrupted upgrade resumes rather than re-runs.
+const MIGRATIONS: &[Migration] = &[Migration {
+    // v1 → v2: the stable accounting id (see B-6). Existing rows keep the empty
+    // default, which the partial unique index exempts.
+    to: 2,
+    sql: "
+        ALTER TABLE requests ADD COLUMN request_id TEXT NOT NULL DEFAULT '';
+        CREATE UNIQUE INDEX IF NOT EXISTS requests_request_id
+            ON requests (request_id) WHERE request_id <> '';
+    ",
+}];
+
 /// One row per exchange, flattened from `RequestRecord`.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS requests (
@@ -97,11 +119,15 @@ impl SqliteStore {
                     .map_err(|error| format!("metrics schema version: {error}"))?;
             }
             SCHEMA_VERSION => {}
-            other => {
+            older if older < SCHEMA_VERSION => {
+                // An older store: migrate it forward instead of bricking it.
+                Self::migrate(path, &connection, older)?;
+            }
+            newer => {
                 // A newer client wrote here. Refusing beats silently writing
                 // rows a future schema no longer means the same thing by.
                 return Err(format!(
-                    "metrics store `{}` has schema version {other}, this build knows {SCHEMA_VERSION}",
+                    "metrics store `{}` has schema version {newer}, this build knows {SCHEMA_VERSION}",
                     path.display()
                 ));
             }
@@ -110,6 +136,33 @@ impl SqliteStore {
         Ok(Self {
             connection: Mutex::new(connection),
         })
+    }
+
+    /// Brings an older store up to [`SCHEMA_VERSION`], applying each pending
+    /// migration in order and stamping `user_version` as each lands. A copy of
+    /// the database is taken first, so a failed or unwanted upgrade can be
+    /// rolled back to exactly the bytes that were there before.
+    fn migrate(path: &Path, connection: &Connection, from: u32) -> Result<(), String> {
+        let backup = path.with_extension(format!("v{from}.bak"));
+        std::fs::copy(path, &backup).map_err(|error| {
+            format!(
+                "metrics backup `{}` before migrating: {error}",
+                backup.display()
+            )
+        })?;
+
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.to > from && migration.to <= SCHEMA_VERSION)
+        {
+            connection
+                .execute_batch(migration.sql)
+                .map_err(|error| format!("metrics migration to v{}: {error}", migration.to))?;
+            connection
+                .pragma_update(None, "user_version", migration.to)
+                .map_err(|error| format!("metrics migration version v{}: {error}", migration.to))?;
+        }
+        Ok(())
     }
 
     fn insert(&self, record: &RequestRecord) -> Result<(), rusqlite::Error> {
@@ -280,6 +333,50 @@ mod tests {
         assert_eq!(count, 1, "the stable id dedups the replay");
 
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn an_older_store_is_migrated_forward_with_a_backup_not_bricked() {
+        let path = scratch("migrate");
+        std::fs::remove_file(&path).ok();
+
+        // Stand up a minimal v1 store: a requests table with no request_id.
+        {
+            let connection = rusqlite::Connection::open(&path).expect("opens");
+            connection
+                .execute_batch(
+                    "CREATE TABLE requests (id INTEGER PRIMARY KEY, started_at_ms INTEGER NOT NULL);",
+                )
+                .expect("v1 table");
+            connection
+                .pragma_update(None, "user_version", 1)
+                .expect("stamps v1");
+        }
+
+        // Opening with this build migrates it forward rather than refusing.
+        let store = SqliteStore::open(&path).expect("migrates, not bricks");
+        {
+            let connection = store.connection.lock().expect("lock");
+            let version: u32 = connection
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("version");
+            assert_eq!(version, super::SCHEMA_VERSION, "brought up to current");
+            assert!(
+                connection
+                    .prepare("SELECT request_id FROM requests")
+                    .is_ok(),
+                "the migration added the request_id column"
+            );
+        }
+
+        let backup = path.with_extension("v1.bak");
+        assert!(
+            backup.exists(),
+            "the pre-migration database was backed up first"
+        );
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&backup).ok();
     }
 
     #[test]
