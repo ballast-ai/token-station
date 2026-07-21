@@ -113,12 +113,21 @@ pub struct DiscoveredPackage {
     pub verified: bool,
 }
 
-/// What `plugin install` records after a package passes its conformance
-/// suite: the hash the approval applies to. A changed `adapter.wasm`
-/// invalidates the receipt — approval follows bytes, not names.
+/// What `plugin install` records after a package passes its conformance suite:
+/// the hashes the approval applies to. Approval follows bytes, not names — and
+/// not just the `adapter.wasm` bytes. The `manifest.json` is bound too, so a
+/// package that quietly widens its `permissions` (network, filesystem, a new
+/// secret) or changes any other declared behavior invalidates the receipt even
+/// when the WASM is byte-for-byte identical.
+///
+/// A receipt with an empty `manifest_sha256` is a legacy receipt from before
+/// this binding existed; it no longer verifies, and the package must be
+/// re-installed to earn a full-package approval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Receipt {
     pub sha256: String,
+    #[serde(default)]
+    pub manifest_sha256: String,
     pub suite: String,
 }
 
@@ -149,10 +158,15 @@ impl Receipts {
         Ok(Self { path, entries })
     }
 
-    fn matches(&self, package: &str, sha256: &str) -> bool {
-        self.entries
-            .get(package)
-            .is_some_and(|receipt| receipt.sha256 == sha256)
+    fn matches(&self, package: &str, sha256: &str, manifest_sha256: &str) -> bool {
+        self.entries.get(package).is_some_and(|receipt| {
+            // Both the WASM and the manifest must match, and a legacy receipt
+            // with no bound manifest hash never verifies — the full package is
+            // what was approved, not the bytes alone.
+            !receipt.manifest_sha256.is_empty()
+                && receipt.sha256 == sha256
+                && receipt.manifest_sha256 == manifest_sha256
+        })
     }
 
     fn record(&mut self, package: String, receipt: Receipt) {
@@ -519,9 +533,16 @@ fn scan(dir: &Path, receipts: &Receipts) -> Result<Vec<DiscoveredPackage>, Strin
             .validate()
             .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
         // Approval follows bytes: a receipt for a different (or absent)
-        // adapter.wasm vouches for nothing.
-        let verified = sha256_file(&package_dir.join("adapter.wasm"))
-            .is_ok_and(|sha256| receipts.matches(&package_dir_name(&package_dir), &sha256));
+        // adapter.wasm or manifest.json vouches for nothing.
+        let verified = match (
+            sha256_file(&package_dir.join("adapter.wasm")),
+            sha256_file(&manifest_path),
+        ) {
+            (Ok(wasm), Ok(manifest_hash)) => {
+                receipts.matches(&package_dir_name(&package_dir), &wasm, &manifest_hash)
+            }
+            _ => false,
+        };
         packages.push(DiscoveredPackage {
             manifest,
             source: PackageSource::Dir(package_dir),
@@ -597,10 +618,13 @@ pub fn install(config: &ClientConfig, source: &Path) -> Result<String, String> {
     }
     let sha256 = sha256_file(&dest.join("adapter.wasm"))
         .map_err(|error| format!("{}: {error}", dest.join("adapter.wasm").display()))?;
+    let manifest_sha256 = sha256_file(&dest.join("manifest.json"))
+        .map_err(|error| format!("{}: {error}", dest.join("manifest.json").display()))?;
     receipts.record(
         name.clone(),
         Receipt {
             sha256,
+            manifest_sha256,
             suite: report.suite().to_owned(),
         },
     );
@@ -1000,6 +1024,7 @@ mod tests {
         let dir = scratch("receipts");
         write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
         let wasm = dir.join("provider-x/adapter.wasm");
+        let manifest = dir.join("provider-x/manifest.json");
         fs::write(&wasm, b"component bytes").expect("temp dir is writable");
 
         let data = dir.join("data");
@@ -1008,6 +1033,7 @@ mod tests {
             "provider-x".to_owned(),
             super::Receipt {
                 sha256: super::sha256_file(&wasm).expect("the file just got written"),
+                manifest_sha256: super::sha256_file(&manifest).expect("the manifest exists"),
                 suite: "provider-protocol-v1".to_owned(),
             },
         );
@@ -1027,6 +1053,77 @@ mod tests {
         assert!(
             registry.provider_binding("x").is_none(),
             "approval follows bytes"
+        );
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn changing_the_manifest_invalidates_a_receipt_even_if_the_wasm_is_identical() {
+        let dir = scratch("receipts-manifest");
+        write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
+        let wasm = dir.join("provider-x/adapter.wasm");
+        let manifest = dir.join("provider-x/manifest.json");
+        fs::write(&wasm, b"component bytes").expect("temp dir is writable");
+
+        let data = dir.join("data");
+        let mut receipts = super::Receipts::load(&data).expect("missing file is empty");
+        receipts.record(
+            "provider-x".to_owned(),
+            super::Receipt {
+                sha256: super::sha256_file(&wasm).expect("wasm exists"),
+                manifest_sha256: super::sha256_file(&manifest).expect("manifest exists"),
+                suite: "provider-protocol-v1".to_owned(),
+            },
+        );
+        receipts.save().expect("data dir is writable");
+
+        let mut config = plugins(dir.clone(), &[]);
+        config.allow_unsigned = false;
+        let reloaded = super::Receipts::load(&data).expect("round-trips");
+
+        // Rewrite the manifest to widen the dialects it claims — the WASM is
+        // untouched, but the approved package is not this one.
+        write_package(
+            &dir,
+            "provider-x",
+            &provider_manifest("provider-x", &["x", "y"]),
+        );
+        let registry = PluginRegistry::discover(&config, &reloaded)
+            .expect("a mismatched manifest is a note, not an error");
+        assert!(
+            !registry.package("provider-x").expect("catalogued").verified,
+            "the receipt binds the whole package, not just the WASM"
+        );
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_legacy_receipt_without_a_manifest_hash_no_longer_verifies() {
+        let dir = scratch("receipts-legacy");
+        write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
+        let wasm = dir.join("provider-x/adapter.wasm");
+        fs::write(&wasm, b"component bytes").expect("temp dir is writable");
+
+        let data = dir.join("data");
+        let mut receipts = super::Receipts::load(&data).expect("missing file is empty");
+        // A receipt from before the manifest binding existed: no manifest hash.
+        receipts.record(
+            "provider-x".to_owned(),
+            super::Receipt {
+                sha256: super::sha256_file(&wasm).expect("wasm exists"),
+                manifest_sha256: String::new(),
+                suite: "provider-protocol-v1".to_owned(),
+            },
+        );
+        receipts.save().expect("data dir is writable");
+
+        let mut config = plugins(dir.clone(), &[]);
+        config.allow_unsigned = false;
+        let reloaded = super::Receipts::load(&data).expect("round-trips");
+        let registry = PluginRegistry::discover(&config, &reloaded).expect("a note, not an error");
+        assert!(
+            !registry.package("provider-x").expect("catalogued").verified,
+            "a partial (WASM-only) approval must be re-earned as a full-package one"
         );
         fs::remove_dir_all(dir).ok();
     }
