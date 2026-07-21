@@ -739,11 +739,36 @@ struct CapturedOutput {
 struct OutputReader {
     receiver: std::sync::mpsc::Receiver<CapturedOutput>,
     stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl OutputReader {
     fn stop(&self) {
         self.stop.store(true, Ordering::Release);
+    }
+
+    fn finish(mut self, deadline: Instant) -> CapturedOutput {
+        let captured = self
+            .receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(CapturedOutput {
+                bytes: Vec::new(),
+                truncated: true,
+            });
+        self.stop();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        captured
+    }
+}
+
+impl Drop for OutputReader {
+    fn drop(&mut self) {
+        self.stop();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -794,7 +819,7 @@ where
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
-    std::thread::spawn(move || {
+    let thread = std::thread::spawn(move || {
         let mut retained = Vec::with_capacity(limit.min(8 * 1024));
         let mut buffer = [0_u8; 8 * 1024];
         let mut truncated = false;
@@ -828,7 +853,11 @@ where
             truncated,
         });
     });
-    OutputReader { receiver, stop }
+    OutputReader {
+        receiver,
+        stop,
+        thread: Some(thread),
+    }
 }
 
 #[cfg(unix)]
@@ -853,13 +882,7 @@ impl<T: std::os::windows::io::AsRawHandle> PipeHandle for T {}
 
 fn finish_output_reader(reader: Option<OutputReader>, deadline: Instant) -> CapturedOutput {
     match reader {
-        Some(reader) => reader
-            .receiver
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .unwrap_or(CapturedOutput {
-                bytes: Vec::new(),
-                truncated: true,
-            }),
+        Some(reader) => reader.finish(deadline),
         None => CapturedOutput {
             bytes: Vec::new(),
             truncated: false,
@@ -1794,6 +1817,7 @@ mod tests {
             Some(OutputReader {
                 receiver,
                 stop: Arc::new(AtomicBool::new(false)),
+                thread: None,
             }),
             Instant::now() + Duration::from_millis(20),
         );
@@ -1822,6 +1846,59 @@ mod tests {
 
         assert!(started.elapsed() < Duration::from_millis(200));
         assert!(captured.bytes.is_empty());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_output_reader_timeout_stops_and_drops_the_read_end() {
+        use std::os::fd::{AsRawFd, RawFd};
+
+        struct DropObservedReader {
+            inner: std::process::ChildStdout,
+            dropped: std::sync::mpsc::SyncSender<()>,
+        }
+
+        impl Read for DropObservedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.inner.read(buffer)
+            }
+        }
+
+        impl AsRawFd for DropObservedReader {
+            fn as_raw_fd(&self) -> RawFd {
+                self.inner.as_raw_fd()
+            }
+        }
+
+        impl Drop for DropObservedReader {
+            fn drop(&mut self) {
+                let _ = self.dropped.send(());
+            }
+        }
+
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 5"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (dropped, observed) = std::sync::mpsc::sync_channel(1);
+        let reader = spawn_output_reader(
+            DropObservedReader {
+                inner: child.stdout.take().unwrap(),
+                dropped,
+            },
+            1024,
+        );
+
+        let captured =
+            finish_output_reader(Some(reader), Instant::now() + Duration::from_millis(20));
+
+        assert!(captured.truncated);
+        observed
+            .recv_timeout(Duration::from_millis(200))
+            .expect("timed-out output reader must release its pipe");
         let _ = child.kill();
         let _ = child.wait();
     }

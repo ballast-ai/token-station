@@ -129,6 +129,100 @@ describe("desktop station navigation", () => {
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2));
   });
 
+  it("silently ignores a backend scan already in progress", async () => {
+    const user = userEvent.setup();
+    let scans = 0;
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") {
+        scans += 1;
+        if (scans === 1) return [];
+        throw { message: "Agent 扫描正在进行", code: "scan_in_progress" };
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await waitFor(() => expect(scans).toBe(1));
+    await user.click(navigation().getByRole("button", { name: "重新扫描" }));
+    await waitFor(() => expect(scans).toBe(2));
+
+    expect(screen.queryByText(/Agent 扫描正在进行/)).toBeNull();
+    expect(navigation().getByRole("button", { name: "重新扫描" })).toBeEnabled();
+  });
+
+  it("queues an overlapping rescan and only commits the newest generation", async () => {
+    const user = userEvent.setup();
+    let resolveSlow!: (agents: AgentView[]) => void;
+    let resolveNewest!: (agents: AgentView[]) => void;
+    const slow = new Promise<AgentView[]>((resolve) => { resolveSlow = resolve; });
+    const newestScan = new Promise<AgentView[]>((resolve) => { resolveNewest = resolve; });
+    let scans = 0;
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") {
+        return stateFixture({
+          serve: {
+            phase: "running",
+            running: true,
+            listen: "127.0.0.1:8787",
+            virtual_key: "vk-overlap",
+            error: null,
+          },
+        });
+      }
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") {
+        scans += 1;
+        if (scans === 1) return [scannedClaude];
+        return scans === 2 ? slow : newestScan;
+      }
+      if (command === "plan_agent_connection") {
+        return { operation_id: "op-overlap", confirmation_token: "token-overlap" };
+      }
+      if (command === "apply_agent_plan") {
+        return { operation_id: "op-overlap", maintenance_warning: null };
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await waitFor(() => expect(scans).toBe(1));
+    await user.click(navigation().getByRole("button", { name: "重新扫描" }));
+    await waitFor(() => expect(scans).toBe(2));
+    await user.click(navigation().getByRole("button", { name: "Claude Code" }));
+    await user.click(screen.getByRole("button", { name: "一键接入" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
+      "apply_agent_plan",
+      { operationId: "op-overlap", confirmationToken: "token-overlap" },
+    ));
+    expect(scans).toBe(2);
+
+    resolveSlow([scannedClaude]);
+    await waitFor(() => expect(scans).toBe(3));
+    const newest = structuredClone(scannedClaude);
+    const versionTen = structuredClone(scannedClaude.installations[0]);
+    versionTen.discovery.executable_path = "/opt/claude-10";
+    versionTen.discovery.canonical_path = "/opt/claude-10";
+    versionTen.discovery.version_raw = "10.0.0";
+    versionTen.discovery.version_normalized = "10.0.0";
+    versionTen.compatibility.installation_path = "/opt/claude-10";
+    const versionEleven = structuredClone(versionTen);
+    versionEleven.discovery.executable_path = "/opt/claude-11";
+    versionEleven.discovery.canonical_path = "/opt/claude-11";
+    versionEleven.discovery.version_raw = "11.0.0";
+    versionEleven.discovery.version_normalized = "11.0.0";
+    versionEleven.compatibility.installation_path = "/opt/claude-11";
+    newest.installations = [versionTen, versionEleven];
+    newest.status = "MULTIPLE_INSTALLATIONS";
+    resolveNewest([newest]);
+
+    await user.click(await screen.findByRole("button", { name: /选择安装/ }));
+    expect(screen.getByRole("option", { name: "claude-10 · v10.0.0" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "claude-11 · v11.0.0" })).toBeInTheDocument();
+    expect(screen.queryByText("9.9.9")).toBeNull();
+  });
+
   it("keeps usage independent and puts router, plugins and about inside Settings", async () => {
     const user = userEvent.setup();
     invokeMock.mockImplementation(async (command) => {

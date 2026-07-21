@@ -922,6 +922,7 @@ impl AgentCommandState {
         expected_intents: &[PlanIntent],
         runtime: Option<&AgentProxyRuntime>,
     ) -> Result<TransactionOutcome, AgentCommandError> {
+        self.refresh_scan()?;
         let taken = self.take_plan(
             operation_id,
             confirmation_token,
@@ -934,7 +935,6 @@ impl AgentCommandState {
                 "代理运行态已变化，请重新预览",
             ));
         }
-        self.refresh_scan()?;
         let (current, decision, sequence, _) = self.selected(
             &taken.prepared.view.agent_id,
             &taken.prepared.view.installation_path,
@@ -1564,6 +1564,39 @@ mod tests {
         };
 
         assert_eq!(error.code, "scan_in_progress");
+    }
+
+    #[test]
+    fn commands_apply_keeps_the_plan_when_refresh_cannot_start() {
+        let state = state("apply-refresh-failure");
+        let target = scratch("apply-refresh-failure-target").join("settings.json");
+        let runtime = runtime("vk-refresh-failure");
+        let plan = state
+            .issue_plan(
+                prepared(&target, "vk-refresh-failure", state.clock.now_ms()),
+                &record(&target, false),
+                "main",
+                Some(runtime.fingerprint()),
+            )
+            .unwrap();
+        state.scan_in_progress.store(true, Ordering::Release);
+
+        let error = state
+            .apply(
+                &plan.plan.operation_id,
+                &plan.confirmation_token,
+                "main",
+                &[PlanIntent::Connect],
+                Some(&runtime),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, "scan_in_progress");
+        assert_eq!(
+            state.plan_intent(&plan.plan.operation_id).unwrap(),
+            PlanIntent::Connect
+        );
+        state.scan_in_progress.store(false, Ordering::Release);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use json_five::rt::parser::{
 use serde::de::{Error as DeError, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use toml_edit::{value as toml_value, Document, Item, Table};
+use toml_edit::{value as toml_value, Document, Item, Table, TableLike};
 use yaml_edit::Document as YamlEditDocument;
 
 use super::types::{ConfigPath, PatchKind, PatchOperation};
@@ -369,14 +369,14 @@ fn project_toml_path(
     path: &ConfigPath,
 ) -> Result<(), String> {
     let (last, parents) = split_path(path)?;
-    let mut baseline_table = Some(baseline.as_table());
+    let mut baseline_table: Option<&dyn TableLike> = Some(baseline.as_table());
     for segment in parents {
         baseline_table = baseline_table
             .and_then(|table| table.get(segment))
-            .and_then(Item::as_table);
+            .and_then(Item::as_table_like);
     }
     let baseline_item = baseline_table.and_then(|table| table.get(last)).cloned();
-    let mut current_table = current.as_table_mut();
+    let mut current_table: &mut dyn TableLike = current.as_table_mut();
     if let Some(item) = baseline_item {
         for segment in parents {
             if !current_table.contains_key(segment) {
@@ -384,7 +384,7 @@ fn project_toml_path(
             }
             current_table = current_table
                 .get_mut(segment)
-                .and_then(Item::as_table_mut)
+                .and_then(Item::as_table_like_mut)
                 .ok_or_else(|| format!("配置路径 '{path}' 的父级不是 TOML 表"))?;
         }
         current_table.insert(last, item);
@@ -395,7 +395,7 @@ fn project_toml_path(
             return Ok(());
         };
         current_table = next
-            .as_table_mut()
+            .as_table_like_mut()
             .ok_or_else(|| format!("配置路径 '{path}' 的父级不是 TOML 表"))?;
     }
     current_table.remove(last);
@@ -460,7 +460,7 @@ fn apply_json_operation(root: &mut Value, operation: &PatchOperation) -> Result<
 
 fn apply_toml_operation(document: &mut Document, operation: &PatchOperation) -> Result<(), String> {
     let (last, parents) = split_path(&operation.path)?;
-    let mut table = document.as_table_mut();
+    let mut table: &mut dyn TableLike = document.as_table_mut();
     match operation.operation {
         PatchKind::Add | PatchKind::Replace => {
             for segment in parents {
@@ -469,7 +469,7 @@ fn apply_toml_operation(document: &mut Document, operation: &PatchOperation) -> 
                 }
                 table = table
                     .get_mut(segment)
-                    .and_then(Item::as_table_mut)
+                    .and_then(Item::as_table_like_mut)
                     .ok_or_else(|| format!("配置路径 '{}' 的父级不是 TOML 表", operation.path))?;
             }
             let item = json_scalar_to_toml(
@@ -487,7 +487,7 @@ fn apply_toml_operation(document: &mut Document, operation: &PatchOperation) -> 
                     return Ok(());
                 };
                 table = next
-                    .as_table_mut()
+                    .as_table_like_mut()
                     .ok_or_else(|| format!("配置路径 '{}' 的父级不是 TOML 表", operation.path))?;
             }
             table.remove(last);
