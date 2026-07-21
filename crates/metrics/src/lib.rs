@@ -41,7 +41,8 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 ///
 /// - v1: the original record shape.
 /// - v2: adds `request_id` (the stable accounting id).
-pub const SCHEMA_VERSION: u32 = 2;
+/// - v3: adds `price_version` (the price table a cost was computed under).
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Everything one request leaves behind. One per request, exactly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,11 +79,14 @@ pub struct RequestRecord {
     /// event). Absence is information; it is not zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
-    /// Micro-units of the account currency. `None` until the pricing table
-    /// arrives (C2#4); the column exists so history starts accumulating the
-    /// moment it does.
+    /// Micro-units of the account currency. `None` when the model has no price
+    /// (an unknown cost, never a claimed-free zero).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_micros: Option<i64>,
+    /// The price table version `cost_micros` was computed under, pinned so a
+    /// later price change never re-values this request. `None` when unpriced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_version: Option<u32>,
 }
 
 impl RequestRecord {
@@ -103,6 +107,7 @@ impl RequestRecord {
             routing: None,
             usage: None,
             cost_micros: None,
+            price_version: None,
         }
     }
 }

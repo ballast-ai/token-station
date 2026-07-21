@@ -25,6 +25,7 @@ pub mod filelog;
 pub mod gateway;
 pub mod manage;
 pub mod plugins;
+pub mod pricing;
 pub mod request_context;
 pub mod scaffold;
 pub mod secrets;
