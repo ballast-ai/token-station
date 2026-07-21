@@ -62,11 +62,16 @@ read from the local metrics store).
 
 ## Verifying official binaries
 
-Official releases are reproducible and signed: an Ed25519-signed manifest
-proves the publisher, and rebuilding at the release tag proves the source —
-`scripts/verify-release.sh` does both comparisons for you. The signing key
-lives offline; the public key is in this source tree. Details in
-[docs/release/可复现构建与发布验证.md](docs/release/可复现构建与发布验证.md).
+Official releases are designed to be reproducible and signed: an Ed25519-signed
+manifest proves the publisher, and rebuilding at the release tag proves the
+source — `scripts/verify-release.sh` does both comparisons for you.
+
+The signing key lives offline. **Note (pre-release):** the release public key is
+not yet embedded in this build (`OFFICIAL_RELEASE_PUBKEY_HEX` is empty), so
+`upgrade` refuses to download rather than trust an unverified binary. Until the
+key is injected by a reviewed release build, verify official binaries manually
+per [docs/release/可复现构建与发布验证.md](docs/release/可复现构建与发布验证.md).
+Embedding the key is a release prerequisite, not an optional step.
 
 ## Status
 
