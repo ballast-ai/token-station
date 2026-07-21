@@ -470,6 +470,7 @@ impl Gateway {
 
     /// The normal request pipeline with a host-validated Agent routing scope.
     /// `None` is the backward-compatible, unnamespaced home route.
+    #[allow(clippy::too_many_arguments)] // the request pipeline's real surface
     pub fn chat_scoped(
         &self,
         ctx: &RequestContext,
@@ -594,6 +595,7 @@ impl Gateway {
 
     /// The pipeline. Returns `Err` only before anything was emitted, so the
     /// caller can still shape a whole error response.
+    #[allow(clippy::too_many_arguments)] // the request pipeline's real surface
     fn chat_inner(
         &self,
         ctx: &RequestContext,

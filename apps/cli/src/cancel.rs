@@ -22,6 +22,7 @@ pub struct CancelToken {
 
 impl CancelToken {
     /// A parentless token — the drain token a running server owns.
+    #[must_use]
     pub fn root() -> Self {
         Self {
             flag: Arc::new(AtomicBool::new(false)),
@@ -30,6 +31,7 @@ impl CancelToken {
     }
 
     /// A token that is cancelled when it, or its parent, is cancelled.
+    #[must_use]
     pub fn child(&self) -> Self {
         Self {
             flag: Arc::new(AtomicBool::new(false)),
@@ -43,6 +45,7 @@ impl CancelToken {
     }
 
     /// True once this token or its parent has been cancelled.
+    #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
             || self
