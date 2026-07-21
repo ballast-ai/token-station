@@ -23,6 +23,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use token_station_cli::config::{ClientConfig, PluginsConfig, KNOWN_AGENT_IDS};
 use token_station_cli::plugins::{PluginRegistry, Receipts};
 use token_station_cli::{secrets, stats, upgrade};
+use token_station_router_core::UpstreamRef;
 
 use agent_integration::commands::{
     apply_agent_plan, apply_snapshot_restore, list_agent_registry, list_agent_snapshots,
@@ -787,6 +788,8 @@ fn add_provider(
     if name.trim().is_empty() {
         return Err("供应商名不能为空".into());
     }
+    let name = name.trim().to_string();
+    UpstreamRef::new(name.clone()).map_err(|error| format!("供应商名不合法: {error}"))?;
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
 
@@ -2228,6 +2231,19 @@ mod tests {
         .err()
         .expect("blank model set is rejected")
         .contains("至少填一个"));
+        let provider_count = get_state(app.state()).providers.len();
+        let invalid_name = match add_provider(
+            app.state(),
+            "minimax-cn".to_string(),
+            "https://api.minimaxi.com/v1".to_string(),
+            vec!["MiniMax-M3".to_string()],
+            None,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid upstream reference names must be rejected before mutation"),
+        };
+        assert!(invalid_name.contains("upstream reference name"));
+        assert_eq!(get_state(app.state()).providers.len(), provider_count);
 
         set_tier(
             app.state(),

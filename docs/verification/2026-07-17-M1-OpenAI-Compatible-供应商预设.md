@@ -60,11 +60,16 @@ npm run build
 目录与组件测试覆盖：
 
 - 所有预设 ID 唯一；
+- 所有预设 ID 满足 Router upstream 名称契约 `[a-z][a-z0-9_]*`；
 - 推荐模型非空且不重复；
 - 远端 Base URL 使用 HTTPS、无尾斜杠、无未解析占位符；
 - MiniMax、NVIDIA NIM、Mistral、xAI、火山方舟与 BytePlus 必选项存在；
 - 区域与 Coding Plan 端点没有被合并；
 - 选择预设后显示正确 Base URL、模型和凭证边界说明。
+
+2026-07-21 运行态复核发现原迁移分支使用的连字符 ID（如 `minimax-cn`）不能表示为
+Router `UpstreamRef`。当前项目已统一改为下划线 ID（如 `minimax_cn`），并在桌面后端
+写 keychain 或修改草稿前复用 `UpstreamRef` 校验，避免内置预设或自定义名称再次污染配置。
 
 ## 5. 真实 E2E 状态
 
