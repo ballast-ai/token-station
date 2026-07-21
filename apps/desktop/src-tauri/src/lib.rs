@@ -1600,14 +1600,25 @@ mod tests {
     }
 
     fn wait_for_serve_phase<R: Runtime>(app: &tauri::App<R>, expected: ServePhase) -> StateView {
-        // Debug Wasmtime cold compilation can exceed ten seconds on CI. This is
-        // only a safety deadline; the loop still waits on the lifecycle condition.
-        let deadline = Instant::now() + Duration::from_secs(60);
+        wait_for_serve_phase_with_timeout(app, expected, Duration::from_secs(60))
+    }
+
+    fn wait_for_serve_phase_with_timeout<R: Runtime>(
+        app: &tauri::App<R>,
+        expected: ServePhase,
+        timeout: Duration,
+    ) -> StateView {
+        let deadline = Instant::now() + timeout;
         loop {
             let state = get_state(app.state());
             if state.serve.phase == expected {
                 return state;
             }
+            assert!(
+                expected == ServePhase::Error || state.serve.phase != ServePhase::Error,
+                "serve phase entered Error before {expected:?}; error={:?}",
+                state.serve.error
+            );
             assert!(
                 Instant::now() < deadline,
                 "serve phase did not reach {expected:?}; current={:?}, error={:?}",
@@ -2294,7 +2305,10 @@ mod tests {
             duplicate.serve.phase,
             ServePhase::Starting | ServePhase::Running
         ));
-        let running = wait_for_serve_phase(&app, ServePhase::Running);
+        // Coverage instrumentation makes Wasmtime's first compilation much
+        // slower on a cold Linux runner; this remains a bounded integration test.
+        let running =
+            wait_for_serve_phase_with_timeout(&app, ServePhase::Running, Duration::from_secs(180));
         assert!(running.serve.running);
         assert!(running.serve.virtual_key.is_none());
         assert!(root.join("data").join("requests.log").exists());

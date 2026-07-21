@@ -162,3 +162,14 @@ fn item_matches_json(item: Option<&toml_edit::Item>, expected: &serde_json::Valu
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projected_field_matcher_rejects_unsupported_json_shapes() {
+        assert!(!item_matches_json(None, &json!(null)));
+        assert!(!item_matches_json(None, &json!(["unexpected"])));
+    }
+}
