@@ -181,4 +181,41 @@ mod tests {
             .ends_with(".tmp")));
         std::fs::remove_dir_all(root).ok();
     }
+
+    #[test]
+    fn safe_fs_rejects_non_directories_non_files_and_broad_permissions() {
+        let root = scratch();
+        std::fs::create_dir_all(&root).unwrap();
+        let regular_file = root.join("regular");
+        std::fs::write(&regular_file, b"data").unwrap();
+        assert_eq!(
+            ensure_private_dir(&regular_file).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            verify_private_file(&root).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+
+            let symlink_path = root.join("directory-link");
+            symlink(&root, &symlink_path).unwrap();
+            assert_eq!(
+                ensure_private_dir(&symlink_path).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+
+            std::fs::set_permissions(&regular_file, std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+            assert_eq!(
+                verify_private_file(&regular_file).unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
+
+        std::fs::remove_dir_all(root).ok();
+    }
 }

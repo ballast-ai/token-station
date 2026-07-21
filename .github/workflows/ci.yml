@@ -173,7 +173,11 @@ jobs:
       - run: >-
           cargo llvm-cov --manifest-path apps/desktop/src-tauri/Cargo.toml
           --lcov --output-path apps/desktop/src-tauri/target/desktop-agent.lcov
-          --fail-under-lines 90
+      - name: Enforce desktop Rust line coverage
+        run: >-
+          node scripts/check-coverage-thresholds.mjs
+          apps/desktop/src-tauri/target/desktop-agent.lcov
+          apps/desktop/src-tauri/src 90
       - run: >-
           node scripts/check-coverage-thresholds.mjs
           apps/desktop/src-tauri/target/desktop-agent.lcov
