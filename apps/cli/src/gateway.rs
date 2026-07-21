@@ -423,21 +423,28 @@ impl Gateway {
                 Candidate::new(
                     target.clone(),
                     capability.clone(),
-                    health.health_of(&target.upstream, now),
+                    health.health_of(&target.upstream, &target.model, now),
                 )
             })
             .collect()
     }
 
-    /// Feeds one attempt's outcome to the tracker; logs a transition.
-    fn observe(&self, upstream: &UpstreamRef, outcome: Result<(), &ErrorEnvelope>) {
+    /// Feeds one attempt's outcome to the tracker; logs a transition. Health is
+    /// tracked per (upstream, wire model), so one model's failures never eject
+    /// another model on the same upstream.
+    fn observe(&self, upstream: &UpstreamRef, model: &str, outcome: Result<(), &ErrorEnvelope>) {
         let mut health = self.health.lock().expect("health lock");
         match outcome {
-            Ok(()) => health.observe_success(upstream),
+            Ok(()) => health.observe_success(upstream, model),
             Err(envelope) => {
-                if health.observe_failure(upstream, envelope.code, std::time::Instant::now()) {
+                if health.observe_failure(
+                    upstream,
+                    model,
+                    envelope.code,
+                    std::time::Instant::now(),
+                ) {
                     eprintln!(
-                        "upstream {upstream} ejected from rotation ({:?})",
+                        "upstream {upstream} model {model} ejected from rotation ({:?})",
                         envelope.code
                     );
                 }
@@ -529,7 +536,7 @@ impl Gateway {
 
         if let Some(agent) = selected {
             match self.chat_inner(ctx, agent, router, headers, body, emit, &mut record) {
-                Ok((upstream, outcome)) => self.settle(&mut record, &upstream, outcome),
+                Ok((served, outcome)) => self.settle(&mut record, &served, outcome),
                 Err(refusal) => {
                     // Failed before any upstream served — a whole error response
                     // the client can still receive; no upstream health verdict.
@@ -605,7 +612,7 @@ impl Gateway {
         body: &[u8],
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
-    ) -> Result<(UpstreamRef, StreamOutcome), ErrorEnvelope> {
+    ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
         if body.len() > MAX_INBOUND_BODY {
             return Err(ErrorEnvelope::new(
                 ErrorCode::InvalidRequest,
@@ -676,14 +683,14 @@ impl Gateway {
         decision: &Decision,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
-    ) -> Result<(UpstreamRef, StreamOutcome), ErrorEnvelope> {
+    ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
         let mut last_error = None;
 
         for target in std::iter::once(&decision.chosen).chain(&decision.fallbacks) {
             // A client that already hung up (or a fired drain) gets no further
             // upstreams tried on its behalf.
             if ctx.is_cancelled() {
-                return Ok((target.upstream.clone(), StreamOutcome::ClientCancelled));
+                return Ok((target.clone(), StreamOutcome::ClientCancelled));
             }
             record.attempts += 1;
             if let Some(routing) = record.routing.as_mut() {
@@ -697,9 +704,9 @@ impl Gateway {
                 // once, in `settle`; here we only report who served and how the
                 // exchange ended. Per-attempt failures below still trip health so
                 // the fallback sweep can eject a bad upstream mid-flight.
-                Ok(outcome) => return Ok((target.upstream.clone(), outcome)),
+                Ok(outcome) => return Ok((target.clone(), outcome)),
                 Err(error) => {
-                    self.observe(&target.upstream, Err(&error));
+                    self.observe(&target.upstream, &target.model, Err(&error));
                     let retriable = error.code.is_retriable_elsewhere();
                     eprintln!(
                         "upstream {target} failed: {} ({:?})",
@@ -722,11 +729,12 @@ impl Gateway {
     /// written. Only [`StreamOutcome::Complete`] settles as success; every other
     /// outcome records a truthful failure (or a client cancel that is nobody's
     /// fault). Nothing outside this function may set `record.status = 200`.
-    fn settle(&self, record: &mut RequestRecord, upstream: &UpstreamRef, outcome: StreamOutcome) {
+    fn settle(&self, record: &mut RequestRecord, served: &UpstreamModel, outcome: StreamOutcome) {
+        let (upstream, model) = (&served.upstream, served.model.as_str());
         match outcome {
             StreamOutcome::Complete => {
                 record.status = 200;
-                self.observe(upstream, Ok(()));
+                self.observe(upstream, model, Ok(()));
             }
             StreamOutcome::FailedAfterPartial | StreamOutcome::FailedBeforeOutput => {
                 let code = record.error_code.unwrap_or(ErrorCode::UpstreamUnavailable);
@@ -734,7 +742,11 @@ impl Gateway {
                 if record.status < 400 {
                     record.status = 502;
                 }
-                self.observe(upstream, Err(&ErrorEnvelope::new(code, record.status, "")));
+                self.observe(
+                    upstream,
+                    model,
+                    Err(&ErrorEnvelope::new(code, record.status, "")),
+                );
             }
             StreamOutcome::ClientCancelled => {
                 // A cancel is not the upstream's failure: no health penalty.
