@@ -1124,6 +1124,7 @@ body {
 .form-span { grid-column: 1 / -1; }
 .mono { font-family: "SF Mono", Menlo, monospace; }
 .local-provider-note { padding: 10px 12px; border-radius: 8px; color: var(--success); background: color-mix(in srgb, var(--success) 8%, var(--surface)); font-size: 11px; }
+.preset-note { margin: 14px 18px 0 76px; padding: 9px 11px; border-left: 2px solid var(--warning); border-radius: 6px; color: var(--warning); background: color-mix(in srgb, var(--warning) 8%, var(--surface)); font-size: 11px; line-height: 1.5; }
 .wizard-actions { display: flex; justify-content: flex-end; gap: 9px; padding: 14px 18px; background: var(--surface-2); }
 .model-catalog { background: var(--surface-2); border-color: var(--line); }
 .model-search { background: var(--surface); }

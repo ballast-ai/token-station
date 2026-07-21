@@ -122,6 +122,7 @@ export default function AddProviderPage({ onCancel, onAdded }: AddProviderPagePr
 
         {presetId && (
           <>
+            {preset?.note && <div className="preset-note">{preset.note}</div>}
             <div className="wizard-step">
               <div className="step-index">02</div>
               <div className="step-body form-grid">
