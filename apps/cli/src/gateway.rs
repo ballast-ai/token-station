@@ -38,6 +38,8 @@ use token_station_router_core::{
     Candidate, Decision, HealthPolicy, HealthTracker, Router, UpstreamModel, UpstreamRef,
 };
 
+use crate::request_context::RequestContext;
+
 use crate::config::ClientConfig;
 use crate::secrets::SecretStore;
 
@@ -45,6 +47,10 @@ use crate::secrets::SecretStore;
 const MAX_INBOUND_BODY: usize = 10 * 1024 * 1024;
 const MAX_UPSTREAM_BODY: u64 = 32 * 1024 * 1024;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Default overall budget for one request when the caller supplies no context.
+/// Long enough for slow generations, finite enough to bound an abandoned one.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(600);
 /// `upstream test` answers "is it alive"; it should not take the data plane's
 /// word-count-sized timeout to say no.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -455,13 +461,18 @@ impl Gateway {
         body: &[u8],
         emit: &mut dyn FnMut(Reply) -> bool,
     ) {
-        self.chat_scoped(None, method, path, headers, body, emit);
+        // No supervised context supplied: a detached one still bounds the
+        // request by deadline; the server layer replaces it with a drain-child
+        // that also carries the client-disconnect signal.
+        let ctx = RequestContext::detached(REQUEST_DEADLINE, UPSTREAM_TIMEOUT);
+        self.chat_scoped(&ctx, None, method, path, headers, body, emit);
     }
 
     /// The normal request pipeline with a host-validated Agent routing scope.
     /// `None` is the backward-compatible, unnamespaced home route.
     pub fn chat_scoped(
         &self,
+        ctx: &RequestContext,
         agent_id: Option<&str>,
         method: &str,
         path: &str,
@@ -516,7 +527,7 @@ impl Gateway {
         let mut record = RequestRecord::begin(started_at_ms, protocol);
 
         if let Some(agent) = selected {
-            match self.chat_inner(agent, router, headers, body, emit, &mut record) {
+            match self.chat_inner(ctx, agent, router, headers, body, emit, &mut record) {
                 Ok((upstream, outcome)) => self.settle(&mut record, &upstream, outcome),
                 Err(refusal) => {
                     // Failed before any upstream served — a whole error response
@@ -585,6 +596,7 @@ impl Gateway {
     /// caller can still shape a whole error response.
     fn chat_inner(
         &self,
+        ctx: &RequestContext,
         agent: &LoadedAgent,
         router: &Router,
         headers: &[(String, String)],
@@ -649,13 +661,14 @@ impl Gateway {
         );
         record.routing = Some(RoutingRecord::from(&decision));
 
-        self.dispatch(agent, &request, &decision, emit, record)
+        self.dispatch(ctx, agent, &request, &decision, emit, record)
     }
 
     /// Tries the decision's targets in order; moves on only while the error
     /// says another upstream is worth trying, and only before first byte out.
     fn dispatch(
         &self,
+        ctx: &RequestContext,
         agent: &LoadedAgent,
         request: &ChatRequest,
         decision: &Decision,
@@ -665,6 +678,11 @@ impl Gateway {
         let mut last_error = None;
 
         for target in std::iter::once(&decision.chosen).chain(&decision.fallbacks) {
+            // A client that already hung up (or a fired drain) gets no further
+            // upstreams tried on its behalf.
+            if ctx.is_cancelled() {
+                return Ok((target.upstream.clone(), StreamOutcome::ClientCancelled));
+            }
             record.attempts += 1;
             if let Some(routing) = record.routing.as_mut() {
                 // The record names who actually served (or last refused), not
@@ -672,7 +690,7 @@ impl Gateway {
                 target.upstream.as_str().clone_into(&mut routing.upstream);
                 routing.model.clone_from(&target.model);
             }
-            match self.try_upstream(agent, request, target, emit, record) {
+            match self.try_upstream(ctx, agent, request, target, emit, record) {
                 // The terminal health verdict and status are decided exactly
                 // once, in `settle`; here we only report who served and how the
                 // exchange ended. Per-attempt failures below still trip health so
@@ -726,6 +744,7 @@ impl Gateway {
     /// One upstream attempt: build, authorize, inject, send, translate back.
     fn try_upstream(
         &self,
+        ctx: &RequestContext,
         agent: &LoadedAgent,
         request: &ChatRequest,
         target: &UpstreamModel,
@@ -775,6 +794,7 @@ impl Gateway {
                 "model": target.model,
             });
             Ok(Self::relay_stream(
+                ctx,
                 agent,
                 upstream,
                 response,
@@ -911,6 +931,7 @@ impl Gateway {
     /// Streams the upstream body through the parse/render pair, chunk by
     /// chunk, with the split points the network chose.
     fn relay_stream(
+        ctx: &RequestContext,
         agent: &LoadedAgent,
         upstream: &Upstream,
         response: UpstreamResponse,
@@ -933,6 +954,13 @@ impl Gateway {
 
         let mut buffer = [0u8; STREAM_READ];
         loop {
+            // Between reads is where a mid-stream cancel actually lands: the
+            // client hung up or the deadline passed, so stop paying for output
+            // nobody will read instead of draining the upstream to its end.
+            if ctx.is_cancelled() {
+                Self::clear_stream_state(agent, render_context);
+                return StreamOutcome::ClientCancelled;
+            }
             let read = match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(read) => read,

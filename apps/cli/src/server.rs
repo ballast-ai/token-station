@@ -20,14 +20,22 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
+use std::time::Duration;
+
 use crate::admin::AdminContext;
 use crate::gateway::{Gateway, Reply};
+use crate::request_context::RequestContext;
 use crate::virtual_key;
 
 /// How many rendered SSE chunks may sit between the worker and a slow client
 /// before the worker blocks — which in turn stops reading the upstream:
 /// backpressure end to end.
 const STREAM_BACKLOG: usize = 32;
+
+/// Default overall budget and per-attempt cap for a request's context until the
+/// supervised drain wiring (T2) replaces the detached one built here.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(600);
+const PER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Everything a handler needs: the data plane, and the door key.
 #[derive(Clone)]
@@ -307,8 +315,15 @@ async fn chat(
 
     // The pipeline owns its thread for the whole exchange; `blocking_send`
     // makes a slow reader slow the upstream read down, not buffer it.
+    //
+    // TODO(T2/Contract B): build this context as a child of the RunningServer's
+    // drain token and fire `ctx.cancel()` when this axum connection closes, so a
+    // client disconnect and a save-and-apply drain both stop the exchange. For
+    // now a detached context still bounds the request by its overall deadline.
+    let ctx = RequestContext::detached(REQUEST_DEADLINE, PER_ATTEMPT_TIMEOUT);
     let worker = tokio::task::spawn_blocking(move || {
         gateway.chat_scoped(
+            &ctx,
             agent_id.as_deref(),
             &method,
             &path,
