@@ -35,9 +35,13 @@ use token_station_protocol::{ErrorCode, Usage};
 use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 
 /// The persisted shape's version. Stores stamp it (`SQLite` `user_version`, a
-/// column, a document field) and refuse to write a record shape they do not
-/// know.
-pub const SCHEMA_VERSION: u32 = 1;
+/// column, a document field). A store older than this migrates forward (with a
+/// backup first); a store newer than this is refused rather than written by a
+/// schema that no longer means the same thing.
+///
+/// - v1: the original record shape.
+/// - v2: adds `request_id` (the stable accounting id).
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Everything one request leaves behind. One per request, exactly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
