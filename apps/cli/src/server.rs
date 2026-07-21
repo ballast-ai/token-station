@@ -114,11 +114,64 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !admitted(&state, &headers) {
         return unauthorized("/v1/models");
     }
+    models_response(&state)
+}
+
+fn models_response(state: &AppState) -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(state.gateway.models().to_owned()))
         .expect("a literal response builds")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ScopedInboundPath<'a> {
+    agent_id: Option<&'a str>,
+    canonical_path: &'a str,
+}
+
+fn parse_inbound_path(path: &str) -> Result<ScopedInboundPath<'_>, String> {
+    let Some(rest) = path.strip_prefix("/agents/") else {
+        return Ok(ScopedInboundPath {
+            agent_id: None,
+            canonical_path: path,
+        });
+    };
+    let Some((agent_id, _suffix)) = rest.split_once('/') else {
+        return Err("Agent namespace is missing a protocol path".to_owned());
+    };
+    if !crate::config::ClientConfig::is_known_agent_id(agent_id) {
+        return Err(format!("unknown Agent namespace `{agent_id}`"));
+    }
+    let canonical_path = &rest[agent_id.len()..];
+    if !canonical_path.starts_with("/v1/")
+        || canonical_path.contains("//")
+        || canonical_path.contains('%')
+    {
+        return Err("Agent namespace has an invalid protocol path".to_owned());
+    }
+    Ok(ScopedInboundPath {
+        agent_id: Some(agent_id),
+        canonical_path,
+    })
+}
+
+fn invalid_namespace(detail: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "error": {
+                    "message": detail,
+                    "type": "invalid_request",
+                    "code": "invalid_request"
+                }
+            })
+            .to_string(),
+        ))
+        .expect("a json response builds")
 }
 
 /// The CORS allowance for `/admin/*`: echo the origin back — but only a
@@ -222,14 +275,22 @@ async fn chat(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let scoped = match parse_inbound_path(uri.path()) {
+        Ok(scoped) => scoped,
+        Err(detail) => return invalid_namespace(&detail),
+    };
     if !admitted(&state, &headers) {
-        return unauthorized(uri.path());
+        return unauthorized(scoped.canonical_path);
+    }
+    if method == Method::GET && scoped.canonical_path == "/v1/models" {
+        return models_response(&state);
     }
     let gateway = Arc::clone(&state.gateway);
     // The method and path feed the gateway's `match_inbound` step, which picks
     // the inbound adapter. Owned copies cross into the blocking thread.
     let method = method.as_str().to_owned();
-    let path = uri.path().to_owned();
+    let path = scoped.canonical_path.to_owned();
+    let agent_id = scoped.agent_id.map(str::to_owned);
     // Owned copies for the blocking thread. Values that are not UTF-8 keep
     // their name and lose their value — same rule HeaderDigest applies.
     let headers: Vec<(String, String)> = headers
@@ -247,9 +308,14 @@ async fn chat(
     // The pipeline owns its thread for the whole exchange; `blocking_send`
     // makes a slow reader slow the upstream read down, not buffer it.
     let worker = tokio::task::spawn_blocking(move || {
-        gateway.chat(&method, &path, &headers, &body, &mut |reply| {
-            tx.blocking_send(reply).is_ok()
-        });
+        gateway.chat_scoped(
+            agent_id.as_deref(),
+            &method,
+            &path,
+            &headers,
+            &body,
+            &mut |reply| tx.blocking_send(reply).is_ok(),
+        );
     });
 
     let first = rx.recv().await;
@@ -286,5 +352,56 @@ async fn chat(
                 r#"{"error":{"message":"the request pipeline failed to answer","type":"internal"}}"#,
             ))
             .expect("a literal response builds"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ScopedInboundPath, parse_inbound_path};
+
+    #[test]
+    fn agent_namespaces_are_stripped_to_canonical_protocol_paths() {
+        let cases = [
+            ("claude-code", "/v1/messages"),
+            ("codex", "/v1/responses"),
+            ("opencode", "/v1/chat/completions"),
+            ("openclaw", "/v1/chat/completions"),
+            ("nous-hermes-agent", "/v1/chat/completions"),
+        ];
+        for (agent_id, canonical_path) in cases {
+            let path = format!("/agents/{agent_id}{canonical_path}");
+            assert_eq!(
+                parse_inbound_path(&path),
+                Ok(ScopedInboundPath {
+                    agent_id: Some(agent_id),
+                    canonical_path,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn unnamespaced_paths_remain_backward_compatible() {
+        assert_eq!(
+            parse_inbound_path("/v1/responses"),
+            Ok(ScopedInboundPath {
+                agent_id: None,
+                canonical_path: "/v1/responses",
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_or_unknown_agent_namespaces_fail_closed() {
+        for path in [
+            "/agents/codex",
+            "/agents/future/v1/responses",
+            "/agents//v1/responses",
+            "/agents/codex//v1/responses",
+            "/agents/codex/v2/responses",
+            "/agents/codex/v1/%72esponses",
+        ] {
+            assert!(parse_inbound_path(path).is_err(), "{path}");
+        }
     }
 }

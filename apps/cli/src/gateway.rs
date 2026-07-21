@@ -72,7 +72,10 @@ pub struct Gateway {
     /// the first whose `match_inbound` claims it — that is `match_inbound`, the
     /// multi-inbound multiplexing, done here in the host orchestrator.
     agents: Vec<LoadedAgent>,
-    router: Router,
+    home_router: Router,
+    /// Only custom routes are materialized. Missing/inherit entries use the
+    /// home router, so old configurations allocate no duplicate routers.
+    agent_routers: BTreeMap<String, Router>,
     upstreams: BTreeMap<String, Upstream>,
     /// What each upstream serves; health is applied per request from the
     /// tracker, because it changes and this does not.
@@ -246,11 +249,20 @@ impl Gateway {
             );
         }
 
-        let router = Router::new(config.router.clone()).map_err(|error| error.to_string())?;
+        let home_router = Router::new(config.router.clone()).map_err(|error| error.to_string())?;
+        let mut agent_routers = BTreeMap::new();
+        for agent_id in config.agent_routes.keys() {
+            if let Some(router) = config.custom_router_for_agent(agent_id)? {
+                let router = Router::new(router)
+                    .map_err(|error| format!("Agent `{agent_id}` route: {error}"))?;
+                agent_routers.insert(agent_id.clone(), router);
+            }
+        }
 
         Ok(Self {
             agents,
-            router,
+            home_router,
+            agent_routers,
             upstreams,
             catalog,
             health: std::sync::Mutex::new(HealthTracker::new(HealthPolicy {
@@ -442,12 +454,58 @@ impl Gateway {
         body: &[u8],
         emit: &mut dyn FnMut(Reply) -> bool,
     ) {
+        self.chat_scoped(None, method, path, headers, body, emit);
+    }
+
+    /// The normal request pipeline with a host-validated Agent routing scope.
+    /// `None` is the backward-compatible, unnamespaced home route.
+    pub fn chat_scoped(
+        &self,
+        agent_id: Option<&str>,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+        emit: &mut dyn FnMut(Reply) -> bool,
+    ) {
         let clock = std::time::Instant::now();
         let started_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |epoch| {
                 u64::try_from(epoch.as_millis()).unwrap_or(u64::MAX)
             });
+
+        let router = match agent_id {
+            None => &self.home_router,
+            Some(agent_id) if crate::config::ClientConfig::is_known_agent_id(agent_id) => self
+                .agent_routers
+                .get(agent_id)
+                .unwrap_or(&self.home_router),
+            Some(agent_id) => {
+                let mut record = RequestRecord::begin(started_at_ms, String::new());
+                let refusal = ErrorEnvelope::new(
+                    ErrorCode::InvalidRequest,
+                    404,
+                    format!("unknown Agent namespace `{agent_id}`"),
+                );
+                record.status = refusal.http_status;
+                record.error_code = Some(refusal.code);
+                emit(Reply::BeginJson(JsonReply {
+                    status: refusal.http_status,
+                    body: json!({
+                        "error": {
+                            "message": refusal.message,
+                            "type": "invalid_request",
+                            "code": "invalid_request"
+                        }
+                    })
+                    .to_string(),
+                }));
+                record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+                self.recorder.record(&record);
+                return;
+            }
+        };
 
         // Ask each inbound adapter which claims this request. The winner's
         // protocol tags the record; no winner is a request in a dialect nothing
@@ -457,7 +515,7 @@ impl Gateway {
         let mut record = RequestRecord::begin(started_at_ms, protocol);
 
         if let Some(agent) = selected {
-            if let Err(refusal) = self.chat_inner(agent, headers, body, emit, &mut record) {
+            if let Err(refusal) = self.chat_inner(agent, router, headers, body, emit, &mut record) {
                 record.status = refusal.http_status;
                 record.error_code = Some(refusal.code);
                 let rendered = Self::render_error(agent, &refusal);
@@ -522,6 +580,7 @@ impl Gateway {
     fn chat_inner(
         &self,
         agent: &LoadedAgent,
+        router: &Router,
         headers: &[(String, String)],
         body: &[u8],
         emit: &mut dyn FnMut(Reply) -> bool,
@@ -570,8 +629,7 @@ impl Gateway {
         record.stream = request.stream;
 
         let candidates = self.candidates(std::time::Instant::now());
-        let decision = self
-            .router
+        let decision = router
             .route(&request, &hints, &candidates)
             .map_err(|no_route| {
                 ErrorEnvelope::new(no_route.error_code(), 503, no_route.to_string())

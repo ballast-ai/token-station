@@ -20,7 +20,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
-use token_station_cli::config::{ClientConfig, PluginsConfig};
+use token_station_cli::config::{ClientConfig, PluginsConfig, KNOWN_AGENT_IDS};
 use token_station_cli::plugins::{PluginRegistry, Receipts};
 use token_station_cli::{secrets, stats, upgrade};
 
@@ -233,10 +233,17 @@ struct ProviderView {
     has_auth: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct TierView {
     upstream: Option<String>,
     model: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AgentRouteView {
+    mode: String,
+    tiers: std::collections::BTreeMap<String, TierView>,
+    config_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -262,6 +269,7 @@ struct ServeView {
 struct StateView {
     providers: Vec<ProviderView>,
     tiers: std::collections::BTreeMap<String, TierView>,
+    agent_routes: std::collections::BTreeMap<String, AgentRouteView>,
     serve: ServeView,
     /// Whether the draft materializes as a valid config and can be saved or started.
     config_error: Option<String>,
@@ -425,6 +433,61 @@ impl AppInner {
         }
     }
 
+    fn home_tiers(&self) -> std::collections::BTreeMap<String, TierView> {
+        let mut tiers = std::collections::BTreeMap::new();
+        tiers.insert("high".to_string(), self.tier(TIER_HIGH));
+        tiers.insert("mid".to_string(), self.tier(TIER_MID));
+        tiers.insert("low".to_string(), self.tier(TIER_LOW));
+        tiers
+    }
+
+    fn agent_route_mode(&self, agent_id: &str) -> &str {
+        self.draft["agent_routes"][agent_id]["mode"]
+            .as_str()
+            .unwrap_or("inherit")
+    }
+
+    fn agent_tier(&self, agent_id: &str, slot: &str) -> TierView {
+        if self.agent_route_mode(agent_id) != "custom" {
+            return self.tier(pool_key(slot).expect("known UI tier slot"));
+        }
+        let target = &self.draft["agent_routes"][agent_id]["custom_route"][slot];
+        TierView {
+            upstream: target["upstream"].as_str().map(str::to_string),
+            model: target["model"].as_str().map(str::to_string),
+        }
+    }
+
+    fn agent_routes_view(&self) -> std::collections::BTreeMap<String, AgentRouteView> {
+        KNOWN_AGENT_IDS
+            .iter()
+            .map(|agent_id| {
+                let mode = self.agent_route_mode(agent_id).to_string();
+                let tiers = ["high", "mid", "low"]
+                    .into_iter()
+                    .map(|slot| (slot.to_string(), self.agent_tier(agent_id, slot)))
+                    .collect();
+                let config_error = if mode == "custom" {
+                    ["high", "mid", "low"].into_iter().find_map(|slot| {
+                        let tier = self.agent_tier(agent_id, slot);
+                        (tier.upstream.is_none() || tier.model.is_none())
+                            .then(|| format!("{slot} 档尚未配置供应商和模型"))
+                    })
+                } else {
+                    None
+                };
+                (
+                    (*agent_id).to_string(),
+                    AgentRouteView {
+                        mode,
+                        tiers,
+                        config_error,
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// Rebuild tier-pool references, heuristic bands, and default from configured
     /// tiers. Include only tiers with a selected upstream-model pair.
     fn rebuild_routing(&mut self) {
@@ -525,13 +588,10 @@ impl AppInner {
     }
 
     fn snapshot(&self) -> StateView {
-        let mut tiers = std::collections::BTreeMap::new();
-        tiers.insert("high".to_string(), self.tier(TIER_HIGH));
-        tiers.insert("mid".to_string(), self.tier(TIER_MID));
-        tiers.insert("low".to_string(), self.tier(TIER_LOW));
         StateView {
             providers: self.upstreams(),
-            tiers,
+            tiers: self.home_tiers(),
+            agent_routes: self.agent_routes_view(),
             serve: self.serve_view(),
             config_error: self.config_error(),
             settings: self.settings_view(),
@@ -605,6 +665,91 @@ impl AppInner {
         self.rebuild_routing();
         Ok(())
     }
+
+    fn validate_route_target(&self, upstream: &str, model: &str) -> Result<(), String> {
+        let configured = self.draft["upstreams"][upstream]
+            .as_object()
+            .ok_or_else(|| format!("未知供应商 `{upstream}`"))?;
+        let model_exists = configured["models"].as_array().is_some_and(|models| {
+            models
+                .iter()
+                .any(|entry| entry["model"].as_str() == Some(model))
+        });
+        model_exists
+            .then_some(())
+            .ok_or_else(|| format!("供应商 `{upstream}` 未配置模型 `{model}`"))
+    }
+
+    fn seed_agent_custom_route(&mut self, agent_id: &str) {
+        if self.draft["agent_routes"][agent_id]["custom_route"].is_object() {
+            return;
+        }
+        let mut custom = serde_json::Map::new();
+        for (slot, pool) in [
+            ("high", TIER_HIGH),
+            ("mid", TIER_MID),
+            ("low", TIER_LOW),
+        ] {
+            let tier = self.tier(pool);
+            custom.insert(
+                slot.to_string(),
+                match (tier.upstream, tier.model) {
+                    (Some(upstream), Some(model)) => {
+                        json!({ "upstream": upstream, "model": model })
+                    }
+                    _ => Value::Null,
+                },
+            );
+        }
+        self.draft["agent_routes"][agent_id]["custom_route"] = Value::Object(custom);
+    }
+
+    fn agent_custom_route_complete(&self, agent_id: &str) -> bool {
+        ["high", "mid", "low"].into_iter().all(|slot| {
+            let target = &self.draft["agent_routes"][agent_id]["custom_route"][slot];
+            target["upstream"].as_str().is_some() && target["model"].as_str().is_some()
+        })
+    }
+
+    fn set_agent_route_mode_value(&mut self, agent_id: &str, mode: &str) {
+        if mode == "custom" {
+            self.seed_agent_custom_route(agent_id);
+        } else if !self.agent_custom_route_complete(agent_id) {
+            // ClientConfig intentionally persists only executable routes. An
+            // incomplete desktop draft may be edited in custom mode, but once
+            // the user returns to inherit it must not poison an otherwise valid
+            // home configuration.
+            if let Some(route) = self.draft["agent_routes"][agent_id].as_object_mut() {
+                route.remove("custom_route");
+            }
+        }
+        self.draft["agent_routes"][agent_id]["mode"] = json!(mode);
+    }
+
+    fn set_agent_tier_value(
+        &mut self,
+        agent_id: &str,
+        slot: &str,
+        upstream: Option<String>,
+        model: Option<String>,
+    ) -> Result<(), String> {
+        ensure_known_agent_id(agent_id)?;
+        pool_key(slot)?;
+        self.seed_agent_custom_route(agent_id);
+        match (upstream, model) {
+            (Some(upstream), Some(model)) => {
+                self.validate_route_target(&upstream, &model)?;
+                self.draft["agent_routes"][agent_id]["custom_route"][slot] =
+                    json!({ "upstream": upstream, "model": model });
+            }
+            (None, None) => {
+                self.draft["agent_routes"][agent_id]["custom_route"][slot] = Value::Null;
+            }
+            _ => return Err("档位必须同时提供供应商和模型，或同时清空".to_string()),
+        }
+        self.draft["agent_routes"][agent_id]["mode"] = json!("custom");
+        Ok(())
+    }
 }
 
 fn pool_key(slot: &str) -> Result<&'static str, String> {
@@ -614,6 +759,13 @@ fn pool_key(slot: &str) -> Result<&'static str, String> {
         "low" => Ok(TIER_LOW),
         other => Err(format!("未知档位 `{other}`(应为 high/mid/low)")),
     }
+}
+
+fn ensure_known_agent_id(agent_id: &str) -> Result<(), String> {
+    KNOWN_AGENT_IDS
+        .contains(&agent_id)
+        .then_some(())
+        .ok_or_else(|| format!("未知 Agent `{agent_id}`"))
 }
 
 // ---- Tauri commands ---------------------------------------------------------------
@@ -772,6 +924,26 @@ fn replace_provider_models(
         ));
     }
 
+    let mut agent_blocked = Vec::new();
+    for agent_id in KNOWN_AGENT_IDS {
+        for slot in ["high", "mid", "low"] {
+            let target = &inner.draft["agent_routes"][agent_id]["custom_route"][slot];
+            let refers_to_provider = target["upstream"].as_str() == Some(name);
+            let retained = target["model"]
+                .as_str()
+                .is_some_and(|model| normalized.iter().any(|candidate| candidate == model));
+            if refers_to_provider && !retained {
+                agent_blocked.push(format!("{agent_id}/{slot}"));
+            }
+        }
+    }
+    if !agent_blocked.is_empty() {
+        return Err(format!(
+            "不能移除 Agent 独立路由 {} 正在使用的模型，请先调整对应档位",
+            agent_blocked.join("、")
+        ));
+    }
+
     let existing: std::collections::BTreeMap<String, Value> = upstream["models"]
         .as_array()
         .into_iter()
@@ -837,6 +1009,21 @@ fn remove_provider(state: State<'_, AppStateManaged>, name: String) -> Result<St
             }
         }
     }
+    // Independent Agent routes store only provider and model references. If a provider is deleted, an independent draft that references it
+    // It cannot be restored as valid configuration. Safely fall back to the home page and clear the invalid draft.
+    for agent_id in KNOWN_AGENT_IDS {
+        let refers = ["high", "mid", "low"].into_iter().any(|slot| {
+            inner.draft["agent_routes"][agent_id]["custom_route"][slot]["upstream"]
+                .as_str()
+                == Some(name.as_str())
+        });
+        if refers {
+            inner.draft["agent_routes"][agent_id]["mode"] = json!("inherit");
+            if let Some(route) = inner.draft["agent_routes"][agent_id].as_object_mut() {
+                route.remove("custom_route");
+            }
+        }
+    }
     inner.rebuild_routing();
     Ok(inner.snapshot())
 }
@@ -854,6 +1041,63 @@ fn set_tier(
     inner.ensure_editable()?;
 
     inner.set_tier_value(pool, upstream, model)?;
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn set_agent_route_mode(
+    state: State<'_, AppStateManaged>,
+    agent_id: String,
+    mode: String,
+) -> Result<StateView, String> {
+    ensure_known_agent_id(&agent_id)?;
+    if mode != "inherit" && mode != "custom" {
+        return Err("路由模式必须是 inherit 或 custom".to_string());
+    }
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.set_agent_route_mode_value(&agent_id, &mode);
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn set_agent_tier(
+    state: State<'_, AppStateManaged>,
+    agent_id: String,
+    slot: String,
+    upstream: Option<String>,
+    model: Option<String>,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.set_agent_tier_value(&agent_id, &slot, upstream, model)?;
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn save_agent_routes(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
+    let inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let config = inner.materialize()?;
+    config
+        .save(&inner.config_path)
+        .map_err(|error| format!("写配置失败: {error}"))?;
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn apply_home_route_to_all_agents(
+    state: State<'_, AppStateManaged>,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    for agent_id in KNOWN_AGENT_IDS {
+        inner.set_agent_route_mode_value(agent_id, "inherit");
+    }
+    let config = inner.materialize()?;
+    config
+        .save(&inner.config_path)
+        .map_err(|error| format!("写配置失败: {error}"))?;
     Ok(inner.snapshot())
 }
 
@@ -1313,7 +1557,11 @@ pub fn run() {
             update_provider_models,
             remove_provider,
             set_tier,
+            set_agent_route_mode,
+            set_agent_tier,
             save_config,
+            save_agent_routes,
+            apply_home_route_to_all_agents,
             serve_start,
             serve_stop,
             list_agent_registry,
@@ -1536,6 +1784,53 @@ mod tests {
     }
 
     #[test]
+    fn provider_model_updates_protect_inactive_agent_route_drafts() {
+        let root = scratch_home("model-update-agent-route");
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft: template(&root),
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+        };
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "home"}, {"model": "agent"}]
+        });
+        inner
+            .set_tier_value(
+                TIER_LOW,
+                Some("provider".into()),
+                Some("home".into()),
+            )
+            .unwrap();
+        inner.set_agent_route_mode_value("codex", "custom");
+        for slot in ["high", "mid", "low"] {
+            inner
+                .set_agent_tier_value(
+                    "codex",
+                    slot,
+                    Some("provider".into()),
+                    Some("agent".into()),
+                )
+                .unwrap();
+        }
+        inner.set_agent_route_mode_value("codex", "inherit");
+
+        let error = replace_provider_models(&mut inner, "provider", vec!["home".to_owned()])
+            .expect_err("inactive custom drafts still protect their model references");
+        assert!(error.contains("codex/high"), "{error}");
+        assert_eq!(
+            inner.draft["upstreams"]["provider"]["models"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn stored_discovery_credentials_cannot_be_redirected_to_another_base_url() {
         let root = scratch_home("model-discovery-url-binding");
         let mut draft = template(&root);
@@ -1602,6 +1897,138 @@ mod tests {
             .as_object()
             .unwrap()
             .is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn agent_route_drafts_seed_from_home_validate_targets_and_preserve_complete_profiles() {
+        let root = scratch_home("agent-route-draft");
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft: template(&root),
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+        };
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "home"}, {"model": "agent"}]
+        });
+        for pool in [TIER_HIGH, TIER_MID, TIER_LOW] {
+            inner
+                .set_tier_value(pool, Some("provider".into()), Some("home".into()))
+                .unwrap();
+        }
+
+        inner.set_agent_route_mode_value("codex", "custom");
+        assert!(inner.agent_custom_route_complete("codex"));
+        assert_eq!(inner.agent_tier("codex", "high").model.as_deref(), Some("home"));
+        inner
+            .set_agent_tier_value(
+                "codex",
+                "high",
+                Some("provider".into()),
+                Some("agent".into()),
+            )
+            .unwrap();
+        assert!(inner
+            .set_agent_tier_value(
+                "future-agent",
+                "high",
+                Some("provider".into()),
+                Some("agent".into()),
+            )
+            .unwrap_err()
+            .contains("未知 Agent"));
+        let config = inner.materialize().expect("complete custom profile validates");
+        assert_eq!(
+            config.agent_routes["codex"]
+                .custom_route
+                .as_ref()
+                .unwrap()
+                .high
+                .model,
+            "agent"
+        );
+
+        inner.set_agent_route_mode_value("codex", "inherit");
+        assert!(inner.draft["agent_routes"]["codex"]["custom_route"].is_object());
+        assert!(inner.materialize().is_ok());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn returning_an_incomplete_agent_draft_to_inherit_cannot_poison_home_config() {
+        let root = scratch_home("agent-route-incomplete");
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft: template(&root),
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+        };
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "model"}]
+        });
+        inner
+            .set_tier_value(
+                TIER_LOW,
+                Some("provider".into()),
+                Some("model".into()),
+            )
+            .unwrap();
+
+        inner.set_agent_route_mode_value("codex", "custom");
+        assert!(!inner.agent_custom_route_complete("codex"));
+        assert!(inner.materialize().is_err());
+        inner.set_agent_route_mode_value("codex", "inherit");
+        assert!(inner.draft["agent_routes"]["codex"]["custom_route"].is_null());
+        assert!(inner.materialize().is_ok());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn agent_route_commands_save_one_profile_and_apply_home_without_deleting_its_draft() {
+        let root = scratch_home("agent-route-commands");
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft: template(&root),
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+        };
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "model"}]
+        });
+        for pool in [TIER_HIGH, TIER_MID, TIER_LOW] {
+            inner
+                .set_tier_value(
+                    pool,
+                    Some("provider".into()),
+                    Some("model".into()),
+                )
+                .unwrap();
+        }
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+        let custom = set_agent_route_mode(
+            app.state(),
+            "codex".to_string(),
+            "custom".to_string(),
+        )
+        .unwrap();
+        assert_eq!(custom.agent_routes["codex"].mode, "custom");
+        save_agent_routes(app.state()).unwrap();
+        let inherited = apply_home_route_to_all_agents(app.state()).unwrap();
+        assert!(inherited
+            .agent_routes
+            .values()
+            .all(|profile| profile.mode == "inherit"));
+        let saved = ClientConfig::load(&root.join("token-station.json")).unwrap();
+        assert!(saved.agent_routes["codex"].custom_route.is_some());
         std::fs::remove_dir_all(root).ok();
     }
 

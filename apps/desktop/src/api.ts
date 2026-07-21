@@ -33,6 +33,14 @@ export interface ServeView {
 
 export type TierSlot = "high" | "mid" | "low";
 
+export type AgentRouteMode = "inherit" | "custom";
+
+export interface AgentRouteView {
+  mode: AgentRouteMode;
+  tiers: Record<TierSlot, TierView>;
+  config_error: string | null;
+}
+
 export interface SettingsView {
   listen: string;
   auth: boolean;
@@ -46,6 +54,7 @@ export interface SettingsView {
 export interface StateView {
   providers: ProviderView[];
   tiers: Record<TierSlot, TierView>;
+  agent_routes: Record<string, AgentRouteView>;
   serve: ServeView;
   config_error: string | null;
   settings: SettingsView;
@@ -269,6 +278,21 @@ export const setTier = (
   upstream: string | null,
   model: string | null,
 ) => invoke<StateView>("set_tier", { slot, upstream, model });
+
+export const setAgentRouteMode = (agentId: AgentId, mode: AgentRouteMode) =>
+  invoke<StateView>("set_agent_route_mode", { agentId, mode });
+
+export const setAgentTier = (
+  agentId: AgentId,
+  slot: TierSlot,
+  upstream: string | null,
+  model: string | null,
+) => invoke<StateView>("set_agent_tier", { agentId, slot, upstream, model });
+
+export const saveAgentRoutes = () => invoke<StateView>("save_agent_routes");
+
+export const applyHomeRouteToAllAgents = () =>
+  invoke<StateView>("apply_home_route_to_all_agents");
 
 export const saveConfig = () => invoke<StateView>("save_config");
 

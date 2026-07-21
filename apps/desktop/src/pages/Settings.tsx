@@ -34,7 +34,7 @@ export default function Settings({
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>设置</h2>
+        <h2>代理与数据</h2>
         <p className="sub">虚拟 Key 鉴权与本地指标两个开关。其余环境信息只读。</p>
       </div>
 
