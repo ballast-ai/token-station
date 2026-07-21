@@ -414,4 +414,126 @@ mod tests {
         assert!(ownership_matches(&record, &unowned_changed, &key).unwrap());
         assert!(!ownership_matches(&record, &owned_changed, &key).unwrap());
     }
+
+    #[test]
+    fn ownership_index_rejects_invalid_schema_records_and_duplicate_keys() {
+        let valid = record(BTreeMap::from([(
+            "/env/TOKEN".to_string(),
+            "mac".to_string(),
+        )]));
+
+        assert!(validate_index(OwnershipIndex {
+            schema_version: INDEX_SCHEMA_VERSION + 1,
+            records: Vec::new(),
+        })
+        .err()
+        .expect("unsupported schema is rejected")
+        .contains("schema"));
+
+        let mut invalid = valid.clone();
+        invalid.connector_id.clear();
+        assert!(validate_index(OwnershipIndex {
+            schema_version: INDEX_SCHEMA_VERSION,
+            records: vec![invalid],
+        })
+        .err()
+        .expect("invalid record is rejected")
+        .contains("record"));
+
+        assert!(validate_index(OwnershipIndex {
+            schema_version: INDEX_SCHEMA_VERSION,
+            records: vec![valid.clone(), valid],
+        })
+        .err()
+        .expect("duplicate key is rejected")
+        .contains("重复"));
+    }
+
+    #[test]
+    fn ownership_store_lists_only_matching_installation_in_target_order() {
+        let root = scratch();
+        let store = FileOwnershipStore::new(root.clone());
+        let mut first = record(BTreeMap::from([(
+            "/env/TOKEN".to_string(),
+            "one".to_string(),
+        )]));
+        first.target_config_path = "/tmp/z-settings.json".to_string();
+        let mut second = first.clone();
+        second.target_config_path = "/tmp/a-settings.json".to_string();
+        let mut other_installation = first.clone();
+        other_installation.installation_path = "/opt/other".to_string();
+
+        store.commit(first, None).unwrap();
+        store.commit(second, None).unwrap();
+        store.commit(other_installation, None).unwrap();
+
+        let listed = store
+            .list_agent_installation("claude-code", "/opt/claude")
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].target_config_path, "/tmp/a-settings.json");
+        assert_eq!(listed[1].target_config_path, "/tmp/z-settings.json");
+        assert!(store
+            .list_agent_installation("codex", "/opt/claude")
+            .unwrap()
+            .is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn ownership_store_rejects_corrupt_and_unsupported_index_files() {
+        for (label, bytes, expected) in [
+            ("json", b"not json".as_slice(), "JSON"),
+            (
+                "schema",
+                br#"{"schema_version":2,"records":[]}"#.as_slice(),
+                "schema",
+            ),
+        ] {
+            let root = scratch().join(label);
+            ensure_private_dir(&root).unwrap();
+            write_atomic_private(&root.join(INDEX_FILE), bytes).unwrap();
+            let store = FileOwnershipStore::new(root.clone());
+            assert!(store
+                .list_agent_installation("claude-code", "/opt/claude")
+                .err()
+                .expect("corrupt index is rejected")
+                .contains(expected));
+            std::fs::remove_dir_all(root).ok();
+        }
+    }
+
+    #[test]
+    fn ownership_store_default_listing_capability_fails_closed() {
+        struct MinimalStore;
+        impl OwnershipStore for MinimalStore {
+            fn load(&self, _: &OwnershipKey) -> Result<Option<OwnershipRecord>, String> {
+                Ok(None)
+            }
+            fn commit(
+                &self,
+                record: OwnershipRecord,
+                _: Option<u64>,
+            ) -> Result<OwnershipRecord, String> {
+                Ok(record)
+            }
+            fn remove(&self, _: &OwnershipKey, _: u64) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        let store = MinimalStore;
+        assert!(store
+            .list_agent_installation("claude-code", "/opt/claude")
+            .err()
+            .expect("default listing is unsupported")
+            .contains("不支持"));
+        let sample = record(BTreeMap::from([(
+            "/env/TOKEN".to_string(),
+            "mac".to_string(),
+        )]));
+        assert!(store.load(&sample.key()).unwrap().is_none());
+        assert!(store.commit(sample.clone(), None).unwrap().key() == sample.key());
+        store.remove(&sample.key(), 1).unwrap();
+    }
 }
