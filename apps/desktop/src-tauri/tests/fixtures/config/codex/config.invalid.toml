@@ -1,0 +1,1 @@
+model_providers = ["invalid-table-shape"]

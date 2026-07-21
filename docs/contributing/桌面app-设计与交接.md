@@ -99,7 +99,9 @@ token-station 的内核是一个本地回环 LLM 代理二进制（`apps/cli`）
 | `set_tier` | 设/清某一档 (供应商, 模型)，触发 `rebuild_routing` |
 | `save_config` | 校验 + 原子写盘（校验不过不写） |
 | `serve_start` / `serve_stop` | 起停后台 serve runtime;起时按 `server.auth` 生成/复用虚拟 Key |
-| `connect_agent` | 接入 cc / codex / opencode（见 §7） |
+| `scan_agents` / `plan_agent_connection` / `apply_agent_plan` | 只读发现、预览确认并事务接入（见 §7） |
+| `plan_agent_disconnect` | 预览断开，只恢复 owned paths |
+| `list_agent_snapshots` / `plan_snapshot_restore` / `apply_snapshot_restore` | 列出加密快照、预览并事务恢复 |
 | `set_settings` | 切 auth / metrics 开关 |
 | `get_stats` | 用量聚合（since / by 参数） |
 | `get_router_table` | 四层路由表视图 |
@@ -145,27 +147,21 @@ token-station 的内核是一个本地回环 LLM 代理二进制（`apps/cli`）
 
 ---
 
-## 7. 接入 agent 与 CC 安全闸（重要 footgun）
+## 7. Agent 控制面与 CC 安全闸（重要 footgun）
 
-`connect_agent` 各 agent 各写各的配置文件,互不冲突、可同时接:
+Agent 页面由后端 Registry 动态生成，先执行只读发现和版本兼容判断。Claude Code、Codex、
+OpenCode、OpenClaw、Hermes 只有在版本允许、安装实例唯一且对应 Adapter 就绪时才能生成脱敏计划。
+前端逐项确认后，后端再次复验并统一经过加密快照、
+原子写入、写后校验和 ownership 提交。旧 `connect_agent` 直写入口已删除。
 
-- **Codex** → `~/.codex/config.toml` 加指向本代理的 `model_provider`（key 走环境变量）。
-- **opencode** → `~/.config/opencode/opencode.json` 加 openai-compatible provider。
-- **Claude Code** → `~/.claude/settings.json` 的 `env` 写 `ANTHROPIC_BASE_URL` +
-  `ANTHROPIC_AUTH_TOKEN`。
+**⚠️ CC 接入的安全闸——务必理解:** `~/.claude/settings.json` 是全局配置，会影响读取它的
+Claude Code 进程。后端既检查 `agent-anthropic` 运行态，也要求明确预览目标和 diff；任何
+一项不满足都不会创建快照或写配置。断开只恢复 Token Station 声明的 owned env keys，保留
+用户其他设置。
 
-**⚠️ CC 接入的安全闸——务必理解:** 写 `~/.claude/settings.json` 是**全局**的,会连带
-改变**本机上正在运行的每一个 Claude Code**的后续请求目标,包括**用来开发
-token-station 的那个会话**。当前桌面模板已包含 `agent-anthropic`，但自定义配置仍可能
-移除或改名该 Adapter。
-
-因此 `connect_cc` 仍有前置闸:`anthropic_inbound_ready()` 检查配置里（`agent` 与
-`agents` 两处适配器名）是否已挂上名称含 `anthropic` 的入站适配器,**未满足就直接拒绝、
-完全不碰 settings.json**。判据落在写文件那一步（不是灰按钮），任何入口都拦得住。
-原文件存在时，接入前写
-`~/.claude/settings.json.token-station.bak`；重复接入会用最近一次写入前的内容覆盖该备份。
-
-**长期待办:** 改回 scoped 启动（派生带 env 的 CC 子进程,不写全局配置）。
+历史 `.token-station.bak` 只作为只读候选展示，不覆盖、不删除、不自动恢复。新操作只使用
+OS keychain 保护的加密快照。完整契约见
+[桌面App-Agent接入机制.md](桌面App-Agent接入机制.md)。
 
 ---
 

@@ -1,120 +1,111 @@
-# OpenClaw 经 token-station 接入 DeepSeek
+# OpenClaw 安全接入指南
 
-OpenClaw 的自定义模型 provider 使用 `openai-completions`。token-station 在
-`POST /v1/chat/completions` 接收请求，经 `agent-openai` 和 Canonical IR 路由到
-DeepSeek。样例配置：
-[apps/cli/openclaw-deepseek-config.json](../../apps/cli/openclaw-deepseek-config.json)。
+Token Station 桌面端从 `0.1.0` 开始可以自动发现 OpenClaw，并对已验证版本生成配置
+预览。当前内置精确准入版本是 `2026.6.11`；其他版本显示“未知”，不会写配置。扩大版本
+范围必须先完成新版本 fixtures、官方 schema 核对和隔离验证。
 
-该实例监听 `127.0.0.1:8793`，数据写入
-`token-station-m4/openclaw/data`，不会读取现有 OpenClaw 状态。
+官方依据：
 
-## 1. 插件和隔离服务
+- [OpenClaw v2026.6.11](https://github.com/openclaw/openclaw/releases/tag/v2026.6.11)
+- [JSON5 配置与路径](https://docs.openclaw.ai/gateway/configuration)
+- [自定义 Provider 字段](https://docs.openclaw.ai/gateway/config-tools)
 
-本配方与 OpenCode 共用 `agent-openai` 和
-`provider-openai-compatible`。按 OpenCode 指南安装一次即可。随后在独立终端运行：
+## 1. 自动发现
 
-```bash
-export DEEPSEEK_API_KEY='你的 DeepSeek API Key'
-./target/release/token-station-cli \
-  --config apps/cli/openclaw-deepseek-config.json upstream list
-./target/release/token-station-cli \
-  --config apps/cli/openclaw-deepseek-config.json rule list
-./target/release/token-station-cli \
-  --config apps/cli/openclaw-deepseek-config.json serve
+桌面端只读检查：
+
+- 可执行文件：`openclaw`，版本命令 `openclaw --version`；
+- 显式路径：`OPENCLAW_CONFIG_PATH`；
+- 状态目录：`OPENCLAW_STATE_DIR/openclaw.json`；
+- 默认路径：`~/.openclaw/openclaw.json`；
+- 兼容环境：macOS、Linux、Windows、WSL fixtures。
+
+扫描不执行 install、update、doctor、repair，不创建 OpenClaw 目录，也不启动 Gateway。
+多安装实例必须由用户选择唯一目标。
+
+## 2. 接入前预览
+
+在 Agent 页面选择 OpenClaw 后点击“预览接入”。页面会显示目标配置和 owned paths：
+
+```text
+/models/providers/tokenstation
+/agents/defaults/model/primary
 ```
 
-## 2. 临时 OpenClaw 状态和配置
-
-同时覆盖 HOME、配置路径和状态目录，避免 OpenClaw 的旧状态迁移访问用户
-`~/.openclaw`：
-
-```bash
-export TS_VIRTUAL_KEY="$(tr -d '\r\n' < token-station-m4/openclaw/data/virtual-key)"
-export HOME=/tmp/token-station-m4-openclaw-home
-export OPENCLAW_STATE_DIR=/tmp/token-station-m4-openclaw-state
-export OPENCLAW_CONFIG_PATH=/tmp/token-station-m4-openclaw-config.json5
-mkdir -p "$HOME" "$OPENCLAW_STATE_DIR" /tmp/token-station-m4-openclaw-work
-```
-
-在 `$OPENCLAW_CONFIG_PATH` 写入以下 JSON5；`${TS_VIRTUAL_KEY}` 由 OpenClaw 在
-运行时从环境变量解析：
+Connector 写入的核心结构：
 
 ```json5
 {
   models: {
-    mode: "replace",
     providers: {
-      "token-station": {
-        baseUrl: "http://127.0.0.1:8793/v1",
-        apiKey: "${TS_VIRTUAL_KEY}",
+      tokenstation: {
+        baseUrl: "http://127.0.0.1:8787/v1",
+        apiKey: "<本地虚拟 Key>",
         api: "openai-completions",
         models: [{
           id: "auto",
-          name: "Token Station routed model",
+          name: "Token Station Auto",
           reasoning: false,
           input: ["text"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: 1000000,
-          maxTokens: 8192
-        }]
-      }
-    }
+          contextWindow: 200000,
+          maxTokens: 32000,
+        }],
+      },
+    },
   },
   agents: {
-    defaults: {
-      model: { primary: "token-station/auto" },
-      workspace: "/tmp/token-station-m4-openclaw-work"
-    }
-  }
+    defaults: { model: { primary: "tokenstation/auto" } },
+  },
 }
 ```
 
-普通流式验收：
+现有 `channels`、Gateway、MCP、浏览器、skills、其他 Provider 和其他 Agent 默认设置均
+不属于 Token Station。JSON5 注释、尾逗号和未知字段通过语法树投影保留；重复键、无效
+JSON5 或 owned path 父级类型错误会在写入前拒绝。
 
-```bash
-openclaw agent --local --agent main --model token-station/auto \
-  --message '只回答固定标记：OPENCLAW_M4_OK' --json
-```
+如果根对象或 owned path 的任一祖先使用 `$include`，当前 Connector 同样拒绝接入。原因是
+直接增加 sibling 可能改变 OpenClaw 的 include 合并/覆盖语义；在实现 include-aware 多文件
+事务前，不以丢配置风险换取表面兼容。
 
-工具闭环验收时，在临时 workspace 准备 `marker.txt`，要求 Agent 必须用读取工具
-读取并原样回答。不要给它修改仓库或用户目录的任务。
+## 3. 确认、写入和恢复
 
-## 3. 错误链、审计与清理
+只有以下条件同时满足才可确认：
 
-本地鉴权错误：
+1. 版本精确命中兼容目录；
+2. 安装实例和配置路径仍与最近扫描一致；
+3. `agent-openai` 已在 Token Station 运行态加载；
+4. 用户确认安装实例、目标配置和脱敏差异；
+5. 计划和确认令牌未过期。
 
-```bash
-TS_VIRTUAL_KEY='intentionally-wrong' \
-openclaw agent --local --agent main --model token-station/auto \
-  --message '回答 AUTH_TEST' --json
-```
+确认后，后端先创建 AES-256-GCM 加密快照，再原子替换配置、重新解析、自检并提交
+ownership。快照 master key 保存在 OS keychain。
 
-该请求应得到 OpenAI 形状的 401，且不进入上游。受控上游错误只重启 8793 隔离
-实例并注入错误 `DEEPSEEK_API_KEY`，发出一次请求后确认没有无限重试。
+“断开”只恢复上述两个 owned paths，保留接入后用户修改的其他字段。用户或其他工具改动
+owned values 时，Token Station 会拒绝写入并要求重新预览。“恢复快照”采用相同确认流程。
 
-```bash
-./target/release/token-station-cli \
-  --config apps/cli/openclaw-deepseek-config.json stats --since all
-rg -n 'OPENCLAW_M4_OK|intentionally-wrong|sk-' \
-  token-station-m4/openclaw/data/requests.log || true
-```
+历史 `openclaw.json.token-station.bak` 仅作为只读候选展示，不覆盖、不删除、不自动恢复。
 
-日志和 metrics 不应含 prompt、response 或凭证。完成后停止本轮服务并删除：
+## 4. OpenClaw 更新后的行为
 
-```bash
-rm -rf /tmp/token-station-m4-openclaw-state \
-  /tmp/token-station-m4-openclaw-home \
-  /tmp/token-station-m4-openclaw-work \
-  /tmp/token-station-m4-openclaw-config.json5
-```
+例如从 `2026.6.11` 更新到 `2026.7.1` 后，当前内置目录会返回
+`DETECTED_UNKNOWN`：
 
-这些路径全部属于本配方；不要删除用户的 `~/.openclaw`。
+- 仍显示安装路径、版本和诊断；
+- 禁止生成接入计划；
+- 已接入实例仍保留断开/恢复安全出口；
+- 不自动降级或升级 OpenClaw；
+- 后续只需发布签名兼容目录即可扩大经过验证的精确版本，不会远程下发 Connector 代码。
 
-## 4. 当前边界
+如果新版本改变 `openclaw.json` schema，则新增 `openclaw-v2` Connector；旧版本继续
+绑定 `openclaw-v1`，不能用同一个 Connector ID 静默改变 owned paths。
 
-- 本配方覆盖 OpenAI Chat Completions 文本流和本地 function tool 主链。
-- 结构化输出暂不支持；`response_format.type` 为 `json_schema` 或 `json_object` 时
-  返回 capability 错误，不会进入 router 或上游。
-- OpenClaw gateway、远程 channel、MCP、浏览器和用户级 skills 不在验收范围。
-- `reasoning: false` 是模型声明，不代表 Responses reasoning 已实现；该 Agent 走的
-  是 `agent-openai`，不是 `agent-openai-responses`。
+## 5. 协议边界
+
+OpenClaw 的 `openai-completions` 请求进入 Token Station
+`/v1/chat/completions`，复用 `agent-openai`。文本、流式和 function tool 主链沿用
+现有协议回归；Gateway、远程 channel、MCP、浏览器、用户 skills 和 OpenClaw 自身安装升级
+不在本功能范围。
+
+该接入不修改 `crates/router-core/**`。Router 只看到归一后的 Canonical IR，不按
+“OpenClaw”名称增加任何特判。

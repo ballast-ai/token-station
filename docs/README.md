@@ -14,6 +14,9 @@
 ### 我要维护 / 开发 / 测试它（贡献者）
 
 - [贡献者文档入口](contributing/README.md) —— 架构、开发环境、测试、贡献流程
+- [桌面 App Agent 接入机制](contributing/桌面App-Agent接入机制.md)
+- [Agent Connector 准入指南](contributing/Agent-Connector-准入指南.md)
+- [Agent 兼容目录发布与回滚](release/Agent-兼容目录发布与回滚.md)
 
 ## 目录结构
 
@@ -23,4 +26,5 @@ docs/
   contributing/  贡献者文档（维护 / 开发 / 测试）
   guides/        端到端上手指南
   release/       发布验证与打包
+  verification/  自动化、真实 E2E 与发布前验收证据
 ```

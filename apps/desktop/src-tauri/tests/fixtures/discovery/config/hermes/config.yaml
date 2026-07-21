@@ -1,0 +1,3 @@
+model:
+  provider: existing
+  api_key: TS_SECRET_HERMES

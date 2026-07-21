@@ -1,0 +1,251 @@
+{
+  "schema_version": 1,
+  "agents": [
+    {
+      "schema_version": 1,
+      "agent_id": "claude-code",
+      "legacy_kind": "cc",
+      "display_name": "Claude Code",
+      "icon_key": "claude",
+      "admission": "supported",
+      "executable_candidates": ["claude"],
+      "known_install_locations": {
+        "macos": ["${HOME}/.local/bin/claude"],
+        "linux": ["${HOME}/.local/bin/claude"],
+        "wsl": ["${HOME}/.local/bin/claude"]
+      },
+      "version_probe": {
+        "argv": ["--version"],
+        "timeout_ms": 2000,
+        "max_output_bytes": 65536,
+        "output_matcher": "SEMVER_ANYWHERE"
+      },
+      "config_locations": [
+        {
+          "env_override": {
+            "name": "CLAUDE_CONFIG_DIR",
+            "value_kind": "directory",
+            "suffix": "settings.json"
+          },
+          "platform_defaults": {
+            "macos": ["${HOME}/.claude/settings.json"],
+            "linux": ["${HOME}/.claude/settings.json"],
+            "windows": ["${USERPROFILE}/.claude/settings.json"],
+            "wsl": ["${HOME}/.claude/settings.json"]
+          },
+          "format": "json"
+        }
+      ],
+      "protocol_binding": {
+        "adapter_id": "agent-anthropic",
+        "base_url_shape": "origin"
+      },
+      "local_connector_ids": ["claude-code-v1"],
+      "discovery_fingerprint_rules": ["json-shape-v1"]
+    },
+    {
+      "schema_version": 1,
+      "agent_id": "codex",
+      "legacy_kind": "codex",
+      "display_name": "Codex",
+      "icon_key": "codex",
+      "admission": "supported",
+      "executable_candidates": ["codex"],
+      "known_install_locations": {
+        "macos": ["/Applications/ChatGPT.app/Contents/Resources/codex"]
+      },
+      "version_probe": {
+        "argv": ["--version"],
+        "timeout_ms": 2000,
+        "max_output_bytes": 65536,
+        "output_matcher": "SEMVER_ANYWHERE"
+      },
+      "config_locations": [
+        {
+          "env_override": {
+            "name": "CODEX_HOME",
+            "value_kind": "directory",
+            "suffix": "config.toml"
+          },
+          "platform_defaults": {
+            "macos": ["${HOME}/.codex/config.toml"],
+            "linux": ["${HOME}/.codex/config.toml"],
+            "windows": ["${USERPROFILE}/.codex/config.toml"],
+            "wsl": ["${HOME}/.codex/config.toml"]
+          },
+          "format": "toml"
+        }
+      ],
+      "protocol_binding": {
+        "adapter_id": "agent-openai-responses",
+        "base_url_shape": "origin_v1"
+      },
+      "local_connector_ids": ["codex-v1"],
+      "discovery_fingerprint_rules": ["toml-shape-v1"]
+    },
+    {
+      "schema_version": 1,
+      "agent_id": "nous-hermes-agent",
+      "legacy_kind": null,
+      "display_name": "Hermes Agent",
+      "icon_key": "hermes",
+      "admission": "supported",
+      "executable_candidates": ["hermes"],
+      "known_install_locations": {
+        "macos": ["${HOME}/.local/bin/hermes"],
+        "linux": ["${HOME}/.local/bin/hermes"],
+        "wsl": ["${HOME}/.local/bin/hermes"]
+      },
+      "version_probe": {
+        "argv": ["version"],
+        "timeout_ms": 2000,
+        "max_output_bytes": 65536,
+        "output_matcher": "SEMVER_ANYWHERE",
+        "retry_on_timeout": true
+      },
+      "config_locations": [
+        {
+          "env_override": {
+            "name": "HERMES_HOME",
+            "value_kind": "directory",
+            "suffix": "config.yaml"
+          },
+          "platform_defaults": {
+            "macos": ["${HOME}/.hermes/config.yaml"],
+            "linux": ["${HOME}/.hermes/config.yaml"],
+            "windows": ["${LOCALAPPDATA}/hermes/config.yaml"],
+            "wsl": ["${HOME}/.hermes/config.yaml"]
+          },
+          "format": "yaml"
+        }
+      ],
+      "protocol_binding": {
+        "adapter_id": "agent-openai",
+        "base_url_shape": "origin_v1"
+      },
+      "local_connector_ids": ["hermes-v1"],
+      "discovery_fingerprint_rules": ["yaml-shape-v1"]
+    },
+    {
+      "schema_version": 1,
+      "agent_id": "openclaw",
+      "legacy_kind": null,
+      "display_name": "OpenClaw",
+      "icon_key": "openclaw",
+      "admission": "supported",
+      "executable_candidates": ["openclaw"],
+      "known_install_locations": {
+        "macos": ["${HOME}/.local/bin/openclaw"],
+        "linux": ["${HOME}/.local/bin/openclaw"],
+        "wsl": ["${HOME}/.local/bin/openclaw"]
+      },
+      "version_probe": {
+        "argv": ["--version"],
+        "timeout_ms": 2000,
+        "max_output_bytes": 65536,
+        "output_matcher": "SEMVER_ANYWHERE",
+        "runtime": {
+          "kind": "env_shebang",
+          "interpreter_candidates": ["node"],
+          "resolution_sources": ["observed_entry_sibling", "known_install_locations"],
+          "known_install_locations": {
+            "macos": ["${HOME}/.local/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"],
+            "linux": ["${HOME}/.local/bin/node", "/usr/local/bin/node", "/usr/bin/node"],
+            "wsl": ["${HOME}/.local/bin/node", "/usr/local/bin/node", "/usr/bin/node"]
+          }
+        }
+      },
+      "config_locations": [
+        {
+          "env_override": {
+            "name": "OPENCLAW_CONFIG_PATH",
+            "value_kind": "file",
+            "suffix": null
+          },
+          "platform_defaults": {
+            "macos": ["${HOME}/.openclaw/openclaw.json"],
+            "linux": ["${HOME}/.openclaw/openclaw.json"],
+            "windows": ["${USERPROFILE}/.openclaw/openclaw.json"],
+            "wsl": ["${HOME}/.openclaw/openclaw.json"]
+          },
+          "format": "json5"
+        },
+        {
+          "env_override": {
+            "name": "OPENCLAW_STATE_DIR",
+            "value_kind": "directory",
+            "suffix": "openclaw.json"
+          },
+          "platform_defaults": {},
+          "format": "json5"
+        },
+        {
+          "env_override": {
+            "name": "OPENCLAW_HOME",
+            "value_kind": "directory",
+            "suffix": ".openclaw/openclaw.json"
+          },
+          "platform_defaults": {},
+          "format": "json5"
+        }
+      ],
+      "protocol_binding": {
+        "adapter_id": "agent-openai",
+        "base_url_shape": "origin_v1"
+      },
+      "local_connector_ids": [
+        "openclaw-v1"
+      ],
+      "discovery_fingerprint_rules": ["json-shape-v1"]
+    },
+    {
+      "schema_version": 1,
+      "agent_id": "opencode",
+      "legacy_kind": "opencode",
+      "display_name": "OpenCode",
+      "icon_key": "opencode",
+      "admission": "supported",
+      "executable_candidates": ["opencode"],
+      "known_install_locations": {
+        "macos": ["/opt/homebrew/bin/opencode"]
+      },
+      "version_probe": {
+        "argv": ["--version"],
+        "timeout_ms": 2000,
+        "max_output_bytes": 65536,
+        "output_matcher": "SEMVER_ANYWHERE"
+      },
+      "config_locations": [
+        {
+          "env_override": {
+            "name": "OPENCODE_CONFIG",
+            "value_kind": "file",
+            "suffix": null
+          },
+          "platform_defaults": {},
+          "format": "json"
+        },
+        {
+          "env_override": {
+            "name": "OPENCODE_CONFIG_DIR",
+            "value_kind": "directory",
+            "suffix": "opencode.json"
+          },
+          "platform_defaults": {
+            "macos": ["${XDG_CONFIG_HOME}/opencode/opencode.json", "${HOME}/.config/opencode/opencode.json"],
+            "linux": ["${XDG_CONFIG_HOME}/opencode/opencode.json", "${HOME}/.config/opencode/opencode.json"],
+            "windows": ["${LOCALAPPDATA}/opencode/opencode.json"],
+            "wsl": ["${XDG_CONFIG_HOME}/opencode/opencode.json", "${HOME}/.config/opencode/opencode.json"]
+          },
+          "format": "json"
+        }
+      ],
+      "protocol_binding": {
+        "adapter_id": "agent-openai",
+        "base_url_shape": "origin_v1"
+      },
+      "local_connector_ids": ["opencode-v1"],
+      "discovery_fingerprint_rules": ["json-shape-v1"]
+    }
+  ]
+}
