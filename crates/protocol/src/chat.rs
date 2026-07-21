@@ -53,6 +53,40 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// A stable view of a tool call's `arguments`, for comparison, de-duplication
+/// or a receipt — computed without ever changing what goes on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalArguments {
+    /// The arguments parsed as JSON, re-serialized deterministically (object
+    /// keys sorted, insignificant whitespace dropped). Two calls that mean the
+    /// same thing produce the same string here.
+    Canonical(String),
+    /// The arguments are not valid JSON. The exact bytes the model produced are
+    /// preserved and flagged — never silently rewritten into something with a
+    /// different meaning.
+    Unparseable(String),
+}
+
+impl ToolCall {
+    /// Canonicalizes `arguments` for a stable representation. Valid JSON becomes
+    /// a deterministic re-serialization; anything else comes back verbatim and
+    /// marked [`CanonicalArguments::Unparseable`]. The wire `arguments` string is
+    /// untouched — this is a view, not a mutation, so the exact bytes still reach
+    /// the tool.
+    #[must_use]
+    pub fn canonical_arguments(&self) -> CanonicalArguments {
+        match serde_json::from_str::<serde_json::Value>(&self.arguments) {
+            // serde_json::Value orders object keys (no `preserve_order`), so the
+            // re-serialization is canonical.
+            Ok(value) => serde_json::to_string(&value).map_or_else(
+                |_| CanonicalArguments::Unparseable(self.arguments.clone()),
+                CanonicalArguments::Canonical,
+            ),
+            Err(_) => CanonicalArguments::Unparseable(self.arguments.clone()),
+        }
+    }
+}
+
 /// A tool the caller offers to the model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDef {
@@ -231,6 +265,44 @@ mod tests {
                 .expect("valid call");
 
         assert_eq!(round_tripped.arguments, r#"{"city": "Beijing"}"#);
+    }
+
+    #[test]
+    fn canonical_arguments_are_stable_across_key_order_and_whitespace() {
+        use super::CanonicalArguments;
+        let a = ToolCall {
+            id: "1".to_owned(),
+            name: "f".to_owned(),
+            arguments: r#"{ "b": 1, "a": 2 }"#.to_owned(),
+        };
+        let b = ToolCall {
+            id: "2".to_owned(),
+            name: "f".to_owned(),
+            arguments: r#"{"a":2,"b":1}"#.to_owned(),
+        };
+        assert_eq!(a.canonical_arguments(), b.canonical_arguments());
+        assert_eq!(
+            a.canonical_arguments(),
+            CanonicalArguments::Canonical(r#"{"a":2,"b":1}"#.to_owned())
+        );
+    }
+
+    #[test]
+    fn canonical_arguments_never_rewrite_invalid_json() {
+        use super::CanonicalArguments;
+        let raw = r#"{"city": "Beijing"  // trailing junk"#;
+        let call = ToolCall {
+            id: "1".to_owned(),
+            name: "f".to_owned(),
+            arguments: raw.to_owned(),
+        };
+        // The invalid arguments are preserved verbatim and flagged, not "fixed".
+        assert_eq!(
+            call.canonical_arguments(),
+            CanonicalArguments::Unparseable(raw.to_owned())
+        );
+        // And the wire bytes are untouched.
+        assert_eq!(call.arguments, raw);
     }
 
     #[test]

@@ -54,8 +54,8 @@ use std::collections::BTreeMap;
 
 pub use capability::ModelCapability;
 pub use chat::{
-    ChatRequest, ChatResponse, Choice, Content, ContentPart, FinishReason, ImageUrl, Message,
-    ResponseFormat, Role, Sampling, ToolCall, ToolDef,
+    CanonicalArguments, ChatRequest, ChatResponse, Choice, Content, ContentPart, FinishReason,
+    ImageUrl, Message, ResponseFormat, Role, Sampling, ToolCall, ToolDef,
 };
 pub use envelope::{AgentRequestEnvelope, HeaderDigest, Principal};
 pub use error::{ErrorCode, ErrorEnvelope};
