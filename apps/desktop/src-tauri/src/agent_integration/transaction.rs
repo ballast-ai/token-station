@@ -729,7 +729,9 @@ impl<'a> TransactionEngine<'a> {
         let status_allowed = if plan.view.intent == PlanIntent::Connect {
             matches!(
                 admission.status,
-                CompatibilityStatus::DetectedVerified | CompatibilityStatus::DetectedInferred
+                CompatibilityStatus::DetectedVerified
+                    | CompatibilityStatus::DetectedInferred
+                    | CompatibilityStatus::DetectedUnknown
             ) && admission.status == plan.view.compatibility_evidence.status
                 && plan
                     .view
@@ -1093,6 +1095,15 @@ mod tests {
         }
     }
 
+    fn experimental_unknown() -> CompatibilityDecision {
+        let mut decision = verified();
+        decision.status = CompatibilityStatus::DetectedUnknown;
+        decision.reason_code = ReasonCode::NoCompatibilityEntry;
+        decision.message = "unverified".to_string();
+        decision.allowed_actions = BTreeSet::from([AllowedAction::ConfirmExperimentalConnect]);
+        decision
+    }
+
     fn openclaw_discovery(target: &Path) -> DiscoveryRecord {
         DiscoveryRecord {
             agent_id: "openclaw".to_string(),
@@ -1228,6 +1239,27 @@ mod tests {
         .unwrap()
     }
 
+    fn prepare_experimental_unknown(target: &Path, secret: &str) -> PreparedChangePlan {
+        let source = read_config_source(target).unwrap();
+        build_connection_plan(
+            &ClaudeCodeConnector,
+            &discovery(target),
+            &experimental_unknown(),
+            target,
+            &source,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787",
+                token: Some(secret),
+                adapter_ready: true,
+            },
+            1,
+            None,
+            1_000,
+            "cd".repeat(16),
+        )
+        .unwrap()
+    }
+
     fn confirmation(plan: &PreparedChangePlan) -> ConfirmedOperation {
         confirmation_at(plan, 1_001)
     }
@@ -1255,6 +1287,58 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
+    }
+
+    #[test]
+    fn transaction_experimental_unknown_requires_confirmation_and_preserves_zero_write_on_reject() {
+        let root = scratch("experimental-unknown");
+        let target = root.join("settings.json");
+        let initial = br#"{"unowned":"keep"}"#;
+        write_initial(&target, initial);
+        let plan = prepare_experimental_unknown(&target, "vk-experimental");
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &FixedClock(1_001),
+        );
+        let mut missing = confirmation(&plan);
+        missing
+            .confirmations
+            .remove(&ConfirmationKind::ExperimentalCompatibility);
+        let admission = RuntimeAdmission {
+            compatibility_sequence: 1,
+            status: CompatibilityStatus::DetectedUnknown,
+        };
+
+        let failure = engine
+            .apply_connection(&plan, &missing, &admission, 1_001)
+            .expect_err("experimental confirmation is required");
+        assert_eq!(failure.stage, TransactionStage::Confirmation);
+        assert_eq!(std::fs::read(&target).unwrap(), initial);
+        assert!(snapshots.list_agent("claude-code").unwrap().is_empty());
+
+        let blocked = RuntimeAdmission {
+            compatibility_sequence: 1,
+            status: CompatibilityStatus::DetectedBlocked,
+        };
+        let failure = engine
+            .apply_connection(&plan, &confirmation(&plan), &blocked, 1_001)
+            .expect_err("a newly blocked version must fail before writing");
+        assert_eq!(failure.stage, TransactionStage::Admission);
+        assert_eq!(std::fs::read(&target).unwrap(), initial);
+        assert!(snapshots.list_agent("claude-code").unwrap().is_empty());
+
+        engine
+            .apply_connection(&plan, &confirmation(&plan), &admission, 1_001)
+            .expect("confirmed experimental unknown may proceed");
+        assert_ne!(std::fs::read(&target).unwrap(), initial);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

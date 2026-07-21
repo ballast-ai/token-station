@@ -6,6 +6,7 @@ import {
   saveAgentRoutes,
   setAgentRouteMode,
   setAgentTier,
+  type AgentInstallationView,
   type AgentRouteView,
   type AgentUiMetadataView,
   type AgentView,
@@ -46,11 +47,20 @@ function errorText(error: unknown) {
   return String(error);
 }
 
-function statusCopy(agent: AgentView | undefined) {
+function isExperimentalCompatibility(installation: AgentInstallationView | undefined) {
+  if (!installation) return false;
+  return ["DETECTED_INFERRED", "DETECTED_UNKNOWN"].includes(installation.compatibility.status)
+    && Boolean(installation.discovery.version_normalized)
+    && Boolean(installation.compatibility.connector_id)
+    && installation.compatibility.allowed_actions.includes("run_read_only_preflight");
+}
+
+function statusCopy(agent: AgentView | undefined, installation: AgentInstallationView | undefined) {
   if (!agent || agent.installations.length === 0) return { tone: "idle", label: "未发现", detail: "没有在本机发现可管理的安装。" };
-  if (agent.status === "CONNECTED") return { tone: "success", label: "已接入", detail: "请求已通过 Token Station。" };
-  if (["DETECTED_BLOCKED", "INSTALLED_BROKEN"].includes(agent.status)) return { tone: "danger", label: "暂不可接入", detail: "当前版本或配置未通过安全准入。" };
-  if (agent.status === "DETECTED_UNKNOWN") return { tone: "warning", label: "版本待确认", detail: "兼容目录尚未确认当前版本。" };
+  if (installation?.connected) return { tone: "success", label: "已接入", detail: "请求已通过 Token Station。" };
+  if (installation && ["DETECTED_BLOCKED", "INSTALLED_BROKEN"].includes(installation.compatibility.status)) return { tone: "danger", label: "暂不可接入", detail: "当前版本或配置未通过安全准入。" };
+  if (isExperimentalCompatibility(installation)) return { tone: "warning", label: "版本未经验证", detail: "当前版本未在兼容目录中验证，可在确认风险后试验性接入。" };
+  if (installation?.compatibility.status === "DETECTED_UNKNOWN") return { tone: "warning", label: "版本待确认", detail: "兼容目录尚未确认当前版本。" };
   return { tone: "ready", label: "可接入", detail: "已发现兼容安装，可以一键接入。" };
 }
 
@@ -67,6 +77,7 @@ export default function AgentRoutePage({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [experimentalConfirmationOpen, setExperimentalConfirmationOpen] = useState(false);
 
   useEffect(() => {
     const paths = agent?.installations.map((item) => item.discovery.canonical_path) ?? [];
@@ -77,11 +88,24 @@ export default function AgentRoutePage({
     () => agent?.installations.find((item) => item.discovery.canonical_path === selectedPath),
     [agent, selectedPath],
   );
-  const status = statusCopy(agent);
+  useEffect(() => {
+    setExperimentalConfirmationOpen(false);
+  }, [
+    metadata.agent_id,
+    selectedPath,
+    installation?.discovery.version_normalized,
+    installation?.discovery.version_raw,
+    installation?.compatibility.connector_id,
+    installation?.compatibility.status,
+  ]);
+
+  const status = statusCopy(agent, installation);
   const connected = installation?.connected ?? false;
+  const experimentalCompatibility = !connected && isExperimentalCompatibility(installation);
   const canConnect = Boolean(
     installation
-      && ["DETECTED_VERIFIED", "DETECTED_INFERRED", "CONNECTED"].includes(installation.compatibility.status),
+      && (["DETECTED_VERIFIED", "CONNECTED"].includes(installation.compatibility.status)
+        || experimentalCompatibility),
   );
   const canOperate = connected ? Boolean(installation) : serveRunning && canConnect;
 
@@ -100,17 +124,36 @@ export default function AgentRoutePage({
     }
   };
 
-  const applyConnection = async () => {
+  const applyConnection = async (experimentalConfirmed = false) => {
     if (!installation || !canOperate || busy) return;
+    if (experimentalCompatibility && !experimentalConfirmed) {
+      setExperimentalConfirmationOpen(true);
+      return;
+    }
+    setExperimentalConfirmationOpen(false);
     setBusy(true);
     setError("");
     setNotice("");
     try {
       const plan = connected
         ? await planAgentDisconnect(metadata.agent_id, installation.discovery.canonical_path)
-        : await planAgentConnection(metadata.agent_id, installation.discovery.canonical_path);
-      await applyAgentPlan(plan.operation_id, plan.confirmation_token);
-      setNotice(connected ? "已恢复接入前的 Agent 配置" : "Agent 已接入，无需再次确认");
+        : await planAgentConnection(
+          metadata.agent_id,
+          installation.discovery.canonical_path,
+          experimentalCompatibility
+            ? { expectedVersion: installation.discovery.version_normalized as string }
+            : undefined,
+        );
+      await applyAgentPlan(
+        plan.operation_id,
+        plan.confirmation_token,
+        experimentalCompatibility,
+      );
+      setNotice(connected
+        ? "已恢复接入前的 Agent 配置"
+        : experimentalCompatibility
+          ? "Agent 已试验性接入"
+          : "Agent 已接入，无需再次确认");
       await onRescan();
     } catch (caught) {
       setError(errorText(caught));
@@ -173,10 +216,49 @@ export default function AgentRoutePage({
             disabled={busy || !canOperate}
             onClick={() => void applyConnection()}
           >
-            {busy ? "处理中…" : connected ? "恢复 Agent 原始配置" : "一键接入"}
+            {busy ? "处理中…" : connected ? "恢复 Agent 原始配置" : experimentalCompatibility ? "试验性接入" : "一键接入"}
           </button>
         </div>
       </header>
+
+      {experimentalConfirmationOpen && experimentalCompatibility && installation && (
+        <div
+          className="agent-dialog-backdrop"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setExperimentalConfirmationOpen(false);
+          }}
+        >
+          <section
+            className="agent-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="experimental-connect-title"
+            aria-describedby="experimental-connect-risk"
+          >
+            <div className="agent-dialog-head">
+              <div>
+                <span className="eyebrow">UNVERIFIED VERSION</span>
+                <h2 id="experimental-connect-title">确认试验性接入</h2>
+              </div>
+            </div>
+            <p id="experimental-connect-risk" className="experimental-warning">
+              {metadata.display_name} {installation.discovery.version_normalized ?? installation.discovery.version_raw ?? "未知版本"}
+              尚未通过兼容目录验证。继续操作可能因上游配置格式变化而失败。
+            </p>
+            <div className="plan-bindings">
+              <div>
+                <span>安装路径</span>
+                <code>{installation.discovery.canonical_path}</code>
+              </div>
+            </div>
+            <p>写入前会创建快照；失败时会自动恢复，不会绕过配置预检或安全准入。</p>
+            <div className="agent-dialog-actions">
+              <button autoFocus className="btn" type="button" disabled={busy} onClick={() => setExperimentalConfirmationOpen(false)}>取消</button>
+              <button className="btn primary" type="button" disabled={busy} onClick={() => void applyConnection(true)}>确认试验性接入</button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {!serveRunning && !connected && <div className="inline-note">请先启动代理，再接入 Agent。路由仍可先行配置。</div>}
       {notice && <div className="banner ok">{notice}</div>}
