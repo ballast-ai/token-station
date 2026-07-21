@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly target="wasm32-wasip2"
+readonly output="$root/plugins-dist"
+readonly plugins=(
+  agent-openai
+  agent-anthropic
+  agent-openai-responses
+  provider-openai-compatible
+)
+
+# Desktop startup tests exercise the real Gateway, whose development config
+# resolves official adapters from the repository-level plugins-dist directory.
+for plugin in "${plugins[@]}"; do
+  source="$root/plugins/official/$plugin"
+  cargo build --locked --manifest-path "$source/Cargo.toml" --target "$target"
+  mkdir -p "$output/$plugin"
+  cp "$source/manifest.json" "$output/$plugin/manifest.json"
+  cp "$source/target/$target/debug/${plugin//-/_}.wasm" \
+    "$output/$plugin/adapter.wasm"
+done
+
+echo "desktop test plugins: PASS (${#plugins[@]} packages in $output)"

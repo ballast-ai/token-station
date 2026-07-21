@@ -76,10 +76,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          workspaces: apps/desktop/src-tauri
+          workspaces: |
+            apps/desktop/src-tauri
+            plugins/official/agent-anthropic
+            plugins/official/agent-openai
+            plugins/official/agent-openai-responses
+            plugins/official/provider-openai-compatible
+      - name: Prepare official plugins for desktop gateway tests
+        run: scripts/prepare-desktop-test-plugins.sh
       - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
@@ -144,6 +152,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+          targets: wasm32-wasip2
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.1
@@ -153,7 +162,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          workspaces: apps/desktop/src-tauri
+          workspaces: |
+            apps/desktop/src-tauri
+            plugins/official/agent-anthropic
+            plugins/official/agent-openai
+            plugins/official/agent-openai-responses
+            plugins/official/provider-openai-compatible
+      - name: Prepare official plugins for desktop gateway tests
+        run: scripts/prepare-desktop-test-plugins.sh
       - run: >-
           cargo llvm-cov --manifest-path apps/desktop/src-tauri/Cargo.toml
           --lcov --output-path target/desktop-agent.lcov --fail-under-lines 90
