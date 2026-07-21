@@ -290,8 +290,11 @@ struct CommandSession {
 }
 
 pub struct AgentProxyRuntime {
-    origin: String,
-    openai_base: String,
+    claude_origin: String,
+    codex_base: String,
+    opencode_base: String,
+    openclaw_base: String,
+    hermes_base: String,
     virtual_key: Zeroizing<String>,
     anthropic_ready: bool,
     responses_ready: bool,
@@ -302,8 +305,11 @@ impl AgentProxyRuntime {
     fn fingerprint(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(b"token-station-agent-proxy-binding-v1\0");
-        hash_field(&mut hash, self.origin.as_bytes());
-        hash_field(&mut hash, self.openai_base.as_bytes());
+        hash_field(&mut hash, self.claude_origin.as_bytes());
+        hash_field(&mut hash, self.codex_base.as_bytes());
+        hash_field(&mut hash, self.opencode_base.as_bytes());
+        hash_field(&mut hash, self.openclaw_base.as_bytes());
+        hash_field(&mut hash, self.hermes_base.as_bytes());
         hash_field(&mut hash, self.virtual_key.as_bytes());
         hash.update([
             u8::from(self.anthropic_ready),
@@ -316,27 +322,27 @@ impl AgentProxyRuntime {
     fn input_for<'a>(&'a self, connector_id: &str) -> Result<ConnectInput<'a>, AgentCommandError> {
         match connector_id {
             "claude-code-v1" => Ok(ConnectInput {
-                base_url: &self.origin,
+                base_url: &self.claude_origin,
                 token: Some(self.virtual_key.as_str()),
                 adapter_ready: self.anthropic_ready,
             }),
             "codex-v1" => Ok(ConnectInput {
-                base_url: &self.openai_base,
+                base_url: &self.codex_base,
                 token: None,
                 adapter_ready: self.responses_ready,
             }),
             "opencode-v1" => Ok(ConnectInput {
-                base_url: &self.openai_base,
+                base_url: &self.opencode_base,
                 token: Some(self.virtual_key.as_str()),
                 adapter_ready: self.openai_ready,
             }),
             "openclaw-v1" => Ok(ConnectInput {
-                base_url: &self.openai_base,
+                base_url: &self.openclaw_base,
                 token: Some(self.virtual_key.as_str()),
                 adapter_ready: self.openai_ready,
             }),
             "hermes-v1" => Ok(ConnectInput {
-                base_url: &self.openai_base,
+                base_url: &self.hermes_base,
                 token: Some(self.virtual_key.as_str()),
                 adapter_ready: self.openai_ready,
             }),
@@ -1162,10 +1168,13 @@ fn runtime_from_app(state: &AppStateManaged) -> Result<AgentProxyRuntime, AgentC
             "请先启动代理再生成或应用连接计划",
         ));
     }
-    let origin = format!("http://{}", serve.listen);
+    let origin = format!("http://{}", serve.listen).trim_end_matches('/').to_string();
     Ok(AgentProxyRuntime {
-        openai_base: format!("{}/v1", origin.trim_end_matches('/')),
-        origin,
+        claude_origin: format!("{origin}/agents/claude-code"),
+        codex_base: format!("{origin}/agents/codex/v1"),
+        opencode_base: format!("{origin}/agents/opencode/v1"),
+        openclaw_base: format!("{origin}/agents/openclaw/v1"),
+        hermes_base: format!("{origin}/agents/nous-hermes-agent/v1"),
         virtual_key: Zeroizing::new(
             serve
                 .virtual_key
@@ -1375,8 +1384,11 @@ mod tests {
 
     fn runtime(token: &str) -> AgentProxyRuntime {
         AgentProxyRuntime {
-            origin: "http://127.0.0.1:8787".to_string(),
-            openai_base: "http://127.0.0.1:8787/v1".to_string(),
+            claude_origin: "http://127.0.0.1:8787/agents/claude-code".to_string(),
+            codex_base: "http://127.0.0.1:8787/agents/codex/v1".to_string(),
+            opencode_base: "http://127.0.0.1:8787/agents/opencode/v1".to_string(),
+            openclaw_base: "http://127.0.0.1:8787/agents/openclaw/v1".to_string(),
+            hermes_base: "http://127.0.0.1:8787/agents/nous-hermes-agent/v1".to_string(),
             virtual_key: Zeroizing::new(token.to_string()),
             anthropic_ready: true,
             responses_ready: true,
@@ -1678,16 +1690,16 @@ mod tests {
     fn commands_runtime_connector_and_input_boundary_matrix_is_fail_closed() {
         let runtime_view = runtime("vk-runtime-matrix");
         let fingerprint = runtime_view.fingerprint();
-        for connector_id in [
-            "claude-code-v1",
-            "codex-v1",
-            "opencode-v1",
-            "openclaw-v1",
-            "hermes-v1",
+        for (connector_id, expected_base) in [
+            ("claude-code-v1", "http://127.0.0.1:8787/agents/claude-code"),
+            ("codex-v1", "http://127.0.0.1:8787/agents/codex/v1"),
+            ("opencode-v1", "http://127.0.0.1:8787/agents/opencode/v1"),
+            ("openclaw-v1", "http://127.0.0.1:8787/agents/openclaw/v1"),
+            ("hermes-v1", "http://127.0.0.1:8787/agents/nous-hermes-agent/v1"),
         ] {
             let connector = connector_for(connector_id).unwrap();
             let input = runtime_view.input_for(connector_id).unwrap();
-            assert!(input.base_url.starts_with("http://127.0.0.1:8787"));
+            assert_eq!(input.base_url, expected_base);
             assert_eq!(connector.connector_id(), connector_id);
         }
         assert!(runtime_view.input_for("future-v1").is_err());

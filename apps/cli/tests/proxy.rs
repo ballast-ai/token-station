@@ -315,6 +315,101 @@ fn start_proxy_with_agents(
     }
 }
 
+fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Path) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-scoped-proxy-data-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let tiers = |upstream: &str, model: &str| {
+        json!({
+            "high": { "upstream": upstream, "model": model },
+            "mid": { "upstream": upstream, "model": model },
+            "low": { "upstream": upstream, "model": model }
+        })
+    };
+    let config = json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-openai", "agent-anthropic", "agent-openai-responses"],
+            "providers": { "openai-compatible": "provider-openai-compatible" }
+        },
+        "upstreams": {
+            "home_upstream": {
+                "provider": "openai-compatible",
+                "base_url": home.base_url(),
+                "auth": { "slot": "provider_api_key", "file": key_file },
+                "models": [{ "model": "home-model", "tool": true, "context_window": 128_000 }]
+            },
+            "agent_upstream": {
+                "provider": "openai-compatible",
+                "base_url": custom.base_url(),
+                "auth": { "slot": "provider_api_key", "file": key_file },
+                "models": [{ "model": "agent-model", "tool": true, "context_window": 128_000 }]
+            }
+        },
+        "router": {
+            "version": 1,
+            "pools": {
+                "tier_high": [{ "upstream": "home_upstream", "model": "home-model" }],
+                "tier_mid": [{ "upstream": "home_upstream", "model": "home-model" }],
+                "tier_low": [{ "upstream": "home_upstream", "model": "home-model" }]
+            },
+            "default_pool": "tier_low"
+        },
+        "agent_routes": {
+            "codex": {
+                "mode": "custom",
+                "custom_route": tiers("agent_upstream", "agent-model")
+            },
+            "opencode": {
+                "mode": "inherit",
+                "custom_route": tiers("agent_upstream", "agent-model")
+            }
+        }
+    });
+    let config: ClientConfig = serde_json::from_value(config).expect("scoped config parses");
+    let recorder = Arc::new(token_station_cli::filelog::Recorders(vec![Box::new(
+        token_station_cli::filelog::FileLog::open(&config.data.dir).expect("log opens"),
+    )]));
+    let gateway = Arc::new(Gateway::new(&config, recorder).expect("scoped gateway assembles"));
+    let (virtual_key, created) =
+        token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
+    assert!(created);
+    let state = server::AppState {
+        gateway,
+        virtual_key: Some(Arc::from(virtual_key.as_str())),
+        admin: Arc::new(token_station_cli::admin::AdminContext {
+            data_dir: config.data.dir.clone(),
+            router: config.router.clone(),
+            plugins: config.plugins.clone(),
+        }),
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let address = listener.local_addr().expect("bound");
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tokio builds");
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("listener converts");
+            server::serve(state, listener).await.expect("server runs");
+        });
+    });
+    Proxy {
+        url: format!("http://{address}"),
+        data_dir,
+        virtual_key,
+    }
+}
+
 /// One row out of the metrics store, as (column -> debug-rendered value).
 fn last_row(data_dir: &Path) -> std::collections::BTreeMap<String, String> {
     let db = rusqlite::Connection::open(data_dir.join("metrics.sqlite")).expect("db opens");
@@ -416,6 +511,32 @@ fn send_responses(proxy: &Proxy, body: &Value, token: &str) -> (u16, Option<Stri
         .map(str::to_owned);
     let body = response.into_body().read_to_string().expect("body reads");
     (status, content_type, body)
+}
+
+fn post_scoped(
+    proxy: &Proxy,
+    path: &str,
+    body: &Value,
+    token: &str,
+    anthropic: bool,
+) -> (u16, String) {
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    let mut request = agent
+        .post(format!("{}{path}", proxy.url))
+        .header("authorization", &format!("Bearer {token}"));
+    if anthropic {
+        request = request.header("anthropic-version", "2023-06-01");
+    }
+    let response = request
+        .send(&body.to_string())
+        .expect("the scoped proxy answers");
+    let status = response.status().as_u16();
+    let body = response.into_body().read_to_string().expect("body reads");
+    (status, body)
 }
 
 fn sse_events(body: &str) -> Vec<Value> {
@@ -554,6 +675,144 @@ fn all_three_inbound_agents_coexist_in_declared_match_order() {
         (200, 200, 200)
     );
     assert_eq!(mock.hits(), 3);
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn agent_namespaces_select_custom_or_inherited_routers_and_strip_paths() {
+    let answer = |id: &str, model: &str| {
+        json!({
+            "id": id,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "OK" },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        })
+    };
+    let home = MockUpstream::start(vec![vec![http_json(
+        200,
+        &answer("chatcmpl-home", "home-model").to_string(),
+    )]]);
+    let custom = MockUpstream::start(vec![vec![http_json(
+        200,
+        &answer("chatcmpl-agent", "agent-model").to_string(),
+    )]]);
+    let key = key_file("scoped-routing", "sk-test-key-abc");
+    let proxy = start_scoped_proxy(&home, &custom, &key);
+    let token = proxy.virtual_key.clone();
+
+    let responses = json!({ "model": "auto", "input": "hi", "stream": false });
+    let (status, _) = post_scoped(&proxy, "/v1/responses", &responses, &token, false);
+    assert_eq!(status, 200);
+    let (status, _) = post_scoped(
+        &proxy,
+        "/agents/codex/v1/responses",
+        &responses,
+        &token,
+        false,
+    );
+    assert_eq!(status, 200);
+
+    let chat = json!({
+        "model": "auto",
+        "messages": [{ "role": "user", "content": "hi" }]
+    });
+    for agent_id in ["opencode", "openclaw", "nous-hermes-agent"] {
+        let (status, _) = post_scoped(
+            &proxy,
+            &format!("/agents/{agent_id}/v1/chat/completions"),
+            &chat,
+            &token,
+            false,
+        );
+        assert_eq!(status, 200, "{agent_id}");
+    }
+    let messages = json!({
+        "model": "auto",
+        "max_tokens": 16,
+        "messages": [{ "role": "user", "content": "hi" }]
+    });
+    let (status, _) = post_scoped(
+        &proxy,
+        "/agents/claude-code/v1/messages",
+        &messages,
+        &token,
+        true,
+    );
+    assert_eq!(status, 200);
+
+    assert_eq!(custom.hits(), 1, "only Codex uses its custom route");
+    assert_eq!(home.hits(), 5, "home plus four inherited Agent requests");
+    assert!(
+        custom
+            .seen()
+            .iter()
+            .all(|seen| seen.body["model"] == "agent-model")
+    );
+    assert!(
+        home.seen()
+            .iter()
+            .all(|seen| seen.body["model"] == "home-model")
+    );
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn scoped_models_auth_and_unknown_namespaces_fail_closed() {
+    let answer = json!({
+        "id": "chatcmpl-unused",
+        "model": "home-model",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "unused" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    });
+    let home = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let custom = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("scoped-boundaries", "sk-test-key-abc");
+    let proxy = start_scoped_proxy(&home, &custom, &key);
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+
+    let models = agent
+        .get(format!("{}/agents/opencode/v1/models", proxy.url))
+        .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+        .call()
+        .expect("namespaced models answers");
+    assert_eq!(models.status().as_u16(), 200);
+
+    let responses = json!({ "model": "auto", "input": "hi", "stream": false });
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/codex/v1/responses",
+        &responses,
+        "wrong-local-key",
+        false,
+    );
+    assert_eq!(status, 401, "{body}");
+    let body: Value = serde_json::from_str(&body).expect("Responses auth error is JSON");
+    assert_eq!(body["error"]["code"], "authentication_error");
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/future/v1/responses",
+        &responses,
+        &proxy.virtual_key,
+        false,
+    );
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(home.hits(), 0);
+    assert_eq!(custom.hits(), 0);
+
     std::fs::remove_file(key).ok();
 }
 

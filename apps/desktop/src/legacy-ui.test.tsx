@@ -50,6 +50,7 @@ const state: StateView = {
     mid: { upstream: null, model: null },
     low: { upstream: null, model: null },
   },
+  agent_routes: {},
   serve: { phase: "stopped", running: false, listen: settings.listen, virtual_key: null, error: null },
   config_error: null,
   settings,
