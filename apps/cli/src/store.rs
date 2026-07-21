@@ -23,6 +23,7 @@ use token_station_metrics::{Recorder, RequestRecord, SCHEMA_VERSION};
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS requests (
     id                  INTEGER PRIMARY KEY,
+    request_id          TEXT    NOT NULL DEFAULT '',
     started_at_ms       INTEGER NOT NULL,
     latency_ms          INTEGER NOT NULL,
     protocol            TEXT    NOT NULL,
@@ -61,6 +62,10 @@ CREATE TABLE IF NOT EXISTS requests (
     cost_micros         INTEGER
 );
 CREATE INDEX IF NOT EXISTS requests_started_at ON requests (started_at_ms);
+-- A stable accounting id is unique: writing the same request twice (a derived
+-- table rebuild) is idempotent. Empty ids (legacy rows) are exempt.
+CREATE UNIQUE INDEX IF NOT EXISTS requests_request_id
+    ON requests (request_id) WHERE request_id <> '';
 ";
 
 /// The SQLite-backed [`Recorder`].
@@ -148,7 +153,10 @@ impl SqliteStore {
 
         let connection = self.connection.lock().expect("store lock");
         connection.execute(
-            "INSERT INTO requests (
+            // OR IGNORE makes a re-write of the same accounting id a no-op: the
+            // unique index dedups it rather than double-counting.
+            "INSERT OR IGNORE INTO requests (
+                request_id,
                 started_at_ms, latency_ms, protocol, requested_model, stream, status,
                 error_code, attempts,
                 upstream, model, pool, tier, rule_id, hint_kind, hint_value,
@@ -158,6 +166,7 @@ impl SqliteStore {
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
                 reasoning_tokens, cost_micros
             ) VALUES (
+                ?33,
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                 ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32
             )",
@@ -196,6 +205,7 @@ impl SqliteStore {
                 record.usage.map(|u| wide(u.cache_write_tokens)),
                 record.usage.map(|u| wide(u.reasoning_tokens)),
                 record.cost_micros,
+                record.request_id,
             ],
         )?;
         Ok(())
@@ -243,6 +253,31 @@ mod tests {
             .query_row("SELECT count(*) FROM requests", [], |row| row.get(0))
             .expect("counts");
         assert_eq!(count, 1);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn the_same_accounting_id_written_twice_is_one_row() {
+        let path = scratch("dedup");
+        std::fs::remove_file(&path).ok();
+
+        let store = SqliteStore::open(&path).expect("creates");
+        let mut record = RequestRecord::begin(1_752_000_000_000, "openai-chat-completions");
+        record.request_id = "req_1752000000000_7".to_owned();
+        record.status = 200;
+        record.attempts = 1;
+        // A rebuild of a derived table replays the same record.
+        store.record(&record);
+        store.record(&record);
+
+        let count: i64 = store
+            .connection
+            .lock()
+            .expect("lock")
+            .query_row("SELECT count(*) FROM requests", [], |row| row.get(0))
+            .expect("counts");
+        assert_eq!(count, 1, "the stable id dedups the replay");
 
         std::fs::remove_file(path).ok();
     }
