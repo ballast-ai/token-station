@@ -260,10 +260,54 @@ describe("desktop station navigation", () => {
     render(<App />);
     await waitFor(() => expect(scans).toBe(1));
     await user.click(navigation().getByRole("button", { name: "Claude Code" }));
+    expect(screen.queryByText("/opt/claude")).toBeNull();
+    expect(screen.queryByRole("button", { name: /选择安装/ })).toBeNull();
     await user.click(await screen.findByRole("button", { name: "一键接入" }));
+    expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
+      agentId: "claude-code",
+      installationPath: "/opt/claude",
+    });
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", { operationId: "op-1", confirmationToken: "token-1" }));
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(await screen.findByText("Agent 已接入，无需再次确认")).toBeInTheDocument();
     expect(scans).toBe(2);
+  });
+
+  it("selects among multiple installations without displaying full paths", async () => {
+    const user = userEvent.setup();
+    const secondInstallation = structuredClone(scannedClaude.installations[0]);
+    secondInstallation.discovery.executable_path = "/Users/x/.local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe";
+    secondInstallation.discovery.canonical_path = "/Users/x/.local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe";
+    secondInstallation.discovery.version_raw = "10.0.0";
+    secondInstallation.discovery.version_normalized = "10.0.0";
+    secondInstallation.compatibility.installation_path = secondInstallation.discovery.canonical_path;
+    const multipleClaude: AgentView = {
+      ...scannedClaude,
+      status: "MULTIPLE_INSTALLATIONS",
+      installations: [scannedClaude.installations[0], secondInstallation],
+    };
+    const running = stateFixture({ serve: { phase: "running", running: true, listen: "127.0.0.1:8787", virtual_key: "vk-test", error: null } });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return running;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [multipleClaude];
+      if (command === "plan_agent_connection") return { operation_id: "op-2", confirmation_token: "token-2" };
+      if (command === "apply_agent_plan") return { operation_id: "op-2", maintenance_warning: null };
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    const nav = within(await screen.findByLabelText("主导航"));
+    await user.click(nav.getByRole("button", { name: "Claude Code" }));
+    expect(document.body).not.toHaveTextContent(secondInstallation.discovery.canonical_path);
+    await user.click(await screen.findByRole("button", { name: /选择安装/ }));
+    await user.click(screen.getByRole("option", { name: "claude.exe · v10.0.0" }));
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(document.body).not.toHaveTextContent(secondInstallation.discovery.canonical_path);
+    await user.click(screen.getByRole("button", { name: "一键接入" }));
+    expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
+      agentId: "claude-code",
+      installationPath: secondInstallation.discovery.canonical_path,
+    });
   });
 });

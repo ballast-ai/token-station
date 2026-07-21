@@ -889,8 +889,7 @@ body {
   line-height: 1.1;
   letter-spacing: -.035em;
 }
-.page-title-row p,
-.agent-route-hero p { margin: 0; color: var(--muted); font-size: 12.5px; }
+.page-title-row p { margin: 0; color: var(--muted); font-size: 12.5px; }
 .eyebrow {
   display: inline-block;
   color: var(--signal);
@@ -1035,7 +1034,6 @@ body {
   background: var(--signal-soft);
   font: 800 18px/1 "SF Mono", Menlo, monospace;
 }
-.agent-identity p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10.5px/1.2 "SF Mono", Menlo, monospace; }
 .agent-connect-box {
   max-width: 440px;
   display: flex;
@@ -1044,7 +1042,49 @@ body {
   gap: 9px;
 }
 .agent-connect-box small { max-width: 150px; color: var(--muted); font-size: 10px; }
-.compact-select { max-width: 190px; font-size: 10px; }
+.agent-primary-action {
+  min-width: 92px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.installation-picker { position: relative; flex: 0 0 auto; }
+.installation-picker-trigger { white-space: nowrap; }
+.installation-picker-trigger span { margin-left: 3px; color: var(--muted); }
+.installation-picker-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 7px);
+  right: 0;
+  min-width: 210px;
+  padding: 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.installation-picker-menu button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+  font: 600 10.5px/1.25 "SF Mono", Menlo, monospace;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.installation-picker-menu button:hover,
+.installation-picker-menu button:focus-visible,
+.installation-picker-menu button.selected {
+  color: var(--signal);
+  background: var(--signal-soft);
+}
+.installation-check { color: var(--signal); font: 800 12px/1 ui-sans-serif, system-ui, sans-serif; }
 .inline-note {
   padding: 9px 12px;
   border-left: 2px solid var(--warning);
