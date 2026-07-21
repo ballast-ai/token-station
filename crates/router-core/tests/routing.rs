@@ -8,8 +8,8 @@ use token_station_protocol::{
     ToolDef,
 };
 use token_station_router_core::{
-    Candidate, DecidedBy, Health, Heuristic, HintRoute, Match, NoRoute, Router, RouterConfig, Rule,
-    UnmetRequirement, UpstreamModel, UpstreamRef, Weights,
+    Candidate, DecidedBy, Health, Heuristic, HintRoute, Match, NoRoute, RecoveryPolicy, Router,
+    RouterConfig, Rule, UnmetRequirement, UpstreamModel, UpstreamRef, Weights,
 };
 
 fn target(upstream: &str, model: &str) -> UpstreamModel {
@@ -70,6 +70,7 @@ fn config() -> RouterConfig {
         default_pool: "cheap".to_owned(),
         assumed_context_window: 8_192,
         honor_exact_model: false,
+        recovery: RecoveryPolicy::Strict,
     }
 }
 
@@ -476,5 +477,66 @@ fn honor_exact_fails_over_within_the_same_model_across_providers() {
     assert!(
         decision.fallbacks[0].upstream.as_str() != decision.chosen.upstream.as_str(),
         "failover crosses providers, not models"
+    );
+}
+
+// -- P1-4: RecoveryPolicy separates tier selection from failover --------------
+
+fn ordered_router(backup: &[&str]) -> Router {
+    let mut config = config();
+    config.recovery = RecoveryPolicy::Ordered {
+        pools: backup.iter().map(|pool| (*pool).to_owned()).collect(),
+    };
+    Router::new(config).expect("ordered recovery config validates")
+}
+
+#[test]
+fn strict_recovery_never_leaves_the_selected_tier() {
+    // A summarize hint routes to `cheap`, whose only member is llama3.3. Under
+    // the default Strict policy there is no cross-tier backup.
+    let hints = [AgentHint::new(HintKind::StepType, "summarize")];
+    let decision = router()
+        .route(&ask("hi"), &hints, &candidates())
+        .expect("routable");
+
+    assert_eq!(decision.pool, "cheap");
+    assert_eq!(decision.chosen.model, "llama3.3");
+    assert!(
+        decision.fallbacks.is_empty(),
+        "Strict stays in its tier — no silent downgrade to another"
+    );
+}
+
+#[test]
+fn ordered_recovery_appends_authorized_backup_tiers_behind_the_selected_one() {
+    let hints = [AgentHint::new(HintKind::StepType, "summarize")];
+    let decision = ordered_router(&["sota"])
+        .route(&ask("hi"), &hints, &candidates())
+        .expect("routable");
+
+    // Quality still chose the tier: the decision resolved into `cheap`.
+    assert_eq!(decision.pool, "cheap");
+    assert_eq!(decision.chosen.model, "llama3.3");
+
+    // Reliability, decided separately, authorized `sota` as the backup — its
+    // members trail the selected tier's as fallbacks, never as the chosen tier.
+    let fallback_models: Vec<&str> = decision
+        .fallbacks
+        .iter()
+        .map(|target| target.model.as_str())
+        .collect();
+    assert!(fallback_models.contains(&"gpt-5.5"));
+    assert!(fallback_models.contains(&"claude-opus-4-8"));
+}
+
+#[test]
+fn ordered_recovery_naming_a_missing_tier_is_refused_at_build() {
+    let mut config = config();
+    config.recovery = RecoveryPolicy::Ordered {
+        pools: vec!["ghost".to_owned()],
+    };
+    assert!(
+        Router::new(config).is_err(),
+        "a backup tier that does not exist is a config error, like any other pool reference"
     );
 }
