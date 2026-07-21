@@ -44,6 +44,27 @@ pub struct VersionProbe {
     pub timeout_ms: u64,
     pub max_output_bytes: usize,
     pub output_matcher: VersionOutputMatcher,
+    #[serde(default)]
+    pub retry_on_timeout: bool,
+    pub runtime: Option<ProbeRuntime>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProbeRuntime {
+    Direct,
+    EnvShebang {
+        interpreter_candidates: Vec<String>,
+        resolution_sources: Vec<RuntimeResolutionSource>,
+        known_install_locations: BTreeMap<Platform, Vec<String>>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeResolutionSource {
+    ObservedEntrySibling,
+    KnownInstallLocations,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

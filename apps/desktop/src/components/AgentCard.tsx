@@ -63,11 +63,21 @@ export default function AgentCard({
     ["DETECTED_VERIFIED", "DETECTED_INFERRED", "MULTIPLE_INSTALLATIONS"].includes(
       selected.compatibility.status,
     );
-  const version = selected?.discovery.version_normalized ?? selected?.discovery.version_raw;
+  const version =
+    selected?.discovery.version_normalized ??
+    (selected?.discovery.runnable ? selected.discovery.version_raw : null);
+  const primaryDiagnostic =
+    status === "INSTALLED_BROKEN"
+      ? selected?.discovery.diagnostics.find(
+          (diagnostic) => diagnostic.reason_code === selected?.compatibility.reason_code,
+        ) ?? selected?.discovery.diagnostics[0]
+      : undefined;
   const reason =
     !scanCompleted
       ? "本次会话尚未完成首次扫描。"
-      : selected?.compatibility.message ??
+      : primaryDiagnostic
+        ? `${primaryDiagnostic.reason_code}：${primaryDiagnostic.message}`
+        : selected?.compatibility.message ??
         (agent.installations.length === 0
           ? "本机未找到可运行入口。Token Station 不会自动安装或升级它。"
           : "请选择一个安装实例后继续。");

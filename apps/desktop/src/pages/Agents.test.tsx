@@ -238,6 +238,38 @@ describe("Agents page", () => {
     }
   });
 
+  it("shows structured probe diagnostics without rendering raw stderr as the version", async () => {
+    const broken = agent("openclaw", "OpenClaw", "INSTALLED_BROKEN");
+    const installation = broken.installations[0];
+    installation.discovery.runnable = false;
+    installation.discovery.version_raw = "env: node: TS_SECRET_STDERR";
+    installation.discovery.version_normalized = null;
+    installation.discovery.diagnostics = [
+      {
+        reason_code: "CONFIG_READ_FAILED",
+        message: "候选配置不可读",
+      },
+      {
+        reason_code: "VERSION_PROBE_EXIT_FAILURE",
+        message: "版本探测以非零状态退出（code=127）",
+      },
+    ];
+    installation.compatibility.reason_code = "VERSION_PROBE_EXIT_FAILURE";
+    installation.compatibility.message = "安装入口存在，但版本探测未成功";
+    scans = [broken];
+    const user = userEvent.setup();
+
+    await renderReady();
+
+    const row = screen.getByTestId("agent-openclaw");
+    expect(within(row).queryByText(/TS_SECRET_STDERR/)).not.toBeInTheDocument();
+    expect(within(row).getByText("—")).toBeInTheDocument();
+    await expandAgent(user, "openclaw");
+    expect(within(row).getByText(/VERSION_PROBE_EXIT_FAILURE/)).toHaveTextContent(
+      "VERSION_PROBE_EXIT_FAILURE：版本探测以非零状态退出（code=127）",
+    );
+  });
+
   it("shows Registry rows while scanning and preserves cached rows on scan failure", async () => {
     const registry: AgentUiMetadataView[] = fiveAgents().map((item) => item.metadata);
     const { rerender } = render(

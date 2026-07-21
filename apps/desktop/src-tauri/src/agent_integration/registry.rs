@@ -2,7 +2,10 @@ use std::collections::{BTreeSet, HashSet};
 
 use serde::Deserialize;
 
-use super::types::{AdmissionStatus, AgentDescriptor, AgentUiMetadata, ConfigFormat, EnvValueKind};
+use super::types::{
+    AdmissionStatus, AgentDescriptor, AgentUiMetadata, ConfigFormat, EnvValueKind, ProbeRuntime,
+    RuntimeResolutionSource,
+};
 
 pub const BUILTIN_REGISTRY_JSON: &str = include_str!("../../agent-registry/builtin-agents.json");
 
@@ -276,6 +279,89 @@ fn validate_probe(descriptor: &AgentDescriptor) -> Result<(), String> {
             "{}: version_probe.max_output_bytes must be 1..={MAX_OUTPUT_BYTES}",
             descriptor.agent_id
         ));
+    }
+    if let Some(runtime) = &probe.runtime {
+        match runtime {
+            ProbeRuntime::Direct => {}
+            ProbeRuntime::EnvShebang {
+                interpreter_candidates,
+                resolution_sources,
+                known_install_locations,
+            } => {
+                if interpreter_candidates.is_empty() || interpreter_candidates.len() > 8 {
+                    return Err(format!(
+                        "{}: interpreter_candidates must contain 1..=8 names",
+                        descriptor.agent_id
+                    ));
+                }
+                ensure_unique(
+                    &descriptor.agent_id,
+                    "interpreter_candidates",
+                    interpreter_candidates,
+                )?;
+                for candidate in interpreter_candidates {
+                    validate_executable_name(
+                        &descriptor.agent_id,
+                        "interpreter candidate",
+                        candidate,
+                    )?;
+                }
+                if resolution_sources.is_empty() || resolution_sources.len() > 2 {
+                    return Err(format!(
+                        "{}: runtime resolution_sources must contain 1..=2 values",
+                        descriptor.agent_id
+                    ));
+                }
+                let unique_sources = BTreeSet::from_iter(resolution_sources.iter().copied());
+                if unique_sources.len() != resolution_sources.len() {
+                    return Err(format!(
+                        "{}: duplicate runtime resolution_sources",
+                        descriptor.agent_id
+                    ));
+                }
+                let uses_known_locations =
+                    resolution_sources.contains(&RuntimeResolutionSource::KnownInstallLocations);
+                let has_known_locations = known_install_locations
+                    .values()
+                    .any(|paths| !paths.is_empty());
+                if uses_known_locations != has_known_locations {
+                    return Err(format!(
+                        "{}: known_install_locations must match runtime resolution_sources",
+                        descriptor.agent_id
+                    ));
+                }
+                for paths in known_install_locations.values() {
+                    ensure_unique(&descriptor.agent_id, "runtime known install paths", paths)?;
+                    for path in paths {
+                        validate_path_template(&descriptor.agent_id, path)?;
+                        let file_name = path
+                            .replace('\\', "/")
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or_default()
+                            .to_string();
+                        if !interpreter_candidates.contains(&file_name) {
+                            return Err(format!(
+                                "{}: runtime known install path must end in an interpreter candidate",
+                                descriptor.agent_id
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_executable_name(agent_id: &str, label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 80
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(format!("{agent_id}: invalid {label} '{value}'"));
     }
     Ok(())
 }
@@ -562,6 +648,46 @@ mod tests {
     }
 
     #[test]
+    fn version_probe_runtime_is_declarative_and_fail_closed() {
+        let runtime = json!({
+            "kind": "env_shebang",
+            "interpreter_candidates": ["node"],
+            "resolution_sources": ["observed_entry_sibling", "known_install_locations"],
+            "known_install_locations": {
+                "macos": ["${HOME}/.local/bin/node"],
+                "linux": ["${HOME}/.local/bin/node"],
+                "wsl": ["${HOME}/.local/bin/node"]
+            }
+        });
+
+        let mut valid = fixture();
+        valid["agents"][3]["version_probe"]["runtime"] = runtime.clone();
+        assert!(validate(&valid).is_ok());
+
+        let mut shell_candidate = fixture();
+        shell_candidate["agents"][3]["version_probe"]["runtime"] = runtime.clone();
+        shell_candidate["agents"][3]["version_probe"]["runtime"]["interpreter_candidates"] =
+            json!(["../node"]);
+        assert!(validate(&shell_candidate)
+            .unwrap_err()
+            .contains("interpreter candidate"));
+
+        let mut traversal = fixture();
+        traversal["agents"][3]["version_probe"]["runtime"] = runtime.clone();
+        traversal["agents"][3]["version_probe"]["runtime"]["known_install_locations"]["macos"] =
+            json!(["${HOME}/../node"]);
+        assert!(validate(&traversal).unwrap_err().contains("traversal"));
+
+        let mut duplicate_source = fixture();
+        duplicate_source["agents"][3]["version_probe"]["runtime"] = runtime;
+        duplicate_source["agents"][3]["version_probe"]["runtime"]["resolution_sources"] =
+            json!(["observed_entry_sibling", "observed_entry_sibling"]);
+        assert!(validate(&duplicate_source)
+            .unwrap_err()
+            .contains("resolution_sources"));
+    }
+
+    #[test]
     fn path_templates_reject_traversal_and_unknown_variables() {
         let mut traversal = fixture();
         traversal["agents"][0]["known_install_locations"]["macos"] =
@@ -639,9 +765,24 @@ mod tests {
         let hermes = &registry.descriptors()[2];
         assert_eq!(hermes.admission, AdmissionStatus::Supported);
         assert_eq!(hermes.local_connector_ids, ["hermes-v1"]);
+        assert!(hermes.version_probe.retry_on_timeout);
         let openclaw = &registry.descriptors()[3];
         assert_eq!(openclaw.admission, AdmissionStatus::Supported);
         assert_eq!(openclaw.local_connector_ids, ["openclaw-v1"]);
+        assert!(matches!(
+            openclaw.version_probe.runtime,
+            Some(ProbeRuntime::EnvShebang { .. })
+        ));
+        assert!(registry
+            .descriptors()
+            .iter()
+            .filter(|descriptor| descriptor.agent_id != "openclaw")
+            .all(|descriptor| descriptor.version_probe.runtime.is_none()));
+        assert!(registry
+            .descriptors()
+            .iter()
+            .filter(|descriptor| descriptor.agent_id != "nous-hermes-agent")
+            .all(|descriptor| !descriptor.version_probe.retry_on_timeout));
         assert_eq!(
             registry.descriptors()[0].known_install_locations
                 [&super::super::types::Platform::Macos],
