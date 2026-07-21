@@ -12,9 +12,11 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand, ValueEnum};
 use token_station_cli::config::ClientConfig;
 use token_station_cli::filelog::{FileLog, Recorders};
-use token_station_cli::gateway::Gateway;
+use token_station_cli::gateway::{Gateway, StageStatus};
 use token_station_cli::store::SqliteStore;
-use token_station_cli::{manage, plugins, scaffold, secrets, server, stats, upgrade, virtual_key};
+use token_station_cli::{
+    backup, manage, plugins, scaffold, secrets, server, stats, upgrade, virtual_key,
+};
 use token_station_metrics::Recorder;
 
 #[derive(Parser)]
@@ -63,6 +65,17 @@ enum Command {
         #[arg(long, conflicts_with = "yes")]
         check_only: bool,
     },
+    /// Copy the config and metrics database into a directory for safe-keeping.
+    Backup {
+        /// The directory to write the backup into (created if needed).
+        dest: PathBuf,
+    },
+    /// Restore config and metrics from a backup directory. The current files are
+    /// stashed to `<file>.pre-restore` first, so a restore is reversible.
+    Restore {
+        /// A directory a previous `backup` wrote.
+        from: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -108,6 +121,14 @@ enum UpstreamCommand {
     Test {
         name: String,
         /// Probe only this model.
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Layered health for an upstream: DNS/TLS, HTTP, auth, model, generation —
+    /// each reported separately, so "reachable" is never shown as "usable".
+    Diagnose {
+        name: String,
+        /// Diagnose only this model.
         #[arg(long)]
         model: Option<String>,
     },
@@ -265,6 +286,9 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Upstream(UpstreamCommand::Test { name, model }) => {
             probe(&cli.config, &name, model.as_deref())
         }
+        Command::Upstream(UpstreamCommand::Diagnose { name, model }) => {
+            diagnose(&cli.config, &name, model.as_deref())
+        }
         Command::Config(ConfigCommand::Set { switch, value }) => mutate(&cli.config, |config| {
             manage::set_switch(config, &switch, value)
         }),
@@ -293,6 +317,21 @@ fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
         Command::Upgrade { yes, check_only } => upgrade_command(yes, check_only),
+        Command::Backup { dest } => {
+            let config = load(&cli.config)?;
+            let metrics = config.data.dir.join("metrics.sqlite");
+            let written = backup::backup(&cli.config, &metrics, &dest)?;
+            println!("backed up config and metrics into {}", written.display());
+            Ok(())
+        }
+        Command::Restore { from } => {
+            let config = load(&cli.config)?;
+            let metrics = config.data.dir.join("metrics.sqlite");
+            backup::restore(&from, &cli.config, &metrics)?;
+            println!("restored from {}", from.display());
+            eprintln!("note: a running `serve` applies restored configuration on restart");
+            Ok(())
+        }
     }
 }
 
@@ -446,6 +485,48 @@ fn probe(config_path: &Path, name: &str, model: Option<&str>) -> Result<(), Stri
     }
     if failed > 0 {
         Err(format!("{failed} of {} probe(s) failed", outcomes.len()))
+    } else {
+        Ok(())
+    }
+}
+
+fn diagnose(config_path: &Path, name: &str, model: Option<&str>) -> Result<(), String> {
+    let config = load(config_path)?;
+    // Diagnostics, like a probe: no recorder, must not skew `stats`.
+    let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder))?;
+
+    let probes = gateway.probe_layered(name, model)?;
+    let mut unhealthy = 0usize;
+    for probe in &probes {
+        let failed = probe
+            .stages
+            .iter()
+            .any(|stage| stage.status == StageStatus::Fail);
+        if failed {
+            unhealthy += 1;
+        }
+        let latency = probe
+            .latency_ms
+            .map_or_else(String::new, |ms| format!(" ({ms} ms)"));
+        println!("{}{latency}", probe.model);
+        for stage in &probe.stages {
+            let mark = match stage.status {
+                StageStatus::Pass => "ok",
+                StageStatus::Fail => "FAIL",
+                StageStatus::Skipped => "skipped",
+            };
+            let detail = stage
+                .detail
+                .as_deref()
+                .map_or_else(String::new, |detail| format!(" — {detail}"));
+            println!("  {:?}: {mark}{detail}", stage.layer);
+        }
+    }
+    if unhealthy > 0 {
+        Err(format!(
+            "{unhealthy} of {} model(s) are not fully healthy",
+            probes.len()
+        ))
     } else {
         Ok(())
     }
