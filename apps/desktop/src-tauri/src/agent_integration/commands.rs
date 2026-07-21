@@ -1168,7 +1168,9 @@ fn runtime_from_app(state: &AppStateManaged) -> Result<AgentProxyRuntime, AgentC
             "请先启动代理再生成或应用连接计划",
         ));
     }
-    let origin = format!("http://{}", serve.listen).trim_end_matches('/').to_string();
+    let origin = format!("http://{}", serve.listen)
+        .trim_end_matches('/')
+        .to_string();
     Ok(AgentProxyRuntime {
         claude_origin: format!("{origin}/agents/claude-code"),
         codex_base: format!("{origin}/agents/codex/v1"),
@@ -1695,7 +1697,10 @@ mod tests {
             ("codex-v1", "http://127.0.0.1:8787/agents/codex/v1"),
             ("opencode-v1", "http://127.0.0.1:8787/agents/opencode/v1"),
             ("openclaw-v1", "http://127.0.0.1:8787/agents/openclaw/v1"),
-            ("hermes-v1", "http://127.0.0.1:8787/agents/nous-hermes-agent/v1"),
+            (
+                "hermes-v1",
+                "http://127.0.0.1:8787/agents/nous-hermes-agent/v1",
+            ),
         ] {
             let connector = connector_for(connector_id).unwrap();
             let input = runtime_view.input_for(connector_id).unwrap();
@@ -1763,6 +1768,33 @@ mod tests {
         assert_eq!(boundary.code, "write_failed");
         assert_eq!(boundary.stage, Some(TransactionStage::TargetWrite));
         assert_eq!(boundary.recovery, Some(RecoveryStatus::RepairRequired));
+    }
+
+    #[test]
+    fn commands_runtime_from_app_rejects_readonly_and_stopped_states() {
+        for (label, load_error, expected_code) in [
+            (
+                "runtime-readonly",
+                Some("existing config is invalid".to_string()),
+                "agent_operation_rejected",
+            ),
+            ("runtime-stopped", None, "proxy_not_running"),
+        ] {
+            let root = scratch(label);
+            let state = AppStateManaged(Mutex::new(crate::AppInner {
+                config_path: root.join("token-station.json"),
+                draft: crate::template(&root),
+                load_error,
+                server: crate::ServerLifecycle::stopped(),
+            }));
+
+            let error = runtime_from_app(&state)
+                .err()
+                .expect("runtime must fail closed");
+
+            assert_eq!(error.code, expected_code);
+            std::fs::remove_dir_all(root).ok();
+        }
     }
 
     #[test]
