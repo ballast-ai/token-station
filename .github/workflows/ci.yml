@@ -172,10 +172,12 @@ jobs:
         run: scripts/prepare-desktop-test-plugins.sh
       - run: >-
           cargo llvm-cov --manifest-path apps/desktop/src-tauri/Cargo.toml
-          --lcov --output-path target/desktop-agent.lcov --fail-under-lines 90
+          --lcov --output-path apps/desktop/src-tauri/target/desktop-agent.lcov
+          --fail-under-lines 90
       - run: >-
           node scripts/check-coverage-thresholds.mjs
-          target/desktop-agent.lcov apps/desktop/src-tauri/src/agent_integration 90
+          apps/desktop/src-tauri/target/desktop-agent.lcov
+          apps/desktop/src-tauri/src/agent_integration 90
 
   agent-platform-targeted:
     name: Agent platform checks (${{ matrix.os }})
