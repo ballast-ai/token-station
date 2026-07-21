@@ -98,6 +98,34 @@ fn egress_agent(timeout: Duration) -> ureq::Agent {
     )
 }
 
+/// Decodes the complete-UTF-8 prefix of `pending`, leaving any bytes of a
+/// character split across socket reads for the next call. This is what makes
+/// stream decoding is boundary-safe: a three-byte UTF-8 character split 2+1 across two reads is
+/// decoded once, whole, not mangled into replacement characters.
+///
+/// Genuinely invalid bytes (not a boundary split) are lossy-decoded so the
+/// stream makes progress instead of stalling on garbage.
+fn take_decodable(pending: &mut Vec<u8>) -> String {
+    match std::str::from_utf8(pending) {
+        Ok(_) => String::from_utf8(std::mem::take(pending)).expect("just validated as UTF-8"),
+        // No `error_len` means the tail is an incomplete-but-valid character:
+        // decode up to it, keep the rest for the next read.
+        Err(error) if error.error_len().is_none() => {
+            let boundary = error.valid_up_to();
+            let valid =
+                String::from_utf8(pending[..boundary].to_vec()).expect("valid up to the boundary");
+            pending.drain(..boundary);
+            valid
+        }
+        // Genuinely invalid bytes: lossy-decode everything so we do not stall.
+        Err(_) => {
+            let decoded = String::from_utf8_lossy(pending).into_owned();
+            pending.clear();
+            decoded
+        }
+    }
+}
+
 fn begin_record(started_at_ms: u64, protocol: impl Into<String>) -> RequestRecord {
     let mut record = RequestRecord::begin(started_at_ms, protocol);
     record.request_id = format!(
@@ -1340,6 +1368,10 @@ impl Gateway {
         let mut saw_done = false;
 
         let mut buffer = [0u8; STREAM_READ];
+        // Raw bytes not yet handed to the parser. A multibyte UTF-8 character
+        // (or a whole frame) that a socket read split in the middle waits here
+        // for the rest, instead of being mangled by a per-read lossy decode.
+        let mut pending: Vec<u8> = Vec::new();
         loop {
             // Between reads is where a mid-stream cancel actually lands: the
             // client hung up or the deadline passed, so stop paying for output
@@ -1368,7 +1400,13 @@ impl Gateway {
                 }
             };
 
-            let data = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            pending.extend_from_slice(&buffer[..read]);
+            let data = take_decodable(&mut pending);
+            if data.is_empty() {
+                // Only an incomplete multibyte character so far — read the rest
+                // before decoding, rather than emit a replacement char.
+                continue;
+            }
             let events = match parser.parse_chunk(&StreamChunk { data }) {
                 Ok(events) => events,
                 Err(envelope) => {
@@ -1540,6 +1578,41 @@ impl From<UpstreamResponse> for HttpResponseParts {
             body,
             extensions: token_station_protocol::Extensions::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod sse_decode_tests {
+    use super::take_decodable;
+
+    #[test]
+    fn a_multibyte_char_split_across_reads_is_decoded_whole() {
+        // The UTF-8 bytes for the Chinese character meaning you are E4 BD A0. A socket read ends after E4 BD.
+        let mut pending = vec![0xE4, 0xBD];
+        assert_eq!(take_decodable(&mut pending), "", "an incomplete char waits");
+        assert_eq!(pending, vec![0xE4, 0xBD], "its bytes are kept");
+
+        // The next read brings A0 and more.
+        pending.push(0xA0);
+        pending.extend_from_slice(b"ok");
+        assert_eq!(take_decodable(&mut pending), "你ok");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn a_four_byte_emoji_split_across_reads_survives() {
+        // "😀" is F0 9F 98 80.
+        let mut pending = vec![0xF0, 0x9F];
+        assert_eq!(take_decodable(&mut pending), "");
+        pending.extend_from_slice(&[0x98, 0x80]);
+        assert_eq!(take_decodable(&mut pending), "😀");
+    }
+
+    #[test]
+    fn complete_ascii_decodes_immediately() {
+        let mut pending = b"data: {}\n\n".to_vec();
+        assert_eq!(take_decodable(&mut pending), "data: {}\n\n");
+        assert!(pending.is_empty());
     }
 }
 
