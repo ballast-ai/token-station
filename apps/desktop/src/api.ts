@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export interface TierView {
   upstream: string | null;
@@ -20,13 +21,25 @@ export interface ModelDiscoveryView {
   warning: string | null;
 }
 
+export type ServePhase = "stopped" | "starting" | "stopping" | "running" | "error";
+
 export interface ServeView {
+  phase: ServePhase;
   running: boolean;
   listen: string;
   virtual_key: string | null;
+  error: string | null;
 }
 
 export type TierSlot = "high" | "mid" | "low";
+
+export type AgentRouteMode = "inherit" | "custom";
+
+export interface AgentRouteView {
+  mode: AgentRouteMode;
+  tiers: Record<TierSlot, TierView>;
+  config_error: string | null;
+}
 
 export interface SettingsView {
   listen: string;
@@ -41,9 +54,142 @@ export interface SettingsView {
 export interface StateView {
   providers: ProviderView[];
   tiers: Record<TierSlot, TierView>;
+  agent_routes: Record<string, AgentRouteView>;
   serve: ServeView;
   config_error: string | null;
   settings: SettingsView;
+}
+
+export type AgentId = string;
+export type AgentAdmission = "supported" | "discovery_only";
+export type AgentPlatform = "macos" | "linux" | "windows" | "wsl";
+export type AgentStatus =
+  | "NOT_DETECTED"
+  | "DETECTED_VERIFIED"
+  | "DETECTED_INFERRED"
+  | "DETECTED_UNKNOWN"
+  | "DETECTED_BLOCKED"
+  | "INSTALLED_BROKEN"
+  | "MULTIPLE_INSTALLATIONS"
+  | "CONNECTED";
+export type AgentPlanIntent = "connect" | "disconnect" | "restore";
+export type AgentConfirmationKind =
+  | "installation"
+  | "target_config"
+  | "configuration_diff"
+  | "experimental_compatibility";
+
+export interface AgentUiMetadataView {
+  agent_id: AgentId;
+  legacy_kind: string | null;
+  display_name: string;
+  icon_key: string;
+  admission: AgentAdmission;
+}
+
+export interface AgentDiagnosticView {
+  reason_code: string;
+  message: string;
+}
+
+export interface AgentDiscoveryView {
+  agent_id: AgentId;
+  executable_path: string;
+  canonical_path: string;
+  version_raw: string | null;
+  version_normalized: string | null;
+  environment: AgentPlatform;
+  evidence: Array<{
+    source: "known_path" | "path" | "env_override";
+    observed_path: string;
+    is_path_default: boolean;
+  }>;
+  is_path_default: boolean;
+  runnable: boolean;
+  config_candidates: string[];
+  config_fingerprint: string | null;
+  conflict_group: string | null;
+  diagnostics: AgentDiagnosticView[];
+  scanned_at_ms: number;
+}
+
+export interface AgentCompatibilityView {
+  agent_id: AgentId;
+  installation_path: string | null;
+  status: AgentStatus;
+  reason_code: string;
+  message: string;
+  matched_catalog_version: string | null;
+  connector_id: string | null;
+  allowed_actions: string[];
+}
+
+export interface AgentInstallationView {
+  discovery: AgentDiscoveryView;
+  compatibility: AgentCompatibilityView;
+  connected: boolean;
+}
+
+export interface AgentView {
+  metadata: AgentUiMetadataView;
+  installations: AgentInstallationView[];
+  status: AgentStatus;
+  catalog_sequence: number;
+  catalog_expires_at_ms: number | null;
+  catalog_source: "builtin" | "remote";
+  catalog_warning: string | null;
+}
+
+export interface ConfigPlanView {
+  schema_version: number;
+  operation_id: string;
+  intent: AgentPlanIntent;
+  agent_id: AgentId;
+  installation_path: string;
+  target_config_path: string;
+  target_existed: boolean;
+  before_hash: string;
+  expected_after_hash: string;
+  owned_paths: Array<{ segments: string[] }>;
+  changes: Array<{
+    operation: "add" | "replace" | "remove" | "test";
+    path: { segments: string[] };
+    sensitive: boolean;
+    summary: string;
+  }>;
+  human_diff: string;
+  connector_id: string;
+  compatibility_evidence: AgentCompatibilityView;
+  compatibility_sequence: number;
+  compatibility_expires_at_ms: number | null;
+  created_at_ms: number;
+  expires_at_ms: number;
+  required_confirmations: AgentConfirmationKind[];
+  confirmation_token: string;
+}
+
+export interface AgentOperationView {
+  operation_id: string;
+  agent_id: AgentId;
+  target_config_path: string;
+  before_hash: string;
+  after_hash: string;
+  snapshot_id: string;
+  ownership_revision: number;
+  maintenance_warning: string | null;
+}
+
+export interface SnapshotView {
+  snapshot_id: string;
+  agent_id: AgentId;
+  target_config_path: string;
+  created_at_ms: number;
+  connector_id: string;
+  app_version: string;
+  original_existed: boolean;
+  pinned: boolean;
+  source: "encrypted" | "legacy_backup";
+  restorable: boolean;
 }
 
 export interface AggView {
@@ -133,15 +279,68 @@ export const setTier = (
   model: string | null,
 ) => invoke<StateView>("set_tier", { slot, upstream, model });
 
+export const setAgentRouteMode = (agentId: AgentId, mode: AgentRouteMode) =>
+  invoke<StateView>("set_agent_route_mode", { agentId, mode });
+
+export const setAgentTier = (
+  agentId: AgentId,
+  slot: TierSlot,
+  upstream: string | null,
+  model: string | null,
+) => invoke<StateView>("set_agent_tier", { agentId, slot, upstream, model });
+
+export const saveAgentRoutes = () => invoke<StateView>("save_agent_routes");
+
+export const applyHomeRouteToAllAgents = () =>
+  invoke<StateView>("apply_home_route_to_all_agents");
+
 export const saveConfig = () => invoke<StateView>("save_config");
 
 export const serveStart = () => invoke<StateView>("serve_start");
 export const serveStop = () => invoke<StateView>("serve_stop");
 
-export type AgentKind = "cc" | "codex" | "opencode";
+export const listenServeState = (handler: (serve: ServeView) => void) =>
+  listen<ServeView>("serve-state-changed", (event) => handler(event.payload));
 
-export const connectAgent = (kind: AgentKind) =>
-  invoke<string>("connect_agent", { kind });
+export const listAgentRegistry = () =>
+  invoke<AgentUiMetadataView[]>("list_agent_registry");
+
+export const scanAgents = () => invoke<AgentView[]>("scan_agents");
+
+export const planAgentConnection = (
+  agentId: AgentId,
+  installationPath: string,
+  options?: { expectedVersion: string },
+) => invoke<ConfigPlanView>("plan_agent_connection", {
+  agentId,
+  installationPath,
+  ...(options ? options : {}),
+});
+
+export const applyAgentPlan = (
+  operationId: string,
+  confirmationToken: string,
+  experimentalCompatibilityConfirmed = false,
+) => invoke<AgentOperationView>("apply_agent_plan", {
+  operationId,
+  confirmationToken,
+  ...(experimentalCompatibilityConfirmed ? { experimentalCompatibilityConfirmed: true } : {}),
+});
+
+export const planAgentDisconnect = (agentId: AgentId, installationPath: string) =>
+  invoke<ConfigPlanView>("plan_agent_disconnect", { agentId, installationPath });
+
+export const listAgentSnapshots = (agentId: AgentId) =>
+  invoke<SnapshotView[]>("list_agent_snapshots", { agentId });
+
+export const planSnapshotRestore = (snapshotId: string) =>
+  invoke<ConfigPlanView>("plan_snapshot_restore", { snapshotId });
+
+export const applySnapshotRestore = (operationId: string, confirmationToken: string) =>
+  invoke<AgentOperationView>("apply_snapshot_restore", {
+    operationId,
+    confirmationToken,
+  });
 
 export const setSettings = (auth: boolean, metrics: boolean) =>
   invoke<StateView>("set_settings", { auth, metrics });
@@ -150,7 +349,7 @@ export const setSettings = (auth: boolean, metrics: boolean) =>
 // Read-only data plane: prefer local HTTP `/admin/*` so the same frontend can run without the Tauri shell
 // (direct browser development and a future remote console). In the Tauri shell, IPC is the fallback if the proxy is stopped or the request fails
 // IPC keeps the usage and routing-table pages available when the proxy is stopped. It reads drafts and the local database. This matches
-// Behavior matches the state before the change. Privileged operations, including connect_agent, configuration writes, and secrets, use IPC only and never HTTP.
+// Behavior matches the state before the change. Privileged operations, including Agent transactions, configuration writes, and secrets, use IPC only and never HTTP.
 
 const IN_TAURI = "__TAURI_INTERNALS__" in window;
 
@@ -159,8 +358,8 @@ let adminKey: string | null = null;
 
 /** Synchronize the data-plane endpoint whenever App.tsx refreshes state. */
 export function setAdminEndpoint(serve: ServeView) {
-  adminBase = serve.running ? `http://${serve.listen}` : null;
-  adminKey = serve.virtual_key;
+  adminBase = serve.phase === "running" ? `http://${serve.listen}` : null;
+  adminKey = serve.phase === "running" ? serve.virtual_key : null;
 }
 
 // Browser-only mode without a Tauri shell cannot call get_state. Read the endpoint from localStorage,

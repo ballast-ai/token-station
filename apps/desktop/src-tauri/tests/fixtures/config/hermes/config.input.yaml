@@ -1,0 +1,11 @@
+# keep Hermes root comment
+_config_version: 33
+model:
+  default: original/model # keep model comment
+  provider: original-provider
+  base_url: https://original.invalid/v1
+  api_key: original-fixture-key
+  api_mode: anthropic_messages
+  unknown_model_setting: keep-me
+display:
+  skin: default # keep unrelated comment

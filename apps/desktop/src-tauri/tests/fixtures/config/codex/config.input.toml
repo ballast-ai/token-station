@@ -1,0 +1,4 @@
+# keep root comment
+[features]
+# keep apps comment
+apps = false

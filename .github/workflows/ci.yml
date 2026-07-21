@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   rust:
     runs-on: ubuntu-latest
@@ -58,3 +61,175 @@ jobs:
         with:
           tool: cargo-audit
       - run: cargo audit
+
+  desktop-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Tauri Linux system dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            apps/desktop/src-tauri
+            plugins/official/agent-anthropic
+            plugins/official/agent-openai
+            plugins/official/agent-openai-responses
+            plugins/official/provider-openai-compatible
+      - name: Prepare official plugins for desktop gateway tests
+        run: scripts/prepare-desktop-test-plugins.sh
+      - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - run: cargo doc --manifest-path apps/desktop/src-tauri/Cargo.toml --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: npm --prefix apps/desktop ci
+      - run: npm --prefix apps/desktop run test:coverage
+      - run: npm --prefix apps/desktop run build
+
+  rust-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+          targets: wasm32-wasip2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            .
+            plugins/official/agent-anthropic
+            plugins/official/agent-openai
+            plugins/official/agent-openai-responses
+            plugins/official/provider-openai-compatible
+            crates/plugin-runtime/tests/guests/test-provider
+      - run: >-
+          cargo llvm-cov --workspace --coverage-host-only --summary-only
+          --fail-under-lines 80
+
+  desktop-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Tauri Linux system dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+          targets: wasm32-wasip2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            apps/desktop/src-tauri
+            plugins/official/agent-anthropic
+            plugins/official/agent-openai
+            plugins/official/agent-openai-responses
+            plugins/official/provider-openai-compatible
+      - name: Prepare official plugins for desktop gateway tests
+        run: scripts/prepare-desktop-test-plugins.sh
+      - run: >-
+          cargo llvm-cov --manifest-path apps/desktop/src-tauri/Cargo.toml
+          --lcov --output-path apps/desktop/src-tauri/target/desktop-agent.lcov
+      - name: Enforce desktop Rust line coverage
+        run: >-
+          node scripts/check-coverage-thresholds.mjs
+          apps/desktop/src-tauri/target/desktop-agent.lcov
+          apps/desktop/src-tauri/src 90
+      - run: >-
+          node scripts/check-coverage-thresholds.mjs
+          apps/desktop/src-tauri/target/desktop-agent.lcov
+          apps/desktop/src-tauri/src/agent_integration 90
+
+  agent-platform-targeted:
+    name: Agent platform checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: apps/desktop/src-tauri
+      # Run only repository fixtures and in-memory key or key-decoding boundaries. Never install or upgrade an Agent.
+      - run: >-
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+          discovery_platform_templates_expand_without_touching_the_filesystem
+      - run: >-
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+          discovery_windows_path_enumerates_native_files_and_reports_shell_shims
+      - run: >-
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+          snapshot_validation_rejects_malformed_index_envelope_and_hex
+
+  desktop-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - run: node scripts/check-rustsec-exceptions.mjs
+      - run: >-
+          cargo audit -D unsound
+          --file apps/desktop/src-tauri/Cargo.lock
+          --ignore RUSTSEC-2024-0429
+      - run: >-
+          cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml
+          --config apps/desktop/src-tauri/deny.toml check

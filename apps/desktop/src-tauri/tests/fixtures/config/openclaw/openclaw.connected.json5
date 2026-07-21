@@ -1,0 +1,25 @@
+// Isolated OpenClaw 2026.6.11 validation fixture
+{
+  gateway: { mode: 'local' },
+  models: {
+    providers: {
+      tokenstation: {
+        baseUrl: 'http://127.0.0.1:8787/v1',
+        apiKey: 'fixture-local-key',
+        api: 'openai-completions',
+        models: [{
+          id: 'auto',
+          name: 'Token Station Auto',
+          reasoning: false,
+          input: ['text'],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 200000,
+          maxTokens: 32000,
+        }],
+      },
+    },
+  },
+  agents: {
+    defaults: { model: { primary: 'tokenstation/auto' } },
+  },
+}

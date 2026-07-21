@@ -1,129 +1,128 @@
-# Connect OpenClaw to DeepSeek through Token Station
+# Secure OpenClaw Connection Guide
 
-The OpenClaw custom model provider uses `openai-completions`. Token Station
-receives requests at `POST /v1/chat/completions`. It routes them to DeepSeek
-through `agent-openai` and the Canonical IR. See the sample configuration:
-[apps/cli/openclaw-deepseek-config.json](../../apps/cli/openclaw-deepseek-config.json).
+Token Station Desktop can automatically find  OpenClaw starting with
+`0.1.0`. It creates a configuration preview for accepted versions. The current exact
+accepted version is `2026.6.11`. Other versions have the “unknown” state, so
+Token Station does not write their configuration. Before the accepted range
+expands, add fixtures for the new version, verify the official schema, and run
+isolated acceptance.
 
-This instance listens on `127.0.0.1:8793`. It writes data to
-`token-station-m4/openclaw/data`. It does not read existing OpenClaw state.
+Official sources:
 
-## 1. Plugins and isolated service
+- [OpenClaw v2026.6.11](https://github.com/openclaw/openclaw/releases/tag/v2026.6.11)
+- [JSON5 configuration and paths](https://docs.openclaw.ai/gateway/configuration)
+- [Custom Provider fields](https://docs.openclaw.ai/gateway/config-tools)
 
-This procedure shares `agent-openai` and
-`provider-openai-compatible` with OpenCode. Install them once as shown in the
-OpenCode guide. Then use a separate terminal:
+## 1. Automatic discovery
 
-```bash
-export DEEPSEEK_API_KEY='your DeepSeek API Key'
-./target/release/token-station-cli \
-  --config apps/cli/openclaw-deepseek-config.json upstream list
-./target/release/token-station-cli \
-  --config apps/cli/openclaw-deepseek-config.json rule list
-./target/release/token-station-cli \
-  --config apps/cli/openclaw-deepseek-config.json serve
+The desktop app performs these read-only checks:
+
+- Executable: `openclaw`. Version command: `openclaw --version`.
+- Explicit path: `OPENCLAW_CONFIG_PATH`.
+- State directory: `OPENCLAW_STATE_DIR/openclaw.json`.
+- Default path: `~/.openclaw/openclaw.json`.
+- Compatible environments: macOS, Linux, Windows, and WSL fixtures.
+
+The scan does not run install, update, doctor, or repair. It does not create an
+OpenClaw directory. It does not start Gateway. If the scan finds multiple
+installations, select one target.
+
+## 2. Preview before connection
+
+Select OpenClaw on the Agents page and select **Preview Connection**.
+The page shows the target configuration and these owned paths:
+
+
+
+```text
+/models/providers/tokenstation
+/agents/defaults/model/primary
 ```
 
-## 2. Temporary OpenClaw state and configuration
-
-Override HOME, the configuration path, and the state directory. This prevents
-migration of old OpenClaw state from accessing `~/.openclaw`.
-
-```bash
-export TS_VIRTUAL_KEY="$(tr -d '\r\n' < token-station-m4/openclaw/data/virtual-key)"
-export HOME=/tmp/token-station-m4-openclaw-home
-export OPENCLAW_STATE_DIR=/tmp/token-station-m4-openclaw-state
-export OPENCLAW_CONFIG_PATH=/tmp/token-station-m4-openclaw-config.json5
-mkdir -p "$HOME" "$OPENCLAW_STATE_DIR" /tmp/token-station-m4-openclaw-work
-```
-
-Write this JSON5 to `$OPENCLAW_CONFIG_PATH`. OpenClaw resolves
-`${TS_VIRTUAL_KEY}` from the environment at runtime.
+The Connector writes this core structure:
 
 ```json5
 {
   models: {
-    mode: "replace",
     providers: {
-      "token-station": {
-        baseUrl: "http://127.0.0.1:8793/v1",
-        apiKey: "${TS_VIRTUAL_KEY}",
+      tokenstation: {
+        baseUrl: "http://127.0.0.1:8787/v1",
+        apiKey: "<local virtual key>",
         api: "openai-completions",
         models: [{
           id: "auto",
-          name: "Token Station routed model",
+          name: "Token Station Auto",
           reasoning: false,
           input: ["text"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: 1000000,
-          maxTokens: 8192
-        }]
-      }
-    }
+          contextWindow: 200000,
+          maxTokens: 32000,
+        }],
+      },
+    },
   },
   agents: {
-    defaults: {
-      model: { primary: "token-station/auto" },
-      workspace: "/tmp/token-station-m4-openclaw-work"
-    }
-  }
+    defaults: { model: { primary: "tokenstation/auto" } },
+  },
 }
 ```
 
-Run the standard streaming acceptance test:
+Token Station does not own existing `channels`, Gateway, MCP, browser access,
+skills, other providers, or other Agent defaults. The syntax-tree projection
+preserves JSON5 comments, trailing commas, and unknown fields. It rejects
+duplicate keys, invalid JSON5, and parent-type errors on owned paths before
+writing.
 
-```bash
-openclaw agent --local --agent main --model token-station/auto \
-  --message 'Reply only with this exact marker: OPENCLAW_M4_OK' --json
-```
+The Connector also rejects the connection when the root object or an ancestor
+of an owned path uses `$include`. Adding a sibling directly can change
+OpenClaw include merge and override semantics. Do not risk configuration loss
+until include-aware multi-file transactions are available.
 
-For the tool-loop test, put a read-only `marker.txt` in the temporary
-workspace. Require the Agent to read it with the read tool and return its exact
-content. Do not give the Agent a task that modifies the repository or a user
-directory.
+## 3. Confirmation, write, and recovery
 
-## 3. Error path, audit, and cleanup
+The backend writes only when all conditions are true:
 
-Test a local authentication error:
+1. The version exactly matches the compatibility catalog.
+2. The installation and configuration path still match the latest scan.
+3. `agent-openai` is loaded in the Token Station runtime.
+4. The user confirms the installation, target configuration, and redacted differences.
+5. The plan and confirmation token are not expired.
 
-```bash
-TS_VIRTUAL_KEY='intentionally-wrong' \
-openclaw agent --local --agent main --model token-station/auto \
-  --message 'Reply with AUTH_TEST' --json
-```
+After confirmation, The backend creates an AES-256-GCM encrypted snapshot.
+It atomically replaces and reparses the configuration. It then runs a self-check
+and commits ownership. The snapshot master key is stored in the OS keychain.
 
-The request must receive an OpenAI-shaped 401 and must not reach the upstream.
-To test a controlled upstream error, restart only the isolated instance on
-port 8793 with an invalid `DEEPSEEK_API_KEY`. Send one request. Confirm that
-retries are bounded.
+**Disconnect** removes only the two owned paths. It
+preserves other fields that the user changed after connection. If the user or
+another tool changes an owned value, Token Station refuses the write and requires a new preview.
+**Restore Snapshot** uses the same confirmation flow.
 
-```bash
-./target/release/token-station-cli \
-  --config apps/cli/openclaw-deepseek-config.json stats --since all
-rg -n 'OPENCLAW_M4_OK|intentionally-wrong|sk-' \
-  token-station-m4/openclaw/data/requests.log || true
-```
+Historical `openclaw.json.token-station.bak` files are read-only candidates.
+Token Station does not overwrite, delete, or restore them automatically.
 
-Logs and metrics must not contain prompts, responses, or credentials. Stop the
-service when the test is complete. Then delete only these paths:
+## 4. Behavior after an OpenClaw update
 
-```bash
-rm -rf /tmp/token-station-m4-openclaw-state \
-  /tmp/token-station-m4-openclaw-home \
-  /tmp/token-station-m4-openclaw-work \
-  /tmp/token-station-m4-openclaw-config.json5
-```
+For example, after an update from `2026.6.11` to `2026.7.1`, the built-in
+catalog returns `DETECTED_UNKNOWN`:
 
-All listed paths belong to this procedure. Do not delete the user's
-`~/.openclaw`.
+- It continues to show the installation path, version, and diagnostics.
+- It does not create a connection plan.
+- A connected installation keeps safe disconnect and recovery actions.
+- Token Station does not downgrade or upgrade OpenClaw automatically.
+- A later signed compatibility catalog can add exact accepted versions without
+  remotely delivering Connector code.
 
-## 4. Current boundaries
+If a new version changes the `openclaw.json` schema, add an `openclaw-v2`
+Connector. Keep old versions bound to `openclaw-v1`. Do not silently change
+owned paths under the same Connector ID.
 
-- This procedure covers the OpenAI Chat Completions text stream and the local function-tool path.
-- Structured output is not supported. If `response_format.type` is `json_schema`
-  or `json_object`, the adapter returns a capability error before the router
-  or upstream receives the request.
-- OpenClaw gateway, remote channels, MCP, browser access, and user-level skills are outside acceptance.
-- `reasoning: false` is a model declaration. It does not mean that Responses
-  reasoning is implemented. This Agent uses `agent-openai`, not
-  `agent-openai-responses`.
+## 5. Protocol boundaries
+
+OpenClaw `openai-completions` requests enter Token Station at
+`/v1/chat/completions` and use `agent-openai`. Existing protocol regressions
+cover text, streaming, and the main function-tool path. Gateway, remote
+channels, MCP, browser access, user skills, and OpenClaw installation or upgrade
+are outside this feature.
+
+This connection does not change `crates/router-core/**`. The Router receives
+normalized Canonical IR and has no special case for the name “OpenClaw.”

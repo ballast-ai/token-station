@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "catalog_version": "fixture-2",
+  "sequence": 2,
+  "issued_at_ms": 1000,
+  "expires_at_ms": 2000,
+  "minimum_app_version": "0.1.0",
+  "router_config": {"strategy": "remote-code-is-forbidden"},
+  "entries": []
+}

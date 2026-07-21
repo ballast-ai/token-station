@@ -20,7 +20,19 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use token_station_protocol::{ModelCapability, ProviderEndpoint};
-use token_station_router_core::{ConfigSource, RouterConfig};
+use token_station_router_core::{ConfigSource, RouterConfig, UpstreamModel, UpstreamRef};
+
+pub const KNOWN_AGENT_IDS: [&str; 5] = [
+    "claude-code",
+    "codex",
+    "opencode",
+    "openclaw",
+    "nous-hermes-agent",
+];
+
+const TIER_HIGH: &str = "tier_high";
+const TIER_MID: &str = "tier_mid";
+const TIER_LOW: &str = "tier_low";
 
 /// The whole client configuration file.
 ///
@@ -37,12 +49,69 @@ pub struct ClientConfig {
     /// use, validated to the same credential-proof shape by `UpstreamRef`.
     pub upstreams: BTreeMap<String, UpstreamConfig>,
     pub router: RouterConfig,
+    /// Optional per-Agent three-tier overrides. An absent entry inherits the
+    /// home router, keeping every pre-Agent-routes configuration compatible.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_routes: BTreeMap<String, AgentRouteConfig>,
     /// Where the request log and metrics store live. Optional; defaults apply.
     #[serde(default)]
     pub data: DataConfig,
     /// When an upstream is taken out of rotation. Optional; defaults apply.
     #[serde(default)]
     pub health: HealthConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRouteMode {
+    Inherit,
+    Custom,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRouteConfig {
+    pub mode: AgentRouteMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_route: Option<AgentTierRoutes>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTierRoutes {
+    pub high: AgentRouteTarget,
+    pub mid: AgentRouteTarget,
+    pub low: AgentRouteTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRouteTarget {
+    pub upstream: String,
+    pub model: String,
+}
+
+impl AgentTierRoutes {
+    fn entries(&self) -> [(&'static str, &AgentRouteTarget); 3] {
+        [
+            (TIER_HIGH, &self.high),
+            (TIER_MID, &self.mid),
+            (TIER_LOW, &self.low),
+        ]
+    }
+
+    fn materialize(&self, home: &RouterConfig) -> Result<RouterConfig, String> {
+        let mut router = home.clone();
+        for (pool, target) in self.entries() {
+            let upstream = UpstreamRef::new(target.upstream.clone())
+                .map_err(|error| format!("Agent route {pool} has invalid upstream: {error}"))?;
+            router.pools.insert(
+                pool.to_owned(),
+                vec![UpstreamModel::new(upstream, target.model.clone())],
+            );
+        }
+        Ok(router)
+    }
 }
 
 /// The client's ejection policy (C1#2's simplified health check).
@@ -204,6 +273,35 @@ pub struct AuthConfig {
 }
 
 impl ClientConfig {
+    #[must_use]
+    pub fn is_known_agent_id(agent_id: &str) -> bool {
+        KNOWN_AGENT_IDS.contains(&agent_id)
+    }
+
+    /// Returns a validated custom router document for `agent_id`, or `None`
+    /// when that Agent inherits the home router.
+    ///
+    /// # Errors
+    ///
+    /// The Agent ID is unknown, custom mode has no three-tier route, or one of
+    /// its upstream references cannot be represented safely.
+    pub fn custom_router_for_agent(&self, agent_id: &str) -> Result<Option<RouterConfig>, String> {
+        if !Self::is_known_agent_id(agent_id) {
+            return Err(format!("unknown Agent route id `{agent_id}`"));
+        }
+        let Some(route) = self.agent_routes.get(agent_id) else {
+            return Ok(None);
+        };
+        match route.mode {
+            AgentRouteMode::Inherit => Ok(None),
+            AgentRouteMode::Custom => route
+                .custom_route
+                .as_ref()
+                .ok_or_else(|| format!("Agent `{agent_id}` custom mode requires custom_route"))
+                .and_then(|tiers| tiers.materialize(&self.router).map(Some)),
+        }
+    }
+
     /// Reads and structurally validates a configuration file.
     ///
     /// Routability of the embedded router section is *not* checked here — that
@@ -319,6 +417,39 @@ impl ClientConfig {
             }
         }
 
+        for (agent_id, route) in &self.agent_routes {
+            if !Self::is_known_agent_id(agent_id) {
+                return Err(format!("unknown Agent route id `{agent_id}`"));
+            }
+            if route.mode == AgentRouteMode::Custom && route.custom_route.is_none() {
+                return Err(format!(
+                    "Agent `{agent_id}` custom mode requires custom_route"
+                ));
+            }
+            if let Some(tiers) = &route.custom_route {
+                for (pool, target) in tiers.entries() {
+                    UpstreamRef::new(target.upstream.clone())
+                        .map_err(|error| format!("Agent `{agent_id}` {pool} upstream: {error}"))?;
+                    let upstream = self.upstreams.get(&target.upstream).ok_or_else(|| {
+                        format!(
+                            "Agent `{agent_id}` {pool} routes to upstream `{}`, which is not configured",
+                            target.upstream
+                        )
+                    })?;
+                    if !upstream
+                        .models
+                        .iter()
+                        .any(|capability| capability.model == target.model)
+                    {
+                        return Err(format!(
+                            "Agent `{agent_id}` {pool} routes to model `{}` not declared by upstream `{}`",
+                            target.model, target.upstream
+                        ));
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -426,7 +557,107 @@ mod tests {
         let config = ClientConfig::load(&path).expect("the example must stay loadable");
 
         assert_eq!(config.plugins.effective_agents(), ["agent-openai"]);
+        assert!(config.agent_routes.is_empty());
         fs::remove_file(path).ok();
+    }
+
+    fn three_tiers(upstream: &str, model: &str) -> serde_json::Value {
+        serde_json::json!({
+            "high": { "upstream": upstream, "model": model },
+            "mid": { "upstream": upstream, "model": model },
+            "low": { "upstream": upstream, "model": model }
+        })
+    }
+
+    #[test]
+    fn agent_routes_are_optional_and_empty_routes_do_not_serialize() {
+        let config: ClientConfig = serde_json::from_value(example()).expect("example parses");
+        assert!(config.agent_routes.is_empty());
+        let encoded = serde_json::to_value(config).expect("config serializes");
+        assert!(encoded.get("agent_routes").is_none());
+    }
+
+    #[test]
+    fn custom_agent_routes_validate_and_materialize_only_the_three_tier_pools() {
+        let mut value = example();
+        value["agent_routes"] = serde_json::json!({
+            "codex": {
+                "mode": "custom",
+                "custom_route": three_tiers("openai_personal", "gpt-5.5")
+            },
+            "opencode": {
+                "mode": "inherit",
+                "custom_route": three_tiers("ollama_local", "llama3.3")
+            }
+        });
+        let path = scratch("agent-routes", &value.to_string());
+        let config = ClientConfig::load(&path).expect("Agent routes validate");
+
+        let codex = config
+            .custom_router_for_agent("codex")
+            .expect("known Agent")
+            .expect("custom RouterConfig");
+        for pool in ["tier_high", "tier_mid", "tier_low"] {
+            assert_eq!(codex.pools[pool][0].upstream.as_str(), "openai_personal");
+            assert_eq!(codex.pools[pool][0].model, "gpt-5.5");
+        }
+        assert!(
+            config
+                .custom_router_for_agent("opencode")
+                .expect("known Agent")
+                .is_none()
+        );
+        assert!(config.agent_routes["opencode"].custom_route.is_some());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn agent_route_ids_modes_and_targets_fail_closed() {
+        let cases = [
+            (
+                "unknown-agent",
+                serde_json::json!({
+                    "future-agent": { "mode": "inherit" }
+                }),
+                "unknown Agent route id",
+            ),
+            (
+                "custom-without-route",
+                serde_json::json!({
+                    "codex": { "mode": "custom" }
+                }),
+                "requires custom_route",
+            ),
+            (
+                "unknown-upstream",
+                serde_json::json!({
+                    "codex": {
+                        "mode": "custom",
+                        "custom_route": three_tiers("nowhere", "gpt-5.5")
+                    }
+                }),
+                "not configured",
+            ),
+            (
+                "unknown-model",
+                serde_json::json!({
+                    "codex": {
+                        "mode": "custom",
+                        "custom_route": three_tiers("openai_personal", "missing-model")
+                    }
+                }),
+                "not declared",
+            ),
+        ];
+
+        for (name, routes, expected) in cases {
+            let mut value = example();
+            value["agent_routes"] = routes;
+            let path = scratch(name, &value.to_string());
+            let error = ClientConfig::load(&path).expect_err("invalid Agent route is refused");
+            assert!(error.to_string().contains(expected), "{error}");
+            fs::remove_file(path).ok();
+        }
     }
 
     #[test]

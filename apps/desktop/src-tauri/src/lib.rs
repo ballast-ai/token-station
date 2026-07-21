@@ -9,24 +9,29 @@
 //! draft remains a serde_json::Value and materializes as ClientConfig only when
 //! saving or starting. Failed validation is reported to the user without writing.
 
+pub mod agent_integration;
 mod model_catalog;
+mod serve_lifecycle;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
-use token_station_cli::config::{ClientConfig, PluginsConfig};
-use token_station_cli::filelog::{FileLog, Recorders};
-use token_station_cli::gateway::Gateway;
+use token_station_cli::config::{ClientConfig, PluginsConfig, KNOWN_AGENT_IDS};
 use token_station_cli::plugins::{PluginRegistry, Receipts};
-use token_station_cli::store::SqliteStore;
-use token_station_cli::{secrets, server, stats, upgrade, virtual_key};
-use token_station_metrics::Recorder;
+use token_station_cli::{secrets, stats, upgrade};
+use token_station_router_core::UpstreamRef;
 
+use agent_integration::commands::{
+    apply_agent_plan, apply_snapshot_restore, list_agent_registry, list_agent_snapshots,
+    plan_agent_connection, plan_agent_disconnect, plan_snapshot_restore, scan_agents,
+    AgentCommandState,
+};
 use model_catalog::ModelDiscoveryView;
+use serve_lifecycle::{prepare_server, PreparedServer, RunningServer, StartFailure};
 
 /// Pool names for the three tier slots shown as the panel's high, middle, and low rows.
 const TIER_HIGH: &str = "tier_high";
@@ -42,11 +47,45 @@ const CUT_MID: u32 = 22;
 /// are mutually exclusive, so putting the general Chat Completions first does not consume Messages or Responses.
 const DESKTOP_AGENTS: [&str; 3] = ["agent-openai", "agent-anthropic", "agent-openai-responses"];
 
-/// Running serve instance. Stop it by shutting down this runtime; the listener then releases the port.
-struct RunningServer {
-    runtime: tokio::runtime::Runtime,
-    listen: String,
-    virtual_key: Option<String>,
+const SERVE_STATE_CHANGED_EVENT: &str = "serve-state-changed";
+
+enum ServerLifecycle {
+    Stopped {
+        generation: u64,
+    },
+    Starting {
+        generation: u64,
+        listen: String,
+    },
+    Stopping {
+        generation: u64,
+        listen: String,
+    },
+    Running {
+        generation: u64,
+        server: RunningServer,
+    },
+    Failed {
+        generation: u64,
+        listen: String,
+        error: String,
+    },
+}
+
+impl ServerLifecycle {
+    fn stopped() -> Self {
+        Self::Stopped { generation: 0 }
+    }
+
+    fn generation(&self) -> u64 {
+        match self {
+            Self::Stopped { generation }
+            | Self::Starting { generation, .. }
+            | Self::Stopping { generation, .. }
+            | Self::Running { generation, .. }
+            | Self::Failed { generation, .. } => *generation,
+        }
+    }
 }
 
 /// Global backend state protected by one lock; commands are short transactions.
@@ -58,11 +97,21 @@ struct AppInner {
     /// Preserve startup read or validation errors. Show a safe template but block
     /// writes so Save cannot silently overwrite the user's original file.
     load_error: Option<String>,
-    /// Currently running serve instance, if any.
-    server: Option<RunningServer>,
+    /// Authoritative proxy-service lifecycle state.
+    server: ServerLifecycle,
 }
 
 pub struct AppStateManaged(Mutex<AppInner>);
+
+/// OS application cache root injected by Tauri. Agent compatibility data is
+/// kept outside the repository and is not created until a valid signed remote
+/// catalog is actually accepted.
+#[derive(Clone)]
+pub struct AgentIntegrationPaths {
+    pub compatibility_cache_dir: PathBuf,
+    pub snapshot_root: PathBuf,
+    pub ownership_root: PathBuf,
+}
 
 // ---- Path anchor (repository root during development. Packaging handles it separately) -------------------------------
 
@@ -185,23 +234,43 @@ struct ProviderView {
     has_auth: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct TierView {
     upstream: Option<String>,
     model: Option<String>,
 }
 
 #[derive(Serialize)]
+struct AgentRouteView {
+    mode: String,
+    tiers: std::collections::BTreeMap<String, TierView>,
+    config_error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ServePhase {
+    Stopped,
+    Starting,
+    Stopping,
+    Running,
+    Error,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct ServeView {
+    phase: ServePhase,
     running: bool,
     listen: String,
     virtual_key: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Serialize)]
 struct StateView {
     providers: Vec<ProviderView>,
     tiers: std::collections::BTreeMap<String, TierView>,
+    agent_routes: std::collections::BTreeMap<String, AgentRouteView>,
     serve: ServeView,
     /// Whether the draft materializes as a valid config and can be saved or started.
     config_error: Option<String>,
@@ -365,6 +434,61 @@ impl AppInner {
         }
     }
 
+    fn home_tiers(&self) -> std::collections::BTreeMap<String, TierView> {
+        let mut tiers = std::collections::BTreeMap::new();
+        tiers.insert("high".to_string(), self.tier(TIER_HIGH));
+        tiers.insert("mid".to_string(), self.tier(TIER_MID));
+        tiers.insert("low".to_string(), self.tier(TIER_LOW));
+        tiers
+    }
+
+    fn agent_route_mode(&self, agent_id: &str) -> &str {
+        self.draft["agent_routes"][agent_id]["mode"]
+            .as_str()
+            .unwrap_or("inherit")
+    }
+
+    fn agent_tier(&self, agent_id: &str, slot: &str) -> TierView {
+        if self.agent_route_mode(agent_id) != "custom" {
+            return self.tier(pool_key(slot).expect("known UI tier slot"));
+        }
+        let target = &self.draft["agent_routes"][agent_id]["custom_route"][slot];
+        TierView {
+            upstream: target["upstream"].as_str().map(str::to_string),
+            model: target["model"].as_str().map(str::to_string),
+        }
+    }
+
+    fn agent_routes_view(&self) -> std::collections::BTreeMap<String, AgentRouteView> {
+        KNOWN_AGENT_IDS
+            .iter()
+            .map(|agent_id| {
+                let mode = self.agent_route_mode(agent_id).to_string();
+                let tiers = ["high", "mid", "low"]
+                    .into_iter()
+                    .map(|slot| (slot.to_string(), self.agent_tier(agent_id, slot)))
+                    .collect();
+                let config_error = if mode == "custom" {
+                    ["high", "mid", "low"].into_iter().find_map(|slot| {
+                        let tier = self.agent_tier(agent_id, slot);
+                        (tier.upstream.is_none() || tier.model.is_none())
+                            .then(|| format!("{slot} 档尚未配置供应商和模型"))
+                    })
+                } else {
+                    None
+                };
+                (
+                    (*agent_id).to_string(),
+                    AgentRouteView {
+                        mode,
+                        tiers,
+                        config_error,
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// Rebuild tier-pool references, heuristic bands, and default from configured
     /// tiers. Include only tiers with a selected upstream-model pair.
     fn rebuild_routing(&mut self) {
@@ -423,30 +547,52 @@ impl AppInner {
 
     fn serve_view(&self) -> ServeView {
         match &self.server {
-            Some(s) => ServeView {
-                running: true,
-                listen: s.listen.clone(),
-                virtual_key: s.virtual_key.clone(),
-            },
-            None => ServeView {
+            ServerLifecycle::Stopped { .. } => ServeView {
+                phase: ServePhase::Stopped,
                 running: false,
                 listen: self.draft["server"]["listen"]
                     .as_str()
                     .unwrap_or("127.0.0.1:8787")
                     .to_string(),
                 virtual_key: None,
+                error: None,
+            },
+            ServerLifecycle::Starting { listen, .. } => ServeView {
+                phase: ServePhase::Starting,
+                running: false,
+                listen: listen.clone(),
+                virtual_key: None,
+                error: None,
+            },
+            ServerLifecycle::Stopping { listen, .. } => ServeView {
+                phase: ServePhase::Stopping,
+                running: false,
+                listen: listen.clone(),
+                virtual_key: None,
+                error: None,
+            },
+            ServerLifecycle::Running { server, .. } => ServeView {
+                phase: ServePhase::Running,
+                running: true,
+                listen: server.listen().to_string(),
+                virtual_key: server.virtual_key().map(str::to_string),
+                error: None,
+            },
+            ServerLifecycle::Failed { listen, error, .. } => ServeView {
+                phase: ServePhase::Error,
+                running: false,
+                listen: listen.clone(),
+                virtual_key: None,
+                error: Some(error.clone()),
             },
         }
     }
 
     fn snapshot(&self) -> StateView {
-        let mut tiers = std::collections::BTreeMap::new();
-        tiers.insert("high".to_string(), self.tier(TIER_HIGH));
-        tiers.insert("mid".to_string(), self.tier(TIER_MID));
-        tiers.insert("low".to_string(), self.tier(TIER_LOW));
         StateView {
             providers: self.upstreams(),
-            tiers,
+            tiers: self.home_tiers(),
+            agent_routes: self.agent_routes_view(),
             serve: self.serve_view(),
             config_error: self.config_error(),
             settings: self.settings_view(),
@@ -520,6 +666,87 @@ impl AppInner {
         self.rebuild_routing();
         Ok(())
     }
+
+    fn validate_route_target(&self, upstream: &str, model: &str) -> Result<(), String> {
+        let configured = self.draft["upstreams"][upstream]
+            .as_object()
+            .ok_or_else(|| format!("未知供应商 `{upstream}`"))?;
+        let model_exists = configured["models"].as_array().is_some_and(|models| {
+            models
+                .iter()
+                .any(|entry| entry["model"].as_str() == Some(model))
+        });
+        model_exists
+            .then_some(())
+            .ok_or_else(|| format!("供应商 `{upstream}` 未配置模型 `{model}`"))
+    }
+
+    fn seed_agent_custom_route(&mut self, agent_id: &str) {
+        if self.draft["agent_routes"][agent_id]["custom_route"].is_object() {
+            return;
+        }
+        let mut custom = serde_json::Map::new();
+        for (slot, pool) in [("high", TIER_HIGH), ("mid", TIER_MID), ("low", TIER_LOW)] {
+            let tier = self.tier(pool);
+            custom.insert(
+                slot.to_string(),
+                match (tier.upstream, tier.model) {
+                    (Some(upstream), Some(model)) => {
+                        json!({ "upstream": upstream, "model": model })
+                    }
+                    _ => Value::Null,
+                },
+            );
+        }
+        self.draft["agent_routes"][agent_id]["custom_route"] = Value::Object(custom);
+    }
+
+    fn agent_custom_route_complete(&self, agent_id: &str) -> bool {
+        ["high", "mid", "low"].into_iter().all(|slot| {
+            let target = &self.draft["agent_routes"][agent_id]["custom_route"][slot];
+            target["upstream"].as_str().is_some() && target["model"].as_str().is_some()
+        })
+    }
+
+    fn set_agent_route_mode_value(&mut self, agent_id: &str, mode: &str) {
+        if mode == "custom" {
+            self.seed_agent_custom_route(agent_id);
+        } else if !self.agent_custom_route_complete(agent_id) {
+            // ClientConfig intentionally persists only executable routes. An
+            // incomplete desktop draft may be edited in custom mode, but once
+            // the user returns to inherit it must not poison an otherwise valid
+            // home configuration.
+            if let Some(route) = self.draft["agent_routes"][agent_id].as_object_mut() {
+                route.remove("custom_route");
+            }
+        }
+        self.draft["agent_routes"][agent_id]["mode"] = json!(mode);
+    }
+
+    fn set_agent_tier_value(
+        &mut self,
+        agent_id: &str,
+        slot: &str,
+        upstream: Option<String>,
+        model: Option<String>,
+    ) -> Result<(), String> {
+        ensure_known_agent_id(agent_id)?;
+        pool_key(slot)?;
+        self.seed_agent_custom_route(agent_id);
+        match (upstream, model) {
+            (Some(upstream), Some(model)) => {
+                self.validate_route_target(&upstream, &model)?;
+                self.draft["agent_routes"][agent_id]["custom_route"][slot] =
+                    json!({ "upstream": upstream, "model": model });
+            }
+            (None, None) => {
+                self.draft["agent_routes"][agent_id]["custom_route"][slot] = Value::Null;
+            }
+            _ => return Err("档位必须同时提供供应商和模型，或同时清空".to_string()),
+        }
+        self.draft["agent_routes"][agent_id]["mode"] = json!("custom");
+        Ok(())
+    }
 }
 
 fn pool_key(slot: &str) -> Result<&'static str, String> {
@@ -529,6 +756,13 @@ fn pool_key(slot: &str) -> Result<&'static str, String> {
         "low" => Ok(TIER_LOW),
         other => Err(format!("未知档位 `{other}`(应为 high/mid/low)")),
     }
+}
+
+fn ensure_known_agent_id(agent_id: &str) -> Result<(), String> {
+    KNOWN_AGENT_IDS
+        .contains(&agent_id)
+        .then_some(())
+        .ok_or_else(|| format!("未知 Agent `{agent_id}`"))
 }
 
 // ---- Tauri commands ---------------------------------------------------------------
@@ -550,6 +784,8 @@ fn add_provider(
     if name.trim().is_empty() {
         return Err("供应商名不能为空".into());
     }
+    let name = name.trim().to_string();
+    UpstreamRef::new(name.clone()).map_err(|error| format!("供应商名不合法: {error}"))?;
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
 
@@ -687,6 +923,26 @@ fn replace_provider_models(
         ));
     }
 
+    let mut agent_blocked = Vec::new();
+    for agent_id in KNOWN_AGENT_IDS {
+        for slot in ["high", "mid", "low"] {
+            let target = &inner.draft["agent_routes"][agent_id]["custom_route"][slot];
+            let refers_to_provider = target["upstream"].as_str() == Some(name);
+            let retained = target["model"]
+                .as_str()
+                .is_some_and(|model| normalized.iter().any(|candidate| candidate == model));
+            if refers_to_provider && !retained {
+                agent_blocked.push(format!("{agent_id}/{slot}"));
+            }
+        }
+    }
+    if !agent_blocked.is_empty() {
+        return Err(format!(
+            "不能移除 Agent 独立路由 {} 正在使用的模型，请先调整对应档位",
+            agent_blocked.join("、")
+        ));
+    }
+
     let existing: std::collections::BTreeMap<String, Value> = upstream["models"]
         .as_array()
         .into_iter()
@@ -752,6 +1008,20 @@ fn remove_provider(state: State<'_, AppStateManaged>, name: String) -> Result<St
             }
         }
     }
+    // Independent Agent routes store only provider and model references. If a provider is deleted, an independent draft that references it
+    // It cannot be restored as valid configuration. Safely fall back to the home page and clear the invalid draft.
+    for agent_id in KNOWN_AGENT_IDS {
+        let refers = ["high", "mid", "low"].into_iter().any(|slot| {
+            inner.draft["agent_routes"][agent_id]["custom_route"][slot]["upstream"].as_str()
+                == Some(name.as_str())
+        });
+        if refers {
+            inner.draft["agent_routes"][agent_id]["mode"] = json!("inherit");
+            if let Some(route) = inner.draft["agent_routes"][agent_id].as_object_mut() {
+                route.remove("custom_route");
+            }
+        }
+    }
     inner.rebuild_routing();
     Ok(inner.snapshot())
 }
@@ -769,6 +1039,61 @@ fn set_tier(
     inner.ensure_editable()?;
 
     inner.set_tier_value(pool, upstream, model)?;
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn set_agent_route_mode(
+    state: State<'_, AppStateManaged>,
+    agent_id: String,
+    mode: String,
+) -> Result<StateView, String> {
+    ensure_known_agent_id(&agent_id)?;
+    if mode != "inherit" && mode != "custom" {
+        return Err("路由模式必须是 inherit 或 custom".to_string());
+    }
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.set_agent_route_mode_value(&agent_id, &mode);
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn set_agent_tier(
+    state: State<'_, AppStateManaged>,
+    agent_id: String,
+    slot: String,
+    upstream: Option<String>,
+    model: Option<String>,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.set_agent_tier_value(&agent_id, &slot, upstream, model)?;
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn save_agent_routes(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
+    let inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let config = inner.materialize()?;
+    config
+        .save(&inner.config_path)
+        .map_err(|error| format!("写配置失败: {error}"))?;
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn apply_home_route_to_all_agents(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    for agent_id in KNOWN_AGENT_IDS {
+        inner.set_agent_route_mode_value(agent_id, "inherit");
+    }
+    let config = inner.materialize()?;
+    config
+        .save(&inner.config_path)
+        .map_err(|error| format!("写配置失败: {error}"))?;
     Ok(inner.snapshot())
 }
 
@@ -791,131 +1116,205 @@ fn save_config(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
     Ok(inner.snapshot())
 }
 
-#[tauri::command]
-fn serve_start(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
-    let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    if inner.server.is_some() {
-        return Ok(inner.snapshot());
-    }
-    let config = inner.materialize()?;
-
-    // recorder: always write file logs and gate the metrics database by its setting. Neither contains prompt content.
-    let mut sinks: Vec<Box<dyn Recorder>> = vec![Box::new(FileLog::open(&config.data.dir)?)];
-    if config.data.metrics {
-        sinks.push(Box::new(SqliteStore::open(
-            &config.data.dir.join("metrics.sqlite"),
-        )?));
-    }
-    let gateway = Arc::new(Gateway::new(&config, Arc::new(Recorders(sinks)))?);
-
-    let key = if config.server.auth {
-        let (key, _created) = virtual_key::load_or_create(&config.data.dir)?;
-        Some(key)
-    } else {
-        None
-    };
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("tokio runtime: {e}"))?;
-
-    let listen = config.server.listen.clone();
-    let listener = runtime
-        .block_on(async { tokio::net::TcpListener::bind(&listen).await })
-        .map_err(|e| format!("绑定 {listen} 失败: {e}"))?;
-
-    let app_state = server::AppState {
-        gateway,
-        virtual_key: key.clone().map(Arc::from),
-        admin: Arc::new(token_station_cli::admin::AdminContext {
-            data_dir: config.data.dir.clone(),
-            router: config.router.clone(),
-            plugins: config.plugins.clone(),
-        }),
-    };
-    runtime.spawn(async move {
-        let _ = server::serve(app_state, listener).await;
-    });
-
-    inner.server = Some(RunningServer {
-        runtime,
-        listen,
-        virtual_key: key,
-    });
-    Ok(inner.snapshot())
+fn emit_serve_state<R: Runtime>(app: &AppHandle<R>, view: &ServeView) {
+    let _ = app.emit(SERVE_STATE_CHANGED_EVENT, view.clone());
 }
 
-#[tauri::command]
-fn serve_stop(state: State<'_, AppStateManaged>) -> StateView {
-    let mut inner = state.0.lock().unwrap();
-    if let Some(s) = inner.server.take() {
-        s.runtime.shutdown_background();
-    }
-    inner.snapshot()
-}
-
-fn home_dir() -> Result<PathBuf, String> {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .map_err(|_| "读不到 HOME".to_string())
-}
-
-/// Read an optional JSON object configuration. If the file exists but is unreadable, contains invalid JSON, or has a non-object root,
-/// Return the original error. Do not fall back to an empty object and overwrite the user configuration.
-fn read_json_object(path: &std::path::Path, label: &str) -> Result<Value, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => {
-            let value: Value = serde_json::from_str(&text)
-                .map_err(|error| format!("{label} 不是合法 JSON（{}）：{error}", path.display()))?;
-            if value.is_object() {
-                Ok(value)
-            } else {
-                Err(format!("{label} 顶层必须是对象（{}）", path.display()))
+fn complete_serve_start<R: Runtime>(
+    app: &AppHandle<R>,
+    generation: u64,
+    result: Result<PreparedServer, StartFailure>,
+) {
+    match result {
+        Ok(prepared) => {
+            let mut prepared = Some(prepared);
+            let view = {
+                let state = app.state::<AppStateManaged>();
+                let mut inner = state.0.lock().unwrap();
+                match &inner.server {
+                    ServerLifecycle::Starting {
+                        generation: current,
+                        ..
+                    } if *current == generation => {
+                        let running = prepared
+                            .take()
+                            .expect("prepared server is present")
+                            .publish();
+                        inner.server = ServerLifecycle::Running {
+                            generation,
+                            server: running,
+                        };
+                        Some(inner.serve_view())
+                    }
+                    ServerLifecycle::Stopping {
+                        generation: current,
+                        ..
+                    } if *current == generation => {
+                        // Keep `Stopping` authoritative until the prepared listener
+                        // is dropped outside the mutex below.
+                        None
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(prepared) = prepared {
+                prepared.discard();
+                complete_serve_stop(app, generation);
+            }
+            if let Some(view) = view {
+                emit_serve_state(app, &view);
             }
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
-        Err(error) => Err(format!("读取 {label} 失败（{}）：{error}", path.display())),
+        Err(failure) => {
+            let view = {
+                let state = app.state::<AppStateManaged>();
+                let mut inner = state.0.lock().unwrap();
+                match &inner.server {
+                    ServerLifecycle::Starting {
+                        generation: current,
+                        listen,
+                    } if *current == generation => {
+                        inner.server = ServerLifecycle::Failed {
+                            generation,
+                            listen: listen.clone(),
+                            error: failure.public_message(),
+                        };
+                        Some(inner.serve_view())
+                    }
+                    ServerLifecycle::Stopping {
+                        generation: current,
+                        ..
+                    } if *current == generation => {
+                        inner.server = ServerLifecycle::Stopped { generation };
+                        Some(inner.serve_view())
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(view) = view {
+                emit_serve_state(app, &view);
+            }
+        }
     }
 }
 
-fn backup_path(path: &std::path::Path) -> PathBuf {
-    path.with_extension(format!(
-        "{}.token-station.bak",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("bak")
-    ))
+fn begin_serve_start<R, F>(
+    app: AppHandle<R>,
+    state: &AppStateManaged,
+    prepare: F,
+) -> Result<StateView, String>
+where
+    R: Runtime,
+    F: FnOnce(ClientConfig) -> Result<PreparedServer, StartFailure> + Send + 'static,
+{
+    let (config, generation, snapshot, serve_view) = {
+        let mut inner = state.0.lock().unwrap();
+        inner.ensure_editable()?;
+        match &inner.server {
+            ServerLifecycle::Starting { .. } | ServerLifecycle::Running { .. } => {
+                return Ok(inner.snapshot());
+            }
+            ServerLifecycle::Stopping { .. } => {
+                return Err(
+                    "startup_cleanup_in_progress: 上一次代理正在停止，请稍后重试".to_string(),
+                );
+            }
+            ServerLifecycle::Stopped { .. } | ServerLifecycle::Failed { .. } => {}
+        }
+        let config = inner.materialize()?;
+        let generation = inner
+            .server
+            .generation()
+            .checked_add(1)
+            .ok_or_else(|| "代理启动 generation 已耗尽，请重启 App".to_string())?;
+        let listen = config.server.listen.clone();
+        inner.server = ServerLifecycle::Starting { generation, listen };
+        let snapshot = inner.snapshot();
+        let serve_view = snapshot.serve.clone();
+        (config, generation, snapshot, serve_view)
+    };
+
+    emit_serve_state(&app, &serve_view);
+    let completion_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = tauri::async_runtime::spawn_blocking(move || prepare(config))
+            .await
+            .unwrap_or_else(|error| Err(StartFailure::new("startup_task", error)));
+        complete_serve_start(&completion_app, generation, result);
+    });
+    Ok(snapshot)
 }
 
-/// Create a reliable backup, then atomically replace the configuration with a same-directory temporary file and rename.
-fn write_config(path: &std::path::Path, rendered: &str, label: &str) -> Result<(), String> {
-    match std::fs::read(path) {
-        Ok(original) => {
-            let backup = backup_path(path);
-            std::fs::write(&backup, original)
-                .map_err(|error| format!("备份 {label} 失败（{}）：{error}", backup.display()))?;
+#[tauri::command]
+fn serve_start(app: AppHandle, state: State<'_, AppStateManaged>) -> Result<StateView, String> {
+    begin_serve_start(app, state.inner(), prepare_server)
+}
+
+fn complete_serve_stop<R: Runtime>(app: &AppHandle<R>, generation: u64) {
+    let view = {
+        let state = app.state::<AppStateManaged>();
+        let mut inner = state.0.lock().unwrap();
+        match &inner.server {
+            ServerLifecycle::Stopping {
+                generation: current,
+                ..
+            } if *current == generation => {
+                inner.server = ServerLifecycle::Stopped { generation };
+                Some(inner.serve_view())
+            }
+            _ => None,
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "读取 {label} 以备份失败（{}）：{error}",
-                path.display()
-            ))
-        }
+    };
+    if let Some(view) = view {
+        emit_serve_state(app, &view);
     }
-    let file_name = path
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .ok_or_else(|| format!("{label} 路径没有文件名：{}", path.display()))?;
-    let temporary = path.with_file_name(format!(".{file_name}.token-station.tmp"));
-    std::fs::write(&temporary, rendered).map_err(|error| {
-        format!(
-            "写 {label} 临时文件失败（{}）：{error}",
-            temporary.display()
-        )
-    })?;
-    std::fs::rename(&temporary, path)
-        .map_err(|error| format!("替换 {label} 失败（{}）：{error}", path.display()))
+}
+
+fn begin_serve_stop<R: Runtime>(app: AppHandle<R>, state: &AppStateManaged) -> StateView {
+    let (generation, snapshot, serve_view, running) = {
+        let mut inner = state.0.lock().unwrap();
+        let generation = inner.server.generation();
+        let current = std::mem::replace(&mut inner.server, ServerLifecycle::Stopped { generation });
+        let mut running = None;
+        let changed = match current {
+            ServerLifecycle::Running { server, .. } => {
+                let listen = server.listen().to_string();
+                inner.server = ServerLifecycle::Stopping { generation, listen };
+                running = Some(server);
+                true
+            }
+            ServerLifecycle::Starting { listen, .. } => {
+                inner.server = ServerLifecycle::Stopping { generation, listen };
+                true
+            }
+            ServerLifecycle::Stopping { listen, .. } => {
+                inner.server = ServerLifecycle::Stopping { generation, listen };
+                false
+            }
+            ServerLifecycle::Failed { .. } => true,
+            ServerLifecycle::Stopped { .. } => false,
+        };
+        let snapshot = inner.snapshot();
+        let serve_view = changed.then(|| snapshot.serve.clone());
+        (generation, snapshot, serve_view, running)
+    };
+
+    if let Some(serve_view) = serve_view {
+        emit_serve_state(&app, &serve_view);
+    }
+    if let Some(running) = running {
+        let completion_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = tauri::async_runtime::spawn_blocking(move || running.shutdown()).await;
+            complete_serve_stop(&completion_app, generation);
+        });
+    }
+    snapshot
+}
+
+#[tauri::command]
+fn serve_stop(app: AppHandle, state: State<'_, AppStateManaged>) -> StateView {
+    begin_serve_stop(app, state.inner())
 }
 
 /// Claude Code: write the env block to `~/.claude/settings.json` (embedded key; CC reads it directly, with no
@@ -939,6 +1338,10 @@ fn responses_inbound_ready(plugins: &Value) -> bool {
     inbound_adapter_ready(plugins, "agent-openai-responses")
 }
 
+fn openai_inbound_ready(plugins: &Value) -> bool {
+    inbound_adapter_ready(plugins, "agent-openai")
+}
+
 /// Display inbound adapters from the comma-joined agents list, falling back to the single agent value.
 fn agents_display(plugins: &Value) -> String {
     let list: Vec<&str> = plugins["agents"]
@@ -949,210 +1352,6 @@ fn agents_display(plugins: &Value) -> String {
         plugins["agent"].as_str().unwrap_or_default().to_string()
     } else {
         list.join(", ")
-    }
-}
-
-fn connect_cc_at(
-    home: &std::path::Path,
-    base: &str,
-    token: &str,
-    anthropic_inbound_ready: bool,
-) -> Result<String, String> {
-    // Security gate: CC uses the Anthropic protocol. If the gateway inbound adapter does not support Anthropic
-    // (agent-anthropic is unavailable), connection only points ~/.claude/settings.json to a
-    // A proxy that cannot answer Anthropic requests also stops a running Claude Code instance, including development
-    // this token-station session). Reject before readiness and do not touch settings.json.
-    if !anthropic_inbound_ready {
-        return Err(
-            "暂不能接入 Claude Code:网关入站适配器(plugins.agent)还不支持 Anthropic \
-             协议,agent-anthropic 尚未就位。现在接入会把 ~/.claude/settings.json 指向一个\
-             无法应答 Anthropic 请求的代理,反而掐断你正在运行的 Claude Code。等 agent-anthropic \
-             入站适配器配好后再接。(Codex / opencode 走 OpenAI 协议,现在即可正常接入。)"
-                .to_string(),
-        );
-    }
-    let dir = home.join(".claude");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("建 ~/.claude 失败: {e}"))?;
-    let path = dir.join("settings.json");
-    let mut settings = read_json_object(&path, "Claude Code settings.json")?;
-    {
-        let obj = settings.as_object_mut().unwrap();
-        let env = obj.entry("env").or_insert_with(|| json!({}));
-        let env = env
-            .as_object_mut()
-            .ok_or_else(|| "Claude Code settings.json 的 env 必须是对象".to_string())?;
-        env.insert("ANTHROPIC_BASE_URL".into(), json!(base));
-        env.insert("ANTHROPIC_AUTH_TOKEN".into(), json!(token));
-        env.insert("MAX_THINKING_TOKENS".into(), json!("0"));
-        env.insert("CLAUDE_CODE_DISABLE_THINKING".into(), json!("1"));
-        env.insert("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING".into(), json!("1"));
-        env.insert("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS".into(), json!("1"));
-        env.insert(
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
-            json!("1"),
-        );
-    }
-    let rendered = serde_json::to_string_pretty(&settings)
-        .map_err(|error| format!("序列化 settings.json 失败：{error}"))?;
-    write_config(&path, &rendered, "Claude Code settings.json")?;
-    Ok(format!(
-        "Claude Code 已指向 {base}(~/.claude/settings.json,已备份)。\
-         已关闭当前 Canonical IR 暂不支持的 thinking/beta；\
-         使用 /v1/messages，经 agent-anthropic 入站适配器转发。"
-    ))
-}
-
-fn connect_cc(base: &str, token: &str, anthropic_inbound_ready: bool) -> Result<String, String> {
-    connect_cc_at(&home_dir()?, base, token, anthropic_inbound_ready)
-}
-
-/// Codex: write `~/.codex/config.toml` and add a model_provider that points to this proxy
-/// (`wire_api = "responses"`, which maps to gateway `/v1/responses`). The Codex key uses
-/// environment variable, so return a one-line export instruction.
-fn connect_codex_at(
-    home: &std::path::Path,
-    openai_base: &str,
-    responses_inbound_ready: bool,
-) -> Result<String, String> {
-    if !responses_inbound_ready {
-        return Err(
-            "暂不能接入 Codex：网关未加载 agent-openai-responses，/v1/responses \
-             无入站适配器。本次未修改 ~/.codex/config.toml。"
-                .to_string(),
-        );
-    }
-    let dir = home.join(".codex");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("建 ~/.codex 失败: {e}"))?;
-    let path = dir.join("config.toml");
-    let mut doc: toml::Value = match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text)
-            .map_err(|error| format!("Codex config.toml 不合法（{}）：{error}", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            toml::Value::Table(toml::map::Map::new())
-        }
-        Err(error) => {
-            return Err(format!(
-                "读取 Codex config.toml 失败（{}）：{error}",
-                path.display()
-            ))
-        }
-    };
-    let root = doc
-        .as_table_mut()
-        .ok_or_else(|| "config.toml 顶层不是表".to_string())?;
-
-    root.insert("model".into(), toml::Value::String("auto".into()));
-    root.insert(
-        "model_provider".into(),
-        toml::Value::String("tokenstation".into()),
-    );
-
-    let mut provider = toml::map::Map::new();
-    provider.insert("name".into(), toml::Value::String("token-station".into()));
-    provider.insert(
-        "base_url".into(),
-        toml::Value::String(openai_base.to_string()),
-    );
-    provider.insert("wire_api".into(), toml::Value::String("responses".into()));
-    provider.insert(
-        "env_key".into(),
-        toml::Value::String("TOKENSTATION_KEY".into()),
-    );
-    provider.insert("requires_openai_auth".into(), toml::Value::Boolean(false));
-    provider.insert("request_max_retries".into(), toml::Value::Integer(0));
-    provider.insert("stream_max_retries".into(), toml::Value::Integer(0));
-
-    let providers = root
-        .entry("model_providers".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    let providers = providers
-        .as_table_mut()
-        .ok_or_else(|| "Codex config.toml 的 model_providers 必须是表".to_string())?;
-    providers.insert("tokenstation".into(), toml::Value::Table(provider));
-
-    let text = toml::to_string_pretty(&doc).map_err(|e| format!("序列化 config.toml 失败: {e}"))?;
-    write_config(&path, &text, "Codex config.toml")?;
-    Ok(format!(
-        "Codex 已通过 Responses API 指向 {openai_base}(~/.codex/config.toml,已备份)。\
-         Codex 的 key 走环境变量,请在启动 Codex 的终端执行一次:\
-         export TOKENSTATION_KEY=<面板上的虚拟 Key>"
-    ))
-}
-
-fn connect_codex(openai_base: &str, responses_inbound_ready: bool) -> Result<String, String> {
-    connect_codex_at(&home_dir()?, openai_base, responses_inbound_ready)
-}
-
-/// opencode: write `~/.config/opencode/opencode.json` and add an OpenAI-compatible custom
-/// provider (embedded apiKey; no export required).
-fn connect_opencode_at(
-    home: &std::path::Path,
-    openai_base: &str,
-    token: &str,
-) -> Result<String, String> {
-    let dir = home.join(".config").join("opencode");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("建 ~/.config/opencode 失败: {e}"))?;
-    let path = dir.join("opencode.json");
-    let mut cfg = read_json_object(&path, "OpenCode opencode.json")?;
-    {
-        let obj = cfg.as_object_mut().unwrap();
-        let providers = obj.entry("provider").or_insert_with(|| json!({}));
-        let providers = providers
-            .as_object_mut()
-            .ok_or_else(|| "OpenCode opencode.json 的 provider 必须是对象".to_string())?;
-        providers.insert(
-            "tokenstation".into(),
-            json!({
-                "npm": "@ai-sdk/openai-compatible",
-                "name": "token-station",
-                "options": { "baseURL": openai_base, "apiKey": token },
-                "models": { "auto": { "name": "auto (智能路由)" } }
-            }),
-        );
-    }
-    let rendered = serde_json::to_string_pretty(&cfg)
-        .map_err(|error| format!("序列化 opencode.json 失败：{error}"))?;
-    write_config(&path, &rendered, "OpenCode opencode.json")?;
-    Ok(
-        "opencode 已加入 token-station provider(~/.config/opencode/opencode.json,已备份)。\
-         在 opencode 里选模型 tokenstation/auto 即可。"
-            .to_string(),
-    )
-}
-
-fn connect_opencode(openai_base: &str, token: &str) -> Result<String, String> {
-    connect_opencode_at(&home_dir()?, openai_base, token)
-}
-
-/// Connect an agent. Each agent writes its own configuration file, so they do not conflict and can connect and run at the same time.
-#[tauri::command]
-fn connect_agent(state: State<'_, AppStateManaged>, kind: String) -> Result<String, String> {
-    let (listen, token, anthropic_inbound_ready, responses_inbound_ready) = {
-        let inner = state.0.lock().unwrap();
-        inner.ensure_editable()?;
-        let sv = inner.serve_view();
-        if !sv.running {
-            return Err("请先启动代理(serve)再接入 agent".into());
-        }
-        // Check whether inbound adapters include an Anthropic-capable adapter. Support both plugins.agent and
-        // The plugins.agents list after match_inbound. Check adapter names only in these two locations, not the complete
-        // plugins. This prevents packages named anthropic-* under providers from being accepted incorrectly.
-        let anthropic_ready = anthropic_inbound_ready(&inner.draft["plugins"]);
-        let responses_ready = responses_inbound_ready(&inner.draft["plugins"]);
-        let client_token = sv
-            .virtual_key
-            .clone()
-            .unwrap_or_else(|| "token-station-no-auth".to_string());
-        (sv.listen, client_token, anthropic_ready, responses_ready)
-    };
-    let anthropic_base = format!("http://{listen}");
-    let openai_base = format!("http://{listen}/v1");
-
-    match kind.as_str() {
-        "cc" => connect_cc(&anthropic_base, &token, anthropic_inbound_ready),
-        "codex" => connect_codex(&openai_base, responses_inbound_ready),
-        "opencode" => connect_opencode(&openai_base, &token),
-        other => Err(format!("未知 agent `{other}`")),
     }
 }
 
@@ -1326,11 +1525,26 @@ pub fn run() {
         config_path,
         draft,
         load_error,
-        server: None,
+        server: ServerLifecycle::stopped(),
     }));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let compatibility_cache_dir = app.path().app_cache_dir()?.join("agent-compatibility");
+            let agent_data_root = app.path().app_data_dir()?.join("agent-integration");
+            let paths = AgentIntegrationPaths {
+                compatibility_cache_dir,
+                snapshot_root: agent_data_root.join("snapshots"),
+                ownership_root: agent_data_root.join("ownership"),
+            };
+            let agent_commands = AgentCommandState::new(paths.clone()).map_err(|message| {
+                std::io::Error::other(format!("初始化 Agent IPC 失败：{message}"))
+            })?;
+            app.manage(paths);
+            app.manage(agent_commands);
+            Ok(())
+        })
         .manage(managed)
         .invoke_handler(tauri::generate_handler![
             get_state,
@@ -1339,10 +1553,21 @@ pub fn run() {
             update_provider_models,
             remove_provider,
             set_tier,
+            set_agent_route_mode,
+            set_agent_tier,
             save_config,
+            save_agent_routes,
+            apply_home_route_to_all_agents,
             serve_start,
             serve_stop,
-            connect_agent,
+            list_agent_registry,
+            scan_agents,
+            plan_agent_connection,
+            apply_agent_plan,
+            plan_agent_disconnect,
+            list_agent_snapshots,
+            plan_snapshot_restore,
+            apply_snapshot_restore,
             set_settings,
             get_stats,
             get_router_table,
@@ -1356,6 +1581,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::{Duration, Instant};
+    use tauri::Manager;
 
     fn scratch_home(label: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -1368,6 +1597,36 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).expect("scratch home is writable");
         path
+    }
+
+    fn wait_for_serve_phase<R: Runtime>(app: &tauri::App<R>, expected: ServePhase) -> StateView {
+        wait_for_serve_phase_with_timeout(app, expected, Duration::from_secs(60))
+    }
+
+    fn wait_for_serve_phase_with_timeout<R: Runtime>(
+        app: &tauri::App<R>,
+        expected: ServePhase,
+        timeout: Duration,
+    ) -> StateView {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let state = get_state(app.state());
+            if state.serve.phase == expected {
+                return state;
+            }
+            assert!(
+                expected == ServePhase::Error || state.serve.phase != ServePhase::Error,
+                "serve phase entered Error before {expected:?}; error={:?}",
+                state.serve.error
+            );
+            assert!(
+                Instant::now() < deadline,
+                "serve phase did not reach {expected:?}; current={:?}, error={:?}",
+                state.serve.phase,
+                state.serve.error
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -1417,16 +1676,22 @@ mod tests {
     #[test]
     fn inbound_readiness_requires_exact_adapter_names() {
         let plugins = json!({
-            "agents": ["agent-anthropic-proxy", "agent-openai-responses-beta"]
+            "agents": [
+                "agent-anthropic-proxy",
+                "agent-openai-responses-beta",
+                "agent-openai-compatible"
+            ]
         });
         assert!(!anthropic_inbound_ready(&plugins));
         assert!(!responses_inbound_ready(&plugins));
+        assert!(!openai_inbound_ready(&plugins));
 
         let plugins = json!({
-            "agents": ["agent-anthropic", "agent-openai-responses"]
+            "agents": ["agent-anthropic", "agent-openai-responses", "agent-openai"]
         });
         assert!(anthropic_inbound_ready(&plugins));
         assert!(responses_inbound_ready(&plugins));
+        assert!(openai_inbound_ready(&plugins));
     }
 
     #[test]
@@ -1464,7 +1729,7 @@ mod tests {
             config_path: root.join("token-station.json"),
             draft,
             load_error: None,
-            server: None,
+            server: ServerLifecycle::stopped(),
         };
         inner.rebuild_routing();
 
@@ -1513,7 +1778,7 @@ mod tests {
             config_path: root.join("token-station.json"),
             draft,
             load_error: Some("只读保护".to_owned()),
-            server: None,
+            server: ServerLifecycle::stopped(),
         };
 
         let error = replace_provider_models(&mut inner, "provider", vec!["replacement".to_owned()])
@@ -1522,6 +1787,44 @@ mod tests {
         assert_eq!(inner.draft, before);
         assert!(!inner.config_path.exists());
 
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn provider_model_updates_protect_inactive_agent_route_drafts() {
+        let root = scratch_home("model-update-agent-route");
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft: template(&root),
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+        };
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "home"}, {"model": "agent"}]
+        });
+        inner
+            .set_tier_value(TIER_LOW, Some("provider".into()), Some("home".into()))
+            .unwrap();
+        inner.set_agent_route_mode_value("codex", "custom");
+        for slot in ["high", "mid", "low"] {
+            inner
+                .set_agent_tier_value("codex", slot, Some("provider".into()), Some("agent".into()))
+                .unwrap();
+        }
+        inner.set_agent_route_mode_value("codex", "inherit");
+
+        let error = replace_provider_models(&mut inner, "provider", vec!["home".to_owned()])
+            .expect_err("inactive custom drafts still protect their model references");
+        assert!(error.contains("codex/high"), "{error}");
+        assert_eq!(
+            inner.draft["upstreams"]["provider"]["models"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1539,7 +1842,7 @@ mod tests {
             config_path: root.join("token-station.json"),
             draft,
             load_error: None,
-            server: None,
+            server: ServerLifecycle::stopped(),
         };
 
         let error = resolve_discovery_key(&inner, "provider", "https://attacker.example/v1", None)
@@ -1558,154 +1861,13 @@ mod tests {
     }
 
     #[test]
-    fn codex_connection_uses_responses_and_preserves_the_existing_config() {
-        let home = scratch_home("codex");
-        let dir = home.join(".codex");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        let original = "[features]\napps = false\n";
-        std::fs::write(&path, original).unwrap();
-
-        connect_codex_at(&home, "http://127.0.0.1:8787/v1", true).unwrap();
-
-        let text = std::fs::read_to_string(&path).unwrap();
-        let config: toml::Value = toml::from_str(&text).unwrap();
-        let provider = &config["model_providers"]["tokenstation"];
-        assert_eq!(provider["wire_api"].as_str(), Some("responses"));
-        assert_eq!(provider["requires_openai_auth"].as_bool(), Some(false));
-        assert_eq!(provider["request_max_retries"].as_integer(), Some(0));
-        assert_eq!(provider["stream_max_retries"].as_integer(), Some(0));
-        assert_eq!(config["features"]["apps"].as_bool(), Some(false));
-        assert_eq!(
-            std::fs::read_to_string(backup_path(&path)).unwrap(),
-            original
-        );
-        std::fs::remove_dir_all(home).ok();
-    }
-
-    #[test]
-    fn an_invalid_codex_config_is_never_replaced() {
-        let home = scratch_home("codex-invalid");
-        let dir = home.join(".codex");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        let original = "this = [is not valid";
-        std::fs::write(&path, original).unwrap();
-
-        let error =
-            connect_codex_at(&home, "http://127.0.0.1:8787/v1", true).unwrap_err();
-
-        assert!(error.contains("不合法"), "{error}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        assert!(!backup_path(&path).exists());
-        std::fs::remove_dir_all(home).ok();
-    }
-
-    #[test]
-    fn codex_connection_refuses_before_writing_when_responses_inbound_is_missing() {
-        let home = scratch_home("codex-missing-responses");
-        let dir = home.join(".codex");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        let original = "model = \"existing\"\nmodel_provider = \"existing-provider\"\n";
-        std::fs::write(&path, original).unwrap();
-
-        let error =
-            connect_codex_at(&home, "http://127.0.0.1:8787/v1", false).unwrap_err();
-
-        assert!(error.contains("agent-openai-responses"), "{error}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        assert!(!backup_path(&path).exists());
-        std::fs::remove_dir_all(home).ok();
-    }
-
-    #[test]
-    fn claude_connection_preserves_other_settings_and_creates_a_recovery_backup() {
-        let home = scratch_home("claude");
-        let dir = home.join(".claude");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("settings.json");
-        let original = r#"{"permissions":{"allow":["Read"]},"env":{"KEEP":"yes"}}"#;
-        std::fs::write(&path, original).unwrap();
-
-        connect_cc_at(&home, "http://127.0.0.1:8787", "local-test-key", true).unwrap();
-
-        let settings: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(settings["permissions"]["allow"], json!(["Read"]));
-        assert_eq!(settings["env"]["KEEP"], json!("yes"));
-        assert_eq!(
-            settings["env"]["ANTHROPIC_BASE_URL"],
-            json!("http://127.0.0.1:8787")
-        );
-        assert_eq!(
-            settings["env"]["ANTHROPIC_AUTH_TOKEN"],
-            json!("local-test-key")
-        );
-        assert_eq!(settings["env"]["MAX_THINKING_TOKENS"], json!("0"));
-        assert_eq!(settings["env"]["CLAUDE_CODE_DISABLE_THINKING"], json!("1"));
-        assert_eq!(
-            settings["env"]["CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"],
-            json!("1")
-        );
-        assert_eq!(
-            settings["env"]["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"],
-            json!("1")
-        );
-        assert_eq!(
-            std::fs::read_to_string(backup_path(&path)).unwrap(),
-            original
-        );
-        std::fs::remove_dir_all(home).ok();
-    }
-
-    #[test]
-    fn claude_safety_gate_and_invalid_json_leave_settings_untouched() {
-        let home = scratch_home("claude-invalid");
-        let dir = home.join(".claude");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("settings.json");
-        let original = "not-json";
-        std::fs::write(&path, original).unwrap();
-
-        let gated = connect_cc_at(&home, "http://127.0.0.1:8787", "key", false).unwrap_err();
-        assert!(gated.contains("暂不能接入"));
-        let invalid = connect_cc_at(&home, "http://127.0.0.1:8787", "key", true).unwrap_err();
-        assert!(invalid.contains("不是合法 JSON"), "{invalid}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-        assert!(!backup_path(&path).exists());
-        std::fs::remove_dir_all(home).ok();
-    }
-
-    #[test]
-    fn opencode_connection_preserves_other_providers_and_is_idempotent() {
-        let home = scratch_home("opencode");
-        let dir = home.join(".config/opencode");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("opencode.json");
-        std::fs::write(&path, r#"{"provider":{"existing":{"name":"keep"}}}"#).unwrap();
-
-        connect_opencode_at(&home, "http://127.0.0.1:8787/v1", "local-key").unwrap();
-        connect_opencode_at(&home, "http://127.0.0.1:8787/v1", "local-key").unwrap();
-
-        let config: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(config["provider"]["existing"]["name"], json!("keep"));
-        assert_eq!(
-            config["provider"]["tokenstation"]["options"]["baseURL"],
-            json!("http://127.0.0.1:8787/v1")
-        );
-        assert_eq!(config["provider"].as_object().unwrap().len(), 2);
-        std::fs::remove_dir_all(home).ok();
-    }
-
-    #[test]
     fn tier_updates_refuse_unknown_provider_model_and_partial_values() {
         let root = scratch_home("tiers-invalid");
         let mut inner = AppInner {
             config_path: root.join("token-station.json"),
             draft: template(&root),
             load_error: None,
-            server: None,
+            server: ServerLifecycle::stopped(),
         };
         inner.draft["upstreams"]["deepseek"] = json!({
             "provider": "openai-compatible",
@@ -1737,13 +1899,138 @@ mod tests {
     }
 
     #[test]
+    fn agent_route_drafts_seed_from_home_validate_targets_and_preserve_complete_profiles() {
+        let root = scratch_home("agent-route-draft");
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft: template(&root),
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+        };
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "home"}, {"model": "agent"}]
+        });
+        for pool in [TIER_HIGH, TIER_MID, TIER_LOW] {
+            inner
+                .set_tier_value(pool, Some("provider".into()), Some("home".into()))
+                .unwrap();
+        }
+
+        inner.set_agent_route_mode_value("codex", "custom");
+        assert!(inner.agent_custom_route_complete("codex"));
+        assert_eq!(
+            inner.agent_tier("codex", "high").model.as_deref(),
+            Some("home")
+        );
+        inner
+            .set_agent_tier_value(
+                "codex",
+                "high",
+                Some("provider".into()),
+                Some("agent".into()),
+            )
+            .unwrap();
+        assert!(inner
+            .set_agent_tier_value(
+                "future-agent",
+                "high",
+                Some("provider".into()),
+                Some("agent".into()),
+            )
+            .unwrap_err()
+            .contains("未知 Agent"));
+        let config = inner
+            .materialize()
+            .expect("complete custom profile validates");
+        assert_eq!(
+            config.agent_routes["codex"]
+                .custom_route
+                .as_ref()
+                .unwrap()
+                .high
+                .model,
+            "agent"
+        );
+
+        inner.set_agent_route_mode_value("codex", "inherit");
+        assert!(inner.draft["agent_routes"]["codex"]["custom_route"].is_object());
+        assert!(inner.materialize().is_ok());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn returning_an_incomplete_agent_draft_to_inherit_cannot_poison_home_config() {
+        let root = scratch_home("agent-route-incomplete");
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft: template(&root),
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+        };
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "model"}]
+        });
+        inner
+            .set_tier_value(TIER_LOW, Some("provider".into()), Some("model".into()))
+            .unwrap();
+
+        inner.set_agent_route_mode_value("codex", "custom");
+        assert!(!inner.agent_custom_route_complete("codex"));
+        assert!(inner.materialize().is_err());
+        inner.set_agent_route_mode_value("codex", "inherit");
+        assert!(inner.draft["agent_routes"]["codex"]["custom_route"].is_null());
+        assert!(inner.materialize().is_ok());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn agent_route_commands_save_one_profile_and_apply_home_without_deleting_its_draft() {
+        let root = scratch_home("agent-route-commands");
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft: template(&root),
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+        };
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "model"}]
+        });
+        for pool in [TIER_HIGH, TIER_MID, TIER_LOW] {
+            inner
+                .set_tier_value(pool, Some("provider".into()), Some("model".into()))
+                .unwrap();
+        }
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+        let custom =
+            set_agent_route_mode(app.state(), "codex".to_string(), "custom".to_string()).unwrap();
+        assert_eq!(custom.agent_routes["codex"].mode, "custom");
+        save_agent_routes(app.state()).unwrap();
+        let inherited = apply_home_route_to_all_agents(app.state()).unwrap();
+        assert!(inherited
+            .agent_routes
+            .values()
+            .all(|profile| profile.mode == "inherit"));
+        let saved = ClientConfig::load(&root.join("token-station.json")).unwrap();
+        assert!(saved.agent_routes["codex"].custom_route.is_some());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn one_two_and_three_tiers_always_end_with_a_zero_score_fallback() {
         let root = scratch_home("tiers-valid");
         let mut inner = AppInner {
             config_path: root.join("token-station.json"),
             draft: template(&root),
             load_error: None,
-            server: None,
+            server: ServerLifecycle::stopped(),
         };
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
@@ -1765,6 +2052,321 @@ mod tests {
             assert_eq!(bands.last().unwrap()["at_least"], json!(0));
         }
         assert_eq!(inner.draft["router"]["default_pool"], json!(TIER_LOW));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn startup_preparation_is_single_flight_lock_free_and_cancellable() {
+        let root = scratch_home("nonblocking-start");
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft: template(&repo_root()),
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+        };
+        inner.draft["data"]["dir"] = json!(root.join("data"));
+        inner.draft["server"]["listen"] = json!("127.0.0.1:0");
+        inner.draft["server"]["auth"] = json!(false);
+        inner.draft["data"]["metrics"] = json!(false);
+        inner.draft["upstreams"]["local"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "models": [{"model": "small"}]
+        });
+        inner
+            .set_tier_value(TIER_LOW, Some("local".into()), Some("small".into()))
+            .unwrap();
+
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let prepare_calls = Arc::new(AtomicUsize::new(0));
+        let calls_in_task = Arc::clone(&prepare_calls);
+
+        let starting = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            move |_config| {
+                calls_in_task.fetch_add(1, Ordering::SeqCst);
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Err(StartFailure::new("test_gate", "cancelled fixture"))
+            },
+        )
+        .unwrap();
+        assert_eq!(starting.serve.phase, ServePhase::Starting);
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("preparer starts in the background");
+
+        // get_state acquires the same AppInner mutex while preparation is blocked.
+        let visible = get_state(app.state());
+        assert_eq!(visible.serve.phase, ServePhase::Starting);
+
+        let duplicate_calls = Arc::new(AtomicUsize::new(0));
+        let duplicate_calls_in_task = Arc::clone(&duplicate_calls);
+        let duplicate = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            move |_config| {
+                duplicate_calls_in_task.fetch_add(1, Ordering::SeqCst);
+                Err(StartFailure::new("duplicate", "must not run"))
+            },
+        )
+        .unwrap();
+        assert_eq!(duplicate.serve.phase, ServePhase::Starting);
+        assert_eq!(duplicate_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
+
+        let stopping =
+            begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+        assert_eq!(stopping.serve.phase, ServePhase::Stopping);
+        release_tx.send(()).unwrap();
+        let stopped = wait_for_serve_phase(&app, ServePhase::Stopped);
+        assert!(!stopped.serve.running);
+        assert!(stopped.serve.error.is_none());
+
+        let retrying = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            |_config| Err(StartFailure::new("gateway_init", "fixture failure")),
+        )
+        .unwrap();
+        assert_eq!(retrying.serve.phase, ServePhase::Starting);
+        let failed = wait_for_serve_phase(&app, ServePhase::Error);
+        assert!(failed
+            .serve
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("gateway_init: fixture failure")));
+
+        let (retry_started_tx, retry_started_rx) = mpsc::channel();
+        let (retry_release_tx, retry_release_rx) = mpsc::channel();
+        let retry = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            move |_config| {
+                retry_started_tx.send(()).unwrap();
+                retry_release_rx.recv().unwrap();
+                Err(StartFailure::new("test_gate", "retry cancelled"))
+            },
+        )
+        .unwrap();
+        assert_eq!(retry.serve.phase, ServePhase::Starting);
+        retry_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("failed lifecycle can start a fresh generation");
+        let retry_stopping =
+            begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+        assert_eq!(retry_stopping.serve.phase, ServePhase::Stopping);
+        retry_release_tx.send(()).unwrap();
+        wait_for_serve_phase(&app, ServePhase::Stopped);
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views() {
+        let root = scratch_home("command-lifecycle");
+        let mut draft = template(&repo_root());
+        draft["data"]["dir"] = json!(root.join("data"));
+        draft["server"]["listen"] = json!("127.0.0.1:0");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner {
+            config_path: root.join("token-station.json"),
+            draft,
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+        }))));
+
+        let initial = get_state(app.state());
+        assert!(!initial.serve.running);
+        assert!(initial.providers.is_empty());
+        assert_eq!(initial.settings.listen, "127.0.0.1:0");
+
+        for (name, url, models) in [
+            ("local", "http://127.0.0.1:11434/v1", vec!["small", "large"]),
+            ("spare", "http://127.0.0.1:11435/v1", vec!["backup"]),
+        ] {
+            let view = add_provider(
+                app.state(),
+                name.to_string(),
+                url.to_string(),
+                models.into_iter().map(str::to_string).collect(),
+                None,
+            )
+            .unwrap();
+            assert!(view.providers.iter().any(|provider| provider.name == name));
+        }
+        assert!(add_provider(
+            app.state(),
+            " ".to_string(),
+            "http://127.0.0.1/v1".to_string(),
+            vec!["m".to_string()],
+            None,
+        )
+        .err()
+        .expect("blank provider is rejected")
+        .contains("不能为空"));
+        assert!(add_provider(
+            app.state(),
+            "empty".to_string(),
+            "http://127.0.0.1/v1".to_string(),
+            vec![" ".to_string()],
+            None,
+        )
+        .err()
+        .expect("blank model set is rejected")
+        .contains("至少填一个"));
+        let provider_count = get_state(app.state()).providers.len();
+        let invalid_name = match add_provider(
+            app.state(),
+            "minimax-cn".to_string(),
+            "https://api.minimaxi.com/v1".to_string(),
+            vec!["MiniMax-M3".to_string()],
+            None,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid upstream reference names must be rejected before mutation"),
+        };
+        assert!(invalid_name.contains("upstream reference name"));
+        assert_eq!(get_state(app.state()).providers.len(), provider_count);
+
+        set_tier(
+            app.state(),
+            "high".to_string(),
+            Some("local".to_string()),
+            Some("large".to_string()),
+        )
+        .unwrap();
+        set_tier(
+            app.state(),
+            "low".to_string(),
+            Some("local".to_string()),
+            Some("small".to_string()),
+        )
+        .unwrap();
+        assert!(set_tier(app.state(), "invalid".to_string(), None, None)
+            .err()
+            .expect("invalid tier is rejected")
+            .contains("未知档位"));
+
+        let saved = save_config(app.state()).unwrap();
+        assert!(saved.config_error.is_none());
+        assert!(root.join("token-station.json").is_file());
+        let router = get_router_table(app.state());
+        assert_eq!(router.default_pool, TIER_LOW);
+        assert_eq!(router.threshold, Some(CUT_MID));
+        assert_eq!(router.bands.len(), 2);
+        assert_eq!(router.pools.len(), 2);
+        assert_eq!(router.bands[0].upstream.as_deref(), Some("local"));
+
+        update_provider_models(
+            app.state(),
+            "local".to_string(),
+            vec![
+                "large".to_string(),
+                "small".to_string(),
+                "extra".to_string(),
+            ],
+        )
+        .unwrap();
+        let configured = set_settings(app.state(), false, false).unwrap();
+        assert!(!configured.settings.auth);
+        assert!(!configured.settings.metrics);
+
+        let plugins = get_plugins(app.state()).unwrap();
+        assert!(plugins.agent.contains("agent-openai"));
+        assert!(plugins
+            .dialects
+            .iter()
+            .any(|dialect| dialect == "openai-compatible"));
+        assert!(plugins.listing.contains("provider-openai-compatible"));
+
+        let empty_stats = get_stats(app.state(), "all".to_string(), None).unwrap();
+        assert!(empty_stats.empty);
+        assert_eq!(empty_stats.total.requests, 0);
+
+        let started = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            prepare_server,
+        )
+        .unwrap();
+        assert_eq!(started.serve.phase, ServePhase::Starting);
+        let duplicate = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            prepare_server,
+        )
+        .unwrap();
+        assert!(matches!(
+            duplicate.serve.phase,
+            ServePhase::Starting | ServePhase::Running
+        ));
+        // Coverage instrumentation makes Wasmtime's first compilation much
+        // slower on a cold Linux runner; this remains a bounded integration test.
+        let running =
+            wait_for_serve_phase_with_timeout(&app, ServePhase::Running, Duration::from_secs(180));
+        assert!(running.serve.running);
+        assert!(running.serve.virtual_key.is_none());
+        assert!(root.join("data").join("requests.log").exists());
+        let stopping =
+            begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+        assert_eq!(stopping.serve.phase, ServePhase::Stopping);
+        let stopped = wait_for_serve_phase(&app, ServePhase::Stopped);
+        assert!(!stopped.serve.running);
+
+        let removed = remove_provider(app.state(), "local".to_string()).unwrap();
+        assert_eq!(removed.providers.len(), 1);
+        assert!(removed.tiers.values().all(|tier| tier.upstream.is_none()));
+        assert!(save_config(app.state())
+            .err()
+            .expect("empty routing config is rejected")
+            .contains("至少配置一档"));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn desktop_helpers_cover_empty_absolute_and_legacy_display_shapes() {
+        let root = scratch_home("helper-shapes");
+        let missing = root.join("missing.json");
+        let (draft, error) = load_draft(&missing, &root);
+        assert!(error.is_none());
+        assert_eq!(draft["server"]["auth"], json!(true));
+
+        let absolute = root.join("already-absolute");
+        let mut shapes = template(&root);
+        shapes["plugins"]["dir"] = json!(absolute.clone());
+        shapes["data"]["dir"] = json!(42);
+        let shapes = prepare_desktop_draft(shapes, &root);
+        assert_eq!(shapes["plugins"]["dir"], json!(absolute));
+        assert_eq!(shapes["data"]["dir"], json!(42));
+
+        assert_eq!(agents_display(&json!({"agent": "legacy"})), "legacy");
+        assert_eq!(agents_display(&json!({"agents": [1, null]})), "");
+        assert_eq!(pool_key("high").unwrap(), TIER_HIGH);
+        assert_eq!(pool_key("mid").unwrap(), TIER_MID);
+        assert_eq!(pool_key("low").unwrap(), TIER_LOW);
+
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft: json!({
+                "server": {}, "data": {}, "plugins": {}, "upstreams": [],
+                "router": {"pools": [], "rules": null, "hint_routes": null}
+            }),
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+        };
+        assert!(inner.upstreams().is_empty());
+        assert_eq!(inner.pool_member("missing"), (None, None));
+        inner.rebuild_routing();
+        assert!(inner.draft["router"]["heuristic"].is_null());
+        assert_eq!(inner.serve_view().listen, "127.0.0.1:8787");
+        assert!(inner.config_error().is_some());
+
         std::fs::remove_dir_all(root).ok();
     }
 }

@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { ThemeProvider } from "./components/ThemeProvider";
 
 /** Show rendering errors instead of a blank screen. This supports diagnosis and lets users report the error text. */
 class ErrorBoundary extends React.Component<
@@ -30,7 +31,9 @@ class ErrorBoundary extends React.Component<
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <App />
+      <ThemeProvider>
+        <App />
+      </ThemeProvider>
     </ErrorBoundary>
   </React.StrictMode>,
 );
