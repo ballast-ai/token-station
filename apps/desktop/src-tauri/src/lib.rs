@@ -686,11 +686,7 @@ impl AppInner {
             return;
         }
         let mut custom = serde_json::Map::new();
-        for (slot, pool) in [
-            ("high", TIER_HIGH),
-            ("mid", TIER_MID),
-            ("low", TIER_LOW),
-        ] {
+        for (slot, pool) in [("high", TIER_HIGH), ("mid", TIER_MID), ("low", TIER_LOW)] {
             let tier = self.tier(pool);
             custom.insert(
                 slot.to_string(),
@@ -1016,8 +1012,7 @@ fn remove_provider(state: State<'_, AppStateManaged>, name: String) -> Result<St
     // It cannot be restored as valid configuration. Safely fall back to the home page and clear the invalid draft.
     for agent_id in KNOWN_AGENT_IDS {
         let refers = ["high", "mid", "low"].into_iter().any(|slot| {
-            inner.draft["agent_routes"][agent_id]["custom_route"][slot]["upstream"]
-                .as_str()
+            inner.draft["agent_routes"][agent_id]["custom_route"][slot]["upstream"].as_str()
                 == Some(name.as_str())
         });
         if refers {
@@ -1089,9 +1084,7 @@ fn save_agent_routes(state: State<'_, AppStateManaged>) -> Result<StateView, Str
 }
 
 #[tauri::command]
-fn apply_home_route_to_all_agents(
-    state: State<'_, AppStateManaged>,
-) -> Result<StateView, String> {
+fn apply_home_route_to_all_agents(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
     for agent_id in KNOWN_AGENT_IDS {
@@ -1801,21 +1794,12 @@ mod tests {
             "models": [{"model": "home"}, {"model": "agent"}]
         });
         inner
-            .set_tier_value(
-                TIER_LOW,
-                Some("provider".into()),
-                Some("home".into()),
-            )
+            .set_tier_value(TIER_LOW, Some("provider".into()), Some("home".into()))
             .unwrap();
         inner.set_agent_route_mode_value("codex", "custom");
         for slot in ["high", "mid", "low"] {
             inner
-                .set_agent_tier_value(
-                    "codex",
-                    slot,
-                    Some("provider".into()),
-                    Some("agent".into()),
-                )
+                .set_agent_tier_value("codex", slot, Some("provider".into()), Some("agent".into()))
                 .unwrap();
         }
         inner.set_agent_route_mode_value("codex", "inherit");
@@ -1925,7 +1909,10 @@ mod tests {
 
         inner.set_agent_route_mode_value("codex", "custom");
         assert!(inner.agent_custom_route_complete("codex"));
-        assert_eq!(inner.agent_tier("codex", "high").model.as_deref(), Some("home"));
+        assert_eq!(
+            inner.agent_tier("codex", "high").model.as_deref(),
+            Some("home")
+        );
         inner
             .set_agent_tier_value(
                 "codex",
@@ -1943,7 +1930,9 @@ mod tests {
             )
             .unwrap_err()
             .contains("未知 Agent"));
-        let config = inner.materialize().expect("complete custom profile validates");
+        let config = inner
+            .materialize()
+            .expect("complete custom profile validates");
         assert_eq!(
             config.agent_routes["codex"]
                 .custom_route
@@ -1975,11 +1964,7 @@ mod tests {
             "models": [{"model": "model"}]
         });
         inner
-            .set_tier_value(
-                TIER_LOW,
-                Some("provider".into()),
-                Some("model".into()),
-            )
+            .set_tier_value(TIER_LOW, Some("provider".into()), Some("model".into()))
             .unwrap();
 
         inner.set_agent_route_mode_value("codex", "custom");
@@ -2007,22 +1992,14 @@ mod tests {
         });
         for pool in [TIER_HIGH, TIER_MID, TIER_LOW] {
             inner
-                .set_tier_value(
-                    pool,
-                    Some("provider".into()),
-                    Some("model".into()),
-                )
+                .set_tier_value(pool, Some("provider".into()), Some("model".into()))
                 .unwrap();
         }
         let app = tauri::test::mock_app();
         assert!(app.manage(AppStateManaged(Mutex::new(inner))));
 
-        let custom = set_agent_route_mode(
-            app.state(),
-            "codex".to_string(),
-            "custom".to_string(),
-        )
-        .unwrap();
+        let custom =
+            set_agent_route_mode(app.state(), "codex".to_string(), "custom".to_string()).unwrap();
         assert_eq!(custom.agent_routes["codex"].mode, "custom");
         save_agent_routes(app.state()).unwrap();
         let inherited = apply_home_route_to_all_agents(app.state()).unwrap();
