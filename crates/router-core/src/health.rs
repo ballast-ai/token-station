@@ -56,7 +56,16 @@ impl Default for HealthPolicy {
 #[derive(Debug, Default)]
 pub struct HealthTracker {
     policy: HealthPolicy,
-    states: BTreeMap<UpstreamRef, State>,
+    // Keyed by (upstream, wire model), not by upstream alone: one model going
+    // bad on a provider must not eject that provider's other models. A provider
+    // that is wholly unreachable still ejects, one model at a time, as each of
+    // its models independently fails.
+    states: BTreeMap<(UpstreamRef, String), State>,
+}
+
+/// The health key: an upstream and the wire model on it.
+fn key(upstream: &UpstreamRef, model: &str) -> (UpstreamRef, String) {
+    (upstream.clone(), model.to_owned())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -76,16 +85,17 @@ impl HealthTracker {
         }
     }
 
-    /// The upstream answered. One success clears probation and the counter.
-    pub fn observe_success(&mut self, upstream: &UpstreamRef) {
-        self.states.remove(upstream);
+    /// The upstream's model answered. One success clears probation and counter.
+    pub fn observe_success(&mut self, upstream: &UpstreamRef, model: &str) {
+        self.states.remove(&key(upstream, model));
     }
 
-    /// The upstream failed with `code`. Returns `true` when this observation
-    /// ejected it — the caller's cue to log the transition.
+    /// The upstream's model failed with `code`. Returns `true` when this
+    /// observation ejected it — the caller's cue to log the transition.
     pub fn observe_failure(
         &mut self,
         upstream: &UpstreamRef,
+        model: &str,
         code: ErrorCode,
         now: Instant,
     ) -> bool {
@@ -93,7 +103,8 @@ impl HealthTracker {
             return false;
         }
 
-        let consecutive = match self.states.get(upstream) {
+        let key = key(upstream, model);
+        let consecutive = match self.states.get(&key) {
             Some(State::Counting { consecutive }) => consecutive + 1,
             // A failed probe re-ejects at once: it already proved the point.
             Some(State::Ejected { until }) if now >= *until => self.policy.eject_after,
@@ -104,23 +115,22 @@ impl HealthTracker {
 
         if consecutive >= self.policy.eject_after {
             self.states.insert(
-                upstream.clone(),
+                key,
                 State::Ejected {
                     until: now + self.policy.cooldown,
                 },
             );
             true
         } else {
-            self.states
-                .insert(upstream.clone(), State::Counting { consecutive });
+            self.states.insert(key, State::Counting { consecutive });
             false
         }
     }
 
-    /// The health the router should see for `upstream`, as of `now`.
+    /// The health the router should see for `upstream`'s `model`, as of `now`.
     #[must_use]
-    pub fn health_of(&self, upstream: &UpstreamRef, now: Instant) -> Health {
-        match self.states.get(upstream) {
+    pub fn health_of(&self, upstream: &UpstreamRef, model: &str, now: Instant) -> Health {
+        match self.states.get(&key(upstream, model)) {
             None | Some(State::Counting { .. }) => Health::Healthy,
             Some(State::Ejected { until }) if now < *until => Health::Unavailable,
             // Cooldown over: usable, but only when nothing healthy remains.
@@ -145,6 +155,8 @@ mod tests {
     use std::time::{Duration, Instant};
     use token_station_protocol::ErrorCode;
 
+    const MODEL: &str = "gpt-4";
+
     fn upstream() -> UpstreamRef {
         UpstreamRef::new("openai_personal").expect("valid name")
     }
@@ -162,19 +174,19 @@ mod tests {
         let now = Instant::now();
         let target = upstream();
 
-        assert!(!tracker.observe_failure(&target, ErrorCode::Timeout, now));
-        assert!(!tracker.observe_failure(&target, ErrorCode::UpstreamUnavailable, now));
+        assert!(!tracker.observe_failure(&target, MODEL, ErrorCode::Timeout, now));
+        assert!(!tracker.observe_failure(&target, MODEL, ErrorCode::UpstreamUnavailable, now));
         assert_eq!(
-            tracker.health_of(&target, now),
+            tracker.health_of(&target, MODEL, now),
             Health::Healthy,
             "two is not three"
         );
 
         assert!(
-            tracker.observe_failure(&target, ErrorCode::Capacity, now),
+            tracker.observe_failure(&target, MODEL, ErrorCode::Capacity, now),
             "the third ejects, and says so"
         );
-        assert_eq!(tracker.health_of(&target, now), Health::Unavailable);
+        assert_eq!(tracker.health_of(&target, MODEL, now), Health::Unavailable);
     }
 
     #[test]
@@ -183,13 +195,13 @@ mod tests {
         let now = Instant::now();
         let target = upstream();
 
-        tracker.observe_failure(&target, ErrorCode::Timeout, now);
-        tracker.observe_failure(&target, ErrorCode::Timeout, now);
-        tracker.observe_success(&target);
-        tracker.observe_failure(&target, ErrorCode::Timeout, now);
+        tracker.observe_failure(&target, MODEL, ErrorCode::Timeout, now);
+        tracker.observe_failure(&target, MODEL, ErrorCode::Timeout, now);
+        tracker.observe_success(&target, MODEL);
+        tracker.observe_failure(&target, MODEL, ErrorCode::Timeout, now);
 
         assert_eq!(
-            tracker.health_of(&target, now),
+            tracker.health_of(&target, MODEL, now),
             Health::Healthy,
             "the counter is consecutive, not cumulative"
         );
@@ -202,9 +214,9 @@ mod tests {
         let target = upstream();
 
         for _ in 0..10 {
-            assert!(!tracker.observe_failure(&target, ErrorCode::Auth, now));
+            assert!(!tracker.observe_failure(&target, MODEL, ErrorCode::Auth, now));
         }
-        assert_eq!(tracker.health_of(&target, now), Health::Healthy);
+        assert_eq!(tracker.health_of(&target, MODEL, now), Health::Healthy);
     }
 
     #[test]
@@ -214,10 +226,10 @@ mod tests {
         let target = upstream();
 
         for _ in 0..10 {
-            tracker.observe_failure(&target, ErrorCode::RateLimit, now);
+            tracker.observe_failure(&target, MODEL, ErrorCode::RateLimit, now);
         }
         assert_eq!(
-            tracker.health_of(&target, now),
+            tracker.health_of(&target, MODEL, now),
             Health::Healthy,
             "429 must not become a 30-second outage"
         );
@@ -230,14 +242,14 @@ mod tests {
         let target = upstream();
 
         for _ in 0..3 {
-            tracker.observe_failure(&target, ErrorCode::Timeout, now);
+            tracker.observe_failure(&target, MODEL, ErrorCode::Timeout, now);
         }
         let during = now + Duration::from_secs(10);
         let after = now + Duration::from_secs(31);
 
-        assert_eq!(tracker.health_of(&target, during), Health::Unavailable);
+        assert_eq!(tracker.health_of(&target, MODEL, during), Health::Unavailable);
         assert_eq!(
-            tracker.health_of(&target, after),
+            tracker.health_of(&target, MODEL, after),
             Health::Degraded,
             "the first request after cooldown is the probe, not business as usual"
         );
@@ -250,14 +262,14 @@ mod tests {
         let target = upstream();
 
         for _ in 0..3 {
-            tracker.observe_failure(&target, ErrorCode::Timeout, now);
+            tracker.observe_failure(&target, MODEL, ErrorCode::Timeout, now);
         }
         let after = now + Duration::from_secs(31);
 
         // A successful probe restores full health.
         let mut recovered = tracker;
-        recovered.observe_success(&target);
-        assert_eq!(recovered.health_of(&target, after), Health::Healthy);
+        recovered.observe_success(&target, MODEL);
+        assert_eq!(recovered.health_of(&target, MODEL, after), Health::Healthy);
 
         // A failed probe re-ejects immediately — no second run of three.
         let mut relapsed = HealthTracker::new(HealthPolicy {
@@ -265,14 +277,14 @@ mod tests {
             cooldown: Duration::from_secs(30),
         });
         for _ in 0..3 {
-            relapsed.observe_failure(&target, ErrorCode::Timeout, now);
+            relapsed.observe_failure(&target, MODEL, ErrorCode::Timeout, now);
         }
         assert!(
-            relapsed.observe_failure(&target, ErrorCode::Timeout, after),
+            relapsed.observe_failure(&target, MODEL, ErrorCode::Timeout, after),
             "one failed probe is proof enough"
         );
         assert_eq!(
-            relapsed.health_of(&target, after + Duration::from_secs(1)),
+            relapsed.health_of(&target, MODEL, after + Duration::from_secs(1)),
             Health::Unavailable
         );
     }
@@ -284,15 +296,40 @@ mod tests {
         let target = upstream();
 
         for _ in 0..3 {
-            tracker.observe_failure(&target, ErrorCode::Timeout, now);
+            tracker.observe_failure(&target, MODEL, ErrorCode::Timeout, now);
         }
         // A straggler (e.g. an in-flight request) fails during cooldown.
-        tracker.observe_failure(&target, ErrorCode::Timeout, now + Duration::from_secs(5));
+        tracker.observe_failure(&target, MODEL, ErrorCode::Timeout, now + Duration::from_secs(5));
 
         assert_eq!(
-            tracker.health_of(&target, now + Duration::from_secs(31)),
+            tracker.health_of(&target, MODEL, now + Duration::from_secs(31)),
             Health::Degraded,
             "the original cooldown still governs"
+        );
+    }
+
+    #[test]
+    fn one_model_failing_does_not_eject_another_model_on_the_same_upstream() {
+        let mut tracker = tracker();
+        let now = Instant::now();
+        let target = upstream();
+        let sick = "gpt-4";
+        let well = "gpt-4o-mini";
+
+        // Eject the sick model on this upstream.
+        for _ in 0..3 {
+            tracker.observe_failure(&target, sick, ErrorCode::Timeout, now);
+        }
+
+        assert_eq!(
+            tracker.health_of(&target, sick, now),
+            Health::Unavailable,
+            "the failing model is out of rotation"
+        );
+        assert_eq!(
+            tracker.health_of(&target, well, now),
+            Health::Healthy,
+            "a sibling model on the same upstream is untouched — this is the fix"
         );
     }
 }
