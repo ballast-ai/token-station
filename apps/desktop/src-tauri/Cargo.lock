@@ -5043,6 +5043,7 @@ dependencies = [
  "getrandom 0.4.3",
  "json-five",
  "keyring",
+ "libc",
  "ring",
  "semver",
  "serde",

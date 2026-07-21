@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use command_group::CommandGroup;
@@ -10,17 +12,18 @@ use sha2::{Digest, Sha256};
 
 use super::config_codec::{parse_rendered, semantic_json, DocumentFormat};
 use super::platform::{
-    config_candidates, executable_candidates, path_identity, ExecutableCandidate,
+    config_candidates, executable_candidates, expand_template, path_identity, ExecutableCandidate,
     ResolvedConfigCandidate, ScanEnvironment,
 };
 use super::registry::AgentRegistry;
 use super::types::{
     AgentDescriptor, ConfigFormat, Diagnostic, DiscoveryEvidence, DiscoveryRecord, DiscoverySource,
-    Platform, ReasonCode, VersionProbe,
+    Platform, ProbeRuntime, ReasonCode, RuntimeResolutionSource, VersionProbe,
 };
 
 const CONFIG_READ_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const OUTPUT_READER_GRACE: Duration = Duration::from_millis(100);
 
 pub struct ProbeOutcome {
     pub runnable: bool,
@@ -33,6 +36,7 @@ pub trait ProbeRunner {
     fn run(
         &self,
         executable: &Path,
+        observed_entry: &Path,
         probe: &VersionProbe,
         environment: &ScanEnvironment,
     ) -> ProbeOutcome;
@@ -44,127 +48,395 @@ impl ProbeRunner for SystemProbeRunner {
     fn run(
         &self,
         executable: &Path,
+        observed_entry: &Path,
         probe: &VersionProbe,
         environment: &ScanEnvironment,
     ) -> ProbeOutcome {
-        if unsupported_script_shim(executable, environment.platform) {
-            return broken_probe(
-                ReasonCode::ExecutableNotRunnable,
-                "已发现脚本 shim；为避免调用系统 shell，本版本不执行该入口",
-            );
+        if probe.retry_on_timeout {
+            run_with_timeout_retry(|| {
+                run_probe_once(executable, observed_entry, probe, environment)
+            })
+        } else {
+            run_probe_once(executable, observed_entry, probe, environment)
         }
+    }
+}
 
-        let mut command = Command::new(executable);
-        command
-            .args(&probe.argv)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env_clear();
-        for (name, value) in &environment.child_environment {
+fn run_with_timeout_retry(mut attempt: impl FnMut() -> ProbeOutcome) -> ProbeOutcome {
+    let first = attempt();
+    if !first
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.reason_code == ReasonCode::VersionProbeTimeout)
+    {
+        return first;
+    }
+
+    std::thread::sleep(Duration::from_millis(100));
+    let mut second = attempt();
+    if second.runnable {
+        second.diagnostics.insert(
+            0,
+            Diagnostic {
+                reason_code: ReasonCode::VersionProbeTimeout,
+                message: "首次版本探测超时，第二次尝试成功".to_string(),
+            },
+        );
+    }
+    second
+}
+
+struct ResolvedProbeCommand {
+    observed_executable: PathBuf,
+    canonical_executable: PathBuf,
+    observed_program: PathBuf,
+    canonical_program: PathBuf,
+    arguments: Vec<std::ffi::OsString>,
+}
+
+fn run_probe_once(
+    executable: &Path,
+    observed_entry: &Path,
+    probe: &VersionProbe,
+    environment: &ScanEnvironment,
+) -> ProbeOutcome {
+    if unsupported_script_shim(executable, environment.platform) {
+        return broken_probe(
+            ReasonCode::ExecutableNotRunnable,
+            "已发现脚本 shim；为避免调用系统 shell，本版本不执行该入口",
+        );
+    }
+
+    let resolved = match resolve_probe_command(executable, observed_entry, probe, environment) {
+        Ok(resolved) => resolved,
+        Err(outcome) => return outcome,
+    };
+    if !probe_command_still_matches(&resolved) {
+        return broken_probe(
+            ReasonCode::ExecutableNotRunnable,
+            "版本探测入口或运行时在启动前发生变化",
+        );
+    }
+
+    let mut command = Command::new(&resolved.canonical_program);
+    command
+        .args(&resolved.arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_clear();
+    for (name, value) in &environment.child_environment {
+        if name != "PATH" {
             command.env(name, value);
         }
+    }
+    let path = match probe_child_path(&resolved.canonical_program, environment) {
+        Ok(path) => path,
+        Err(()) => {
+            return broken_probe(
+                ReasonCode::ExecutableNotRunnable,
+                "无法构造受限的版本探测 PATH",
+            );
+        }
+    };
+    command.env("PATH", path);
 
-        let mut child = match command.group_spawn() {
-            Ok(child) => child,
+    let mut child = match command.group_spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            return broken_probe(ReasonCode::ExecutableNotRunnable, "版本探测进程无法启动");
+        }
+    };
+    let stdout = child.inner().stdout.take();
+    let stderr = child.inner().stderr.take();
+    let stdout_reader = stdout.map(|stream| spawn_output_reader(stream, probe.max_output_bytes));
+    let stderr_reader = stderr.map(|stream| spawn_output_reader(stream, probe.max_output_bytes));
+
+    let deadline = Instant::now() + Duration::from_millis(probe.timeout_ms);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(PROBE_POLL_INTERVAL);
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(ReasonCode::VersionProbeTimeout);
+            }
             Err(_) => {
-                return broken_probe(ReasonCode::ExecutableNotRunnable, "版本探测进程无法启动");
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(ReasonCode::VersionProbeExitFailure);
             }
-        };
-        let stdout = child.inner().stdout.take();
-        let stderr = child.inner().stderr.take();
-        let stdout_reader =
-            stdout.map(|stream| spawn_output_reader(stream, probe.max_output_bytes));
-        let stderr_reader =
-            stderr.map(|stream| spawn_output_reader(stream, probe.max_output_bytes));
+        }
+    };
 
-        let deadline = Instant::now() + Duration::from_millis(probe.timeout_ms);
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Ok(status),
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(PROBE_POLL_INTERVAL);
-                }
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break Err(ReasonCode::VersionProbeTimeout);
-                }
-                Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break Err(ReasonCode::VersionProbeExitFailure);
-                }
-            }
-        };
+    if let Some(reader) = &stdout_reader {
+        reader.stop();
+    }
+    if let Some(reader) = &stderr_reader {
+        reader.stop();
+    }
+    let output_deadline = Instant::now() + OUTPUT_READER_GRACE;
+    let stdout = finish_output_reader(stdout_reader, output_deadline);
+    let stderr = finish_output_reader(stderr_reader, output_deadline);
+    let output = combine_output(&stdout.bytes, &stderr.bytes, probe.max_output_bytes);
+    let truncated = stdout.truncated || stderr.truncated || output.truncated;
+    let raw = sanitize_output(&output.bytes, probe.max_output_bytes);
 
-        let stdout = finish_output_reader(stdout_reader);
-        let stderr = finish_output_reader(stderr_reader);
-        let output = combine_output(&stdout.bytes, &stderr.bytes, probe.max_output_bytes);
-        let truncated = stdout.truncated || stderr.truncated || output.truncated;
-        let raw = sanitize_output(&output.bytes, probe.max_output_bytes);
-
-        let status = match status {
-            Ok(status) => status,
-            Err(reason_code) => {
-                return ProbeOutcome {
-                    runnable: false,
-                    version_raw: raw,
-                    version_normalized: None,
-                    diagnostics: vec![Diagnostic {
-                        reason_code,
-                        message: match reason_code {
-                            ReasonCode::VersionProbeTimeout => {
-                                "版本探测超时，进程组已终止并回收".to_string()
-                            }
-                            _ => "版本探测进程异常，已终止并回收".to_string(),
-                        },
-                    }],
-                };
-            }
-        };
-
-        if !status.success() {
+    let status = match status {
+        Ok(status) => status,
+        Err(reason_code) => {
             return ProbeOutcome {
                 runnable: false,
-                version_raw: raw,
+                version_raw: None,
                 version_normalized: None,
                 diagnostics: vec![Diagnostic {
-                    reason_code: ReasonCode::VersionProbeExitFailure,
-                    message: format!(
-                        "版本探测以非零状态退出（code={}）",
-                        status
-                            .code()
-                            .map_or_else(|| "signal".to_string(), |code| code.to_string())
-                    ),
+                    reason_code,
+                    message: match reason_code {
+                        ReasonCode::VersionProbeTimeout => {
+                            "版本探测超时，进程组已终止并回收".to_string()
+                        }
+                        _ => "版本探测进程异常，已终止并回收".to_string(),
+                    },
                 }],
             };
         }
+    };
 
-        let normalized = raw.as_deref().and_then(normalize_version);
-        let mut diagnostics = Vec::new();
-        if truncated {
-            diagnostics.push(Diagnostic {
-                reason_code: ReasonCode::VersionOutputTruncated,
+    if !status.success() {
+        return ProbeOutcome {
+            runnable: false,
+            version_raw: None,
+            version_normalized: None,
+            diagnostics: vec![Diagnostic {
+                reason_code: ReasonCode::VersionProbeExitFailure,
                 message: format!(
-                    "版本输出超过 {} 字节，已截断且未写入普通日志",
-                    probe.max_output_bytes
+                    "版本探测以非零状态退出（code={}）",
+                    status
+                        .code()
+                        .map_or_else(|| "signal".to_string(), |code| code.to_string())
                 ),
-            });
-        }
-        if normalized.is_none() {
-            diagnostics.push(Diagnostic {
-                reason_code: ReasonCode::VersionOutputUnparseable,
-                message: "版本命令成功，但输出中没有可识别的 SemVer".to_string(),
-            });
-        }
-        ProbeOutcome {
-            runnable: true,
-            version_raw: raw,
-            version_normalized: normalized,
-            diagnostics,
+            }],
+        };
+    }
+
+    let normalized = raw.as_deref().and_then(normalize_version);
+    let mut diagnostics = Vec::new();
+    if truncated {
+        diagnostics.push(Diagnostic {
+            reason_code: ReasonCode::VersionOutputTruncated,
+            message: format!(
+                "版本输出超过 {} 字节，已截断且未写入普通日志",
+                probe.max_output_bytes
+            ),
+        });
+    }
+    if normalized.is_none() {
+        diagnostics.push(Diagnostic {
+            reason_code: ReasonCode::VersionOutputUnparseable,
+            message: "版本命令成功，但输出中没有可识别的 SemVer".to_string(),
+        });
+    }
+    ProbeOutcome {
+        runnable: true,
+        version_raw: raw,
+        version_normalized: normalized,
+        diagnostics,
+    }
+}
+
+fn resolve_probe_command(
+    executable: &Path,
+    observed_entry: &Path,
+    probe: &VersionProbe,
+    environment: &ScanEnvironment,
+) -> Result<ResolvedProbeCommand, ProbeOutcome> {
+    let canonical_executable = std::fs::canonicalize(executable).map_err(|_| {
+        broken_probe(
+            ReasonCode::ExecutableNotRunnable,
+            "版本探测入口无法再次解析真实路径",
+        )
+    })?;
+    match probe.runtime.as_ref().unwrap_or(&ProbeRuntime::Direct) {
+        ProbeRuntime::Direct => Ok(ResolvedProbeCommand {
+            observed_executable: observed_entry.to_path_buf(),
+            canonical_executable: canonical_executable.clone(),
+            observed_program: observed_entry.to_path_buf(),
+            canonical_program: canonical_executable,
+            arguments: probe.argv.iter().map(std::ffi::OsString::from).collect(),
+        }),
+        ProbeRuntime::EnvShebang {
+            interpreter_candidates,
+            resolution_sources,
+            known_install_locations,
+        } => {
+            if !matches_declared_env_shebang(&canonical_executable, interpreter_candidates) {
+                return Err(broken_probe(
+                    ReasonCode::ExecutableNotRunnable,
+                    "版本探测脚本的 shebang 与内置 Registry 声明不匹配",
+                ));
+            }
+            let (observed_program, canonical_program) = resolve_interpreter(
+                observed_entry,
+                interpreter_candidates,
+                resolution_sources,
+                known_install_locations,
+                environment,
+            )
+            .map_err(|message| broken_probe(ReasonCode::ExecutableNotRunnable, message))?;
+            let mut arguments = Vec::with_capacity(probe.argv.len() + 1);
+            arguments.push(canonical_executable.as_os_str().to_os_string());
+            arguments.extend(probe.argv.iter().map(std::ffi::OsString::from));
+            Ok(ResolvedProbeCommand {
+                observed_executable: observed_entry.to_path_buf(),
+                canonical_executable,
+                observed_program,
+                canonical_program,
+                arguments,
+            })
         }
     }
+}
+
+fn matches_declared_env_shebang(executable: &Path, candidates: &[String]) -> bool {
+    let mut file = match std::fs::File::open(executable) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let mut bytes = Vec::new();
+    if file.by_ref().take(256).read_to_end(&mut bytes).is_err() {
+        return false;
+    }
+    let first_line = bytes
+        .split(|byte| *byte == b'\n')
+        .next()
+        .and_then(|line| std::str::from_utf8(line).ok())
+        .map(str::trim_end);
+    first_line.is_some_and(|line| {
+        candidates
+            .iter()
+            .any(|candidate| line == format!("#!/usr/bin/env {candidate}"))
+    })
+}
+
+fn resolve_interpreter(
+    observed_entry: &Path,
+    candidates: &[String],
+    sources: &[RuntimeResolutionSource],
+    known_locations: &BTreeMap<Platform, Vec<String>>,
+    environment: &ScanEnvironment,
+) -> Result<(PathBuf, PathBuf), &'static str> {
+    for source in sources {
+        let paths: Vec<PathBuf> = match source {
+            RuntimeResolutionSource::ObservedEntrySibling => observed_entry
+                .parent()
+                .into_iter()
+                .flat_map(|parent| candidates.iter().map(move |name| parent.join(name)))
+                .collect(),
+            RuntimeResolutionSource::KnownInstallLocations => known_locations
+                .get(&environment.platform)
+                .into_iter()
+                .flatten()
+                .filter_map(|template| expand_template(template, environment))
+                .collect(),
+        };
+        let mut resolved = BTreeMap::new();
+        for path in paths {
+            if let Some(canonical) = canonical_native_executable(&path, environment.platform) {
+                resolved
+                    .entry(path_identity(&canonical, environment.platform))
+                    .or_insert((path, canonical));
+            }
+        }
+        match resolved.len() {
+            0 => continue,
+            1 => {
+                return Ok(resolved
+                    .into_values()
+                    .next()
+                    .expect("one runtime candidate"))
+            }
+            _ => return Err("同一优先级发现多个不同的版本探测运行时"),
+        }
+    }
+    Err("未找到与安装入口匹配的版本探测运行时")
+}
+
+fn canonical_native_executable(path: &Path, platform: Platform) -> Option<PathBuf> {
+    let entry = std::fs::symlink_metadata(path).ok()?;
+    if !entry.is_file() && !entry.file_type().is_symlink() {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(path).ok()?;
+    let metadata = std::fs::metadata(&canonical).ok()?;
+    (metadata.is_file()
+        && executable_permission(Some(&metadata), &canonical, platform)
+        && is_native_executable(&canonical))
+    .then_some(canonical)
+}
+
+fn is_native_executable(path: &Path) -> bool {
+    let mut magic = [0_u8; 4];
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    if file.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    matches!(
+        magic,
+        [0x7f, b'E', b'L', b'F']
+            | [b'M', b'Z', _, _]
+            | [0xfe, 0xed, 0xfa, 0xce]
+            | [0xfe, 0xed, 0xfa, 0xcf]
+            | [0xce, 0xfa, 0xed, 0xfe]
+            | [0xcf, 0xfa, 0xed, 0xfe]
+            | [0xca, 0xfe, 0xba, 0xbe]
+            | [0xbe, 0xba, 0xfe, 0xca]
+    )
+}
+
+fn probe_command_still_matches(command: &ResolvedProbeCommand) -> bool {
+    std::fs::canonicalize(&command.observed_executable)
+        .is_ok_and(|path| path == command.canonical_executable)
+        && std::fs::canonicalize(&command.observed_program)
+            .is_ok_and(|path| path == command.canonical_program)
+}
+
+fn probe_child_path(
+    program: &Path,
+    environment: &ScanEnvironment,
+) -> Result<std::ffi::OsString, ()> {
+    let mut entries = Vec::new();
+    if let Some(parent) = program.parent() {
+        entries.push(parent.to_path_buf());
+    }
+    match environment.platform {
+        Platform::Macos | Platform::Linux | Platform::Wsl => {
+            for path in ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+                let path = PathBuf::from(path);
+                if !entries.contains(&path) {
+                    entries.push(path);
+                }
+            }
+        }
+        Platform::Windows => {
+            for root in ["SYSTEMROOT", "WINDIR"]
+                .into_iter()
+                .filter_map(|name| environment.child_environment.get(name))
+            {
+                for path in [PathBuf::from(root), PathBuf::from(root).join("System32")] {
+                    if path.is_absolute() && !entries.contains(&path) {
+                        entries.push(path);
+                    }
+                }
+            }
+        }
+    }
+    std::env::join_paths(entries).map_err(|_| ())
 }
 
 pub struct DiscoveryScanner<R = SystemProbeRunner> {
@@ -241,6 +513,7 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
                 let probe = if installation.probe_allowed {
                     self.runner.run(
                         &installation.canonical_path,
+                        &installation.observed_probe_path,
                         &descriptor.version_probe,
                         &self.environment,
                     )
@@ -378,9 +651,6 @@ fn mark_path_default(installations: &mut BTreeMap<String, Installation>) {
         .values()
         .flat_map(|installation| installation.path_orders.iter().flatten().copied())
         .min();
-    let Some(minimum) = minimum else {
-        return;
-    };
     for installation in installations.values_mut() {
         for (evidence, order) in installation
             .evidence
@@ -388,7 +658,26 @@ fn mark_path_default(installations: &mut BTreeMap<String, Installation>) {
             .zip(&installation.path_orders)
         {
             evidence.is_path_default = evidence.source == DiscoverySource::Path
-                && order.is_some_and(|order| order == minimum);
+                && minimum.is_some_and(|minimum| order.is_some_and(|order| order == minimum));
+        }
+        if let Some(selected) = installation
+            .evidence
+            .iter()
+            .min_by_key(|evidence| {
+                (
+                    if evidence.is_path_default {
+                        0
+                    } else if evidence.source == DiscoverySource::KnownPath {
+                        1
+                    } else {
+                        2
+                    },
+                    evidence.observed_path.as_str(),
+                )
+            })
+            .map(|evidence| PathBuf::from(&evidence.observed_path))
+        {
+            installation.observed_probe_path = selected;
         }
     }
 }
@@ -447,39 +736,135 @@ struct CapturedOutput {
     truncated: bool,
 }
 
-fn spawn_output_reader<R: Read + Send + 'static>(
-    mut reader: R,
-    limit: usize,
-) -> std::thread::JoinHandle<CapturedOutput> {
+struct OutputReader {
+    receiver: std::sync::mpsc::Receiver<CapturedOutput>,
+    stop: Arc<AtomicBool>,
+}
+
+impl OutputReader {
+    fn stop(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(unix)]
+fn pipe_bytes_available<R: std::os::fd::AsRawFd + ?Sized>(reader: &R) -> std::io::Result<usize> {
+    let mut available: libc::c_int = 0;
+    // SAFETY: FIONREAD only reads the available-byte count for this valid pipe fd.
+    let result = unsafe { libc::ioctl(reader.as_raw_fd(), libc::FIONREAD, &mut available) };
+    if result == 0 {
+        usize::try_from(available).map_err(|_| std::io::Error::other("invalid pipe byte count"))
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn pipe_bytes_available<R: std::os::windows::io::AsRawHandle + ?Sized>(
+    reader: &R,
+) -> std::io::Result<usize> {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+    let mut available = 0_u32;
+    // SAFETY: the handle belongs to a live ChildStdout/ChildStderr pipe and all optional buffers
+    // are null; PeekNamedPipe only writes the available-byte count.
+    let result = unsafe {
+        PeekNamedPipe(
+            reader.as_raw_handle(),
+            null_mut(),
+            0,
+            null_mut(),
+            &mut available,
+            null_mut(),
+        )
+    };
+    if result != 0 {
+        Ok(available as usize)
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn spawn_output_reader<R>(mut reader: R, limit: usize) -> OutputReader
+where
+    R: Read + Send + 'static,
+    R: PipeHandle,
+{
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
     std::thread::spawn(move || {
         let mut retained = Vec::with_capacity(limit.min(8 * 1024));
         let mut buffer = [0_u8; 8 * 1024];
         let mut truncated = false;
         loop {
-            match reader.read(&mut buffer) {
+            let available = match reader.bytes_available() {
+                Ok(0) if thread_stop.load(Ordering::Acquire) => break,
+                Ok(0) => {
+                    std::thread::sleep(PROBE_POLL_INTERVAL);
+                    continue;
+                }
+                Ok(available) => available,
+                Err(_) => break,
+            };
+            let read_limit = available.min(buffer.len());
+            match reader.read(&mut buffer[..read_limit]) {
                 Ok(0) | Err(_) => break,
                 Ok(read) => {
                     let remaining = limit.saturating_sub(retained.len());
                     let kept = remaining.min(read);
                     retained.extend_from_slice(&buffer[..kept]);
                     truncated |= kept < read;
+                    if thread_stop.load(Ordering::Acquire) && retained.len() >= limit {
+                        truncated = true;
+                        break;
+                    }
                 }
             }
         }
-        CapturedOutput {
+        let _ = sender.send(CapturedOutput {
             bytes: retained,
             truncated,
-        }
-    })
+        });
+    });
+    OutputReader { receiver, stop }
 }
 
-fn finish_output_reader(reader: Option<std::thread::JoinHandle<CapturedOutput>>) -> CapturedOutput {
-    reader
-        .and_then(|reader| reader.join().ok())
-        .unwrap_or(CapturedOutput {
+#[cfg(unix)]
+trait PipeHandle: std::os::fd::AsRawFd {
+    fn bytes_available(&self) -> std::io::Result<usize> {
+        pipe_bytes_available(self)
+    }
+}
+
+#[cfg(unix)]
+impl<T: std::os::fd::AsRawFd> PipeHandle for T {}
+
+#[cfg(windows)]
+trait PipeHandle: std::os::windows::io::AsRawHandle {
+    fn bytes_available(&self) -> std::io::Result<usize> {
+        pipe_bytes_available(self)
+    }
+}
+
+#[cfg(windows)]
+impl<T: std::os::windows::io::AsRawHandle> PipeHandle for T {}
+
+fn finish_output_reader(reader: Option<OutputReader>, deadline: Instant) -> CapturedOutput {
+    match reader {
+        Some(reader) => reader
+            .receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(CapturedOutput {
+                bytes: Vec::new(),
+                truncated: true,
+            }),
+        None => CapturedOutput {
             bytes: Vec::new(),
             truncated: false,
-        })
+        },
+    }
 }
 
 fn combine_output(stdout: &[u8], stderr: &[u8], limit: usize) -> CapturedOutput {
@@ -716,6 +1101,7 @@ mod tests {
         fn run(
             &self,
             _executable: &Path,
+            _observed_entry: &Path,
             _probe: &VersionProbe,
             _environment: &ScanEnvironment,
         ) -> ProbeOutcome {
@@ -862,8 +1248,219 @@ mod tests {
 
         assert_eq!(records.len(), 1);
         assert!(records[0].is_path_default);
+        assert_eq!(records[0].executable_path, path_alias.to_string_lossy());
         assert_eq!(records[0].evidence.len(), 2);
         assert_eq!(records[0].version_normalized.as_deref(), Some("1.2.3"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_env_shebang_runtime_uses_the_observed_entry_sibling_with_a_slim_path() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = scratch("env-shebang-runtime");
+        let canonical_script = root.join("lib/node_modules/openclaw/openclaw.mjs");
+        std::fs::create_dir_all(canonical_script.parent().unwrap()).unwrap();
+        std::fs::write(
+            &canonical_script,
+            b"#!/usr/bin/env node\nprintf 'OpenClaw 2026.6.11 (fixture)\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&canonical_script, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+
+        let observed_entry = root.join("bin/openclaw");
+        std::fs::create_dir_all(observed_entry.parent().unwrap()).unwrap();
+        symlink(&canonical_script, &observed_entry).unwrap();
+        let sibling_node = root.join("bin/node");
+        symlink("/bin/sh", &sibling_node).unwrap();
+
+        let registry = AgentRegistry::builtin().unwrap();
+        let mut descriptor = registry.descriptors()[3].clone();
+        assert_eq!(descriptor.agent_id, "openclaw");
+        descriptor.known_install_locations.insert(
+            Platform::Macos,
+            vec![observed_entry.to_string_lossy().into_owned()],
+        );
+        let mut context = environment(&root);
+        context.path_entries.clear();
+        context.child_environment.insert(
+            "PATH".to_string(),
+            "/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+        );
+        let scanner = DiscoveryScanner::new(context, SystemProbeRunner);
+
+        let records = scanner.scan_descriptor(&descriptor);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].executable_path, observed_entry.to_string_lossy());
+        assert!(records[0].runnable, "{:?}", records[0].diagnostics);
+        assert_eq!(records[0].version_normalized.as_deref(), Some("2026.6.11"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_env_shebang_runtime_rejects_a_mismatched_interpreter() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = scratch("env-shebang-mismatch");
+        let canonical_script = root.join("lib/openclaw.mjs");
+        std::fs::create_dir_all(canonical_script.parent().unwrap()).unwrap();
+        std::fs::write(&canonical_script, b"#!/usr/bin/env python\n").unwrap();
+        std::fs::set_permissions(&canonical_script, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let observed_entry = root.join("bin/openclaw");
+        std::fs::create_dir_all(observed_entry.parent().unwrap()).unwrap();
+        symlink(&canonical_script, &observed_entry).unwrap();
+        let sibling_node = root.join("bin/node");
+        symlink("/bin/sh", &sibling_node).unwrap();
+
+        let registry = AgentRegistry::builtin().unwrap();
+        let mut descriptor = registry.descriptors()[3].clone();
+        descriptor.known_install_locations.insert(
+            Platform::Macos,
+            vec![observed_entry.to_string_lossy().into_owned()],
+        );
+        let mut context = environment(&root);
+        context.path_entries.clear();
+        let scanner = DiscoveryScanner::new(context, SystemProbeRunner);
+
+        let records = scanner.scan_descriptor(&descriptor);
+
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].runnable);
+        assert!(records[0].diagnostics.iter().any(|diagnostic| {
+            diagnostic.reason_code == ReasonCode::ExecutableNotRunnable
+                && diagnostic.message.contains("shebang")
+        }));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_runtime_known_locations_are_a_fallback_and_conflicts_fail_closed() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch("runtime-known-locations");
+        let observed_entry = root.join("bin/openclaw");
+        let first = root.join("runtime-a/node");
+        let second = root.join("runtime-b/node");
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        symlink("/bin/sh", &first).unwrap();
+        symlink("/bin/echo", &second).unwrap();
+        let context = environment(&root);
+        let candidates = vec!["node".to_string()];
+        let sources = vec![
+            RuntimeResolutionSource::ObservedEntrySibling,
+            RuntimeResolutionSource::KnownInstallLocations,
+        ];
+
+        let one = BTreeMap::from([(Platform::Macos, vec![first.to_string_lossy().into_owned()])]);
+        let resolved =
+            resolve_interpreter(&observed_entry, &candidates, &sources, &one, &context).unwrap();
+        assert_eq!(resolved.1, std::fs::canonicalize(&first).unwrap());
+
+        let conflict = BTreeMap::from([(
+            Platform::Macos,
+            vec![
+                first.to_string_lossy().into_owned(),
+                second.to_string_lossy().into_owned(),
+            ],
+        )]);
+        assert!(
+            resolve_interpreter(&observed_entry, &candidates, &sources, &conflict, &context,)
+                .unwrap_err()
+                .contains("多个")
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_runtime_rejects_script_directory_and_non_executable_impersonators() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = scratch("runtime-native-only");
+        let script = root.join("script-node");
+        executable(&script);
+        assert!(canonical_native_executable(&script, Platform::Macos).is_none());
+
+        let directory = root.join("directory-node");
+        std::fs::create_dir_all(&directory).unwrap();
+        assert!(canonical_native_executable(&directory, Platform::Macos).is_none());
+
+        let non_executable = root.join("non-executable-node");
+        std::fs::copy("/bin/sh", &non_executable).unwrap();
+        std::fs::set_permissions(&non_executable, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(canonical_native_executable(&non_executable, Platform::Macos).is_none());
+
+        let native = root.join("native-node");
+        symlink("/bin/sh", &native).unwrap();
+        assert!(canonical_native_executable(&native, Platform::Macos).is_some());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_revalidates_observed_paths_before_spawn() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch("runtime-revalidation");
+        let observed = root.join("node");
+        symlink("/bin/sh", &observed).unwrap();
+        let original = std::fs::canonicalize(&observed).unwrap();
+        let command = ResolvedProbeCommand {
+            observed_executable: observed.clone(),
+            canonical_executable: original.clone(),
+            observed_program: observed.clone(),
+            canonical_program: original,
+            arguments: Vec::new(),
+        };
+        assert!(probe_command_still_matches(&command));
+
+        std::fs::remove_file(&observed).unwrap();
+        symlink("/bin/echo", &observed).unwrap();
+        assert!(!probe_command_still_matches(&command));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_probe_path_excludes_inherited_user_directories() {
+        let root = scratch("probe-path-allowlist");
+        let malicious = root.join("user-bin");
+        let mut context = environment(&root);
+        context.child_environment.insert(
+            "PATH".to_string(),
+            std::env::join_paths([malicious.clone(), PathBuf::from("/usr/bin")])
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let runtime = root.join("runtime/node");
+
+        let path = probe_child_path(&runtime, &context).unwrap();
+        let entries: Vec<_> = std::env::split_paths(&path).collect();
+
+        assert_eq!(entries.first(), Some(&root.join("runtime")));
+        assert!(entries.contains(&PathBuf::from("/usr/bin")));
+        assert!(!entries.contains(&malicious));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_probe_path_fails_closed_when_runtime_parent_cannot_be_encoded() {
+        let root = scratch("probe-path-invalid");
+        let context = environment(&root);
+        let runtime = root.join("bad:path/node");
+
+        assert!(probe_child_path(&runtime, &context).is_err());
+
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1053,9 +1650,11 @@ mod tests {
             timeout_ms: 1_000,
             max_output_bytes: 1_024,
             output_matcher: super::super::types::VersionOutputMatcher::SemverAnywhere,
+            retry_on_timeout: false,
+            runtime: None,
         };
 
-        let unknown = SystemProbeRunner.run(&executable, &probe("unknown"), &context);
+        let unknown = SystemProbeRunner.run(&executable, &executable, &probe("unknown"), &context);
         assert!(unknown.runnable);
         assert_eq!(unknown.version_raw.as_deref(), Some("release-current"));
         assert!(unknown.version_normalized.is_none());
@@ -1064,8 +1663,9 @@ mod tests {
                 && !diagnostic.message.contains("release-current")
         }));
 
-        let broken = SystemProbeRunner.run(&executable, &probe("fail"), &context);
+        let broken = SystemProbeRunner.run(&executable, &executable, &probe("fail"), &context);
         assert!(!broken.runnable);
+        assert!(broken.version_raw.is_none());
         assert!(broken.diagnostics.iter().any(|diagnostic| {
             diagnostic.reason_code == ReasonCode::VersionProbeExitFailure
                 && !diagnostic.message.contains("TS_SECRET_STDERR")
@@ -1101,9 +1701,12 @@ mod tests {
             timeout_ms: 50,
             max_output_bytes: 1024,
             output_matcher: super::super::types::VersionOutputMatcher::SemverAnywhere,
+            retry_on_timeout: false,
+            runtime: None,
         };
-        let timeout_result = SystemProbeRunner.run(&timeout, &timeout_probe, &context);
+        let timeout_result = SystemProbeRunner.run(&timeout, &timeout, &timeout_probe, &context);
         assert!(!timeout_result.runnable);
+        assert!(timeout_result.version_raw.is_none());
         assert!(timeout_result.diagnostics.iter().any(|diagnostic| {
             diagnostic.reason_code == ReasonCode::VersionProbeTimeout
                 && !diagnostic.message.contains("TS_SECRET_TIMEOUT")
@@ -1114,8 +1717,10 @@ mod tests {
             timeout_ms: 2_000,
             max_output_bytes: 1024,
             output_matcher: super::super::types::VersionOutputMatcher::SemverAnywhere,
+            retry_on_timeout: false,
+            runtime: None,
         };
-        let output_result = SystemProbeRunner.run(&output, &output_probe, &context);
+        let output_result = SystemProbeRunner.run(&output, &output, &output_probe, &context);
         assert!(output_result.runnable);
         assert!(output_result
             .version_raw
@@ -1129,6 +1734,99 @@ mod tests {
     }
 
     #[test]
+    fn discovery_timeout_retries_once_and_keeps_a_sanitized_diagnostic() {
+        let mut attempts = 0;
+        let outcome = run_with_timeout_retry(|| {
+            attempts += 1;
+            if attempts == 1 {
+                broken_probe(
+                    ReasonCode::VersionProbeTimeout,
+                    "版本探测超时，进程组已终止并回收",
+                )
+            } else {
+                ProbeOutcome {
+                    runnable: true,
+                    version_raw: Some("tool 1.2.3".to_string()),
+                    version_normalized: Some("1.2.3".to_string()),
+                    diagnostics: Vec::new(),
+                }
+            }
+        });
+
+        assert!(outcome.runnable, "{:?}", outcome.diagnostics);
+        assert_eq!(attempts, 2);
+        assert_eq!(outcome.version_normalized.as_deref(), Some("1.2.3"));
+        assert!(outcome.diagnostics.iter().any(|diagnostic| {
+            diagnostic.reason_code == ReasonCode::VersionProbeTimeout
+                && diagnostic.message == "首次版本探测超时，第二次尝试成功"
+        }));
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.message.contains("TS_SECRET_TIMEOUT")));
+    }
+
+    #[test]
+    fn discovery_retry_policy_stops_after_two_timeouts_and_never_retries_nonzero() {
+        let mut timeouts = 0;
+        let timed_out = run_with_timeout_retry(|| {
+            timeouts += 1;
+            broken_probe(ReasonCode::VersionProbeTimeout, "timeout")
+        });
+        assert_eq!(timeouts, 2);
+        assert!(!timed_out.runnable);
+
+        let mut failures = 0;
+        let failed = run_with_timeout_retry(|| {
+            failures += 1;
+            broken_probe(ReasonCode::VersionProbeExitFailure, "nonzero")
+        });
+        assert_eq!(failures, 1);
+        assert!(!failed.runnable);
+    }
+
+    #[test]
+    fn discovery_output_reader_has_a_hard_collection_deadline() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let started = Instant::now();
+
+        let captured = finish_output_reader(
+            Some(OutputReader {
+                receiver,
+                stop: Arc::new(AtomicBool::new(false)),
+            }),
+            Instant::now() + Duration::from_millis(20),
+        );
+
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(captured.truncated);
+        assert!(captured.bytes.is_empty());
+        drop(sender);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_output_reader_can_cancel_an_open_idle_pipe() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 5"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let reader = spawn_output_reader(stdout, 1024);
+        let started = Instant::now();
+
+        reader.stop();
+        let captured =
+            finish_output_reader(Some(reader), Instant::now() + Duration::from_millis(200));
+
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(captured.bytes.is_empty());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
     #[ignore = "read-only smoke test against Agents already installed on the current machine"]
     fn discovery_real_platform_probe_is_read_only_and_never_installs() {
         let registry = AgentRegistry::builtin().unwrap();
@@ -1138,6 +1836,19 @@ mod tests {
 
         for record in records {
             assert!(Path::new(&record.executable_path).exists());
+            if matches!(record.agent_id.as_str(), "openclaw" | "nous-hermes-agent") {
+                assert!(
+                    record.runnable,
+                    "{}: {:?}",
+                    record.agent_id, record.diagnostics
+                );
+                assert!(
+                    record.version_normalized.is_some(),
+                    "{}: {:?}",
+                    record.agent_id,
+                    record.diagnostics
+                );
+            }
             assert!(record.diagnostics.iter().all(|diagnostic| {
                 diagnostic.message.len() <= 256
                     && !diagnostic.message.chars().any(|character| {

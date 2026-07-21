@@ -2,7 +2,7 @@
 
 日期：2026-07-21
 
-状态：已根据 cc-Switch 调研修订，等待用户确认书面方案
+状态：用户已确认，已按方案实现，等待最终 App 验收
 
 关联文档：
 
@@ -92,6 +92,7 @@ VersionProbe
   timeout_ms
   max_output_bytes
   output_matcher
+  retry_on_timeout
   runtime?
     kind: direct | env_shebang
     interpreter_candidates[]
@@ -108,7 +109,7 @@ VersionProbe
 - 解释器候选名称只允许普通文件名，不允许路径分隔符、空白和 Shell 元字符。
 - 已知位置沿用现有绝对路径模板校验，只允许受支持的根变量。
 - `env_shebang` 只读取 canonical 脚本开头的有限字节，并要求 shebang 与 Descriptor 声明完全匹配；不解析或执行脚本正文。
-- 解释器必须是可执行普通文件，执行前解析为 canonical path。
+- 解释器必须是可执行普通文件，执行前解析为 canonical path，并校验为 Mach-O、ELF 或 PE 原生可执行格式；文本脚本和 shebang shim 不能冒充解释器。
 - Scanner 先检查实际被选择的 observed entry 同目录中的解释器。这吸收 cc-Switch 的“安装目录携带运行时”经验，并确保 npm、nvm、Homebrew 的入口优先使用同一安装上下文中的 Node。
 - observed entry 同目录无有效解释器时，才检查 Descriptor 的精确已知位置；不读取登录 Shell PATH，不递归遍历整个版本管理器目录。
 - 同一优先级若有多个候选解析为不同 canonical path，探测失败并进入只读保护；低优先级发现其他 Node 不否定已经验证的同目录 Node。
@@ -134,11 +135,15 @@ VersionProbe
 
 版本命令继续调用 `env_clear()`。子进程只获得当前允许列表中的最小环境，不增加 API Key、代理凭据或配置原文。
 
-解释器模式不依赖 PATH 找 Node。子进程 PATH 仅包含 canonical 解释器所在目录和现有允许的绝对系统目录，用于该运行时确有需要的子命令；不会加入其他候选安装目录。Scanner 不修改全局 PATH，也不把用户登录 Shell 的完整 PATH 注入所有探测。
+解释器模式不依赖 PATH 找 Node。子进程 PATH 仅包含 canonical 解释器所在目录和固定系统允许目录；不会恢复 GUI 进程中的其他用户目录，也不会加入其他候选安装目录。Scanner 不修改全局 PATH，也不把用户登录 Shell 的完整 PATH 注入所有探测。
+
+进程退出或被终止后，stdout/stderr reader 会收到停止信号，并通过 Unix `FIONREAD` 或 Windows `PeekNamedPipe` 进行可取消的非阻塞轮询；即使异常后代进程仍持有管道，也不会留下永久阻塞的读取线程。Scanner 最多等待 100 毫秒回收输出，超过期限即返回截断诊断。
+
+子进程 PATH 必须由 canonical 解释器目录和固定系统目录成功构造。注入最小环境时始终忽略父环境中的 PATH；若路径包含平台无法编码的分隔符等异常导致 PATH 构造失败，探测直接 fail closed，绝不回落到继承 PATH。
 
 ### 5.4 有边界的重试
 
-版本命令只在 `VersionProbeTimeout` 时重试一次，间隔 100 毫秒，每次继续使用 Descriptor 规定的独立超时和输出上限。
+只有内置 Registry 明确设置 `retry_on_timeout: true` 的版本命令，才在 `VersionProbeTimeout` 时重试一次，间隔 100 毫秒；每次继续使用 Descriptor 规定的独立超时和输出上限。首期仅 Hermes 开启，其他 Agent 不默认重复执行外部程序。
 
 以下情况不重试：
 
@@ -153,7 +158,7 @@ VersionProbe
 
 ### 5.5 界面诊断
 
-`AgentDiscoveryView` 已包含脱敏后的 `diagnostics`。Agent 卡片在 `INSTALLED_BROKEN` 状态下展示第一条诊断的 `message` 和 `reason_code`，但版本栏不再直接展示失败进程的原始 stdout/stderr，也不展示配置原文或环境变量。
+`AgentDiscoveryView` 已包含脱敏后的 `diagnostics`。失败或超时时，后端直接把 `version_raw` 置空，不让原始 stderr 通过 IPC 返回；Agent 卡片在 `INSTALLED_BROKEN` 状态下优先展示与兼容结论 `reason_code` 匹配的诊断，只有找不到匹配项时才回退到首条诊断，且不展示配置原文或环境变量。
 
 展示示例：
 
@@ -198,12 +203,16 @@ cc-Switch 的 OpenClaw 写入链包含写锁、写前内容冲突检测、无变
 - 构造 npm、Homebrew 和 nvm 风格的入口软链接夹具，证明运行时始终与被选 probe entry 属于同一安装上下文。
 - 同目录 Node 缺失时允许命中唯一的 Descriptor 已知位置；同一优先级存在多个不同 canonical Node 时 fail closed。
 - shebang 与声明不符、解释器缺失、路径为目录、无执行权限或解析路径被替换时全部 fail closed。
+- 文本脚本不能伪装成 Node 解释器；解释器必须命中受支持的原生可执行格式。
 - Descriptor 包含相对路径、Shell 元字符或未知字段时拒绝加载。
 - 同一 canonical Agent 的多个软链接入口正确归并；不同 canonical Agent 真身不因版本相同而合并。
 - Windows 候选不把 npm 裸名 Unix shim 误报为独立安装，现有脚本 shim 仍不执行。
 - 首次超时、第二次成功时记录诊断并返回版本。
 - 连续两次超时仍为不可运行。
 - 非零退出不重试。
+- 未声明 `retry_on_timeout` 的 Agent 即使超时也不重试；连续两次超时在第二次后停止。
+- 输出 reader 超过硬回收截止时必须返回，不得卡住完整扫描。
+- 继承 PATH 中的用户可写目录不能进入 probe 子进程 PATH。
 - 版本输出、stderr 和诊断继续满足长度与脱敏约束。
 - 现有五类 Agent 发现、版本归一化、兼容判断和计划前强制复核测试全部通过。
 
