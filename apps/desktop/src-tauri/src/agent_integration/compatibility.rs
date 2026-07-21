@@ -386,7 +386,7 @@ pub fn evaluate_discovery(
     if let Some(blocked) = entry
         .blocked
         .iter()
-        .find(|rule| requirement_matches(&rule.version_requirement, &version))
+        .find(|rule| blocked_requirement_matches(&rule.version_requirement, &version))
     {
         return decision(
             CompatibilityStatus::DetectedBlocked,
@@ -612,6 +612,13 @@ fn validate_safe_text(text: &str) -> Result<(), String> {
 
 fn requirement_matches(requirement: &str, version: &Version) -> bool {
     VersionReq::parse(requirement).is_ok_and(|requirement| requirement.matches(version))
+}
+
+/// Blocking is intentionally more conservative than normal SemVer admission:
+/// a prerelease inherits every block applied to its `major.minor.patch` core.
+fn blocked_requirement_matches(requirement: &str, version: &Version) -> bool {
+    let core_version = Version::new(version.major, version.minor, version.patch);
+    requirement_matches(requirement, &core_version)
 }
 
 fn inferred_rule_matches(rule: &CompatibilityRule, version: &Version) -> bool {
@@ -1084,6 +1091,11 @@ mod tests {
             descriptor,
             &discovery("opencode", "1.18.9", Some(&fingerprint)),
         );
+        let blocked_prerelease = evaluate_discovery(
+            &catalog,
+            descriptor,
+            &discovery("opencode", "1.18.9-rc.1", Some(&fingerprint)),
+        );
         let next_minor = evaluate_discovery(
             &catalog,
             descriptor,
@@ -1107,6 +1119,10 @@ mod tests {
         );
         assert_eq!(changed.reason_code, ReasonCode::ConfigFingerprintChanged);
         assert_eq!(blocked.status, CompatibilityStatus::DetectedBlocked);
+        assert_eq!(
+            blocked_prerelease.status,
+            CompatibilityStatus::DetectedBlocked
+        );
         assert_eq!(
             blocked.allowed_actions,
             BTreeSet::from([

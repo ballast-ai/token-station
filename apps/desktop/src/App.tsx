@@ -37,6 +37,10 @@ function errorText(error: unknown): string {
   return String(error);
 }
 
+function hasErrorCode(error: unknown, code: string): boolean {
+  return Boolean(error && typeof error === "object" && (error as { code?: unknown }).code === code);
+}
+
 function emptyAgentRoute(state: StateView): AgentRouteView {
   return { mode: "inherit", tiers: state.tiers, config_error: null };
 }
@@ -54,6 +58,8 @@ export default function App() {
   const [error, setError] = useState("");
   const busyRef = useRef(false);
   const scanRef = useRef(false);
+  const scanQueuedRef = useRef(false);
+  const scanGenerationRef = useRef(0);
   const pendingServeRef = useRef<ServeView | null>(null);
 
   const orderedRegistry = useMemo(
@@ -65,13 +71,31 @@ export default function App() {
   );
 
   const rescanAgents = useCallback(async () => {
-    if (scanRef.current) return;
+    const requestedGeneration = ++scanGenerationRef.current;
+    if (scanRef.current) {
+      scanQueuedRef.current = true;
+      return;
+    }
     scanRef.current = true;
     setScanBusy(true);
     try {
-      setAgents(await scanAgents());
-    } catch (caught) {
-      setError(errorText(caught));
+      let generation = requestedGeneration;
+      for (;;) {
+        scanQueuedRef.current = false;
+        try {
+          const nextAgents = await scanAgents();
+          if (generation === scanGenerationRef.current) setAgents(nextAgents);
+        } catch (caught) {
+          if (
+            generation === scanGenerationRef.current
+            && !hasErrorCode(caught, "scan_in_progress")
+          ) {
+            setError(errorText(caught));
+          }
+        }
+        if (!scanQueuedRef.current) break;
+        generation = scanGenerationRef.current;
+      }
     } finally {
       scanRef.current = false;
       setScanBusy(false);

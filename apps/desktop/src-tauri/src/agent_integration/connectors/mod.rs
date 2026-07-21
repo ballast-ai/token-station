@@ -221,7 +221,10 @@ mod tests {
                 .any(|owned| { sensitive.segments.starts_with(&owned.segments) })));
             assert!(connector.validate_preconditions(&not_ready).is_err());
             assert!(connector.validate_preconditions(&good).is_ok());
-            if matches!(connector.connector_id(), "hermes-v1" | "openclaw-v1") {
+            if matches!(
+                connector.connector_id(),
+                "claude-code-v1" | "hermes-v1" | "openclaw-v1"
+            ) {
                 assert!(connector.validate_preconditions(&missing_token).is_err());
             } else {
                 assert!(connector.validate_preconditions(&missing_token).is_ok());
@@ -256,6 +259,46 @@ mod tests {
         assert!(ClaudeCodeConnector.validate_source(&toml).is_err());
         assert!(OpenCodeConnector.validate_source(&toml).is_err());
         assert!(CodexConnector.validate_source(&json).is_err());
+    }
+
+    #[test]
+    fn codex_connector_accepts_and_preserves_inline_model_provider_tables() {
+        let source = br#"model_providers = { existing = { name = "keep-me" } }
+unknown = "preserved"
+"#;
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/codex/v1",
+            token: None,
+            adapter_ready: true,
+        };
+        let baseline = parse_source_bytes(Some(source), DocumentFormat::Toml, "Codex").unwrap();
+        let mut document = parse_source_bytes(Some(source), DocumentFormat::Toml, "Codex").unwrap();
+
+        CodexConnector.validate_source(&document).unwrap();
+        apply_patch(
+            &mut document,
+            &CodexConnector.connect_patch(&input).unwrap(),
+        )
+        .unwrap();
+        CodexConnector
+            .validate_projected(&document, &input)
+            .unwrap();
+
+        let rendered = render_document(&document, "Codex").unwrap();
+        assert!(rendered.contains("keep-me"), "{rendered}");
+        assert!(rendered.contains("unknown = \"preserved\""), "{rendered}");
+        assert!(rendered.contains("tokenstation"), "{rendered}");
+
+        crate::agent_integration::config_codec::project_owned_paths(
+            &mut document,
+            &baseline,
+            &CodexConnector.owned_paths(),
+        )
+        .unwrap();
+        let restored = render_document(&document, "Codex").unwrap();
+        assert!(restored.contains("keep-me"), "{restored}");
+        assert!(restored.contains("unknown = \"preserved\""), "{restored}");
+        assert!(!restored.contains("tokenstation"), "{restored}");
     }
 
     #[test]

@@ -55,17 +55,19 @@ impl Connector for ClaudeCodeConnector {
     }
 
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String> {
-        if input.adapter_ready {
-            Ok(())
-        } else {
-            Err(
+        if !input.adapter_ready {
+            return Err(
                 "暂不能接入 Claude Code:网关入站适配器(plugins.agent)还不支持 Anthropic \
                  协议,agent-anthropic 尚未就位。现在接入会把 ~/.claude/settings.json 指向一个\
                  无法应答 Anthropic 请求的代理,反而掐断你正在运行的 Claude Code。等 agent-anthropic \
                  入站适配器配好后再接。(Codex / opencode 走 OpenAI 协议,现在即可正常接入。)"
                     .to_string(),
-            )
+            );
         }
+        input
+            .token
+            .map(|_| ())
+            .ok_or_else(|| "Claude Code 接入缺少虚拟 Key".to_string())
     }
 
     fn validate_source(&self, document: &ConfigDocument) -> Result<(), String> {

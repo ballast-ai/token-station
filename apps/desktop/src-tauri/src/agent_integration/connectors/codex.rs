@@ -60,7 +60,7 @@ impl Connector for CodexConnector {
         let root = document.as_table();
         match root.get("model_providers") {
             None => Ok(()),
-            Some(item) if item.is_table() => Ok(()),
+            Some(item) if item.is_table_like() => Ok(()),
             Some(_) => Err("Codex config.toml 的 model_providers 必须是表".to_string()),
         }
     }
@@ -105,9 +105,9 @@ impl Connector for CodexConnector {
         let root = document.as_table();
         let provider = root
             .get("model_providers")
-            .and_then(toml_edit::Item::as_table)
+            .and_then(toml_edit::Item::as_table_like)
             .and_then(|providers| providers.get("tokenstation"))
-            .and_then(toml_edit::Item::as_table)
+            .and_then(toml_edit::Item::as_table_like)
             .ok_or_else(|| "Codex 写入前复验缺少 tokenstation provider".to_string())?;
         let valid = root.get("model").and_then(toml_edit::Item::as_str) == Some("auto")
             && root.get("model_provider").and_then(toml_edit::Item::as_str) == Some("tokenstation")
