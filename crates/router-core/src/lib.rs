@@ -62,7 +62,8 @@ mod source;
 mod test_support;
 
 pub use config::{
-    Band, CONFIG_VERSION, ConfigError, Heuristic, HintRoute, Match, RouterConfig, Rule, Weights,
+    Band, CONFIG_VERSION, ConfigError, Heuristic, HintRoute, Match, RecoveryPolicy, RouterConfig,
+    Rule, Weights,
 };
 pub use decision::{
     DecidedBy, Decision, InvalidUpstreamRef, NoRoute, UnmetRequirement, UpstreamModel, UpstreamRef,

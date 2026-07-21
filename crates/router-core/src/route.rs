@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use token_station_protocol::{AgentHint, ChatRequest, ModelCapability};
 
-use crate::config::{ConfigError, RouterConfig};
+use crate::config::{ConfigError, RecoveryPolicy, RouterConfig};
 use crate::decision::{DecidedBy, Decision, NoRoute, UnmetRequirement, UpstreamModel};
 use crate::features::RequestFeatures;
 
@@ -115,8 +115,16 @@ impl Router {
             .get(pool)
             .expect("Router::new proved every referenced pool exists");
 
-        let ranked = self.rank(members, candidates, &features, pool)?;
-        let (chosen, fallbacks) = ranked.split_first().expect("rank returns a non-empty list");
+        let mut targets = self.rank(members, candidates, &features, pool)?;
+
+        // Reliability, decided separately from quality: the selected tier's
+        // candidates come first; only an explicit `Ordered` policy appends
+        // other tiers' candidates behind them as authorized backups.
+        if let RecoveryPolicy::Ordered { pools } = &self.config.recovery {
+            self.extend_with_backups(&mut targets, pools, pool, candidates, &features);
+        }
+
+        let (chosen, fallbacks) = targets.split_first().expect("rank returns a non-empty list");
 
         Ok(Decision {
             chosen: (*chosen).clone(),
@@ -125,6 +133,35 @@ impl Router {
             features,
             pool: pool.to_owned(),
         })
+    }
+
+    /// Appends backup-tier candidates after the selected tier's, in the order the
+    /// operator authorized, health-ranked and de-duplicated. A backup tier that
+    /// has nothing usable contributes nothing rather than failing the route — the
+    /// selected tier already produced a routable chosen target.
+    fn extend_with_backups<'a>(
+        &self,
+        targets: &mut Vec<&'a UpstreamModel>,
+        pools: &[String],
+        selected: &str,
+        candidates: &'a [Candidate],
+        features: &RequestFeatures,
+    ) {
+        for backup in pools {
+            if backup == selected {
+                continue;
+            }
+            let Some(members) = self.config.pools.get(backup) else {
+                continue;
+            };
+            if let Ok(ranked) = self.rank(members, candidates, features, backup) {
+                for target in ranked {
+                    if !targets.contains(&target) {
+                        targets.push(target);
+                    }
+                }
+            }
+        }
     }
 
     /// Honor the caller's exact model: serve only candidates whose wire model is
@@ -245,7 +282,7 @@ impl Router {
     /// Drops what cannot serve the request, then orders by health.
     fn rank<'a>(
         &self,
-        members: &'a [UpstreamModel],
+        members: &[UpstreamModel],
         candidates: &'a [Candidate],
         features: &RequestFeatures,
         pool: &str,

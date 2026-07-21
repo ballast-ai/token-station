@@ -62,6 +62,28 @@ pub struct RouterConfig {
     /// different one. This is what makes "I asked for `deepseek-chat`" mean it.
     #[serde(default)]
     pub honor_exact_model: bool,
+    /// What may serve as a backup once the selected tier's candidates are all
+    /// exhausted. The reliability half of routing, kept separate from tier
+    /// selection: the tier decides *quality*, this decides *what happens when it
+    /// fails*.
+    #[serde(default)]
+    pub recovery: RecoveryPolicy,
+}
+
+/// Failover behavior once the selected tier is exhausted, decoupled from which
+/// tier was chosen. Naming this separately stops "pick the good tier" and "the
+/// good tier broke" from collapsing into one opaque outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "policy", rename_all = "snake_case")]
+pub enum RecoveryPolicy {
+    /// Stay inside the selected tier; if its candidates are all exhausted, fail.
+    /// The honest default — nothing is downgraded unless the operator asked.
+    #[default]
+    Strict,
+    /// After the selected tier, try these tiers in order. Listing them is the
+    /// operator's explicit cross-tier authorization; a route never silently
+    /// leaves its tier without one.
+    Ordered { pools: Vec<String> },
 }
 
 const fn assumed_context_window_default() -> u32 {
@@ -442,6 +464,12 @@ impl RouterConfig {
             }
             for band in &heuristic.bands {
                 self.require_pool(&band.pool, "heuristic.bands")?;
+            }
+        }
+
+        if let RecoveryPolicy::Ordered { pools } = &self.recovery {
+            for pool in pools {
+                self.require_pool(pool, "recovery.ordered")?;
             }
         }
 

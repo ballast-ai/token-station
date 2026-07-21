@@ -91,5 +91,6 @@ pub(crate) fn config() -> RouterConfig {
         default_pool: "cheap".to_owned(),
         assumed_context_window: 8_192,
         honor_exact_model: false,
+        recovery: crate::config::RecoveryPolicy::Strict,
     }
 }
