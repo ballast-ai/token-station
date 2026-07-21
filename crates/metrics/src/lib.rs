@@ -14,8 +14,10 @@
 //!
 //! - [`RequestRecord::requested_model`] is caller-supplied text. Model names
 //!   are classified as metadata (they appear in the cloud-sync whitelist
-//!   design), but the *whitelist* decision is C2#3's; locally it is stored
-//!   as-is.
+//!   design), but the *whitelist* decision is C2#3's. The gateway canonicalizes
+//!   it before it lands here: a configured model name (or `auto`) is kept, and
+//!   any other caller string collapses to a fixed-width `unlisted:<hash>` token,
+//!   so this field can never carry free-form caller text.
 //! - Token usage is [`Usage`] — the canonical vocabulary. There is
 //!   deliberately no parallel usage type here: an earlier `TokenUsage`
 //!   placeholder was removed the day this schema was decided.
