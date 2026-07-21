@@ -52,6 +52,14 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(120);
 /// Default overall budget for one request when the caller supplies no context.
 /// Long enough for slow generations, finite enough to bound an abandoned one.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(600);
+/// A hard ceiling on upstream attempts per request, independent of how many
+/// candidates a decision carries: twenty all-503 upstreams must not become
+/// twenty attempts. The request deadline (from [`RequestContext`]) bounds the
+/// wall-clock; this bounds the count.
+const MAX_ATTEMPTS: u32 = 6;
+/// A single honored `Retry-After` is capped so one upstream cannot park a
+/// request past anything useful; the request deadline caps it further.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(5);
 /// `upstream test` answers "is it alive"; it should not take the data plane's
 /// word-count-sized timeout to say no.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -1018,6 +1026,12 @@ impl Gateway {
             if ctx.is_cancelled() {
                 return Ok((target.clone(), StreamOutcome::ClientCancelled));
             }
+            // Attempt budget: stop retrying once the count ceiling is reached,
+            // whatever the candidate list length. The deadline (ctx) bounds the
+            // wall-clock separately.
+            if record.attempts >= MAX_ATTEMPTS {
+                break;
+            }
             // Per-Provider admission, held across this attempt. A provider at
             // its ceiling is skipped like a retriable failure — the next
             // candidate gets a turn rather than the request queueing on a hot
@@ -1050,10 +1064,21 @@ impl Gateway {
                         "upstream {target} failed: {} ({:?})",
                         error.message, error.code
                     );
-                    last_error = Some(error);
                     if !retriable {
+                        last_error = Some(error);
                         break;
                     }
+                    // Honor a `Retry-After` before the next candidate, capped by
+                    // both MAX_RETRY_AFTER and the request's remaining deadline.
+                    if let Some(retry_after_ms) = error.retry_after_ms {
+                        let wait = Duration::from_millis(retry_after_ms)
+                            .min(MAX_RETRY_AFTER)
+                            .min(ctx.remaining());
+                        if !wait.is_zero() && !ctx.is_cancelled() {
+                            std::thread::sleep(wait);
+                        }
+                    }
+                    last_error = Some(error);
                 }
             }
         }
