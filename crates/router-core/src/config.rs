@@ -53,6 +53,15 @@ pub struct RouterConfig {
     pub default_pool: String,
     #[serde(default = "assumed_context_window_default")]
     pub assumed_context_window: u32,
+    /// Honor the caller's exact model name instead of tier-routing it.
+    ///
+    /// Off by default: the request's `model` is a routing input and the tier
+    /// decides the actual model. On (a per-Agent choice), a named model is a
+    /// pin — the router serves only that same model, failing over across the
+    /// providers that carry it, and refuses rather than silently substituting a
+    /// different one. This is what makes "I asked for `deepseek-chat`" mean it.
+    #[serde(default)]
+    pub honor_exact_model: bool,
 }
 
 const fn assumed_context_window_default() -> u32 {

@@ -101,6 +101,12 @@ impl Router {
         candidates: &[Candidate],
     ) -> Result<Decision, NoRoute> {
         let features = RequestFeatures::extract(request, hints);
+
+        // Exact-model Agents pin the caller's model instead of tier-routing it.
+        if self.config.honor_exact_model {
+            return self.route_exact(request, features, candidates);
+        }
+
         let (pool, decided_by) = self.select_pool(request, hints, &features);
 
         let members = self
@@ -118,6 +124,72 @@ impl Router {
             fallbacks: fallbacks.iter().map(|target| (*target).clone()).collect(),
             features,
             pool: pool.to_owned(),
+        })
+    }
+
+    /// Honor the caller's exact model: serve only candidates whose wire model is
+    /// the one named, ordered by health so failover stays within that same model
+    /// across whichever providers carry it. Refuse — never substitute — when none
+    /// can. The `pool` in the decision is the pinned model name, for explaining a
+    /// route the same way tier routing does.
+    fn route_exact(
+        &self,
+        request: &ChatRequest,
+        features: RequestFeatures,
+        candidates: &[Candidate],
+    ) -> Result<Decision, NoRoute> {
+        let named: Vec<&Candidate> = candidates
+            .iter()
+            .filter(|candidate| candidate.target.model == request.model)
+            .collect();
+
+        if named.is_empty() {
+            return Err(NoRoute::Unsatisfiable {
+                pool: request.model.clone(),
+                reason: UnmetRequirement::ExactModelUnavailable,
+            });
+        }
+
+        let capable: Vec<&Candidate> = named
+            .iter()
+            .copied()
+            .filter(|candidate| self.satisfies(candidate, &features).is_none())
+            .collect();
+
+        if capable.is_empty() {
+            let reason = self
+                .satisfies(named[0], &features)
+                .unwrap_or(UnmetRequirement::Unknown);
+            return Err(NoRoute::Unsatisfiable {
+                pool: request.model.clone(),
+                reason,
+            });
+        }
+
+        let mut usable: Vec<&Candidate> = capable
+            .into_iter()
+            .filter(|candidate| candidate.health != Health::Unavailable)
+            .collect();
+
+        if usable.is_empty() {
+            return Err(NoRoute::Unavailable {
+                pool: request.model.clone(),
+            });
+        }
+
+        usable.sort_by_key(|candidate| candidate.health);
+
+        let targets: Vec<&UpstreamModel> = usable.iter().map(|candidate| &candidate.target).collect();
+        let (chosen, fallbacks) = targets.split_first().expect("usable is non-empty");
+
+        Ok(Decision {
+            chosen: (*chosen).clone(),
+            decided_by: DecidedBy::ExactModel {
+                model: request.model.clone(),
+            },
+            fallbacks: fallbacks.iter().map(|target| (*target).clone()).collect(),
+            features,
+            pool: request.model.clone(),
         })
     }
 

@@ -138,6 +138,11 @@ impl SqliteStore {
                 Some(token_station_router_core::DecidedBy::Default) => {
                     ("default", None, None, None, None, None)
                 }
+                Some(token_station_router_core::DecidedBy::ExactModel { model }) => {
+                    // The pinned model rides the rule_id column: it is the "why"
+                    // identifier for an exact-model route.
+                    ("exact_model", Some(model.clone()), None, None, None, None)
+                }
                 None => ("", None, None, None, None, None),
             };
 
