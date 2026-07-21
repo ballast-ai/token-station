@@ -138,6 +138,10 @@ pub enum DecidedBy {
     Heuristic { score: u32, threshold: u32 },
     /// No rule, no hint, no heuristic configured.
     Default,
+    /// The Agent honors exact model names: the caller pinned this model and the
+    /// router served it as-is rather than choosing a tier. `model` is the pinned
+    /// wire name, so a decision record still says exactly what was asked for.
+    ExactModel { model: String },
 }
 
 /// Where a request is going, why, and what to try if it fails.
@@ -224,6 +228,10 @@ pub enum UnmetRequirement {
     ContextWindow {
         needed: u32,
     },
+    /// The Agent honors exact model names and no installed candidate carries the
+    /// one the caller pinned. Refusing is the honest answer — substituting a
+    /// different model would break the promise the pin makes.
+    ExactModelUnavailable,
 }
 
 impl fmt::Display for UnmetRequirement {
@@ -236,6 +244,7 @@ impl fmt::Display for UnmetRequirement {
             Self::ContextWindow { needed } => {
                 write!(f, "has a context window of at least {needed} tokens")
             }
+            Self::ExactModelUnavailable => f.write_str("carries the pinned model"),
         }
     }
 }

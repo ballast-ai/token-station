@@ -69,6 +69,7 @@ fn config() -> RouterConfig {
         }),
         default_pool: "cheap".to_owned(),
         assumed_context_window: 8_192,
+        honor_exact_model: false,
     }
 }
 
@@ -394,5 +395,78 @@ fn a_pool_naming_an_upstream_nobody_installed_says_so() {
             pool: "sota".to_owned(),
             reason: UnmetRequirement::Unknown,
         }
+    );
+}
+
+// -- B-1: exact-model Agents pin the caller's model, never substitute ---------
+
+fn exact_router() -> Router {
+    let mut config = config();
+    config.honor_exact_model = true;
+    Router::new(config).expect("honor_exact config validates")
+}
+
+fn ask_model(model: &str, text: &str) -> ChatRequest {
+    ChatRequest::new(model, vec![Message::text(Role::User, text)])
+}
+
+#[test]
+fn honor_exact_serves_the_named_model_instead_of_tier_routing_it() {
+    // A prompt a tier router would score into `sota` and could answer with any
+    // capable model. With honor_exact on, naming the local model pins it.
+    let decision = exact_router()
+        .route(&ask_model("llama3.3", "请给出这个引理的证明"), &[], &candidates())
+        .expect("the pinned model is installed");
+
+    assert_eq!(decision.chosen.model, "llama3.3");
+    assert_eq!(
+        decision.decided_by,
+        DecidedBy::ExactModel {
+            model: "llama3.3".to_owned()
+        }
+    );
+    assert_eq!(decision.pool, "llama3.3");
+}
+
+#[test]
+fn honor_exact_refuses_rather_than_substitute_a_different_model() {
+    let refused = exact_router()
+        .route(&ask_model("gpt-6-that-nobody-has", "hi"), &[], &candidates())
+        .expect_err("no candidate carries the pinned model");
+
+    assert_eq!(
+        refused,
+        NoRoute::Unsatisfiable {
+            pool: "gpt-6-that-nobody-has".to_owned(),
+            reason: UnmetRequirement::ExactModelUnavailable,
+        }
+    );
+    // Capability, not Capacity: another upstream would refuse for the same
+    // reason, so the host must not retry it as if the model might appear.
+    assert_eq!(refused.error_code(), ErrorCode::Capability);
+}
+
+#[test]
+fn honor_exact_fails_over_within_the_same_model_across_providers() {
+    // The same wire model carried by two providers: pinning it still allows
+    // failover, but only among providers of that one model.
+    let mut pool = candidates();
+    pool.push(Candidate::new(
+        target("openai_backup", "gpt-5.5"),
+        capable(400_000),
+        Health::Healthy,
+    ));
+
+    let decision = exact_router()
+        .route(&ask_model("gpt-5.5", "hi"), &[], &pool)
+        .expect("pinned model is installed on two providers");
+
+    assert_eq!(decision.chosen.model, "gpt-5.5");
+    // The fallback is the other provider of the SAME model, never a different one.
+    assert_eq!(decision.fallbacks.len(), 1);
+    assert_eq!(decision.fallbacks[0].model, "gpt-5.5");
+    assert!(
+        decision.fallbacks[0].upstream.as_str() != decision.chosen.upstream.as_str(),
+        "failover crosses providers, not models"
     );
 }
