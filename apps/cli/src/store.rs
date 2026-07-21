@@ -30,16 +30,24 @@ struct Migration {
 /// reached — never by re-creating the schema and losing the rows. Each step is
 /// idempotent (`IF NOT EXISTS`, additive `ALTER`) and stamps `user_version` as
 /// it lands, so an interrupted upgrade resumes rather than re-runs.
-const MIGRATIONS: &[Migration] = &[Migration {
-    // v1 → v2: the stable accounting id (see B-6). Existing rows keep the empty
-    // default, which the partial unique index exempts.
-    to: 2,
-    sql: "
-        ALTER TABLE requests ADD COLUMN request_id TEXT NOT NULL DEFAULT '';
-        CREATE UNIQUE INDEX IF NOT EXISTS requests_request_id
-            ON requests (request_id) WHERE request_id <> '';
-    ",
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        // v1 → v2: the stable accounting id (see B-6). Existing rows keep the
+        // empty default, which the partial unique index exempts.
+        to: 2,
+        sql: "
+            ALTER TABLE requests ADD COLUMN request_id TEXT NOT NULL DEFAULT '';
+            CREATE UNIQUE INDEX IF NOT EXISTS requests_request_id
+                ON requests (request_id) WHERE request_id <> '';
+        ",
+    },
+    Migration {
+        // v2 → v3: the price table version a cost was computed under. NULL on
+        // existing rows means their cost predates versioned pricing.
+        to: 3,
+        sql: "ALTER TABLE requests ADD COLUMN price_version INTEGER;",
+    },
+];
 
 /// One row per exchange, flattened from `RequestRecord`.
 const SCHEMA: &str = "
@@ -80,8 +88,10 @@ CREATE TABLE IF NOT EXISTS requests (
     cache_read_tokens   INTEGER,
     cache_write_tokens  INTEGER,
     reasoning_tokens    INTEGER,
-    -- micro-units; NULL until the pricing table exists (C2#4)
-    cost_micros         INTEGER
+    -- micro-units; NULL when the model has no price (unknown, not zero)
+    cost_micros         INTEGER,
+    -- the price table version cost_micros was computed under (NULL if unpriced)
+    price_version       INTEGER
 );
 CREATE INDEX IF NOT EXISTS requests_started_at ON requests (started_at_ms);
 -- A stable accounting id is unique: writing the same request twice (a derived
@@ -217,11 +227,12 @@ impl SqliteStore {
                 est_input_tokens, message_count, tool_count, has_images,
                 requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                reasoning_tokens, cost_micros
+                reasoning_tokens, cost_micros, price_version
             ) VALUES (
                 ?33,
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32
+                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
+                ?34
             )",
             rusqlite::params![
                 wide(record.started_at_ms),
@@ -259,6 +270,7 @@ impl SqliteStore {
                 record.usage.map(|u| wide(u.reasoning_tokens)),
                 record.cost_micros,
                 record.request_id,
+                record.price_version,
             ],
         )?;
         Ok(())

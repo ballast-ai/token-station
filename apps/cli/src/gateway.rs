@@ -105,6 +105,8 @@ pub struct Gateway {
     health: std::sync::Mutex<HealthTracker>,
     /// In-flight concurrency ceilings, global / per Agent / per Provider.
     admission: Admission,
+    /// Versioned per-model prices; the version travels onto each priced record.
+    pricing: crate::pricing::PriceTable,
     secrets: SecretStore,
     http: ureq::Agent,
     recorder: Arc<dyn Recorder>,
@@ -435,6 +437,7 @@ impl Gateway {
                 cooldown: Duration::from_millis(config.health.cooldown_ms),
             })),
             admission: Admission::new(config.concurrency),
+            pricing: config.pricing.clone(),
             secrets: SecretStore::from_config(config),
             recorder,
             http: ureq::Agent::new_with_config(
@@ -1059,6 +1062,16 @@ impl Gateway {
     /// fault). Nothing outside this function may set `record.status = 200`.
     fn settle(&self, record: &mut RequestRecord, served: &UpstreamModel, outcome: StreamOutcome) {
         let (upstream, model) = (&served.upstream, served.model.as_str());
+
+        // Price the exchange once, here, and pin the table version onto the
+        // record so a later price change never re-values it. An unpriced model
+        // leaves cost unknown (None), never a claimed-free zero.
+        if let Some(usage) = record.usage {
+            if let Some((cost, version)) = self.pricing.price(model, &usage) {
+                record.cost_micros = Some(cost);
+                record.price_version = Some(version);
+            }
+        }
         match outcome {
             StreamOutcome::Complete => {
                 record.status = 200;

@@ -64,6 +64,10 @@ pub struct ClientConfig {
     /// unchanged.
     #[serde(default)]
     pub concurrency: crate::admission::Limits,
+    /// Versioned per-model prices. Optional; an empty table leaves every cost
+    /// unknown (never zero).
+    #[serde(default)]
+    pub pricing: crate::pricing::PriceTable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
