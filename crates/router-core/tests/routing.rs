@@ -415,7 +415,11 @@ fn honor_exact_serves_the_named_model_instead_of_tier_routing_it() {
     // A prompt a tier router would score into `sota` and could answer with any
     // capable model. With honor_exact on, naming the local model pins it.
     let decision = exact_router()
-        .route(&ask_model("llama3.3", "请给出这个引理的证明"), &[], &candidates())
+        .route(
+            &ask_model("llama3.3", "请给出这个引理的证明"),
+            &[],
+            &candidates(),
+        )
         .expect("the pinned model is installed");
 
     assert_eq!(decision.chosen.model, "llama3.3");
@@ -431,7 +435,11 @@ fn honor_exact_serves_the_named_model_instead_of_tier_routing_it() {
 #[test]
 fn honor_exact_refuses_rather_than_substitute_a_different_model() {
     let refused = exact_router()
-        .route(&ask_model("gpt-6-that-nobody-has", "hi"), &[], &candidates())
+        .route(
+            &ask_model("gpt-6-that-nobody-has", "hi"),
+            &[],
+            &candidates(),
+        )
         .expect_err("no candidate carries the pinned model");
 
     assert_eq!(

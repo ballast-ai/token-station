@@ -59,7 +59,7 @@ pub enum StreamOutcome {
     /// Upstream closed cleanly after a terminal event (`[DONE]` / finish reason
     /// / `message_stop`). The only outcome that may be recorded as success.
     Complete,
-    /// Already committed to the stream (BeginStream emitted, some output sent)
+    /// Already committed to the stream (`BeginStream` emitted, some output sent)
     /// when the upstream broke, errored, or produced an unparseable frame — the
     /// answer is incomplete. Never a success; never transparently replayed.
     FailedAfterPartial,

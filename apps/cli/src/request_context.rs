@@ -21,6 +21,7 @@ pub struct RequestContext {
 
 impl RequestContext {
     /// Build a request-scoped context under a server's drain token.
+    #[must_use]
     pub fn new(drain: &CancelToken, total: Duration, per_attempt: Duration) -> Self {
         Self {
             cancel: drain.child(),
@@ -31,6 +32,7 @@ impl RequestContext {
 
     /// A standalone context with no drain parent — for tests and callers that do
     /// not (yet) run under a supervised server.
+    #[must_use]
     pub fn detached(total: Duration, per_attempt: Duration) -> Self {
         Self::new(&CancelToken::root(), total, per_attempt)
     }
@@ -41,21 +43,25 @@ impl RequestContext {
     }
 
     /// True once the client hung up, the drain fired, or the deadline passed.
+    #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled() || self.remaining().is_zero()
     }
 
     /// Time left before the overall deadline (zero once it has passed).
+    #[must_use]
     pub fn remaining(&self) -> Duration {
         self.deadline.saturating_duration_since(Instant::now())
     }
 
     /// The cap on a single upstream attempt.
+    #[must_use]
     pub fn per_attempt_timeout(&self) -> Duration {
         self.per_attempt_timeout
     }
 
     /// A handle to hand an upstream client for abort/read-timeout slicing.
+    #[must_use]
     pub fn token(&self) -> CancelToken {
         self.cancel.clone()
     }

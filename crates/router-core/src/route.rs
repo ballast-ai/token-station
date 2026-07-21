@@ -179,7 +179,8 @@ impl Router {
 
         usable.sort_by_key(|candidate| candidate.health);
 
-        let targets: Vec<&UpstreamModel> = usable.iter().map(|candidate| &candidate.target).collect();
+        let targets: Vec<&UpstreamModel> =
+            usable.iter().map(|candidate| &candidate.target).collect();
         let (chosen, fallbacks) = targets.split_first().expect("usable is non-empty");
 
         Ok(Decision {
