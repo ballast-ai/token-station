@@ -109,6 +109,121 @@ pub struct ProbeOutcome {
     pub latency_ms: Result<u64, String>,
 }
 
+/// The layers a request passes through, deepest last. A layered probe reports
+/// each separately so "the port answered" is never shown as "the model works".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthLayer {
+    /// DNS / TCP / TLS: the host was reachable at all.
+    Network,
+    /// The gateway spoke HTTP (any status that is not a transport failure).
+    Http,
+    /// Credentials were accepted (not 401/403).
+    Auth,
+    /// The named model exists at the endpoint (not 404).
+    Model,
+    /// The model actually produced a well-formed completion.
+    Generation,
+}
+
+impl HealthLayer {
+    const ORDER: [HealthLayer; 5] = [
+        HealthLayer::Network,
+        HealthLayer::Http,
+        HealthLayer::Auth,
+        HealthLayer::Model,
+        HealthLayer::Generation,
+    ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageStatus {
+    Pass,
+    Fail,
+    /// A deeper layer never ran because a shallower one failed.
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct StageResult {
+    pub layer: HealthLayer,
+    pub status: StageStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// One model's five-layer health, derived from a single real probe exchange.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LayeredProbe {
+    pub model: String,
+    pub stages: Vec<StageResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+}
+
+/// Where a single probe exchange ended — the raw signal the classifier turns
+/// into per-layer results. Kept separate from the networking so the mapping is
+/// a pure function that can be tested without a live upstream.
+pub enum ProbeSignal {
+    /// The request never reached HTTP (DNS/TCP/TLS or a build/authorize refusal).
+    Transport(String),
+    /// The gateway answered with an HTTP status (and a value-free detail).
+    Http { status: u16, detail: String },
+    /// HTTP 2xx, but the body was not a valid completion.
+    BadBody(String),
+    /// A well-formed completion came back.
+    Ok,
+}
+
+/// Maps one probe exchange onto the five layers: every layer up to the failure
+/// passes, the failure layer fails, everything deeper is skipped. A clean
+/// success passes all five. Pure: no IO, so it is unit-tested directly.
+#[must_use]
+pub fn classify_layers(signal: &ProbeSignal) -> Vec<StageResult> {
+    let (failed_at, detail) = match signal {
+        ProbeSignal::Ok => (None, None),
+        ProbeSignal::Transport(detail) => (Some(HealthLayer::Network), Some(detail.clone())),
+        ProbeSignal::BadBody(detail) => (Some(HealthLayer::Generation), Some(detail.clone())),
+        ProbeSignal::Http { status, detail } => {
+            let layer = match *status {
+                401 | 403 => HealthLayer::Auth,
+                404 => HealthLayer::Model,
+                // 429 / 5xx and other 4xx: the gateway is reachable and spoke
+                // HTTP, but refused — that is an HTTP-layer failure, not proof
+                // the model is usable.
+                _ => HealthLayer::Http,
+            };
+            (Some(layer), Some(detail.clone()))
+        }
+    };
+
+    let mut passed = true;
+    HealthLayer::ORDER
+        .iter()
+        .map(|&layer| {
+            let status = match failed_at {
+                None => StageStatus::Pass,
+                Some(failure) if layer == failure => {
+                    passed = false;
+                    StageStatus::Fail
+                }
+                Some(_) if passed => StageStatus::Pass,
+                Some(_) => StageStatus::Skipped,
+            };
+            StageResult {
+                layer,
+                status,
+                detail: if status == StageStatus::Fail {
+                    detail.clone()
+                } else {
+                    None
+                },
+            }
+        })
+        .collect()
+}
+
 /// What the blocking worker sends the async facade, in order: exactly one
 /// `Begin*`, then zero or more `Chunk`s if streaming began.
 pub enum Reply {
@@ -411,6 +526,112 @@ impl Gateway {
         }
         upstream.plugin.parse_response(&parts).map_err(describe)?;
         Ok(u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX))
+    }
+
+    /// Like [`Gateway::probe`], but reports each model's health across the five
+    /// [`HealthLayer`]s instead of one pass/fail — a reachable-but-unauthorized
+    /// or a missing-model upstream then reads honestly instead of as one red dot.
+    ///
+    /// # Errors
+    ///
+    /// An unknown upstream, an unserved `only_model`, or an upstream with no
+    /// declared models — the same shape as [`Gateway::probe`].
+    pub fn probe_layered(
+        &self,
+        upstream_name: &str,
+        only_model: Option<&str>,
+    ) -> Result<Vec<LayeredProbe>, String> {
+        let upstream = self
+            .upstreams
+            .get(upstream_name)
+            .ok_or_else(|| format!("no upstream `{upstream_name}`"))?;
+
+        let mut models: Vec<&str> = self
+            .catalog
+            .iter()
+            .filter(|(target, _)| target.upstream.as_str() == upstream_name)
+            .map(|(target, _)| target.model.as_str())
+            .collect();
+        if let Some(only) = only_model {
+            if !models.contains(&only) {
+                return Err(format!(
+                    "upstream `{upstream_name}` does not serve `{only}`"
+                ));
+            }
+            models = vec![only];
+        }
+        if models.is_empty() {
+            return Err(format!("upstream `{upstream_name}` declares no models"));
+        }
+
+        let http = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(PROBE_TIMEOUT))
+                .http_status_as_error(false)
+                .build(),
+        );
+
+        Ok(models
+            .into_iter()
+            .map(|model| {
+                let (signal, latency_ms) =
+                    self.probe_model_signal(upstream_name, upstream, model, &http);
+                LayeredProbe {
+                    model: model.to_owned(),
+                    stages: classify_layers(&signal),
+                    latency_ms,
+                }
+            })
+            .collect())
+    }
+
+    /// One probe exchange, reduced to the raw [`ProbeSignal`] the pure
+    /// [`classify_layers`] maps onto layers. Same southbound path as
+    /// [`Gateway::probe_model`]; only the reporting differs.
+    fn probe_model_signal(
+        &self,
+        upstream_name: &str,
+        upstream: &Upstream,
+        model: &str,
+        http: &ureq::Agent,
+    ) -> (ProbeSignal, Option<u64>) {
+        let mut request = ChatRequest::new(
+            model,
+            vec![token_station_protocol::Message::text(
+                token_station_protocol::Role::User,
+                "ping",
+            )],
+        );
+        request.sampling.max_output_tokens = Some(1);
+        let describe =
+            |envelope: ErrorEnvelope| format!("{} ({:?})", envelope.message, envelope.code);
+
+        let descriptor = match upstream.plugin.build_http_request(&request, &upstream.config) {
+            Ok(descriptor) => descriptor,
+            Err(envelope) => return (ProbeSignal::Transport(describe(envelope)), None),
+        };
+        if let Err(refusal) = upstream.config.authorize(&descriptor) {
+            return (ProbeSignal::Transport(refusal.to_string()), None);
+        }
+
+        let clock = std::time::Instant::now();
+        let response = match self.send_with(http, &descriptor, upstream_name) {
+            Ok(response) => response,
+            Err(envelope) => return (ProbeSignal::Transport(describe(envelope)), None),
+        };
+        let latency = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let status = response.status;
+        let parts: HttpResponseParts = response.into();
+        if status >= 400 {
+            let detail = match upstream.plugin.map_provider_error(&parts) {
+                Ok(envelope) | Err(envelope) => describe(envelope),
+            };
+            return (ProbeSignal::Http { status, detail }, Some(latency));
+        }
+        match upstream.plugin.parse_response(&parts) {
+            Ok(_) => (ProbeSignal::Ok, Some(latency)),
+            Err(envelope) => (ProbeSignal::BadBody(describe(envelope)), Some(latency)),
+        }
     }
 
     /// The routing candidates as of this instant: the static catalog with the
@@ -1167,5 +1388,73 @@ impl From<UpstreamResponse> for HttpResponseParts {
             body,
             extensions: token_station_protocol::Extensions::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod layered_health_tests {
+    use super::{HealthLayer, ProbeSignal, StageStatus, classify_layers};
+
+    fn status_of(signal: &ProbeSignal, layer: HealthLayer) -> StageStatus {
+        classify_layers(signal)
+            .into_iter()
+            .find(|stage| stage.layer == layer)
+            .expect("every layer is reported")
+            .status
+    }
+
+    #[test]
+    fn a_clean_completion_passes_all_five_layers() {
+        let stages = classify_layers(&ProbeSignal::Ok);
+        assert!(stages.iter().all(|stage| stage.status == StageStatus::Pass));
+        assert_eq!(stages.len(), 5);
+    }
+
+    #[test]
+    fn a_transport_failure_fails_network_and_skips_the_rest() {
+        let signal = ProbeSignal::Transport("dns: no such host".to_owned());
+        assert_eq!(status_of(&signal, HealthLayer::Network), StageStatus::Fail);
+        assert_eq!(status_of(&signal, HealthLayer::Http), StageStatus::Skipped);
+        assert_eq!(status_of(&signal, HealthLayer::Generation), StageStatus::Skipped);
+    }
+
+    #[test]
+    fn a_401_reaches_http_but_fails_auth() {
+        let signal = ProbeSignal::Http {
+            status: 401,
+            detail: "unauthorized".to_owned(),
+        };
+        assert_eq!(status_of(&signal, HealthLayer::Network), StageStatus::Pass);
+        assert_eq!(status_of(&signal, HealthLayer::Http), StageStatus::Pass);
+        assert_eq!(status_of(&signal, HealthLayer::Auth), StageStatus::Fail);
+        assert_eq!(status_of(&signal, HealthLayer::Model), StageStatus::Skipped);
+    }
+
+    #[test]
+    fn a_404_passes_auth_but_fails_model() {
+        let signal = ProbeSignal::Http {
+            status: 404,
+            detail: "model not found".to_owned(),
+        };
+        assert_eq!(status_of(&signal, HealthLayer::Auth), StageStatus::Pass);
+        assert_eq!(status_of(&signal, HealthLayer::Model), StageStatus::Fail);
+        assert_eq!(status_of(&signal, HealthLayer::Generation), StageStatus::Skipped);
+    }
+
+    #[test]
+    fn a_429_is_an_http_layer_failure_not_a_working_model() {
+        let signal = ProbeSignal::Http {
+            status: 429,
+            detail: "rate limited".to_owned(),
+        };
+        assert_eq!(status_of(&signal, HealthLayer::Http), StageStatus::Fail);
+        assert_eq!(status_of(&signal, HealthLayer::Model), StageStatus::Skipped);
+    }
+
+    #[test]
+    fn a_2xx_with_a_broken_body_fails_only_generation() {
+        let signal = ProbeSignal::BadBody("not json".to_owned());
+        assert_eq!(status_of(&signal, HealthLayer::Model), StageStatus::Pass);
+        assert_eq!(status_of(&signal, HealthLayer::Generation), StageStatus::Fail);
     }
 }
