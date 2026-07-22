@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use token_station_protocol::{
-    AgentHint, ChatRequest, ErrorCode, HintKind, Message, ModelCapability, ResponseFormat, Role,
-    ToolDef,
+    AgentHint, CapabilityState, ChatRequest, ErrorCode, HintKind, Message, ModelCapability,
+    ResponseFormat, Role, ToolDef,
 };
 use token_station_router_core::{
     Candidate, DecidedBy, Health, Heuristic, HintRoute, Match, NoRoute, RecoveryPolicy, Router,
@@ -83,6 +83,9 @@ fn capable(context_window: u32) -> ModelCapability {
         tool: true,
         vision: true,
         json_schema: true,
+        tool_state: Some(CapabilityState::Declared),
+        vision_state: Some(CapabilityState::Declared),
+        json_schema_state: Some(CapabilityState::Declared),
         context_window,
         ..ModelCapability::default()
     }
@@ -103,6 +106,7 @@ fn candidates() -> Vec<Candidate> {
             target("ollama_local", "llama3.3"),
             ModelCapability {
                 tool: true,
+                tool_state: Some(CapabilityState::Declared),
                 context_window: 128_000,
                 ..ModelCapability::default()
             },

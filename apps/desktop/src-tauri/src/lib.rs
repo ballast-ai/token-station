@@ -10,26 +10,32 @@
 //! saving or starting. Failed validation is reported to the user without writing.
 
 pub mod agent_integration;
+mod config_state;
 mod model_catalog;
+mod provider_tombstones;
 mod serve_lifecycle;
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 use token_station_cli::config::{ClientConfig, PluginsConfig, KNOWN_AGENT_IDS};
+use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, StageStatus};
 use token_station_cli::plugins::{PluginRegistry, Receipts};
-use token_station_cli::{secrets, stats, upgrade};
+use token_station_cli::{secrets, stats, store::SqliteStore, upgrade};
+use token_station_metrics::ReceiptView;
+use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, ProviderEndpoint};
 use token_station_router_core::UpstreamRef;
 
 use agent_integration::commands::{
     apply_agent_plan, apply_snapshot_restore, list_agent_registry, list_agent_snapshots,
-    plan_agent_connection, plan_agent_disconnect, plan_snapshot_restore, scan_agents,
-    AgentCommandState,
+    plan_agent_connection, plan_agent_disconnect, plan_snapshot_restore, runtime_from_app,
+    scan_agents, AgentCommandState,
 };
+use config_state::ConfigState;
 use model_catalog::ModelDiscoveryView;
 use serve_lifecycle::{prepare_server, PreparedServer, RunningServer, StartFailure};
 
@@ -81,14 +87,22 @@ enum ServerLifecycle {
     Starting {
         generation: u64,
         listen: String,
+        revision: u64,
+    },
+    Applying {
+        generation: u64,
+        revision: u64,
+        old: RunningServer,
     },
     Stopping {
         generation: u64,
         listen: String,
+        draining: bool,
     },
     Running {
         generation: u64,
         server: RunningServer,
+        apply_error: Option<String>,
     },
     Failed {
         generation: u64,
@@ -106,6 +120,7 @@ impl ServerLifecycle {
         match self {
             Self::Stopped { generation }
             | Self::Starting { generation, .. }
+            | Self::Applying { generation, .. }
             | Self::Stopping { generation, .. }
             | Self::Running { generation, .. }
             | Self::Failed { generation, .. } => *generation,
@@ -122,59 +137,65 @@ struct AppInner {
     /// Preserve startup read or validation errors. Show a safe template but block
     /// writes so Save cannot silently overwrite the user's original file.
     load_error: Option<String>,
+    /// Persistent identity of the editable saved config; Runtime Supervisor owns the running revision.
+    config_state: ConfigState,
     /// Authoritative proxy-service lifecycle state.
     server: ServerLifecycle,
-    /// Hash of the configuration saved to disk. A different draft hash means unsaved changes exist.
-    saved_config_hash: Option<u64>,
-    /// Hash of the configuration used when the current server started; None when stopped. Equal to
-    /// Only `saved_config_hash` proves that the running configuration is the saved configuration; otherwise, it is “saved but not applied.”
-    running_config_hash: Option<u64>,
-}
-
-/// Content hash of one configuration, stable within the process and used to compare draft, saved, and running states.
-fn config_hash(config: &ClientConfig) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    // Serialize as canonical JSON before hashing. Stable field order is sufficient to detect changes.
-    serde_json::to_string(config)
-        .unwrap_or_default()
-        .hash(&mut hasher);
-    hasher.finish()
 }
 
 pub struct AppStateManaged(Mutex<AppInner>);
 
-/// OS application cache root injected by Tauri. Agent compatibility data is
-/// kept outside the repository and is not created until a valid signed remote
-/// catalog is actually accepted.
+/// Writable runtime locations resolved from Tauri's per-application roots.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DesktopPaths {
+    config_file: PathBuf,
+    data_dir: PathBuf,
+    plugins_dir: PathBuf,
+    agent_data_root: PathBuf,
+}
+
+impl DesktopPaths {
+    fn from_app_roots(config_root: PathBuf, data_root: PathBuf) -> Self {
+        Self {
+            config_file: config_root.join("token-station.json"),
+            data_dir: data_root.join("token-station-data"),
+            plugins_dir: data_root.join("plugins"),
+            agent_data_root: data_root.join("agent-integration"),
+        }
+    }
+
+    fn create_writable_dirs(&self) -> Result<(), std::io::Error> {
+        for path in [
+            self.config_file
+                .parent()
+                .expect("desktop config file always has a parent"),
+            self.data_dir.as_path(),
+            self.plugins_dir.as_path(),
+            self.agent_data_root.as_path(),
+        ] {
+            std::fs::create_dir_all(path)?;
+        }
+        Ok(())
+    }
+}
+
+/// OS application data roots injected by Tauri for Agent snapshots and
+/// ownership records.
 #[derive(Clone)]
 pub struct AgentIntegrationPaths {
-    pub compatibility_cache_dir: PathBuf,
     pub snapshot_root: PathBuf,
     pub ownership_root: PathBuf,
 }
 
-// ---- Path anchor (repository root during development. Packaging handles it separately) -------------------------------
-
-/// Repository root: three levels above `apps/desktop/src-tauri`. The CWD for `tauri dev` is unstable,
-/// Therefore, anchor configuration, plugin, and data directories to this absolute path so serve can find `plugins-dist`.
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
 /// New-config template. Empty upstreams and pools are invalid ClientConfig but a
-/// remains valid until the user configures at least one tier. Absolute paths let serve find plugins from any CWD.
-fn template(root: &std::path::Path) -> Value {
+/// valid draft until the user configures one tier. Tauri injects runtime directories.
+fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value {
     json!({
         "version": 1,
         "server": { "listen": "127.0.0.1:8787", "auth": true },
-        "data": { "dir": root.join("token-station-data"), "metrics": true },
+        "data": { "dir": data_dir, "metrics": true },
         "plugins": {
-            "dir": root.join("plugins-dist"),
+            "dir": plugins_dir,
             "agents": DESKTOP_AGENTS,
             "providers": { "openai-compatible": "provider-openai-compatible" }
         },
@@ -191,8 +212,8 @@ fn template(root: &std::path::Path) -> Value {
 }
 
 /// Upgrade the CLI-era single Chat inbound configuration to the desktop three-inbound draft, and anchor relative runtime directories to
-/// Repository root that contains the configuration file. Change only the in-memory draft; do not touch the original file until the user saves.
-fn prepare_desktop_draft(mut draft: Value, root: &std::path::Path) -> Value {
+/// Directory that contains the configuration file. Change only the in-memory draft; do not touch the original file until the user saves.
+fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Value {
     let agents = draft["plugins"]["agents"].as_array();
     let legacy_alias = agents.is_none_or(Vec::is_empty)
         && draft["plugins"]["agent"].as_str() == Some("agent-openai");
@@ -208,38 +229,64 @@ fn prepare_desktop_draft(mut draft: Value, root: &std::path::Path) -> Value {
         draft["plugins"]["agents"] = json!(DESKTOP_AGENTS);
     }
 
-    fn anchor(path: &mut Value, root: &std::path::Path) {
+    fn anchor(path: &mut Value, config_dir: &std::path::Path) {
         let Some(raw) = path.as_str() else {
             return;
         };
         let value = PathBuf::from(raw);
         if value.is_relative() {
-            *path = json!(root.join(value));
+            *path = json!(config_dir.join(value));
         }
     }
-    anchor(&mut draft["plugins"]["dir"], root);
-    anchor(&mut draft["data"]["dir"], root);
+    anchor(&mut draft["plugins"]["dir"], config_dir);
+    anchor(&mut draft["data"]["dir"], config_dir);
     draft
 }
 
 /// Existing configurations must pass the CLI read, default filling, and structural validation flow. On failure, return a safe template for
 /// for display, with a read-only error gate that rejects later save and start operations to prevent overwriting the damaged file.
+#[cfg(test)]
 fn load_draft(config_path: &std::path::Path, root: &std::path::Path) -> (Value, Option<String>) {
+    let (draft, _saved, error) = load_draft_state(
+        config_path,
+        &root.join("token-station-data"),
+        &root.join("plugins"),
+    );
+    (draft, error)
+}
+
+fn load_draft_state(
+    config_path: &std::path::Path,
+    data_dir: &std::path::Path,
+    plugins_dir: &std::path::Path,
+) -> (Value, Value, Option<String>) {
     if !config_path.exists() {
-        return (template(root), None);
+        let draft = template(data_dir, plugins_dir);
+        return (draft.clone(), draft, None);
     }
     match ClientConfig::load(config_path) {
         Ok(config) => {
-            let draft = serde_json::to_value(config).expect("ClientConfig always serializes");
-            (prepare_desktop_draft(draft, root), None)
+            let saved = serde_json::to_value(config).expect("ClientConfig always serializes");
+            let config_dir = config_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            (
+                prepare_desktop_draft(saved.clone(), config_dir),
+                saved,
+                None,
+            )
         }
-        Err(error) => (
-            template(root),
-            Some(format!(
-                "现有配置无法读取，已进入只读保护；请先修复或移走 {}：{error}",
-                config_path.display()
-            )),
-        ),
+        Err(error) => {
+            let draft = template(data_dir, plugins_dir);
+            (
+                draft.clone(),
+                draft,
+                Some(format!(
+                    "现有配置无法读取，已进入只读保护；请先修复或移走 {}：{error}",
+                    config_path.display()
+                )),
+            )
+        }
     }
 }
 
@@ -272,23 +319,48 @@ struct ProviderView {
     provider: String,
     base_url: String,
     models: Vec<String>,
-    /// The same models with their declared four-state capabilities, so the UI
-    /// can show what each can do (tools, vision, JSON schema, context window)
-    /// before a request is ever routed. `models` stays as the flat id list that
-    /// existing views rely on.
-    model_details: Vec<ModelCapabilityView>,
+    model_capabilities: Vec<ModelCapabilityView>,
+    catalog_revision: u64,
+    catalog: Vec<model_catalog::CatalogModelView>,
     has_auth: bool,
 }
 
-/// A model's declared capabilities, flattened for the UI. Mirrors the four
-/// dimensions the router gates on; `context_window` of 0 means "unknown".
 #[derive(Serialize)]
 struct ModelCapabilityView {
     model: String,
-    tool: bool,
-    vision: bool,
-    json_schema: bool,
-    context_window: u32,
+    tool: CapabilityState,
+    vision: CapabilityState,
+    json_schema: CapabilityState,
+}
+
+#[derive(Serialize)]
+struct ProviderEndpointPreview {
+    chat: String,
+    responses: String,
+    messages: String,
+}
+
+#[derive(Serialize)]
+struct ProviderRemovalPreview {
+    name: String,
+    references: Vec<String>,
+    can_remove: bool,
+}
+
+#[derive(Serialize)]
+struct ProviderTestStage {
+    layer: String,
+    status: StageStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ProviderTestResult {
+    model: String,
+    stages: Vec<ProviderTestStage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_ms: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -302,7 +374,6 @@ struct AgentRouteView {
     mode: String,
     tiers: std::collections::BTreeMap<String, TierView>,
     config_error: Option<String>,
-    /// The mounted profile name, when `mode == "profile"`.
     profile: Option<String>,
 }
 
@@ -316,10 +387,21 @@ enum ServePhase {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AppRuntime {
+    Stopped,
+    Running,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct ServeView {
     phase: ServePhase,
-    running: bool,
+    app_runtime: AppRuntime,
+    listener_reachable: bool,
+    agent_connected: bool,
+    running_revision: Option<u64>,
+    instance_id: Option<String>,
     listen: String,
     virtual_key: Option<String>,
     error: Option<String>,
@@ -328,22 +410,22 @@ struct ServeView {
 #[derive(Serialize)]
 struct StateView {
     providers: Vec<ProviderView>,
+    deleted_providers: Vec<String>,
+    provider_recovery_error: Option<String>,
     tiers: std::collections::BTreeMap<String, TierView>,
     /// User keyword set for each tier (high/mid/low). A match forces that tier; this is the requested
     /// A direct control for user routing; stored in `router.rules` as `keywords_any`.
     keywords: std::collections::BTreeMap<String, Vec<String>>,
     agent_routes: std::collections::BTreeMap<String, AgentRouteView>,
+    profiles: Vec<String>,
     serve: ServeView,
+    draft_revision: u64,
+    saved_revision: u64,
+    config_dirty: bool,
     /// Whether the draft materializes as a valid config and can be saved or started.
     config_error: Option<String>,
     /// Settings page read model: switches and read-only environment information.
     settings: SettingsView,
-    /// The draft differs from the configuration saved to disk, so unsaved changes exist.
-    dirty: bool,
-    /// The running proxy uses the saved configuration (true when stopped). false means the saved configuration has not been applied.
-    applied: bool,
-    /// Configured named profiles (profile names) available for Agent mounts.
-    profiles: Vec<String>,
 }
 
 /// Settings page view: two writable switches (server.auth / data.metrics) and read-only environment information.
@@ -457,6 +539,62 @@ struct UpgradeView {
 // ---- helpers ------------------------------------------------------------------
 
 impl AppInner {
+    #[cfg(test)]
+    fn new(config_path: PathBuf, draft: Value, load_error: Option<String>) -> Self {
+        Self::new_with_saved(config_path, draft.clone(), draft, load_error)
+    }
+
+    fn new_with_saved(
+        config_path: PathBuf,
+        mut draft: Value,
+        saved: Value,
+        mut load_error: Option<String>,
+    ) -> Self {
+        let mut config_state = ConfigState::load(&config_path, &saved).unwrap_or_else(|error| {
+            load_error
+                .get_or_insert_with(|| format!("配置版本状态无法持久化，已进入只读保护：{error}"));
+            ConfigState::read_only(&config_path, &saved)
+        });
+        if load_error.is_none() {
+            if let Err(error) = config_state.observe_draft(&draft) {
+                load_error = Some(format!("配置版本状态无法持久化，已进入只读保护：{error}"));
+                draft = config_state.draft().clone();
+            }
+        }
+        Self {
+            config_path,
+            draft,
+            load_error,
+            config_state,
+            server: ServerLifecycle::stopped(),
+        }
+    }
+
+    fn observe_draft(&mut self) -> Result<(), String> {
+        let draft = self.draft.clone();
+        if let Err(error) = self.config_state.observe_draft(&draft) {
+            self.draft = self.config_state.draft().clone();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn save_draft(&mut self) -> Result<u64, String> {
+        self.ensure_editable()?;
+        let config = self.materialize()?;
+        let draft = self.draft.clone();
+        let revision = self.config_state.prepare_save(&draft)?;
+        config
+            .save(&self.config_path)
+            .map_err(|error| format!("写配置失败: {error}"))?;
+        if let Err(error) = self.config_state.finish_save(&draft) {
+            // Configuration was committed atomically. The pending journal is promoted at the next start,
+            // Do not report a final state-write failure as a configuration-save failure.
+            eprintln!("configuration saved but revision finalization failed: {error}");
+        }
+        Ok(revision)
+    }
+
     fn ensure_editable(&self) -> Result<(), String> {
         match &self.load_error {
             Some(error) => Err(error.clone()),
@@ -469,39 +607,47 @@ impl AppInner {
             return vec![];
         };
         map.iter()
-            .map(|(name, up)| ProviderView {
-                name: name.clone(),
-                provider: up["provider"].as_str().unwrap_or_default().to_string(),
-                base_url: up["base_url"].as_str().unwrap_or_default().to_string(),
-                models: up["models"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|m| m["model"].as_str().map(str::to_string))
-                            .collect()
+            .map(|(name, up)| {
+                let model_values = up["models"].as_array().cloned().unwrap_or_default();
+                let models = model_values
+                    .iter()
+                    .filter_map(|model| model["model"].as_str().map(str::to_owned))
+                    .collect();
+                let configured_capabilities: Vec<ModelCapability> = model_values
+                    .into_iter()
+                    .filter_map(|model| serde_json::from_value::<ModelCapability>(model).ok())
+                    .collect();
+                let model_capabilities = configured_capabilities
+                    .iter()
+                    .map(|capability| {
+                        let tool = capability.tool_state();
+                        let vision = capability.vision_state();
+                        let json_schema = capability.json_schema_state();
+                        ModelCapabilityView {
+                            model: capability.model.clone(),
+                            tool,
+                            vision,
+                            json_schema,
+                        }
                     })
-                    .unwrap_or_default(),
-                model_details: up["models"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|m| {
-                                let model = m["model"].as_str()?.to_string();
-                                Some(ModelCapabilityView {
-                                    model,
-                                    tool: m["tool"].as_bool().unwrap_or(false),
-                                    vision: m["vision"].as_bool().unwrap_or(false),
-                                    json_schema: m["json_schema"].as_bool().unwrap_or(false),
-                                    context_window: m["context_window"]
-                                        .as_u64()
-                                        .and_then(|w| u32::try_from(w).ok())
-                                        .unwrap_or(0),
-                                })
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                has_auth: up.get("auth").map(|a| !a.is_null()).unwrap_or(false),
+                    .collect();
+                let base_url = up["base_url"].as_str().unwrap_or_default().to_string();
+                let (catalog_revision, catalog) = model_catalog::catalog_for_provider(
+                    &self.data_dir(),
+                    name,
+                    &base_url,
+                    &configured_capabilities,
+                );
+                ProviderView {
+                    name: name.clone(),
+                    provider: up["provider"].as_str().unwrap_or_default().to_string(),
+                    base_url,
+                    models,
+                    model_capabilities,
+                    catalog_revision,
+                    catalog,
+                    has_auth: up.get("auth").map(|a| !a.is_null()).unwrap_or(false),
+                }
             })
             .collect()
     }
@@ -668,7 +814,6 @@ impl AppInner {
                     .unwrap_or_default();
                 &self.draft["profiles"][name][slot]
             }
-            // inherit (or unknown): the home tier.
             _ => return self.tier(pool_key(slot).expect("known UI tier slot")),
         };
         TierView {
@@ -677,7 +822,6 @@ impl AppInner {
         }
     }
 
-    /// The profile this Agent mounts, when in profile mode.
     fn agent_profile(&self, agent_id: &str) -> Option<String> {
         (self.agent_route_mode(agent_id) == "profile")
             .then(|| {
@@ -688,11 +832,10 @@ impl AppInner {
             .flatten()
     }
 
-    /// Names of every configured profile.
     fn profile_names(&self) -> Vec<String> {
         self.draft["profiles"]
             .as_object()
-            .map(|map| map.keys().cloned().collect())
+            .map(|profiles| profiles.keys().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -705,7 +848,7 @@ impl AppInner {
                     .into_iter()
                     .map(|slot| (slot.to_string(), self.agent_tier(agent_id, slot)))
                     .collect();
-                let config_error = if mode == "custom" {
+                let config_error = if mode == "custom" || mode == "profile" {
                     ["high", "mid", "low"].into_iter().find_map(|slot| {
                         let tier = self.agent_tier(agent_id, slot);
                         (tier.upstream.is_none() || tier.model.is_none())
@@ -714,14 +857,13 @@ impl AppInner {
                 } else {
                     None
                 };
-                let profile = self.agent_profile(agent_id);
                 (
                     (*agent_id).to_string(),
                     AgentRouteView {
                         mode,
                         tiers,
                         config_error,
-                        profile,
+                        profile: self.agent_profile(agent_id),
                     },
                 )
             })
@@ -780,32 +922,6 @@ impl AppInner {
             .map_err(|e| format!("配置结构不合法: {e}"))
     }
 
-    /// Hash of the materialized current draft; None when the draft is invalid.
-    fn draft_config_hash(&self) -> Option<u64> {
-        self.materialize().ok().map(|config| config_hash(&config))
-    }
-
-    /// A draft that differs from the saved state has unsaved changes. Treat an invalid draft as changed because it cannot be called “unchanged.”
-    fn is_dirty(&self) -> bool {
-        match (self.draft_config_hash(), self.saved_config_hash) {
-            (Some(draft), Some(saved)) => draft != saved,
-            // Conservatively report changes when the draft is invalid or no baseline was saved.
-            _ => true,
-        }
-    }
-
-    /// The running server uses the saved configuration. This matters only in the Running state:
-    /// There is no “pending application” state when the service is not running.
-    fn is_applied(&self) -> bool {
-        if !matches!(self.server, ServerLifecycle::Running { .. }) {
-            return true;
-        }
-        match (self.running_config_hash, self.saved_config_hash) {
-            (Some(running), Some(saved)) => running == saved,
-            _ => false,
-        }
-    }
-
     fn config_error(&self) -> Option<String> {
         self.load_error.clone().or_else(|| self.materialize().err())
     }
@@ -814,7 +930,11 @@ impl AppInner {
         match &self.server {
             ServerLifecycle::Stopped { .. } => ServeView {
                 phase: ServePhase::Stopped,
-                running: false,
+                app_runtime: AppRuntime::Stopped,
+                listener_reachable: false,
+                agent_connected: false,
+                running_revision: None,
+                instance_id: None,
                 listen: self.draft["server"]["listen"]
                     .as_str()
                     .unwrap_or("127.0.0.1:8787")
@@ -824,28 +944,83 @@ impl AppInner {
             },
             ServerLifecycle::Starting { listen, .. } => ServeView {
                 phase: ServePhase::Starting,
-                running: false,
+                app_runtime: AppRuntime::Stopped,
+                listener_reachable: false,
+                agent_connected: false,
+                running_revision: None,
+                instance_id: None,
                 listen: listen.clone(),
                 virtual_key: None,
                 error: None,
             },
+            ServerLifecycle::Applying { old, .. } => {
+                let alive = old.is_task_alive();
+                let reachable = alive && old.listener_reachable();
+                ServeView {
+                    phase: ServePhase::Starting,
+                    app_runtime: if alive {
+                        AppRuntime::Running
+                    } else {
+                        AppRuntime::Stopped
+                    },
+                    listener_reachable: reachable,
+                    agent_connected: false,
+                    running_revision: alive.then(|| old.running_revision()),
+                    instance_id: alive.then(|| old.instance_id().to_owned()),
+                    listen: old.listen().to_owned(),
+                    virtual_key: old.virtual_key().map(str::to_string),
+                    error: None,
+                }
+            }
             ServerLifecycle::Stopping { listen, .. } => ServeView {
                 phase: ServePhase::Stopping,
-                running: false,
+                app_runtime: AppRuntime::Stopped,
+                listener_reachable: false,
+                agent_connected: false,
+                running_revision: None,
+                instance_id: None,
                 listen: listen.clone(),
                 virtual_key: None,
                 error: None,
             },
-            ServerLifecycle::Running { server, .. } => ServeView {
-                phase: ServePhase::Running,
-                running: true,
-                listen: server.listen().to_string(),
-                virtual_key: server.virtual_key().map(str::to_string),
-                error: None,
-            },
+            ServerLifecycle::Running {
+                server,
+                apply_error,
+                ..
+            } => {
+                let alive = server.is_task_alive();
+                let reachable = alive && server.listener_reachable();
+                ServeView {
+                    phase: if alive {
+                        ServePhase::Running
+                    } else {
+                        ServePhase::Error
+                    },
+                    app_runtime: if alive {
+                        AppRuntime::Running
+                    } else {
+                        AppRuntime::Stopped
+                    },
+                    listener_reachable: reachable,
+                    agent_connected: false,
+                    running_revision: alive.then(|| server.running_revision()),
+                    instance_id: alive.then(|| server.instance_id().to_owned()),
+                    listen: server.listen().to_string(),
+                    virtual_key: server.virtual_key().map(str::to_string),
+                    error: if alive {
+                        apply_error.clone()
+                    } else {
+                        Some("serve_task_exited: 代理任务已退出".to_owned())
+                    },
+                }
+            }
             ServerLifecycle::Failed { listen, error, .. } => ServeView {
                 phase: ServePhase::Error,
-                running: false,
+                app_runtime: AppRuntime::Stopped,
+                listener_reachable: false,
+                agent_connected: false,
+                running_revision: None,
+                instance_id: None,
                 listen: listen.clone(),
                 virtual_key: None,
                 error: Some(error.clone()),
@@ -854,17 +1029,25 @@ impl AppInner {
     }
 
     fn snapshot(&self) -> StateView {
+        let (deleted_providers, provider_recovery_error) =
+            match provider_tombstones::list(&self.data_dir()) {
+                Ok(providers) => (providers, None),
+                Err(error) => (Vec::new(), Some(error)),
+            };
         StateView {
             providers: self.upstreams(),
+            deleted_providers,
+            provider_recovery_error,
             tiers: self.home_tiers(),
             keywords: self.home_keywords(),
             agent_routes: self.agent_routes_view(),
+            profiles: self.profile_names(),
             serve: self.serve_view(),
+            draft_revision: self.config_state.draft_revision(),
+            saved_revision: self.config_state.saved_revision(),
+            config_dirty: self.config_state.is_dirty(),
             config_error: self.config_error(),
             settings: self.settings_view(),
-            dirty: self.is_dirty(),
-            applied: self.is_applied(),
-            profiles: self.profile_names(),
         }
     }
 
@@ -991,6 +1174,11 @@ impl AppInner {
                 route.remove("custom_route");
             }
         }
+        if mode != "profile" {
+            if let Some(route) = self.draft["agent_routes"][agent_id].as_object_mut() {
+                route.remove("profile");
+            }
+        }
         self.draft["agent_routes"][agent_id]["mode"] = json!(mode);
     }
 
@@ -1019,24 +1207,22 @@ impl AppInner {
         Ok(())
     }
 
-    /// Save the current home-page tiers as a named profile. All three tiers must be configured.
-    fn save_home_route_as_profile(&mut self, name: &str) -> Result<(), String> {
+    fn save_home_route_as_profile_value(&mut self, name: &str) -> Result<(), String> {
         let name = name.trim();
-        if name.is_empty() {
-            return Err("策略组名称不能为空".to_string());
+        if name.is_empty() || name.len() > 80 || name.chars().any(char::is_control) {
+            return Err("策略组名称无效".to_string());
         }
         let mut tiers = serde_json::Map::new();
         for (slot, pool) in [("high", TIER_HIGH), ("mid", TIER_MID), ("low", TIER_LOW)] {
             let tier = self.tier(pool);
-            match (tier.upstream, tier.model) {
-                (Some(upstream), Some(model)) => {
-                    tiers.insert(
-                        slot.to_string(),
-                        json!({ "upstream": upstream, "model": model }),
-                    );
-                }
-                _ => return Err(format!("{slot} 档尚未配置，无法另存为策略组")),
-            }
+            let (Some(upstream), Some(model)) = (tier.upstream, tier.model) else {
+                return Err(format!("{slot} 档尚未配置，无法另存为策略组"));
+            };
+            self.validate_route_target(&upstream, &model)?;
+            tiers.insert(
+                slot.to_string(),
+                json!({ "upstream": upstream, "model": model }),
+            );
         }
         if !self.draft["profiles"].is_object() {
             self.draft["profiles"] = json!({});
@@ -1045,40 +1231,34 @@ impl AppInner {
         Ok(())
     }
 
-    /// Mount a named profile on an Agent.
-    fn set_agent_profile_value(&mut self, agent_id: &str, profile: &str) -> Result<(), String> {
+    fn mount_agent_profile_value(&mut self, agent_id: &str, profile: &str) -> Result<(), String> {
         ensure_known_agent_id(agent_id)?;
         if !self.draft["profiles"][profile].is_object() {
             return Err(format!("策略组 `{profile}` 不存在"));
         }
-        self.draft["agent_routes"][agent_id] = json!({ "mode": "profile", "profile": profile });
+        if !self.draft["agent_routes"][agent_id].is_object() {
+            self.draft["agent_routes"][agent_id] = json!({});
+        }
+        self.draft["agent_routes"][agent_id]["mode"] = json!("profile");
+        self.draft["agent_routes"][agent_id]["profile"] = json!(profile);
         Ok(())
     }
 
-    /// Delete a profile. Reject the operation while an Agent mounts it to avoid a dangling mount.
     fn delete_profile_value(&mut self, name: &str) -> Result<(), String> {
-        let mounted: Vec<String> = KNOWN_AGENT_IDS
+        let mounted: Vec<_> = KNOWN_AGENT_IDS
             .iter()
-            .filter(|id| self.agent_profile(id).as_deref() == Some(name))
-            .map(|id| (*id).to_string())
+            .filter(|agent_id| self.agent_profile(agent_id).as_deref() == Some(name))
+            .copied()
             .collect();
         if !mounted.is_empty() {
-            return Err(format!("策略组 `{name}` 仍被挂载:{}", mounted.join(", ")));
+            return Err(format!("策略组 `{name}` 仍被挂载：{}", mounted.join(", ")));
         }
-        if let Some(map) = self.draft["profiles"].as_object_mut() {
-            map.remove(name);
+        let profiles = self.draft["profiles"]
+            .as_object_mut()
+            .ok_or_else(|| format!("策略组 `{name}` 不存在"))?;
+        if profiles.remove(name).is_none() {
+            return Err(format!("策略组 `{name}` 不存在"));
         }
-        Ok(())
-    }
-
-    /// Write the current draft to disk and set it as the saved baseline. Named profiles are persistent library entries, like providers,
-    /// Cannot exist only in the in-memory draft, or a backend restart would remove it. The caller rolls back the draft on failure.
-    fn persist_draft(&mut self) -> Result<(), String> {
-        let config = self.materialize()?;
-        config
-            .save(&self.config_path)
-            .map_err(|e| format!("写配置失败: {e}"))?;
-        self.saved_config_hash = Some(config_hash(&config));
         Ok(())
     }
 }
@@ -1106,32 +1286,45 @@ fn get_state(state: State<'_, AppStateManaged>) -> StateView {
     state.0.lock().unwrap().snapshot()
 }
 
-/// The final request URLs a base URL resolves to, so the operator sees a
-/// doubled `/v1/v1` (or an invalid URL) before saving, not as a 404 later.
-#[derive(serde::Serialize)]
-struct EndpointPreview {
-    base: String,
-    chat: String,
-    responses: String,
-    messages: String,
+#[tauri::command]
+fn get_runtime_state(
+    state: State<'_, AppStateManaged>,
+    agents: State<'_, AgentCommandState>,
+) -> ServeView {
+    // Agent config inspection is file I/O and therefore intentionally outside
+    // the App lock. Revalidate the immutable instance identity afterwards so
+    // a concurrent publish can never combine old Agent facts with a new
+    // running_revision/instance_id.
+    for _ in 0..3 {
+        let Ok(runtime) = runtime_from_app(state.inner()) else {
+            return state.0.lock().unwrap().serve_view();
+        };
+        let identity = runtime.instance_id().to_owned();
+        let agent_connected = agents.any_connected_to(&runtime).unwrap_or(false);
+        let mut view = state.0.lock().unwrap().serve_view();
+        if view.instance_id.as_deref() == Some(identity.as_str()) {
+            view.agent_connected = agent_connected;
+            return view;
+        }
+    }
+    // Continuous handoffs are rare; if all snapshots raced, return a truthful
+    // current runtime view with the conservative independent Agent fact.
+    state.0.lock().unwrap().serve_view()
 }
 
+/// Preview the provider URL selected by each inbound protocol before saving.
 #[tauri::command]
-fn preview_endpoint(base_url: String) -> Result<EndpointPreview, String> {
-    let endpoint =
-        token_station_protocol::ProviderEndpoint::try_new(&base_url).map_err(|e| e.to_string())?;
-    let base = endpoint.as_str();
-    let trimmed = base.trim_end_matches('/').to_owned();
-    let join = |suffix: &str| format!("{trimmed}/{suffix}");
-    Ok(EndpointPreview {
-        chat: join("chat/completions"),
-        responses: join("responses"),
-        messages: join("messages"),
-        base,
+fn preview_provider_endpoints(base_url: String) -> Result<ProviderEndpointPreview, String> {
+    let endpoint = ProviderEndpoint::try_new(base_url.trim())
+        .map_err(|error| format!("Base URL 不合法：{error}"))?;
+    Ok(ProviderEndpointPreview {
+        chat: endpoint.resolve(ProviderApi::ChatCompletions),
+        responses: endpoint.resolve(ProviderApi::Responses),
+        messages: endpoint.resolve(ProviderApi::Messages),
     })
 }
 
-/// Add or update a provider (an OpenAI-compatible upstream). Store its key in the system keychain when provided.
+/// Add an OpenAI-compatible upstream provider, storing its key in the system keychain when present.
 #[tauri::command]
 fn add_provider(
     state: State<'_, AppStateManaged>,
@@ -1145,17 +1338,43 @@ fn add_provider(
     }
     let name = name.trim().to_string();
     UpstreamRef::new(name.clone()).map_err(|error| format!("供应商名不合法: {error}"))?;
+    let base_url = ProviderEndpoint::try_new(base_url.trim())
+        .map_err(|error| format!("Base URL 不合法：{error}"))?
+        .as_str();
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    if inner.draft["upstreams"].get(&name).is_some() {
+        return Err(format!("供应商 `{name}` 已存在，请在 Provider 详情中编辑"));
+    }
+    let data_dir = inner.data_dir();
+    if provider_tombstones::contains(&data_dir, &name)? {
+        return Err(format!(
+            "Provider 回收站中已有 `{name}`，请先恢复它，再在详情中编辑"
+        ));
+    }
 
     let model_objs: Vec<Value> = models
         .iter()
         .filter(|m| !m.trim().is_empty())
-        .map(|m| json!({ "model": m, "tool": true, "context_window": 128000 }))
+        .map(|m| {
+            json!({
+                "model": m,
+                "tool": false,
+                "vision": false,
+                "json_schema": false,
+                "tool_state": "unknown",
+                "vision_state": "unknown",
+                "json_schema_state": "unknown",
+                "context_window": 128000
+            })
+        })
         .collect();
     if model_objs.is_empty() {
         return Err("至少填一个模型名".into());
     }
+    // A previous interrupted removal may have left only derived catalog data.
+    // New Provider identity must never inherit it, even with the same name/URL.
+    model_catalog::remove_provider(&data_dir, &name)?;
 
     let mut up = json!({
         "provider": "openai-compatible",
@@ -1163,12 +1382,90 @@ fn add_provider(
         "models": model_objs,
     });
     // Store a key in the keychain and point auth to its slot; omit auth when no key exists, as with local Ollama.
-    if let Some(key) = api_key.as_ref().filter(|k| !k.trim().is_empty()) {
-        secrets::keyring_set(&name, "provider_api_key", key.trim())?;
+    let api_key = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned);
+    if api_key.is_some() {
         up["auth"] = json!({ "slot": "provider_api_key", "keyring": true });
     }
 
     inner.draft["upstreams"][&name] = up;
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["upstreams"]
+            .as_object_mut()
+            .expect("upstreams is an object")
+            .remove(&name);
+        return Err(error);
+    }
+    if let Some(key) = api_key {
+        if let Err(key_error) = secrets::keyring_set(&name, "provider_api_key", &key) {
+            inner.draft["upstreams"]
+                .as_object_mut()
+                .expect("upstreams is an object")
+                .remove(&name);
+            return match inner.observe_draft() {
+                Ok(()) => Err(key_error),
+                Err(rollback_error) => Err(format!(
+                    "{key_error}；同时回滚新增 Provider 草稿失败：{rollback_error}"
+                )),
+            };
+        }
+    }
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn edit_provider(
+    state: State<'_, AppStateManaged>,
+    name: String,
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<StateView, String> {
+    let name = name.trim().to_owned();
+    let base_url = ProviderEndpoint::try_new(base_url.trim())
+        .map_err(|error| format!("Base URL 不合法：{error}"))?
+        .as_str();
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let previous = inner.draft["upstreams"]
+        .get(&name)
+        .cloned()
+        .ok_or_else(|| format!("供应商 `{name}` 不存在"))?;
+    let api_key = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned);
+    let identity_changed =
+        previous["base_url"].as_str() != Some(base_url.as_str()) || api_key.is_some();
+    if identity_changed {
+        // A URL or credential change may select a different Provider account.
+        // Invalidate first: losing derived cache on a later rollback is safe;
+        // presenting the old account's catalog as trusted is not.
+        model_catalog::remove_provider(&inner.data_dir(), &name)?;
+    }
+    inner.draft["upstreams"][&name]["base_url"] = json!(base_url);
+    if api_key.is_some() {
+        inner.draft["upstreams"][&name]["auth"] =
+            json!({ "slot": "provider_api_key", "keyring": true });
+    }
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["upstreams"][&name] = previous;
+        return Err(error);
+    }
+    if let Some(key) = api_key {
+        if let Err(key_error) = secrets::keyring_set(&name, "provider_api_key", &key) {
+            inner.draft["upstreams"][&name] = previous;
+            return match inner.observe_draft() {
+                Ok(()) => Err(key_error),
+                Err(rollback_error) => Err(format!(
+                    "{key_error}；同时回滚 Provider 草稿失败：{rollback_error}"
+                )),
+            };
+        }
+    }
     Ok(inner.snapshot())
 }
 
@@ -1221,9 +1518,9 @@ async fn discover_provider_models(
     if name.is_empty() {
         return Err("请先填写供应商名称".to_owned());
     }
-    if !(base_url.starts_with("https://") || base_url.starts_with("http://")) {
-        return Err("Base URL 必须使用 http:// 或 https://".to_owned());
-    }
+    let base_url = ProviderEndpoint::try_new(&base_url)
+        .map_err(|error| format!("Base URL 不合法：{error}"))?
+        .as_str();
 
     let (data_dir, resolved_key) = {
         let inner = state.0.lock().unwrap();
@@ -1236,6 +1533,87 @@ async fn discover_provider_models(
     })
     .await
     .map_err(|error| format!("模型目录任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn test_provider(
+    state: State<'_, AppStateManaged>,
+    name: String,
+) -> Result<Vec<ProviderTestResult>, String> {
+    let (config, name) = {
+        let inner = state.0.lock().unwrap();
+        let name = name.trim().to_owned();
+        if inner.draft["upstreams"].get(&name).is_none() {
+            return Err(format!("供应商 `{name}` 不存在"));
+        }
+        (inner.materialize()?, name)
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let recorder = Arc::new(token_station_cli::filelog::Recorders(Vec::new()));
+        let gateway = Gateway::new(&config, recorder)?;
+        let probes = gateway.probe_layered(&name, None)?;
+        Ok(probes
+            .into_iter()
+            .map(|probe| {
+                let generation_passed = probe
+                    .stages
+                    .last()
+                    .is_some_and(|stage| stage.status == StageStatus::Pass);
+                let mut stages: Vec<ProviderTestStage> = probe
+                    .stages
+                    .into_iter()
+                    .map(|stage| ProviderTestStage {
+                        layer: match stage.layer {
+                            HealthLayer::Network => "network",
+                            HealthLayer::Http => "http",
+                            HealthLayer::Auth => "auth",
+                            HealthLayer::Model => "model",
+                            HealthLayer::Generation => "generation",
+                        }
+                        .to_owned(),
+                        status: stage.status,
+                        detail: stage.detail,
+                    })
+                    .collect();
+                if generation_passed {
+                    match gateway.probe_features(&name, &probe.model) {
+                        Ok(features) => stages.extend(features.stages.into_iter().map(|stage| {
+                            ProviderTestStage {
+                                layer: match stage.layer {
+                                    FeatureLayer::Stream => "stream",
+                                    FeatureLayer::Tool => "tool",
+                                    FeatureLayer::Json => "json",
+                                }
+                                .to_owned(),
+                                status: stage.status,
+                                detail: stage.detail,
+                            }
+                        })),
+                        Err(error) => stages.extend(["stream", "tool", "json"].map(|layer| {
+                            ProviderTestStage {
+                                layer: layer.to_owned(),
+                                status: StageStatus::Fail,
+                                detail: Some(error.clone()),
+                            }
+                        })),
+                    }
+                } else {
+                    stages.extend(["stream", "tool", "json"].map(|layer| ProviderTestStage {
+                        layer: layer.to_owned(),
+                        status: StageStatus::Skipped,
+                        detail: Some("基础生成测试未通过".to_owned()),
+                    }));
+                }
+                ProviderTestResult {
+                    model: probe.model,
+                    stages,
+                    latency_ms: probe.latency_ms,
+                }
+            })
+            .collect())
+    })
+    .await
+    .map_err(|error| format!("Provider 测试任务异常结束：{error}"))?
 }
 
 /// Update an existing provider's model set while protecting models referenced by routing tiers.
@@ -1315,21 +1693,28 @@ fn replace_provider_models(
     let model_objects: Vec<Value> = normalized
         .into_iter()
         .map(|model| {
-            existing.get(&model).cloned().unwrap_or_else(
-                || json!({ "model": model, "tool": true, "context_window": 128000 }),
-            )
+            existing.get(&model).cloned().unwrap_or_else(|| {
+                json!({
+                    "model": model,
+                    "tool": false,
+                    "vision": false,
+                    "json_schema": false,
+                    "tool_state": "unknown",
+                    "vision_state": "unknown",
+                    "json_schema_state": "unknown",
+                    "context_window": 128000
+                })
+            })
         })
         .collect();
 
     let previous = inner.draft["upstreams"][name]["models"].clone();
+    let previous_state = inner.config_state.clone();
     inner.draft["upstreams"][name]["models"] = json!(model_objects);
-    let save = inner.materialize().and_then(|config| {
-        config
-            .save(&inner.config_path)
-            .map_err(|error| error.to_string())
-    });
+    let save = inner.observe_draft().and_then(|()| inner.save_draft());
     if let Err(error) = save {
         inner.draft["upstreams"][name]["models"] = previous;
+        inner.config_state = previous_state;
         return Err(format!("保存供应商模型失败：{error}"));
     }
     Ok(())
@@ -1346,42 +1731,109 @@ fn update_provider_models(
     Ok(inner.snapshot())
 }
 
+fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {
+    let mut references = Vec::new();
+    for (pool, label) in [
+        (TIER_HIGH, "主页/上档"),
+        (TIER_MID, "主页/中档"),
+        (TIER_LOW, "主页/下档"),
+    ] {
+        for (index, member) in inner.draft["router"]["pools"][pool]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            if member["upstream"].as_str() == Some(name) {
+                references.push(format!("{label}#{}", index + 1));
+            }
+        }
+    }
+    for agent_id in KNOWN_AGENT_IDS {
+        for slot in ["high", "mid", "low"] {
+            if inner.draft["agent_routes"][agent_id]["custom_route"][slot]["upstream"].as_str()
+                == Some(name)
+            {
+                references.push(format!("Agent/{agent_id}/{slot}"));
+            }
+        }
+    }
+    references.sort();
+    references
+}
+
+#[tauri::command]
+fn preview_provider_removal(
+    state: State<'_, AppStateManaged>,
+    name: String,
+) -> Result<ProviderRemovalPreview, String> {
+    let inner = state.0.lock().unwrap();
+    let name = name.trim();
+    if inner.draft["upstreams"].get(name).is_none() {
+        return Err(format!("供应商 `{name}` 不存在"));
+    }
+    let references = provider_references(&inner, name);
+    Ok(ProviderRemovalPreview {
+        name: name.to_owned(),
+        can_remove: references.is_empty(),
+        references,
+    })
+}
+
 #[tauri::command]
 fn remove_provider(state: State<'_, AppStateManaged>, name: String) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
-    if let Some(obj) = inner.draft["upstreams"].as_object_mut() {
-        obj.remove(&name);
+    let name = name.trim();
+    let references = provider_references(&inner, name);
+    if !references.is_empty() {
+        return Err(format!(
+            "供应商仍被引用，不能删除：{}。请先调整这些路由",
+            references.join("、")
+        ));
     }
-    // Remove any tier that references it.
-    for pool in [TIER_HIGH, TIER_MID, TIER_LOW] {
-        let refers = inner.draft["router"]["pools"][pool]
-            .as_array()
-            .and_then(|a| a.first())
-            .and_then(|m| m["upstream"].as_str())
-            .map(|u| u == name)
-            .unwrap_or(false);
-        if refers {
-            if let Some(pools) = inner.draft["router"]["pools"].as_object_mut() {
-                pools.remove(pool);
-            }
-        }
-    }
-    // Independent Agent routes store only provider and model references. If a provider is deleted, an independent draft that references it
-    // It cannot be restored as valid configuration. Safely fall back to the home page and clear the invalid draft.
-    for agent_id in KNOWN_AGENT_IDS {
-        let refers = ["high", "mid", "low"].into_iter().any(|slot| {
-            inner.draft["agent_routes"][agent_id]["custom_route"][slot]["upstream"].as_str()
-                == Some(name.as_str())
-        });
-        if refers {
-            inner.draft["agent_routes"][agent_id]["mode"] = json!("inherit");
-            if let Some(route) = inner.draft["agent_routes"][agent_id].as_object_mut() {
-                route.remove("custom_route");
-            }
-        }
-    }
+    let provider = inner.draft["upstreams"]
+        .get(name)
+        .cloned()
+        .ok_or_else(|| format!("供应商 `{name}` 不存在"))?;
+    let data_dir = inner.data_dir();
+    model_catalog::remove_provider(&data_dir, name)?;
+    provider_tombstones::archive(&data_dir, name, &provider)?;
+    inner.draft["upstreams"]
+        .as_object_mut()
+        .expect("upstreams is an object")
+        .remove(name);
     inner.rebuild_routing();
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["upstreams"][name] = provider;
+        provider_tombstones::discard(&data_dir, name).ok();
+        return Err(error);
+    }
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn restore_provider(state: State<'_, AppStateManaged>, name: String) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let name = name.trim();
+    if inner.draft["upstreams"].get(name).is_some() {
+        return Err(format!("同名供应商 `{name}` 已存在，不能覆盖恢复"));
+    }
+    let data_dir = inner.data_dir();
+    model_catalog::remove_provider(&data_dir, name)?;
+    let provider = provider_tombstones::take(&data_dir, name)?
+        .ok_or_else(|| format!("Provider 回收站中没有 `{name}`"))?;
+    inner.draft["upstreams"][name] = provider.clone();
+    inner.rebuild_routing();
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["upstreams"]
+            .as_object_mut()
+            .expect("upstreams is an object")
+            .remove(name);
+        provider_tombstones::archive(&data_dir, name, &provider).ok();
+        return Err(error);
+    }
     Ok(inner.snapshot())
 }
 
@@ -1398,6 +1850,7 @@ fn set_tier(
     inner.ensure_editable()?;
 
     inner.set_tier_value(pool, upstream, model)?;
+    inner.observe_draft()?;
     Ok(inner.snapshot())
 }
 
@@ -1440,6 +1893,7 @@ fn set_agent_route_mode(
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
     inner.set_agent_route_mode_value(&agent_id, &mode);
+    inner.observe_draft()?;
     Ok(inner.snapshot())
 }
 
@@ -1454,10 +1908,10 @@ fn set_agent_tier(
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
     inner.set_agent_tier_value(&agent_id, &slot, upstream, model)?;
+    inner.observe_draft()?;
     Ok(inner.snapshot())
 }
 
-/// Save the current home-page tiers as a named profile for reuse by multiple Agents.
 #[tauri::command]
 fn save_home_route_as_profile(
     state: State<'_, AppStateManaged>,
@@ -1466,15 +1920,14 @@ fn save_home_route_as_profile(
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
     let previous = inner.draft.clone();
-    inner.save_home_route_as_profile(&name)?;
-    if let Err(error) = inner.persist_draft() {
+    inner.save_home_route_as_profile_value(&name)?;
+    if let Err(error) = inner.observe_draft() {
         inner.draft = previous;
         return Err(error);
     }
     Ok(inner.snapshot())
 }
 
-/// Mount a named profile on an Agent.
 #[tauri::command]
 fn mount_agent_profile(
     state: State<'_, AppStateManaged>,
@@ -1484,22 +1937,21 @@ fn mount_agent_profile(
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
     let previous = inner.draft.clone();
-    inner.set_agent_profile_value(&agent_id, &profile)?;
-    if let Err(error) = inner.persist_draft() {
+    inner.mount_agent_profile_value(&agent_id, &profile)?;
+    if let Err(error) = inner.observe_draft() {
         inner.draft = previous;
         return Err(error);
     }
     Ok(inner.snapshot())
 }
 
-/// Delete a named profile; reject the operation while it is mounted.
 #[tauri::command]
 fn delete_profile(state: State<'_, AppStateManaged>, name: String) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
     let previous = inner.draft.clone();
     inner.delete_profile_value(&name)?;
-    if let Err(error) = inner.persist_draft() {
+    if let Err(error) = inner.observe_draft() {
         inner.draft = previous;
         return Err(error);
     }
@@ -1508,12 +1960,8 @@ fn delete_profile(state: State<'_, AppStateManaged>, name: String) -> Result<Sta
 
 #[tauri::command]
 fn save_agent_routes(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
-    let inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    let config = inner.materialize()?;
-    config
-        .save(&inner.config_path)
-        .map_err(|error| format!("写配置失败: {error}"))?;
+    let mut inner = state.0.lock().unwrap();
+    inner.save_draft()?;
     Ok(inner.snapshot())
 }
 
@@ -1524,10 +1972,8 @@ fn apply_home_route_to_all_agents(state: State<'_, AppStateManaged>) -> Result<S
     for agent_id in KNOWN_AGENT_IDS {
         inner.set_agent_route_mode_value(agent_id, "inherit");
     }
-    let config = inner.materialize()?;
-    config
-        .save(&inner.config_path)
-        .map_err(|error| format!("写配置失败: {error}"))?;
+    inner.observe_draft()?;
+    inner.save_draft()?;
     Ok(inner.snapshot())
 }
 
@@ -1543,14 +1989,7 @@ fn save_config(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
     {
         return Err("请至少配置一档(供应商 + 模型)再保存".into());
     }
-    let config = inner.materialize()?;
-    config
-        .save(&inner.config_path)
-        .map_err(|e| format!("写配置失败: {e}"))?;
-    // The draft is now the saved baseline (so "unsaved" clears). If the proxy is
-    // running, it still holds the old config — `applied` will read false until it
-    // is restarted, which is the truth the save button used to hide.
-    inner.saved_config_hash = Some(config_hash(&config));
+    inner.save_draft()?;
     Ok(inner.snapshot())
 }
 
@@ -1563,76 +2002,194 @@ fn complete_serve_start<R: Runtime>(
     generation: u64,
     result: Result<PreparedServer, StartFailure>,
 ) {
-    match result {
-        Ok(prepared) => {
-            let mut prepared = Some(prepared);
-            let view = {
-                let state = app.state::<AppStateManaged>();
-                let mut inner = state.0.lock().unwrap();
-                match &inner.server {
-                    ServerLifecycle::Starting {
-                        generation: current,
-                        ..
-                    } if *current == generation => {
-                        let running = prepared
-                            .take()
-                            .expect("prepared server is present")
-                            .publish();
-                        inner.server = ServerLifecycle::Running {
-                            generation,
-                            server: running,
-                        };
-                        Some(inner.serve_view())
-                    }
-                    ServerLifecycle::Stopping {
-                        generation: current,
-                        ..
-                    } if *current == generation => {
-                        // Keep `Stopping` authoritative until the prepared listener
-                        // is dropped outside the mutex below.
-                        None
-                    }
-                    _ => None,
-                }
-            };
-            if let Some(prepared) = prepared {
-                prepared.discard();
-                complete_serve_stop(app, generation);
+    // Same-port handoff must first release the old accept socket. This state
+    // mutation is instant; the candidate bind/retry itself happens below,
+    // outside the App mutex.
+    let resume_listen = result.as_ref().ok().and_then(|prepared| {
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
+        match &inner.server {
+            ServerLifecycle::Applying {
+                generation: current,
+                old,
+                ..
+            } if *current == generation && old.listen() == prepared.listen() => {
+                old.stop_accepting();
+                Some(old.listen().to_owned())
             }
-            if let Some(view) = view {
-                emit_serve_state(app, &view);
-            }
+            _ => None,
         }
-        Err(failure) => {
-            let view = {
-                let state = app.state::<AppStateManaged>();
-                let mut inner = state.0.lock().unwrap();
-                match &inner.server {
-                    ServerLifecycle::Starting {
-                        generation: current,
+    });
+    let result = result.and_then(PreparedServer::bind);
+    // A failed candidate bind must restore the old listener, but that retry is
+    // equally forbidden under the global lock. The reserved socket is only
+    // installed if the same generation is still Applying.
+    let mut resume_listener = if result.is_err() {
+        resume_listen.as_deref().map(PreparedServer::bind_listener)
+    } else {
+        None
+    };
+    let mut discard = None;
+    let mut retire = None;
+    let view = {
+        let state = app.state::<AppStateManaged>();
+        let mut inner = state.0.lock().unwrap();
+        let current = std::mem::replace(&mut inner.server, ServerLifecycle::Stopped { generation });
+        inner.server = match (current, result) {
+            (
+                ServerLifecycle::Starting {
+                    generation: current,
+                    listen,
+                    revision,
+                },
+                Ok(prepared),
+            ) if current == generation => match prepared.publish(revision) {
+                Ok(server) => ServerLifecycle::Running {
+                    generation,
+                    server,
+                    apply_error: None,
+                },
+                Err(failure) => ServerLifecycle::Failed {
+                    generation,
+                    listen,
+                    error: failure.public_message(),
+                },
+            },
+            (
+                ServerLifecycle::Applying {
+                    generation: current,
+                    revision,
+                    mut old,
+                    ..
+                },
+                Ok(prepared),
+            ) if current == generation => {
+                let same_listener = old.listen() == prepared.listen();
+                match prepared.publish(revision) {
+                    Ok(server) => {
+                        old.stop_accepting();
+                        retire = Some(old);
+                        ServerLifecycle::Running {
+                            generation,
+                            server,
+                            apply_error: None,
+                        }
+                    }
+                    Err(failure) => {
+                        let mut message = failure.public_message();
+                        if same_listener {
+                            let restore = resume_listener
+                                .take()
+                                .unwrap_or_else(|| {
+                                    Err(StartFailure::new("listen_restore", "旧 listener 未能预留"))
+                                })
+                                .and_then(|listener| old.resume_accepting(listener));
+                            if let Err(restore) = restore {
+                                message = format!(
+                                    "切换失败且旧 listener 恢复失败：{message}; {}",
+                                    restore.public_message()
+                                );
+                                let listen = old.listen().to_owned();
+                                retire = Some(old);
+                                ServerLifecycle::Failed {
+                                    generation,
+                                    listen,
+                                    error: message,
+                                }
+                            } else {
+                                ServerLifecycle::Running {
+                                    generation,
+                                    server: old,
+                                    apply_error: Some(format!("已保存尚未应用：{message}")),
+                                }
+                            }
+                        } else {
+                            ServerLifecycle::Running {
+                                generation,
+                                server: old,
+                                apply_error: Some(format!("已保存尚未应用：{message}")),
+                            }
+                        }
+                    }
+                }
+            }
+            (
+                ServerLifecycle::Starting {
+                    generation: current,
+                    listen,
+                    ..
+                },
+                Err(failure),
+            ) if current == generation => ServerLifecycle::Failed {
+                generation,
+                listen,
+                error: failure.public_message(),
+            },
+            (
+                ServerLifecycle::Applying {
+                    generation: current,
+                    old,
+                    ..
+                },
+                Err(failure),
+            ) if current == generation => ServerLifecycle::Running {
+                generation,
+                server: old,
+                apply_error: Some(format!("已保存尚未应用：{}", failure.public_message())),
+            },
+            (
+                ServerLifecycle::Stopping {
+                    generation: current,
+                    listen,
+                    draining,
+                },
+                Ok(prepared),
+            ) if current == generation => {
+                discard = Some(prepared);
+                if draining {
+                    ServerLifecycle::Stopping {
+                        generation,
                         listen,
-                    } if *current == generation => {
-                        inner.server = ServerLifecycle::Failed {
-                            generation,
-                            listen: listen.clone(),
-                            error: failure.public_message(),
-                        };
-                        Some(inner.serve_view())
+                        draining,
                     }
-                    ServerLifecycle::Stopping {
-                        generation: current,
-                        ..
-                    } if *current == generation => {
-                        inner.server = ServerLifecycle::Stopped { generation };
-                        Some(inner.serve_view())
-                    }
-                    _ => None,
+                } else {
+                    ServerLifecycle::Stopped { generation }
                 }
-            };
-            if let Some(view) = view {
-                emit_serve_state(app, &view);
             }
-        }
+            (
+                ServerLifecycle::Stopping {
+                    generation: current,
+                    listen,
+                    draining,
+                },
+                Err(_),
+            ) if current == generation => {
+                if draining {
+                    ServerLifecycle::Stopping {
+                        generation,
+                        listen,
+                        draining,
+                    }
+                } else {
+                    ServerLifecycle::Stopped { generation }
+                }
+            }
+            (current, Ok(prepared)) => {
+                discard = Some(prepared);
+                current
+            }
+            (current, Err(_)) => current,
+        };
+        Some(inner.serve_view())
+    };
+    if let Some(prepared) = discard {
+        prepared.discard();
+    }
+    if let Some(old) = retire {
+        tauri::async_runtime::spawn_blocking(move || old.drain_and_shutdown());
+    }
+    if let Some(view) = view {
+        emit_serve_state(app, &view);
     }
 }
 
@@ -1649,24 +2206,39 @@ where
         let mut inner = state.0.lock().unwrap();
         inner.ensure_editable()?;
         match &inner.server {
-            ServerLifecycle::Starting { .. } | ServerLifecycle::Running { .. } => {
-                return Ok(inner.snapshot());
+            ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. } => {
+                return Err("apply_in_progress: 已有配置正在应用".to_owned());
             }
             ServerLifecycle::Stopping { .. } => {
                 return Err(
                     "startup_cleanup_in_progress: 上一次代理正在停止，请稍后重试".to_string(),
                 );
             }
-            ServerLifecycle::Stopped { .. } | ServerLifecycle::Failed { .. } => {}
+            ServerLifecycle::Stopped { .. }
+            | ServerLifecycle::Running { .. }
+            | ServerLifecycle::Failed { .. } => {}
         }
         let config = inner.materialize()?;
+        let revision = inner.save_draft()?;
         let generation = inner
             .server
             .generation()
             .checked_add(1)
             .ok_or_else(|| "代理启动 generation 已耗尽，请重启 App".to_string())?;
         let listen = config.server.listen.clone();
-        inner.server = ServerLifecycle::Starting { generation, listen };
+        let current = std::mem::replace(&mut inner.server, ServerLifecycle::Stopped { generation });
+        inner.server = match current {
+            ServerLifecycle::Running { server: old, .. } => ServerLifecycle::Applying {
+                generation,
+                revision,
+                old,
+            },
+            _ => ServerLifecycle::Starting {
+                generation,
+                listen,
+                revision,
+            },
+        };
         let snapshot = inner.snapshot();
         let serve_view = snapshot.serve.clone();
         (config, generation, snapshot, serve_view)
@@ -1678,20 +2250,16 @@ where
         let result = tauri::async_runtime::spawn_blocking(move || prepare(config))
             .await
             .unwrap_or_else(|error| Err(StartFailure::new("startup_task", error)));
-        complete_serve_start(&completion_app, generation, result);
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            complete_serve_start(&completion_app, generation, result);
+        })
+        .await;
     });
     Ok(snapshot)
 }
 
 #[tauri::command]
 fn serve_start(app: AppHandle, state: State<'_, AppStateManaged>) -> Result<StateView, String> {
-    // Stamp the config the proxy is being started with, so `applied` can later
-    // tell whether a subsequent save has diverged from what is running.
-    {
-        let mut inner = state.0.lock().unwrap();
-        let hash = inner.draft_config_hash();
-        inner.running_config_hash = hash;
-    }
     begin_serve_start(app, state.inner(), prepare_server)
 }
 
@@ -1722,18 +2290,33 @@ fn begin_serve_stop<R: Runtime>(app: AppHandle<R>, state: &AppStateManaged) -> S
         let current = std::mem::replace(&mut inner.server, ServerLifecycle::Stopped { generation });
         let mut running = None;
         let changed = match current {
-            ServerLifecycle::Running { server, .. } => {
+            ServerLifecycle::Running { server, .. }
+            | ServerLifecycle::Applying { old: server, .. } => {
                 let listen = server.listen().to_string();
-                inner.server = ServerLifecycle::Stopping { generation, listen };
+                inner.server = ServerLifecycle::Stopping {
+                    generation,
+                    listen,
+                    draining: true,
+                };
                 running = Some(server);
                 true
             }
             ServerLifecycle::Starting { listen, .. } => {
-                inner.server = ServerLifecycle::Stopping { generation, listen };
+                inner.server = ServerLifecycle::Stopping {
+                    generation,
+                    listen,
+                    draining: false,
+                };
                 true
             }
-            ServerLifecycle::Stopping { listen, .. } => {
-                inner.server = ServerLifecycle::Stopping { generation, listen };
+            ServerLifecycle::Stopping {
+                listen, draining, ..
+            } => {
+                inner.server = ServerLifecycle::Stopping {
+                    generation,
+                    listen,
+                    draining,
+                };
                 false
             }
             ServerLifecycle::Failed { .. } => true,
@@ -1750,7 +2333,8 @@ fn begin_serve_stop<R: Runtime>(app: AppHandle<R>, state: &AppStateManaged) -> S
     if let Some(running) = running {
         let completion_app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = tauri::async_runtime::spawn_blocking(move || running.shutdown()).await;
+            let _ =
+                tauri::async_runtime::spawn_blocking(move || running.drain_and_shutdown()).await;
             complete_serve_stop(&completion_app, generation);
         });
     }
@@ -1759,10 +2343,6 @@ fn begin_serve_stop<R: Runtime>(app: AppHandle<R>, state: &AppStateManaged) -> S
 
 #[tauri::command]
 fn serve_stop(app: AppHandle, state: State<'_, AppStateManaged>) -> StateView {
-    {
-        let mut inner = state.0.lock().unwrap();
-        inner.running_config_hash = None;
-    }
     begin_serve_stop(app, state.inner())
 }
 
@@ -1818,10 +2398,9 @@ fn set_settings(
     inner.ensure_editable()?;
     inner.draft["server"]["auth"] = json!(auth);
     inner.draft["data"]["metrics"] = json!(metrics);
-    if let Ok(config) = inner.materialize() {
-        config
-            .save(&inner.config_path)
-            .map_err(|e| format!("写配置失败: {e}"))?;
+    inner.observe_draft()?;
+    if inner.materialize().is_ok() {
+        inner.save_draft()?;
     }
     Ok(inner.snapshot())
 }
@@ -1868,17 +2447,18 @@ fn get_stats(
     })
 }
 
-/// Recent N request receipts (requester / actual service / reason / terminal state / cost). Read-only metrics database; no body content.
+/// Home page: the five most recent body-free Request Receipts. If the metrics database has not been created, including when
+/// metrics) return an empty array. The read layer itself limits results to five.
 #[tauri::command]
-fn get_receipts(
+fn get_recent_receipts(
     state: State<'_, AppStateManaged>,
-    limit: u32,
-) -> Result<Vec<stats::Receipt>, String> {
+    limit: usize,
+) -> Result<Vec<ReceiptView>, String> {
     let db = {
         let inner = state.0.lock().unwrap();
         inner.data_dir().join("metrics.sqlite")
     };
-    stats::recent(&db, limit.min(200))
+    SqliteStore::recent_receipts(&db, limit)
 }
 
 /// Convert the draft's rules, hints, heuristic tiers, and fallback into a read-only routing-table view with no API calls.
@@ -1976,55 +2556,39 @@ fn check_upgrade() -> Result<UpgradeView, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let root = repo_root();
-    let config_path = root.join("token-station.json");
-
-    // Validate existing configuration and apply defaults through the CLI before reuse. Put damaged configuration into read-only protection,
-    // Never silently overwrite with an empty template. Upgrade the legacy OpenAI-only inbound configuration in memory to three desktop inbounds.
-    let (draft, load_error) = load_draft(&config_path, &root);
-
-    // Migrate an existing metrics store up to the current schema at startup, so
-    // the read-only receipts/stats views (which cannot migrate themselves) never
-    // trip over an old version. Only an existing store is touched — nothing is
-    // created before the proxy first serves.
-    if let Some(dir) = draft["data"]["dir"].as_str() {
-        let metrics = std::path::Path::new(dir).join("metrics.sqlite");
-        if metrics.exists() {
-            if let Err(error) = token_station_cli::store::SqliteStore::open(&metrics) {
-                eprintln!("metrics migration on startup failed: {error}");
-            }
-        }
-    }
-
-    // The on-disk baseline: a clean load means the draft equals what's saved, so
-    // nothing shows as "unsaved" until the user edits. A load error leaves no
-    // trustworthy baseline (None → treated as dirty).
-    let saved_config_hash = if load_error.is_none() {
-        serde_json::from_value::<ClientConfig>(draft.clone())
-            .ok()
-            .map(|config| config_hash(&config))
-    } else {
-        None
-    };
-
-    let managed = AppStateManaged(Mutex::new(AppInner {
-        config_path,
-        draft,
-        load_error,
-        server: ServerLifecycle::stopped(),
-        saved_config_hash,
-        running_config_hash: None,
-    }));
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let compatibility_cache_dir = app.path().app_cache_dir()?.join("agent-compatibility");
-            let agent_data_root = app.path().app_data_dir()?.join("agent-integration");
+            let desktop_paths = DesktopPaths::from_app_roots(
+                app.path().app_config_dir()?,
+                app.path().app_data_dir()?,
+            );
+            desktop_paths.create_writable_dirs().map_err(|error| {
+                std::io::Error::other(format!(
+                    "初始化桌面应用目录失败（配置：{}，数据：{}，插件：{}）：{error}",
+                    desktop_paths.config_file.display(),
+                    desktop_paths.data_dir.display(),
+                    desktop_paths.plugins_dir.display()
+                ))
+            })?;
+
+            // Validate existing configuration and apply defaults through the CLI before reuse. Put damaged configuration into read-only
+            // Protection prevents silent overwrite with an empty template. Upgrade the legacy single OpenAI inbound config only in memory.
+            let (draft, saved, load_error) = load_draft_state(
+                &desktop_paths.config_file,
+                &desktop_paths.data_dir,
+                &desktop_paths.plugins_dir,
+            );
+            app.manage(AppStateManaged(Mutex::new(AppInner::new_with_saved(
+                desktop_paths.config_file.clone(),
+                draft,
+                saved,
+                load_error,
+            ))));
+
             let paths = AgentIntegrationPaths {
-                compatibility_cache_dir,
-                snapshot_root: agent_data_root.join("snapshots"),
-                ownership_root: agent_data_root.join("ownership"),
+                snapshot_root: desktop_paths.agent_data_root.join("snapshots"),
+                ownership_root: desktop_paths.agent_data_root.join("ownership"),
             };
             let agent_commands = AgentCommandState::new(paths.clone()).map_err(|message| {
                 std::io::Error::other(format!("初始化 Agent IPC 失败：{message}"))
@@ -2033,14 +2597,18 @@ pub fn run() {
             app.manage(agent_commands);
             Ok(())
         })
-        .manage(managed)
         .invoke_handler(tauri::generate_handler![
             get_state,
-            preview_endpoint,
+            get_runtime_state,
+            preview_provider_endpoints,
             add_provider,
+            edit_provider,
             discover_provider_models,
+            test_provider,
             update_provider_models,
+            preview_provider_removal,
             remove_provider,
+            restore_provider,
             set_tier,
             add_keyword,
             remove_keyword,
@@ -2064,7 +2632,7 @@ pub fn run() {
             apply_snapshot_restore,
             set_settings,
             get_stats,
-            get_receipts,
+            get_recent_receipts,
             get_router_table,
             get_plugins,
             check_upgrade,
@@ -2076,6 +2644,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
@@ -2092,6 +2661,150 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).expect("scratch home is writable");
         path
+    }
+
+    fn template_for_test(root: &std::path::Path) -> Value {
+        template(&root.join("token-station-data"), &root.join("plugins"))
+    }
+
+    fn gateway_template_for_test(root: &std::path::Path) -> Value {
+        let plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("plugins-dist");
+        template(&root.join("token-station-data"), &plugins_dir)
+    }
+
+    fn serve_model_catalog(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("model catalog fixture binds");
+        listener
+            .set_nonblocking(true)
+            .expect("model catalog fixture is nonblocking");
+        let address = listener
+            .local_addr()
+            .expect("model catalog fixture has an address");
+        let worker = std::thread::spawn(move || {
+            for (status, body) in responses {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "model catalog discovery request did not arrive before deadline"
+                            );
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("model catalog fixture accept failed: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("model catalog fixture read is bounded");
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .expect("model catalog fixture write is bounded");
+                let mut request = [0u8; 2048];
+                let read = stream
+                    .read(&mut request)
+                    .expect("model catalog fixture reads the request");
+                assert!(read > 0, "model catalog request must not be empty");
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("model catalog fixture responds");
+            }
+        });
+        (format!("http://{address}"), worker)
+    }
+
+    fn serve_chat_completion(
+        marker: &'static str,
+        requests: usize,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("chat fixture binds");
+        let address = listener.local_addr().expect("chat fixture has an address");
+        let worker = std::thread::spawn(move || {
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().expect("chat request arrives");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let read = stream.read(&mut chunk).expect("chat fixture reads request");
+                    assert!(read > 0, "chat request ended before its declared body");
+                    request.extend_from_slice(&chunk[..read]);
+                    let Some(header_end) =
+                        request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+                assert!(
+                    String::from_utf8_lossy(&request).contains("/v1/chat/completions"),
+                    "gateway must call the configured chat endpoint"
+                );
+                let body = json!({
+                    "id": format!("fixture-{marker}"),
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "small",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": marker},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                })
+                .to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .expect("chat fixture responds");
+            }
+        });
+        (format!("http://{address}/v1"), worker)
+    }
+
+    fn chat_through_proxy(listen: &str) -> String {
+        let body = r#"{"model":"auto","messages":[{"role":"user","content":"ping"}]}"#;
+        let mut stream = std::net::TcpStream::connect(listen).expect("proxy listener is reachable");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        write!(
+            stream,
+            "POST /v1/chat/completions HTTP/1.1\r\nhost: {listen}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("proxy request writes");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("proxy response reads");
+        response
     }
 
     fn wait_for_serve_phase<R: Runtime>(app: &tauri::App<R>, expected: ServePhase) -> StateView {
@@ -2124,10 +2837,26 @@ mod tests {
         }
     }
 
+    fn wait_for_receipts(path: &std::path::Path, expected: usize) -> Vec<ReceiptView> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let receipts = SqliteStore::recent_receipts(path, 5).expect("receipts read");
+            if receipts.len() >= expected {
+                return receipts;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "receipt count did not reach {expected}; current={}",
+                receipts.len()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn the_desktop_template_enables_every_supported_inbound_protocol() {
         let root = PathBuf::from("/tmp/token-station-desktop-test");
-        let draft = template(&root);
+        let draft = template_for_test(&root);
 
         assert_eq!(
             draft["plugins"]["agents"],
@@ -2136,14 +2865,247 @@ mod tests {
     }
 
     #[test]
+    fn desktop_paths_stay_inside_tauri_roots_and_create_writable_directories() {
+        let root = scratch_home("tauri-paths");
+        let config_root = root.join("config");
+        let data_root = root.join("data");
+        let paths = DesktopPaths::from_app_roots(config_root.clone(), data_root.clone());
+
+        assert_eq!(paths.config_file, config_root.join("token-station.json"));
+        assert_eq!(paths.data_dir, data_root.join("token-station-data"));
+        assert_eq!(paths.plugins_dir, data_root.join("plugins"));
+        assert_eq!(paths.agent_data_root, data_root.join("agent-integration"));
+
+        paths.create_writable_dirs().unwrap();
+        assert!(config_root.is_dir());
+        assert!(paths.data_dir.is_dir());
+        assert!(paths.plugins_dir.is_dir());
+        assert!(paths.agent_data_root.is_dir());
+
+        let draft = template(&paths.data_dir, &paths.plugins_dir);
+        assert_eq!(draft["data"]["dir"], json!(paths.data_dir));
+        assert_eq!(draft["plugins"]["dir"], json!(paths.plugins_dir));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(feature = "bundled-plugins")]
+    #[test]
+    fn desktop_bundled_plugins_load_without_an_external_plugin_directory() {
+        let root = scratch_home("bundled-plugins");
+        let missing_plugins = root.join("intentionally-missing-plugins");
+        let plugins: PluginsConfig = serde_json::from_value(
+            template(&root.join("data"), &missing_plugins)["plugins"].clone(),
+        )
+        .unwrap();
+        let receipts = Receipts::load(&root.join("data")).unwrap();
+        let registry = PluginRegistry::discover(&plugins, &receipts).unwrap();
+
+        for package in [
+            "agent-openai",
+            "agent-anthropic",
+            "agent-openai-responses",
+            "provider-openai-compatible",
+        ] {
+            let package = registry
+                .package(package)
+                .expect("official package is builtin");
+            assert!(matches!(
+                package.source,
+                token_station_cli::plugins::PackageSource::Builtin { .. }
+            ));
+        }
+        assert!(registry.provider_binding("openai-compatible").is_some());
+        assert!(!missing_plugins.exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn repeated_model_discovery_only_updates_the_catalog_cache() {
+        const CATALOG: &str = r#"{"data":[{"id":"model-b"},{"id":"model-a"}]}"#;
+
+        let root = scratch_home("discovery-isolation");
+        let data_dir = root.join("data");
+        let config_path = root.join("token-station.json");
+        let (base_url, server) = serve_model_catalog(vec![
+            (200, CATALOG),
+            (200, CATALOG),
+            (200, CATALOG),
+            (503, r#"{"error":"offline"}"#),
+        ]);
+        let mut draft = template_for_test(&root);
+        draft["data"]["dir"] = json!(data_dir.clone());
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": base_url,
+            "models": [{"model": "configured-model"}]
+        });
+        let expected_draft = draft.clone();
+        // Compact JSON is intentionally different from the normal pretty save
+        // format, so even a semantically identical rewrite fails this check.
+        let expected_config =
+            serde_json::to_vec(&expected_draft).expect("saved config fixture serializes");
+        std::fs::write(&config_path, &expected_config).expect("saved config fixture writes");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            config_path.clone(),
+            draft,
+            None,
+        )))));
+        let initial_state = get_state(app.state());
+        assert_eq!(initial_state.draft_revision, initial_state.saved_revision);
+        assert!(!initial_state.config_dirty);
+
+        for _ in 0..3 {
+            let result = tauri::async_runtime::block_on(discover_provider_models(
+                app.state(),
+                "fixture".to_owned(),
+                base_url.clone(),
+                None,
+            ))
+            .expect("live discovery succeeds");
+            assert_eq!(result.source, "live");
+            assert_eq!(result.models, ["model-a", "model-b"]);
+            assert_eq!(
+                app.state::<AppStateManaged>()
+                    .inner()
+                    .0
+                    .lock()
+                    .unwrap()
+                    .draft,
+                expected_draft
+            );
+            assert_eq!(
+                std::fs::read(&config_path).expect("saved config remains readable"),
+                expected_config
+            );
+            let state = get_state(app.state());
+            assert_eq!(state.draft_revision, initial_state.draft_revision);
+            assert_eq!(state.saved_revision, initial_state.saved_revision);
+            assert!(!state.config_dirty);
+        }
+
+        let cached = tauri::async_runtime::block_on(discover_provider_models(
+            app.state(),
+            "fixture".to_owned(),
+            base_url,
+            None,
+        ))
+        .expect("offline discovery falls back to its cache");
+        assert_eq!(cached.source, "cache");
+        assert_eq!(cached.models, ["model-a", "model-b"]);
+        assert_eq!(
+            app.state::<AppStateManaged>()
+                .inner()
+                .0
+                .lock()
+                .unwrap()
+                .draft,
+            expected_draft
+        );
+        assert_eq!(
+            std::fs::read(&config_path).expect("saved config remains readable"),
+            expected_config
+        );
+        let cached_state = get_state(app.state());
+        assert_eq!(cached_state.draft_revision, initial_state.draft_revision);
+        assert_eq!(cached_state.saved_revision, initial_state.saved_revision);
+        assert!(!cached_state.config_dirty);
+        assert!(data_dir.join("model-catalog-cache.json").is_file());
+        server.join().expect("model catalog fixture exits");
+
+        {
+            let managed = app.state::<AppStateManaged>();
+            let mut inner = managed.0.lock().unwrap();
+            inner.draft["upstreams"]["fixture"]["models"] = json!([{"model": "model-a"}]);
+            inner.observe_draft().unwrap();
+        }
+        let explicitly_edited = get_state(app.state());
+        assert!(explicitly_edited.draft_revision > initial_state.draft_revision);
+        assert_eq!(
+            explicitly_edited.saved_revision,
+            initial_state.saved_revision
+        );
+        assert!(explicitly_edited.config_dirty);
+
+        let warning_root = scratch_home("discovery-cache-warning");
+        let warning_data = warning_root.join("data");
+        std::fs::create_dir_all(warning_data.join("model-catalog-cache.json"))
+            .expect("directory fixture blocks the cache rename");
+        let warning_config = warning_root.join("token-station.json");
+        let (warning_base, warning_server) = serve_model_catalog(vec![(200, CATALOG)]);
+        let mut warning_draft = template_for_test(&warning_root);
+        warning_draft["data"]["dir"] = json!(warning_data);
+        warning_draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": warning_base,
+            "models": [{"model": "configured-model"}]
+        });
+        let expected_warning_draft = warning_draft.clone();
+        let expected_warning_config =
+            serde_json::to_vec(&expected_warning_draft).expect("warning config fixture serializes");
+        std::fs::write(&warning_config, &expected_warning_config)
+            .expect("warning config fixture writes");
+        let warning_app = tauri::test::mock_app();
+        assert!(warning_app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            warning_config.clone(),
+            warning_draft,
+            None,
+        )))));
+        let warning_initial_state = get_state(warning_app.state());
+
+        let warning = tauri::async_runtime::block_on(discover_provider_models(
+            warning_app.state(),
+            "fixture".to_owned(),
+            warning_base,
+            None,
+        ))
+        .expect("cache failure remains a live discovery result");
+        assert_eq!(warning.source, "live");
+        assert_eq!(warning.models, ["model-a", "model-b"]);
+        assert!(warning
+            .warning
+            .as_deref()
+            .is_some_and(|message| message.contains("保存模型缓存失败")));
+        assert_eq!(
+            warning_app
+                .state::<AppStateManaged>()
+                .inner()
+                .0
+                .lock()
+                .unwrap()
+                .draft,
+            expected_warning_draft
+        );
+        assert_eq!(
+            std::fs::read(&warning_config).expect("warning config remains readable"),
+            expected_warning_config
+        );
+        let warning_state = get_state(warning_app.state());
+        assert_eq!(
+            warning_state.draft_revision,
+            warning_initial_state.draft_revision
+        );
+        assert_eq!(
+            warning_state.saved_revision,
+            warning_initial_state.saved_revision
+        );
+        assert!(!warning_state.config_dirty);
+        warning_server.join().expect("warning fixture exits");
+
+        std::fs::remove_dir_all(root).ok();
+        std::fs::remove_dir_all(warning_root).ok();
+    }
+
+    #[test]
     fn a_legacy_chat_only_config_is_migrated_in_memory_with_absolute_runtime_paths() {
         let root = scratch_home("legacy");
-        let mut draft = template(&root);
+        let mut draft = template_for_test(&root);
         draft["plugins"].as_object_mut().unwrap().remove("agents");
         draft["plugins"]["agent"] = json!("agent-openai");
         draft["plugins"]["dir"] = json!("plugins-dist");
         draft["data"]["dir"] = json!("token-station-data");
 
+        let saved = draft.clone();
         let prepared = prepare_desktop_draft(draft, &root);
 
         assert_eq!(prepared["plugins"]["agents"], json!(DESKTOP_AGENTS));
@@ -2153,13 +3115,20 @@ mod tests {
             prepared["data"]["dir"],
             json!(root.join("token-station-data"))
         );
+        let inner =
+            AppInner::new_with_saved(root.join("token-station.json"), prepared, saved, None);
+        assert!(inner.config_state.is_dirty());
+        assert_ne!(
+            inner.config_state.draft_revision(),
+            inner.config_state.saved_revision()
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
     fn a_desktop_v1_agent_list_is_migrated_to_every_supported_inbound_protocol() {
         let root = scratch_home("desktop-v1-agents");
-        let mut draft = template(&root);
+        let mut draft = template_for_test(&root);
         draft["plugins"]["agents"] = json!(["agent-openai"]);
 
         let prepared = prepare_desktop_draft(draft, &root);
@@ -2206,7 +3175,7 @@ mod tests {
     #[test]
     fn provider_model_updates_preserve_metadata_and_protect_routing_references() {
         let root = scratch_home("model-update");
-        let mut draft = template(&root);
+        let mut draft = template_for_test(&root);
         draft["upstreams"]["moonshot"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://api.moonshot.cn/v1",
@@ -2220,14 +3189,7 @@ mod tests {
         });
         draft["router"]["pools"][TIER_LOW] =
             json!([{ "upstream": "moonshot", "model": "moonshot-v1-8k" }]);
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft,
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-            saved_config_hash: None,
-            running_config_hash: None,
-        };
+        let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
         inner.rebuild_routing();
 
         let error = replace_provider_models(&mut inner, "moonshot", vec!["kimi-k2.6".to_owned()])
@@ -2264,21 +3226,18 @@ mod tests {
     #[test]
     fn provider_model_updates_respect_broken_config_read_only_protection() {
         let root = scratch_home("model-update-read-only");
-        let mut draft = template(&root);
+        let mut draft = template_for_test(&root);
         draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
             "models": [{"model": "keep"}]
         });
         let before = draft.clone();
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
             draft,
-            load_error: Some("只读保护".to_owned()),
-            server: ServerLifecycle::stopped(),
-            saved_config_hash: None,
-            running_config_hash: None,
-        };
+            Some("只读保护".to_owned()),
+        );
 
         let error = replace_provider_models(&mut inner, "provider", vec!["replacement".to_owned()])
             .expect_err("read-only protection blocks model writes");
@@ -2292,14 +3251,11 @@ mod tests {
     #[test]
     fn provider_model_updates_protect_inactive_agent_route_drafts() {
         let root = scratch_home("model-update-agent-route");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&root),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-            saved_config_hash: None,
-            running_config_hash: None,
-        };
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -2332,14 +3288,11 @@ mod tests {
     #[test]
     fn tier_keywords_write_valid_rules_dedupe_and_require_a_configured_pool() {
         let root = scratch_home("tier-keywords");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&root),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-            saved_config_hash: None,
-            running_config_hash: None,
-        };
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -2387,14 +3340,11 @@ mod tests {
     #[test]
     fn clearing_a_tier_drops_its_keyword_rule_so_the_config_stays_valid() {
         let root = scratch_home("tier-keywords-clear");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&root),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-            saved_config_hash: None,
-            running_config_hash: None,
-        };
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -2429,21 +3379,14 @@ mod tests {
     #[test]
     fn stored_discovery_credentials_cannot_be_redirected_to_another_base_url() {
         let root = scratch_home("model-discovery-url-binding");
-        let mut draft = template(&root);
+        let mut draft = template_for_test(&root);
         draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://trusted.example/v1",
             "auth": {"slot": "provider_api_key", "keyring": true},
             "models": [{"model": "model"}]
         });
-        let inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft,
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-            saved_config_hash: None,
-            running_config_hash: None,
-        };
+        let inner = AppInner::new(root.join("token-station.json"), draft, None);
 
         let error = resolve_discovery_key(&inner, "provider", "https://attacker.example/v1", None)
             .expect_err("a stored credential is bound to its configured URL");
@@ -2463,14 +3406,11 @@ mod tests {
     #[test]
     fn tier_updates_refuse_unknown_provider_model_and_partial_values() {
         let root = scratch_home("tiers-invalid");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&root),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-            saved_config_hash: None,
-            running_config_hash: None,
-        };
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
         inner.draft["upstreams"]["deepseek"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://api.deepseek.com",
@@ -2503,14 +3443,11 @@ mod tests {
     #[test]
     fn agent_route_drafts_seed_from_home_validate_targets_and_preserve_complete_profiles() {
         let root = scratch_home("agent-route-draft");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&root),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-            saved_config_hash: None,
-            running_config_hash: None,
-        };
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -2567,14 +3504,11 @@ mod tests {
     #[test]
     fn returning_an_incomplete_agent_draft_to_inherit_cannot_poison_home_config() {
         let root = scratch_home("agent-route-incomplete");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&root),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-            saved_config_hash: None,
-            running_config_hash: None,
-        };
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -2596,14 +3530,11 @@ mod tests {
     #[test]
     fn agent_route_commands_save_one_profile_and_apply_home_without_deleting_its_draft() {
         let root = scratch_home("agent-route-commands");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&root),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-            saved_config_hash: None,
-            running_config_hash: None,
-        };
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -2632,16 +3563,117 @@ mod tests {
     }
 
     #[test]
+    fn named_profiles_are_draft_only_until_saved_and_can_be_shared_by_agents() {
+        let root = scratch_home("named-agent-profile");
+        let config_path = root.join("token-station.json");
+        let mut inner = AppInner::new(config_path.clone(), template_for_test(&root), None);
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "shared"}]
+        });
+        for pool in [TIER_HIGH, TIER_MID, TIER_LOW] {
+            inner
+                .set_tier_value(pool, Some("provider".into()), Some("shared".into()))
+                .unwrap();
+        }
+        inner.observe_draft().unwrap();
+        let before_revision = inner.config_state.draft_revision();
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+        let missing =
+            match mount_agent_profile(app.state(), "codex".to_string(), "missing".to_string()) {
+                Ok(_) => panic!("an unknown profile cannot be mounted"),
+                Err(error) => error,
+            };
+        assert!(missing.contains("不存在"), "{missing}");
+
+        let profiled = save_home_route_as_profile(app.state(), "daily".to_string()).unwrap();
+        assert_eq!(profiled.profiles, vec!["daily"]);
+        assert!(profiled.config_dirty);
+        assert!(profiled.draft_revision > before_revision);
+        assert!(
+            !config_path.exists(),
+            "creating a profile must not bypass save"
+        );
+
+        for agent_id in ["codex", "opencode"] {
+            let mounted =
+                mount_agent_profile(app.state(), agent_id.to_string(), "daily".to_string())
+                    .unwrap();
+            assert_eq!(mounted.agent_routes[agent_id].mode, "profile");
+            assert_eq!(
+                mounted.agent_routes[agent_id].profile.as_deref(),
+                Some("daily")
+            );
+            assert_eq!(
+                mounted.agent_routes[agent_id].tiers["high"]
+                    .model
+                    .as_deref(),
+                Some("shared")
+            );
+        }
+
+        let error = match delete_profile(app.state(), "daily".to_string()) {
+            Ok(_) => panic!("mounted profiles cannot be deleted"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("codex") && error.contains("opencode"),
+            "{error}"
+        );
+
+        {
+            let managed = app.state::<AppStateManaged>();
+            let mut inner = managed.0.lock().unwrap();
+            inner.draft["upstreams"]["provider"]["models"] =
+                json!([{"model": "shared"}, {"model": "updated"}]);
+            for pool in [TIER_HIGH, TIER_MID, TIER_LOW] {
+                inner
+                    .set_tier_value(pool, Some("provider".into()), Some("updated".into()))
+                    .unwrap();
+            }
+            inner.observe_draft().unwrap();
+        }
+        let updated = save_home_route_as_profile(app.state(), "daily".to_string()).unwrap();
+        assert_eq!(updated.profiles, vec!["daily"]);
+        assert_eq!(
+            updated.agent_routes["codex"].tiers["high"].model.as_deref(),
+            Some("updated")
+        );
+
+        save_agent_routes(app.state()).unwrap();
+        let saved = ClientConfig::load(&config_path).unwrap();
+        assert!(saved.profiles.contains_key("daily"));
+        for agent_id in ["codex", "opencode"] {
+            let router = saved
+                .custom_router_for_agent(agent_id)
+                .unwrap()
+                .expect("mounted profile materializes");
+            assert_eq!(router.pools[TIER_HIGH][0].model, "updated");
+        }
+
+        for agent_id in ["codex", "opencode"] {
+            set_agent_route_mode(app.state(), agent_id.to_string(), "inherit".to_string()).unwrap();
+        }
+        let deleted = delete_profile(app.state(), "daily".to_string()).unwrap();
+        assert!(deleted.profiles.is_empty());
+        assert!(deleted
+            .agent_routes
+            .values()
+            .all(|route| route.profile.is_none()));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn one_two_and_three_tiers_always_end_with_a_zero_score_fallback() {
         let root = scratch_home("tiers-valid");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&root),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-            saved_config_hash: None,
-            running_config_hash: None,
-        };
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -2668,14 +3700,11 @@ mod tests {
     #[test]
     fn startup_preparation_is_single_flight_lock_free_and_cancellable() {
         let root = scratch_home("nonblocking-start");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&repo_root()),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-            saved_config_hash: None,
-            running_config_hash: None,
-        };
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            gateway_template_for_test(&root),
+            None,
+        );
         inner.draft["data"]["dir"] = json!(root.join("data"));
         inner.draft["server"]["listen"] = json!("127.0.0.1:0");
         inner.draft["server"]["auth"] = json!(false);
@@ -2726,8 +3755,9 @@ mod tests {
                 Err(StartFailure::new("duplicate", "must not run"))
             },
         )
-        .unwrap();
-        assert_eq!(duplicate.serve.phase, ServePhase::Starting);
+        .err()
+        .expect("a concurrent apply is rejected explicitly");
+        assert!(duplicate.contains("apply_in_progress"));
         assert_eq!(duplicate_calls.load(Ordering::SeqCst), 0);
         assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
 
@@ -2736,7 +3766,7 @@ mod tests {
         assert_eq!(stopping.serve.phase, ServePhase::Stopping);
         release_tx.send(()).unwrap();
         let stopped = wait_for_serve_phase(&app, ServePhase::Stopped);
-        assert!(!stopped.serve.running);
+        assert_eq!(stopped.serve.app_runtime, AppRuntime::Stopped);
         assert!(stopped.serve.error.is_none());
 
         let retrying = begin_serve_start(
@@ -2779,23 +3809,185 @@ mod tests {
     }
 
     #[test]
+    fn save_and_apply_hands_new_requests_to_the_new_revision() {
+        let root = scratch_home("live-apply");
+        let listen = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().to_string()
+        };
+        let (upstream_a, fixture_a) = serve_chat_completion("revision-a", 1);
+        let (upstream_b, fixture_b) = serve_chat_completion("revision-b", 2);
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            gateway_template_for_test(&root),
+            None,
+        );
+        inner.draft["server"]["listen"] = json!(listen.clone());
+        inner.draft["server"]["auth"] = json!(false);
+        inner.draft["data"]["metrics"] = json!(true);
+        inner.draft["data"]["dir"] = json!(root.join("data"));
+        let metrics_path = root.join("data/metrics.sqlite");
+        inner.draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": upstream_a,
+            "models": [{"model": "small"}]
+        });
+        for pool in [TIER_HIGH, TIER_MID, TIER_LOW] {
+            inner
+                .set_tier_value(pool, Some("fixture".into()), Some("small".into()))
+                .unwrap();
+        }
+        inner.observe_draft().unwrap();
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+        begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            prepare_server,
+        )
+        .unwrap();
+        let first =
+            wait_for_serve_phase_with_timeout(&app, ServePhase::Running, Duration::from_secs(180));
+        let revision_a = first.serve.running_revision.unwrap();
+        let instance_a = first.serve.instance_id.clone().unwrap();
+        assert_eq!(revision_a, first.saved_revision);
+        assert!(chat_through_proxy(&listen).contains("revision-a"));
+        let first_receipts = wait_for_receipts(&metrics_path, 1);
+        assert_eq!(first_receipts[0].running_revision, Some(revision_a));
+        fixture_a.join().unwrap();
+
+        save_home_route_as_profile(app.state(), "shared".to_string()).unwrap();
+        let mounted =
+            mount_agent_profile(app.state(), "codex".to_string(), "shared".to_string()).unwrap();
+        assert!(mounted.config_dirty);
+        assert_eq!(mounted.serve.running_revision, Some(revision_a));
+
+        edit_provider(app.state(), "fixture".to_owned(), upstream_b, None).unwrap();
+        update_provider_models(
+            app.state(),
+            "fixture".to_owned(),
+            vec!["small".to_owned(), "extra".to_owned()],
+        )
+        .unwrap();
+        let applying = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            prepare_server,
+        )
+        .unwrap();
+        assert_eq!(applying.serve.app_runtime, AppRuntime::Running);
+        assert_eq!(applying.serve.running_revision, Some(revision_a));
+        let second =
+            wait_for_serve_phase_with_timeout(&app, ServePhase::Running, Duration::from_secs(180));
+        assert!(second.serve.running_revision.unwrap() > revision_a);
+        assert_eq!(second.serve.running_revision, Some(second.saved_revision));
+        assert_ne!(
+            second.serve.instance_id.as_deref(),
+            Some(instance_a.as_str())
+        );
+        assert!(chat_through_proxy(&listen).contains("revision-b"));
+        let second_revision = second.serve.running_revision.unwrap();
+        let second_receipts = wait_for_receipts(&metrics_path, 2);
+        assert_eq!(second_receipts[0].running_revision, Some(second_revision));
+        let ipc_receipts = get_recent_receipts(app.state(), 5).expect("receipt IPC reads");
+        assert_eq!(
+            ipc_receipts, second_receipts,
+            "IPC uses the fixed store view"
+        );
+
+        edit_provider(
+            app.state(),
+            "fixture".to_owned(),
+            "http://127.0.0.1:1/v1".to_owned(),
+            None,
+        )
+        .unwrap();
+        save_home_route_as_profile(app.state(), "candidate".to_string()).unwrap();
+        let candidate =
+            mount_agent_profile(app.state(), "opencode".to_string(), "candidate".to_string())
+                .unwrap();
+        assert_eq!(candidate.serve.running_revision, Some(second_revision));
+        begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            |_config| {
+                Err(StartFailure::new(
+                    "gateway_init",
+                    "preflight fixture failure",
+                ))
+            },
+        )
+        .unwrap();
+        let failed_apply = wait_for_serve_phase(&app, ServePhase::Running);
+        assert_eq!(
+            failed_apply.serve.running_revision,
+            second.serve.running_revision
+        );
+        assert!(failed_apply.saved_revision > failed_apply.serve.running_revision.unwrap());
+        assert!(failed_apply
+            .serve
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("已保存尚未应用")));
+        assert!(chat_through_proxy(&listen).contains("revision-b"));
+        let failed_apply_receipts = wait_for_receipts(&metrics_path, 3);
+        assert_eq!(
+            failed_apply_receipts[0].running_revision,
+            Some(second_revision),
+            "a failed apply keeps serving and receipting the published revision"
+        );
+        fixture_b.join().unwrap();
+
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            let ServerLifecycle::Running { server, .. } = &inner.server else {
+                panic!("fixture server must still be published");
+            };
+            server.abort_task();
+        }
+        let exited =
+            wait_for_serve_phase_with_timeout(&app, ServePhase::Error, Duration::from_secs(1));
+        assert_eq!(exited.serve.app_runtime, AppRuntime::Stopped);
+        assert!(!exited.serve.listener_reachable);
+        assert_eq!(exited.serve.running_revision, None);
+        assert_eq!(exited.serve.instance_id, None);
+
+        begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+        wait_for_serve_phase(&app, ServePhase::Stopped);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn provider_endpoint_preview_uses_the_protocol_resolver() {
+        for input in [
+            "https://api.example.com",
+            "https://api.example.com/v1",
+            "https://api.example.com/v1/chat/completions",
+        ] {
+            let preview = preview_provider_endpoints(input.to_owned()).unwrap();
+            assert_eq!(preview.chat, "https://api.example.com/v1/chat/completions");
+            assert_eq!(preview.responses, "https://api.example.com/v1/responses");
+            assert_eq!(preview.messages, "https://api.example.com/v1/messages");
+        }
+    }
+
+    #[test]
     fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views() {
         let root = scratch_home("command-lifecycle");
-        let mut draft = template(&repo_root());
+        let mut draft = gateway_template_for_test(&root);
         draft["data"]["dir"] = json!(root.join("data"));
         draft["server"]["listen"] = json!("127.0.0.1:0");
         let app = tauri::test::mock_app();
-        assert!(app.manage(AppStateManaged(Mutex::new(AppInner {
-            config_path: root.join("token-station.json"),
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
             draft,
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-            saved_config_hash: None,
-            running_config_hash: None,
-        }))));
+            None,
+        )))));
 
         let initial = get_state(app.state());
-        assert!(!initial.serve.running);
+        assert_eq!(initial.serve.app_runtime, AppRuntime::Stopped);
         assert!(initial.providers.is_empty());
         assert_eq!(initial.settings.listen, "127.0.0.1:0");
 
@@ -2811,8 +4003,42 @@ mod tests {
                 None,
             )
             .unwrap();
-            assert!(view.providers.iter().any(|provider| provider.name == name));
+            let provider = view
+                .providers
+                .iter()
+                .find(|provider| provider.name == name)
+                .expect("the added provider is visible");
+            assert_eq!(
+                provider.model_capabilities[0].tool,
+                CapabilityState::Unknown
+            );
+            assert_eq!(
+                provider.model_capabilities[0].vision,
+                CapabilityState::Unknown
+            );
+            assert_eq!(
+                provider.model_capabilities[0].json_schema,
+                CapabilityState::Unknown
+            );
         }
+        let duplicate = add_provider(
+            app.state(),
+            "local".to_owned(),
+            "http://127.0.0.1:9999/v1".to_owned(),
+            vec!["replacement".to_owned()],
+            None,
+        )
+        .err()
+        .expect("重复名称不能绕过 Provider 编辑流程");
+        assert!(duplicate.contains("已存在"));
+        let unchanged = get_state(app.state());
+        let local = unchanged
+            .providers
+            .iter()
+            .find(|provider| provider.name == "local")
+            .unwrap();
+        assert_eq!(local.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(local.models, ["small", "large"]);
         assert!(add_provider(
             app.state(),
             " ".to_string(),
@@ -2914,27 +4140,101 @@ mod tests {
             app.state::<AppStateManaged>().inner(),
             prepare_server,
         )
-        .unwrap();
-        assert!(matches!(
-            duplicate.serve.phase,
-            ServePhase::Starting | ServePhase::Running
-        ));
+        .err()
+        .expect("a concurrent apply is rejected explicitly");
+        assert!(duplicate.contains("apply_in_progress"));
         // Coverage instrumentation makes Wasmtime's first compilation much
         // slower on a cold Linux runner; this remains a bounded integration test.
         let running =
             wait_for_serve_phase_with_timeout(&app, ServePhase::Running, Duration::from_secs(180));
-        assert!(running.serve.running);
+        assert_eq!(running.serve.app_runtime, AppRuntime::Running);
+        assert!(running.serve.listener_reachable);
         assert!(running.serve.virtual_key.is_none());
         assert!(root.join("data").join("requests.log").exists());
         let stopping =
             begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
         assert_eq!(stopping.serve.phase, ServePhase::Stopping);
         let stopped = wait_for_serve_phase(&app, ServePhase::Stopped);
-        assert!(!stopped.serve.running);
+        assert_eq!(stopped.serve.app_runtime, AppRuntime::Stopped);
+
+        let impact = preview_provider_removal(app.state(), "local".to_string()).unwrap();
+        assert!(!impact.can_remove);
+        assert!(impact
+            .references
+            .iter()
+            .any(|item| item.contains("主页/上档")));
+        assert!(remove_provider(app.state(), "local".to_string())
+            .err()
+            .expect("被引用的 Provider 必须拒绝删除")
+            .contains("仍被引用"));
+        set_tier(app.state(), "high".to_string(), None, None).unwrap();
+        set_tier(app.state(), "low".to_string(), None, None).unwrap();
+        assert!(
+            preview_provider_removal(app.state(), "local".to_string())
+                .unwrap()
+                .can_remove
+        );
+
+        let catalog_path = root.join("data").join("model-catalog-cache.json");
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(
+            &catalog_path,
+            serde_json::to_vec_pretty(&json!({
+                "version": 2,
+                "providers": {
+                    "local": {
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "revision": 7,
+                        "models": [{
+                            "model": "old-account-private-model",
+                            "tool": "unknown",
+                            "vision": "unknown",
+                            "json_schema": "unknown",
+                            "source": "live",
+                            "last_seen_ms": 1,
+                            "catalog_state": "active"
+                        }],
+                        "fetched_at_ms": 1
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
 
         let removed = remove_provider(app.state(), "local".to_string()).unwrap();
         assert_eq!(removed.providers.len(), 1);
+        assert_eq!(removed.deleted_providers, ["local"]);
         assert!(removed.tiers.values().all(|tier| tier.upstream.is_none()));
+        assert!(
+            !std::fs::read_to_string(&catalog_path)
+                .unwrap()
+                .contains("old-account-private-model"),
+            "deletion invalidates the old Provider identity's trusted catalog"
+        );
+        let Err(readd_error) = add_provider(
+            app.state(),
+            "local".to_owned(),
+            "http://127.0.0.1:11434/v1".to_owned(),
+            vec!["replacement".to_owned()],
+            None,
+        ) else {
+            panic!("a tombstoned Provider name must be restored, never silently replaced")
+        };
+        assert!(readd_error.contains("请先恢复"), "{readd_error}");
+        let restored = restore_provider(app.state(), "local".to_string()).unwrap();
+        assert_eq!(restored.providers.len(), 2);
+        assert!(restored.deleted_providers.is_empty());
+        let restored_local = restored
+            .providers
+            .iter()
+            .find(|provider| provider.name == "local")
+            .unwrap();
+        assert_eq!(restored_local.catalog_revision, 0);
+        assert!(restored_local
+            .catalog
+            .iter()
+            .all(|model| model.source == model_catalog::CatalogSource::Configured));
         assert!(save_config(app.state())
             .err()
             .expect("empty routing config is rejected")
@@ -2952,7 +4252,7 @@ mod tests {
         assert_eq!(draft["server"]["auth"], json!(true));
 
         let absolute = root.join("already-absolute");
-        let mut shapes = template(&root);
+        let mut shapes = template_for_test(&root);
         shapes["plugins"]["dir"] = json!(absolute.clone());
         shapes["data"]["dir"] = json!(42);
         let shapes = prepare_desktop_draft(shapes, &root);
@@ -2965,17 +4265,14 @@ mod tests {
         assert_eq!(pool_key("mid").unwrap(), TIER_MID);
         assert_eq!(pool_key("low").unwrap(), TIER_LOW);
 
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: json!({
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            json!({
                 "server": {}, "data": {}, "plugins": {}, "upstreams": [],
                 "router": {"pools": [], "rules": null, "hint_routes": null}
             }),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-            saved_config_hash: None,
-            running_config_hash: None,
-        };
+            None,
+        );
         assert!(inner.upstreams().is_empty());
         assert_eq!(inner.pool_member("missing"), (None, None));
         inner.rebuild_routing();

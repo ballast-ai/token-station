@@ -8,6 +8,9 @@
       "tool": true,
       "vision": true,
       "json_schema": true,
+      "tool_state": "declared",
+      "vision_state": "declared",
+      "json_schema_state": "declared",
       "context_window": 400000,
       "supported_parameters": ["stop", "temperature", "top_p"]
     }

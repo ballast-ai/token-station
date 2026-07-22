@@ -1,9 +1,18 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
+  CatalogModelView,
   ModelDiscoveryView,
+  CapabilityState,
+  ModelCapabilityView,
   ProviderView,
   StateView,
   discoverProviderModels,
+  editProvider,
+  getStats,
+  previewProviderEndpoints,
+  ProviderEndpointPreview,
+  ProviderTestResult,
+  testProvider,
   updateProviderModels,
 } from "../api";
 import ModelPicker, { CatalogStatus } from "./ModelPicker";
@@ -16,6 +25,49 @@ interface ProviderModelManagerProps {
 }
 
 const mergeModels = (...groups: string[][]) => [...new Set(groups.flat())];
+
+const capabilityLabel: Record<CapabilityState, string> = {
+  verified: "已验证",
+  declared: "已声明",
+  unsupported: "不支持",
+  unknown: "未知",
+};
+
+const unknownCapabilities = (model: string): ModelCapabilityView => ({
+  model,
+  tool: "unknown",
+  vision: "unknown",
+  json_schema: "unknown",
+});
+
+const catalogStateLabel = {
+  active: "在售",
+  stale: "缓存待确认",
+  removed: "已下架",
+} as const;
+
+const catalogSourceLabel = {
+  live: "实时目录",
+  cache: "本地缓存",
+  configured: "手工配置",
+} as const;
+
+const probeLayerLabel = {
+  network: "DNS / 网络",
+  http: "HTTP",
+  auth: "鉴权",
+  model: "模型",
+  generation: "生成",
+  stream: "流式",
+  tool: "Tool",
+  json: "JSON Schema",
+} as const;
+
+function costLabel(costMicros: number | null): string {
+  return costMicros != null && costMicros > 0
+    ? `估算成本 ${(costMicros / 1_000_000).toFixed(4)}`
+    : "成本未知";
+}
 
 const resultStatus = (result: ModelDiscoveryView): CatalogStatus => {
   if (result.source === "live") {
@@ -50,8 +102,63 @@ export default function ProviderModelManager({
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [catalog, setCatalog] = useState<CatalogModelView[]>(provider.catalog ?? []);
+  const [diff, setDiff] = useState<{ added: string[]; removed: string[] } | null>(null);
+  const [endpointPreview, setEndpointPreview] = useState<ProviderEndpointPreview | null>(null);
+  const [testResults, setTestResults] = useState<ProviderTestResult[]>([]);
+  const [testing, setTesting] = useState(false);
+  const [usage, setUsage] = useState<string>("正在读取无正文用量…");
+  const [editBaseUrl, setEditBaseUrl] = useState(provider.base_url);
+  const [editKey, setEditKey] = useState("");
+  const [editing, setEditing] = useState(false);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
-  const operationDisabled = disabled || refreshing || saving;
+  const capabilities = useMemo(() => {
+    const byModel = new Map((provider.model_capabilities ?? []).map((item) => [item.model, item]));
+    return provider.models.map((model) => byModel.get(model) ?? unknownCapabilities(model));
+  }, [provider.model_capabilities, provider.models]);
+  const operationDisabled = disabled || refreshing || saving || testing || editing;
+
+  useEffect(() => {
+    void previewProviderEndpoints(editBaseUrl).then(setEndpointPreview).catch(() => setEndpointPreview(null));
+  }, [editBaseUrl]);
+
+  useEffect(() => {
+    void getStats("all", "upstream")
+      .then((view) => {
+        const aggregate = view.groups.find(([name]) => name === provider.name)?.[1];
+        setUsage(aggregate
+          ? `${aggregate.requests} 次请求 · ${aggregate.errors} 次错误 · P95 ${aggregate.p95_latency_ms}ms · ${aggregate.input_tokens + aggregate.output_tokens} tokens · ${costLabel(aggregate.cost_micros)}`
+          : "暂无请求记录");
+      })
+      .catch(() => setUsage("用量暂不可读"));
+  }, [provider.name]);
+
+  const saveProviderDetails = async () => {
+    if (operationDisabled || !endpointPreview) return;
+    setEditing(true);
+    setError("");
+    try {
+      onSaved(await editProvider(provider.name, editBaseUrl, editKey.trim() || null));
+      setEditKey("");
+    } catch (caught) {
+      setError(String(caught));
+    } finally {
+      setEditing(false);
+    }
+  };
+
+  const runProviderTest = async () => {
+    if (operationDisabled) return;
+    setTesting(true);
+    setError("");
+    try {
+      setTestResults(await testProvider(provider.name));
+    } catch (caught) {
+      setError(String(caught));
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const refresh = async () => {
     if (operationDisabled) return;
@@ -61,6 +168,8 @@ export default function ProviderModelManager({
     try {
       const result = await discoverProviderModels(provider.name, provider.base_url, null);
       setModels((current) => mergeModels(current, result.models));
+      setCatalog(result.catalog ?? []);
+      setDiff({ added: result.added ?? [], removed: result.removed ?? [] });
       setStatus(resultStatus(result));
     } catch (caught) {
       setStatus({ label: "获取失败", tone: "error", warning: String(caught) });
@@ -86,6 +195,75 @@ export default function ProviderModelManager({
 
   return (
     <div className="provider-model-manager">
+      <div className="provider-detail-summary">
+        <div>
+          <strong>Provider 详情</strong>
+          <span>{usage}</span>
+        </div>
+        <button className="btn tiny" type="button" disabled={operationDisabled} onClick={() => void runProviderTest()}>
+          {testing ? "测试中…" : "运行分层测试"}
+        </button>
+      </div>
+      <div className="provider-edit-fields">
+        <input className="input mono" aria-label="编辑 Base URL" value={editBaseUrl} disabled={operationDisabled} onChange={(event) => setEditBaseUrl(event.target.value)} />
+        <input className="input mono" aria-label="更新 API Key" type="password" value={editKey} disabled={operationDisabled} placeholder="留空则保留现有 Key" onChange={(event) => setEditKey(event.target.value)} />
+        <button className="btn tiny" type="button" disabled={operationDisabled || !endpointPreview} onClick={() => void saveProviderDetails()}>
+          {editing ? "保存中…" : "保存基本信息"}
+        </button>
+      </div>
+      {endpointPreview && (
+        <div className="provider-endpoint-list" aria-label="Provider 最终 URL">
+          <code>{endpointPreview.chat}</code>
+          <code>{endpointPreview.responses}</code>
+          <code>{endpointPreview.messages}</code>
+        </div>
+      )}
+      {testResults.length > 0 && (
+        <div className="provider-test-results" aria-label="Provider 分层测试结果">
+          {testResults.map((result) => (
+            <div key={result.model}>
+              <strong>{result.model}</strong>
+              {result.stages.map((stage) => (
+                <span className={stage.status} key={stage.layer} title={stage.detail}>{probeLayerLabel[stage.layer]} · {stage.status}</span>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+      {diff && (diff.added.length > 0 || diff.removed.length > 0) && (
+        <div className="catalog-diff" aria-label="模型目录变化">
+          {diff.added.length > 0 && <span className="added">新增：{diff.added.join("、")}</span>}
+          {diff.removed.length > 0 && <span className="removed">下架：{diff.removed.join("、")}（仍保留引用）</span>}
+        </div>
+      )}
+      {catalog.length > 0 && (
+        <div className="catalog-ledger" aria-label="可信模型目录">
+          {catalog.map((model) => (
+            <div className={`catalog-ledger-row ${model.catalog_state}`} key={model.model}>
+              <code>{model.model}</code>
+              <span>{catalogStateLabel[model.catalog_state]}</span>
+              <span>{catalogSourceLabel[model.source]}</span>
+              <span>{model.last_seen_ms ? `最后见到 ${new Date(model.last_seen_ms).toLocaleString()}` : "尚无实时记录"}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="capability-table" aria-label="模型能力状态">
+        {capabilities.map((capability) => (
+          <div className="capability-row" key={capability.model}>
+            <code>{capability.model}</code>
+            {([
+              ["工具", capability.tool],
+              ["视觉", capability.vision],
+              ["JSON", capability.json_schema],
+            ] as const).map(([label, state]) => (
+              <span className={`capability-tag ${state}`} key={label}>
+                {label} · {capabilityLabel[state]}
+              </span>
+            ))}
+          </div>
+        ))}
+      </div>
       <ModelPicker
         models={models}
         selected={selected}

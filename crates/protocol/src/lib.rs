@@ -52,7 +52,7 @@ mod usage;
 
 use std::collections::BTreeMap;
 
-pub use capability::ModelCapability;
+pub use capability::{CapabilityState, ModelCapability};
 pub use chat::{
     CanonicalArguments, ChatRequest, ChatResponse, Choice, Content, ContentPart, FinishReason,
     ImageUrl, Message, ResponseFormat, Role, Sampling, ToolCall, ToolDef,
@@ -64,7 +64,7 @@ pub use http::{
     Auth, AuthPlacementError, HttpMethod, HttpRequestDescriptor, HttpResponseParts, SafeHeaders,
     SecretBoundaryError, SecretRef,
 };
-pub use provider::{DescriptorError, EndpointError, ProviderConfig, ProviderEndpoint};
+pub use provider::{DescriptorError, EndpointError, ProviderApi, ProviderConfig, ProviderEndpoint};
 pub use stream::{StreamChunk, StreamEvent, StreamOutcome};
 pub use usage::Usage;
 

@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addKeyword,
   applyHomeRouteToAllAgents,
+  getRuntimeState,
   getState,
   listAgentRegistry,
   listenServeState,
   removeKeyword,
   removeProvider,
-  saveConfig,
+  restoreProvider,
   scanAgents,
   serveStart,
   serveStop,
@@ -45,6 +46,18 @@ function hasErrorCode(error: unknown, code: string): boolean {
 
 function emptyAgentRoute(state: StateView): AgentRouteView {
   return { mode: "inherit", tiers: state.tiers, config_error: null, profile: null };
+}
+
+export function configSaveStatus(state: StateView): string {
+  if (state.config_dirty) return "有未保存更改";
+  const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
+  if (runtimeHealthy && state.serve.running_revision !== state.saved_revision) {
+    return "已保存尚未应用";
+  }
+  if (runtimeHealthy && state.serve.running_revision === state.saved_revision) {
+    return `运行中 revision ${state.saved_revision}`;
+  }
+  return "无改动";
 }
 
 export default function App() {
@@ -142,6 +155,18 @@ export default function App() {
   }, [rescanAgents]);
 
   useEffect(() => {
+    const timer = window.setInterval(() => {
+      void getRuntimeState()
+        .then((serve) => {
+          pendingServeRef.current = serve;
+          setState((current) => current ? { ...current, serve } : current);
+        })
+        .catch(() => undefined);
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     if (state) setAdminEndpoint(state.serve);
   }, [state]);
 
@@ -167,65 +192,14 @@ export default function App() {
     }
   };
 
-  // Poll the backend until the proxy stops or the operation times out. serve_stop is asynchronous. On return, it has only
-  // Stopping is not Stopped. Background shutdown completes later. Wait before restart, or
-  // serve_start returns an error during Stopping.
-  const waitForStopped = async (timeoutMs: number): Promise<boolean> => {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const snapshot = await getState();
-      setState((current) => (current ? { ...current, serve: snapshot.serve } : snapshot));
-      if (snapshot.serve.phase === "stopped" || snapshot.serve.phase === "error") return true;
-      if (Date.now() > deadline) return false;
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-  };
-
-  // Save and apply writes to disk. If the proxy runs, restart it so new rules and user terms apply immediately.
-  // The proxy reads configuration only at startup. Application must restart it to load changes.
-  const saveAndApply = async () => {
-    if (!state || busyRef.current) return;
-    busyRef.current = true;
-    setBusy(true);
-    setError("");
-    setMessage("");
-    try {
-      const wasRunning = state.serve.running || state.serve.phase === "starting";
-      const saved = await saveConfig();
-      if (!wasRunning) {
-        showState(saved, "已保存");
-        return;
-      }
-      setState(saved);
-      setMessage("正在重启代理以应用新规则…");
-      await serveStop();
-      const stopped = await waitForStopped(8000);
-      if (!stopped) {
-        showState(await getState(), "已保存 · 代理停止较慢，请手动点上方「启动」");
-        return;
-      }
-      const started = await serveStart();
-      showState(started, "已保存并重启代理 · 新规则已生效");
-    } catch (caught) {
-      setError(errorText(caught));
-      try {
-        setState(await getState());
-      } catch {
-        /* If reading back fails, keep the current state. */
-      }
-    } finally {
-      busyRef.current = false;
-      setBusy(false);
-    }
-  };
-
   const toggleServe = async () => {
     if (!state || serveBusy) return;
     setServeBusy(true);
     setError("");
     setMessage("");
     try {
-      showState(await (state.serve.running || state.serve.phase === "starting" ? serveStop() : serveStart()));
+      const active = state.serve.app_runtime === "running" || state.serve.phase === "starting";
+      showState(await (active ? serveStop() : serveStart()));
     } catch (caught) {
       setError(errorText(caught));
     } finally {
@@ -254,6 +228,8 @@ export default function App() {
   const metadata = agentId ? orderedRegistry.find((item) => item.agent_id === agentId) : undefined;
   const agent = agentId ? agents.find((item) => item.metadata.agent_id === agentId) : undefined;
   const route = agentId ? (state.agent_routes?.[agentId] ?? emptyAgentRoute(state)) : undefined;
+  const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
+  const saveStatus = configSaveStatus(state);
 
   return (
     <AppShell
@@ -274,23 +250,26 @@ export default function App() {
       {view === "home" && (
         <HomePage
           providers={state.providers}
+          deletedProviders={state.deleted_providers ?? []}
+          providerRecoveryError={state.provider_recovery_error ?? null}
           tiers={state.tiers}
           agentRoutes={state.agent_routes ?? {}}
+          profiles={state.profiles ?? []}
           registry={orderedRegistry}
           agents={agents}
-          serveRunning={state.serve.running}
-          dirty={state.dirty}
-          applied={state.applied}
+          serveRunning={runtimeHealthy}
           busy={busy}
           configError={state.config_error}
           keywords={state.keywords}
+          saveStatus={saveStatus}
           onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
           onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
           onRemoveKeyword={(slot, keyword) => void run(() => removeKeyword(slot, keyword))}
-          onSave={() => void saveAndApply()}
-          onApplyAll={() => void run(applyHomeRouteToAllAgents, state.serve.running ? "全部 Agent 已恢复跟随主页 · 重启代理后生效" : "全部 Agent 已恢复跟随主页")}
+          onSave={() => void run(serveStart, "正在保存并应用配置")}
+          onApplyAll={() => void run(applyHomeRouteToAllAgents, runtimeHealthy ? "全部 Agent 已恢复跟随主页 · 尚待应用" : "全部 Agent 已恢复跟随主页")}
           onOpenAgent={(id) => navigate(`agent:${id}`)}
           onRemoveProvider={(name) => void run(() => removeProvider(name), "供应商已删除")}
+          onRestoreProvider={(name) => void run(() => restoreProvider(name), "供应商已从回收站恢复")}
           onStateChange={showState}
         />
       )}
@@ -300,9 +279,9 @@ export default function App() {
           metadata={metadata}
           agent={agent}
           route={route}
+          profiles={state.profiles ?? []}
           providers={state.providers}
-          profiles={state.profiles}
-          serveRunning={state.serve.running}
+          serveRunning={runtimeHealthy}
           onStateChange={showState}
           onRescan={rescanAgents}
         />

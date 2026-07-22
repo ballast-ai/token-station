@@ -8,7 +8,11 @@ import {
   applySnapshotRestore,
   checkUpgrade,
   discoverProviderModels,
+  deleteProfile,
+  editProvider,
   getPlugins,
+  getRecentReceipts,
+  getRuntimeState,
   getRouterTable,
   getState,
   getStats,
@@ -18,7 +22,11 @@ import {
   planAgentConnection,
   planAgentDisconnect,
   planSnapshotRestore,
+  mountAgentProfile,
+  previewProviderRemoval,
   removeProvider,
+  restoreProvider,
+  saveHomeRouteAsProfile,
   saveConfig,
   saveAgentRoutes,
   scanAgents,
@@ -29,8 +37,10 @@ import {
   setAgentRouteMode,
   setAgentTier,
   setTier,
+  testProvider,
   updateProviderModels,
 } from "./api";
+import type { ServeView } from "./api";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -52,6 +62,14 @@ const forbiddenKeys = new Set([
   "argv",
   "executablePath",
 ]);
+
+function serveFixture(overrides: Partial<ServeView> = {}): ServeView {
+  return {
+    phase: "stopped", app_runtime: "stopped", listener_reachable: false,
+    agent_connected: false, running_revision: null, instance_id: null,
+    listen: "127.0.0.1:9999", virtual_key: null, error: null, ...overrides,
+  };
+}
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -116,17 +134,7 @@ describe("structured Agent IPC", () => {
     expect(Object.keys(sent).some((key) => forbiddenKeys.has(key))).toBe(false);
   });
 
-  it("sends explicit experimental compatibility confirmation only when accepted", async () => {
-    await applyAgentPlan("operation", "confirmation", true);
-
-    expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
-      operationId: "operation",
-      confirmationToken: "confirmation",
-      experimentalCompatibilityConfirmed: true,
-    });
-  });
-
-  it("binds an experimental plan request to the version shown to the user", async () => {
+  it("binds a plan request to the version shown to the user when available", async () => {
     await planAgentConnection("claude-code", "/opt/claude", { expectedVersion: "2.1.210" });
 
     expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
@@ -158,13 +166,21 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
 
   it.each([
     ["get state", () => getState(), "get_state", undefined],
+    ["get runtime facts", () => getRuntimeState(), "get_runtime_state", undefined],
     ["add provider", () => addProvider("p", "https://p/v1", ["m"], "k"), "add_provider", { name: "p", baseUrl: "https://p/v1", models: ["m"], apiKey: "k" }],
+    ["edit provider", () => editProvider("p", "https://p/v1", null), "edit_provider", { name: "p", baseUrl: "https://p/v1", apiKey: null }],
+    ["preview provider removal", () => previewProviderRemoval("p"), "preview_provider_removal", { name: "p" }],
     ["remove provider", () => removeProvider("p"), "remove_provider", { name: "p" }],
+    ["restore provider", () => restoreProvider("p"), "restore_provider", { name: "p" }],
     ["discover models", () => discoverProviderModels("p", "https://p/v1", null), "discover_provider_models", { name: "p", baseUrl: "https://p/v1", apiKey: null }],
+    ["test provider", () => testProvider("p"), "test_provider", { name: "p" }],
     ["update models", () => updateProviderModels("p", ["a", "b"]), "update_provider_models", { name: "p", models: ["a", "b"] }],
     ["set tier", () => setTier("high", "p", "m"), "set_tier", { slot: "high", upstream: "p", model: "m" }],
     ["set Agent route mode", () => setAgentRouteMode("codex", "custom"), "set_agent_route_mode", { agentId: "codex", mode: "custom" }],
     ["set Agent tier", () => setAgentTier("codex", "high", "p", "m"), "set_agent_tier", { agentId: "codex", slot: "high", upstream: "p", model: "m" }],
+    ["save route profile", () => saveHomeRouteAsProfile("daily"), "save_home_route_as_profile", { name: "daily" }],
+    ["mount route profile", () => mountAgentProfile("codex", "daily"), "mount_agent_profile", { agentId: "codex", profile: "daily" }],
+    ["delete route profile", () => deleteProfile("daily"), "delete_profile", { name: "daily" }],
     ["save", () => saveConfig(), "save_config", undefined],
     ["save Agent routes", () => saveAgentRoutes(), "save_agent_routes", undefined],
     ["apply home to all Agents", () => applyHomeRouteToAllAgents(), "apply_home_route_to_all_agents", undefined],
@@ -183,32 +199,37 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
       const url = String(input);
       const body = url.includes("stats")
         ? { total: {}, groups: [], by: null, empty: true }
+        : url.includes("receipts")
+          ? [{ request_id: "receipt-1", attempt_records: [], conversion_reports: [] }]
         : url.includes("router-table")
           ? { rules: [], hint_routes: [], bands: [], pools: [] }
           : { dir: "/plugins", agent: "a", dialects: [], listing: "" };
       return new Response(JSON.stringify(body), { status: 200 });
     });
-    setAdminEndpoint({ phase: "running", running: true, listen: "127.0.0.1:9999", virtual_key: "virtual", error: null });
+    setAdminEndpoint(serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, virtual_key: "virtual" }));
 
     await getStats("24h", "model");
+    const receipts = await getRecentReceipts(5);
     await getRouterTable();
     await getPlugins();
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(receipts[0]?.request_id).toBe("receipt-1");
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(fetchMock.mock.calls[0]?.[0]).toBe("http://127.0.0.1:9999/admin/stats?since=24h&by=model");
     expect(fetchMock.mock.calls[0]?.[1]).toEqual({ headers: { authorization: "Bearer virtual" } });
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://127.0.0.1:9999/admin/receipts");
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
   it("fails clearly in browser mode when HTTP is unavailable or stopped", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
-    setAdminEndpoint({ phase: "running", running: true, listen: "127.0.0.1:9999", virtual_key: null, error: null });
+    setAdminEndpoint(serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true }));
     await expect(getStats("all", null)).rejects.toThrow("无法连接本地代理");
 
-    setAdminEndpoint({ phase: "stopped", running: false, listen: "127.0.0.1:9999", virtual_key: null, error: null });
+    setAdminEndpoint(serveFixture());
     await expect(getRouterTable()).rejects.toThrow("无法连接本地代理");
 
-    setAdminEndpoint({ phase: "starting", running: true, listen: "127.0.0.1:9999", virtual_key: "stale", error: null });
+    setAdminEndpoint(serveFixture({ phase: "starting", app_runtime: "running", virtual_key: "stale" }));
     await expect(getPlugins()).rejects.toThrow("无法连接本地代理");
   });
 });

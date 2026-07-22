@@ -57,30 +57,6 @@ pub struct Report {
     pub groups: Vec<(String, Aggregate)>,
 }
 
-/// One request's routing receipt: who asked, what actually served, why, and how
-/// it ended — content-free, straight from the same store `collect` aggregates.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Receipt {
-    pub request_id: String,
-    pub started_at_ms: u64,
-    pub latency_ms: u64,
-    pub status: u16,
-    pub error_code: Option<String>,
-    /// A short, content-free reason refining `error_code` — most usefully the
-    /// specific unmet capability behind a `capability` refusal. `None` when the
-    /// code alone said everything.
-    pub error_detail: Option<String>,
-    pub requested_model: String,
-    /// The upstream and model that actually served (or last refused).
-    pub upstream: Option<String>,
-    pub model: Option<String>,
-    pub pool: Option<String>,
-    /// How the pool was chosen: rule / hint / heuristic / default / `exact_model`.
-    pub tier: Option<String>,
-    pub attempts: u32,
-    pub cost_micros: Option<i64>,
-}
-
 /// Parses `--since`: `all`, `<N>h`, or `<N>d` — returned as a window in
 /// milliseconds, `None` meaning all history.
 ///
@@ -185,65 +161,6 @@ pub fn collect(
     };
 
     Ok(Report { total, groups })
-}
-
-/// The most recent `limit` requests, newest first — the per-request receipts.
-///
-/// # Errors
-///
-/// The store is missing, at a schema version this build does not know, or the
-/// query fails.
-pub fn recent(db_path: &Path, limit: u32) -> Result<Vec<Receipt>, String> {
-    if !db_path.exists() {
-        return Ok(Vec::new());
-    }
-    let connection = Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|error| format!("metrics store `{}`: {error}", db_path.display()))?;
-
-    let version: u32 = connection
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(|error| format!("metrics store version: {error}"))?;
-    if version != SCHEMA_VERSION {
-        return Err(format!(
-            "metrics store `{}` has schema version {version}, this build knows {SCHEMA_VERSION}",
-            db_path.display()
-        ));
-    }
-
-    let mut statement = connection
-        .prepare(
-            "SELECT request_id, started_at_ms, latency_ms, status, error_code,
-                    requested_model, upstream, model, pool, tier, attempts, cost_micros,
-                    error_detail
-             FROM requests ORDER BY id DESC LIMIT ?1",
-        )
-        .map_err(|error| format!("metrics query: {error}"))?;
-    let narrow = |value: i64| u64::try_from(value).unwrap_or(0);
-    let receipts = statement
-        .query_map([i64::from(limit)], |row| {
-            Ok(Receipt {
-                request_id: row.get::<_, String>(0)?,
-                started_at_ms: narrow(row.get::<_, i64>(1)?),
-                latency_ms: narrow(row.get::<_, i64>(2)?),
-                status: row.get::<_, u16>(3)?,
-                error_code: row.get::<_, Option<String>>(4)?,
-                requested_model: row.get::<_, String>(5)?,
-                upstream: row.get::<_, Option<String>>(6)?,
-                model: row.get::<_, Option<String>>(7)?,
-                pool: row.get::<_, Option<String>>(8)?,
-                tier: row.get::<_, Option<String>>(9)?,
-                attempts: row.get::<_, i64>(10)?.try_into().unwrap_or(0),
-                cost_micros: row.get::<_, Option<i64>>(11)?,
-                error_detail: row.get::<_, Option<String>>(12)?,
-            })
-        })
-        .map_err(|error| format!("metrics query: {error}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("metrics row: {error}"))?;
-    Ok(receipts)
 }
 
 /// Renders a report as an aligned table, totals last.
@@ -559,45 +476,5 @@ mod tests {
         assert!(rendered.contains("no priced rows yet"), "{rendered}");
 
         std::fs::remove_file(path).ok();
-    }
-
-    #[test]
-    fn recent_returns_the_newest_requests_first_with_routing() {
-        let path =
-            std::env::temp_dir().join(format!("ts-stats-recent-{}.sqlite", std::process::id()));
-        std::fs::remove_file(&path).ok();
-        let store = SqliteStore::open(&path).expect("creates");
-        for step in 1..=3u64 {
-            let mut record = record(
-                2_000_000,
-                step * 10,
-                200,
-                Some("openai_personal"),
-                Some((10, 5)),
-            );
-            record.request_id = format!("req_{step}");
-            store.record(&record);
-        }
-        drop(store);
-
-        let receipts = super::recent(&path, 2).expect("reads");
-        assert_eq!(receipts.len(), 2, "limit honored");
-        assert_eq!(receipts[0].request_id, "req_3", "newest first");
-        assert_eq!(receipts[1].request_id, "req_2");
-        assert_eq!(receipts[0].upstream.as_deref(), Some("openai_personal"));
-        assert_eq!(receipts[0].tier.as_deref(), Some("default"));
-
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn recent_on_a_missing_store_is_empty_not_an_error() {
-        let path = std::env::temp_dir().join("ts-stats-recent-absent.sqlite");
-        std::fs::remove_file(&path).ok();
-        assert!(
-            super::recent(&path, 5)
-                .expect("no store is empty")
-                .is_empty()
-        );
     }
 }

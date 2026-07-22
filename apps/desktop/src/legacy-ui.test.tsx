@@ -8,11 +8,16 @@ import {
   getPlugins,
   getRouterTable,
   getStats,
+  editProvider,
+  previewProviderEndpoints,
+  previewProviderRemoval,
   setSettings,
+  testProvider,
   updateProviderModels,
 } from "./api";
 import ModelPicker from "./components/ModelPicker";
 import ProviderModelManager from "./components/ProviderModelManager";
+import ProviderList from "./components/ProviderList";
 import About from "./pages/About";
 import Plugins from "./pages/Plugins";
 import RouterTable from "./pages/RouterTable";
@@ -28,7 +33,11 @@ vi.mock("./api", async (loadOriginal) => {
     getPlugins: vi.fn(),
     getRouterTable: vi.fn(),
     getStats: vi.fn(),
+    editProvider: vi.fn(),
+    previewProviderEndpoints: vi.fn(),
+    previewProviderRemoval: vi.fn(),
     setSettings: vi.fn(),
+    testProvider: vi.fn(),
     updateProviderModels: vi.fn(),
   };
 });
@@ -52,12 +61,17 @@ const state: StateView = {
   },
   keywords: { high: [], mid: [], low: [] },
   agent_routes: {},
-  serve: { phase: "stopped", running: false, listen: settings.listen, virtual_key: null, error: null },
+  profiles: [],
+  serve: {
+    phase: "stopped", app_runtime: "stopped", listener_reachable: false,
+    agent_connected: false, running_revision: null, instance_id: null,
+    listen: settings.listen, virtual_key: null, error: null,
+  },
+  draft_revision: 0,
+  saved_revision: 0,
+  config_dirty: false,
   config_error: null,
   settings,
-  dirty: false,
-  applied: true,
-  profiles: [],
 };
 
 beforeEach(() => {
@@ -66,8 +80,24 @@ beforeEach(() => {
   vi.mocked(getPlugins).mockReset();
   vi.mocked(getRouterTable).mockReset();
   vi.mocked(getStats).mockReset();
+  vi.mocked(editProvider).mockReset();
+  vi.mocked(previewProviderEndpoints).mockReset();
+  vi.mocked(previewProviderRemoval).mockReset();
   vi.mocked(setSettings).mockReset();
+  vi.mocked(testProvider).mockReset();
   vi.mocked(updateProviderModels).mockReset();
+  vi.mocked(previewProviderEndpoints).mockResolvedValue({
+    chat: "https://api.example/v1/chat/completions",
+    responses: "https://api.example/v1/responses",
+    messages: "https://api.example/v1/messages",
+  });
+  vi.mocked(getStats).mockResolvedValue({
+    total: {
+      requests: 0, errors: 0, p50_latency_ms: 0, p95_latency_ms: 0,
+      input_tokens: 0, output_tokens: 0, cost_micros: null,
+    },
+    groups: [], by: "upstream", empty: true,
+  });
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
     value: { writeText: vi.fn().mockResolvedValue(undefined) },
@@ -273,12 +303,28 @@ describe("model selection and provider model management", () => {
     vi.mocked(updateProviderModels)
       .mockResolvedValueOnce(state)
       .mockRejectedValueOnce(new Error("save down"));
+    vi.mocked(getStats).mockResolvedValue({
+      total: {
+        requests: 3, errors: 1, p50_latency_ms: 10, p95_latency_ms: 20,
+        input_tokens: 120, output_tokens: 30, cost_micros: 1_250_000,
+      },
+      groups: [["openai", {
+        requests: 3, errors: 1, p50_latency_ms: 10, p95_latency_ms: 20,
+        input_tokens: 120, output_tokens: 30, cost_micros: 1_250_000,
+      }]],
+      by: "upstream", empty: false,
+    });
     const onSaved = vi.fn();
     const user = userEvent.setup();
     render(<ProviderModelManager provider={provider} serveRunning onSaved={onSaved} />);
+    expect(await screen.findByText(/150 tokens · 估算成本 1\.2500/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "刷新模型" }));
-    expect(await screen.findByRole("button", { name: /new/ })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /new/ }));
+    const discovered = await screen.findByRole("button", { name: /new/ });
+    expect(discovered).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: /old/ })).toHaveAttribute("aria-pressed", "true");
+    expect(updateProviderModels).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
+    await user.click(discovered);
     await user.click(screen.getByRole("button", { name: "保存模型" }));
     await waitFor(() => expect(updateProviderModels).toHaveBeenCalledWith("openai", ["old", "new"]));
     expect(onSaved).toHaveBeenCalledWith(state);
@@ -287,5 +333,131 @@ describe("model selection and provider model management", () => {
     await user.click(screen.getByRole("button", { name: "保存模型" }));
     expect(await screen.findByText(/save down/)).toBeInTheDocument();
     expect(within(screen.getByText(/代理运行中/).parentElement!).getByRole("button")).toBeEnabled();
+  });
+
+  it("未定价 Provider 显示成本未知而不是零成本", async () => {
+    const provider: ProviderView = {
+      name: "local", provider: "openai-compatible", base_url: "http://127.0.0.1:11434/v1",
+      models: ["local-model"], has_auth: false,
+    };
+    vi.mocked(getStats).mockResolvedValue({
+      total: {
+        requests: 1, errors: 0, p50_latency_ms: 5, p95_latency_ms: 5,
+        input_tokens: 2, output_tokens: 3, cost_micros: null,
+      },
+      groups: [["local", {
+        requests: 1, errors: 0, p50_latency_ms: 5, p95_latency_ms: 5,
+        input_tokens: 2, output_tokens: 3, cost_micros: null,
+      }]],
+      by: "upstream", empty: false,
+    });
+
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    expect(await screen.findByText(/5 tokens · 成本未知/)).toBeInTheDocument();
+    expect(screen.queryByText(/零成本/)).not.toBeInTheDocument();
+  });
+
+  it("shows verified declared unsupported and unknown capability states", () => {
+    const provider: ProviderView = {
+      name: "matrix",
+      provider: "openai-compatible",
+      base_url: "https://api.example/v1",
+      models: ["model-a", "model-b"],
+      model_capabilities: [
+        { model: "model-a", tool: "verified", vision: "declared", json_schema: "unsupported" },
+        { model: "model-b", tool: "unknown", vision: "unknown", json_schema: "unknown" },
+      ],
+      has_auth: true,
+    };
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    expect(screen.getByText("工具 · 已验证")).toBeInTheDocument();
+    expect(screen.getByText("视觉 · 已声明")).toBeInTheDocument();
+    expect(screen.getByText("JSON · 不支持")).toBeInTheDocument();
+    expect(screen.getAllByText(/· 未知/)).toHaveLength(3);
+  });
+
+  it("保留已下架模型并展示本次目录差异", async () => {
+    const provider: ProviderView = {
+      name: "catalog", provider: "openai-compatible", base_url: "https://api.example/v1",
+      models: ["old-model"], has_auth: true, catalog_revision: 1,
+      catalog: [{
+        model: "old-model", tool: "unknown", vision: "unknown", json_schema: "unknown",
+        source: "live", last_seen_ms: 1, catalog_state: "active",
+      }],
+    };
+    vi.mocked(discoverProviderModels).mockResolvedValue({
+      models: ["new-model"], source: "live", fetched_at_ms: 2, warning: null,
+      revision: 2, added: ["new-model"], removed: ["old-model"],
+      catalog: [
+        {
+          model: "new-model", tool: "unknown", vision: "unknown", json_schema: "unknown",
+          source: "live", last_seen_ms: 2, catalog_state: "active",
+        },
+        {
+          model: "old-model", tool: "unknown", vision: "unknown", json_schema: "unknown",
+          source: "live", last_seen_ms: 1, catalog_state: "removed",
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "刷新模型" }));
+    expect(await screen.findByText("下架：old-model（仍保留引用）")).toBeInTheDocument();
+    expect(screen.getByText("新增：new-model")).toBeInTheDocument();
+    expect(screen.getByText("已下架")).toBeInTheDocument();
+  });
+
+  it("展示 Provider 八层真实测试结果", async () => {
+    const provider: ProviderView = {
+      name: "tested", provider: "openai-compatible", base_url: "https://api.example/v1",
+      models: ["model-a"], has_auth: true,
+    };
+    vi.mocked(testProvider).mockResolvedValue([{
+      model: "model-a",
+      stages: [
+        "network", "http", "auth", "model", "generation", "stream", "tool", "json",
+      ].map((layer) => ({
+        layer: layer as "network" | "http" | "auth" | "model" | "generation" | "stream" | "tool" | "json",
+        status: "pass" as const,
+      })),
+    }]);
+    const user = userEvent.setup();
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "运行分层测试" }));
+    expect(await screen.findByText("流式 · pass")).toBeInTheDocument();
+    expect(screen.getByText("Tool · pass")).toBeInTheDocument();
+    expect(screen.getByText("JSON Schema · pass")).toBeInTheDocument();
+    expect(screen.queryByText(/未执行/)).not.toBeInTheDocument();
+  });
+});
+
+describe("provider deletion lifecycle", () => {
+  it("删除前展示路由引用并禁止确认", async () => {
+    const provider: ProviderView = {
+      name: "referenced", provider: "openai-compatible", base_url: "https://api.example/v1",
+      models: ["model-a"], has_auth: true,
+    };
+    vi.mocked(previewProviderRemoval).mockResolvedValue({
+      name: "referenced",
+      references: ["主页/上档#1", "Agent/codex/high"],
+      can_remove: false,
+    });
+    const user = userEvent.setup();
+    render(
+      <ProviderList
+        providers={[provider]}
+        deletedProviders={[]}
+        recoveryError={null}
+        serveRunning={false}
+        busy={false}
+        onRemove={vi.fn()}
+        onRestore={vi.fn()}
+        onStateChange={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "删除" }));
+    expect(await screen.findByText("主页/上档#1")).toBeInTheDocument();
+    expect(screen.getByText("Agent/codex/high")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认移入回收站" })).toBeDisabled();
   });
 });

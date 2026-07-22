@@ -20,26 +20,33 @@
 //! which is content-free by `router-core`'s construction.
 
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::fmt;
+use std::fmt::Write as _;
+use std::io::{self, Read};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use token_station_conformance::{AgentAdapter, ProviderAdapter};
-use token_station_metrics::{Recorder, RequestRecord, RoutingRecord};
+use token_station_metrics::{
+    AttemptRecord, ConversionRecord, ConversionStage, CostKind, DecisionRecord, Recorder,
+    RequestRecord, RoutingRecord,
+};
 use token_station_plugin_runtime::{AgentPlugin, NoSecrets, PluginRuntime, ProviderPlugin};
 use token_station_protocol::{
-    AgentRequestEnvelope, Auth, ChatRequest, ErrorCode, ErrorEnvelope, HeaderDigest, HttpMethod,
-    HttpRequestDescriptor, HttpResponseParts, Principal, ProviderConfig, SecretRef, StreamChunk,
-    StreamEvent, StreamOutcome,
+    AgentRequestEnvelope, Auth, ChatRequest, ChatResponse, Content, ErrorCode, ErrorEnvelope,
+    HeaderDigest, HttpMethod, HttpRequestDescriptor, HttpResponseParts, ModelCapability, Principal,
+    ProviderConfig, ResponseFormat, SecretRef, StreamChunk, StreamEvent, StreamOutcome, ToolDef,
 };
 use token_station_router_core::{
     Candidate, Decision, HealthPolicy, HealthTracker, Router, UpstreamModel, UpstreamRef,
 };
 
 use crate::admission::Admission;
+use crate::cancel::CancelToken;
 use crate::request_context::RequestContext;
+use crate::sse::SseFrameDecoder;
 
 use crate::config::ClientConfig;
 use crate::secrets::SecretStore;
@@ -48,6 +55,7 @@ use crate::secrets::SecretStore;
 const MAX_INBOUND_BODY: usize = 10 * 1024 * 1024;
 const MAX_UPSTREAM_BODY: u64 = 32 * 1024 * 1024;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(120);
+const CANCEL_READ_POLL: Duration = Duration::from_millis(100);
 
 /// Default overall budget for one request when the caller supplies no context.
 /// Long enough for slow generations, finite enough to bound an abandoned one.
@@ -59,7 +67,6 @@ const REQUEST_DEADLINE: Duration = Duration::from_secs(600);
 const MAX_ATTEMPTS: u32 = 6;
 /// A single honored `Retry-After` is capped so one upstream cannot park a
 /// request past anything useful; the request deadline caps it further.
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(5);
 /// `upstream test` answers "is it alive"; it should not take the data plane's
 /// word-count-sized timeout to say no.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -68,12 +75,169 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// parser on.
 const STREAM_READ: usize = 8 * 1024;
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_REQUEST_FALLBACK: AtomicU64 = AtomicU64::new(1);
+const CANONICAL_CHAT_PROTOCOL: &str = "token-station-chat";
 
-/// A [`RequestRecord`] with a stable accounting id stamped on it at arrival.
-/// One logical request gets one id; the dispatch fallback sweep reuses it, so
-/// internal retries are one accounting unit, and a record written twice
-/// collapses to one row instead of double-counting.
+/// One logical request's fallback limits. Count, wall-clock and per-attempt
+/// timeout are always active. Cost is optional until the router has a trusted
+/// preflight estimator; when configured, an unknown estimate fails closed.
+struct AttemptBudget {
+    max_attempts: u32,
+    max_elapsed: Duration,
+    per_attempt_timeout: Duration,
+    max_cost: Option<u64>,
+    started: Instant,
+    attempts: u32,
+    reserved_cost: u64,
+}
+
+impl AttemptBudget {
+    fn for_request(ctx: &RequestContext) -> Self {
+        Self {
+            max_attempts: MAX_ATTEMPTS,
+            max_elapsed: ctx.remaining(),
+            per_attempt_timeout: ctx.per_attempt_timeout(),
+            max_cost: None,
+            started: Instant::now(),
+            attempts: 0,
+            reserved_cost: 0,
+        }
+    }
+
+    fn try_begin(&mut self, estimated_cost: Option<u64>) -> bool {
+        if self.attempts >= self.max_attempts || self.remaining().is_zero() {
+            return false;
+        }
+        let reservation = match (self.max_cost, estimated_cost) {
+            (Some(_), None) => return false,
+            (_, None) => 0,
+            (_, Some(cost)) => cost,
+        };
+        if self
+            .max_cost
+            .is_some_and(|maximum| self.reserved_cost.saturating_add(reservation) > maximum)
+        {
+            return false;
+        }
+        self.attempts += 1;
+        self.reserved_cost = self.reserved_cost.saturating_add(reservation);
+        true
+    }
+
+    fn remaining(&self) -> Duration {
+        self.max_elapsed.saturating_sub(self.started.elapsed())
+    }
+
+    fn retry_delay(&self, requested: Duration, ctx: &RequestContext) -> Duration {
+        requested.min(self.remaining()).min(ctx.remaining())
+    }
+
+    const fn has_attempt_remaining(&self) -> bool {
+        self.attempts < self.max_attempts
+    }
+}
+
+fn wait_retry_delay(ctx: &RequestContext, wait: Duration) {
+    let deadline = Instant::now() + wait;
+    while !ctx.is_cancelled() && Instant::now() < deadline {
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(20)),
+        );
+    }
+}
+
+fn map_transport_error(error: ureq::Error) -> ErrorEnvelope {
+    match error {
+        ureq::Error::Timeout(timeout) => ErrorEnvelope::new(
+            ErrorCode::Timeout,
+            504,
+            format!("upstream attempt timed out: {timeout}"),
+        ),
+        error => ErrorEnvelope::new(
+            ErrorCode::UpstreamUnavailable,
+            502,
+            format!("upstream transport: {error}"),
+        ),
+    }
+}
+
+fn language_only_refusal() -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorCode::Capability,
+        400,
+        "this proxy routes language-model text and tool requests only; image, audio, and embeddings are unsupported",
+    )
+}
+
+fn is_embeddings_path(path: &str) -> bool {
+    path.trim_end_matches('/').ends_with("/embeddings")
+}
+
+fn contains_non_language_content(value: &Value) -> bool {
+    let Value::Object(object) = value else {
+        return false;
+    };
+
+    let output_media = object
+        .get("modalities")
+        .and_then(Value::as_array)
+        .is_some_and(|modalities| {
+            modalities
+                .iter()
+                .any(|modality| modality.as_str().is_some_and(|kind| kind != "text"))
+        })
+        || object.contains_key("audio");
+    let message_media = object
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| messages.iter().any(message_contains_non_language_content));
+    let input_media = object
+        .get("input")
+        .is_some_and(input_contains_non_language_content);
+
+    output_media || message_media || input_media
+}
+
+fn message_contains_non_language_content(value: &Value) -> bool {
+    let Value::Object(message) = value else {
+        return false;
+    };
+    message.contains_key("audio")
+        || message
+            .get("content")
+            .is_some_and(input_contains_non_language_content)
+}
+
+fn input_contains_non_language_content(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(input_contains_non_language_content),
+        Value::Object(item) => {
+            let typed_media = item
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| {
+                    matches!(
+                        kind,
+                        "image_url"
+                            | "input_image"
+                            | "image"
+                            | "input_audio"
+                            | "audio"
+                            | "audio_url"
+                    )
+                });
+            typed_media
+                || item.contains_key("audio")
+                || item
+                    .get("content")
+                    .is_some_and(input_contains_non_language_content)
+        }
+        _ => false,
+    }
+}
+
 /// An outbound HTTP agent with an explicit, fail-closed egress policy (P1-6):
 ///
 /// - **No redirects.** Following a 3xx could carry the `Authorization` header to
@@ -82,88 +246,270 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 /// - **No environment proxy.** `HTTP(S)_PROXY` is ignored, so traffic never
 ///   silently detours through a middlebox the operator did not configure here.
 ///
-/// Every upstream and probe request goes through one of these, so where a
+/// Every upstream and probe request goes through this policy, so where a
 /// request (and its credential) can go is a property of the code, not the
 /// ambient environment.
-fn egress_agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::new_with_config(
+struct EgressPolicy;
+
+impl EgressPolicy {
+    fn config(timeout: Duration) -> ureq::config::Config {
         ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
-            // The pipeline maps upstream errors itself; a non-2xx is an answer,
-            // not a transport failure.
+            // The pipeline maps upstream errors itself; a non-2xx is an
+            // answer, not a transport failure.
             .http_status_as_error(false)
             .max_redirects(0)
             .proxy(None)
-            .build(),
+            .build()
+    }
+
+    fn agent(timeout: Duration) -> ureq::Agent {
+        ureq::Agent::new_with_config(Self::config(timeout))
+    }
+
+    fn reject_redirect(status: u16) -> Result<(), ErrorEnvelope> {
+        if (300..400).contains(&status) {
+            return Err(ErrorEnvelope::new(
+                ErrorCode::UpstreamUnavailable,
+                502,
+                format!("upstream redirect refused: HTTP {status}"),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A request-scoped connector that turns a blocking socket read into short,
+/// retryable waits. The HTTP exchange still observes its original timeout,
+/// while a client disconnect or server drain interrupts a hung upstream in at
+/// most [`CANCEL_READ_POLL`].
+struct CancelConnector {
+    inner: ureq::unversioned::transport::DefaultConnector,
+    token: CancelToken,
+}
+
+impl fmt::Debug for CancelConnector {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CancelConnector")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ureq::unversioned::transport::Connector<()> for CancelConnector {
+    type Out = CancelTransport;
+
+    fn connect(
+        &self,
+        details: &ureq::unversioned::transport::ConnectionDetails<'_>,
+        chained: Option<()>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
+        self.inner.connect(details, chained).map(|transport| {
+            transport.map(|inner| CancelTransport {
+                inner,
+                token: self.token.clone(),
+            })
+        })
+    }
+}
+
+struct CancelTransport {
+    inner: Box<dyn ureq::unversioned::transport::Transport>,
+    token: CancelToken,
+}
+
+impl fmt::Debug for CancelTransport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CancelTransport")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ureq::unversioned::transport::Transport for CancelTransport {
+    fn buffers(&mut self) -> &mut dyn ureq::unversioned::transport::Buffers {
+        self.inner.buffers()
+    }
+
+    fn transmit_output(
+        &mut self,
+        amount: usize,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<(), ureq::Error> {
+        self.inner.transmit_output(amount, timeout)
+    }
+
+    fn await_input(
+        &mut self,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<bool, ureq::Error> {
+        use ureq::unversioned::transport::NextTimeout;
+
+        let deadline = match timeout.after {
+            ureq::unversioned::transport::time::Duration::Exact(after) => {
+                Instant::now().checked_add(after)
+            }
+            ureq::unversioned::transport::time::Duration::NotHappening => None,
+        };
+        loop {
+            if self.token.is_cancelled() {
+                return Err(ureq::Error::Io(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "request cancelled",
+                )));
+            }
+            let remaining = deadline.map_or(CANCEL_READ_POLL, |value| {
+                value.saturating_duration_since(Instant::now())
+            });
+            if deadline.is_some() && remaining.is_zero() {
+                return Err(ureq::Error::Timeout(timeout.reason));
+            }
+            let slice = remaining.min(CANCEL_READ_POLL);
+            match self.inner.await_input(NextTimeout {
+                after: slice.into(),
+                reason: timeout.reason,
+            }) {
+                Err(ureq::Error::Timeout(_)) if !self.token.is_cancelled() => {}
+                result => return result,
+            }
+        }
+    }
+
+    fn is_open(&mut self) -> bool {
+        self.inner.is_open()
+    }
+
+    fn is_tls(&self) -> bool {
+        self.inner.is_tls()
+    }
+}
+
+fn cancel_aware_agent(timeout: Duration, token: CancelToken) -> ureq::Agent {
+    ureq::Agent::with_parts(
+        EgressPolicy::config(timeout),
+        CancelConnector {
+            inner: ureq::unversioned::transport::DefaultConnector::default(),
+            token,
+        },
+        ureq::unversioned::resolver::DefaultResolver::default(),
     )
 }
 
-/// Decodes the complete-UTF-8 prefix of `pending`, leaving any bytes of a
-/// character split across socket reads for the next call. This is what makes
-/// stream decoding is boundary-safe: a three-byte UTF-8 character split 2+1 across two reads is
-/// decoded once, whole, not mangled into replacement characters.
-///
-/// Genuinely invalid bytes (not a boundary split) are lossy-decoded so the
-/// stream makes progress instead of stalling on garbage.
-fn take_decodable(pending: &mut Vec<u8>) -> String {
-    match std::str::from_utf8(pending) {
-        Ok(_) => String::from_utf8(std::mem::take(pending)).expect("just validated as UTF-8"),
-        // No `error_len` means the tail is an incomplete-but-valid character:
-        // decode up to it, keep the rest for the next read.
-        Err(error) if error.error_len().is_none() => {
-            let boundary = error.valid_up_to();
-            let valid =
-                String::from_utf8(pending[..boundary].to_vec()).expect("valid up to the boundary");
-            pending.drain(..boundary);
-            valid
-        }
-        // Genuinely invalid bytes: lossy-decode everything so we do not stall.
-        Err(_) => {
-            let decoded = String::from_utf8_lossy(pending).into_owned();
-            pending.clear();
-            decoded
-        }
-    }
-}
-
-/// A token-accounting inconsistency, or `None` when the numbers are coherent.
-///
-/// Cached tokens are a *subset* of the input the model read, so a cache count
-/// larger than the input is a provider reporting bug, not free savings — worth
-/// surfacing rather than silently trusting into a cost figure.
-fn usage_anomaly(usage: &token_station_protocol::Usage) -> Option<&'static str> {
-    if usage.cache_read_tokens > usage.input_tokens {
-        Some("cache_read_tokens exceeds input_tokens")
-    } else if usage.cache_write_tokens > usage.input_tokens {
-        Some("cache_write_tokens exceeds input_tokens")
-    } else {
-        None
-    }
-}
-
-/// True when any message carries non-text (image) content. Audio arrives the
-/// same way (a non-text content part), so this is the multimodal gate.
-fn request_has_multimodal(request: &ChatRequest) -> bool {
-    use token_station_protocol::{Content, ContentPart};
-    request.messages.iter().any(|message| {
-        matches!(&message.content, Some(Content::Parts(parts))
-            if parts.iter().any(|part| !matches!(part, ContentPart::Text { .. })))
-    })
-}
-
-fn begin_record(started_at_ms: u64, protocol: impl Into<String>) -> RequestRecord {
+/// A [`RequestRecord`] with a stable accounting id stamped on it at arrival.
+/// One logical request gets one id; the dispatch fallback sweep reuses it, so
+/// internal retries are one accounting unit, and a record written twice
+/// collapses to one row instead of double-counting.
+fn begin_record(
+    started_at_ms: u64,
+    protocol: impl Into<String>,
+    agent_id: Option<&str>,
+    running_revision: Option<u64>,
+) -> RequestRecord {
     let mut record = RequestRecord::begin(started_at_ms, protocol);
-    record.request_id = format!(
-        "req_{started_at_ms}_{}",
-        NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
-    );
+    let mut random = [0_u8; 16];
+    if getrandom::fill(&mut random).is_err() {
+        // Metrics must never take the request path down. The operating system
+        // random source is the normal path; this process/time/counter mix is a
+        // last-resort uniqueness guard for an unavailable entropy device.
+        random[..8].copy_from_slice(&started_at_ms.to_be_bytes());
+        let fallback = NEXT_REQUEST_FALLBACK.fetch_add(1, Ordering::Relaxed)
+            ^ (u64::from(std::process::id()) << 32);
+        random[8..].copy_from_slice(&fallback.to_be_bytes());
+    }
+    let mut request_id = String::with_capacity(36);
+    request_id.push_str("req_");
+    for byte in random {
+        let _ = write!(request_id, "{byte:02x}");
+    }
+    record.request_id = request_id;
+    record.agent_id = agent_id.map(str::to_owned);
+    record.running_revision = running_revision;
     record
+}
+
+fn record_conversion(
+    record: &mut RequestRecord,
+    stage: ConversionStage,
+    source_protocol: impl Into<String>,
+    target_protocol: impl Into<String>,
+    succeeded: bool,
+    error_code: Option<ErrorCode>,
+) {
+    record.conversion_reports.push(ConversionRecord {
+        ordinal: u32::try_from(record.conversion_reports.len() + 1).unwrap_or(u32::MAX),
+        stage,
+        source_protocol: source_protocol.into(),
+        target_protocol: target_protocol.into(),
+        succeeded,
+        error_code,
+    });
+}
+
+fn attempt_receipt(
+    target: &UpstreamModel,
+    ordinal: u32,
+    latency_ms: u64,
+    upstream_http_status: Option<u16>,
+    result: Result<StreamOutcome, &ErrorEnvelope>,
+    record: &RequestRecord,
+) -> AttemptRecord {
+    match result {
+        Ok(outcome) => {
+            let error_code = match outcome {
+                StreamOutcome::Complete | StreamOutcome::ClientCancelled => None,
+                StreamOutcome::FailedAfterPartial | StreamOutcome::FailedBeforeOutput => {
+                    record.error_code
+                }
+            };
+            AttemptRecord {
+                ordinal,
+                upstream: target.upstream.as_str().to_owned(),
+                model: target.model.clone(),
+                latency_ms,
+                http_status: upstream_http_status,
+                error_code,
+                stream_outcome: Some(outcome),
+                fallback_allowed: matches!(outcome, StreamOutcome::FailedBeforeOutput)
+                    && error_code.is_some_and(ErrorCode::is_retriable_elsewhere),
+            }
+        }
+        Err(error) => AttemptRecord {
+            ordinal,
+            upstream: target.upstream.as_str().to_owned(),
+            model: target.model.clone(),
+            latency_ms,
+            http_status: upstream_http_status,
+            error_code: Some(error.code),
+            stream_outcome: Some(StreamOutcome::FailedBeforeOutput),
+            fallback_allowed: error.code.is_retriable_elsewhere(),
+        },
+    }
+}
+
+fn record_route_decision(record: &mut RequestRecord, decision: &Decision) {
+    record.decision = Some(DecisionRecord::from(decision));
+}
+
+fn record_actual_attempt_target(
+    record: &mut RequestRecord,
+    decision: &Decision,
+    target: &UpstreamModel,
+) {
+    let mut routing = RoutingRecord::from(decision);
+    target.upstream.as_str().clone_into(&mut routing.upstream);
+    routing.model.clone_from(&target.model);
+    record.routing = Some(routing);
 }
 
 /// One configured upstream, resolved and ready to serve.
 struct Upstream {
     config: ProviderConfig,
     plugin: Arc<ProviderPlugin>,
+}
+
+enum AttemptTerminal {
+    Outcome(StreamOutcome),
+    Error(ErrorEnvelope),
 }
 
 /// One loaded inbound adapter and the protocol its manifest declares. The
@@ -173,15 +519,61 @@ struct LoadedAgent {
     protocol: String,
 }
 
+struct AgentLoadSet {
+    ready: Vec<LoadedAgent>,
+    skipped: Vec<(String, String)>,
+}
+
+/// Keep evidence that was recorded by the host when a v1 provider plugin only
+/// understands the legacy capability booleans. Older plugins legitimately
+/// omit the optional `*_state` fields when they deserialize and re-serialize
+/// the catalog; allowing that round-trip to erase `unknown` could turn it into
+/// a positive `declared` result through the legacy `true` fallback.
+fn project_capability_evidence_for_v1(mut capability: ModelCapability) -> ModelCapability {
+    if let Some(state) = capability.tool_state {
+        capability.tool = state.is_supported();
+    }
+    if let Some(state) = capability.vision_state {
+        capability.vision = state.is_supported();
+    }
+    if let Some(state) = capability.json_schema_state {
+        capability.json_schema = state.is_supported();
+    }
+    capability
+}
+
+fn restore_configured_capability_evidence(
+    mut reported: ModelCapability,
+    configured: &[ModelCapability],
+) -> ModelCapability {
+    let Some(saved) = configured
+        .iter()
+        .find(|saved| saved.model == reported.model)
+    else {
+        return reported;
+    };
+
+    if reported.tool_state.is_none() && saved.tool_state.is_some() {
+        reported.tool_state = saved.tool_state;
+    }
+    if reported.vision_state.is_none() && saved.vision_state.is_some() {
+        reported.vision_state = saved.vision_state;
+    }
+    if reported.json_schema_state.is_none() && saved.json_schema_state.is_some() {
+        reported.json_schema_state = saved.json_schema_state;
+    }
+    reported
+}
+
 /// The assembled data plane.
 pub struct Gateway {
     /// Inbound adapters in match-priority order. Each request is dispatched to
     /// the first whose `match_inbound` claims it — that is `match_inbound`, the
     /// multi-inbound multiplexing, done here in the host orchestrator.
     agents: Vec<LoadedAgent>,
-    /// Adapters that were configured but failed to load, with the reason. The
-    /// proxy still serves on the ones that loaded (P0); this is what to surface
-    /// so a skipped protocol is visible, not silent.
+    /// Configured inbound adapters that could not load. A surviving adapter
+    /// keeps the gateway available, while this list makes the degradation
+    /// visible to callers.
     skipped_agents: Vec<(String, String)>,
     home_router: Router,
     /// Only custom routes are materialized. Missing/inherit entries use the
@@ -196,11 +588,7 @@ pub struct Gateway {
     admission: Admission,
     /// Versioned per-model prices; the version travels onto each priced record.
     pricing: crate::pricing::PriceTable,
-    /// Refuse image/audio requests with a typed capability error (language
-    /// models only).
-    reject_multimodal: bool,
     secrets: SecretStore,
-    http: ureq::Agent,
     recorder: Arc<dyn Recorder>,
     /// `/v1/models`, rendered once: it changes only with the config.
     models_document: String,
@@ -273,6 +661,28 @@ pub struct LayeredProbe {
     pub latency_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureLayer {
+    Stream,
+    Tool,
+    Json,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FeatureStageResult {
+    pub layer: FeatureLayer,
+    pub status: StageStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FeatureProbe {
+    pub model: String,
+    pub stages: Vec<FeatureStageResult>,
+}
+
 /// Where a single probe exchange ended — the raw signal the classifier turns
 /// into per-layer results. Kept separate from the networking so the mapping is
 /// a pure function that can be tested without a live upstream.
@@ -333,6 +743,18 @@ pub fn classify_layers(signal: &ProbeSignal) -> Vec<StageResult> {
             }
         })
         .collect()
+}
+
+fn validate_provider_health_json(text: &str) -> Result<(), String> {
+    let value: Value = serde_json::from_str(text)
+        .map_err(|_| "Provider structured output was not valid JSON".to_owned())?;
+    let object = value.as_object().ok_or_else(|| {
+        "Provider structured output did not satisfy the requested schema".to_owned()
+    })?;
+    if object.len() != 1 || object.get("ok").and_then(Value::as_bool).is_none() {
+        return Err("Provider structured output did not satisfy the requested schema".to_owned());
+    }
+    Ok(())
 }
 
 /// A stable, non-cryptographic hash to de-identify an unlisted model name: the
@@ -411,11 +833,6 @@ fn load_provider_plugins(
 }
 
 impl Gateway {
-    /// Loads one inbound adapter, resolving builtin vs on-disk source.
-    ///
-    /// # Errors
-    ///
-    /// A human reason on any failure so the caller can skip it and say why.
     fn load_agent(
         runtime: &PluginRuntime,
         registry: &crate::plugins::PluginRegistry,
@@ -428,7 +845,7 @@ impl Gateway {
             } => AgentPlugin::load_embedded(runtime, manifest_source, wasm),
             crate::plugins::PackageSource::Dir(dir) => AgentPlugin::load(runtime, &dir),
         }
-        .map_err(|error| format!("{error}"))?;
+        .map_err(|error| error.to_string())?;
         let protocol = plugin
             .manifest()
             .agent_protocols
@@ -436,6 +853,42 @@ impl Gateway {
             .cloned()
             .ok_or_else(|| "declares no protocol".to_owned())?;
         Ok(LoadedAgent { plugin, protocol })
+    }
+
+    fn load_agents(
+        runtime: &PluginRuntime,
+        registry: &crate::plugins::PluginRegistry,
+        config: &ClientConfig,
+    ) -> Result<AgentLoadSet, String> {
+        let mut agents = Vec::new();
+        let mut skipped = Vec::new();
+        for package in config.plugins.effective_agents() {
+            match Self::load_agent(runtime, registry, &package) {
+                Ok(agent) => agents.push(agent),
+                Err(error) => {
+                    eprintln!("agent adapter `{package}` failed to load, skipping: {error}");
+                    skipped.push((package, error));
+                }
+            }
+        }
+        if !agents.is_empty() {
+            return Ok(AgentLoadSet {
+                ready: agents,
+                skipped,
+            });
+        }
+        if skipped.is_empty() {
+            return Err("no agent adapters configured (plugins.agents is empty)".to_owned());
+        }
+        let reasons = skipped
+            .iter()
+            .map(|(package, error)| format!("`{package}`: {error}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(format!(
+            "no agent adapter could load; all {} failed: {reasons}",
+            skipped.len()
+        ))
     }
 
     /// Loads plugins, probes capabilities, validates the routing table, and
@@ -463,36 +916,7 @@ impl Gateway {
 
         // Load every configured inbound adapter. Order is match priority: the
         // first whose match_inbound claims a request serves it.
-        //
-        // Resilient by design (P0): one broken adapter must not sink the whole
-        // proxy. A load failure is recorded and the adapter skipped, so the
-        // remaining protocols still serve. Only an empty result — nothing could
-        // load — is fatal, and its message names why each one failed.
-        let mut agents = Vec::new();
-        let mut skipped_agents: Vec<(String, String)> = Vec::new();
-        for package in config.plugins.effective_agents() {
-            match Self::load_agent(&runtime, &registry, &package) {
-                Ok(agent) => agents.push(agent),
-                Err(error) => {
-                    eprintln!("agent adapter `{package}` failed to load, skipping: {error}");
-                    skipped_agents.push((package, error));
-                }
-            }
-        }
-        if agents.is_empty() {
-            if skipped_agents.is_empty() {
-                return Err("no agent adapters configured (plugins.agents is empty)".to_owned());
-            }
-            let reasons = skipped_agents
-                .iter()
-                .map(|(package, error)| format!("`{package}`: {error}"))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(format!(
-                "no agent adapter could load; all {} failed: {reasons}",
-                skipped_agents.len()
-            ));
-        }
+        let loaded_agents = Self::load_agents(&runtime, &registry, config)?;
 
         let provider_plugins = load_provider_plugins(&runtime, &registry, config)?;
 
@@ -511,13 +935,21 @@ impl Gateway {
             let mut provider_config =
                 ProviderConfig::new(entry.provider.clone(), entry.base_url.clone());
             provider_config.auth = entry.auth.as_ref().map(|auth| SecretRef::new(&auth.slot));
-            provider_config.models.clone_from(&entry.models);
+            provider_config.models = entry
+                .models
+                .iter()
+                .cloned()
+                .map(project_capability_evidence_for_v1)
+                .collect();
 
             // The adapter may refine the declared catalog; it cannot invent one,
             // having no network. This is `model_capabilities`' production call.
-            let capabilities = plugin
+            let capabilities: Vec<_> = plugin
                 .model_capabilities(&provider_config)
-                .map_err(|error| format!("upstream `{name}` capabilities: {}", error.message))?;
+                .map_err(|error| format!("upstream `{name}` capabilities: {}", error.message))?
+                .into_iter()
+                .map(|capability| restore_configured_capability_evidence(capability, &entry.models))
+                .collect();
 
             let reference = token_station_router_core::UpstreamRef::new(name.clone())
                 .expect("config validation checked the shape");
@@ -555,8 +987,8 @@ impl Gateway {
         }
 
         Ok(Self {
-            agents,
-            skipped_agents,
+            agents: loaded_agents.ready,
+            skipped_agents: loaded_agents.skipped,
             home_router,
             agent_routers,
             upstreams,
@@ -567,10 +999,8 @@ impl Gateway {
             })),
             admission: Admission::new(config.concurrency),
             pricing: config.pricing.clone(),
-            reject_multimodal: config.reject_multimodal,
             secrets: SecretStore::from_config(config),
             recorder,
-            http: egress_agent(UPSTREAM_TIMEOUT),
             models_document: json!({ "object": "list", "data": models_document }).to_string(),
         })
     }
@@ -587,9 +1017,7 @@ impl Gateway {
         self.catalog.len()
     }
 
-    /// Adapters that were configured but could not load, each with its reason.
-    /// The proxy is serving without them (P0 resilience); surface this so a
-    /// dropped protocol is visible rather than silently missing.
+    /// Configured inbound adapters that were skipped during startup.
     #[must_use]
     pub fn skipped_agents(&self) -> &[(String, String)] {
         &self.skipped_agents
@@ -643,7 +1071,7 @@ impl Gateway {
             return Err(format!("upstream `{upstream_name}` declares no models"));
         }
 
-        let http = egress_agent(PROBE_TIMEOUT);
+        let http = EgressPolicy::agent(PROBE_TIMEOUT);
 
         Ok(models
             .into_iter()
@@ -689,7 +1117,7 @@ impl Gateway {
             .send_with(http, &descriptor, upstream_name)
             .map_err(describe)?;
         let status = response.status;
-        let parts: HttpResponseParts = response.into();
+        let parts = response.into_parts().map_err(describe)?;
         if status >= 400 {
             let envelope = upstream
                 .plugin
@@ -737,7 +1165,7 @@ impl Gateway {
             return Err(format!("upstream `{upstream_name}` declares no models"));
         }
 
-        let http = egress_agent(PROBE_TIMEOUT);
+        let http = EgressPolicy::agent(PROBE_TIMEOUT);
 
         Ok(models
             .into_iter()
@@ -751,6 +1179,253 @@ impl Gateway {
                 }
             })
             .collect())
+    }
+
+    /// Runs the three capability-specific Provider checks after a normal
+    /// generation probe has passed. Each stage is a real southbound request;
+    /// no model-name heuristic is treated as evidence.
+    ///
+    /// # Errors
+    ///
+    /// The upstream/model selection is invalid. Per-stage failures are data so
+    /// one unsupported feature does not hide the other two.
+    pub fn probe_features(
+        &self,
+        upstream_name: &str,
+        only_model: &str,
+    ) -> Result<FeatureProbe, String> {
+        let upstream = self
+            .upstreams
+            .get(upstream_name)
+            .ok_or_else(|| format!("no upstream `{upstream_name}`"))?;
+        if !self.catalog.iter().any(|(target, _)| {
+            target.upstream.as_str() == upstream_name && target.model == only_model
+        }) {
+            return Err(format!(
+                "upstream `{upstream_name}` does not serve `{only_model}`"
+            ));
+        }
+
+        let http = EgressPolicy::agent(PROBE_TIMEOUT);
+        let stages = vec![
+            Self::feature_stage(
+                FeatureLayer::Stream,
+                self.probe_stream_feature(upstream_name, upstream, only_model, &http),
+            ),
+            Self::feature_stage(
+                FeatureLayer::Tool,
+                self.probe_tool_feature(upstream_name, upstream, only_model, &http),
+            ),
+            Self::feature_stage(
+                FeatureLayer::Json,
+                self.probe_json_feature(upstream_name, upstream, only_model, &http),
+            ),
+        ];
+        Ok(FeatureProbe {
+            model: only_model.to_owned(),
+            stages,
+        })
+    }
+
+    fn feature_stage(layer: FeatureLayer, result: Result<(), String>) -> FeatureStageResult {
+        match result {
+            Ok(()) => FeatureStageResult {
+                layer,
+                status: StageStatus::Pass,
+                detail: None,
+            },
+            Err(detail) => FeatureStageResult {
+                layer,
+                status: StageStatus::Fail,
+                detail: Some(detail),
+            },
+        }
+    }
+
+    fn probe_request(
+        &self,
+        upstream_name: &str,
+        upstream: &Upstream,
+        request: &ChatRequest,
+        http: &ureq::Agent,
+    ) -> Result<ChatResponse, String> {
+        let describe =
+            |envelope: ErrorEnvelope| format!("{} ({:?})", envelope.message, envelope.code);
+        let descriptor = upstream
+            .plugin
+            .build_http_request(request, &upstream.config)
+            .map_err(describe)?;
+        upstream
+            .config
+            .authorize(&descriptor)
+            .map_err(|refusal| refusal.to_string())?;
+        let response = self
+            .send_with(http, &descriptor, upstream_name)
+            .map_err(describe)?;
+        let status = response.status;
+        let parts = response.into_parts().map_err(describe)?;
+        if status >= 400 {
+            let envelope = upstream
+                .plugin
+                .map_provider_error(&parts)
+                .map_err(describe)?;
+            return Err(format!("HTTP {status}: {}", describe(envelope)));
+        }
+        upstream.plugin.parse_response(&parts).map_err(describe)
+    }
+
+    fn probe_tool_feature(
+        &self,
+        upstream_name: &str,
+        upstream: &Upstream,
+        model: &str,
+        http: &ureq::Agent,
+    ) -> Result<(), String> {
+        let mut request = ChatRequest::new(
+            model,
+            vec![token_station_protocol::Message::text(
+                token_station_protocol::Role::User,
+                "Call the provider_health_check tool now.",
+            )],
+        );
+        request.sampling.max_output_tokens = Some(32);
+        request.tools.push(ToolDef {
+            name: "provider_health_check".to_owned(),
+            description: Some("Return an empty health-check payload.".to_owned()),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        });
+        let response = self.probe_request(upstream_name, upstream, &request, http)?;
+        if response.choices.iter().any(|choice| {
+            choice
+                .message
+                .tool_calls
+                .iter()
+                .any(|call| call.name == "provider_health_check")
+        }) {
+            Ok(())
+        } else {
+            Err("Provider returned no requested tool call".to_owned())
+        }
+    }
+
+    fn probe_json_feature(
+        &self,
+        upstream_name: &str,
+        upstream: &Upstream,
+        model: &str,
+        http: &ureq::Agent,
+    ) -> Result<(), String> {
+        let mut request = ChatRequest::new(
+            model,
+            vec![token_station_protocol::Message::text(
+                token_station_protocol::Role::User,
+                r#"Return exactly {"ok":true}."#,
+            )],
+        );
+        request.sampling.max_output_tokens = Some(32);
+        request.response_format = Some(ResponseFormat::JsonSchema {
+            json_schema: json!({
+                "name": "provider_health_check",
+                "strict": true,
+                "schema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": false
+                }
+            }),
+        });
+        let response = self.probe_request(upstream_name, upstream, &request, http)?;
+        let text = response
+            .choices
+            .first()
+            .and_then(|choice| choice.message.content.as_ref())
+            .and_then(|content| match content {
+                Content::Text(text) => Some(text.as_str()),
+                Content::Parts(_) => None,
+            })
+            .ok_or_else(|| "Provider returned no structured text".to_owned())?;
+        validate_provider_health_json(text)
+    }
+
+    fn probe_stream_feature(
+        &self,
+        upstream_name: &str,
+        upstream: &Upstream,
+        model: &str,
+        http: &ureq::Agent,
+    ) -> Result<(), String> {
+        let describe =
+            |envelope: ErrorEnvelope| format!("{} ({:?})", envelope.message, envelope.code);
+        let mut request = ChatRequest::new(
+            model,
+            vec![token_station_protocol::Message::text(
+                token_station_protocol::Role::User,
+                "Reply with OK.",
+            )],
+        );
+        request.stream = true;
+        request.sampling.max_output_tokens = Some(8);
+        let descriptor = upstream
+            .plugin
+            .build_http_request(&request, &upstream.config)
+            .map_err(describe)?;
+        upstream
+            .config
+            .authorize(&descriptor)
+            .map_err(|refusal| refusal.to_string())?;
+        let mut response = self
+            .send_with(http, &descriptor, upstream_name)
+            .map_err(describe)?;
+        if response.status >= 400 {
+            let status = response.status;
+            let parts = response.into_parts().map_err(describe)?;
+            let envelope = upstream
+                .plugin
+                .map_provider_error(&parts)
+                .map_err(describe)?;
+            return Err(format!("HTTP {status}: {}", describe(envelope)));
+        }
+
+        let mut parser = upstream.plugin.stream_parser();
+        let mut decoder = SseFrameDecoder::default();
+        let mut buffer = [0u8; STREAM_READ];
+        loop {
+            let read = response
+                .reader
+                .read(&mut buffer)
+                .map_err(|_| "upstream connection broke while streaming".to_owned())?;
+            if read == 0 {
+                decoder.finish().map_err(describe)?;
+                for event in parser.finish().map_err(describe)? {
+                    match event {
+                        StreamEvent::Done { .. } => return Ok(()),
+                        StreamEvent::Error { error } => return Err(describe(error)),
+                        _ => {}
+                    }
+                }
+                return Err("upstream SSE connection closed before a terminal event".to_owned());
+            }
+            let mut events = Vec::new();
+            for data in decoder.push(&buffer[..read]).map_err(describe)? {
+                events.extend(
+                    parser
+                        .parse_chunk(&StreamChunk { data })
+                        .map_err(describe)?,
+                );
+            }
+            for event in events {
+                match event {
+                    StreamEvent::Done { .. } => return Ok(()),
+                    StreamEvent::Error { error } => return Err(describe(error)),
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// One probe exchange, reduced to the raw [`ProbeSignal`] the pure
@@ -792,7 +1467,12 @@ impl Gateway {
         };
         let latency = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
         let status = response.status;
-        let parts: HttpResponseParts = response.into();
+        let parts = match response.into_parts() {
+            Ok(parts) => parts,
+            Err(envelope) => {
+                return (ProbeSignal::BadBody(describe(envelope)), Some(latency));
+            }
+        };
         if status >= 400 {
             let detail = match upstream.plugin.map_provider_error(&parts) {
                 Ok(envelope) | Err(envelope) => describe(envelope),
@@ -860,7 +1540,7 @@ impl Gateway {
         // request by deadline; the server layer replaces it with a drain-child
         // that also carries the client-disconnect signal.
         let ctx = RequestContext::detached(REQUEST_DEADLINE, UPSTREAM_TIMEOUT);
-        self.chat_scoped(&ctx, None, method, path, headers, body, emit);
+        self.chat_scoped(&ctx, None, None, method, path, headers, body, emit);
     }
 
     /// The normal request pipeline with a host-validated Agent routing scope.
@@ -871,6 +1551,7 @@ impl Gateway {
         &self,
         ctx: &RequestContext,
         agent_id: Option<&str>,
+        running_revision: Option<u64>,
         method: &str,
         path: &str,
         headers: &[(String, String)],
@@ -891,7 +1572,7 @@ impl Gateway {
                 .get(agent_id)
                 .unwrap_or(&self.home_router),
             Some(agent_id) => {
-                let mut record = begin_record(started_at_ms, String::new());
+                let mut record = begin_record(started_at_ms, String::new(), None, running_revision);
                 let refusal = ErrorEnvelope::new(
                     ErrorCode::InvalidRequest,
                     404,
@@ -916,15 +1597,40 @@ impl Gateway {
             }
         };
 
+        // The language-only product boundary belongs to the host, not an
+        // adapter. Reject embeddings before `match_inbound` so an old or
+        // third-party adapter cannot claim the path and accidentally forward
+        // it through the chat pipeline.
+        if is_embeddings_path(path) {
+            let refusal = language_only_refusal();
+            let mut record = begin_record(started_at_ms, String::new(), agent_id, running_revision);
+            record.status = refusal.http_status;
+            record.error_code = Some(refusal.code);
+            emit(Reply::BeginJson(JsonReply {
+                status: refusal.http_status,
+                body: json!({
+                    "error": {
+                        "message": refusal.message,
+                        "type": refusal.code.as_str(),
+                        "code": refusal.code.as_str()
+                    }
+                })
+                .to_string(),
+            }));
+            record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+            self.recorder.record(&record);
+            return;
+        }
+
         // Concurrency admission: take a global and a per-Agent permit, held for
         // the whole exchange. Over a ceiling we refuse with 429 rather than pile
         // another request onto the upstreams.
         let Some(global_permit) = self.admission.enter_global() else {
-            self.refuse_concurrency(started_at_ms, &clock, emit);
+            self.refuse_concurrency(started_at_ms, agent_id, running_revision, &clock, emit);
             return;
         };
         let Some(agent_permit) = self.admission.enter_agent(agent_id.unwrap_or("")) else {
-            self.refuse_concurrency(started_at_ms, &clock, emit);
+            self.refuse_concurrency(started_at_ms, agent_id, running_revision, &clock, emit);
             return;
         };
         let _permits = (global_permit, agent_permit);
@@ -934,7 +1640,7 @@ impl Gateway {
         // here serves, and no adapter exists to phrase the refusal in.
         let selected = self.select_agent(method, path, headers);
         let protocol = selected.map_or_else(String::new, |agent| agent.protocol.clone());
-        let mut record = begin_record(started_at_ms, protocol);
+        let mut record = begin_record(started_at_ms, protocol, agent_id, running_revision);
 
         if let Some(agent) = selected {
             match self.chat_inner(ctx, agent, router, headers, body, emit, &mut record) {
@@ -944,14 +1650,6 @@ impl Gateway {
                     // the client can still receive; no upstream health verdict.
                     record.status = refusal.http_status;
                     record.error_code = Some(refusal.code);
-                    // A capability refusal names the specific unmet requirement
-                    // (which of tools / vision / JSON schema / context window) in
-                    // its message. That message is router/adapter-generated and
-                    // content-free, so persist it to explain the refusal in the
-                    // receipt — the bare `capability` code cannot say which.
-                    if refusal.code == ErrorCode::Capability {
-                        record.error_detail = Some(refusal.message.clone());
-                    }
                     let rendered = Self::render_error(agent, &refusal);
                     emit(Reply::BeginJson(rendered));
                 }
@@ -969,8 +1667,8 @@ impl Gateway {
                 body: json!({
                     "error": {
                         "message": refusal.message,
-                        "type": "invalid_request",
-                        "code": "invalid_request"
+                        "type": refusal.code.as_str(),
+                        "code": refusal.code.as_str()
                     }
                 })
                 .to_string(),
@@ -987,6 +1685,8 @@ impl Gateway {
     fn refuse_concurrency(
         &self,
         started_at_ms: u64,
+        agent_id: Option<&str>,
+        running_revision: Option<u64>,
         clock: &std::time::Instant,
         emit: &mut dyn FnMut(Reply) -> bool,
     ) {
@@ -995,7 +1695,7 @@ impl Gateway {
             429,
             "concurrency limit reached; retry shortly",
         );
-        let mut record = begin_record(started_at_ms, String::new());
+        let mut record = begin_record(started_at_ms, String::new(), agent_id, running_revision);
         record.status = refusal.http_status;
         record.error_code = Some(refusal.code);
         emit(Reply::BeginJson(JsonReply {
@@ -1042,33 +1742,60 @@ impl Gateway {
         None
     }
 
-    /// The pipeline. Returns `Err` only before anything was emitted, so the
-    /// caller can still shape a whole error response.
-    #[allow(clippy::too_many_arguments)] // the request pipeline's real surface
-    fn chat_inner(
-        &self,
-        ctx: &RequestContext,
+    fn normalize_request(
         agent: &LoadedAgent,
-        router: &Router,
         headers: &[(String, String)],
         body: &[u8],
-        emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
-    ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
+    ) -> Result<(ChatRequest, Vec<token_station_protocol::AgentHint>), ErrorEnvelope> {
+        let inbound_protocol = record.protocol.clone();
         if body.len() > MAX_INBOUND_BODY {
-            return Err(ErrorEnvelope::new(
+            let error = ErrorEnvelope::new(
                 ErrorCode::InvalidRequest,
                 413,
                 "request body exceeds the local proxy's limit",
-            ));
+            );
+            record_conversion(
+                record,
+                ConversionStage::InboundNormalize,
+                &inbound_protocol,
+                CANONICAL_CHAT_PROTOCOL,
+                false,
+                Some(error.code),
+            );
+            return Err(error);
         }
-        let body: Value = serde_json::from_slice(body).map_err(|error| {
-            ErrorEnvelope::new(
-                ErrorCode::InvalidRequest,
-                400,
-                format!("body is not JSON: {error}"),
-            )
-        })?;
+        let body: Value = match serde_json::from_slice(body) {
+            Ok(body) => body,
+            Err(parse_error) => {
+                let error = ErrorEnvelope::new(
+                    ErrorCode::InvalidRequest,
+                    400,
+                    format!("body is not JSON: {parse_error}"),
+                );
+                record_conversion(
+                    record,
+                    ConversionStage::InboundNormalize,
+                    &inbound_protocol,
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    Some(error.code),
+                );
+                return Err(error);
+            }
+        };
+        if contains_non_language_content(&body) {
+            let error = language_only_refusal();
+            record_conversion(
+                record,
+                ConversionStage::InboundNormalize,
+                &inbound_protocol,
+                CANONICAL_CHAT_PROTOCOL,
+                false,
+                Some(error.code),
+            );
+            return Err(error);
+        }
 
         // The envelope an agent adapter is allowed to see: headers already
         // redacted, principal already decided. (Inbound auth itself is C1#4.)
@@ -1092,19 +1819,48 @@ impl Gateway {
             extensions: token_station_protocol::Extensions::new(),
         };
 
-        let request = agent.plugin.normalize_inbound(&envelope)?;
-
-        // Language models only: an image/audio request gets an honest typed
-        // refusal, not a pretend-support attempt that times out downstream.
-        if self.reject_multimodal && request_has_multimodal(&request) {
-            return Err(ErrorEnvelope::new(
-                ErrorCode::Capability,
-                400,
-                "this proxy routes language models only; multimodal (image/audio) requests are not supported",
-            ));
-        }
-
+        let request = match agent.plugin.normalize_inbound(&envelope) {
+            Ok(request) => {
+                record_conversion(
+                    record,
+                    ConversionStage::InboundNormalize,
+                    &inbound_protocol,
+                    CANONICAL_CHAT_PROTOCOL,
+                    true,
+                    None,
+                );
+                request
+            }
+            Err(error) => {
+                record_conversion(
+                    record,
+                    ConversionStage::InboundNormalize,
+                    &inbound_protocol,
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    Some(error.code),
+                );
+                return Err(error);
+            }
+        };
         let hints = agent.plugin.extract_agent_hint(&envelope)?;
+        Ok((request, hints))
+    }
+
+    /// The pipeline. Returns `Err` only before anything was emitted, so the
+    /// caller can still shape a whole error response.
+    #[allow(clippy::too_many_arguments)] // the request pipeline's real surface
+    fn chat_inner(
+        &self,
+        ctx: &RequestContext,
+        agent: &LoadedAgent,
+        router: &Router,
+        headers: &[(String, String)],
+        body: &[u8],
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
+        let (request, hints) = Self::normalize_request(agent, headers, body, record)?;
         // Privacy boundary: the persisted requested model is a configured name
         // or a hashed `unlisted:` token — never the caller's raw string.
         let configured = self
@@ -1127,7 +1883,7 @@ impl Gateway {
             decision.decided_by,
             decision.fallbacks.len()
         );
-        record.routing = Some(RoutingRecord::from(&decision));
+        record_route_decision(record, &decision);
 
         self.dispatch(ctx, agent, &request, &decision, emit, record)
     }
@@ -1144,18 +1900,17 @@ impl Gateway {
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
         let mut last_error = None;
+        let mut budget = AttemptBudget::for_request(ctx);
 
-        for target in std::iter::once(&decision.chosen).chain(&decision.fallbacks) {
+        let mut targets = std::iter::once(&decision.chosen)
+            .chain(&decision.fallbacks)
+            .peekable();
+        while let Some(target) = targets.next() {
             // A client that already hung up (or a fired drain) gets no further
             // upstreams tried on its behalf.
             if ctx.is_cancelled() {
+                Self::emit_cancelled(emit);
                 return Ok((target.clone(), StreamOutcome::ClientCancelled));
-            }
-            // Attempt budget: stop retrying once the count ceiling is reached,
-            // whatever the candidate list length. The deadline (ctx) bounds the
-            // wall-clock separately.
-            if record.attempts >= MAX_ATTEMPTS {
-                break;
             }
             // Per-Provider admission, held across this attempt. A provider at
             // its ceiling is skipped like a retriable failure — the next
@@ -1169,14 +1924,47 @@ impl Gateway {
                 ));
                 continue;
             };
-            record.attempts += 1;
-            if let Some(routing) = record.routing.as_mut() {
-                // The record names who actually served (or last refused), not
-                // only who was chosen first.
-                target.upstream.as_str().clone_into(&mut routing.upstream);
-                routing.model.clone_from(&target.model);
+            // Only a request that obtained its Provider permit consumes an
+            // attempt. Local admission skips do not pretend an upstream call
+            // happened.
+            if !budget.try_begin(None) {
+                break;
             }
-            match self.try_upstream(ctx, agent, request, target, emit, record) {
+            record.attempts = budget.attempts;
+            record_actual_attempt_target(record, decision, target);
+            let attempt_clock = Instant::now();
+            let mut upstream_http_status = None;
+            let result = self.try_upstream(
+                ctx,
+                budget.per_attempt_timeout,
+                agent,
+                request,
+                target,
+                emit,
+                record,
+                &mut upstream_http_status,
+            );
+            let latency_ms = u64::try_from(attempt_clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let attempt = match &result {
+                Ok(outcome) => attempt_receipt(
+                    target,
+                    budget.attempts,
+                    latency_ms,
+                    upstream_http_status,
+                    Ok(*outcome),
+                    record,
+                ),
+                Err(error) => attempt_receipt(
+                    target,
+                    budget.attempts,
+                    latency_ms,
+                    upstream_http_status,
+                    Err(error),
+                    record,
+                ),
+            };
+            record.attempt_records.push(attempt);
+            match result {
                 // The terminal health verdict and status are decided exactly
                 // once, in `settle`; here we only report who served and how the
                 // exchange ended. Per-attempt failures below still trip health so
@@ -1193,14 +1981,15 @@ impl Gateway {
                         last_error = Some(error);
                         break;
                     }
-                    // Honor a `Retry-After` before the next candidate, capped by
-                    // both MAX_RETRY_AFTER and the request's remaining deadline.
-                    if let Some(retry_after_ms) = error.retry_after_ms {
-                        let wait = Duration::from_millis(retry_after_ms)
-                            .min(MAX_RETRY_AFTER)
-                            .min(ctx.remaining());
+                    // Honor a `Retry-After` only when another real attempt can
+                    // follow, bounded by both elapsed and request deadlines.
+                    if let Some(retry_after_ms) = error
+                        .retry_after_ms
+                        .filter(|_| targets.peek().is_some() && budget.has_attempt_remaining())
+                    {
+                        let wait = budget.retry_delay(Duration::from_millis(retry_after_ms), ctx);
                         if !wait.is_zero() && !ctx.is_cancelled() {
-                            std::thread::sleep(wait);
+                            wait_retry_delay(ctx, wait);
                         }
                     }
                     last_error = Some(error);
@@ -1224,13 +2013,12 @@ impl Gateway {
         // record so a later price change never re-values it. An unpriced model
         // leaves cost unknown (None), never a claimed-free zero.
         if let Some(usage) = record.usage {
-            // Surface an incoherent cache count before it becomes a cost figure.
-            if let Some(reason) = usage_anomaly(&usage) {
-                eprintln!("usage anomaly on {model}: {reason}");
-            }
             if let Some((cost, version)) = self.pricing.price(model, &usage) {
-                record.cost_micros = Some(cost);
-                record.price_version = Some(version);
+                if cost > 0 {
+                    record.cost_kind = CostKind::Estimated;
+                    record.cost_micros = Some(cost);
+                    record.price_version = Some(version);
+                }
             }
         }
         match outcome {
@@ -1257,15 +2045,254 @@ impl Gateway {
         }
     }
 
+    fn build_provider_request(
+        upstream: &Upstream,
+        request: &ChatRequest,
+        record: &mut RequestRecord,
+    ) -> Result<HttpRequestDescriptor, ErrorEnvelope> {
+        let provider_protocol = upstream.config.provider.as_str();
+        let descriptor = upstream
+            .plugin
+            .build_http_request(request, &upstream.config)
+            .inspect_err(|error| {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderRequest,
+                    CANONICAL_CHAT_PROTOCOL,
+                    provider_protocol,
+                    false,
+                    Some(error.code),
+                );
+            })?;
+        if let Err(refusal) = upstream.config.authorize(&descriptor) {
+            let error = ErrorEnvelope::new(ErrorCode::Internal, 500, refusal.to_string());
+            record_conversion(
+                record,
+                ConversionStage::ProviderRequest,
+                CANONICAL_CHAT_PROTOCOL,
+                provider_protocol,
+                false,
+                Some(error.code),
+            );
+            return Err(error);
+        }
+        record_conversion(
+            record,
+            ConversionStage::ProviderRequest,
+            CANONICAL_CHAT_PROTOCOL,
+            provider_protocol,
+            true,
+            None,
+        );
+        Ok(descriptor)
+    }
+
+    fn response_parts(
+        ctx: &RequestContext,
+        upstream: &Upstream,
+        response: UpstreamResponse,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<HttpResponseParts, AttemptTerminal> {
+        let provider_protocol = upstream.config.provider.as_str();
+        let parts = match response.into_parts() {
+            Err(_) if ctx.is_cancelled() => {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    provider_protocol,
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    None,
+                );
+                Self::emit_cancelled(emit);
+                return Err(AttemptTerminal::Outcome(StreamOutcome::ClientCancelled));
+            }
+            Err(error) => {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    provider_protocol,
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    Some(error.code),
+                );
+                return Err(AttemptTerminal::Error(error));
+            }
+            Ok(parts) => parts,
+        };
+        if ctx.is_cancelled() {
+            record_conversion(
+                record,
+                ConversionStage::ProviderResponse,
+                provider_protocol,
+                CANONICAL_CHAT_PROTOCOL,
+                false,
+                None,
+            );
+            Self::emit_cancelled(emit);
+            return Err(AttemptTerminal::Outcome(StreamOutcome::ClientCancelled));
+        }
+        Ok(parts)
+    }
+
+    fn classify_provider_error(
+        ctx: &RequestContext,
+        upstream: &Upstream,
+        response: UpstreamResponse,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<ErrorEnvelope, StreamOutcome> {
+        let parts = match Self::response_parts(ctx, upstream, response, emit, record) {
+            Ok(parts) => parts,
+            Err(AttemptTerminal::Outcome(outcome)) => return Err(outcome),
+            Err(AttemptTerminal::Error(error)) => return Ok(error),
+        };
+        let error = match upstream.plugin.map_provider_error(&parts) {
+            Ok(error) | Err(error) => error,
+        };
+        record_conversion(
+            record,
+            ConversionStage::ProviderResponse,
+            upstream.config.provider.as_str(),
+            CANONICAL_CHAT_PROTOCOL,
+            false,
+            Some(error.code),
+        );
+        Ok(error)
+    }
+
+    fn translate_stream_response(
+        ctx: &RequestContext,
+        agent: &LoadedAgent,
+        upstream: &Upstream,
+        response: UpstreamResponse,
+        target: &UpstreamModel,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<StreamOutcome, ErrorEnvelope> {
+        let sequence = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
+        let render_context = json!({
+            "protocol": record.protocol,
+            "stream_id": format!("stream-{sequence}"),
+            "response_id": format!("msg_token_station_{sequence}"),
+            "model": target.model,
+        });
+        let result = Self::relay_stream(
+            ctx,
+            agent,
+            upstream,
+            response,
+            &render_context,
+            emit,
+            record,
+        );
+        let (succeeded, error_code) = match &result {
+            Ok(StreamOutcome::Complete) => (true, None),
+            Ok(_) => (false, record.error_code),
+            Err(error) => (false, Some(error.code)),
+        };
+        record_conversion(
+            record,
+            ConversionStage::ProviderResponse,
+            upstream.config.provider.as_str(),
+            CANONICAL_CHAT_PROTOCOL,
+            succeeded,
+            error_code,
+        );
+        record_conversion(
+            record,
+            ConversionStage::StreamTranslate,
+            CANONICAL_CHAT_PROTOCOL,
+            agent.protocol.as_str(),
+            succeeded,
+            error_code,
+        );
+        result
+    }
+
+    fn translate_nonstream_response(
+        ctx: &RequestContext,
+        agent: &LoadedAgent,
+        upstream: &Upstream,
+        response: UpstreamResponse,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<StreamOutcome, ErrorEnvelope> {
+        let parts = match Self::response_parts(ctx, upstream, response, emit, record) {
+            Ok(parts) => parts,
+            Err(AttemptTerminal::Outcome(outcome)) => return Ok(outcome),
+            Err(AttemptTerminal::Error(error)) => return Err(error),
+        };
+        let chat_response = upstream
+            .plugin
+            .parse_response(&parts)
+            .inspect_err(|error| {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    upstream.config.provider.as_str(),
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    Some(error.code),
+                );
+            })?;
+        record_conversion(
+            record,
+            ConversionStage::ProviderResponse,
+            upstream.config.provider.as_str(),
+            CANONICAL_CHAT_PROTOCOL,
+            true,
+            None,
+        );
+        record.usage = Some(chat_response.usage);
+        let render_context = json!({
+            "protocol": record.protocol,
+            "response_id": chat_response.id,
+            "model": chat_response.model,
+        });
+        let rendered = agent
+            .plugin
+            .render_response(&chat_response, &render_context)
+            .inspect_err(|error| {
+                record_conversion(
+                    record,
+                    ConversionStage::OutboundRender,
+                    CANONICAL_CHAT_PROTOCOL,
+                    agent.protocol.as_str(),
+                    false,
+                    Some(error.code),
+                );
+            })?;
+        record_conversion(
+            record,
+            ConversionStage::OutboundRender,
+            CANONICAL_CHAT_PROTOCOL,
+            agent.protocol.as_str(),
+            true,
+            None,
+        );
+        if !emit(Reply::BeginJson(JsonReply {
+            status: 200,
+            body: rendered.to_string(),
+        })) {
+            return Ok(StreamOutcome::ClientCancelled);
+        }
+        Ok(StreamOutcome::Complete)
+    }
+
     /// One upstream attempt: build, authorize, inject, send, translate back.
+    #[allow(clippy::too_many_arguments)] // one attempt's explicit protocol boundary
     fn try_upstream(
         &self,
         ctx: &RequestContext,
+        attempt_timeout: Duration,
         agent: &LoadedAgent,
         request: &ChatRequest,
         target: &UpstreamModel,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
+        upstream_http_status: &mut Option<u16>,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         let upstream = self
             .upstreams
@@ -1281,61 +2308,60 @@ impl Gateway {
         // Routing may have picked a different model than the caller named.
         let mut request = request.clone();
         request.model.clone_from(&target.model);
+        let descriptor = Self::build_provider_request(upstream, &request, record)?;
 
-        let descriptor = upstream
-            .plugin
-            .build_http_request(&request, &upstream.config)?;
+        let response = match self.send(ctx, attempt_timeout, &descriptor, target.upstream.as_str())
+        {
+            Err(_) if ctx.is_cancelled() => {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    upstream.config.provider.as_str(),
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    None,
+                );
+                Self::emit_cancelled(emit);
+                return Ok(StreamOutcome::ClientCancelled);
+            }
+            Err(error) => {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    upstream.config.provider.as_str(),
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    Some(error.code),
+                );
+                return Err(error);
+            }
+            Ok(response) => response,
+        };
+        *upstream_http_status = Some(response.status);
 
-        // The exfiltration gate, in the real request path: the plugin chose the
-        // URL and named the credential; nothing is resolved until this passes.
-        upstream
-            .config
-            .authorize(&descriptor)
-            .map_err(|refusal| ErrorEnvelope::new(ErrorCode::Internal, 500, refusal.to_string()))?;
-
-        let response = self.send(&descriptor, target.upstream.as_str())?;
+        if let Err(error) = EgressPolicy::reject_redirect(response.status) {
+            record_conversion(
+                record,
+                ConversionStage::ProviderResponse,
+                upstream.config.provider.as_str(),
+                CANONICAL_CHAT_PROTOCOL,
+                false,
+                Some(error.code),
+            );
+            return Err(error);
+        }
 
         if response.status >= 400 {
-            // The adapter classifies; the catalog decides retriability.
-            let parts: HttpResponseParts = response.into();
-            return Err(upstream.plugin.map_provider_error(&parts)?);
+            return match Self::classify_provider_error(ctx, upstream, response, emit, record) {
+                Ok(error) => Err(error),
+                Err(outcome) => Ok(outcome),
+            };
         }
 
         if request.stream {
-            let sequence = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
-            let render_context = json!({
-                "protocol": record.protocol,
-                "stream_id": format!("stream-{sequence}"),
-                "response_id": format!("msg_token_station_{sequence}"),
-                "model": target.model,
-            });
-            Ok(Self::relay_stream(
-                ctx,
-                agent,
-                upstream,
-                response,
-                &render_context,
-                emit,
-                record,
-            ))
+            Self::translate_stream_response(ctx, agent, upstream, response, target, emit, record)
         } else {
-            let parts: HttpResponseParts = response.into();
-            let chat_response = upstream.plugin.parse_response(&parts)?;
-            record.usage = Some(chat_response.usage);
-            let render_context = json!({
-                "protocol": record.protocol,
-                "response_id": chat_response.id,
-                "model": chat_response.model,
-            });
-            let rendered = agent
-                .plugin
-                .render_response(&chat_response, &render_context)?;
-            emit(Reply::BeginJson(JsonReply {
-                status: 200,
-                body: rendered.to_string(),
-            }));
-            // A fully collected non-stream body is a complete exchange.
-            Ok(StreamOutcome::Complete)
+            Self::translate_nonstream_response(ctx, agent, upstream, response, emit, record)
         }
     }
 
@@ -1345,15 +2371,35 @@ impl Gateway {
     /// scope with the request. It never touches a log, an error, or the guest.
     fn send(
         &self,
+        ctx: &RequestContext,
+        attempt_timeout: Duration,
         descriptor: &HttpRequestDescriptor,
         upstream_name: &str,
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
-        self.send_with(&self.http, descriptor, upstream_name)
+        let timeout = ctx.remaining().min(attempt_timeout);
+        let http = cancel_aware_agent(timeout, ctx.token());
+        self.send_raw_with(&http, descriptor, upstream_name)
     }
 
     /// [`Gateway::send`] over a caller-chosen agent — the probe path brings
     /// its own, with a timeout sized for diagnostics rather than generation.
     fn send_with(
+        &self,
+        http: &ureq::Agent,
+        descriptor: &HttpRequestDescriptor,
+        upstream_name: &str,
+    ) -> Result<UpstreamResponse, ErrorEnvelope> {
+        let response = self.send_raw_with(http, descriptor, upstream_name)?;
+        EgressPolicy::reject_redirect(response.status)?;
+        Ok(response)
+    }
+
+    /// Performs the authorized first hop without following redirects. The
+    /// request path consumes the raw status before enforcing the redirect
+    /// rejection so its receipt can preserve the upstream's real terminal
+    /// response; probes use [`Gateway::send_with`] and retain the same
+    /// fail-closed behavior.
+    fn send_raw_with(
         &self,
         http: &ureq::Agent,
         descriptor: &HttpRequestDescriptor,
@@ -1402,15 +2448,8 @@ impl Gateway {
                 }
             }
         };
-        let response = sent.map_err(|error| {
-            ErrorEnvelope::new(
-                ErrorCode::UpstreamUnavailable,
-                502,
-                format!("upstream transport: {error}"),
-            )
-        })?;
-
-        Ok(UpstreamResponse::from(response))
+        sent.map(UpstreamResponse::from)
+            .map_err(map_transport_error)
     }
 
     /// `protocol::Auth` dialect -> one concrete header.
@@ -1444,8 +2483,9 @@ impl Gateway {
         }
     }
 
-    /// Streams the upstream body through the parse/render pair, chunk by
-    /// chunk, with the split points the network chose.
+    /// Streams complete byte-framed SSE events through the parse/render pair.
+    /// Nothing is committed to the client before the first valid event.
+    #[allow(clippy::too_many_lines)] // framing, checkpoint and terminal mapping stay one state machine
     fn relay_stream(
         ctx: &RequestContext,
         agent: &LoadedAgent,
@@ -1454,133 +2494,267 @@ impl Gateway {
         render_context: &Value,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
-    ) -> StreamOutcome {
+    ) -> Result<StreamOutcome, ErrorEnvelope> {
         let mut parser = upstream.plugin.stream_parser();
         let mut reader = response.reader;
-
-        if !emit(Reply::BeginStream) {
-            return StreamOutcome::ClientCancelled;
-        }
-
-        // `committed` flips once assistant output has left for the client; it
-        // decides whether a later break is FailedAfterPartial (a truncated
-        // answer) or FailedBeforeOutput (nothing sent, a candidate may retry).
+        let mut decoder = SseFrameDecoder::default();
         let mut committed = false;
-        let mut saw_done = false;
-
         let mut buffer = [0u8; STREAM_READ];
-        // Raw bytes not yet handed to the parser. A multibyte UTF-8 character
-        // (or a whole frame) that a socket read split in the middle waits here
-        // for the rest, instead of being mangled by a per-read lossy decode.
-        let mut pending: Vec<u8> = Vec::new();
+
         loop {
-            // Between reads is where a mid-stream cancel actually lands: the
-            // client hung up or the deadline passed, so stop paying for output
-            // nobody will read instead of draining the upstream to its end.
             if ctx.is_cancelled() {
                 Self::clear_stream_state(agent, render_context);
-                return StreamOutcome::ClientCancelled;
+                if !committed {
+                    Self::emit_cancelled(emit);
+                }
+                return Ok(StreamOutcome::ClientCancelled);
             }
             let read = match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(read) => read,
-                Err(error) => {
-                    // Mid-stream failure: already committed to SSE, so it goes
-                    // out as a rendered error event rather than a status code —
-                    // and into the outcome, where status 200 alone would lie.
-                    let envelope = ErrorEnvelope::new(
-                        ErrorCode::UpstreamUnavailable,
-                        502,
-                        format!("upstream stream broke: {error}"),
-                    );
-                    record.error_code = Some(envelope.code);
-                    let rendered = Self::render_stream_error(agent, &envelope, render_context);
-                    emit(Reply::Chunk(rendered));
-                    Self::clear_stream_state(agent, render_context);
-                    return Self::stream_failure(committed);
-                }
-            };
-
-            pending.extend_from_slice(&buffer[..read]);
-            let data = take_decodable(&mut pending);
-            if data.is_empty() {
-                // Only an incomplete multibyte character so far — read the rest
-                // before decoding, rather than emit a replacement char.
-                continue;
-            }
-            let events = match parser.parse_chunk(&StreamChunk { data }) {
-                Ok(events) => events,
-                Err(envelope) => {
-                    record.error_code = Some(envelope.code);
-                    let rendered = Self::render_stream_error(agent, &envelope, render_context);
-                    emit(Reply::Chunk(rendered));
-                    Self::clear_stream_state(agent, render_context);
-                    return Self::stream_failure(committed);
-                }
-            };
-
-            for event in events {
-                match &event {
-                    StreamEvent::Usage { usage } => record.usage = Some(*usage),
-                    StreamEvent::Done { .. } => saw_done = true,
-                    // An upstream error surfaced mid-stream is a failed exchange,
-                    // not a completed one: settle must not read it as success
-                    // even when bytes are already out.
-                    StreamEvent::Error { error } => {
-                        record.error_code = Some(error.code);
-                        let rendered = Self::render_stream_error(agent, error, render_context);
-                        emit(Reply::Chunk(rendered));
-                        Self::clear_stream_state(agent, render_context);
-                        return Self::stream_failure(committed);
+                Ok(0) => {
+                    if let Err(envelope) = decoder.finish() {
+                        return Self::terminate_stream(
+                            agent,
+                            render_context,
+                            emit,
+                            record,
+                            envelope,
+                            committed,
+                        );
                     }
-                    _ => {}
-                }
-                let chunk = match agent.plugin.render_stream_event(&event, render_context) {
-                    Ok(chunk) => chunk,
-                    Err(envelope) => {
-                        record.error_code = Some(envelope.code);
-                        let rendered = Self::render_stream_error(agent, &envelope, render_context);
-                        emit(Reply::Chunk(rendered));
+                    let events = match parser.finish() {
+                        Ok(events) => events,
+                        Err(envelope) => {
+                            return Self::terminate_stream(
+                                agent,
+                                render_context,
+                                emit,
+                                record,
+                                envelope,
+                                committed,
+                            );
+                        }
+                    };
+                    if let Some(error) = events.iter().find_map(|event| match event {
+                        StreamEvent::Error { error } => Some(error.clone()),
+                        _ => None,
+                    }) {
+                        return Self::terminate_stream(
+                            agent,
+                            render_context,
+                            emit,
+                            record,
+                            error,
+                            committed,
+                        );
+                    }
+                    let mut terminal = false;
+                    for event in events {
+                        let chunk = match agent.plugin.render_stream_event(&event, render_context) {
+                            Ok(chunk) => chunk,
+                            Err(envelope) => {
+                                return Self::terminate_stream(
+                                    agent,
+                                    render_context,
+                                    emit,
+                                    record,
+                                    envelope,
+                                    committed,
+                                );
+                            }
+                        };
+                        if !committed && !emit(Reply::BeginStream) {
+                            Self::clear_stream_state(agent, render_context);
+                            return Ok(StreamOutcome::ClientCancelled);
+                        }
+                        let data = chunk
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        if !emit(Reply::Chunk(data)) {
+                            Self::clear_stream_state(agent, render_context);
+                            return Ok(StreamOutcome::ClientCancelled);
+                        }
+                        committed = true;
+                        match event {
+                            StreamEvent::Usage { usage } => record.usage = Some(usage),
+                            StreamEvent::Done { .. } => terminal = true,
+                            _ => {}
+                        }
+                    }
+                    if terminal {
                         Self::clear_stream_state(agent, render_context);
-                        return Self::stream_failure(committed);
+                        return Ok(StreamOutcome::Complete);
+                    }
+                    return Self::terminate_stream(
+                        agent,
+                        render_context,
+                        emit,
+                        record,
+                        ErrorEnvelope::new(
+                            ErrorCode::TransportTruncated,
+                            502,
+                            "upstream SSE connection closed before a terminal event",
+                        ),
+                        committed,
+                    );
+                }
+                Ok(read) => read,
+                Err(_) => {
+                    if ctx.is_cancelled() {
+                        Self::clear_stream_state(agent, render_context);
+                        if !committed {
+                            Self::emit_cancelled(emit);
+                        }
+                        return Ok(StreamOutcome::ClientCancelled);
+                    }
+                    let envelope = ErrorEnvelope::new(
+                        ErrorCode::TransportTruncated,
+                        502,
+                        "upstream connection broke while streaming",
+                    );
+                    return Self::terminate_stream(
+                        agent,
+                        render_context,
+                        emit,
+                        record,
+                        envelope,
+                        committed,
+                    );
+                }
+            };
+
+            let frames = match decoder.push(&buffer[..read]) {
+                Ok(frames) => frames,
+                Err(envelope) => {
+                    return Self::terminate_stream(
+                        agent,
+                        render_context,
+                        emit,
+                        record,
+                        envelope,
+                        committed,
+                    );
+                }
+            };
+
+            for data in frames {
+                let events = match parser.parse_chunk(&StreamChunk { data }) {
+                    Ok(events) => events,
+                    Err(envelope) => {
+                        return Self::terminate_stream(
+                            agent,
+                            render_context,
+                            emit,
+                            record,
+                            envelope,
+                            committed,
+                        );
                     }
                 };
-                let data = chunk
-                    .get("data")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                if !emit(Reply::Chunk(data)) {
-                    Self::clear_stream_state(agent, render_context);
-                    return StreamOutcome::ClientCancelled; // Client hung up.
+                if let Some(error) = events.iter().find_map(|event| match event {
+                    StreamEvent::Error { error } => Some(error.clone()),
+                    _ => None,
+                }) {
+                    return Self::terminate_stream(
+                        agent,
+                        render_context,
+                        emit,
+                        record,
+                        error,
+                        committed,
+                    );
                 }
-                if matches!(
-                    event,
-                    StreamEvent::Delta { .. } | StreamEvent::ToolCallDelta { .. }
-                ) {
+
+                let mut rendered = Vec::with_capacity(events.len());
+                for event in &events {
+                    let chunk = match agent.plugin.render_stream_event(event, render_context) {
+                        Ok(chunk) => chunk,
+                        Err(envelope) => {
+                            return Self::terminate_stream(
+                                agent,
+                                render_context,
+                                emit,
+                                record,
+                                envelope,
+                                committed,
+                            );
+                        }
+                    };
+                    rendered.push(
+                        chunk
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                }
+                if rendered.is_empty() {
+                    continue;
+                }
+                if !committed && !emit(Reply::BeginStream) {
+                    Self::clear_stream_state(agent, render_context);
+                    return Ok(StreamOutcome::ClientCancelled);
+                }
+
+                let mut terminal = false;
+                for (event, data) in events.into_iter().zip(rendered) {
+                    if !emit(Reply::Chunk(data)) {
+                        Self::clear_stream_state(agent, render_context);
+                        return Ok(StreamOutcome::ClientCancelled);
+                    }
                     committed = true;
+                    match event {
+                        StreamEvent::Usage { usage } => record.usage = Some(usage),
+                        StreamEvent::Done { .. } => terminal = true,
+                        _ => {}
+                    }
+                }
+                if terminal {
+                    Self::clear_stream_state(agent, render_context);
+                    return Ok(StreamOutcome::Complete);
                 }
             }
-        }
-
-        Self::clear_stream_state(agent, render_context);
-        // Clean EOF: a terminal `done` is the only honest success. A stream that
-        // stops without one left the answer half-said, whatever it already sent.
-        if saw_done {
-            StreamOutcome::Complete
-        } else {
-            Self::stream_failure(committed)
         }
     }
 
-    /// A broken stream maps to a pre/post-output failure so `settle` can decide
-    /// retriability without ever recording success.
-    const fn stream_failure(committed: bool) -> StreamOutcome {
-        if committed {
-            StreamOutcome::FailedAfterPartial
-        } else {
-            StreamOutcome::FailedBeforeOutput
+    fn terminate_stream(
+        agent: &LoadedAgent,
+        render_context: &Value,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+        envelope: ErrorEnvelope,
+        committed: bool,
+    ) -> Result<StreamOutcome, ErrorEnvelope> {
+        if !committed {
+            Self::clear_stream_state(agent, render_context);
+            return Err(envelope);
         }
+        record.error_code = Some(envelope.code);
+        let rendered = Self::render_stream_error(agent, &envelope, render_context);
+        if !emit(Reply::Chunk(rendered)) {
+            Self::clear_stream_state(agent, render_context);
+            return Ok(StreamOutcome::ClientCancelled);
+        }
+        Self::clear_stream_state(agent, render_context);
+        Ok(StreamOutcome::FailedAfterPartial)
+    }
+
+    /// Complete the still-uncommitted HTTP exchange when a drain/deadline
+    /// cancels it. Without this reply the server would mistake the intentional
+    /// cancellation for a worker crash and manufacture a 500 response.
+    fn emit_cancelled(emit: &mut dyn FnMut(Reply) -> bool) {
+        emit(Reply::BeginJson(JsonReply {
+            status: 499,
+            body: json!({
+                "error": {
+                    "message": "request cancelled",
+                    "type": "cancelled",
+                    "code": "client_cancelled"
+                }
+            })
+            .to_string(),
+        }));
     }
 
     /// An error, rendered the way the matched inbound protocol spells it.
@@ -1665,118 +2839,99 @@ impl UpstreamResponse {
             reader: Box::new(reader),
         }
     }
-}
 
-impl From<UpstreamResponse> for HttpResponseParts {
-    fn from(mut response: UpstreamResponse) -> Self {
-        let mut body = String::new();
-        // A read failure mid-body surfaces as truncated JSON, which the
-        // adapter reports as a parse error attributed to the upstream.
-        let _ = response.reader.read_to_string(&mut body);
-        Self {
-            status: response.status,
-            headers: response.headers,
+    fn into_parts(mut self) -> Result<HttpResponseParts, ErrorEnvelope> {
+        let mut bytes = Vec::new();
+        self.reader.read_to_end(&mut bytes).map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorCode::TransportTruncated,
+                502,
+                "upstream connection closed before the response body completed",
+            )
+        })?;
+        let body = String::from_utf8(bytes).map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorCode::ProviderProtocolError,
+                502,
+                "upstream response body is not valid UTF-8",
+            )
+        })?;
+        Ok(HttpResponseParts {
+            status: self.status,
+            headers: self.headers,
             body,
             extensions: token_station_protocol::Extensions::new(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod attempt_budget_tests {
+    use super::{AttemptBudget, map_transport_error};
+    use std::time::{Duration, Instant};
+
+    fn budget(max_attempts: u32, max_cost: Option<u64>) -> AttemptBudget {
+        AttemptBudget {
+            max_attempts,
+            max_elapsed: Duration::from_secs(60),
+            per_attempt_timeout: Duration::from_secs(10),
+            max_cost,
+            started: Instant::now(),
+            attempts: 0,
+            reserved_cost: 0,
         }
     }
-}
-
-#[cfg(test)]
-mod usage_anomaly_tests {
-    use super::usage_anomaly;
-    use token_station_protocol::Usage;
 
     #[test]
-    fn coherent_usage_is_not_flagged() {
-        let usage = Usage {
-            input_tokens: 1000,
-            output_tokens: 200,
-            cache_read_tokens: 400,
-            cache_write_tokens: 100,
-            ..Usage::default()
-        };
-        assert!(usage_anomaly(&usage).is_none());
+    fn count_and_cost_are_consumed_before_each_attempt() {
+        let mut value = budget(2, Some(10));
+        assert!(value.try_begin(Some(4)));
+        assert!(value.try_begin(Some(6)));
+        assert!(!value.try_begin(Some(0)), "count ceiling wins");
     }
 
     #[test]
-    fn cache_read_over_input_is_flagged() {
-        let usage = Usage {
-            input_tokens: 100,
-            cache_read_tokens: 500,
-            ..Usage::default()
-        };
-        assert!(usage_anomaly(&usage).is_some());
+    fn configured_cost_budget_rejects_unknown_or_excess_cost() {
+        let mut unknown = budget(3, Some(10));
+        assert!(!unknown.try_begin(None));
+        let mut excess = budget(3, Some(10));
+        assert!(!excess.try_begin(Some(11)));
+        assert_eq!(excess.attempts, 0);
+    }
+
+    #[test]
+    fn a_transport_timeout_has_the_stable_timeout_classification() {
+        let envelope = map_transport_error(ureq::Error::Timeout(ureq::Timeout::Global));
+        assert_eq!(envelope.code, token_station_protocol::ErrorCode::Timeout);
+        assert_eq!(envelope.http_status, 504);
     }
 }
 
 #[cfg(test)]
-mod multimodal_tests {
-    use super::request_has_multimodal;
-    use token_station_protocol::{ChatRequest, Content, ContentPart, ImageUrl, Message, Role};
+mod egress_policy_tests {
+    use super::EgressPolicy;
+    use std::time::Duration;
+    use token_station_protocol::ErrorCode;
 
     #[test]
-    fn a_text_only_request_is_not_multimodal() {
-        let request = ChatRequest::new("m", vec![Message::text(Role::User, "hello")]);
-        assert!(!request_has_multimodal(&request));
+    fn redirects_and_environment_proxies_are_disabled_explicitly() {
+        let agent = EgressPolicy::agent(Duration::from_secs(1));
+
+        assert_eq!(agent.config().max_redirects(), 0);
+        assert!(agent.config().proxy().is_none());
     }
 
     #[test]
-    fn a_request_with_an_image_part_is_multimodal() {
-        let request = ChatRequest::new(
-            "m",
-            vec![Message {
-                role: Role::User,
-                content: Some(Content::Parts(vec![
-                    ContentPart::Text {
-                        text: "what is this".to_owned(),
-                    },
-                    ContentPart::ImageUrl {
-                        image_url: ImageUrl {
-                            url: "data:image/png;base64,AAAA".to_owned(),
-                            detail: None,
-                        },
-                    },
-                ])),
-                ..Message::text(Role::User, "")
-            }],
-        );
-        assert!(request_has_multimodal(&request));
-    }
-}
-
-#[cfg(test)]
-mod sse_decode_tests {
-    use super::take_decodable;
-
-    #[test]
-    fn a_multibyte_char_split_across_reads_is_decoded_whole() {
-        // The UTF-8 bytes for the Chinese character meaning you are E4 BD A0. A socket read ends after E4 BD.
-        let mut pending = vec![0xE4, 0xBD];
-        assert_eq!(take_decodable(&mut pending), "", "an incomplete char waits");
-        assert_eq!(pending, vec![0xE4, 0xBD], "its bytes are kept");
-
-        // The next read brings A0 and more.
-        pending.push(0xA0);
-        pending.extend_from_slice(b"ok");
-        assert_eq!(take_decodable(&mut pending), "你ok");
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn a_four_byte_emoji_split_across_reads_survives() {
-        // "😀" is F0 9F 98 80.
-        let mut pending = vec![0xF0, 0x9F];
-        assert_eq!(take_decodable(&mut pending), "");
-        pending.extend_from_slice(&[0x98, 0x80]);
-        assert_eq!(take_decodable(&mut pending), "😀");
-    }
-
-    #[test]
-    fn complete_ascii_decodes_immediately() {
-        let mut pending = b"data: {}\n\n".to_vec();
-        assert_eq!(take_decodable(&mut pending), "data: {}\n\n");
-        assert!(pending.is_empty());
+    fn every_redirect_status_is_rejected_before_provider_parsing() {
+        for status in [300, 302, 307, 399] {
+            let error = EgressPolicy::reject_redirect(status).unwrap_err();
+            assert_eq!(error.code, ErrorCode::UpstreamUnavailable);
+            assert_eq!(error.http_status, 502);
+            assert!(error.message.contains(&status.to_string()));
+        }
+        for status in [299, 400] {
+            EgressPolicy::reject_redirect(status).expect("non-redirect status continues");
+        }
     }
 }
 
@@ -1858,6 +3013,23 @@ mod layered_health_tests {
 }
 
 #[cfg(test)]
+mod feature_probe_tests {
+    use super::validate_provider_health_json;
+
+    #[test]
+    fn structured_probe_requires_the_exact_requested_shape() {
+        for invalid in ["{}", "[]", r#"{"ok":"true"}"#, r#"{"ok":true,"extra":1}"#] {
+            assert!(
+                validate_provider_health_json(invalid).is_err(),
+                "must reject {invalid}"
+            );
+        }
+        assert!(validate_provider_health_json(r#"{"ok":true}"#).is_ok());
+        assert!(validate_provider_health_json(r#"{"ok":false}"#).is_ok());
+    }
+}
+
+#[cfg(test)]
 mod requested_model_privacy_tests {
     use super::canonical_requested_model;
 
@@ -1893,5 +3065,176 @@ mod requested_model_privacy_tests {
             canonical_requested_model("mystery-model-a", false),
             canonical_requested_model("mystery-model-b", false),
         );
+    }
+}
+
+#[cfg(test)]
+mod request_receipt_tests {
+    use super::{begin_record, record_actual_attempt_target, record_route_decision};
+    use token_station_router_core::{
+        DecidedBy, Decision, RequestFeatures, UpstreamModel, UpstreamRef,
+    };
+
+    #[test]
+    fn request_ids_are_random_fixed_width_and_scope_is_bound_at_arrival() {
+        let first = begin_record(
+            1_752_000_000_000,
+            "openai-chat-completions",
+            Some("codex"),
+            Some(42),
+        );
+        let second = begin_record(
+            1_752_000_000_000,
+            "openai-chat-completions",
+            Some("codex"),
+            Some(42),
+        );
+
+        assert_eq!(first.request_id.len(), 36);
+        assert!(first.request_id.starts_with("req_"));
+        assert!(
+            first.request_id[4..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+        assert_ne!(first.request_id, second.request_id);
+        assert_eq!(first.agent_id.as_deref(), Some("codex"));
+        assert_eq!(first.running_revision, Some(42));
+    }
+
+    #[test]
+    fn a_decision_does_not_claim_an_actual_provider_until_an_attempt_starts() {
+        let chosen = UpstreamModel::new(UpstreamRef::new("primary").unwrap(), "model-a");
+        let fallback = UpstreamModel::new(UpstreamRef::new("fallback").unwrap(), "model-b");
+        let decision = Decision {
+            chosen,
+            decided_by: DecidedBy::Default,
+            fallbacks: vec![fallback.clone()],
+            features: RequestFeatures::default(),
+            pool: "main".to_owned(),
+        };
+        let mut record = begin_record(1, "openai-chat-completions", None, None);
+
+        record_route_decision(&mut record, &decision);
+        assert!(record.decision.is_some());
+        assert!(
+            record.routing.is_none(),
+            "a zero-attempt receipt has no actual server"
+        );
+
+        record_actual_attempt_target(&mut record, &decision, &fallback);
+        assert_eq!(
+            record.routing.as_ref().map(|route| route.upstream.as_str()),
+            Some("fallback")
+        );
+    }
+}
+
+#[cfg(test)]
+mod capability_evidence_tests {
+    use super::{project_capability_evidence_for_v1, restore_configured_capability_evidence};
+    use token_station_protocol::{CapabilityState, ModelCapability};
+
+    #[test]
+    fn an_old_plugin_cannot_promote_explicit_unknown_to_declared() {
+        let configured = ModelCapability {
+            model: "legacy-model".to_owned(),
+            tool: true,
+            tool_state: Some(CapabilityState::Unknown),
+            ..ModelCapability::default()
+        };
+        let projected = project_capability_evidence_for_v1(configured.clone());
+        assert!(!projected.tool, "unknown projects to fail-closed for v1");
+        let reported = ModelCapability {
+            model: "legacy-model".to_owned(),
+            tool: projected.tool,
+            ..ModelCapability::default()
+        };
+
+        let merged = restore_configured_capability_evidence(reported, &[configured]);
+
+        assert_eq!(merged.tool_state(), CapabilityState::Unknown);
+        assert!(!merged.tool_state().is_supported());
+    }
+
+    #[test]
+    fn an_old_plugin_cannot_erase_verified_evidence() {
+        let configured = ModelCapability {
+            model: "legacy-model".to_owned(),
+            tool_state: Some(CapabilityState::Verified),
+            ..ModelCapability::default()
+        };
+        let projected = project_capability_evidence_for_v1(configured.clone());
+        assert!(projected.tool, "verified projects to true for v1");
+        let reported = ModelCapability {
+            model: "legacy-model".to_owned(),
+            tool: projected.tool,
+            ..ModelCapability::default()
+        };
+
+        let merged = restore_configured_capability_evidence(reported, &[configured]);
+
+        assert_eq!(merged.tool_state(), CapabilityState::Verified);
+        assert!(merged.tool_state().is_supported());
+    }
+
+    #[test]
+    fn a_new_plugin_explicit_report_is_not_overwritten_by_configuration() {
+        let configured = ModelCapability {
+            model: "modern-model".to_owned(),
+            tool_state: Some(CapabilityState::Declared),
+            ..ModelCapability::default()
+        };
+        let reported = ModelCapability {
+            model: "modern-model".to_owned(),
+            tool_state: Some(CapabilityState::Unsupported),
+            ..ModelCapability::default()
+        };
+
+        let merged = restore_configured_capability_evidence(reported, &[configured]);
+
+        assert_eq!(merged.tool_state(), CapabilityState::Unsupported);
+    }
+}
+
+#[cfg(test)]
+mod language_boundary_tests {
+    use super::{contains_non_language_content, is_embeddings_path};
+    use serde_json::json;
+
+    #[test]
+    fn only_the_canonical_embeddings_path_is_a_language_boundary() {
+        assert!(is_embeddings_path("/v1/embeddings"));
+        assert!(is_embeddings_path("/v1/embeddings/"));
+        assert!(!is_embeddings_path("/v1/not-embeddings"));
+    }
+
+    #[test]
+    fn protocol_content_and_top_level_output_modalities_are_rejected() {
+        assert!(contains_non_language_content(&json!({
+            "messages": [{"role": "user", "content": [{"type": "image_url"}]}]
+        })));
+        assert!(contains_non_language_content(&json!({
+            "input": [{"type": "message", "content": [{"type": "input_audio"}]}]
+        })));
+        assert!(contains_non_language_content(&json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "modalities": ["text", "audio"]
+        })));
+    }
+
+    #[test]
+    fn metadata_and_tool_schemas_do_not_trigger_the_media_boundary() {
+        assert!(!contains_non_language_content(&json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "metadata": {"type": "audio", "modalities": ["audio"]},
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "catalog",
+                    "parameters": {"type": "object", "properties": {"type": {"const": "image"}}}
+                }
+            }]
+        })));
     }
 }

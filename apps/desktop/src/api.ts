@@ -6,24 +6,57 @@ export interface TierView {
   model: string | null;
 }
 
-/** A model's declared four-state capabilities (what the router gates on). */
-export interface ModelCapabilityView {
-  model: string;
-  tool: boolean;
-  vision: boolean;
-  json_schema: boolean;
-  /** 0 means the adapter did not declare a value. Routing treats it as unknown and does not send long contexts here. */
-  context_window: number;
-}
-
 export interface ProviderView {
   name: string;
   provider: string;
   base_url: string;
   models: string[];
-  /** Four-state capabilities for each model. The backend always supplies them; old mocks might not, so the UI uses `?? []`. */
-  model_details?: ModelCapabilityView[];
+  model_capabilities?: ModelCapabilityView[];
+  catalog_revision?: number;
+  catalog?: CatalogModelView[];
   has_auth: boolean;
+}
+
+export type CapabilityState = "verified" | "declared" | "unsupported" | "unknown";
+
+export interface ModelCapabilityView {
+  model: string;
+  tool: CapabilityState;
+  vision: CapabilityState;
+  json_schema: CapabilityState;
+}
+
+export type CatalogSource = "live" | "cache" | "configured";
+export type CatalogState = "active" | "stale" | "removed";
+
+export interface CatalogModelView extends ModelCapabilityView {
+  source: CatalogSource;
+  last_seen_ms: number | null;
+  catalog_state: CatalogState;
+}
+
+export interface ProviderEndpointPreview {
+  chat: string;
+  responses: string;
+  messages: string;
+}
+
+export interface ProviderRemovalPreview {
+  name: string;
+  references: string[];
+  can_remove: boolean;
+}
+
+export interface ProviderTestStage {
+  layer: "network" | "http" | "auth" | "model" | "generation" | "stream" | "tool" | "json";
+  status: "pass" | "fail" | "skipped";
+  detail?: string;
+}
+
+export interface ProviderTestResult {
+  model: string;
+  stages: ProviderTestStage[];
+  latency_ms?: number;
 }
 
 export interface ModelDiscoveryView {
@@ -31,13 +64,124 @@ export interface ModelDiscoveryView {
   source: "live" | "cache" | "none";
   fetched_at_ms: number | null;
   warning: string | null;
+  revision?: number;
+  catalog?: CatalogModelView[];
+  added?: string[];
+  removed?: string[];
+}
+
+export type ReceiptCostKind = "actual" | "estimated" | "unknown";
+
+export type ReceiptErrorCode =
+  | "invalid_request"
+  | "auth"
+  | "payment_required"
+  | "rate_limit"
+  | "capacity"
+  | "capability"
+  | "content_policy"
+  | "upstream_unavailable"
+  | "transport_truncated"
+  | "context_length"
+  | "provider_protocol_error"
+  | "timeout"
+  | "internal";
+
+export interface ReceiptUsageView {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
+}
+
+export interface ReceiptFeaturesView {
+  estimated_input_tokens: number;
+  message_count: number;
+  tool_count: number;
+  has_images: boolean;
+  requires_json_schema: boolean;
+  code_block_count: number;
+  requested_max_output_tokens: number | null;
+  hint_count: number;
+  reasoning_marker_count: number;
+  technical_term_count: number;
+  simple_indicator_count: number;
+  code_keyword_count: number;
+  math_term_count: number;
+  creative_term_count: number;
+  multi_step_signal: number;
+  question_count: number;
+  system_format_hint: boolean;
+}
+
+export type ReceiptDecidedByView =
+  | { tier: "rule"; rule: string }
+  | { tier: "hint"; kind: "step_type" | "task_type" | "preference" | "capability"; value: string }
+  | { tier: "heuristic"; score: number; threshold: number }
+  | { tier: "default" }
+  | { tier: "exact_model"; model: string };
+
+export interface ReceiptRouteView {
+  upstream: string;
+  model: string;
+  pool: string;
+  decided_by: ReceiptDecidedByView;
+  fallbacks: number;
+  features: ReceiptFeaturesView;
+}
+
+export interface ReceiptAttemptView {
+  ordinal: number;
+  upstream: string;
+  model: string;
+  latency_ms: number;
+  http_status: number | null;
+  error_code: ReceiptErrorCode | null;
+  stream_outcome: "complete" | "failed_after_partial" | "failed_before_output" | "client_cancelled" | null;
+  fallback_allowed: boolean;
+}
+
+export interface ReceiptConversionView {
+  ordinal: number;
+  stage: "inbound_normalize" | "provider_request" | "provider_response" | "outbound_render" | "stream_translate";
+  source_protocol: string;
+  target_protocol: string;
+  succeeded: boolean;
+  error_code: ReceiptErrorCode | null;
+}
+
+export interface ReceiptView {
+  request_id: string;
+  started_at_ms: number;
+  latency_ms: number;
+  protocol: string;
+  requested_model: string;
+  stream: boolean;
+  status: number;
+  error_code: ReceiptErrorCode | null;
+  attempts: number;
+  routing: ReceiptRouteView | null;
+  usage: ReceiptUsageView | null;
+  cost_micros: number | null;
+  price_version: number | null;
+  agent_id: string | null;
+  running_revision: number | null;
+  cost_kind: ReceiptCostKind;
+  decision: ReceiptRouteView | null;
+  attempt_records: ReceiptAttemptView[];
+  conversion_reports: ReceiptConversionView[];
 }
 
 export type ServePhase = "stopped" | "starting" | "stopping" | "running" | "error";
 
 export interface ServeView {
   phase: ServePhase;
-  running: boolean;
+  app_runtime: "stopped" | "running";
+  listener_reachable: boolean;
+  agent_connected: boolean;
+  running_revision: number | null;
+  instance_id: string | null;
   listen: string;
   virtual_key: string | null;
   error: string | null;
@@ -51,7 +195,6 @@ export interface AgentRouteView {
   mode: AgentRouteMode;
   tiers: Record<TierSlot, TierView>;
   config_error: string | null;
-  /** Mounted profile name (when mode === "profile"). */
   profile: string | null;
 }
 
@@ -67,19 +210,19 @@ export interface SettingsView {
 
 export interface StateView {
   providers: ProviderView[];
+  deleted_providers?: string[];
+  provider_recovery_error?: string | null;
   tiers: Record<TierSlot, TierView>;
   /** User keyword library for each tier; a match forces that tier at routing layer 1. */
   keywords: Record<TierSlot, string[]>;
   agent_routes: Record<string, AgentRouteView>;
+  profiles: string[];
   serve: ServeView;
+  draft_revision: number;
+  saved_revision: number;
+  config_dirty: boolean;
   config_error: string | null;
   settings: SettingsView;
-  /** The draft differs from the configuration saved to disk, so unsaved changes exist. */
-  dirty: boolean;
-  /** The running proxy uses the saved configuration (true when it is not running). false means the saved configuration has not been applied. */
-  applied: boolean;
-  /** Configured named policy groups for Agent mounting. */
-  profiles: string[];
 }
 
 export type AgentId = string;
@@ -88,7 +231,6 @@ export type AgentPlatform = "macos" | "linux" | "windows" | "wsl";
 export type AgentStatus =
   | "NOT_DETECTED"
   | "DETECTED_VERIFIED"
-  | "DETECTED_INFERRED"
   | "DETECTED_UNKNOWN"
   | "DETECTED_BLOCKED"
   | "INSTALLED_BROKEN"
@@ -98,8 +240,7 @@ export type AgentPlanIntent = "connect" | "disconnect" | "restore";
 export type AgentConfirmationKind =
   | "installation"
   | "target_config"
-  | "configuration_diff"
-  | "experimental_compatibility";
+  | "configuration_diff";
 
 export interface AgentUiMetadataView {
   agent_id: AgentId;
@@ -158,7 +299,7 @@ export interface AgentView {
   status: AgentStatus;
   catalog_sequence: number;
   catalog_expires_at_ms: number | null;
-  catalog_source: "builtin" | "remote";
+  catalog_source: "builtin";
   catalog_warning: string | null;
 }
 
@@ -271,16 +412,8 @@ export interface UpgradeView {
 
 export const getState = () => invoke<StateView>("get_state");
 
-export interface EndpointPreview {
-  base: string;
-  chat: string;
-  responses: string;
-  messages: string;
-}
-
-/** The final request URLs a base URL resolves to (or a validation error). */
-export const previewEndpoint = (baseUrl: string) =>
-  invoke<EndpointPreview>("preview_endpoint", { baseUrl });
+export const previewProviderEndpoints = (base_url: string) =>
+  invoke<ProviderEndpointPreview>("preview_provider_endpoints", { baseUrl: base_url });
 
 export const addProvider = (
   name: string,
@@ -289,8 +422,17 @@ export const addProvider = (
   api_key: string | null,
 ) => invoke<StateView>("add_provider", { name, baseUrl: base_url, models, apiKey: api_key });
 
+export const editProvider = (name: string, base_url: string, api_key: string | null) =>
+  invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });
+
 export const removeProvider = (name: string) =>
   invoke<StateView>("remove_provider", { name });
+
+export const previewProviderRemoval = (name: string) =>
+  invoke<ProviderRemovalPreview>("preview_provider_removal", { name });
+
+export const restoreProvider = (name: string) =>
+  invoke<StateView>("restore_provider", { name });
 
 export const discoverProviderModels = (
   name: string,
@@ -302,6 +444,9 @@ export const discoverProviderModels = (
     baseUrl: base_url,
     apiKey: api_key,
   });
+
+export const testProvider = (name: string) =>
+  invoke<ProviderTestResult[]>("test_provider", { name });
 
 export const updateProviderModels = (name: string, models: string[]) =>
   invoke<StateView>("update_provider_models", { name, models });
@@ -323,6 +468,13 @@ export const removeKeyword = (slot: TierSlot, keyword: string) =>
 export const setAgentRouteMode = (agentId: AgentId, mode: AgentRouteMode) =>
   invoke<StateView>("set_agent_route_mode", { agentId, mode });
 
+export const setAgentTier = (
+  agentId: AgentId,
+  slot: TierSlot,
+  upstream: string | null,
+  model: string | null,
+) => invoke<StateView>("set_agent_tier", { agentId, slot, upstream, model });
+
 export const saveHomeRouteAsProfile = (name: string) =>
   invoke<StateView>("save_home_route_as_profile", { name });
 
@@ -332,13 +484,6 @@ export const mountAgentProfile = (agentId: AgentId, profile: string) =>
 export const deleteProfile = (name: string) =>
   invoke<StateView>("delete_profile", { name });
 
-export const setAgentTier = (
-  agentId: AgentId,
-  slot: TierSlot,
-  upstream: string | null,
-  model: string | null,
-) => invoke<StateView>("set_agent_tier", { agentId, slot, upstream, model });
-
 export const saveAgentRoutes = () => invoke<StateView>("save_agent_routes");
 
 export const applyHomeRouteToAllAgents = () =>
@@ -346,6 +491,7 @@ export const applyHomeRouteToAllAgents = () =>
 
 export const saveConfig = () => invoke<StateView>("save_config");
 
+export const getRuntimeState = () => invoke<ServeView>("get_runtime_state");
 export const serveStart = () => invoke<StateView>("serve_start");
 export const serveStop = () => invoke<StateView>("serve_stop");
 
@@ -370,11 +516,9 @@ export const planAgentConnection = (
 export const applyAgentPlan = (
   operationId: string,
   confirmationToken: string,
-  experimentalCompatibilityConfirmed = false,
 ) => invoke<AgentOperationView>("apply_agent_plan", {
   operationId,
   confirmationToken,
-  ...(experimentalCompatibilityConfirmed ? { experimentalCompatibilityConfirmed: true } : {}),
 });
 
 export const planAgentDisconnect = (agentId: AgentId, installationPath: string) =>
@@ -408,8 +552,9 @@ let adminKey: string | null = null;
 
 /** Synchronize the data-plane endpoint whenever App.tsx refreshes state. */
 export function setAdminEndpoint(serve: ServeView) {
-  adminBase = serve.phase === "running" ? `http://${serve.listen}` : null;
-  adminKey = serve.phase === "running" ? serve.virtual_key : null;
+  const reachable = serve.app_runtime === "running" && serve.listener_reachable;
+  adminBase = reachable ? `http://${serve.listen}` : null;
+  adminKey = reachable ? serve.virtual_key : null;
 }
 
 // Browser-only mode without a Tauri shell cannot call get_state. Read the endpoint from localStorage,
@@ -444,26 +589,12 @@ export const getStats = (since: string, by: string | null) =>
     () => invoke<StatsView>("get_stats", { since, by }),
   );
 
-/** One request's routing receipt — content-free. */
-export interface Receipt {
-  request_id: string;
-  started_at_ms: number;
-  latency_ms: number;
-  status: number;
-  error_code: string | null;
-  /** The exact unmet capability dimension, which refines error_code. Use null when absent. */
-  error_detail: string | null;
-  requested_model: string;
-  upstream: string | null;
-  model: string | null;
-  pool: string | null;
-  tier: string | null;
-  attempts: number;
-  cost_micros: number | null;
-}
-
-export const getReceipts = (limit: number) =>
-  invoke<Receipt[]>("get_receipts", { limit });
+export const getRecentReceipts = (limit = 5) => {
+  const bounded = Math.min(5, Math.max(1, limit));
+  return dataGet<ReceiptView[]>("/admin/receipts", () =>
+    invoke<ReceiptView[]>("get_recent_receipts", { limit: bounded }),
+  );
+};
 
 // Note the semantic difference: HTTP returns the active routing table. IPC fallback returns the editable draft.
 // Use runtime state while the proxy runs. This is the correct data-plane fact.

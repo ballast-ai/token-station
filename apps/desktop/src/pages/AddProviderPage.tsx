@@ -2,16 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import {
   addProvider,
   discoverProviderModels,
-  type EndpointPreview,
-  previewEndpoint,
+  previewProviderEndpoints,
   type ModelDiscoveryView,
+  type ProviderEndpointPreview,
   type StateView,
 } from "../api";
 import { CUSTOM_ID, PROVIDER_CATALOG, type ProviderPreset } from "../catalog";
 import ModelPicker, { type CatalogStatus } from "../components/ModelPicker";
 
 interface AddProviderPageProps {
-  /** Names already configured, so re-adding one reads as an update, not a duplicate. */
   existingNames: string[];
   onCancel: () => void;
   onAdded: (state: StateView, message: string) => void;
@@ -29,37 +28,8 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
   const [discovering, setDiscovering] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [preview, setPreview] = useState<EndpointPreview | null>(null);
-  const [previewError, setPreviewError] = useState("");
-
-  // Resolve the base URL to its final request URLs as the operator types, so a
-  // doubled /v1/v1 or an invalid URL shows before saving, not as a 404 later.
-  useEffect(() => {
-    const trimmed = url.trim();
-    if (!trimmed) {
-      setPreview(null);
-      setPreviewError("");
-      return;
-    }
-    let cancelled = false;
-    const timer = setTimeout(() => {
-      previewEndpoint(trimmed)
-        .then((result) => {
-          if (cancelled) return;
-          setPreview(result);
-          setPreviewError("");
-        })
-        .catch((caught) => {
-          if (cancelled) return;
-          setPreview(null);
-          setPreviewError(String(caught));
-        });
-    }, 300);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [url]);
+  const [endpointPreview, setEndpointPreview] = useState<ProviderEndpointPreview | null>(null);
+  const [endpointError, setEndpointError] = useState("");
 
   const preset: ProviderPreset | null = useMemo(
     () => PROVIDER_CATALOG.find((item) => item.id === presetId) ?? null,
@@ -70,6 +40,30 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
   const needsKey = isCustom ? true : preset?.needsKey ?? true;
   const catalogModels = preset?.models ?? [];
   const allModels = [...new Set([...catalogModels, ...discoveredModels, ...extraModels])];
+
+  useEffect(() => {
+    const baseUrl = url.trim();
+    if (!baseUrl) {
+      setEndpointPreview(null);
+      setEndpointError("");
+      return;
+    }
+    let active = true;
+    void previewProviderEndpoints(baseUrl)
+      .then((preview) => {
+        if (!active) return;
+        setEndpointPreview(preview);
+        setEndpointError("");
+      })
+      .catch((caught) => {
+        if (!active) return;
+        setEndpointPreview(null);
+        setEndpointError(String(caught));
+      });
+    return () => {
+      active = false;
+    };
+  }, [url]);
 
   const catalogStatus: CatalogStatus = discovering
     ? { label: "正在获取…", tone: "loading" }
@@ -118,6 +112,7 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
   const submit = async () => {
     if (!presetId) return setError("请先选择供应商");
     if (!name.trim() || !url.trim()) return setError("供应商名称和 Base URL 不能为空");
+    if (!endpointPreview || endpointError) return setError(endpointError || "Base URL 尚未解析完成");
     if (picked.length === 0) return setError("请至少选择一个模型");
     setSaving(true);
     setError("");
@@ -146,7 +141,7 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
       {error && <div className="banner err">{error}</div>}
       {isExisting && !error && (
         <div className="banner info">
-          供应商「{name.trim()}」已经添加过了。继续保存会<strong>更新</strong>它的 Base URL、API Key 和模型（不会重复创建）。
+          供应商「{name.trim()}」已经存在。继续保存会更新它的 Base URL、API Key 和模型，不会重复创建。
         </div>
       )}
       <section className="panel provider-wizard">
@@ -175,14 +170,20 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
                 <label className="field-label">
                   Base URL
                   <input className="input mono" value={url} disabled={disabled || !isCustom} onChange={(event) => setUrl(event.target.value)} />
-                  {previewError ? (
-                    <span className="endpoint-preview error mono">✗ {previewError}</span>
-                  ) : preview ? (
-                    <span className="endpoint-preview mono">
-                      最终请求地址 → chat: {preview.chat}
-                    </span>
-                  ) : null}
                 </label>
+                <div className={`endpoint-preview form-span ${endpointError ? "invalid" : ""}`} aria-live="polite">
+                  {endpointError ? (
+                    <span>{endpointError}</span>
+                  ) : endpointPreview ? (
+                    <>
+                      <span><strong>Chat</strong><code>{endpointPreview.chat}</code></span>
+                      <span><strong>Responses</strong><code>{endpointPreview.responses}</code></span>
+                      <span><strong>Messages</strong><code>{endpointPreview.messages}</code></span>
+                    </>
+                  ) : (
+                    <span>填写 Base URL 后显示最终请求地址</span>
+                  )}
+                </div>
                 {needsKey ? (
                   <label className="field-label form-span">
                     API Key
@@ -216,7 +217,7 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
 
         <footer className="wizard-actions">
           <button className="btn" type="button" disabled={disabled} onClick={onCancel}>取消</button>
-          <button className="btn primary" type="button" disabled={disabled || !presetId} onClick={() => void submit()}>
+          <button className="btn primary" type="button" disabled={disabled || !presetId || !endpointPreview || Boolean(endpointError)} onClick={() => void submit()}>
             {saving ? "正在保存…" : isExisting ? "更新供应商" : "添加供应商"}
           </button>
         </footer>

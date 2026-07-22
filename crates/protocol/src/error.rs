@@ -6,10 +6,10 @@ use crate::Extensions;
 ///
 /// Closed on purpose, and small on purpose. An adapter that cannot place a
 /// provider error in one of these buckets must use [`ErrorCode::Internal`]
-/// rather than invent a code, because routing reacts to these values: only
-/// `RateLimit`, `Capacity`, `UpstreamUnavailable` and `Timeout` are retriable on
-/// another upstream, and treating an `Auth` failure as retriable would replay a
-/// bad credential across every provider the user configured.
+/// rather than invent a code, because routing reacts to these values. Transient
+/// transport/capacity failures and malformed Provider responses are
+/// retriable on another upstream; treating an `Auth` failure as retriable would
+/// replay a bad credential across every provider the user configured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -39,7 +39,7 @@ pub enum ErrorCode {
     ContextLength,
     /// The upstream answered 2xx but the body is not valid provider protocol
     /// (e.g. an error object smuggled into a 200, or unparseable JSON). It
-    /// answered, so this is not treated as an outage.
+    /// answered, but a different Provider may still produce a valid response.
     ProviderProtocolError,
     /// The upstream did not answer within the host's budget.
     Timeout,
@@ -48,6 +48,27 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// Stable wire/storage spelling. Do not derive this from `Debug`: compound
+    /// variants must retain their `snake_case` separators.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::Auth => "auth",
+            Self::PaymentRequired => "payment_required",
+            Self::RateLimit => "rate_limit",
+            Self::Capacity => "capacity",
+            Self::Capability => "capability",
+            Self::ContentPolicy => "content_policy",
+            Self::UpstreamUnavailable => "upstream_unavailable",
+            Self::TransportTruncated => "transport_truncated",
+            Self::ContextLength => "context_length",
+            Self::ProviderProtocolError => "provider_protocol_error",
+            Self::Timeout => "timeout",
+            Self::Internal => "internal",
+        }
+    }
+
     /// Whether the host may retry this on a different upstream.
     ///
     /// This is the routing-relevant property of the catalog, kept next to the
@@ -60,6 +81,7 @@ impl ErrorCode {
                 | Self::Capacity
                 | Self::UpstreamUnavailable
                 | Self::TransportTruncated
+                | Self::ProviderProtocolError
                 | Self::Timeout
         )
     }
@@ -119,16 +141,15 @@ mod tests {
         assert!(ErrorCode::Timeout.is_retriable_elsewhere());
         // A dropped connection is an incomplete answer worth trying elsewhere.
         assert!(ErrorCode::TransportTruncated.is_retriable_elsewhere());
+        assert!(ErrorCode::ProviderProtocolError.is_retriable_elsewhere());
     }
 
     #[test]
     fn same_request_failures_are_not_retried_elsewhere() {
-        // A billing problem, an over-length request, or a malformed 2xx body
-        // would fail the same way (or is the upstream's answer) — not an outage
-        // another upstream would dodge.
+        // A billing problem or an over-length request would fail the same way
+        // on another deployment and must not fan out.
         assert!(!ErrorCode::PaymentRequired.is_retriable_elsewhere());
         assert!(!ErrorCode::ContextLength.is_retriable_elsewhere());
-        assert!(!ErrorCode::ProviderProtocolError.is_retriable_elsewhere());
     }
 
     #[test]
@@ -137,6 +158,7 @@ mod tests {
         let json = serde_json::to_value(&envelope).expect("serializable envelope");
 
         assert_eq!(json["code"], serde_json::json!("content_policy"));
+        assert_eq!(ErrorCode::PaymentRequired.as_str(), "payment_required");
     }
 
     #[test]

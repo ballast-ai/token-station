@@ -1,5 +1,6 @@
-//! Heavy proxy preparation kept outside the desktop control-plane mutex.
+//! Heavy proxy preparation and supervised listener ownership.
 
+use std::net::{SocketAddr, TcpListener as StdTcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,7 +12,10 @@ use token_station_cli::{server, virtual_key};
 use token_station_metrics::Recorder;
 
 const ERROR_DETAIL_LIMIT: usize = 512;
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const DRAIN_GRACE: Duration = Duration::from_secs(5);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+const LISTENER_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
+const BIND_HANDOFF_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn timed_stage<T, E>(
     stage: &'static str,
@@ -29,20 +33,34 @@ where
     result
 }
 
-/// A fully prepared server that has not yet been published to global state.
+/// A fully prepared server that has not occupied its public listener yet.
 pub(crate) struct PreparedServer {
     runtime: tokio::runtime::Runtime,
-    listener: tokio::net::TcpListener,
     app_state: server::AppState,
     listen: String,
     virtual_key: Option<String>,
 }
 
-/// The published proxy instance owned by the desktop lifecycle state machine.
-pub(crate) struct RunningServer {
+/// A prepared server whose public socket is already reserved. Slow bind/retry
+/// work happens before this value is committed under the App state lock.
+pub(crate) struct BoundPreparedServer {
     runtime: tokio::runtime::Runtime,
+    app_state: server::AppState,
+    listener: StdTcpListener,
     listen: String,
     virtual_key: Option<String>,
+}
+
+/// The published proxy instance owned by the desktop Runtime Supervisor.
+pub(crate) struct RunningServer {
+    runtime: tokio::runtime::Runtime,
+    app_state: server::AppState,
+    listen: String,
+    virtual_key: Option<String>,
+    running_revision: u64,
+    instance_id: String,
+    serve_task: tokio::task::JoinHandle<std::io::Result<()>>,
+    retired_controls: Vec<server::ServerControl>,
 }
 
 impl RunningServer {
@@ -54,40 +72,192 @@ impl RunningServer {
         self.virtual_key.as_deref()
     }
 
-    /// Runs on Tauri's blocking pool. Waiting here must never hold AppInner's mutex.
-    pub(crate) fn shutdown(self) {
+    pub(crate) const fn running_revision(&self) -> u64 {
+        self.running_revision
+    }
+
+    pub(crate) fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    pub(crate) fn plugins(&self) -> &token_station_cli::config::PluginsConfig {
+        &self.app_state.admin.plugins
+    }
+
+    pub(crate) fn is_task_alive(&self) -> bool {
+        !self.serve_task.is_finished()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn abort_task(&self) {
+        self.serve_task.abort();
+    }
+
+    pub(crate) fn listener_reachable(&self) -> bool {
+        let Ok(address) = self.listen.parse::<SocketAddr>() else {
+            return false;
+        };
+        TcpStream::connect_timeout(&address, LISTENER_PROBE_TIMEOUT).is_ok()
+    }
+
+    pub(crate) fn stop_accepting(&self) {
+        self.app_state.control.stop_accepting();
+    }
+
+    /// Restores this instance after a same-port candidate failed to bind.
+    pub(crate) fn resume_accepting(
+        &mut self,
+        listener: StdTcpListener,
+    ) -> Result<(), StartFailure> {
+        let listener = into_tokio_listener(&self.runtime, listener)?;
+        self.retired_controls.push(self.app_state.control.clone());
+        self.app_state = server::AppState::new(
+            Arc::clone(&self.app_state.gateway),
+            self.app_state.virtual_key.clone(),
+            Arc::clone(&self.app_state.admin),
+        )
+        .with_running_revision(self.running_revision);
+        let served_state = self.app_state.clone();
+        self.serve_task = self
+            .runtime
+            .spawn(async move { server::serve(served_state, listener).await });
+        Ok(())
+    }
+
+    /// Runs on Tauri's blocking pool. Existing requests get the approved five
+    /// second grace; only the remainder is cancelled.
+    pub(crate) fn drain_and_shutdown(self) {
+        self.stop_accepting();
+        let deadline = Instant::now() + DRAIN_GRACE;
+        let in_flight = || {
+            self.app_state.control.in_flight()
+                + self
+                    .retired_controls
+                    .iter()
+                    .map(server::ServerControl::in_flight)
+                    .sum::<usize>()
+        };
+        while in_flight() > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if in_flight() > 0 {
+            self.app_state.control.cancel_in_flight();
+            for control in &self.retired_controls {
+                control.cancel_in_flight();
+            }
+        }
         self.runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
     }
 }
 
 impl PreparedServer {
-    pub(crate) fn publish(self) -> RunningServer {
+    pub(crate) fn listen(&self) -> &str {
+        &self.listen
+    }
+
+    /// Reserves the configured listener. This can retry for up to one second,
+    /// so callers must execute it without holding the global App state lock.
+    pub(crate) fn bind(self) -> Result<BoundPreparedServer, StartFailure> {
         let Self {
             runtime,
-            listener,
             app_state,
             listen,
             virtual_key,
         } = self;
-        runtime.spawn(async move {
-            let _ = server::serve(app_state, listener).await;
-        });
-        RunningServer {
+        let listener = bind_with_retry(&listen)?;
+        Ok(BoundPreparedServer {
             runtime,
+            app_state,
+            listener,
             listen,
             virtual_key,
-        }
+        })
     }
 
-    /// A cancelled preparation was never published. Drop its listener first and
-    /// let Tokio finish tearing down without blocking the async coordinator.
-    pub(crate) fn discard(self) {
-        let Self {
-            runtime, listener, ..
-        } = self;
-        drop(listener);
-        runtime.shutdown_background();
+    pub(crate) fn bind_listener(listen: &str) -> Result<StdTcpListener, StartFailure> {
+        bind_with_retry(listen)
     }
+}
+
+impl BoundPreparedServer {
+    pub(crate) fn listen(&self) -> &str {
+        &self.listen
+    }
+
+    /// Publishes an immutable revision from an already reserved socket. No
+    /// caller may update `running_revision` before this succeeds.
+    pub(crate) fn publish(self, revision: u64) -> Result<RunningServer, StartFailure> {
+        let Self {
+            runtime,
+            app_state,
+            listener,
+            listen,
+            virtual_key,
+        } = self;
+        let listener = into_tokio_listener(&runtime, listener)?;
+        let app_state = app_state.with_running_revision(revision);
+        let published_listen = listener
+            .local_addr()
+            .map(|address| address.to_string())
+            .unwrap_or(listen);
+        let instance_id = instance_id()?;
+        let served_state = app_state.clone();
+        let serve_task = runtime.spawn(async move { server::serve(served_state, listener).await });
+        Ok(RunningServer {
+            runtime,
+            app_state,
+            listen: published_listen,
+            virtual_key,
+            running_revision: revision,
+            instance_id,
+            serve_task,
+            retired_controls: Vec::new(),
+        })
+    }
+
+    pub(crate) fn discard(self) {
+        self.runtime.shutdown_background();
+    }
+}
+
+fn bind_with_retry(listen: &str) -> Result<StdTcpListener, StartFailure> {
+    let deadline = Instant::now() + BIND_HANDOFF_TIMEOUT;
+    loop {
+        match StdTcpListener::bind(listen) {
+            Ok(listener) => {
+                listener
+                    .set_nonblocking(true)
+                    .map_err(|error| StartFailure::new("listen_nonblocking", error))?;
+                return Ok(listener);
+            }
+            Err(error) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+                drop(error);
+            }
+            Err(error) => return Err(StartFailure::new("listen_bind", error)),
+        }
+    }
+}
+
+fn into_tokio_listener(
+    runtime: &tokio::runtime::Runtime,
+    listener: StdTcpListener,
+) -> Result<tokio::net::TcpListener, StartFailure> {
+    let _entered = runtime.enter();
+    tokio::net::TcpListener::from_std(listener)
+        .map_err(|error| StartFailure::new("listen_publish", error))
+}
+
+fn instance_id() -> Result<String, StartFailure> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|error| StartFailure::new("instance_id", error))?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    ))
 }
 
 #[derive(Clone, Debug)]
@@ -114,7 +284,8 @@ impl StartFailure {
     }
 }
 
-/// Performs every potentially blocking startup step without touching AppInner.
+/// Performs every potentially blocking preflight step without binding the
+/// listener, so a running instance keeps serving throughout preparation.
 pub(crate) fn prepare_server(config: ClientConfig) -> Result<PreparedServer, StartFailure> {
     let mut sinks: Vec<Box<dyn Recorder>> = vec![Box::new(timed_stage("log_open", || {
         FileLog::open(&config.data.dir)
@@ -142,25 +313,20 @@ pub(crate) fn prepare_server(config: ClientConfig) -> Result<PreparedServer, Sta
             .enable_all()
             .build()
     })?;
-    let listen = config.server.listen.clone();
-    let listener = timed_stage("listen_bind", || {
-        runtime.block_on(async { tokio::net::TcpListener::bind(&listen).await })
-    })?;
-    let app_state = server::AppState {
+    let app_state = server::AppState::new(
         gateway,
-        virtual_key: virtual_key.clone().map(Arc::from),
-        admin: Arc::new(token_station_cli::admin::AdminContext {
+        virtual_key.clone().map(Arc::from),
+        Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
             router: config.router.clone(),
             plugins: config.plugins.clone(),
         }),
-    };
+    );
 
     Ok(PreparedServer {
         runtime,
-        listener,
         app_state,
-        listen,
+        listen: config.server.listen,
         virtual_key,
     })
 }

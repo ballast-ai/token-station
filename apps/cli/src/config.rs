@@ -53,8 +53,7 @@ pub struct ClientConfig {
     /// home router, keeping every pre-Agent-routes configuration compatible.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_routes: BTreeMap<String, AgentRouteConfig>,
-    /// Named, reusable three-tier routes (“profiles”) that Agents mount by name,
-    /// so several Agents can share one route instead of each carrying a copy.
+    /// Named reusable three-tier routes that multiple Agents can mount.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, AgentTierRoutes>,
     /// Where the request log and metrics store live. Optional; defaults apply.
@@ -72,24 +71,13 @@ pub struct ClientConfig {
     /// unknown (never zero).
     #[serde(default)]
     pub pricing: crate::pricing::PriceTable,
-    /// Refuse requests carrying image/audio content with a typed capability
-    /// error, rather than routing them. This proxy guarantees *language* models
-    /// only; an honest refusal beats a pretend-support timeout. On by default;
-    /// set false to let multimodal requests flow to a capable model.
-    #[serde(default = "default_true")]
-    pub reject_multimodal: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRouteMode {
-    /// Follow the global (home) router.
     Inherit,
-    /// This Agent's own three-tier route, private to it.
     Custom,
-    /// Mount a named [`profiles`](ClientConfig::profiles) entry, shared with any
-    /// other Agent that mounts the same one—the “profile” that prevents every Agent
-    /// needing a private copy of the same route.
     Profile,
 }
 
@@ -99,7 +87,6 @@ pub struct AgentRouteConfig {
     pub mode: AgentRouteMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_route: Option<AgentTierRoutes>,
-    /// Which named profile this Agent mounts, when `mode = profile`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
 }
@@ -332,13 +319,37 @@ impl ClientConfig {
                     .profile
                     .as_deref()
                     .ok_or_else(|| format!("Agent `{agent_id}` profile mode requires a profile"))?;
-                let tiers = self
-                    .profiles
+                self.profiles
                     .get(name)
-                    .ok_or_else(|| format!("Agent `{agent_id}` mounts unknown profile `{name}`"))?;
-                tiers.materialize(&self.router).map(Some)
+                    .ok_or_else(|| format!("Agent `{agent_id}` mounts unknown profile `{name}`"))?
+                    .materialize(&self.router)
+                    .map(Some)
             }
         }
+    }
+
+    fn validate_agent_tiers(&self, owner: &str, tiers: &AgentTierRoutes) -> Result<(), String> {
+        for (pool, target) in tiers.entries() {
+            UpstreamRef::new(target.upstream.clone())
+                .map_err(|error| format!("{owner} {pool} upstream: {error}"))?;
+            let upstream = self.upstreams.get(&target.upstream).ok_or_else(|| {
+                format!(
+                    "{owner} {pool} routes to upstream `{}`, which is not configured",
+                    target.upstream
+                )
+            })?;
+            if !upstream
+                .models
+                .iter()
+                .any(|capability| capability.model == target.model)
+            {
+                return Err(format!(
+                    "{owner} {pool} routes to model `{}` not declared by upstream `{}`",
+                    target.model, target.upstream
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Reads and structurally validates a configuration file.
@@ -465,28 +476,31 @@ impl ClientConfig {
                     "Agent `{agent_id}` custom mode requires custom_route"
                 ));
             }
-            if let Some(tiers) = &route.custom_route {
-                for (pool, target) in tiers.entries() {
-                    UpstreamRef::new(target.upstream.clone())
-                        .map_err(|error| format!("Agent `{agent_id}` {pool} upstream: {error}"))?;
-                    let upstream = self.upstreams.get(&target.upstream).ok_or_else(|| {
-                        format!(
-                            "Agent `{agent_id}` {pool} routes to upstream `{}`, which is not configured",
-                            target.upstream
-                        )
-                    })?;
-                    if !upstream
-                        .models
-                        .iter()
-                        .any(|capability| capability.model == target.model)
-                    {
-                        return Err(format!(
-                            "Agent `{agent_id}` {pool} routes to model `{}` not declared by upstream `{}`",
-                            target.model, target.upstream
-                        ));
-                    }
+            if route.mode == AgentRouteMode::Profile {
+                let profile = route
+                    .profile
+                    .as_deref()
+                    .ok_or_else(|| format!("Agent `{agent_id}` profile mode requires a profile"))?;
+                if !self.profiles.contains_key(profile) {
+                    return Err(format!(
+                        "Agent `{agent_id}` mounts unknown profile `{profile}`"
+                    ));
                 }
             }
+            if let Some(tiers) = &route.custom_route {
+                self.validate_agent_tiers(&format!("Agent `{agent_id}`"), tiers)?;
+            }
+        }
+
+        for (name, tiers) in &self.profiles {
+            if name.trim().is_empty()
+                || name.len() > 80
+                || name.trim() != name
+                || name.chars().any(char::is_control)
+            {
+                return Err("profile name is invalid".to_string());
+            }
+            self.validate_agent_tiers(&format!("profile `{name}`"), tiers)?;
         }
 
         Ok(())
@@ -612,8 +626,10 @@ mod tests {
     fn agent_routes_are_optional_and_empty_routes_do_not_serialize() {
         let config: ClientConfig = serde_json::from_value(example()).expect("example parses");
         assert!(config.agent_routes.is_empty());
+        assert!(config.profiles.is_empty());
         let encoded = serde_json::to_value(config).expect("config serializes");
         assert!(encoded.get("agent_routes").is_none());
+        assert!(encoded.get("profiles").is_none());
     }
 
     #[test]
@@ -663,12 +679,11 @@ mod tests {
         let path = scratch("agent-profiles", &value.to_string());
         let config = ClientConfig::load(&path).expect("profile routes validate");
 
-        // Both Agents resolve to the same shared profile — no per-Agent copy.
         for agent in ["codex", "opencode"] {
             let router = config
                 .custom_router_for_agent(agent)
-                .expect("known Agent")
-                .expect("profile RouterConfig");
+                .unwrap()
+                .expect("mounted profile materializes");
             for pool in ["tier_high", "tier_mid", "tier_low"] {
                 assert_eq!(router.pools[pool][0].upstream.as_str(), "ollama_local");
                 assert_eq!(router.pools[pool][0].model, "llama3.3");
@@ -684,11 +699,8 @@ mod tests {
             "codex": { "mode": "profile", "profile": "does-not-exist" },
         });
         let path = scratch("agent-profile-missing", &value.to_string());
-        let config = ClientConfig::load(&path).expect("structure is valid");
-        let error = config
-            .custom_router_for_agent("codex")
-            .expect_err("a missing profile is refused, not silently ignored");
-        assert!(error.contains("does-not-exist"), "{error}");
+        let error = ClientConfig::load(&path).expect_err("missing profile is refused");
+        assert!(error.to_string().contains("does-not-exist"), "{error}");
         fs::remove_file(path).ok();
     }
 

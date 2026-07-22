@@ -37,10 +37,8 @@ impl ProviderEndpoint {
             return Err(EndpointError::CarriesQueryOrFragment);
         }
 
-        Ok(Self {
-            origin,
-            path: rest.trim_end_matches('/').to_owned(),
-        })
+        let path = normalize_api_root(rest.trim_end_matches('/'));
+        Ok(Self { origin, path })
     }
 
     /// Whether `url` addresses this upstream.
@@ -85,6 +83,47 @@ impl ProviderEndpoint {
     pub fn as_str(&self) -> String {
         format!("{}{}", self.origin, self.path)
     }
+
+    /// Resolves one canonical Provider API target from the normalized root.
+    /// An origin-only input defaults to `/v1`; a custom root is preserved.
+    #[must_use]
+    pub fn resolve(&self, api: ProviderApi) -> String {
+        let root = if self.path.is_empty() {
+            "/v1"
+        } else {
+            self.path.as_str()
+        };
+        format!("{}{root}/{}", self.origin, api.path())
+    }
+}
+
+/// Canonical Provider API endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderApi {
+    ChatCompletions,
+    Responses,
+    Messages,
+    Models,
+}
+
+impl ProviderApi {
+    const fn path(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat/completions",
+            Self::Responses => "responses",
+            Self::Messages => "messages",
+            Self::Models => "models",
+        }
+    }
+}
+
+fn normalize_api_root(path: &str) -> String {
+    ["/chat/completions", "/responses", "/messages"]
+        .into_iter()
+        .find_map(|suffix| path.strip_suffix(suffix))
+        .unwrap_or(path)
+        .trim_end_matches('/')
+        .to_owned()
 }
 
 impl fmt::Display for ProviderEndpoint {
@@ -285,7 +324,7 @@ impl Error for DescriptorError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{DescriptorError, EndpointError, ProviderConfig, ProviderEndpoint};
+    use super::{DescriptorError, EndpointError, ProviderApi, ProviderConfig, ProviderEndpoint};
     use crate::{Auth, HttpMethod, HttpRequestDescriptor, SecretRef};
 
     fn endpoint(url: &str) -> ProviderEndpoint {
@@ -336,6 +375,41 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&parsed).expect("serializable"),
             r#""https://api.openai.com/v1""#
+        );
+    }
+
+    #[test]
+    fn origin_root_and_complete_endpoint_resolve_to_one_path() {
+        for raw in [
+            "https://api.example.com",
+            "https://api.example.com/v1",
+            "https://api.example.com/v1/chat/completions",
+            "https://api.example.com/v1/chat/completions/",
+            "https://api.example.com/v1/responses/",
+            "https://api.example.com/v1/messages/",
+        ] {
+            let endpoint = endpoint(raw);
+            assert_eq!(
+                endpoint.resolve(ProviderApi::ChatCompletions),
+                "https://api.example.com/v1/chat/completions"
+            );
+            assert_eq!(
+                endpoint.resolve(ProviderApi::Responses),
+                "https://api.example.com/v1/responses"
+            );
+            assert_eq!(
+                endpoint.resolve(ProviderApi::Messages),
+                "https://api.example.com/v1/messages"
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_api_root_is_not_rewritten_to_v1() {
+        let endpoint = endpoint("https://api.example.com/api/paas/v4");
+        assert_eq!(
+            endpoint.resolve(ProviderApi::ChatCompletions),
+            "https://api.example.com/api/paas/v4/chat/completions"
         );
     }
 

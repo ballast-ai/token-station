@@ -2,7 +2,10 @@
   "model": "gpt-5.5",
   "tool": true,
   "vision": true,
-  "json_schema": true,
+  "json_schema": false,
+  "tool_state": "verified",
+  "vision_state": "declared",
+  "json_schema_state": "unsupported",
   "context_window": 400000,
   "supported_parameters": ["stop", "temperature", "top_p"]
 }

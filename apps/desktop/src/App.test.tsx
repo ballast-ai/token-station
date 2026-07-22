@@ -3,8 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import App from "./App";
-import type { AgentRouteView, AgentUiMetadataView, AgentView, StateView } from "./api";
+import App, { configSaveStatus } from "./App";
+import type { AgentRouteView, AgentUiMetadataView, AgentView, ServeView, StateView } from "./api";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -32,6 +32,21 @@ const registryFixture: AgentUiMetadataView[] = [
   { agent_id: "future-agent", legacy_kind: null, display_name: "Future Agent", icon_key: "future", admission: "discovery_only" },
 ];
 
+function serveFixture(overrides: Partial<ServeView> = {}): ServeView {
+  return {
+    phase: "stopped",
+    app_runtime: "stopped",
+    listener_reachable: false,
+    agent_connected: false,
+    running_revision: null,
+    instance_id: null,
+    listen: "127.0.0.1:8787",
+    virtual_key: null,
+    error: null,
+    ...overrides,
+  };
+}
+
 function stateFixture(overrides: Partial<StateView> = {}): StateView {
   return {
     providers: [],
@@ -42,7 +57,11 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
     },
     keywords: { high: [], mid: [], low: [] },
     agent_routes: Object.fromEntries(agentIds.map((id) => [id, structuredClone(emptyRoute)])),
-    serve: { phase: "stopped", running: false, listen: "127.0.0.1:8787", virtual_key: null, error: null },
+    profiles: [],
+    serve: serveFixture(),
+    draft_revision: 0,
+    saved_revision: 0,
+    config_dirty: false,
     config_error: null,
     settings: {
       listen: "127.0.0.1:8787",
@@ -53,9 +72,6 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
       agent: "test-agent",
       version: "test-version",
     },
-    dirty: false,
-    applied: true,
-    profiles: [],
     ...overrides,
   };
 }
@@ -84,8 +100,8 @@ const scannedClaude: AgentView = {
       agent_id: "claude-code",
       installation_path: "/opt/claude",
       status: "DETECTED_VERIFIED",
-      reason_code: "VerifiedRangeMatch",
-      message: "版本命中已验证兼容范围",
+      reason_code: "DefaultAdmission",
+      message: "已通过只读预检，可以安全接入",
       matched_catalog_version: "fixture",
       connector_id: "claude-code-v1",
       allowed_actions: ["preview_connect"],
@@ -98,15 +114,13 @@ const scannedClaude: AgentView = {
   catalog_warning: null,
 };
 
-function experimentalClaude(): AgentView {
+function defaultAdmittedClaude(): AgentView {
   const value = structuredClone(scannedClaude);
-  value.status = "DETECTED_UNKNOWN";
   value.installations[0].discovery.version_raw = "2.1.210";
   value.installations[0].discovery.version_normalized = "2.1.210";
-  value.installations[0].compatibility.status = "DETECTED_UNKNOWN";
-  value.installations[0].compatibility.reason_code = "NoCompatibilityEntry";
-  value.installations[0].compatibility.message = "版本未命中已验证范围";
-  value.installations[0].compatibility.allowed_actions = ["run_read_only_preflight"];
+  value.installations[0].compatibility.reason_code = "DefaultAdmission";
+  value.installations[0].compatibility.message = "已通过只读预检，可以安全接入";
+  value.installations[0].compatibility.allowed_actions = ["preview_connect"];
   return value;
 }
 
@@ -127,6 +141,79 @@ beforeEach(() => {
 });
 
 describe("desktop station navigation", () => {
+  it("maps the four revision relationships to stable save copy", () => {
+    expect(configSaveStatus(stateFixture())).toBe("无改动");
+    expect(configSaveStatus(stateFixture({ config_dirty: true, draft_revision: 2, saved_revision: 1 }))).toBe("有未保存更改");
+    expect(configSaveStatus(stateFixture({
+      saved_revision: 2,
+      serve: serveFixture({ app_runtime: "running", listener_reachable: true, running_revision: 1 }),
+    }))).toBe("已保存尚未应用");
+    expect(configSaveStatus(stateFixture({
+      saved_revision: 2,
+      serve: serveFixture({ app_runtime: "running", listener_reachable: true, running_revision: 2 }),
+    }))).toBe("运行中 revision 2");
+  });
+
+  it("shows the revision save state and makes 保存并应用 start a real apply", async () => {
+    const user = userEvent.setup();
+    const dirty = stateFixture({ draft_revision: 2, saved_revision: 1, config_dirty: true });
+    const applying = stateFixture({
+      draft_revision: 2,
+      saved_revision: 2,
+      config_dirty: false,
+      serve: serveFixture({ phase: "starting" }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return dirty;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "serve_start") return applying;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    expect(await screen.findByTestId("config-save-status")).toHaveTextContent("有未保存更改");
+    await user.click(screen.getByRole("button", { name: "保存并应用" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("serve_start"));
+    expect(invokeMock).not.toHaveBeenCalledWith("save_config");
+  });
+
+  it("refreshes the independent Agent runtime fact within the 500ms poll", async () => {
+    const connected = stateFixture({
+      serve: serveFixture({
+        phase: "running",
+        app_runtime: "running",
+        listener_reachable: true,
+        agent_connected: true,
+        running_revision: 1,
+        instance_id: "runtime-a",
+      }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return connected;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "get_runtime_state") {
+        return serveFixture({
+          phase: "running",
+          app_runtime: "running",
+          listener_reachable: true,
+          agent_connected: false,
+          running_revision: 1,
+          instance_id: "runtime-a",
+        });
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    expect(await screen.findByTestId("agent-runtime-connection")).toHaveTextContent("Agent：已连接");
+    await waitFor(
+      () => expect(screen.getByTestId("agent-runtime-connection")).toHaveTextContent("Agent：未连接"),
+      { timeout: 1_500 },
+    );
+  });
+
   it("shows exactly five fixed Agents, no Gemini, and scans only on load or explicit rescan", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -179,13 +266,10 @@ describe("desktop station navigation", () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") {
         return stateFixture({
-          serve: {
-            phase: "running",
-            running: true,
-            listen: "127.0.0.1:8787",
-            virtual_key: "vk-overlap",
-            error: null,
-          },
+          serve: serveFixture({
+            phase: "running", app_runtime: "running", listener_reachable: true,
+            running_revision: 1, instance_id: "instance-overlap", virtual_key: "vk-overlap",
+          }),
         });
       }
       if (command === "list_agent_registry") return registryFixture;
@@ -267,7 +351,7 @@ describe("desktop station navigation", () => {
     const user = userEvent.setup();
     const writeText = vi.spyOn(navigator.clipboard, "writeText");
     const running = stateFixture({
-      serve: { phase: "running", running: true, listen: "127.0.0.1:8787", virtual_key: "vk-test-secret", error: null },
+      serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test-secret" }),
     });
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
@@ -335,10 +419,62 @@ describe("desktop station navigation", () => {
     });
   });
 
+  it("saves the home route as a reusable profile and mounts it from an Agent page", async () => {
+    const user = userEvent.setup();
+    const provider = { name: "deepseek", provider: "openai-compatible", base_url: "https://example.test/v1", models: ["deepseek-chat"], has_auth: true };
+    const configuredTiers = {
+      high: { upstream: "deepseek", model: "deepseek-chat" },
+      mid: { upstream: "deepseek", model: "deepseek-chat" },
+      low: { upstream: "deepseek", model: "deepseek-chat" },
+    };
+    let current = stateFixture({ providers: [provider], tiers: configuredTiers });
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "get_state") return current;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "save_home_route_as_profile") {
+        current = { ...current, profiles: [(args as { name: string }).name], config_dirty: true, draft_revision: 1 };
+        return current;
+      }
+      if (command === "mount_agent_profile") {
+        const { agentId, profile } = args as { agentId: string; profile: string };
+        current = {
+          ...current,
+          agent_routes: {
+            ...current.agent_routes,
+            [agentId]: { ...current.agent_routes[agentId], mode: "profile", profile, tiers: configuredTiers },
+          },
+          draft_revision: 2,
+        };
+        return current;
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.type(await screen.findByLabelText("策略组名称"), "日常开发");
+    await user.click(screen.getByRole("button", { name: "另存为策略组" }));
+    expect(invokeMock).toHaveBeenCalledWith("save_home_route_as_profile", { name: "日常开发" });
+    expect(await screen.findByText("策略组「日常开发」已加入草稿，请保存并应用")).toBeInTheDocument();
+
+    await user.click(navigation().getByRole("button", { name: "Codex" }));
+    await user.click(screen.getByRole("radio", { name: "挂载策略组" }));
+    expect(invokeMock).toHaveBeenCalledWith("mount_agent_profile", { agentId: "codex", profile: "日常开发" });
+    expect(await screen.findByText("已挂载策略组「日常开发」· 尚待保存并应用")).toBeInTheDocument();
+    expect(screen.getByLabelText("当前策略组")).toHaveValue("日常开发");
+  });
+
   it("opens Add Provider as a separate page and returns to the source page after saving", async () => {
     const user = userEvent.setup();
     invokeMock.mockImplementation(async (command) => {
       if (["get_state", "add_provider"].includes(command)) return stateFixture();
+      if (command === "preview_provider_endpoints") {
+        return {
+          chat: "https://api.openai.com/v1/chat/completions",
+          responses: "https://api.openai.com/v1/responses",
+          messages: "https://api.openai.com/v1/messages",
+        };
+      }
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
       throw new Error(`unexpected IPC command: ${command}`);
@@ -358,7 +494,7 @@ describe("desktop station navigation", () => {
 
   it("performs a safe Agent connection in one click without a confirmation dialog", async () => {
     const user = userEvent.setup();
-    const running = stateFixture({ serve: { phase: "running", running: true, listen: "127.0.0.1:8787", virtual_key: "vk-test", error: null } });
+    const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
     let scans = 0;
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return running;
@@ -377,6 +513,7 @@ describe("desktop station navigation", () => {
     expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
       installationPath: "/opt/claude",
+      expectedVersion: "9.9.9",
     });
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", { operationId: "op-1", confirmationToken: "token-1" }));
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -384,39 +521,33 @@ describe("desktop station navigation", () => {
     expect(scans).toBe(2);
   });
 
-  it("connects an unverified-but-preflight-passed version in one click, no dialog", async () => {
-    // cc-switch-style: no scary modal. The version note is shown inline; clicking
-    // One-click connection runs the preflight-approved plan and confirms automatically. The backend still
-    // snapshots + rolls back). This is the P1 relaxation the user chose.
+  it("shows one connectable state and connects without experimental confirmation", async () => {
     const user = userEvent.setup();
-    const running = stateFixture({ serve: { phase: "running", running: true, listen: "127.0.0.1:8787", virtual_key: "vk-test", error: null } });
-    const unknown = experimentalClaude();
+    const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
+    const admitted = defaultAdmittedClaude();
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return running;
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [unknown];
-      if (command === "plan_agent_connection") return { operation_id: "op-experimental", confirmation_token: "token-experimental" };
-      if (command === "apply_agent_plan") return { operation_id: "op-experimental", maintenance_warning: null };
+      if (command === "scan_agents") return [admitted];
+      if (command === "plan_agent_connection") return { operation_id: "op-admitted", confirmation_token: "token-admitted" };
+      if (command === "apply_agent_plan") return { operation_id: "op-admitted", maintenance_warning: null };
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
     render(<App />);
     await screen.findByLabelText("主导航");
     await user.click(navigation().getByRole("button", { name: "Claude Code" }));
-    // Honest inline note replaces the modal; the click is still informed.
-    expect(await screen.findByText(/一键接入会先创建快照/)).toBeInTheDocument();
-
+    expect(await screen.findByText("可接入")).toBeInTheDocument();
+    expect(screen.queryByText(/未经验证|试验性/)).toBeNull();
     await user.click(screen.getByRole("button", { name: "一键接入" }));
-    // One click drives the whole preflight-gated, auto-confirmed pipeline.
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
       installationPath: "/opt/claude",
       expectedVersion: "2.1.210",
     }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
-      operationId: "op-experimental",
-      confirmationToken: "token-experimental",
-      experimentalCompatibilityConfirmed: true,
+      operationId: "op-admitted",
+      confirmationToken: "token-admitted",
     }));
     expect(screen.queryByRole("alertdialog")).toBeNull();
   });
@@ -434,7 +565,7 @@ describe("desktop station navigation", () => {
       status: "MULTIPLE_INSTALLATIONS",
       installations: [scannedClaude.installations[0], secondInstallation],
     };
-    const running = stateFixture({ serve: { phase: "running", running: true, listen: "127.0.0.1:8787", virtual_key: "vk-test", error: null } });
+    const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return running;
       if (command === "list_agent_registry") return registryFixture;
@@ -456,6 +587,7 @@ describe("desktop station navigation", () => {
     expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
       installationPath: secondInstallation.discovery.canonical_path,
+      expectedVersion: "10.0.0",
     });
   });
 });

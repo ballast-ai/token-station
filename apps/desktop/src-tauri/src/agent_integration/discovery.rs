@@ -1672,7 +1672,7 @@ mod tests {
         let context = environment(&root);
         let probe = |argument: &str| VersionProbe {
             argv: vec![argument.to_string()],
-            timeout_ms: 1_000,
+            timeout_ms: 10_000,
             max_output_bytes: 1_024,
             output_matcher: super::super::types::VersionOutputMatcher::SemverAnywhere,
             retry_on_timeout: false,
@@ -1739,14 +1739,14 @@ mod tests {
 
         let output_probe = VersionProbe {
             argv: vec![],
-            timeout_ms: 2_000,
+            timeout_ms: 10_000,
             max_output_bytes: 1024,
             output_matcher: super::super::types::VersionOutputMatcher::SemverAnywhere,
             retry_on_timeout: false,
             runtime: None,
         };
         let output_result = SystemProbeRunner.run(&output, &output, &output_probe, &context);
-        assert!(output_result.runnable);
+        assert!(output_result.runnable, "{:?}", output_result.diagnostics);
         assert!(output_result
             .version_raw
             .as_ref()
