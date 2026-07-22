@@ -10,12 +10,14 @@ import {
   type TierView,
 } from "../api";
 import TierRouteEditor from "../components/TierRouteEditor";
+import TierKeywords from "../components/TierKeywords";
 import ProviderList from "../components/ProviderList";
 import RecentRequests from "../components/RecentRequests";
 
 interface HomePageProps {
   providers: ProviderView[];
   tiers: Record<TierSlot, TierView>;
+  keywords: Record<TierSlot, string[]>;
   agentRoutes: Record<string, AgentRouteView>;
   registry: AgentUiMetadataView[];
   agents: AgentView[];
@@ -25,6 +27,8 @@ interface HomePageProps {
   busy: boolean;
   configError: string | null;
   onTierChange: (slot: TierSlot, upstream: string | null, model: string | null) => void;
+  onAddKeyword: (slot: TierSlot, keyword: string) => void;
+  onRemoveKeyword: (slot: TierSlot, keyword: string) => void;
   onSave: () => void;
   onApplyAll: () => void;
   onOpenAgent: (agentId: string) => void;
@@ -35,6 +39,7 @@ interface HomePageProps {
 export default function HomePage({
   providers,
   tiers,
+  keywords,
   agentRoutes,
   registry,
   agents,
@@ -44,12 +49,19 @@ export default function HomePage({
   busy,
   configError,
   onTierChange,
+  onAddKeyword,
+  onRemoveKeyword,
   onSave,
   onApplyAll,
   onOpenAgent,
   onRemoveProvider,
   onStateChange,
 }: HomePageProps) {
+  const tierConfigured: Record<TierSlot, boolean> = {
+    high: Boolean(tiers.high?.upstream && tiers.high?.model),
+    mid: Boolean(tiers.mid?.upstream && tiers.mid?.model),
+    low: Boolean(tiers.low?.upstream && tiers.low?.model),
+  };
   const scanned = new Map(agents.map((agent) => [agent.metadata.agent_id, agent]));
   const [namingProfile, setNamingProfile] = useState(false);
   const [profileName, setProfileName] = useState("");
@@ -155,6 +167,28 @@ export default function HomePage({
           {providers.length === 0 && <span className="foot-hint">请先添加供应商，再配置三档。</span>}
           {providers.length > 0 && configError && <span className="foot-hint">还有档位未完成，保存时会进行完整校验。</span>}
         </footer>
+      </section>
+
+      <section className="panel keyword-panel">
+        <div className="panel-head split-heading">
+          <div>
+            <span className="eyebrow">KEYWORD OVERRIDE · YOU'RE IN CONTROL</span>
+            <h2>关键词路由 · 你说了算</h2>
+            <p className="sub">
+              自动分档不称心？<strong>你来定</strong>:给某一档加个关键词,以后请求里
+              只要出现它,就<strong>钉在这一档</strong>、压过自动判断。加完按上方「保存并应用」生效。
+            </p>
+          </div>
+          <span className="default-route-chip">最高优先级</span>
+        </div>
+
+        <TierKeywords
+          keywords={keywords}
+          configured={tierConfigured}
+          disabled={busy}
+          onAdd={onAddKeyword}
+          onRemove={onRemoveKeyword}
+        />
       </section>
 
       <ProviderList

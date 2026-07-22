@@ -47,7 +47,7 @@
       "tier_high": [
         {
           "upstream": "deepseek",
-          "model": "deepseek-v4-flash"
+          "model": "deepseek-v4-pro"
         }
       ],
       "tier_low": [
@@ -63,6 +63,26 @@
         }
       ]
     },
+    "rules": [
+      {
+        "id": "kw-high",
+        "when": {
+          "keywords_any": [
+            "重构"
+          ]
+        },
+        "route_to": "tier_high"
+      },
+      {
+        "id": "kw-low",
+        "when": {
+          "keywords_any": [
+            "git"
+          ]
+        },
+        "route_to": "tier_low"
+      }
+    ],
     "heuristic": {
       "weights": {
         "tokens_per_point": 100,
@@ -109,7 +129,8 @@
   },
   "agent_routes": {
     "claude-code": {
-      "mode": "inherit"
+      "mode": "profile",
+      "profile": "测试"
     },
     "codex": {
       "mode": "inherit"
@@ -122,6 +143,22 @@
     },
     "opencode": {
       "mode": "inherit"
+    }
+  },
+  "profiles": {
+    "测试": {
+      "high": {
+        "upstream": "deepseek",
+        "model": "deepseek-v4-flash"
+      },
+      "mid": {
+        "upstream": "deepseek",
+        "model": "deepseek-v4-flash"
+      },
+      "low": {
+        "upstream": "deepseek",
+        "model": "deepseek-v4-flash"
+      }
     }
   },
   "data": {

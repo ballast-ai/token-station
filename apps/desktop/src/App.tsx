@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  addKeyword,
   applyHomeRouteToAllAgents,
   getState,
   listAgentRegistry,
   listenServeState,
+  removeKeyword,
   removeProvider,
   saveConfig,
   scanAgents,
@@ -165,6 +167,58 @@ export default function App() {
     }
   };
 
+  // 轮询后端直到代理真正停下(或超时)。serve_stop 是异步的:命令返回时只是
+  // Stopping,真正 Stopped 稍后才由后台 shutdown 完成——必须等到位再重启,否则
+  // serve_start 会因 Stopping 而报错。
+  const waitForStopped = async (timeoutMs: number): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const snapshot = await getState();
+      setState((current) => (current ? { ...current, serve: snapshot.serve } : snapshot));
+      if (snapshot.serve.phase === "stopped" || snapshot.serve.phase === "error") return true;
+      if (Date.now() > deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  };
+
+  // 保存并应用:写盘;若代理在跑,自动重启让新规则(含用户关键词)立即生效。
+  // 代理运行期只在启动时读一次配置,不重启就不会换配置——所以"应用"必须重启。
+  const saveAndApply = async () => {
+    if (!state || busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const wasRunning = state.serve.running || state.serve.phase === "starting";
+      const saved = await saveConfig();
+      if (!wasRunning) {
+        showState(saved, "已保存");
+        return;
+      }
+      setState(saved);
+      setMessage("正在重启代理以应用新规则…");
+      await serveStop();
+      const stopped = await waitForStopped(8000);
+      if (!stopped) {
+        showState(await getState(), "已保存 · 代理停止较慢，请手动点上方「启动」");
+        return;
+      }
+      const started = await serveStart();
+      showState(started, "已保存并重启代理 · 新规则已生效");
+    } catch (caught) {
+      setError(errorText(caught));
+      try {
+        setState(await getState());
+      } catch {
+        /* 回读失败就保留当前状态 */
+      }
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
+
   const toggleServe = async () => {
     if (!state || serveBusy) return;
     setServeBusy(true);
@@ -229,8 +283,11 @@ export default function App() {
           applied={state.applied}
           busy={busy}
           configError={state.config_error}
+          keywords={state.keywords}
           onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
-          onSave={() => void run(saveConfig, state.serve.running ? "主页路由已保存 · 重启代理后生效" : "主页路由已保存")}
+          onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
+          onRemoveKeyword={(slot, keyword) => void run(() => removeKeyword(slot, keyword))}
+          onSave={() => void saveAndApply()}
           onApplyAll={() => void run(applyHomeRouteToAllAgents, state.serve.running ? "全部 Agent 已恢复跟随主页 · 重启代理后生效" : "全部 Agent 已恢复跟随主页")}
           onOpenAgent={(id) => navigate(`agent:${id}`)}
           onRemoveProvider={(name) => void run(() => removeProvider(name), "供应商已删除")}
