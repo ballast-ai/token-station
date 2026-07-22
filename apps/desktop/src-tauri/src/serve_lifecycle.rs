@@ -146,15 +146,15 @@ pub(crate) fn prepare_server(config: ClientConfig) -> Result<PreparedServer, Sta
     let listener = timed_stage("listen_bind", || {
         runtime.block_on(async { tokio::net::TcpListener::bind(&listen).await })
     })?;
-    let app_state = server::AppState {
+    let app_state = server::AppState::new(
         gateway,
-        virtual_key: virtual_key.clone().map(Arc::from),
-        admin: Arc::new(token_station_cli::admin::AdminContext {
+        virtual_key.clone().map(Arc::from),
+        Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
             router: config.router.clone(),
             plugins: config.plugins.clone(),
         }),
-    };
+    );
 
     Ok(PreparedServer {
         runtime,

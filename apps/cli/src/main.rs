@@ -588,16 +588,9 @@ fn serve(config_path: &Path) -> Result<(), String> {
         let listener = tokio::net::TcpListener::bind(&listen)
             .await
             .map_err(|error| format!("bind {listen}: {error}"))?;
-        server::serve(
-            server::AppState {
-                gateway,
-                virtual_key: key,
-                admin,
-            },
-            listener,
-        )
-        .await
-        .map_err(|error| format!("server: {error}"))
+        server::serve(server::AppState::new(gateway, key, admin), listener)
+            .await
+            .map_err(|error| format!("server: {error}"))
     })
 }
 
