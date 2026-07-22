@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getReceipts, type Receipt } from "../api";
+import { humanizeErrorCode } from "../errors";
 
 function formatCost(micros: number | null): string {
   if (micros == null) return "成本未知";
@@ -93,6 +94,19 @@ export default function RecentRequests() {
                         {r.error_code ? ` · ${r.error_code}` : ""}
                       </dd>
                     </div>
+                    {(() => {
+                      const human = humanizeErrorCode(r.error_code);
+                      return human ? (
+                        <div className="receipt-diagnosis">
+                          <dt>诊断</dt>
+                          <dd>
+                            <span className="diag-layer">{human.layer}</span>
+                            <p className="diag-message">{human.message}</p>
+                            <p className="diag-suggestion">→ {human.suggestion}</p>
+                          </dd>
+                        </div>
+                      ) : null;
+                    })()}
                   </dl>
                 ) : null}
               </li>
