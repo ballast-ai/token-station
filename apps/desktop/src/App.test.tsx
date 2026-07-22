@@ -20,6 +20,7 @@ const emptyRoute: AgentRouteView = {
     low: { upstream: null, model: null },
   },
   config_error: null,
+  profile: null,
 };
 
 const registryFixture: AgentUiMetadataView[] = [
@@ -53,6 +54,7 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
     },
     dirty: false,
     applied: true,
+    profiles: [],
     ...overrides,
   };
 }

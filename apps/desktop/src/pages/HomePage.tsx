@@ -1,11 +1,12 @@
-import type {
-  AgentRouteView,
-  AgentUiMetadataView,
-  AgentView,
-  ProviderView,
-  StateView,
-  TierSlot,
-  TierView,
+import {
+  saveHomeRouteAsProfile,
+  type AgentRouteView,
+  type AgentUiMetadataView,
+  type AgentView,
+  type ProviderView,
+  type StateView,
+  type TierSlot,
+  type TierView,
 } from "../api";
 import TierRouteEditor from "../components/TierRouteEditor";
 import ProviderList from "../components/ProviderList";
@@ -95,6 +96,22 @@ export default function HomePage({
         <footer className="panel-foot route-actions">
           <button className="btn primary" type="button" disabled={busy} onClick={onSave}>保存并应用</button>
           <button className="btn" type="button" disabled={busy} onClick={onApplyAll}>应用到全部 Agent</button>
+          <button
+            className="btn"
+            type="button"
+            disabled={busy || Boolean(configError)}
+            title="把当前三档存成命名策略组,供多个 Agent 挂载共用"
+            onClick={() => {
+              const name = window.prompt("策略组名称(供多个 Agent 挂载共用):");
+              if (name?.trim()) {
+                void saveHomeRouteAsProfile(name.trim()).then((next) =>
+                  onStateChange(next, `已另存为策略组「${name.trim()}」`),
+                );
+              }
+            }}
+          >
+            另存为策略组
+          </button>
           <span className={`save-state ${dirty ? "dirty" : !applied ? "unapplied" : "clean"}`}>
             {dirty
               ? "● 有未保存更改"

@@ -33,12 +33,14 @@ export interface ServeView {
 
 export type TierSlot = "high" | "mid" | "low";
 
-export type AgentRouteMode = "inherit" | "custom";
+export type AgentRouteMode = "inherit" | "custom" | "profile";
 
 export interface AgentRouteView {
   mode: AgentRouteMode;
   tiers: Record<TierSlot, TierView>;
   config_error: string | null;
+  /** 挂载的策略组名(mode === "profile" 时)。 */
+  profile: string | null;
 }
 
 export interface SettingsView {
@@ -62,6 +64,8 @@ export interface StateView {
   dirty: boolean;
   /** 运行中的代理用的正是已保存那份配置(未运行时 true)。false = 已保存尚未应用。 */
   applied: boolean;
+  /** 已配置的命名策略组(策略组名),供 Agent 挂载。 */
+  profiles: string[];
 }
 
 export type AgentId = string;
@@ -296,6 +300,15 @@ export const setTier = (
 
 export const setAgentRouteMode = (agentId: AgentId, mode: AgentRouteMode) =>
   invoke<StateView>("set_agent_route_mode", { agentId, mode });
+
+export const saveHomeRouteAsProfile = (name: string) =>
+  invoke<StateView>("save_home_route_as_profile", { name });
+
+export const mountAgentProfile = (agentId: AgentId, profile: string) =>
+  invoke<StateView>("mount_agent_profile", { agentId, profile });
+
+export const deleteProfile = (name: string) =>
+  invoke<StateView>("delete_profile", { name });
 
 export const setAgentTier = (
   agentId: AgentId,

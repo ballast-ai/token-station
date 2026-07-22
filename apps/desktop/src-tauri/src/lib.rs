@@ -261,6 +261,8 @@ struct AgentRouteView {
     mode: String,
     tiers: std::collections::BTreeMap<String, TierView>,
     config_error: Option<String>,
+    /// The mounted profile name, when `mode == "profile"`.
+    profile: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -296,6 +298,8 @@ struct StateView {
     dirty: bool,
     /// 运行中的代理用的正是已保存那份配置(未运行时为 true)。false = 已保存尚未应用。
     applied: bool,
+    /// 已配置的命名策略组(策略组名),供 Agent 挂载。
+    profiles: Vec<String>,
 }
 
 /// 设置页视图:两个可写开关(server.auth / data.metrics)+ 只读环境信息。
@@ -469,14 +473,40 @@ impl AppInner {
     }
 
     fn agent_tier(&self, agent_id: &str, slot: &str) -> TierView {
-        if self.agent_route_mode(agent_id) != "custom" {
-            return self.tier(pool_key(slot).expect("known UI tier slot"));
-        }
-        let target = &self.draft["agent_routes"][agent_id]["custom_route"][slot];
+        let target = match self.agent_route_mode(agent_id) {
+            "custom" => &self.draft["agent_routes"][agent_id]["custom_route"][slot],
+            "profile" => {
+                let name = self.draft["agent_routes"][agent_id]["profile"]
+                    .as_str()
+                    .unwrap_or_default();
+                &self.draft["profiles"][name][slot]
+            }
+            // inherit (or unknown): the home tier.
+            _ => return self.tier(pool_key(slot).expect("known UI tier slot")),
+        };
         TierView {
             upstream: target["upstream"].as_str().map(str::to_string),
             model: target["model"].as_str().map(str::to_string),
         }
+    }
+
+    /// The profile this Agent mounts, when in profile mode.
+    fn agent_profile(&self, agent_id: &str) -> Option<String> {
+        (self.agent_route_mode(agent_id) == "profile")
+            .then(|| {
+                self.draft["agent_routes"][agent_id]["profile"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .flatten()
+    }
+
+    /// Names of every configured profile (策略组).
+    fn profile_names(&self) -> Vec<String> {
+        self.draft["profiles"]
+            .as_object()
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     fn agent_routes_view(&self) -> std::collections::BTreeMap<String, AgentRouteView> {
@@ -497,12 +527,14 @@ impl AppInner {
                 } else {
                     None
                 };
+                let profile = self.agent_profile(agent_id);
                 (
                     (*agent_id).to_string(),
                     AgentRouteView {
                         mode,
                         tiers,
                         config_error,
+                        profile,
                     },
                 )
             })
@@ -644,6 +676,7 @@ impl AppInner {
             settings: self.settings_view(),
             dirty: self.is_dirty(),
             applied: self.is_applied(),
+            profiles: self.profile_names(),
         }
     }
 
@@ -793,6 +826,58 @@ impl AppInner {
             _ => return Err("档位必须同时提供供应商和模型，或同时清空".to_string()),
         }
         self.draft["agent_routes"][agent_id]["mode"] = json!("custom");
+        Ok(())
+    }
+
+    /// 把当前主页三档另存为命名策略组。三档必须都配好。
+    fn save_home_route_as_profile(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("策略组名称不能为空".to_string());
+        }
+        let mut tiers = serde_json::Map::new();
+        for (slot, pool) in [("high", TIER_HIGH), ("mid", TIER_MID), ("low", TIER_LOW)] {
+            let tier = self.tier(pool);
+            match (tier.upstream, tier.model) {
+                (Some(upstream), Some(model)) => {
+                    tiers.insert(
+                        slot.to_string(),
+                        json!({ "upstream": upstream, "model": model }),
+                    );
+                }
+                _ => return Err(format!("{slot} 档尚未配置，无法另存为策略组")),
+            }
+        }
+        if !self.draft["profiles"].is_object() {
+            self.draft["profiles"] = json!({});
+        }
+        self.draft["profiles"][name] = Value::Object(tiers);
+        Ok(())
+    }
+
+    /// 让某 Agent 挂载一个命名策略组。
+    fn set_agent_profile_value(&mut self, agent_id: &str, profile: &str) -> Result<(), String> {
+        ensure_known_agent_id(agent_id)?;
+        if !self.draft["profiles"][profile].is_object() {
+            return Err(format!("策略组 `{profile}` 不存在"));
+        }
+        self.draft["agent_routes"][agent_id] = json!({ "mode": "profile", "profile": profile });
+        Ok(())
+    }
+
+    /// 删除一个策略组;仍被某个 Agent 挂载时拒绝,避免留下悬空挂载。
+    fn delete_profile_value(&mut self, name: &str) -> Result<(), String> {
+        let mounted: Vec<String> = KNOWN_AGENT_IDS
+            .iter()
+            .filter(|id| self.agent_profile(id).as_deref() == Some(name))
+            .map(|id| (*id).to_string())
+            .collect();
+        if !mounted.is_empty() {
+            return Err(format!("策略组 `{name}` 仍被挂载:{}", mounted.join(", ")));
+        }
+        if let Some(map) = self.draft["profiles"].as_object_mut() {
+            map.remove(name);
+        }
         Ok(())
     }
 }
@@ -1142,6 +1227,40 @@ fn set_agent_tier(
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
     inner.set_agent_tier_value(&agent_id, &slot, upstream, model)?;
+    Ok(inner.snapshot())
+}
+
+/// 把当前主页三档另存为命名策略组(策略组),供多个 Agent 挂载共用。
+#[tauri::command]
+fn save_home_route_as_profile(
+    state: State<'_, AppStateManaged>,
+    name: String,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.save_home_route_as_profile(&name)?;
+    Ok(inner.snapshot())
+}
+
+/// 让某 Agent 挂载一个命名策略组。
+#[tauri::command]
+fn mount_agent_profile(
+    state: State<'_, AppStateManaged>,
+    agent_id: String,
+    profile: String,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.set_agent_profile_value(&agent_id, &profile)?;
+    Ok(inner.snapshot())
+}
+
+/// 删除一个命名策略组(仍被挂载时拒绝)。
+#[tauri::command]
+fn delete_profile(state: State<'_, AppStateManaged>, name: String) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.delete_profile_value(&name)?;
     Ok(inner.snapshot())
 }
 
@@ -1683,6 +1802,9 @@ pub fn run() {
             set_tier,
             set_agent_route_mode,
             set_agent_tier,
+            save_home_route_as_profile,
+            mount_agent_profile,
+            delete_profile,
             save_config,
             save_agent_routes,
             apply_home_route_to_all_agents,
