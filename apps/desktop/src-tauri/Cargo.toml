@@ -39,6 +39,7 @@ zeroize = "=1.9.0"
 # The kernel, reused as a library — routing / gateway / config / metrics /
 # keychain all come from here. No fork of any of it.
 token-station-cli = { path = "../../cli" }
+token-station-protocol = { path = "../../../crates/protocol" }
 token-station-router-core = { path = "../../../crates/router-core" }
 token-station-metrics = { path = "../../../crates/metrics" }
 token-station-release = { path = "../../../crates/release" }

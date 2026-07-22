@@ -422,6 +422,13 @@ describe("desktop station navigation", () => {
     const user = userEvent.setup();
     invokeMock.mockImplementation(async (command) => {
       if (["get_state", "add_provider"].includes(command)) return stateFixture();
+      if (command === "preview_provider_endpoints") {
+        return {
+          chat: "https://api.openai.com/v1/chat/completions",
+          responses: "https://api.openai.com/v1/responses",
+          messages: "https://api.openai.com/v1/messages",
+        };
+      }
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
       throw new Error(`unexpected IPC command: ${command}`);

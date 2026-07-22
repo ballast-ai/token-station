@@ -5019,6 +5019,7 @@ dependencies = [
  "tauri-plugin-opener",
  "token-station-cli",
  "token-station-metrics",
+ "token-station-protocol",
  "token-station-release",
  "token-station-router-core",
  "tokio",

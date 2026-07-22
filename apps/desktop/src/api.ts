@@ -11,7 +11,23 @@ export interface ProviderView {
   provider: string;
   base_url: string;
   models: string[];
+  model_capabilities?: ModelCapabilityView[];
   has_auth: boolean;
+}
+
+export type CapabilityState = "verified" | "declared" | "unsupported" | "unknown";
+
+export interface ModelCapabilityView {
+  model: string;
+  tool: CapabilityState;
+  vision: CapabilityState;
+  json_schema: CapabilityState;
+}
+
+export interface ProviderEndpointPreview {
+  chat: string;
+  responses: string;
+  messages: string;
 }
 
 export interface ModelDiscoveryView {
@@ -255,6 +271,9 @@ export interface UpgradeView {
 }
 
 export const getState = () => invoke<StateView>("get_state");
+
+export const previewProviderEndpoints = (base_url: string) =>
+  invoke<ProviderEndpointPreview>("preview_provider_endpoints", { baseUrl: base_url });
 
 export const addProvider = (
   name: string,

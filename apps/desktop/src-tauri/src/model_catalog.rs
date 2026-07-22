@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use token_station_protocol::{ProviderApi, ProviderEndpoint};
 
 const CACHE_VERSION: u32 = 1;
 const CACHE_FILE: &str = "model-catalog-cache.json";
@@ -101,7 +102,9 @@ pub(crate) fn discover_with_cache(
 }
 
 fn fetch_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>, String> {
-    let url = format!("{base_url}/models");
+    let endpoint = ProviderEndpoint::try_new(base_url)
+        .map_err(|error| format!("Base URL 不合法：{error}"))?;
+    let url = endpoint.resolve(ProviderApi::Models);
     let http = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .timeout_global(Some(DISCOVERY_TIMEOUT))

@@ -604,6 +604,14 @@ body {
   margin-top: 11px;
   padding-top: 11px;
 }
+.capability-table { display: grid; gap: 6px; margin-bottom: 10px; }
+.capability-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
+.capability-row code { margin-right: auto; color: var(--ink); font-size: 11px; }
+.capability-tag { padding: 2px 6px; border-radius: 999px; font-size: 9.5px; font-weight: 650; }
+.capability-tag.verified { color: var(--success); background: color-mix(in srgb, var(--success) 12%, var(--surface)); }
+.capability-tag.declared { color: var(--signal); background: color-mix(in srgb, var(--signal) 10%, var(--surface)); }
+.capability-tag.unsupported { color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, var(--surface)); }
+.capability-tag.unknown { color: var(--muted); background: color-mix(in srgb, var(--muted) 9%, var(--surface)); }
 .manager-actions {
   display: flex;
   justify-content: flex-end;
@@ -1124,6 +1132,10 @@ body {
 .form-span { grid-column: 1 / -1; }
 .mono { font-family: "SF Mono", Menlo, monospace; }
 .local-provider-note { padding: 10px 12px; border-radius: 8px; color: var(--success); background: color-mix(in srgb, var(--success) 8%, var(--surface)); font-size: 11px; }
+.endpoint-preview { display: grid; gap: 5px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--muted); font-size: 10px; }
+.endpoint-preview span { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.endpoint-preview code { overflow-wrap: anywhere; color: var(--ink); font-size: 10px; }
+.endpoint-preview.invalid { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); color: var(--danger); }
 .preset-note { margin: 14px 18px 0 76px; padding: 9px 11px; border-left: 2px solid var(--warning); border-radius: 6px; color: var(--warning); background: color-mix(in srgb, var(--warning) 8%, var(--surface)); font-size: 11px; line-height: 1.5; }
 .wizard-actions { display: flex; justify-content: flex-end; gap: 9px; padding: 14px 18px; background: var(--surface-2); }
 .model-catalog { background: var(--surface-2); border-color: var(--line); }

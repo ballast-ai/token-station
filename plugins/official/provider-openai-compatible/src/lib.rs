@@ -22,8 +22,8 @@ use serde_json::{json, Map, Value};
 use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     Auth, ChatRequest, ChatResponse, Choice, Content, ErrorCode, ErrorEnvelope, Extensions,
-    FinishReason, HttpMethod, HttpRequestDescriptor, HttpResponseParts, Message, ProviderConfig,
-    Role, SafeHeaders, StreamChunk, StreamEvent, ToolCall, Usage,
+    FinishReason, HttpMethod, HttpRequestDescriptor, HttpResponseParts, Message, ProviderApi,
+    ProviderConfig, Role, SafeHeaders, StreamChunk, StreamEvent, ToolCall, Usage,
 };
 
 /// The unparsed tail and finish reason of the stream this instance is holding.
@@ -351,7 +351,7 @@ impl Guest for OpenAiCompatible {
 
         let mut descriptor = HttpRequestDescriptor::new(
             HttpMethod::Post,
-            format!("{}/chat/completions", config.base_url),
+            config.base_url.resolve(ProviderApi::ChatCompletions),
         );
         descriptor.headers =
             SafeHeaders::try_new([("content-type", "application/json")]).map_err(internal)?;
