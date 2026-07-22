@@ -1,7 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   addProvider,
   discoverProviderModels,
+  type EndpointPreview,
+  previewEndpoint,
   type ModelDiscoveryView,
   type StateView,
 } from "../api";
@@ -25,6 +27,37 @@ export default function AddProviderPage({ onCancel, onAdded }: AddProviderPagePr
   const [discovering, setDiscovering] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [preview, setPreview] = useState<EndpointPreview | null>(null);
+  const [previewError, setPreviewError] = useState("");
+
+  // Resolve the base URL to its final request URLs as the operator types, so a
+  // doubled /v1/v1 or an invalid URL shows before saving, not as a 404 later.
+  useEffect(() => {
+    const trimmed = url.trim();
+    if (!trimmed) {
+      setPreview(null);
+      setPreviewError("");
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      previewEndpoint(trimmed)
+        .then((result) => {
+          if (cancelled) return;
+          setPreview(result);
+          setPreviewError("");
+        })
+        .catch((caught) => {
+          if (cancelled) return;
+          setPreview(null);
+          setPreviewError(String(caught));
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [url]);
 
   const preset: ProviderPreset | null = useMemo(
     () => PROVIDER_CATALOG.find((item) => item.id === presetId) ?? null,
@@ -133,6 +166,13 @@ export default function AddProviderPage({ onCancel, onAdded }: AddProviderPagePr
                 <label className="field-label">
                   Base URL
                   <input className="input mono" value={url} disabled={disabled || !isCustom} onChange={(event) => setUrl(event.target.value)} />
+                  {previewError ? (
+                    <span className="endpoint-preview error mono">✗ {previewError}</span>
+                  ) : preview ? (
+                    <span className="endpoint-preview mono">
+                      最终请求地址 → chat: {preview.chat}
+                    </span>
+                  ) : null}
                 </label>
                 {needsKey ? (
                   <label className="field-label form-span">

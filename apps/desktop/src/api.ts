@@ -249,6 +249,17 @@ export interface UpgradeView {
 
 export const getState = () => invoke<StateView>("get_state");
 
+export interface EndpointPreview {
+  base: string;
+  chat: string;
+  responses: string;
+  messages: string;
+}
+
+/** The final request URLs a base URL resolves to (or a validation error). */
+export const previewEndpoint = (baseUrl: string) =>
+  invoke<EndpointPreview>("preview_endpoint", { baseUrl });
+
 export const addProvider = (
   name: string,
   base_url: string,
