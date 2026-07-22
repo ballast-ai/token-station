@@ -778,6 +778,7 @@ const EGRESS_TARGET_URL: &str = "TOKEN_STATION_EGRESS_TARGET_URL";
 const EGRESS_PROXY_URL: &str = "TOKEN_STATION_EGRESS_PROXY_URL";
 const EGRESS_KEY_FILE: &str = "TOKEN_STATION_EGRESS_KEY_FILE";
 const EGRESS_PLUGIN_DIR: &str = "TOKEN_STATION_EGRESS_PLUGIN_DIR";
+const EGRESS_CHILD_TIMEOUT: Duration = Duration::from_secs(120);
 const PROXY_ENV_VARS: [&str; 8] = [
     "ALL_PROXY",
     "all_proxy",
@@ -832,7 +833,7 @@ fn run_https_proxy_child(
         bytes
     });
 
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + EGRESS_CHILD_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().expect("child status polls") {
             break status;
