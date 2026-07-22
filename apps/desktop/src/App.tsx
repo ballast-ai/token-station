@@ -6,6 +6,7 @@ import {
   listAgentRegistry,
   listenServeState,
   removeProvider,
+  restoreProvider,
   scanAgents,
   serveStart,
   serveStop,
@@ -247,6 +248,8 @@ export default function App() {
       {view === "home" && (
         <HomePage
           providers={state.providers}
+          deletedProviders={state.deleted_providers ?? []}
+          providerRecoveryError={state.provider_recovery_error ?? null}
           tiers={state.tiers}
           agentRoutes={state.agent_routes ?? {}}
           registry={orderedRegistry}
@@ -260,6 +263,7 @@ export default function App() {
           onApplyAll={() => void run(applyHomeRouteToAllAgents, runtimeHealthy ? "全部 Agent 已恢复跟随主页 · 尚待应用" : "全部 Agent 已恢复跟随主页")}
           onOpenAgent={(id) => navigate(`agent:${id}`)}
           onRemoveProvider={(name) => void run(() => removeProvider(name), "供应商已删除")}
+          onRestoreProvider={(name) => void run(() => restoreProvider(name), "供应商已从回收站恢复")}
           onStateChange={showState}
         />
       )}

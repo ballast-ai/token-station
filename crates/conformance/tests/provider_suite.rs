@@ -23,7 +23,7 @@ use token_station_plugin_api::{AdapterKind, AdapterMetadata};
 use token_station_protocol::{
     Auth, ChatRequest, ChatResponse, Choice, Content, ErrorCode, ErrorEnvelope, Extensions,
     FinishReason, HttpMethod, HttpRequestDescriptor, HttpResponseParts, Message, ModelCapability,
-    ProviderConfig, Role, SafeHeaders, StreamChunk, StreamEvent, ToolCall, Usage,
+    ProviderConfig, ResponseFormat, Role, SafeHeaders, StreamChunk, StreamEvent, ToolCall, Usage,
 };
 
 // -- the reference adapter ----------------------------------------------------
@@ -164,6 +164,16 @@ impl OpenAiCompatible {
                 })
                 .collect();
             body.insert("tools".to_owned(), Value::Array(tools));
+        }
+        if let Some(format) = &request.response_format {
+            let format = match format {
+                ResponseFormat::Text => json!({"type": "text"}),
+                ResponseFormat::JsonObject => json!({"type": "json_object"}),
+                ResponseFormat::JsonSchema { json_schema } => {
+                    json!({"type": "json_schema", "json_schema": json_schema})
+                }
+            };
+            body.insert("response_format".to_owned(), format);
         }
         Value::Object(body)
     }

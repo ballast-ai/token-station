@@ -1,23 +1,41 @@
 import { useState } from "react";
-import type { ProviderView, StateView } from "../api";
+import { previewProviderRemoval } from "../api";
+import type { ProviderRemovalPreview, ProviderView, StateView } from "../api";
 import ProviderModelManager from "./ProviderModelManager";
 
 interface ProviderListProps {
   providers: ProviderView[];
+  deletedProviders: string[];
+  recoveryError: string | null;
   serveRunning: boolean;
   busy: boolean;
   onRemove: (name: string) => void;
+  onRestore: (name: string) => void;
   onStateChange: (state: StateView, message: string) => void;
 }
 
 export default function ProviderList({
   providers,
+  deletedProviders,
+  recoveryError,
   serveRunning,
   busy,
   onRemove,
+  onRestore,
   onStateChange,
 }: ProviderListProps) {
   const [managedProvider, setManagedProvider] = useState<string | null>(null);
+  const [removal, setRemoval] = useState<ProviderRemovalPreview | null>(null);
+  const [removalError, setRemovalError] = useState("");
+
+  const inspectRemoval = async (name: string) => {
+    setRemovalError("");
+    try {
+      setRemoval(await previewProviderRemoval(name));
+    } catch (caught) {
+      setRemovalError(String(caught));
+    }
+  };
 
   return (
     <section className="panel provider-panel">
@@ -31,6 +49,17 @@ export default function ProviderList({
       </div>
 
       <div className="provider-list">
+        {recoveryError && <div className="manager-error">{recoveryError}</div>}
+        {deletedProviders.length > 0 && (
+          <div className="provider-recovery" aria-label="Provider 回收站">
+            <strong>可恢复的 Provider</strong>
+            {deletedProviders.map((name) => (
+              <button className="btn tiny" type="button" disabled={busy} key={name} onClick={() => onRestore(name)}>
+                恢复 {name}
+              </button>
+            ))}
+          </div>
+        )}
         {providers.length === 0 && (
           <div className="empty-state">
             <strong>还没有供应商</strong>
@@ -61,7 +90,7 @@ export default function ProviderList({
                 >
                   {managedProvider === provider.name ? "收起" : "管理模型"}
                 </button>
-                <button className="btn tiny danger" type="button" disabled={busy} onClick={() => onRemove(provider.name)}>
+                <button className="btn tiny danger" type="button" disabled={busy} onClick={() => void inspectRemoval(provider.name)}>
                   删除
                 </button>
               </div>
@@ -74,8 +103,33 @@ export default function ProviderList({
                 onSaved={(next) => onStateChange(next, `${provider.name} 的模型已保存`)}
               />
             )}
+            {removal?.name === provider.name && (
+              <div className="provider-removal-preview" role="dialog" aria-label="删除影响预览">
+                <strong>删除影响</strong>
+                {removal.references.length > 0 ? (
+                  <>
+                    <p>以下路由仍在引用，必须先调整：</p>
+                    <ul>{removal.references.map((reference) => <li key={reference}>{reference}</li>)}</ul>
+                  </>
+                ) : (
+                  <p>没有路由引用。删除后会进入本地回收站，可恢复。</p>
+                )}
+                <div>
+                  <button className="btn tiny" type="button" onClick={() => setRemoval(null)}>取消</button>
+                  <button
+                    className="btn tiny danger"
+                    type="button"
+                    disabled={busy || !removal.can_remove}
+                    onClick={() => onRemove(provider.name)}
+                  >
+                    确认移入回收站
+                  </button>
+                </div>
+              </div>
+            )}
           </article>
         ))}
+        {removalError && <div className="manager-error">{removalError}</div>}
       </div>
     </section>
   );

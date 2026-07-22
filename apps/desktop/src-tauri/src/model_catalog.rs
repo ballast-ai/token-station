@@ -7,9 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use token_station_protocol::{ProviderApi, ProviderEndpoint};
+use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, ProviderEndpoint};
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 const CACHE_FILE: &str = "model-catalog-cache.json";
 const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(6);
@@ -23,12 +23,44 @@ pub(crate) struct ModelDiscoveryView {
     pub(crate) source: String,
     pub(crate) fetched_at_ms: Option<u64>,
     pub(crate) warning: Option<String>,
+    pub(crate) revision: u64,
+    pub(crate) catalog: Vec<CatalogModelView>,
+    pub(crate) added: Vec<String>,
+    pub(crate) removed: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CatalogSource {
+    Live,
+    Cache,
+    Configured,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CatalogState {
+    Active,
+    Stale,
+    Removed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct CatalogModelView {
+    pub(crate) model: String,
+    pub(crate) tool: CapabilityState,
+    pub(crate) vision: CapabilityState,
+    pub(crate) json_schema: CapabilityState,
+    pub(crate) source: CatalogSource,
+    pub(crate) last_seen_ms: Option<u64>,
+    pub(crate) catalog_state: CatalogState,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct CacheEntry {
     base_url: String,
-    models: Vec<String>,
+    revision: u64,
+    models: Vec<CatalogModelView>,
     fetched_at_ms: u64,
 }
 
@@ -36,6 +68,19 @@ struct CacheEntry {
 struct CacheFile {
     version: u32,
     providers: BTreeMap<String, CacheEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CacheFileV1 {
+    version: u32,
+    providers: BTreeMap<String, CacheEntryV1>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CacheEntryV1 {
+    base_url: String,
+    models: Vec<String>,
+    fetched_at_ms: u64,
 }
 
 impl Default for CacheFile {
@@ -65,14 +110,17 @@ pub(crate) fn discover_with_cache(
     match fetch_models(base_url, api_key) {
         Ok(models) => {
             let fetched_at_ms = now_ms();
+            let previous = read_cached_entry(data_dir, name, base_url);
+            let (entry, added, removed) = merge_live_catalog(
+                base_url,
+                previous.as_ref(),
+                &models,
+                fetched_at_ms,
+            );
             let warning = write_cache(
                 data_dir,
                 name,
-                CacheEntry {
-                    base_url: base_url.to_owned(),
-                    models: models.clone(),
-                    fetched_at_ms,
-                },
+                entry.clone(),
             )
             .err();
             Ok(ModelDiscoveryView {
@@ -80,15 +128,24 @@ pub(crate) fn discover_with_cache(
                 source: "live".to_owned(),
                 fetched_at_ms: Some(fetched_at_ms),
                 warning,
+                revision: entry.revision,
+                catalog: entry.models,
+                added,
+                removed,
             })
         }
         Err(warning) => {
             if let Some(entry) = read_cached_entry(data_dir, name, base_url) {
+                let catalog = stale_catalog(&entry);
                 return Ok(ModelDiscoveryView {
-                    models: entry.models,
+                    models: visible_models(&catalog),
                     source: "cache".to_owned(),
                     fetched_at_ms: Some(entry.fetched_at_ms),
                     warning: Some(warning),
+                    revision: entry.revision,
+                    catalog,
+                    added: Vec::new(),
+                    removed: Vec::new(),
                 });
             }
             Ok(ModelDiscoveryView {
@@ -96,9 +153,118 @@ pub(crate) fn discover_with_cache(
                 source: "none".to_owned(),
                 fetched_at_ms: None,
                 warning: Some(warning),
+                revision: 0,
+                catalog: Vec::new(),
+                added: Vec::new(),
+                removed: Vec::new(),
             })
         }
     }
+}
+
+fn unknown_catalog_model(
+    model: String,
+    source: CatalogSource,
+    last_seen_ms: Option<u64>,
+    catalog_state: CatalogState,
+) -> CatalogModelView {
+    CatalogModelView {
+        model,
+        tool: CapabilityState::Unknown,
+        vision: CapabilityState::Unknown,
+        json_schema: CapabilityState::Unknown,
+        source,
+        last_seen_ms,
+        catalog_state,
+    }
+}
+
+fn merge_live_catalog(
+    base_url: &str,
+    previous: Option<&CacheEntry>,
+    live_models: &[String],
+    fetched_at_ms: u64,
+) -> (CacheEntry, Vec<String>, Vec<String>) {
+    let previous_by_model: BTreeMap<&str, &CatalogModelView> = previous
+        .into_iter()
+        .flat_map(|entry| &entry.models)
+        .map(|model| (model.model.as_str(), model))
+        .collect();
+    let live: BTreeSet<&str> = live_models.iter().map(String::as_str).collect();
+    let mut added = Vec::new();
+    let mut catalog = Vec::new();
+
+    for model in live_models {
+        let mut record = previous_by_model.get(model.as_str()).map_or_else(
+            || {
+                added.push(model.clone());
+                unknown_catalog_model(
+                    model.clone(),
+                    CatalogSource::Live,
+                    Some(fetched_at_ms),
+                    CatalogState::Active,
+                )
+            },
+            |existing| (*existing).clone(),
+        );
+        if record.catalog_state == CatalogState::Removed {
+            added.push(model.clone());
+        }
+        record.source = CatalogSource::Live;
+        record.last_seen_ms = Some(fetched_at_ms);
+        record.catalog_state = CatalogState::Active;
+        catalog.push(record);
+    }
+
+    let mut removed = Vec::new();
+    for old in previous.into_iter().flat_map(|entry| &entry.models) {
+        if !live.contains(old.model.as_str()) {
+            let mut record = old.clone();
+            if record.catalog_state != CatalogState::Removed {
+                removed.push(record.model.clone());
+            }
+            record.catalog_state = CatalogState::Removed;
+            catalog.push(record);
+        }
+    }
+    catalog.sort_by(|left, right| left.model.cmp(&right.model));
+    added.sort();
+    added.dedup();
+    removed.sort();
+
+    (
+        CacheEntry {
+            base_url: base_url.to_owned(),
+            revision: previous.map_or(1, |entry| entry.revision.saturating_add(1)),
+            models: catalog,
+            fetched_at_ms,
+        },
+        added,
+        removed,
+    )
+}
+
+fn stale_catalog(entry: &CacheEntry) -> Vec<CatalogModelView> {
+    entry
+        .models
+        .iter()
+        .cloned()
+        .map(|mut model| {
+            if model.catalog_state != CatalogState::Removed {
+                model.catalog_state = CatalogState::Stale;
+                model.source = CatalogSource::Cache;
+            }
+            model
+        })
+        .collect()
+}
+
+fn visible_models(catalog: &[CatalogModelView]) -> Vec<String> {
+    catalog
+        .iter()
+        .filter(|model| model.catalog_state != CatalogState::Removed)
+        .map(|model| model.model.clone())
+        .collect()
 }
 
 fn fetch_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>, String> {
@@ -109,6 +275,8 @@ fn fetch_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>, St
         ureq::Agent::config_builder()
             .timeout_global(Some(DISCOVERY_TIMEOUT))
             .http_status_as_error(false)
+            .max_redirects(0)
+            .proxy(None)
             .build(),
     );
     let mut request = http
@@ -123,6 +291,9 @@ fn fetch_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>, St
         .call()
         .map_err(|error| format!("模型目录请求失败：{error}"))?;
     let status = response.status().as_u16();
+    if (300..400).contains(&status) {
+        return Err(format!("模型目录拒绝上游重定向：HTTP {status}"));
+    }
     if status >= 400 {
         return Err(status_message(status));
     }
@@ -169,11 +340,51 @@ fn cache_path(data_dir: &Path) -> PathBuf {
 }
 
 fn load_cache(data_dir: &Path) -> CacheFile {
-    std::fs::read_to_string(cache_path(data_dir))
+    let Some(text) = std::fs::read_to_string(cache_path(data_dir)).ok() else {
+        return CacheFile::default();
+    };
+    if let Some(cache) = serde_json::from_str::<CacheFile>(&text)
         .ok()
-        .and_then(|text| serde_json::from_str::<CacheFile>(&text).ok())
         .filter(|cache| cache.version == CACHE_VERSION)
-        .unwrap_or_default()
+    {
+        return cache;
+    }
+    let Some(old) = serde_json::from_str::<CacheFileV1>(&text)
+        .ok()
+        .filter(|cache| cache.version == 1)
+    else {
+        return CacheFile::default();
+    };
+    CacheFile {
+        version: CACHE_VERSION,
+        providers: old
+            .providers
+            .into_iter()
+            .map(|(name, entry)| {
+                let models = entry
+                    .models
+                    .into_iter()
+                    .map(|model| {
+                        unknown_catalog_model(
+                            model,
+                            CatalogSource::Cache,
+                            Some(entry.fetched_at_ms),
+                            CatalogState::Active,
+                        )
+                    })
+                    .collect();
+                (
+                    name,
+                    CacheEntry {
+                        base_url: entry.base_url,
+                        revision: 1,
+                        models,
+                        fetched_at_ms: entry.fetched_at_ms,
+                    },
+                )
+            })
+            .collect(),
+    }
 }
 
 fn read_cached_entry(data_dir: &Path, name: &str, base_url: &str) -> Option<CacheEntry> {
@@ -181,6 +392,40 @@ fn read_cached_entry(data_dir: &Path, name: &str, base_url: &str) -> Option<Cach
         .providers
         .remove(name)
         .filter(|entry| entry.base_url == base_url)
+}
+
+pub(crate) fn catalog_for_provider(
+    data_dir: &Path,
+    name: &str,
+    base_url: &str,
+    configured: &[ModelCapability],
+) -> (u64, Vec<CatalogModelView>) {
+    let cached = read_cached_entry(data_dir, name, base_url);
+    let revision = cached.as_ref().map_or(0, |entry| entry.revision);
+    let mut catalog: BTreeMap<String, CatalogModelView> = cached
+        .into_iter()
+        .flat_map(|entry| entry.models)
+        .map(|model| (model.model.clone(), model))
+        .collect();
+    for capability in configured {
+        catalog
+            .entry(capability.model.clone())
+            .and_modify(|model| {
+                model.tool = capability.tool_state();
+                model.vision = capability.vision_state();
+                model.json_schema = capability.json_schema_state();
+            })
+            .or_insert_with(|| CatalogModelView {
+                model: capability.model.clone(),
+                tool: capability.tool_state(),
+                vision: capability.vision_state(),
+                json_schema: capability.json_schema_state(),
+                source: CatalogSource::Configured,
+                last_seen_ms: None,
+                catalog_state: CatalogState::Active,
+            });
+    }
+    (revision, catalog.into_values().collect())
 }
 
 fn write_cache(data_dir: &Path, name: &str, entry: CacheEntry) -> Result<(), String> {
@@ -223,11 +468,12 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        discover_with_cache, fetch_models, parse_models, read_cached_entry, status_message,
-        write_cache, CacheEntry,
+        catalog_for_provider, discover_with_cache, fetch_models, parse_models, read_cached_entry,
+        status_message, unknown_catalog_model, write_cache, CacheEntry, CatalogSource, CatalogState,
     };
     use serde_json::json;
     use std::io::{Read, Write};
+    use token_station_protocol::{CapabilityState, ModelCapability};
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -256,6 +502,45 @@ mod tests {
                 .expect("test response writes");
         });
         format!("http://{address}")
+    }
+
+    fn serve_sequence(bodies: Vec<&'static str>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("test port binds");
+        let address = listener.local_addr().expect("test address exists");
+        std::thread::spawn(move || {
+            for body in bodies {
+                let (mut stream, _) = listener.accept().expect("request arrives");
+                let mut request = [0_u8; 2048];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 200 Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("test response writes");
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn cache_entry(base_url: &str, models: &[&str], fetched_at_ms: u64) -> CacheEntry {
+        CacheEntry {
+            base_url: base_url.to_owned(),
+            revision: 1,
+            models: models
+                .iter()
+                .map(|model| {
+                    unknown_catalog_model(
+                        (*model).to_owned(),
+                        CatalogSource::Cache,
+                        Some(fetched_at_ms),
+                        CatalogState::Active,
+                    )
+                })
+                .collect(),
+            fetched_at_ms,
+        }
     }
 
     #[test]
@@ -306,17 +591,13 @@ mod tests {
         write_cache(
             &dir,
             "moonshot",
-            CacheEntry {
-                base_url: "https://api.moonshot.cn/v1".to_owned(),
-                models: vec!["kimi-k2.6".to_owned()],
-                fetched_at_ms: 42,
-            },
+            cache_entry("https://api.moonshot.cn/v1", &["kimi-k2.6"], 42),
         )
         .expect("cache writes");
 
         let hit = read_cached_entry(&dir, "moonshot", "https://api.moonshot.cn/v1")
             .expect("matching cache is returned");
-        assert_eq!(hit.models, ["kimi-k2.6"]);
+        assert_eq!(hit.models[0].model, "kimi-k2.6");
         assert!(read_cached_entry(&dir, "moonshot", "https://example.com/v1").is_none());
 
         std::fs::remove_dir_all(dir).ok();
@@ -330,11 +611,7 @@ mod tests {
             write_cache(
                 &first_dir,
                 "deepseek",
-                CacheEntry {
-                    base_url: "https://api.deepseek.com/v1".to_owned(),
-                    models: vec!["deepseek-chat".to_owned()],
-                    fetched_at_ms: 1,
-                },
+                cache_entry("https://api.deepseek.com/v1", &["deepseek-chat"], 1),
             )
         });
         let second_dir = dir.clone();
@@ -342,11 +619,7 @@ mod tests {
             write_cache(
                 &second_dir,
                 "moonshot",
-                CacheEntry {
-                    base_url: "https://api.moonshot.cn/v1".to_owned(),
-                    models: vec!["moonshot-v1-8k".to_owned()],
-                    fetched_at_ms: 2,
-                },
+                cache_entry("https://api.moonshot.cn/v1", &["moonshot-v1-8k"], 2),
             )
         });
         first.join().unwrap().unwrap();
@@ -387,11 +660,7 @@ mod tests {
         write_cache(
             &dir,
             "offline",
-            CacheEntry {
-                base_url: "http://127.0.0.1:9".to_owned(),
-                models: vec!["cached-model".to_owned()],
-                fetched_at_ms: 42,
-            },
+            cache_entry("http://127.0.0.1:9", &["cached-model"], 42),
         )
         .unwrap();
         let cached = discover_with_cache(&dir, "offline", "http://127.0.0.1:9", None).unwrap();
@@ -400,6 +669,96 @@ mod tests {
         assert_eq!(cached.fetched_at_ms, Some(42));
         assert!(discover_with_cache(&dir, "", "http://example.invalid", None).is_err());
         assert!(discover_with_cache(&dir, "provider", "", None).is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn live_refresh_versions_the_catalog_and_retains_removed_models() {
+        let dir = scratch("catalog-diff");
+        let base = serve_sequence(vec![
+            r#"{"data":[{"id":"model-a"},{"id":"model-b"}]}"#,
+            r#"{"data":[{"id":"model-b"},{"id":"model-c"}]}"#,
+        ]);
+
+        let first = discover_with_cache(&dir, "fixture", &base, None).unwrap();
+        assert_eq!(first.revision, 1);
+        assert_eq!(first.added, ["model-a", "model-b"]);
+        assert!(first.removed.is_empty());
+
+        let second = discover_with_cache(&dir, "fixture", &base, None).unwrap();
+        assert_eq!(second.revision, 2);
+        assert_eq!(second.added, ["model-c"]);
+        assert_eq!(second.removed, ["model-a"]);
+        assert_eq!(second.models, ["model-b", "model-c"]);
+        assert_eq!(
+            second
+                .catalog
+                .iter()
+                .find(|model| model.model == "model-a")
+                .unwrap()
+                .catalog_state,
+            CatalogState::Removed
+        );
+
+        let stale = discover_with_cache(&dir, "fixture", &base, None).unwrap();
+        assert_eq!(stale.source, "cache");
+        assert!(stale.catalog.iter().any(|model| {
+            model.model == "model-b" && model.catalog_state == CatalogState::Stale
+        }));
+        assert!(stale.catalog.iter().any(|model| {
+            model.model == "model-a" && model.catalog_state == CatalogState::Removed
+        }));
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn v1_cache_migrates_and_configured_capabilities_overlay_without_fake_live_evidence() {
+        let dir = scratch("v1-migration");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("model-catalog-cache.json"),
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "providers": {
+                    "fixture": {
+                        "base_url": "https://example.test/v1",
+                        "models": ["cached-model"],
+                        "fetched_at_ms": 42
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let configured = ModelCapability {
+            model: "manual-model".to_owned(),
+            tool_state: Some(CapabilityState::Declared),
+            ..ModelCapability::default()
+        };
+
+        let (revision, catalog) = catalog_for_provider(
+            &dir,
+            "fixture",
+            "https://example.test/v1",
+            &[configured],
+        );
+
+        assert_eq!(revision, 1);
+        let cached = catalog
+            .iter()
+            .find(|model| model.model == "cached-model")
+            .unwrap();
+        assert_eq!(cached.source, CatalogSource::Cache);
+        assert_eq!(cached.tool, CapabilityState::Unknown);
+        let manual = catalog
+            .iter()
+            .find(|model| model.model == "manual-model")
+            .unwrap();
+        assert_eq!(manual.source, CatalogSource::Configured);
+        assert_eq!(manual.tool, CapabilityState::Declared);
+        assert!(manual.last_seen_ms.is_none());
+
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -418,11 +777,7 @@ mod tests {
         let error = write_cache(
             &dir,
             "fixture",
-            CacheEntry {
-                base_url: "https://example.invalid/v1".to_owned(),
-                models: vec!["model".to_owned()],
-                fetched_at_ms: 1,
-            },
+            cache_entry("https://example.invalid/v1", &["model"], 1),
         )
         .unwrap_err();
         assert!(error.contains("保存模型缓存失败"));

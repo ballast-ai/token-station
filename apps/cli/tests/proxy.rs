@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use token_station_cli::config::ClientConfig;
-use token_station_cli::gateway::{Gateway, Reply, StageStatus};
+use token_station_cli::gateway::{FeatureLayer, Gateway, Reply, StageStatus};
 use token_station_cli::server;
 
 // -- plugin packages -------------------------------------------------------------
@@ -2980,6 +2980,82 @@ fn an_upstream_probe_runs_the_real_southbound_path() {
     );
     assert_eq!(seen[0].body["model"], json!("gpt-5.5"));
     assert_eq!(seen[0].body["max_tokens"], json!(1));
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn provider_feature_probe_executes_stream_tool_and_json_requests() {
+    let sse = concat!(
+        "data: {\"id\":\"chatcmpl-stream\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-stream\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let stream = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let tool = json!({
+        "id": "chatcmpl-tool", "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant", "content": null,
+                "tool_calls": [{
+                    "id": "call_health", "type": "function",
+                    "function": {"name": "provider_health_check", "arguments": "{}"}
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let structured = json!({
+        "id": "chatcmpl-json", "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "{\"ok\":true}"},
+            "finish_reason": "stop"
+        }]
+    });
+    let mock = MockUpstream::start(vec![
+        vec![stream],
+        vec![http_json(200, &tool.to_string())],
+        vec![http_json(200, &structured.to_string())],
+    ]);
+    let key = key_file("probe-features", "sk-test-key-abc");
+    let gateway = probe_gateway(&mock, &key);
+
+    let result = gateway
+        .probe_features("mock_primary", "gpt-5.5")
+        .expect("feature probes run");
+    assert_eq!(
+        result
+            .stages
+            .iter()
+            .map(|stage| (stage.layer, stage.status))
+            .collect::<Vec<_>>(),
+        vec![
+            (FeatureLayer::Stream, StageStatus::Pass),
+            (FeatureLayer::Tool, StageStatus::Pass),
+            (FeatureLayer::Json, StageStatus::Pass),
+        ]
+    );
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0].body["stream"], json!(true));
+    assert_eq!(
+        seen[1].body["tools"][0]["function"]["name"],
+        json!("provider_health_check")
+    );
+    assert_eq!(
+        seen[2].body["response_format"]["type"],
+        json!("json_schema")
+    );
+    assert_eq!(
+        seen[2].body["response_format"]["json_schema"]["name"],
+        json!("provider_health_check")
+    );
 
     std::fs::remove_file(key).ok();
 }

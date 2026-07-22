@@ -23,7 +23,7 @@ use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     Auth, ChatRequest, ChatResponse, Choice, Content, ErrorCode, ErrorEnvelope, Extensions,
     FinishReason, HttpMethod, HttpRequestDescriptor, HttpResponseParts, Message, ProviderApi,
-    ProviderConfig, Role, SafeHeaders, StreamChunk, StreamEvent, ToolCall, Usage,
+    ProviderConfig, ResponseFormat, Role, SafeHeaders, StreamChunk, StreamEvent, ToolCall, Usage,
 };
 
 /// The unparsed tail and finish reason of the stream this instance is holding.
@@ -212,6 +212,16 @@ fn body_of(request: &ChatRequest) -> Value {
             })
             .collect();
         body.insert("tools".to_owned(), Value::Array(tools));
+    }
+    if let Some(format) = &request.response_format {
+        let format = match format {
+            ResponseFormat::Text => json!({"type": "text"}),
+            ResponseFormat::JsonObject => json!({"type": "json_object"}),
+            ResponseFormat::JsonSchema { json_schema } => {
+                json!({"type": "json_schema", "json_schema": json_schema})
+            }
+        };
+        body.insert("response_format".to_owned(), format);
     }
     Value::Object(body)
 }

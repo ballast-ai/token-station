@@ -12,6 +12,8 @@ export interface ProviderView {
   base_url: string;
   models: string[];
   model_capabilities?: ModelCapabilityView[];
+  catalog_revision?: number;
+  catalog?: CatalogModelView[];
   has_auth: boolean;
 }
 
@@ -24,10 +26,37 @@ export interface ModelCapabilityView {
   json_schema: CapabilityState;
 }
 
+export type CatalogSource = "live" | "cache" | "configured";
+export type CatalogState = "active" | "stale" | "removed";
+
+export interface CatalogModelView extends ModelCapabilityView {
+  source: CatalogSource;
+  last_seen_ms: number | null;
+  catalog_state: CatalogState;
+}
+
 export interface ProviderEndpointPreview {
   chat: string;
   responses: string;
   messages: string;
+}
+
+export interface ProviderRemovalPreview {
+  name: string;
+  references: string[];
+  can_remove: boolean;
+}
+
+export interface ProviderTestStage {
+  layer: "network" | "http" | "auth" | "model" | "generation" | "stream" | "tool" | "json";
+  status: "pass" | "fail" | "skipped";
+  detail?: string;
+}
+
+export interface ProviderTestResult {
+  model: string;
+  stages: ProviderTestStage[];
+  latency_ms?: number;
 }
 
 export interface ModelDiscoveryView {
@@ -35,6 +64,10 @@ export interface ModelDiscoveryView {
   source: "live" | "cache" | "none";
   fetched_at_ms: number | null;
   warning: string | null;
+  revision?: number;
+  catalog?: CatalogModelView[];
+  added?: string[];
+  removed?: string[];
 }
 
 export type ServePhase = "stopped" | "starting" | "stopping" | "running" | "error";
@@ -73,6 +106,8 @@ export interface SettingsView {
 
 export interface StateView {
   providers: ProviderView[];
+  deleted_providers?: string[];
+  provider_recovery_error?: string | null;
   tiers: Record<TierSlot, TierView>;
   agent_routes: Record<string, AgentRouteView>;
   serve: ServeView;
@@ -282,8 +317,17 @@ export const addProvider = (
   api_key: string | null,
 ) => invoke<StateView>("add_provider", { name, baseUrl: base_url, models, apiKey: api_key });
 
+export const editProvider = (name: string, base_url: string, api_key: string | null) =>
+  invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });
+
 export const removeProvider = (name: string) =>
   invoke<StateView>("remove_provider", { name });
+
+export const previewProviderRemoval = (name: string) =>
+  invoke<ProviderRemovalPreview>("preview_provider_removal", { name });
+
+export const restoreProvider = (name: string) =>
+  invoke<StateView>("restore_provider", { name });
 
 export const discoverProviderModels = (
   name: string,
@@ -295,6 +339,9 @@ export const discoverProviderModels = (
     baseUrl: base_url,
     apiKey: api_key,
   });
+
+export const testProvider = (name: string) =>
+  invoke<ProviderTestResult[]>("test_provider", { name });
 
 export const updateProviderModels = (name: string, models: string[]) =>
   invoke<StateView>("update_provider_models", { name, models });
