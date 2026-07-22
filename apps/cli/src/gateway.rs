@@ -126,6 +126,21 @@ fn take_decodable(pending: &mut Vec<u8>) -> String {
     }
 }
 
+/// A token-accounting inconsistency, or `None` when the numbers are coherent.
+///
+/// Cached tokens are a *subset* of the input the model read, so a cache count
+/// larger than the input is a provider reporting bug, not free savings — worth
+/// surfacing rather than silently trusting into a cost figure.
+fn usage_anomaly(usage: &token_station_protocol::Usage) -> Option<&'static str> {
+    if usage.cache_read_tokens > usage.input_tokens {
+        Some("cache_read_tokens exceeds input_tokens")
+    } else if usage.cache_write_tokens > usage.input_tokens {
+        Some("cache_write_tokens exceeds input_tokens")
+    } else {
+        None
+    }
+}
+
 /// True when any message carries non-text (image) content. Audio arrives the
 /// same way (a non-text content part), so this is the multimodal gate.
 fn request_has_multimodal(request: &ChatRequest) -> bool {
@@ -1152,6 +1167,10 @@ impl Gateway {
         // record so a later price change never re-values it. An unpriced model
         // leaves cost unknown (None), never a claimed-free zero.
         if let Some(usage) = record.usage {
+            // Surface an incoherent cache count before it becomes a cost figure.
+            if let Some(reason) = usage_anomaly(&usage) {
+                eprintln!("usage anomaly on {model}: {reason}");
+            }
             if let Some((cost, version)) = self.pricing.price(model, &usage) {
                 record.cost_micros = Some(cost);
                 record.price_version = Some(version);
@@ -1603,6 +1622,34 @@ impl From<UpstreamResponse> for HttpResponseParts {
             body,
             extensions: token_station_protocol::Extensions::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod usage_anomaly_tests {
+    use super::usage_anomaly;
+    use token_station_protocol::Usage;
+
+    #[test]
+    fn coherent_usage_is_not_flagged() {
+        let usage = Usage {
+            input_tokens: 1000,
+            output_tokens: 200,
+            cache_read_tokens: 400,
+            cache_write_tokens: 100,
+            ..Usage::default()
+        };
+        assert!(usage_anomaly(&usage).is_none());
+    }
+
+    #[test]
+    fn cache_read_over_input_is_flagged() {
+        let usage = Usage {
+            input_tokens: 100,
+            cache_read_tokens: 500,
+            ..Usage::default()
+        };
+        assert!(usage_anomaly(&usage).is_some());
     }
 }
 

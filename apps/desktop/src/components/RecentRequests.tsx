@@ -36,8 +36,13 @@ export default function RecentRequests() {
           刷新
         </button>
       </div>
-      {error ? <div className="banner err">{error}</div> : null}
-      {receipts.length === 0 ? (
+      {error ? (
+        <div className="banner err">
+          {error}
+          {receipts.length > 0 ? "（下方为上次成功获取的数据）" : ""}
+        </div>
+      ) : null}
+      {receipts.length === 0 && !error ? (
         <p className="empty-note">
           还没有请求记录。代理跑起来、有流量后，这里显示最近 5 次的路由回执——为什么走这个模型、fallback 了谁、花了多少。
         </p>
