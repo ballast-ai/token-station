@@ -53,6 +53,10 @@ pub struct ClientConfig {
     /// home router, keeping every pre-Agent-routes configuration compatible.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_routes: BTreeMap<String, AgentRouteConfig>,
+    /// Named, reusable three-tier routes (“profiles”) that Agents mount by name,
+    /// so several Agents can share one route instead of each carrying a copy.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<String, AgentTierRoutes>,
     /// Where the request log and metrics store live. Optional; defaults apply.
     #[serde(default)]
     pub data: DataConfig,
@@ -79,8 +83,14 @@ pub struct ClientConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRouteMode {
+    /// Follow the global (home) router.
     Inherit,
+    /// This Agent's own three-tier route, private to it.
     Custom,
+    /// Mount a named [`profiles`](ClientConfig::profiles) entry, shared with any
+    /// other Agent that mounts the same one—the “profile” that prevents every Agent
+    /// needing a private copy of the same route.
+    Profile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +99,9 @@ pub struct AgentRouteConfig {
     pub mode: AgentRouteMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_route: Option<AgentTierRoutes>,
+    /// Which named profile this Agent mounts, when `mode = profile`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,6 +327,17 @@ impl ClientConfig {
                 .as_ref()
                 .ok_or_else(|| format!("Agent `{agent_id}` custom mode requires custom_route"))
                 .and_then(|tiers| tiers.materialize(&self.router).map(Some)),
+            AgentRouteMode::Profile => {
+                let name = route
+                    .profile
+                    .as_deref()
+                    .ok_or_else(|| format!("Agent `{agent_id}` profile mode requires a profile"))?;
+                let tiers = self
+                    .profiles
+                    .get(name)
+                    .ok_or_else(|| format!("Agent `{agent_id}` mounts unknown profile `{name}`"))?;
+                tiers.materialize(&self.router).map(Some)
+            }
         }
     }
 
@@ -623,6 +647,48 @@ mod tests {
                 .is_none()
         );
         assert!(config.agent_routes["opencode"].custom_route.is_some());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn several_agents_can_mount_one_named_profile() {
+        let mut value = example();
+        value["profiles"] = serde_json::json!({
+            "cheap-and-local": three_tiers("ollama_local", "llama3.3"),
+        });
+        value["agent_routes"] = serde_json::json!({
+            "codex": { "mode": "profile", "profile": "cheap-and-local" },
+            "opencode": { "mode": "profile", "profile": "cheap-and-local" },
+        });
+        let path = scratch("agent-profiles", &value.to_string());
+        let config = ClientConfig::load(&path).expect("profile routes validate");
+
+        // Both Agents resolve to the same shared profile — no per-Agent copy.
+        for agent in ["codex", "opencode"] {
+            let router = config
+                .custom_router_for_agent(agent)
+                .expect("known Agent")
+                .expect("profile RouterConfig");
+            for pool in ["tier_high", "tier_mid", "tier_low"] {
+                assert_eq!(router.pools[pool][0].upstream.as_str(), "ollama_local");
+                assert_eq!(router.pools[pool][0].model, "llama3.3");
+            }
+        }
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn mounting_an_unknown_profile_is_refused() {
+        let mut value = example();
+        value["agent_routes"] = serde_json::json!({
+            "codex": { "mode": "profile", "profile": "does-not-exist" },
+        });
+        let path = scratch("agent-profile-missing", &value.to_string());
+        let config = ClientConfig::load(&path).expect("structure is valid");
+        let error = config
+            .custom_router_for_agent("codex")
+            .expect_err("a missing profile is refused, not silently ignored");
+        assert!(error.contains("does-not-exist"), "{error}");
         fs::remove_file(path).ok();
     }
 
