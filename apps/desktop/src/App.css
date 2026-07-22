@@ -2181,3 +2181,7 @@ pre.block {
 .save-state.dirty { color: var(--warn, #d0a24a); }
 .save-state.unapplied { color: var(--danger, #d05a5a); }
 .save-state.clean { color: var(--muted, #8a8a8a); }
+
+/* 策略组挂载 (T7) */
+.profile-mount { margin: 8px 0; }
+.profile-mount select { max-width: 320px; }

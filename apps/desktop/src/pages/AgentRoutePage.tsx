@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   applyAgentPlan,
+  mountAgentProfile,
   planAgentConnection,
   planAgentDisconnect,
   saveAgentRoutes,
@@ -22,6 +23,7 @@ interface AgentRoutePageProps {
   agent?: AgentView;
   route: AgentRouteView;
   providers: ProviderView[];
+  profiles: string[];
   serveRunning: boolean;
   onStateChange: (state: StateView, message?: string) => void;
   onRescan: () => void | Promise<void>;
@@ -69,6 +71,7 @@ export default function AgentRoutePage({
   agent,
   route,
   providers,
+  profiles,
   serveRunning,
   onStateChange,
   onRescan,
@@ -164,6 +167,14 @@ export default function AgentRoutePage({
 
   const switchMode = async (mode: "inherit" | "custom") => {
     await runState(() => setAgentRouteMode(metadata.agent_id, mode));
+  };
+
+  const mountProfile = async (name: string) => {
+    if (!name) return;
+    await runState(
+      () => mountAgentProfile(metadata.agent_id, name),
+      serveRunning ? "已挂载策略组 · 重启代理后生效" : "已挂载策略组",
+    );
   };
 
   const saveRoute = () => runState(
@@ -274,14 +285,27 @@ export default function AgentRoutePage({
           <div className="mode-switch" role="radiogroup" aria-label="Agent 路由模式">
             <button type="button" role="radio" aria-checked={route.mode === "inherit"} className={route.mode === "inherit" ? "active" : ""} disabled={busy} onClick={() => void switchMode("inherit")}>跟随主页</button>
             <button type="button" role="radio" aria-checked={route.mode === "custom"} className={route.mode === "custom" ? "active" : ""} disabled={busy} onClick={() => void switchMode("custom")}>独立路由</button>
+            <button type="button" role="radio" aria-checked={route.mode === "profile"} className={route.mode === "profile" ? "active" : ""} disabled={busy || profiles.length === 0} title={profiles.length === 0 ? "先在主页把三档另存为策略组" : ""} onClick={() => void mountProfile(route.profile ?? profiles[0] ?? "")}>挂载策略组</button>
           </div>
         </div>
+
+        {route.mode === "profile" ? (
+          <label className="field-label profile-mount">
+            策略组
+            <select className="input" disabled={busy} value={route.profile ?? ""} onChange={(event) => void mountProfile(event.target.value)}>
+              {profiles.map((name) => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
+            <span className="sub">多个 Agent 挂同一个策略组即共用一套三档；改策略组一次,所有挂载的 Agent 一起变。</span>
+          </label>
+        ) : null}
 
         <TierRouteEditor
           tiers={route.tiers}
           providers={providers}
           disabled={busy}
-          readOnly={route.mode === "inherit"}
+          readOnly={route.mode !== "custom"}
           onTierChange={(slot: TierSlot, upstream, model) => runState(() => setAgentTier(metadata.agent_id, slot, upstream, model))}
         />
 

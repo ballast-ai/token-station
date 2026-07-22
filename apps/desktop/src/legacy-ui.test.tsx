@@ -56,6 +56,7 @@ const state: StateView = {
   settings,
   dirty: false,
   applied: true,
+  profiles: [],
 };
 
 beforeEach(() => {
