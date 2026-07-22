@@ -126,6 +126,16 @@ fn take_decodable(pending: &mut Vec<u8>) -> String {
     }
 }
 
+/// True when any message carries non-text (image) content. Audio arrives the
+/// same way (a non-text content part), so this is the multimodal gate.
+fn request_has_multimodal(request: &ChatRequest) -> bool {
+    use token_station_protocol::{Content, ContentPart};
+    request.messages.iter().any(|message| {
+        matches!(&message.content, Some(Content::Parts(parts))
+            if parts.iter().any(|part| !matches!(part, ContentPart::Text { .. })))
+    })
+}
+
 fn begin_record(started_at_ms: u64, protocol: impl Into<String>) -> RequestRecord {
     let mut record = RequestRecord::begin(started_at_ms, protocol);
     record.request_id = format!(
@@ -167,6 +177,9 @@ pub struct Gateway {
     admission: Admission,
     /// Versioned per-model prices; the version travels onto each priced record.
     pricing: crate::pricing::PriceTable,
+    /// Refuse image/audio requests with a typed capability error (language
+    /// models only).
+    reject_multimodal: bool,
     secrets: SecretStore,
     http: ureq::Agent,
     recorder: Arc<dyn Recorder>,
@@ -498,6 +511,7 @@ impl Gateway {
             })),
             admission: Admission::new(config.concurrency),
             pricing: config.pricing.clone(),
+            reject_multimodal: config.reject_multimodal,
             secrets: SecretStore::from_config(config),
             recorder,
             http: egress_agent(UPSTREAM_TIMEOUT),
@@ -1007,6 +1021,17 @@ impl Gateway {
         };
 
         let request = agent.plugin.normalize_inbound(&envelope)?;
+
+        // Language models only: an image/audio request gets an honest typed
+        // refusal, not a pretend-support attempt that times out downstream.
+        if self.reject_multimodal && request_has_multimodal(&request) {
+            return Err(ErrorEnvelope::new(
+                ErrorCode::Capability,
+                400,
+                "this proxy routes language models only; multimodal (image/audio) requests are not supported",
+            ));
+        }
+
         let hints = agent.plugin.extract_agent_hint(&envelope)?;
         // Privacy boundary: the persisted requested model is a configured name
         // or a hashed `unlisted:` token — never the caller's raw string.
@@ -1578,6 +1603,41 @@ impl From<UpstreamResponse> for HttpResponseParts {
             body,
             extensions: token_station_protocol::Extensions::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod multimodal_tests {
+    use super::request_has_multimodal;
+    use token_station_protocol::{ChatRequest, Content, ContentPart, ImageUrl, Message, Role};
+
+    #[test]
+    fn a_text_only_request_is_not_multimodal() {
+        let request = ChatRequest::new("m", vec![Message::text(Role::User, "hello")]);
+        assert!(!request_has_multimodal(&request));
+    }
+
+    #[test]
+    fn a_request_with_an_image_part_is_multimodal() {
+        let request = ChatRequest::new(
+            "m",
+            vec![Message {
+                role: Role::User,
+                content: Some(Content::Parts(vec![
+                    ContentPart::Text {
+                        text: "what is this".to_owned(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "data:image/png;base64,AAAA".to_owned(),
+                            detail: None,
+                        },
+                    },
+                ])),
+                ..Message::text(Role::User, "")
+            }],
+        );
+        assert!(request_has_multimodal(&request));
     }
 }
 
