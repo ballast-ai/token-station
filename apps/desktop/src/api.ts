@@ -6,11 +6,23 @@ export interface TierView {
   model: string | null;
 }
 
+/** A model's declared four-state capabilities (what the router gates on). */
+export interface ModelCapabilityView {
+  model: string;
+  tool: boolean;
+  vision: boolean;
+  json_schema: boolean;
+  /** 0 means the adapter did not declare a value. Routing treats it as unknown and does not send long contexts here. */
+  context_window: number;
+}
+
 export interface ProviderView {
   name: string;
   provider: string;
   base_url: string;
   models: string[];
+  /** Four-state capabilities for each model. The backend always supplies them; old mocks might not, so the UI uses `?? []`. */
+  model_details?: ModelCapabilityView[];
   has_auth: boolean;
 }
 

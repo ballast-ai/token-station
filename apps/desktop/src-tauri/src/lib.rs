@@ -247,7 +247,23 @@ struct ProviderView {
     provider: String,
     base_url: String,
     models: Vec<String>,
+    /// The same models with their declared four-state capabilities, so the UI
+    /// can show what each can do (tools, vision, JSON schema, context window)
+    /// before a request is ever routed. `models` stays as the flat id list that
+    /// existing views rely on.
+    model_details: Vec<ModelCapabilityView>,
     has_auth: bool,
+}
+
+/// A model's declared capabilities, flattened for the UI. Mirrors the four
+/// dimensions the router gates on; `context_window` of 0 means "unknown".
+#[derive(Serialize)]
+struct ModelCapabilityView {
+    model: String,
+    tool: bool,
+    vision: bool,
+    json_schema: bool,
+    context_window: u32,
 }
 
 #[derive(Clone, Serialize)]
@@ -434,6 +450,26 @@ impl AppInner {
                     .map(|arr| {
                         arr.iter()
                             .filter_map(|m| m["model"].as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                model_details: up["models"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| {
+                                let model = m["model"].as_str()?.to_string();
+                                Some(ModelCapabilityView {
+                                    model,
+                                    tool: m["tool"].as_bool().unwrap_or(false),
+                                    vision: m["vision"].as_bool().unwrap_or(false),
+                                    json_schema: m["json_schema"].as_bool().unwrap_or(false),
+                                    context_window: m["context_window"]
+                                        .as_u64()
+                                        .and_then(|w| u32::try_from(w).ok())
+                                        .unwrap_or(0),
+                                })
+                            })
                             .collect()
                     })
                     .unwrap_or_default(),
