@@ -25,7 +25,8 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use token_station_cli::config::{ClientConfig, PluginsConfig, KNOWN_AGENT_IDS};
 use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, StageStatus};
 use token_station_cli::plugins::{PluginRegistry, Receipts};
-use token_station_cli::{secrets, stats, upgrade};
+use token_station_cli::{secrets, stats, store::SqliteStore, upgrade};
+use token_station_metrics::ReceiptView;
 use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, ProviderEndpoint};
 use token_station_router_core::UpstreamRef;
 
@@ -2101,6 +2102,20 @@ fn get_stats(
     })
 }
 
+/// Home page: the five most recent body-free Request Receipts. If the metrics database has not been created, including when
+/// metrics) return an empty array. The read layer itself limits results to five.
+#[tauri::command]
+fn get_recent_receipts(
+    state: State<'_, AppStateManaged>,
+    limit: usize,
+) -> Result<Vec<ReceiptView>, String> {
+    let db = {
+        let inner = state.0.lock().unwrap();
+        inner.data_dir().join("metrics.sqlite")
+    };
+    SqliteStore::recent_receipts(&db, limit)
+}
+
 /// Convert the draft's rules, hints, heuristic tiers, and fallback into a read-only routing-table view with no API calls.
 #[tauri::command]
 fn get_router_table(state: State<'_, AppStateManaged>) -> RouterTableView {
@@ -2258,6 +2273,7 @@ pub fn run() {
             apply_snapshot_restore,
             set_settings,
             get_stats,
+            get_recent_receipts,
             get_router_table,
             get_plugins,
             check_upgrade,
@@ -2350,12 +2366,32 @@ mod tests {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(10)))
                     .unwrap();
-                let mut request = [0_u8; 16 * 1024];
-                let read = stream
-                    .read(&mut request)
-                    .expect("chat fixture reads request");
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let read = stream.read(&mut chunk).expect("chat fixture reads request");
+                    assert!(read > 0, "chat request ended before its declared body");
+                    request.extend_from_slice(&chunk[..read]);
+                    let Some(header_end) =
+                        request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
                 assert!(
-                    String::from_utf8_lossy(&request[..read]).contains("/v1/chat/completions"),
+                    String::from_utf8_lossy(&request).contains("/v1/chat/completions"),
                     "gateway must call the configured chat endpoint"
                 );
                 let body = json!({
@@ -2426,6 +2462,22 @@ mod tests {
                 "serve phase did not reach {expected:?}; current={:?}, error={:?}",
                 state.serve.phase,
                 state.serve.error
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_receipts(path: &std::path::Path, expected: usize) -> Vec<ReceiptView> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let receipts = SqliteStore::recent_receipts(path, 5).expect("receipts read");
+            if receipts.len() >= expected {
+                return receipts;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "receipt count did not reach {expected}; current={}",
+                receipts.len()
             );
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -3128,8 +3180,9 @@ mod tests {
         );
         inner.draft["server"]["listen"] = json!(listen.clone());
         inner.draft["server"]["auth"] = json!(false);
-        inner.draft["data"]["metrics"] = json!(false);
+        inner.draft["data"]["metrics"] = json!(true);
         inner.draft["data"]["dir"] = json!(root.join("data"));
+        let metrics_path = root.join("data/metrics.sqlite");
         inner.draft["upstreams"]["fixture"] = json!({
             "provider": "openai-compatible",
             "base_url": upstream_a,
@@ -3154,6 +3207,8 @@ mod tests {
         let instance_a = first.serve.instance_id.clone().unwrap();
         assert_eq!(revision_a, first.saved_revision);
         assert!(chat_through_proxy(&listen).contains("revision-a"));
+        let first_receipts = wait_for_receipts(&metrics_path, 1);
+        assert_eq!(first_receipts[0].running_revision, Some(revision_a));
         fixture_a.join().unwrap();
 
         edit_provider(app.state(), "fixture".to_owned(), upstream_b, None).unwrap();
@@ -3180,6 +3235,14 @@ mod tests {
             Some(instance_a.as_str())
         );
         assert!(chat_through_proxy(&listen).contains("revision-b"));
+        let second_revision = second.serve.running_revision.unwrap();
+        let second_receipts = wait_for_receipts(&metrics_path, 2);
+        assert_eq!(second_receipts[0].running_revision, Some(second_revision));
+        let ipc_receipts = get_recent_receipts(app.state(), 5).expect("receipt IPC reads");
+        assert_eq!(
+            ipc_receipts, second_receipts,
+            "IPC uses the fixed store view"
+        );
 
         edit_provider(
             app.state(),
@@ -3211,6 +3274,12 @@ mod tests {
             .as_deref()
             .is_some_and(|error| error.contains("已保存尚未应用")));
         assert!(chat_through_proxy(&listen).contains("revision-b"));
+        let failed_apply_receipts = wait_for_receipts(&metrics_path, 3);
+        assert_eq!(
+            failed_apply_receipts[0].running_revision,
+            Some(second_revision),
+            "a failed apply keeps serving and receipting the published revision"
+        );
         fixture_b.join().unwrap();
 
         {

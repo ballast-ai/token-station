@@ -1066,6 +1066,17 @@ fn redirects_to_other_hosts_loopback_and_metadata_never_receive_a_second_hop() {
         assert!(body.contains("upstream_unavailable"), "{body}");
         assert_eq!(source.hits(), 1, "the authorized first hop is called once");
         assert_eq!(canary.hits(), 0, "{label} target must not be contacted");
+        settle();
+        let db = rusqlite::Connection::open(proxy.data_dir.join("metrics.sqlite"))
+            .expect("receipt db opens");
+        let http_status: Option<u16> = db
+            .query_row("SELECT http_status FROM attempts", [], |row| row.get(0))
+            .expect("redirect attempt exists");
+        assert_eq!(
+            http_status,
+            Some(302),
+            "the refused redirect keeps its raw upstream status"
+        );
         assert_eq!(
             source.seen()[0].authorization.as_deref(),
             Some(format!("Bearer {key_value}").as_str())
@@ -2420,11 +2431,11 @@ fn nothing_the_caller_wrote_reaches_disk() {
 
     let answer = json!({
         "id": "chatcmpl-1", "model": "gpt-5.5",
-        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "ok" }, "finish_reason": "stop" }],
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": CANARY }, "finish_reason": "stop" }],
         "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
-    let key = key_file("canary", "sk-test-key-abc");
+    let key = key_file("canary", &format!("sk-test-{CANARY}"));
     let proxy = start_proxy(&mock, &key);
 
     let (status, _) = post_chat(
@@ -2688,6 +2699,61 @@ fn malformed_2xx_and_truncated_bodies_fallback_without_recording_empty_success()
         let row = last_row(&proxy.data_dir);
         assert_eq!(row["attempts"], "Integer(2)", "case {index}");
         assert_eq!(row["error_code"], "Null", "case {index}");
+        assert_eq!(
+            row["upstream"], "Text(\"mock_fallback\")",
+            "legacy routing keeps the actual server"
+        );
+
+        let db = rusqlite::Connection::open(proxy.data_dir.join("metrics.sqlite"))
+            .expect("receipt db opens");
+        let original: String = db
+            .query_row("SELECT upstream FROM decisions", [], |row| row.get(0))
+            .expect("original decision exists");
+        assert_eq!(original, "mock_primary", "fallback cannot rewrite decision");
+        let mut statement = db
+            .prepare(
+                "SELECT ordinal, upstream, http_status, error_code, stream_outcome, fallback_allowed
+                   FROM attempts ORDER BY ordinal",
+            )
+            .expect("attempt query prepares");
+        let attempts = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<u16>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, bool>(5)?,
+                ))
+            })
+            .expect("attempts query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("attempt rows decode");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!((attempts[0].0, attempts[0].1.as_str()), (1, "mock_primary"));
+        assert_eq!(
+            attempts[0].2,
+            Some(200),
+            "attempt keeps the upstream HTTP status when its body is invalid"
+        );
+        assert!(attempts[0].3.is_some(), "first attempt keeps its error");
+        assert_eq!(attempts[0].4.as_deref(), Some("failed_before_output"));
+        assert!(attempts[0].5, "classified failure permits fallback");
+        assert_eq!(
+            (attempts[1].0, attempts[1].1.as_str()),
+            (2, "mock_fallback")
+        );
+        assert_eq!(attempts[1].2, Some(200));
+        assert_eq!(attempts[1].3, None);
+        assert_eq!(attempts[1].4.as_deref(), Some("complete"));
+        assert!(!attempts[1].5);
+        let conversions: i64 = db
+            .query_row("SELECT COUNT(*) FROM conversion_reports", [], |row| {
+                row.get(0)
+            })
+            .expect("conversion count");
+        assert!(conversions >= 6, "both attempts carry stage receipts");
         std::fs::remove_file(key).ok();
     }
 }
@@ -3220,6 +3286,8 @@ fn admin_data_plane_sits_behind_the_virtual_key() {
     assert_eq!(status, 401, "no key, no data");
     let (status, _, _) = admin_get(&proxy, "/admin/stats?since=all", Some("wrong-key"), None);
     assert_eq!(status, 401, "a wrong key is a missing key");
+    let (status, _, _) = admin_get(&proxy, "/admin/receipts", None, None);
+    assert_eq!(status, 401, "receipts use the same admin gate");
     assert_eq!(
         upstream.hits(),
         0,
@@ -3229,9 +3297,21 @@ fn admin_data_plane_sits_behind_the_virtual_key() {
 
 #[test]
 fn admin_data_plane_serves_the_running_views() {
-    let upstream = MockUpstream::start(vec![]);
+    let answer = json!({
+        "id": "chatcmpl-admin", "model": "gpt-5.5",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+    });
+    let upstream = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let key_file = key_file("admin-views", "sk-admin-views");
     let proxy = start_proxy(&upstream, &key_file);
+    let (request_status, _) = post_chat(
+        &proxy,
+        &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+        None,
+    );
+    assert_eq!(request_status, 200);
+    settle();
 
     let (status, _, body) = admin_get(
         &proxy,
@@ -3256,6 +3336,21 @@ fn admin_data_plane_serves_the_running_views() {
     assert!(
         stats_view["total"]["requests"].is_u64(),
         "stats carry totals: {stats_view}"
+    );
+
+    let (status, _, body) = admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    assert_eq!(status, 200);
+    let receipts: Value = serde_json::from_str(&body).expect("receipts are JSON");
+    assert_eq!(receipts.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        receipts[0]["attempt_records"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert!(
+        receipts[0]["conversion_reports"]
+            .as_array()
+            .is_some_and(|reports| !reports.is_empty()),
+        "admin returns the normalized non-empty timeline: {receipts}"
     );
 
     let (status, _, body) = admin_get(

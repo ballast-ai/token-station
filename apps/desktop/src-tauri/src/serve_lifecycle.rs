@@ -115,7 +115,8 @@ impl RunningServer {
             Arc::clone(&self.app_state.gateway),
             self.app_state.virtual_key.clone(),
             Arc::clone(&self.app_state.admin),
-        );
+        )
+        .with_running_revision(self.running_revision);
         let served_state = self.app_state.clone();
         self.serve_task = self
             .runtime
@@ -194,6 +195,7 @@ impl BoundPreparedServer {
             virtual_key,
         } = self;
         let listener = into_tokio_listener(&runtime, listener)?;
+        let app_state = app_state.with_running_revision(revision);
         let published_listen = listener
             .local_addr()
             .map(|address| address.to_string())

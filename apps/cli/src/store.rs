@@ -16,8 +16,13 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::Connection;
-use token_station_metrics::{Recorder, RequestRecord, SCHEMA_VERSION};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, named_params, types::Type};
+use token_station_metrics::{
+    AttemptRecord, ConversionRecord, ConversionStage, CostKind, DecisionRecord, ReceiptView,
+    Recorder, RequestRecord, RoutingRecord, SCHEMA_VERSION,
+};
+use token_station_protocol::{ErrorCode, HintKind, StreamOutcome, Usage};
+use token_station_router_core::{DecidedBy, RequestFeatures};
 
 /// One forward, idempotent step from schema `to - 1` to schema `to`.
 struct Migration {
@@ -47,6 +52,87 @@ const MIGRATIONS: &[Migration] = &[
         to: 3,
         sql: "ALTER TABLE requests ADD COLUMN price_version INTEGER;",
     },
+    Migration {
+        // v3 -> v4: the normalized request receipt. Existing flat rows remain
+        // readable and deliberately receive no invented child events.
+        to: 4,
+        sql: "
+            ALTER TABLE requests ADD COLUMN agent_id TEXT;
+            ALTER TABLE requests ADD COLUMN running_revision INTEGER;
+            ALTER TABLE requests ADD COLUMN cost_kind TEXT NOT NULL DEFAULT 'unknown'
+                CHECK (cost_kind IN ('actual', 'estimated', 'unknown'));
+
+            UPDATE requests
+               SET cost_micros = NULL, price_version = NULL, cost_kind = 'unknown'
+             WHERE cost_micros IS NULL OR cost_micros <= 0;
+            UPDATE requests
+               SET cost_kind = 'estimated'
+             WHERE cost_micros > 0;
+
+            CREATE TABLE decisions (
+                request_id TEXT PRIMARY KEY,
+                upstream TEXT NOT NULL,
+                model TEXT NOT NULL,
+                pool TEXT NOT NULL,
+                decision_kind TEXT NOT NULL
+                    CHECK (decision_kind IN ('rule', 'hint', 'heuristic', 'default', 'exact_model')),
+                rule_id TEXT,
+                hint_kind TEXT,
+                hint_value TEXT,
+                heuristic_score INTEGER,
+                heuristic_threshold INTEGER,
+                fallbacks INTEGER NOT NULL,
+                est_input_tokens INTEGER NOT NULL,
+                message_count INTEGER NOT NULL,
+                tool_count INTEGER NOT NULL,
+                has_images INTEGER NOT NULL,
+                requires_json_schema INTEGER NOT NULL,
+                code_block_count INTEGER NOT NULL,
+                requested_max_output_tokens INTEGER,
+                hint_count INTEGER NOT NULL,
+                reasoning_marker_count INTEGER NOT NULL,
+                technical_term_count INTEGER NOT NULL,
+                simple_indicator_count INTEGER NOT NULL,
+                code_keyword_count INTEGER NOT NULL,
+                math_term_count INTEGER NOT NULL,
+                creative_term_count INTEGER NOT NULL,
+                multi_step_signal INTEGER NOT NULL,
+                question_count INTEGER NOT NULL,
+                system_format_hint INTEGER NOT NULL
+            );
+
+            CREATE TABLE attempts (
+                request_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                upstream TEXT NOT NULL,
+                model TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                http_status INTEGER,
+                error_code TEXT,
+                stream_outcome TEXT CHECK (
+                    stream_outcome IS NULL OR stream_outcome IN (
+                        'complete', 'failed_after_partial', 'failed_before_output', 'client_cancelled'
+                    )
+                ),
+                fallback_allowed INTEGER NOT NULL,
+                PRIMARY KEY (request_id, ordinal)
+            );
+
+            CREATE TABLE conversion_reports (
+                request_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                stage TEXT NOT NULL CHECK (stage IN (
+                    'inbound_normalize', 'provider_request', 'provider_response',
+                    'outbound_render', 'stream_translate'
+                )),
+                source_protocol TEXT NOT NULL,
+                target_protocol TEXT NOT NULL,
+                succeeded INTEGER NOT NULL,
+                error_code TEXT,
+                PRIMARY KEY (request_id, ordinal)
+            );
+        ",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -54,6 +140,8 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS requests (
     id                  INTEGER PRIMARY KEY,
     request_id          TEXT    NOT NULL DEFAULT '',
+    agent_id            TEXT,
+    running_revision    INTEGER,
     started_at_ms       INTEGER NOT NULL,
     latency_ms          INTEGER NOT NULL,
     protocol            TEXT    NOT NULL,
@@ -90,6 +178,9 @@ CREATE TABLE IF NOT EXISTS requests (
     reasoning_tokens    INTEGER,
     -- micro-units; NULL when the model has no price (unknown, not zero)
     cost_micros         INTEGER,
+    -- actual/estimated/unknown; unknown never carries a numeric cost
+    cost_kind           TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (cost_kind IN ('actual', 'estimated', 'unknown')),
     -- the price table version cost_micros was computed under (NULL if unpriced)
     price_version       INTEGER
 );
@@ -98,11 +189,165 @@ CREATE INDEX IF NOT EXISTS requests_started_at ON requests (started_at_ms);
 -- table rebuild) is idempotent. Empty ids (legacy rows) are exempt.
 CREATE UNIQUE INDEX IF NOT EXISTS requests_request_id
     ON requests (request_id) WHERE request_id <> '';
+
+CREATE TABLE IF NOT EXISTS decisions (
+    request_id TEXT PRIMARY KEY,
+    upstream TEXT NOT NULL,
+    model TEXT NOT NULL,
+    pool TEXT NOT NULL,
+    decision_kind TEXT NOT NULL
+        CHECK (decision_kind IN ('rule', 'hint', 'heuristic', 'default', 'exact_model')),
+    rule_id TEXT,
+    hint_kind TEXT,
+    hint_value TEXT,
+    heuristic_score INTEGER,
+    heuristic_threshold INTEGER,
+    fallbacks INTEGER NOT NULL,
+    est_input_tokens INTEGER NOT NULL,
+    message_count INTEGER NOT NULL,
+    tool_count INTEGER NOT NULL,
+    has_images INTEGER NOT NULL,
+    requires_json_schema INTEGER NOT NULL,
+    code_block_count INTEGER NOT NULL,
+    requested_max_output_tokens INTEGER,
+    hint_count INTEGER NOT NULL,
+    reasoning_marker_count INTEGER NOT NULL,
+    technical_term_count INTEGER NOT NULL,
+    simple_indicator_count INTEGER NOT NULL,
+    code_keyword_count INTEGER NOT NULL,
+    math_term_count INTEGER NOT NULL,
+    creative_term_count INTEGER NOT NULL,
+    multi_step_signal INTEGER NOT NULL,
+    question_count INTEGER NOT NULL,
+    system_format_hint INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS attempts (
+    request_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    upstream TEXT NOT NULL,
+    model TEXT NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    http_status INTEGER,
+    error_code TEXT,
+    stream_outcome TEXT CHECK (
+        stream_outcome IS NULL OR stream_outcome IN (
+            'complete', 'failed_after_partial', 'failed_before_output', 'client_cancelled'
+        )
+    ),
+    fallback_allowed INTEGER NOT NULL,
+    PRIMARY KEY (request_id, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS conversion_reports (
+    request_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    stage TEXT NOT NULL CHECK (stage IN (
+        'inbound_normalize', 'provider_request', 'provider_response',
+        'outbound_render', 'stream_translate'
+    )),
+    source_protocol TEXT NOT NULL,
+    target_protocol TEXT NOT NULL,
+    succeeded INTEGER NOT NULL,
+    error_code TEXT,
+    PRIMARY KEY (request_id, ordinal)
+);
 ";
 
 /// The SQLite-backed [`Recorder`].
 pub struct SqliteStore {
     connection: Mutex<Connection>,
+}
+
+fn wide(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn hint_kind_name(kind: HintKind) -> &'static str {
+    match kind {
+        HintKind::StepType => "step_type",
+        HintKind::TaskType => "task_type",
+        HintKind::Preference => "preference",
+        HintKind::Capability => "capability",
+    }
+}
+
+fn stream_outcome_name(outcome: StreamOutcome) -> &'static str {
+    match outcome {
+        StreamOutcome::Complete => "complete",
+        StreamOutcome::FailedAfterPartial => "failed_after_partial",
+        StreamOutcome::FailedBeforeOutput => "failed_before_output",
+        StreamOutcome::ClientCancelled => "client_cancelled",
+    }
+}
+
+/// Storage columns for the closed [`DecidedBy`] vocabulary. Values are either
+/// configured identifiers or bounded numeric facts; no generic detail string
+/// is introduced.
+struct DecisionColumns {
+    kind: &'static str,
+    rule_id: Option<String>,
+    hint_kind: Option<String>,
+    hint_value: Option<String>,
+    score: Option<u32>,
+    threshold: Option<u32>,
+}
+
+fn decision_columns(decided_by: &DecidedBy) -> DecisionColumns {
+    match decided_by {
+        DecidedBy::Rule { rule } => DecisionColumns {
+            kind: "rule",
+            rule_id: Some(rule.clone()),
+            hint_kind: None,
+            hint_value: None,
+            score: None,
+            threshold: None,
+        },
+        DecidedBy::Hint { kind, value } => DecisionColumns {
+            kind: "hint",
+            rule_id: None,
+            hint_kind: Some(hint_kind_name(*kind).to_owned()),
+            hint_value: Some(value.clone()),
+            score: None,
+            threshold: None,
+        },
+        DecidedBy::Heuristic { score, threshold } => DecisionColumns {
+            kind: "heuristic",
+            rule_id: None,
+            hint_kind: None,
+            hint_value: None,
+            score: Some(*score),
+            threshold: Some(*threshold),
+        },
+        DecidedBy::Default => DecisionColumns {
+            kind: "default",
+            rule_id: None,
+            hint_kind: None,
+            hint_value: None,
+            score: None,
+            threshold: None,
+        },
+        DecidedBy::ExactModel { model } => DecisionColumns {
+            kind: "exact_model",
+            rule_id: Some(model.clone()),
+            hint_kind: None,
+            hint_value: None,
+            score: None,
+            threshold: None,
+        },
+    }
+}
+
+fn normalized_cost(record: &RequestRecord) -> (CostKind, Option<i64>, Option<u32>) {
+    match (record.cost_kind, record.cost_micros) {
+        (CostKind::Actual, Some(cost)) if cost > 0 => {
+            (CostKind::Actual, Some(cost), record.price_version)
+        }
+        (CostKind::Estimated, Some(cost)) if cost > 0 && record.price_version.is_some() => {
+            (CostKind::Estimated, Some(cost), record.price_version)
+        }
+        _ => (CostKind::Unknown, None, None),
+    }
 }
 
 impl SqliteStore {
@@ -113,7 +358,7 @@ impl SqliteStore {
     /// A message for the operator: the store failing to open is a startup
     /// error, unlike a single record failing to write.
     pub fn open(path: &Path) -> Result<Self, String> {
-        let connection = Connection::open(path)
+        let mut connection = Connection::open(path)
             .map_err(|error| format!("metrics store `{}`: {error}", path.display()))?;
 
         let version: u32 = connection
@@ -131,7 +376,7 @@ impl SqliteStore {
             SCHEMA_VERSION => {}
             older if older < SCHEMA_VERSION => {
                 // An older store: migrate it forward instead of bricking it.
-                Self::migrate(path, &connection, older)?;
+                Self::migrate(path, &mut connection, older)?;
             }
             newer => {
                 // A newer client wrote here. Refusing beats silently writing
@@ -152,7 +397,7 @@ impl SqliteStore {
     /// migration in order and stamping `user_version` as each lands. A copy of
     /// the database is taken first, so a failed or unwanted upgrade can be
     /// rolled back to exactly the bytes that were there before.
-    fn migrate(path: &Path, connection: &Connection, from: u32) -> Result<(), String> {
+    fn migrate(path: &Path, connection: &mut Connection, from: u32) -> Result<(), String> {
         let backup = path.with_extension(format!("v{from}.bak"));
         std::fs::copy(path, &backup).map_err(|error| {
             format!(
@@ -165,61 +410,47 @@ impl SqliteStore {
             .iter()
             .filter(|migration| migration.to > from && migration.to <= SCHEMA_VERSION)
         {
-            connection
+            let transaction = connection.transaction().map_err(|error| {
+                format!("metrics migration transaction v{}: {error}", migration.to)
+            })?;
+            transaction
                 .execute_batch(migration.sql)
                 .map_err(|error| format!("metrics migration to v{}: {error}", migration.to))?;
-            connection
+            transaction
                 .pragma_update(None, "user_version", migration.to)
                 .map_err(|error| format!("metrics migration version v{}: {error}", migration.to))?;
+            transaction
+                .commit()
+                .map_err(|error| format!("metrics migration commit v{}: {error}", migration.to))?;
         }
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)] // one atomic parent + three child-table write
     fn insert(&self, record: &RequestRecord) -> Result<(), rusqlite::Error> {
-        // SQLite integers are i64; token counts saturate rather than error.
-        fn wide(value: u64) -> i64 {
-            i64::try_from(value).unwrap_or(i64::MAX)
-        }
         let routing = record.routing.as_ref();
         let features = routing.map(|routing| routing.features);
-        let (tier, rule_id, hint_kind, hint_value, score, threshold) =
-            match routing.map(|r| &r.decided_by) {
-                Some(token_station_router_core::DecidedBy::Rule { rule }) => {
-                    ("rule", Some(rule.clone()), None, None, None, None)
-                }
-                Some(token_station_router_core::DecidedBy::Hint { kind, value }) => (
-                    "hint",
-                    None,
-                    Some(format!("{kind:?}").to_lowercase()),
-                    Some(value.clone()),
-                    None,
-                    None,
-                ),
-                Some(token_station_router_core::DecidedBy::Heuristic { score, threshold }) => (
-                    "heuristic",
-                    None,
-                    None,
-                    None,
-                    Some(*score),
-                    Some(*threshold),
-                ),
-                Some(token_station_router_core::DecidedBy::Default) => {
-                    ("default", None, None, None, None, None)
-                }
-                Some(token_station_router_core::DecidedBy::ExactModel { model }) => {
-                    // The pinned model rides the rule_id column: it is the "why"
-                    // identifier for an exact-model route.
-                    ("exact_model", Some(model.clone()), None, None, None, None)
-                }
-                None => ("", None, None, None, None, None),
-            };
+        let route_decision = routing.map_or_else(
+            || DecisionColumns {
+                kind: "",
+                rule_id: None,
+                hint_kind: None,
+                hint_value: None,
+                score: None,
+                threshold: None,
+            },
+            |routing| decision_columns(&routing.decided_by),
+        );
+        let (cost_kind, cost_micros, price_version) = normalized_cost(record);
 
-        let connection = self.connection.lock().expect("store lock");
-        connection.execute(
+        let mut connection = self.connection.lock().expect("store lock");
+        let transaction = connection.transaction()?;
+        let inserted = transaction.execute(
             // OR IGNORE makes a re-write of the same accounting id a no-op: the
-            // unique index dedups it rather than double-counting.
+            // unique index dedups it rather than double-counting. Child rows are
+            // inserted only when this statement actually inserted the parent.
             "INSERT OR IGNORE INTO requests (
-                request_id,
+                request_id, agent_id, running_revision,
                 started_at_ms, latency_ms, protocol, requested_model, stream, status,
                 error_code, attempts,
                 upstream, model, pool, tier, rule_id, hint_kind, hint_value,
@@ -227,54 +458,556 @@ impl SqliteStore {
                 est_input_tokens, message_count, tool_count, has_images,
                 requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                reasoning_tokens, cost_micros, price_version
+                reasoning_tokens, cost_micros, cost_kind, price_version
             ) VALUES (
-                ?33,
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
-                ?34
+                :request_id, :agent_id, :running_revision,
+                :started_at_ms, :latency_ms, :protocol, :requested_model, :stream, :status,
+                :error_code, :attempts,
+                :upstream, :model, :pool, :tier, :rule_id, :hint_kind, :hint_value,
+                :heuristic_score, :heuristic_threshold, :fallbacks,
+                :est_input_tokens, :message_count, :tool_count, :has_images,
+                :requires_json_schema, :code_block_count, :requested_max_output_tokens, :hint_count,
+                :input_tokens, :output_tokens, :cache_read_tokens, :cache_write_tokens,
+                :reasoning_tokens, :cost_micros, :cost_kind, :price_version
             )",
-            rusqlite::params![
-                wide(record.started_at_ms),
-                wide(record.latency_ms),
-                record.protocol,
-                record.requested_model,
-                record.stream,
-                record.status,
-                record
-                    .error_code
-                    .map(token_station_protocol::ErrorCode::as_str),
-                record.attempts,
-                routing.map(|r| r.upstream.clone()),
-                routing.map(|r| r.model.clone()),
-                routing.map(|r| r.pool.clone()),
-                routing.map(|_| tier),
-                rule_id,
-                hint_kind,
-                hint_value,
-                score,
-                threshold,
-                routing.map(|r| r.fallbacks),
-                features.map(|f| f.estimated_input_tokens),
-                features.map(|f| f.message_count),
-                features.map(|f| f.tool_count),
-                features.map(|f| f.has_images),
-                features.map(|f| f.requires_json_schema),
-                features.map(|f| f.code_block_count),
-                features.and_then(|f| f.requested_max_output_tokens),
-                features.map(|f| f.hint_count),
-                record.usage.map(|u| wide(u.input_tokens)),
-                record.usage.map(|u| wide(u.output_tokens)),
-                record.usage.map(|u| wide(u.cache_read_tokens)),
-                record.usage.map(|u| wide(u.cache_write_tokens)),
-                record.usage.map(|u| wide(u.reasoning_tokens)),
-                record.cost_micros,
-                record.request_id,
-                record.price_version,
-            ],
+            named_params! {
+                ":request_id": record.request_id,
+                ":agent_id": record.agent_id,
+                ":running_revision": record.running_revision.map(wide),
+                ":started_at_ms": wide(record.started_at_ms),
+                ":latency_ms": wide(record.latency_ms),
+                ":protocol": record.protocol,
+                ":requested_model": record.requested_model,
+                ":stream": record.stream,
+                ":status": record.status,
+                ":error_code": record.error_code.map(ErrorCode::as_str),
+                ":attempts": record.attempts,
+                ":upstream": routing.map(|value| value.upstream.as_str()),
+                ":model": routing.map(|value| value.model.as_str()),
+                ":pool": routing.map(|value| value.pool.as_str()),
+                ":tier": routing.map(|_| route_decision.kind),
+                ":rule_id": route_decision.rule_id,
+                ":hint_kind": route_decision.hint_kind,
+                ":hint_value": route_decision.hint_value,
+                ":heuristic_score": route_decision.score,
+                ":heuristic_threshold": route_decision.threshold,
+                ":fallbacks": routing.map(|value| value.fallbacks),
+                ":est_input_tokens": features.map(|value| value.estimated_input_tokens),
+                ":message_count": features.map(|value| value.message_count),
+                ":tool_count": features.map(|value| value.tool_count),
+                ":has_images": features.map(|value| value.has_images),
+                ":requires_json_schema": features.map(|value| value.requires_json_schema),
+                ":code_block_count": features.map(|value| value.code_block_count),
+                ":requested_max_output_tokens": features.and_then(|value| value.requested_max_output_tokens),
+                ":hint_count": features.map(|value| value.hint_count),
+                ":input_tokens": record.usage.map(|value| wide(value.input_tokens)),
+                ":output_tokens": record.usage.map(|value| wide(value.output_tokens)),
+                ":cache_read_tokens": record.usage.map(|value| wide(value.cache_read_tokens)),
+                ":cache_write_tokens": record.usage.map(|value| wide(value.cache_write_tokens)),
+                ":reasoning_tokens": record.usage.map(|value| wide(value.reasoning_tokens)),
+                ":cost_micros": cost_micros,
+                ":cost_kind": cost_kind.as_str(),
+                ":price_version": price_version,
+            },
         )?;
+
+        if inserted == 0 {
+            transaction.commit()?;
+            return Ok(());
+        }
+
+        if let Some(decision) = &record.decision {
+            insert_decision(&transaction, &record.request_id, decision)?;
+        }
+        for attempt in &record.attempt_records {
+            transaction.execute(
+                "INSERT INTO attempts (
+                    request_id, ordinal, upstream, model, latency_ms, http_status,
+                    error_code, stream_outcome, fallback_allowed
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    record.request_id,
+                    attempt.ordinal,
+                    attempt.upstream,
+                    attempt.model,
+                    wide(attempt.latency_ms),
+                    attempt.http_status,
+                    attempt.error_code.map(ErrorCode::as_str),
+                    attempt.stream_outcome.map(stream_outcome_name),
+                    attempt.fallback_allowed,
+                ],
+            )?;
+        }
+        for conversion in &record.conversion_reports {
+            transaction.execute(
+                "INSERT INTO conversion_reports (
+                    request_id, ordinal, stage, source_protocol, target_protocol,
+                    succeeded, error_code
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    record.request_id,
+                    conversion.ordinal,
+                    conversion.stage.as_str(),
+                    conversion.source_protocol,
+                    conversion.target_protocol,
+                    conversion.succeeded,
+                    conversion.error_code.map(ErrorCode::as_str),
+                ],
+            )?;
+        }
+
+        transaction.commit()?;
         Ok(())
     }
+}
+
+fn insert_decision(
+    transaction: &Transaction<'_>,
+    request_id: &str,
+    decision: &DecisionRecord,
+) -> Result<(), rusqlite::Error> {
+    let columns = decision_columns(&decision.decided_by);
+    let features = decision.features;
+    transaction.execute(
+        "INSERT INTO decisions (
+            request_id, upstream, model, pool, decision_kind, rule_id, hint_kind,
+            hint_value, heuristic_score, heuristic_threshold, fallbacks,
+            est_input_tokens, message_count, tool_count, has_images,
+            requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
+            reasoning_marker_count, technical_term_count, simple_indicator_count,
+            code_keyword_count, math_term_count, creative_term_count, multi_step_signal,
+            question_count, system_format_hint
+         ) VALUES (
+            :request_id, :upstream, :model, :pool, :decision_kind, :rule_id, :hint_kind,
+            :hint_value, :heuristic_score, :heuristic_threshold, :fallbacks,
+            :est_input_tokens, :message_count, :tool_count, :has_images,
+            :requires_json_schema, :code_block_count, :requested_max_output_tokens, :hint_count,
+            :reasoning_marker_count, :technical_term_count, :simple_indicator_count,
+            :code_keyword_count, :math_term_count, :creative_term_count, :multi_step_signal,
+            :question_count, :system_format_hint
+         )",
+        named_params! {
+            ":request_id": request_id,
+            ":upstream": decision.upstream,
+            ":model": decision.model,
+            ":pool": decision.pool,
+            ":decision_kind": columns.kind,
+            ":rule_id": columns.rule_id,
+            ":hint_kind": columns.hint_kind,
+            ":hint_value": columns.hint_value,
+            ":heuristic_score": columns.score,
+            ":heuristic_threshold": columns.threshold,
+            ":fallbacks": decision.fallbacks,
+            ":est_input_tokens": features.estimated_input_tokens,
+            ":message_count": features.message_count,
+            ":tool_count": features.tool_count,
+            ":has_images": features.has_images,
+            ":requires_json_schema": features.requires_json_schema,
+            ":code_block_count": features.code_block_count,
+            ":requested_max_output_tokens": features.requested_max_output_tokens,
+            ":hint_count": features.hint_count,
+            ":reasoning_marker_count": features.reasoning_marker_count,
+            ":technical_term_count": features.technical_term_count,
+            ":simple_indicator_count": features.simple_indicator_count,
+            ":code_keyword_count": features.code_keyword_count,
+            ":math_term_count": features.math_term_count,
+            ":creative_term_count": features.creative_term_count,
+            ":multi_step_signal": features.multi_step_signal,
+            ":question_count": features.question_count,
+            ":system_format_hint": features.system_format_hint,
+        },
+    )?;
+    Ok(())
+}
+
+fn invalid_enum(column: usize, kind: &str, value: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column,
+        Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unknown {kind} `{value}`"),
+        )),
+    )
+}
+
+fn error_code(column: usize, value: &str) -> Result<ErrorCode, rusqlite::Error> {
+    match value {
+        "invalid_request" => Ok(ErrorCode::InvalidRequest),
+        "auth" => Ok(ErrorCode::Auth),
+        "payment_required" => Ok(ErrorCode::PaymentRequired),
+        "rate_limit" => Ok(ErrorCode::RateLimit),
+        "capacity" => Ok(ErrorCode::Capacity),
+        "capability" => Ok(ErrorCode::Capability),
+        "content_policy" => Ok(ErrorCode::ContentPolicy),
+        "upstream_unavailable" => Ok(ErrorCode::UpstreamUnavailable),
+        "transport_truncated" => Ok(ErrorCode::TransportTruncated),
+        "context_length" => Ok(ErrorCode::ContextLength),
+        "provider_protocol_error" => Ok(ErrorCode::ProviderProtocolError),
+        "timeout" => Ok(ErrorCode::Timeout),
+        "internal" => Ok(ErrorCode::Internal),
+        other => Err(invalid_enum(column, "error code", other)),
+    }
+}
+
+fn optional_error_code(
+    column: usize,
+    value: Option<&str>,
+) -> Result<Option<ErrorCode>, rusqlite::Error> {
+    value.map(|value| error_code(column, value)).transpose()
+}
+
+fn hint_kind(column: usize, value: &str) -> Result<HintKind, rusqlite::Error> {
+    match value {
+        "step_type" => Ok(HintKind::StepType),
+        "task_type" => Ok(HintKind::TaskType),
+        "preference" => Ok(HintKind::Preference),
+        "capability" => Ok(HintKind::Capability),
+        other => Err(invalid_enum(column, "hint kind", other)),
+    }
+}
+
+fn decided_by(
+    column: usize,
+    kind: &str,
+    rule_id: Option<String>,
+    hint_kind_value: Option<&str>,
+    hint_value: Option<String>,
+    score: Option<u32>,
+    threshold: Option<u32>,
+) -> Result<DecidedBy, rusqlite::Error> {
+    match kind {
+        "rule" => Ok(DecidedBy::Rule {
+            rule: rule_id.unwrap_or_default(),
+        }),
+        "hint" => Ok(DecidedBy::Hint {
+            kind: hint_kind(column, hint_kind_value.unwrap_or(""))?,
+            value: hint_value.unwrap_or_default(),
+        }),
+        "heuristic" => Ok(DecidedBy::Heuristic {
+            score: score.unwrap_or(0),
+            threshold: threshold.unwrap_or(0),
+        }),
+        "default" | "" => Ok(DecidedBy::Default),
+        "exact_model" => Ok(DecidedBy::ExactModel {
+            model: rule_id.unwrap_or_default(),
+        }),
+        other => Err(invalid_enum(column, "decision kind", other)),
+    }
+}
+
+fn cost_kind(column: usize, value: &str) -> Result<CostKind, rusqlite::Error> {
+    match value {
+        "actual" => Ok(CostKind::Actual),
+        "estimated" => Ok(CostKind::Estimated),
+        "unknown" => Ok(CostKind::Unknown),
+        other => Err(invalid_enum(column, "cost kind", other)),
+    }
+}
+
+fn stream_outcome(column: usize, value: &str) -> Result<StreamOutcome, rusqlite::Error> {
+    match value {
+        "complete" => Ok(StreamOutcome::Complete),
+        "failed_after_partial" => Ok(StreamOutcome::FailedAfterPartial),
+        "failed_before_output" => Ok(StreamOutcome::FailedBeforeOutput),
+        "client_cancelled" => Ok(StreamOutcome::ClientCancelled),
+        other => Err(invalid_enum(column, "stream outcome", other)),
+    }
+}
+
+fn conversion_stage(column: usize, value: &str) -> Result<ConversionStage, rusqlite::Error> {
+    match value {
+        "inbound_normalize" => Ok(ConversionStage::InboundNormalize),
+        "provider_request" => Ok(ConversionStage::ProviderRequest),
+        "provider_response" => Ok(ConversionStage::ProviderResponse),
+        "outbound_render" => Ok(ConversionStage::OutboundRender),
+        "stream_translate" => Ok(ConversionStage::StreamTranslate),
+        other => Err(invalid_enum(column, "conversion stage", other)),
+    }
+}
+
+fn narrow(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
+struct ReceiptSeed {
+    persisted_request_id: String,
+    view: ReceiptView,
+}
+
+/// Reads at most five recent request receipts. A missing store is the normal
+/// empty state; an older store is backed up and migrated before it is read so
+/// historical flat rows remain visible with empty child timelines.
+///
+/// # Errors
+///
+/// Returns an operator-facing message when the database cannot be opened,
+/// migrated, queried, or decoded under the current closed enum vocabulary.
+pub fn recent_receipts(path: &Path, limit: usize) -> Result<Vec<ReceiptView>, String> {
+    SqliteStore::recent_receipts(path, limit)
+}
+
+impl SqliteStore {
+    /// Associated form used by the admin surfaces; kept alongside the free
+    /// function so callers can choose the module-style API without divergence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operator-facing message when the database cannot be opened,
+    /// migrated, queried, or decoded under the current closed enum vocabulary.
+    pub fn recent_receipts(path: &Path, limit: usize) -> Result<Vec<ReceiptView>, String> {
+        let limit = limit.min(5);
+        if limit == 0 || !path.exists() {
+            return Ok(Vec::new());
+        }
+        let store = SqliteStore::open(path)?;
+        store.read_recent(limit)
+    }
+
+    fn read_recent(&self, limit: usize) -> Result<Vec<ReceiptView>, String> {
+        let connection = self.connection.lock().expect("store lock");
+        let mut statement = connection
+            .prepare(
+                "SELECT id, request_id, started_at_ms, latency_ms, protocol, requested_model,
+                        stream, status, error_code, agent_id, running_revision,
+                        upstream, model, pool, tier, rule_id, hint_kind, hint_value,
+                        heuristic_score, heuristic_threshold, fallbacks,
+                        est_input_tokens, message_count, tool_count, has_images,
+                        requires_json_schema, code_block_count, requested_max_output_tokens,
+                        hint_count, input_tokens, output_tokens, cache_read_tokens,
+                        cache_write_tokens, reasoning_tokens, cost_kind, cost_micros, price_version,
+                        attempts
+                   FROM requests
+                  ORDER BY started_at_ms DESC, request_id DESC, id DESC
+                  LIMIT ?1",
+            )
+            .map_err(|error| format!("request receipts query: {error}"))?;
+        let mut seeds = statement
+            .query_map([i64::try_from(limit).unwrap_or(5)], receipt_seed)
+            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+            .map_err(|error| format!("request receipts decode: {error}"))?;
+        drop(statement);
+
+        for seed in &mut seeds {
+            if seed.persisted_request_id.is_empty() {
+                continue;
+            }
+            seed.view.decision = read_decision(&connection, &seed.persisted_request_id)
+                .map_err(|error| format!("request decision decode: {error}"))?;
+            seed.view.attempt_records = read_attempts(&connection, &seed.persisted_request_id)
+                .map_err(|error| format!("request attempts decode: {error}"))?;
+            seed.view.conversion_reports =
+                read_conversions(&connection, &seed.persisted_request_id)
+                    .map_err(|error| format!("request conversions decode: {error}"))?;
+        }
+        Ok(seeds.into_iter().map(|seed| seed.view).collect())
+    }
+}
+
+fn receipt_seed(row: &Row<'_>) -> Result<ReceiptSeed, rusqlite::Error> {
+    let database_id = row.get::<_, i64>(0)?;
+    let persisted_request_id = row.get::<_, String>(1)?;
+    let raw_error_code = row.get::<_, Option<String>>(8)?;
+    let error_code = optional_error_code(8, raw_error_code.as_deref())?;
+    let route_upstream = row.get::<_, Option<String>>(11)?;
+    let route_model = row.get::<_, Option<String>>(12)?;
+    let route_pool = row.get::<_, Option<String>>(13)?;
+    let route_kind = row.get::<_, Option<String>>(14)?;
+    let route_rule_id = row.get::<_, Option<String>>(15)?;
+    let route_hint_kind = row.get::<_, Option<String>>(16)?;
+    let route_hint_value = row.get::<_, Option<String>>(17)?;
+    let routing = match (route_upstream, route_model, route_pool) {
+        (Some(upstream), Some(model), Some(pool)) => Some(RoutingRecord {
+            upstream,
+            model,
+            pool,
+            decided_by: decided_by(
+                14,
+                route_kind.as_deref().unwrap_or(""),
+                route_rule_id,
+                route_hint_kind.as_deref(),
+                route_hint_value,
+                row.get(18)?,
+                row.get(19)?,
+            )?,
+            fallbacks: row.get::<_, Option<u32>>(20)?.unwrap_or(0),
+            features: RequestFeatures {
+                estimated_input_tokens: row.get::<_, Option<u32>>(21)?.unwrap_or(0),
+                message_count: row.get::<_, Option<u32>>(22)?.unwrap_or(0),
+                tool_count: row.get::<_, Option<u32>>(23)?.unwrap_or(0),
+                has_images: row.get::<_, Option<bool>>(24)?.unwrap_or(false),
+                requires_json_schema: row.get::<_, Option<bool>>(25)?.unwrap_or(false),
+                code_block_count: row.get::<_, Option<u32>>(26)?.unwrap_or(0),
+                requested_max_output_tokens: row.get(27)?,
+                hint_count: row.get::<_, Option<u32>>(28)?.unwrap_or(0),
+                ..RequestFeatures::default()
+            },
+        }),
+        _ => None,
+    };
+    let input_tokens = row.get::<_, Option<i64>>(29)?.map(narrow);
+    let output_tokens = row.get::<_, Option<i64>>(30)?.map(narrow);
+    let cache_read_tokens = row.get::<_, Option<i64>>(31)?.map(narrow);
+    let cache_write_tokens = row.get::<_, Option<i64>>(32)?.map(narrow);
+    let reasoning_tokens = row.get::<_, Option<i64>>(33)?.map(narrow);
+    let usage = (input_tokens.is_some()
+        || output_tokens.is_some()
+        || cache_read_tokens.is_some()
+        || cache_write_tokens.is_some()
+        || reasoning_tokens.is_some())
+    .then_some(Usage {
+        input_tokens: input_tokens.unwrap_or(0),
+        output_tokens: output_tokens.unwrap_or(0),
+        cache_read_tokens: cache_read_tokens.unwrap_or(0),
+        cache_write_tokens: cache_write_tokens.unwrap_or(0),
+        reasoning_tokens: reasoning_tokens.unwrap_or(0),
+    });
+    let cost_kind = cost_kind(34, &row.get::<_, String>(34)?)?;
+    let (cost_micros, price_version) = match cost_kind {
+        CostKind::Unknown => (None, None),
+        CostKind::Actual | CostKind::Estimated => (row.get(35)?, row.get(36)?),
+    };
+    let request_id = if persisted_request_id.is_empty() {
+        format!("legacy-{database_id}")
+    } else {
+        persisted_request_id.clone()
+    };
+
+    Ok(ReceiptSeed {
+        persisted_request_id,
+        view: ReceiptView {
+            request_id,
+            started_at_ms: narrow(row.get(2)?),
+            latency_ms: narrow(row.get(3)?),
+            protocol: row.get(4)?,
+            agent_id: row.get(9)?,
+            running_revision: row.get::<_, Option<i64>>(10)?.map(narrow),
+            requested_model: row.get(5)?,
+            stream: row.get(6)?,
+            status: row.get(7)?,
+            error_code,
+            attempts: row.get(37)?,
+            routing,
+            usage,
+            cost_kind,
+            cost_micros,
+            price_version,
+            decision: None,
+            attempt_records: Vec::new(),
+            conversion_reports: Vec::new(),
+        },
+    })
+}
+
+fn read_decision(
+    connection: &Connection,
+    request_id: &str,
+) -> Result<Option<DecisionRecord>, rusqlite::Error> {
+    connection
+        .query_row(
+            "SELECT upstream, model, pool, decision_kind, rule_id, hint_kind, hint_value,
+                    heuristic_score, heuristic_threshold, fallbacks,
+                    est_input_tokens, message_count, tool_count, has_images,
+                    requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
+                    reasoning_marker_count, technical_term_count, simple_indicator_count,
+                    code_keyword_count, math_term_count, creative_term_count, multi_step_signal,
+                    question_count, system_format_hint
+               FROM decisions WHERE request_id = ?1",
+            [request_id],
+            |row| {
+                let kind = row.get::<_, String>(3)?;
+                let hint_kind_value = row.get::<_, Option<String>>(5)?;
+                Ok(DecisionRecord {
+                    upstream: row.get(0)?,
+                    model: row.get(1)?,
+                    pool: row.get(2)?,
+                    decided_by: decided_by(
+                        3,
+                        &kind,
+                        row.get(4)?,
+                        hint_kind_value.as_deref(),
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    )?,
+                    fallbacks: row.get(9)?,
+                    features: RequestFeatures {
+                        estimated_input_tokens: row.get(10)?,
+                        message_count: row.get(11)?,
+                        tool_count: row.get(12)?,
+                        has_images: row.get(13)?,
+                        requires_json_schema: row.get(14)?,
+                        code_block_count: row.get(15)?,
+                        requested_max_output_tokens: row.get(16)?,
+                        hint_count: row.get(17)?,
+                        reasoning_marker_count: row.get(18)?,
+                        technical_term_count: row.get(19)?,
+                        simple_indicator_count: row.get(20)?,
+                        code_keyword_count: row.get(21)?,
+                        math_term_count: row.get(22)?,
+                        creative_term_count: row.get(23)?,
+                        multi_step_signal: row.get(24)?,
+                        question_count: row.get(25)?,
+                        system_format_hint: row.get(26)?,
+                    },
+                })
+            },
+        )
+        .optional()
+}
+
+fn read_attempts(
+    connection: &Connection,
+    request_id: &str,
+) -> Result<Vec<AttemptRecord>, rusqlite::Error> {
+    let mut statement = connection.prepare(
+        "SELECT ordinal, upstream, model, latency_ms, http_status, error_code,
+                stream_outcome, fallback_allowed
+           FROM attempts WHERE request_id = ?1 ORDER BY ordinal",
+    )?;
+    statement
+        .query_map([request_id], |row| {
+            let outcome = row
+                .get::<_, Option<String>>(6)?
+                .as_deref()
+                .map(|value| stream_outcome(6, value))
+                .transpose()?;
+            let raw_error_code = row.get::<_, Option<String>>(5)?;
+            Ok(AttemptRecord {
+                ordinal: row.get(0)?,
+                upstream: row.get(1)?,
+                model: row.get(2)?,
+                latency_ms: narrow(row.get(3)?),
+                http_status: row.get(4)?,
+                error_code: optional_error_code(5, raw_error_code.as_deref())?,
+                stream_outcome: outcome,
+                fallback_allowed: row.get(7)?,
+            })
+        })?
+        .collect()
+}
+
+fn read_conversions(
+    connection: &Connection,
+    request_id: &str,
+) -> Result<Vec<ConversionRecord>, rusqlite::Error> {
+    let mut statement = connection.prepare(
+        "SELECT ordinal, stage, source_protocol, target_protocol, succeeded, error_code
+           FROM conversion_reports WHERE request_id = ?1 ORDER BY ordinal",
+    )?;
+    statement
+        .query_map([request_id], |row| {
+            let raw_error_code = row.get::<_, Option<String>>(5)?;
+            Ok(ConversionRecord {
+                ordinal: row.get(0)?,
+                stage: conversion_stage(1, &row.get::<_, String>(1)?)?,
+                source_protocol: row.get(2)?,
+                target_protocol: row.get(3)?,
+                succeeded: row.get(4)?,
+                error_code: optional_error_code(5, raw_error_code.as_deref())?,
+            })
+        })?
+        .collect()
 }
 
 impl Recorder for SqliteStore {
@@ -289,11 +1022,141 @@ impl Recorder for SqliteStore {
 
 #[cfg(test)]
 mod tests {
-    use super::SqliteStore;
-    use token_station_metrics::{Recorder, RequestRecord};
+    use super::{SqliteStore, recent_receipts};
+    use token_station_metrics::{
+        AttemptRecord, ConversionRecord, ConversionStage, CostKind, DecisionRecord, Recorder,
+        RequestRecord, RoutingRecord,
+    };
+    use token_station_protocol::{ErrorCode, StreamOutcome, Usage};
+    use token_station_router_core::{DecidedBy, RequestFeatures};
+
+    const V3_SCHEMA: &str = "
+        CREATE TABLE requests (
+            id INTEGER PRIMARY KEY,
+            request_id TEXT NOT NULL DEFAULT '',
+            started_at_ms INTEGER NOT NULL,
+            latency_ms INTEGER NOT NULL,
+            protocol TEXT NOT NULL,
+            requested_model TEXT NOT NULL,
+            stream INTEGER NOT NULL,
+            status INTEGER NOT NULL,
+            error_code TEXT,
+            attempts INTEGER NOT NULL,
+            upstream TEXT,
+            model TEXT,
+            pool TEXT,
+            tier TEXT,
+            rule_id TEXT,
+            hint_kind TEXT,
+            hint_value TEXT,
+            heuristic_score INTEGER,
+            heuristic_threshold INTEGER,
+            fallbacks INTEGER,
+            est_input_tokens INTEGER,
+            message_count INTEGER,
+            tool_count INTEGER,
+            has_images INTEGER,
+            requires_json_schema INTEGER,
+            code_block_count INTEGER,
+            requested_max_output_tokens INTEGER,
+            hint_count INTEGER,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            cache_read_tokens INTEGER,
+            cache_write_tokens INTEGER,
+            reasoning_tokens INTEGER,
+            cost_micros INTEGER,
+            price_version INTEGER
+        );
+        CREATE UNIQUE INDEX requests_request_id
+            ON requests (request_id) WHERE request_id <> '';
+        PRAGMA user_version = 3;
+    ";
 
     fn scratch(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("ts-store-{}-{name}.sqlite", std::process::id()))
+    }
+
+    fn receipt(request_id: &str, started_at_ms: u64) -> RequestRecord {
+        let features = RequestFeatures {
+            estimated_input_tokens: 42,
+            tool_count: 1,
+            technical_term_count: 3,
+            ..RequestFeatures::default()
+        };
+        let original = DecisionRecord {
+            upstream: "primary".to_owned(),
+            model: "model-a".to_owned(),
+            pool: "main".to_owned(),
+            decided_by: DecidedBy::Default,
+            fallbacks: 1,
+            features,
+        };
+        let mut record = RequestRecord::begin(started_at_ms, "openai-chat-completions");
+        record.request_id = request_id.to_owned();
+        record.agent_id = Some("codex".to_owned());
+        record.running_revision = Some(7);
+        record.requested_model = "auto".to_owned();
+        record.status = 200;
+        record.attempts = 2;
+        record.routing = Some(RoutingRecord {
+            upstream: "fallback".to_owned(),
+            model: "model-b".to_owned(),
+            pool: "main".to_owned(),
+            decided_by: DecidedBy::Default,
+            fallbacks: 1,
+            features,
+        });
+        record.decision = Some(original);
+        record.attempt_records = vec![
+            AttemptRecord {
+                ordinal: 1,
+                upstream: "primary".to_owned(),
+                model: "model-a".to_owned(),
+                latency_ms: 12,
+                http_status: Some(503),
+                error_code: Some(ErrorCode::UpstreamUnavailable),
+                stream_outcome: Some(StreamOutcome::FailedBeforeOutput),
+                fallback_allowed: true,
+            },
+            AttemptRecord {
+                ordinal: 2,
+                upstream: "fallback".to_owned(),
+                model: "model-b".to_owned(),
+                latency_ms: 24,
+                http_status: Some(200),
+                error_code: None,
+                stream_outcome: Some(StreamOutcome::Complete),
+                fallback_allowed: false,
+            },
+        ];
+        record.conversion_reports = vec![
+            ConversionRecord {
+                ordinal: 1,
+                stage: ConversionStage::InboundNormalize,
+                source_protocol: "openai-chat-completions".to_owned(),
+                target_protocol: "token-station-chat".to_owned(),
+                succeeded: true,
+                error_code: None,
+            },
+            ConversionRecord {
+                ordinal: 2,
+                stage: ConversionStage::ProviderResponse,
+                source_protocol: "openai-compatible".to_owned(),
+                target_protocol: "token-station-chat".to_owned(),
+                succeeded: true,
+                error_code: None,
+            },
+        ];
+        record.usage = Some(Usage {
+            input_tokens: 8,
+            output_tokens: 3,
+            ..Usage::default()
+        });
+        record.cost_kind = CostKind::Estimated;
+        record.cost_micros = Some(11);
+        record.price_version = Some(2);
+        record
     }
 
     #[test]
@@ -328,67 +1191,230 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         let store = SqliteStore::open(&path).expect("creates");
-        let mut record = RequestRecord::begin(1_752_000_000_000, "openai-chat-completions");
-        record.request_id = "req_1752000000000_7".to_owned();
-        record.status = 200;
-        record.attempts = 1;
+        let record = receipt("req_1752000000000_7", 1_752_000_000_000);
         // A rebuild of a derived table replays the same record.
         store.record(&record);
-        store.record(&record);
+        let mut replay = record.clone();
+        replay.attempt_records.push(AttemptRecord {
+            ordinal: 3,
+            upstream: "must_not_land".to_owned(),
+            model: "must_not_land".to_owned(),
+            latency_ms: 1,
+            http_status: None,
+            error_code: Some(ErrorCode::Internal),
+            stream_outcome: None,
+            fallback_allowed: false,
+        });
+        store.record(&replay);
 
-        let count: i64 = store
-            .connection
-            .lock()
-            .expect("lock")
-            .query_row("SELECT count(*) FROM requests", [], |row| row.get(0))
-            .expect("counts");
-        assert_eq!(count, 1, "the stable id dedups the replay");
+        let connection = store.connection.lock().expect("lock");
+        for (table, expected) in [
+            ("requests", 1_i64),
+            ("decisions", 1),
+            ("attempts", 2),
+            ("conversion_reports", 2),
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("counts");
+            assert_eq!(count, expected, "{table} is idempotent");
+        }
 
         std::fs::remove_file(path).ok();
     }
 
     #[test]
-    fn an_older_store_is_migrated_forward_with_a_backup_not_bricked() {
+    fn a_v3_store_is_migrated_with_a_backup_and_legacy_rows_stay_readable() {
         let path = scratch("migrate");
         std::fs::remove_file(&path).ok();
 
-        // Stand up a minimal v1 store: a requests table with no request_id.
         {
             let connection = rusqlite::Connection::open(&path).expect("opens");
+            connection.execute_batch(V3_SCHEMA).expect("v3 schema");
             connection
-                .execute_batch(
-                    "CREATE TABLE requests (id INTEGER PRIMARY KEY, started_at_ms INTEGER NOT NULL);",
+                .execute(
+                    "INSERT INTO requests (
+                    request_id, started_at_ms, latency_ms, protocol, requested_model,
+                    stream, status, attempts, upstream, model, pool, tier, fallbacks,
+                    input_tokens, output_tokens, cost_micros, price_version
+                 ) VALUES ('', 10, 9, 'legacy', 'auto', 0, 200, 3,
+                           'old', 'old-model', 'main', 'default', 1, 4, 2, 0, 1)",
+                    [],
                 )
-                .expect("v1 table");
+                .expect("legacy row");
             connection
-                .pragma_update(None, "user_version", 1)
-                .expect("stamps v1");
+                .execute(
+                    "INSERT INTO requests (
+                    request_id, started_at_ms, latency_ms, protocol, requested_model,
+                    stream, status, attempts, cost_micros, price_version
+                 ) VALUES ('old-priced', 11, 8, 'legacy', 'auto', 0, 200, 1, 25, 3)",
+                    [],
+                )
+                .expect("priced legacy row");
         }
 
-        // Opening with this build migrates it forward rather than refusing.
-        let store = SqliteStore::open(&path).expect("migrates, not bricks");
+        let store = SqliteStore::open(&path).expect("migrates");
         {
             let connection = store.connection.lock().expect("lock");
             let version: u32 = connection
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("version");
             assert_eq!(version, super::SCHEMA_VERSION, "brought up to current");
-            assert!(
-                connection
-                    .prepare("SELECT request_id FROM requests")
-                    .is_ok(),
-                "the migration added the request_id column"
-            );
+            for table in ["requests", "decisions", "attempts", "conversion_reports"] {
+                let exists: i64 = connection
+                    .query_row(
+                        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                        [table],
+                        |row| row.get(0),
+                    )
+                    .expect("schema query");
+                assert_eq!(exists, 1, "{table} exists");
+            }
         }
 
-        let backup = path.with_extension("v1.bak");
+        let backup = path.with_extension("v3.bak");
         assert!(
             backup.exists(),
             "the pre-migration database was backed up first"
         );
 
+        drop(store);
+        let recent = recent_receipts(&path, 99).expect("legacy receipts read");
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].request_id, "old-priced");
+        assert_eq!(recent[0].cost_kind, CostKind::Estimated);
+        assert_eq!(recent[0].cost_micros, Some(25));
+        assert!(recent[0].attempt_records.is_empty());
+        assert!(recent[0].conversion_reports.is_empty());
+        assert_eq!(recent[1].attempts, 3);
+        assert_eq!(recent[1].cost_kind, CostKind::Unknown);
+        assert_eq!(recent[1].cost_micros, None);
+        assert!(recent[1].request_id.starts_with("legacy-"));
+        let legacy_json = serde_json::to_value(&recent[1]).expect("receipt serializes");
+        assert!(legacy_json["decision"].is_null());
+        assert_eq!(legacy_json["attempt_records"], serde_json::json!([]));
+        assert_eq!(legacy_json["conversion_reports"], serde_json::json!([]));
+
         std::fs::remove_file(&path).ok();
         std::fs::remove_file(&backup).ok();
+    }
+
+    #[test]
+    fn a_child_failure_rolls_the_whole_receipt_back() {
+        let path = scratch("transaction-rollback");
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        let mut record = receipt("req-rollback", 1);
+        record.attempt_records[1].ordinal = record.attempt_records[0].ordinal;
+
+        assert!(
+            store.insert(&record).is_err(),
+            "duplicate child ordinal fails"
+        );
+        let connection = store.connection.lock().expect("lock");
+        for table in ["requests", "decisions", "attempts", "conversion_reports"] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("counts");
+            assert_eq!(count, 0, "{table} rolled back");
+        }
+        drop(connection);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn recent_receipts_are_hard_capped_ordered_and_include_timelines() {
+        let path = scratch("recent");
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        for index in 0..7 {
+            store.record(&receipt(&format!("req-{index}"), 100 + index));
+        }
+        drop(store);
+
+        let recent = recent_receipts(&path, usize::MAX).expect("reads");
+        assert_eq!(recent.len(), 5, "backend hard cap");
+        assert_eq!(recent[0].request_id, "req-6");
+        assert_eq!(recent[4].request_id, "req-2");
+        let newest = &recent[0];
+        assert_eq!(newest.agent_id.as_deref(), Some("codex"));
+        assert_eq!(newest.running_revision, Some(7));
+        assert_eq!(newest.attempts, 2);
+        assert_eq!(newest.attempt_records.len(), 2);
+        assert_eq!(newest.attempt_records[0].ordinal, 1);
+        assert_eq!(newest.conversion_reports.len(), 2);
+        assert_eq!(newest.decision.as_ref().unwrap().upstream, "primary");
+        assert_eq!(newest.routing.as_ref().unwrap().upstream, "fallback");
+        assert_eq!(newest.cost_kind, CostKind::Estimated);
+        assert_eq!(newest.cost_micros, Some(11));
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn unknown_or_zero_cost_is_persisted_as_null() {
+        let path = scratch("unknown-cost");
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        let mut record = receipt("req-cost", 1);
+        record.cost_kind = CostKind::Estimated;
+        record.cost_micros = Some(0);
+        record.price_version = Some(9);
+        store.record(&record);
+
+        let (kind, cost, version): (String, Option<i64>, Option<u32>) = store
+            .connection
+            .lock()
+            .expect("lock")
+            .query_row(
+                "SELECT cost_kind, cost_micros, price_version FROM requests",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("reads");
+        assert_eq!(kind, "unknown");
+        assert_eq!(cost, None);
+        assert_eq!(version, None);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn receipt_schema_has_no_generic_content_or_secret_containers() {
+        let path = scratch("privacy-schema");
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        let connection = store.connection.lock().expect("lock");
+        let mut statement = connection
+            .prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
+            .expect("prepares");
+        for table in ["requests", "decisions", "attempts", "conversion_reports"] {
+            let columns = statement
+                .query_map([table], |row| row.get::<_, String>(0))
+                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                .expect("columns");
+            let names = columns.join(" ");
+            for forbidden in [
+                "prompt",
+                "response_body",
+                "request_body",
+                "raw_header",
+                "api_key",
+                "secret",
+            ] {
+                assert!(
+                    !names.contains(forbidden),
+                    "{table} exposes {forbidden}: {names}"
+                );
+            }
+        }
+        drop(statement);
+        drop(connection);
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

@@ -70,6 +70,109 @@ export interface ModelDiscoveryView {
   removed?: string[];
 }
 
+export type ReceiptCostKind = "actual" | "estimated" | "unknown";
+
+export type ReceiptErrorCode =
+  | "invalid_request"
+  | "auth"
+  | "payment_required"
+  | "rate_limit"
+  | "capacity"
+  | "capability"
+  | "content_policy"
+  | "upstream_unavailable"
+  | "transport_truncated"
+  | "context_length"
+  | "provider_protocol_error"
+  | "timeout"
+  | "internal";
+
+export interface ReceiptUsageView {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
+}
+
+export interface ReceiptFeaturesView {
+  estimated_input_tokens: number;
+  message_count: number;
+  tool_count: number;
+  has_images: boolean;
+  requires_json_schema: boolean;
+  code_block_count: number;
+  requested_max_output_tokens: number | null;
+  hint_count: number;
+  reasoning_marker_count: number;
+  technical_term_count: number;
+  simple_indicator_count: number;
+  code_keyword_count: number;
+  math_term_count: number;
+  creative_term_count: number;
+  multi_step_signal: number;
+  question_count: number;
+  system_format_hint: boolean;
+}
+
+export type ReceiptDecidedByView =
+  | { tier: "rule"; rule: string }
+  | { tier: "hint"; kind: "step_type" | "task_type" | "preference" | "capability"; value: string }
+  | { tier: "heuristic"; score: number; threshold: number }
+  | { tier: "default" }
+  | { tier: "exact_model"; model: string };
+
+export interface ReceiptRouteView {
+  upstream: string;
+  model: string;
+  pool: string;
+  decided_by: ReceiptDecidedByView;
+  fallbacks: number;
+  features: ReceiptFeaturesView;
+}
+
+export interface ReceiptAttemptView {
+  ordinal: number;
+  upstream: string;
+  model: string;
+  latency_ms: number;
+  http_status: number | null;
+  error_code: ReceiptErrorCode | null;
+  stream_outcome: "complete" | "failed_after_partial" | "failed_before_output" | "client_cancelled" | null;
+  fallback_allowed: boolean;
+}
+
+export interface ReceiptConversionView {
+  ordinal: number;
+  stage: "inbound_normalize" | "provider_request" | "provider_response" | "outbound_render" | "stream_translate";
+  source_protocol: string;
+  target_protocol: string;
+  succeeded: boolean;
+  error_code: ReceiptErrorCode | null;
+}
+
+export interface ReceiptView {
+  request_id: string;
+  started_at_ms: number;
+  latency_ms: number;
+  protocol: string;
+  requested_model: string;
+  stream: boolean;
+  status: number;
+  error_code: ReceiptErrorCode | null;
+  attempts: number;
+  routing: ReceiptRouteView | null;
+  usage: ReceiptUsageView | null;
+  cost_micros: number | null;
+  price_version: number | null;
+  agent_id: string | null;
+  running_revision: number | null;
+  cost_kind: ReceiptCostKind;
+  decision: ReceiptRouteView | null;
+  attempt_records: ReceiptAttemptView[];
+  conversion_reports: ReceiptConversionView[];
+}
+
 export type ServePhase = "stopped" | "starting" | "stopping" | "running" | "error";
 
 export interface ServeView {
@@ -468,6 +571,13 @@ export const getStats = (since: string, by: string | null) =>
     `/admin/stats?since=${since}${by ? `&by=${by}` : ""}`,
     () => invoke<StatsView>("get_stats", { since, by }),
   );
+
+export const getRecentReceipts = (limit = 5) => {
+  const bounded = Math.min(5, Math.max(1, limit));
+  return dataGet<ReceiptView[]>("/admin/receipts", () =>
+    invoke<ReceiptView[]>("get_recent_receipts", { limit: bounded }),
+  );
+};
 
 // Note the semantic difference: HTTP returns the active routing table. IPC fallback returns the editable draft.
 // Use runtime state while the proxy runs. This is the correct data-plane fact.
