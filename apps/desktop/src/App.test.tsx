@@ -41,6 +41,9 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
     },
     agent_routes: Object.fromEntries(agentIds.map((id) => [id, structuredClone(emptyRoute)])),
     serve: { phase: "stopped", running: false, listen: "127.0.0.1:8787", virtual_key: null, error: null },
+    draft_revision: 0,
+    saved_revision: 0,
+    config_dirty: false,
     config_error: null,
     settings: {
       listen: "127.0.0.1:8787",

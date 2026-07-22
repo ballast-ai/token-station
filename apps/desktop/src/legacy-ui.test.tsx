@@ -52,6 +52,9 @@ const state: StateView = {
   },
   agent_routes: {},
   serve: { phase: "stopped", running: false, listen: settings.listen, virtual_key: null, error: null },
+  draft_revision: 0,
+  saved_revision: 0,
+  config_dirty: false,
   config_error: null,
   settings,
 };

@@ -1976,12 +1976,11 @@ mod tests {
             ("runtime-stopped", None, "proxy_not_running"),
         ] {
             let root = scratch(label);
-            let state = AppStateManaged(Mutex::new(crate::AppInner {
-                config_path: root.join("token-station.json"),
-                draft: crate::template(&root),
+            let state = AppStateManaged(Mutex::new(crate::AppInner::new(
+                root.join("token-station.json"),
+                crate::template(&root),
                 load_error,
-                server: crate::ServerLifecycle::stopped(),
-            }));
+            )));
 
             let error = runtime_from_app(&state)
                 .err()
