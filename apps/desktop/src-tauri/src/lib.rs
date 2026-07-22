@@ -772,6 +772,31 @@ fn get_state(state: State<'_, AppStateManaged>) -> StateView {
     state.0.lock().unwrap().snapshot()
 }
 
+/// The final request URLs a base URL resolves to, so the operator sees a
+/// doubled `/v1/v1` (or an invalid URL) before saving, not as a 404 later.
+#[derive(serde::Serialize)]
+struct EndpointPreview {
+    base: String,
+    chat: String,
+    responses: String,
+    messages: String,
+}
+
+#[tauri::command]
+fn preview_endpoint(base_url: String) -> Result<EndpointPreview, String> {
+    let endpoint =
+        token_station_protocol::ProviderEndpoint::try_new(&base_url).map_err(|e| e.to_string())?;
+    let base = endpoint.as_str();
+    let trimmed = base.trim_end_matches('/').to_owned();
+    let join = |suffix: &str| format!("{trimmed}/{suffix}");
+    Ok(EndpointPreview {
+        chat: join("chat/completions"),
+        responses: join("responses"),
+        messages: join("messages"),
+        base,
+    })
+}
+
 /// Add or update a provider (an OpenAI-compatible upstream). Store its key in the system keychain when provided.
 #[tauri::command]
 fn add_provider(
@@ -1548,6 +1573,7 @@ pub fn run() {
         .manage(managed)
         .invoke_handler(tauri::generate_handler![
             get_state,
+            preview_endpoint,
             add_provider,
             discover_provider_models,
             update_provider_models,
