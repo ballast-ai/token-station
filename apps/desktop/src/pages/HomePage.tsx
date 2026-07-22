@@ -18,6 +18,8 @@ interface HomePageProps {
   registry: AgentUiMetadataView[];
   agents: AgentView[];
   serveRunning: boolean;
+  dirty: boolean;
+  applied: boolean;
   busy: boolean;
   configError: string | null;
   onTierChange: (slot: TierSlot, upstream: string | null, model: string | null) => void;
@@ -35,6 +37,8 @@ export default function HomePage({
   registry,
   agents,
   serveRunning,
+  dirty,
+  applied,
   busy,
   configError,
   onTierChange,
@@ -91,6 +95,15 @@ export default function HomePage({
         <footer className="panel-foot route-actions">
           <button className="btn primary" type="button" disabled={busy} onClick={onSave}>保存并应用</button>
           <button className="btn" type="button" disabled={busy} onClick={onApplyAll}>应用到全部 Agent</button>
+          <span className={`save-state ${dirty ? "dirty" : !applied ? "unapplied" : "clean"}`}>
+            {dirty
+              ? "● 有未保存更改"
+              : serveRunning && !applied
+                ? "▲ 已保存，尚未应用 · 重启代理后生效"
+                : serveRunning
+                  ? "✓ 运行中 · 已应用"
+                  : "✓ 已保存"}
+          </span>
           {providers.length === 0 && <span className="foot-hint">请先添加供应商，再配置三档。</span>}
           {providers.length > 0 && configError && <span className="foot-hint">还有档位未完成，保存时会进行完整校验。</span>}
         </footer>

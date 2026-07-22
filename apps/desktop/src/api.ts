@@ -58,6 +58,10 @@ export interface StateView {
   serve: ServeView;
   config_error: string | null;
   settings: SettingsView;
+  /** The draft differs from the configuration saved to disk, so unsaved changes exist. */
+  dirty: boolean;
+  /** The running proxy uses the saved configuration (true when it is not running). false means the saved configuration has not been applied. */
+  applied: boolean;
 }
 
 export type AgentId = string;
