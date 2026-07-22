@@ -2706,6 +2706,37 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    #[cfg(feature = "bundled-plugins")]
+    #[test]
+    fn desktop_bundled_plugins_load_without_an_external_plugin_directory() {
+        let root = scratch_home("bundled-plugins");
+        let missing_plugins = root.join("intentionally-missing-plugins");
+        let plugins: PluginsConfig = serde_json::from_value(
+            template(&root.join("data"), &missing_plugins)["plugins"].clone(),
+        )
+        .unwrap();
+        let receipts = Receipts::load(&root.join("data")).unwrap();
+        let registry = PluginRegistry::discover(&plugins, &receipts).unwrap();
+
+        for package in [
+            "agent-openai",
+            "agent-anthropic",
+            "agent-openai-responses",
+            "provider-openai-compatible",
+        ] {
+            let package = registry
+                .package(package)
+                .expect("official package is builtin");
+            assert!(matches!(
+                package.source,
+                token_station_cli::plugins::PackageSource::Builtin { .. }
+            ));
+        }
+        assert!(registry.provider_binding("openai-compatible").is_some());
+        assert!(!missing_plugins.exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn repeated_model_discovery_only_updates_the_catalog_cache() {
         const CATALOG: &str = r#"{"data":[{"id":"model-b"},{"id":"model-a"}]}"#;
