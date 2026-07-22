@@ -429,6 +429,8 @@ export interface Receipt {
   latency_ms: number;
   status: number;
   error_code: string | null;
+  /** 具体不满足的能力(缺哪一维),细化 error_code;无则 null。 */
+  error_detail: string | null;
   requested_model: string;
   upstream: string | null;
   model: string | null;

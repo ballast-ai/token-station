@@ -1624,21 +1624,34 @@ fn a_request_the_pool_cannot_serve_is_refused_with_the_reason() {
     let key = key_file("capability", "sk-test-key-abc");
     let proxy = start_proxy(&mock, &key);
 
-    // The only model has no vision; an image request has nowhere to go.
+    // The only model has a 400k context window; a request asking for more output
+    // than that has nowhere to go. This exercises the router-layer four-state
+    // refusal (not the earlier multimodal gate), and the reason must survive to
+    // the receipt so the desktop can say *which* capability was missing.
     let (status, body) = post_chat(
         &proxy,
         &json!({
             "model": "auto",
-            "messages": [{ "role": "user", "content": [
-                { "type": "image_url", "image_url": { "url": "https://example/cat.png" } }
-            ]}]
+            "messages": [{ "role": "user", "content": "hello" }],
+            "max_tokens": 500_000
         }),
         None,
     );
 
     assert_eq!(status, 503, "{body}");
-    assert!(body.contains("vision"), "{body}");
+    assert!(body.contains("context window"), "{body}");
     assert_eq!(mock.hits(), 0, "nothing capable, so nothing was sent");
+
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(503)");
+    assert_eq!(row["error_code"], "Text(\"capability\")");
+    // The specific unmet requirement is persisted, not just the coarse code.
+    assert!(
+        row["error_detail"].contains("context window"),
+        "{}",
+        row["error_detail"]
+    );
 
     std::fs::remove_file(key).ok();
 }

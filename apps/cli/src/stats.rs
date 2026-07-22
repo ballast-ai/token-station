@@ -66,6 +66,10 @@ pub struct Receipt {
     pub latency_ms: u64,
     pub status: u16,
     pub error_code: Option<String>,
+    /// A short, content-free reason refining `error_code` — most usefully the
+    /// specific unmet capability behind a `capability` refusal. `None` when the
+    /// code alone said everything.
+    pub error_detail: Option<String>,
     pub requested_model: String,
     /// The upstream and model that actually served (or last refused).
     pub upstream: Option<String>,
@@ -212,7 +216,8 @@ pub fn recent(db_path: &Path, limit: u32) -> Result<Vec<Receipt>, String> {
     let mut statement = connection
         .prepare(
             "SELECT request_id, started_at_ms, latency_ms, status, error_code,
-                    requested_model, upstream, model, pool, tier, attempts, cost_micros
+                    requested_model, upstream, model, pool, tier, attempts, cost_micros,
+                    error_detail
              FROM requests ORDER BY id DESC LIMIT ?1",
         )
         .map_err(|error| format!("metrics query: {error}"))?;
@@ -232,6 +237,7 @@ pub fn recent(db_path: &Path, limit: u32) -> Result<Vec<Receipt>, String> {
                 tier: row.get::<_, Option<String>>(9)?,
                 attempts: row.get::<_, i64>(10)?.try_into().unwrap_or(0),
                 cost_micros: row.get::<_, Option<i64>>(11)?,
+                error_detail: row.get::<_, Option<String>>(12)?,
             })
         })
         .map_err(|error| format!("metrics query: {error}"))?

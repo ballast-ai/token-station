@@ -118,6 +118,9 @@ export default function RecentRequests() {
                           <dd>
                             <span className="diag-layer">{human.layer}</span>
                             <p className="diag-message">{human.message}</p>
+                            {r.error_detail ? (
+                              <p className="diag-detail">具体:{r.error_detail}</p>
+                            ) : null}
                             <p className="diag-suggestion">→ {human.suggestion}</p>
                           </dd>
                         </div>

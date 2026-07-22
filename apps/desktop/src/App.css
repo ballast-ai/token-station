@@ -2200,3 +2200,6 @@ pre.block {
 /* 请求 ID 复制 (T9 闭环) */
 .req-id-cell { display: inline-flex; align-items: center; gap: 8px; }
 .btn.tiny { padding: 0 8px; height: 20px; line-height: 20px; font-size: 11px; }
+
+/* 能力四态具体原因 (capability detail) */
+.diag-detail { margin: 0; font-size: 12px; color: var(--muted, #888); font-family: ui-monospace, monospace; }
