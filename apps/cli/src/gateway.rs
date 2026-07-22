@@ -179,6 +179,10 @@ pub struct Gateway {
     /// the first whose `match_inbound` claims it — that is `match_inbound`, the
     /// multi-inbound multiplexing, done here in the host orchestrator.
     agents: Vec<LoadedAgent>,
+    /// Adapters that were configured but failed to load, with the reason. The
+    /// proxy still serves on the ones that loaded (P0); this is what to surface
+    /// so a skipped protocol is visible, not silent.
+    skipped_agents: Vec<(String, String)>,
     home_router: Router,
     /// Only custom routes are materialized. Missing/inherit entries use the
     /// home router, so old configurations allocate no duplicate routers.
@@ -419,6 +423,30 @@ impl Gateway {
     ///
     /// Never for a [`ClientConfig`] that came through [`ClientConfig::load`]:
     /// the `expect`s below restate what its validation already proved.
+    /// Loads one inbound adapter, resolving builtin vs on-disk source. Returns a
+    /// human reason on any failure so the caller can skip it and say why.
+    fn load_agent(
+        runtime: &PluginRuntime,
+        registry: &crate::plugins::PluginRegistry,
+        package: &str,
+    ) -> Result<LoadedAgent, String> {
+        let plugin = match registry.agent_source(package) {
+            crate::plugins::PackageSource::Builtin {
+                manifest_source,
+                wasm,
+            } => AgentPlugin::load_embedded(runtime, manifest_source, wasm),
+            crate::plugins::PackageSource::Dir(dir) => AgentPlugin::load(runtime, &dir),
+        }
+        .map_err(|error| format!("{error}"))?;
+        let protocol = plugin
+            .manifest()
+            .agent_protocols
+            .first()
+            .cloned()
+            .ok_or_else(|| "declares no protocol".to_owned())?;
+        Ok(LoadedAgent { plugin, protocol })
+    }
+
     pub fn new(config: &ClientConfig, recorder: Arc<dyn Recorder>) -> Result<Self, String> {
         let runtime = PluginRuntime::new(token_station_plugin_runtime::RuntimeLimits::default())
             .map_err(|error| format!("wasm engine: {error}"))?;
@@ -432,26 +460,35 @@ impl Gateway {
 
         // Load every configured inbound adapter. Order is match priority: the
         // first whose match_inbound claims a request serves it.
+        //
+        // Resilient by design (P0): one broken adapter must not sink the whole
+        // proxy. A load failure is recorded and the adapter skipped, so the
+        // remaining protocols still serve. Only an empty result — nothing could
+        // load — is fatal, and its message names why each one failed.
         let mut agents = Vec::new();
+        let mut skipped_agents: Vec<(String, String)> = Vec::new();
         for package in config.plugins.effective_agents() {
-            let plugin = match registry.agent_source(&package) {
-                crate::plugins::PackageSource::Builtin {
-                    manifest_source,
-                    wasm,
-                } => AgentPlugin::load_embedded(&runtime, manifest_source, wasm),
-                crate::plugins::PackageSource::Dir(dir) => AgentPlugin::load(&runtime, &dir),
+            match Self::load_agent(&runtime, &registry, &package) {
+                Ok(agent) => agents.push(agent),
+                Err(error) => {
+                    eprintln!("agent adapter `{package}` failed to load, skipping: {error}");
+                    skipped_agents.push((package, error));
+                }
             }
-            .map_err(|error| format!("agent plugin `{package}`: {error}"))?;
-            let protocol = plugin
-                .manifest()
-                .agent_protocols
-                .first()
-                .cloned()
-                .ok_or_else(|| format!("agent plugin `{package}` declares no protocol"))?;
-            agents.push(LoadedAgent { plugin, protocol });
         }
         if agents.is_empty() {
-            return Err("no agent adapters configured (plugins.agents is empty)".to_owned());
+            if skipped_agents.is_empty() {
+                return Err("no agent adapters configured (plugins.agents is empty)".to_owned());
+            }
+            let reasons = skipped_agents
+                .iter()
+                .map(|(package, error)| format!("`{package}`: {error}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!(
+                "no agent adapter could load; all {} failed: {reasons}",
+                skipped_agents.len()
+            ));
         }
 
         let provider_plugins = load_provider_plugins(&runtime, &registry, config)?;
@@ -516,6 +553,7 @@ impl Gateway {
 
         Ok(Self {
             agents,
+            skipped_agents,
             home_router,
             agent_routers,
             upstreams,
@@ -544,6 +582,14 @@ impl Gateway {
     #[must_use]
     pub fn catalog_size(&self) -> usize {
         self.catalog.len()
+    }
+
+    /// Adapters that were configured but could not load, each with its reason.
+    /// The proxy is serving without them (P0 resilience); surface this so a
+    /// dropped protocol is visible rather than silently missing.
+    #[must_use]
+    pub fn skipped_agents(&self) -> &[(String, String)] {
+        &self.skipped_agents
     }
 
     /// `upstream test <name>`: one minimal real completion per declared model.

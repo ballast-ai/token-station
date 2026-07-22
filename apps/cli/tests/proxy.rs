@@ -1657,6 +1657,40 @@ fn a_request_the_pool_cannot_serve_is_refused_with_the_reason() {
 }
 
 #[test]
+fn a_broken_agent_adapter_is_skipped_and_the_proxy_still_serves() {
+    // P0: the shared gateway must not be all-or-nothing. One configured adapter
+    // that cannot load (`does-not-exist` resolves to a missing plugin dir) is
+    // skipped; the working one still serves. Gateway::new panicking here would
+    // mean a single broken protocol sank the whole proxy.
+    let upstream_answer = json!({
+        "id": "chatcmpl-ok",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "ok." },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 4, "completion_tokens": 1 }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("resilient-agents", "sk-test-key-abc");
+    let proxy = start_proxy_with_agents(&mock, &key, false, &["agent-openai", "does-not-exist"]);
+
+    let (status, body) = post_chat(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "messages": [{ "role": "user", "content": "hi" }]
+        }),
+        None,
+    );
+
+    assert_eq!(status, 200, "the surviving adapter still serves: {body}");
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn nothing_the_caller_wrote_reaches_disk() {
     // The canary rides in message content, a tool definition and a hint header
     // — everything except the model name, which is classified metadata. After
