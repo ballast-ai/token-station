@@ -916,6 +916,17 @@ impl AppInner {
         }
         Ok(())
     }
+
+    /// 把当前草稿落盘并设为已保存基线。命名策略组是持久的库条目(和供应商一样),
+    /// 不能只活在内存草稿里——否则后端一重启就没了。失败时由调用方回滚草稿。
+    fn persist_draft(&mut self) -> Result<(), String> {
+        let config = self.materialize()?;
+        config
+            .save(&self.config_path)
+            .map_err(|e| format!("写配置失败: {e}"))?;
+        self.saved_config_hash = Some(config_hash(&config));
+        Ok(())
+    }
 }
 
 fn pool_key(slot: &str) -> Result<&'static str, String> {
@@ -1274,7 +1285,12 @@ fn save_home_route_as_profile(
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    let previous = inner.draft.clone();
     inner.save_home_route_as_profile(&name)?;
+    if let Err(error) = inner.persist_draft() {
+        inner.draft = previous;
+        return Err(error);
+    }
     Ok(inner.snapshot())
 }
 
@@ -1287,7 +1303,12 @@ fn mount_agent_profile(
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    let previous = inner.draft.clone();
     inner.set_agent_profile_value(&agent_id, &profile)?;
+    if let Err(error) = inner.persist_draft() {
+        inner.draft = previous;
+        return Err(error);
+    }
     Ok(inner.snapshot())
 }
 
@@ -1296,7 +1317,12 @@ fn mount_agent_profile(
 fn delete_profile(state: State<'_, AppStateManaged>, name: String) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    let previous = inner.draft.clone();
     inner.delete_profile_value(&name)?;
+    if let Err(error) = inner.persist_draft() {
+        inner.draft = previous;
+        return Err(error);
+    }
     Ok(inner.snapshot())
 }
 
