@@ -2189,3 +2189,10 @@ pre.block {
 /* 另存为策略组内联输入 (T7 fix) */
 .profile-save-inline { display: inline-flex; align-items: center; gap: 6px; }
 .profile-save-inline .input { width: 180px; }
+
+/* 人话错误诊断 (T9) */
+.receipt-diagnosis dd { display: flex; flex-direction: column; gap: 2px; }
+.diag-layer { display: inline-block; align-self: flex-start; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; background: rgba(220, 80, 80, 0.14); color: #d05050; }
+.diag-message { margin: 2px 0 0; }
+.diag-suggestion { margin: 0; color: var(--muted, #888); font-size: 13px; }
+.error-text { color: #d05050; }
