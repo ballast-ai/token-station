@@ -189,12 +189,13 @@ export interface ServeView {
 
 export type TierSlot = "high" | "mid" | "low";
 
-export type AgentRouteMode = "inherit" | "custom";
+export type AgentRouteMode = "inherit" | "custom" | "profile";
 
 export interface AgentRouteView {
   mode: AgentRouteMode;
   tiers: Record<TierSlot, TierView>;
   config_error: string | null;
+  profile: string | null;
 }
 
 export interface SettingsView {
@@ -213,6 +214,7 @@ export interface StateView {
   provider_recovery_error?: string | null;
   tiers: Record<TierSlot, TierView>;
   agent_routes: Record<string, AgentRouteView>;
+  profiles: string[];
   serve: ServeView;
   draft_revision: number;
   saved_revision: number;
@@ -462,6 +464,15 @@ export const setAgentTier = (
   upstream: string | null,
   model: string | null,
 ) => invoke<StateView>("set_agent_tier", { agentId, slot, upstream, model });
+
+export const saveHomeRouteAsProfile = (name: string) =>
+  invoke<StateView>("save_home_route_as_profile", { name });
+
+export const mountAgentProfile = (agentId: AgentId, profile: string) =>
+  invoke<StateView>("mount_agent_profile", { agentId, profile });
+
+export const deleteProfile = (name: string) =>
+  invoke<StateView>("delete_profile", { name });
 
 export const saveAgentRoutes = () => invoke<StateView>("save_agent_routes");
 

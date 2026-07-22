@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   applyAgentPlan,
+  mountAgentProfile,
   planAgentConnection,
   planAgentDisconnect,
   saveAgentRoutes,
@@ -22,6 +23,7 @@ interface AgentRoutePageProps {
   agent?: AgentView;
   route: AgentRouteView;
   providers: ProviderView[];
+  profiles: string[];
   serveRunning: boolean;
   onStateChange: (state: StateView, message?: string) => void;
   onRescan: () => void | Promise<void>;
@@ -59,6 +61,7 @@ export default function AgentRoutePage({
   agent,
   route,
   providers,
+  profiles,
   serveRunning,
   onStateChange,
   onRescan,
@@ -91,7 +94,7 @@ export default function AgentRoutePage({
     setError("");
     setNotice("");
     try {
-      onStateChange(await action(), message);
+      onStateChange(await action());
       if (message) setNotice(message);
     } catch (caught) {
       setError(errorText(caught));
@@ -132,6 +135,17 @@ export default function AgentRoutePage({
 
   const switchMode = async (mode: "inherit" | "custom") => {
     await runState(() => setAgentRouteMode(metadata.agent_id, mode));
+  };
+
+  const mountProfile = async (profile = route.profile ?? profiles[0]) => {
+    if (!profile) {
+      setError("还没有可挂载的策略组，请先在主页将三档路由另存为策略组。");
+      return;
+    }
+    await runState(
+      () => mountAgentProfile(metadata.agent_id, profile),
+      `已挂载策略组「${profile}」· 尚待保存并应用`,
+    );
   };
 
   const saveRoute = () => runState(
@@ -203,14 +217,29 @@ export default function AgentRoutePage({
           <div className="mode-switch" role="radiogroup" aria-label="Agent 路由模式">
             <button type="button" role="radio" aria-checked={route.mode === "inherit"} className={route.mode === "inherit" ? "active" : ""} disabled={busy} onClick={() => void switchMode("inherit")}>跟随主页</button>
             <button type="button" role="radio" aria-checked={route.mode === "custom"} className={route.mode === "custom" ? "active" : ""} disabled={busy} onClick={() => void switchMode("custom")}>独立路由</button>
+            <button type="button" role="radio" aria-checked={route.mode === "profile"} className={route.mode === "profile" ? "active" : ""} disabled={busy} onClick={() => void mountProfile()}>挂载策略组</button>
           </div>
         </div>
+
+        {route.mode === "profile" && (
+          <label className="profile-mount-select">
+            <span>当前策略组</span>
+            <select
+              className="select"
+              value={route.profile ?? ""}
+              disabled={busy}
+              onChange={(event) => void mountProfile(event.target.value)}
+            >
+              {profiles.map((profile) => <option key={profile} value={profile}>{profile}</option>)}
+            </select>
+          </label>
+        )}
 
         <TierRouteEditor
           tiers={route.tiers}
           providers={providers}
           disabled={busy}
-          readOnly={route.mode === "inherit"}
+          readOnly={route.mode !== "custom"}
           onTierChange={(slot: TierSlot, upstream, model) => runState(() => setAgentTier(metadata.agent_id, slot, upstream, model))}
         />
 
@@ -220,6 +249,8 @@ export default function AgentRoutePage({
               <button className="btn primary" type="button" disabled={busy || Boolean(route.config_error)} onClick={() => void saveRoute()}>保存独立路由</button>
               <button className="btn" type="button" disabled={busy} onClick={() => void restoreHome()}>恢复主页路由</button>
             </>
+          ) : route.mode === "profile" ? (
+            <span className="inherit-note">该 Agent 使用策略组「{route.profile}」。在主页管理策略组，保存并应用后生效。</span>
           ) : (
             <span className="inherit-note">主页路由更新后，此 Agent 会自动使用最新三档配置。</span>
           )}

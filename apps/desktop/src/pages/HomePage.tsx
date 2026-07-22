@@ -1,11 +1,14 @@
-import type {
-  AgentRouteView,
-  AgentUiMetadataView,
-  AgentView,
-  ProviderView,
-  StateView,
-  TierSlot,
-  TierView,
+import { useState } from "react";
+import {
+  deleteProfile,
+  saveHomeRouteAsProfile,
+  type AgentRouteView,
+  type AgentUiMetadataView,
+  type AgentView,
+  type ProviderView,
+  type StateView,
+  type TierSlot,
+  type TierView,
 } from "../api";
 import TierRouteEditor from "../components/TierRouteEditor";
 import ProviderList from "../components/ProviderList";
@@ -17,6 +20,7 @@ interface HomePageProps {
   providerRecoveryError: string | null;
   tiers: Record<TierSlot, TierView>;
   agentRoutes: Record<string, AgentRouteView>;
+  profiles: string[];
   registry: AgentUiMetadataView[];
   agents: AgentView[];
   serveRunning: boolean;
@@ -32,12 +36,21 @@ interface HomePageProps {
   onStateChange: (state: StateView, message: string) => void;
 }
 
+function errorText(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && "message" in error) {
+    return String((error as { message: unknown }).message);
+  }
+  return String(error);
+}
+
 export default function HomePage({
   providers,
   deletedProviders,
   providerRecoveryError,
   tiers,
   agentRoutes,
+  profiles,
   registry,
   agents,
   serveRunning,
@@ -52,7 +65,40 @@ export default function HomePage({
   onRestoreProvider,
   onStateChange,
 }: HomePageProps) {
+  const [profileName, setProfileName] = useState("");
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [profileError, setProfileError] = useState("");
   const scanned = new Map(agents.map((agent) => [agent.metadata.agent_id, agent]));
+
+  const saveProfile = async () => {
+    const name = profileName.trim();
+    if (!name || profileBusy) return;
+    setProfileBusy(true);
+    setProfileError("");
+    try {
+      const next = await saveHomeRouteAsProfile(name);
+      setProfileName("");
+      onStateChange(next, `策略组「${name}」已加入草稿，请保存并应用`);
+    } catch (caught) {
+      setProfileError(errorText(caught));
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  const removeProfile = async (name: string) => {
+    if (profileBusy) return;
+    setProfileBusy(true);
+    setProfileError("");
+    try {
+      const next = await deleteProfile(name);
+      onStateChange(next, `策略组「${name}」已从草稿删除，请保存并应用`);
+    } catch (caught) {
+      setProfileError(errorText(caught));
+    } finally {
+      setProfileBusy(false);
+    }
+  };
   return (
     <div className="page-stack home-page">
       <header className="page-title-row">
@@ -73,7 +119,7 @@ export default function HomePage({
               <span className={`overview-signal ${connected ? "connected" : agent?.installations.length ? "detected" : ""}`} />
               <strong>{metadata.display_name.replace(" Agent", "")}</strong>
               <small>{connected ? "已接入" : agent?.installations.length ? "已发现" : "未发现"}</small>
-              <em>{route?.mode === "custom" ? "独立路由" : "跟随主页"}</em>
+              <em>{route?.mode === "custom" ? "独立路由" : route?.mode === "profile" ? `策略组 · ${route.profile}` : "跟随主页"}</em>
             </button>
           );
         })}
@@ -95,6 +141,39 @@ export default function HomePage({
           disabled={busy}
           onTierChange={onTierChange}
         />
+
+        <div className="profile-manager">
+          <div>
+            <strong>可复用策略组</strong>
+            <span>把当前主页三档另存后，可供多个 Agent 共同挂载。</span>
+          </div>
+          <div className="profile-create-row">
+            <input
+              className="input"
+              aria-label="策略组名称"
+              value={profileName}
+              maxLength={80}
+              placeholder="例如：日常开发"
+              disabled={busy || profileBusy}
+              onChange={(event) => setProfileName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void saveProfile();
+              }}
+            />
+            <button className="btn" type="button" disabled={busy || profileBusy || !profileName.trim()} onClick={() => void saveProfile()}>另存为策略组</button>
+          </div>
+          {profiles.length > 0 && (
+            <div className="profile-list" aria-label="已有策略组">
+              {profiles.map((profile) => (
+                <span key={profile}>
+                  {profile}
+                  <button type="button" aria-label={`删除策略组 ${profile}`} disabled={busy || profileBusy} onClick={() => void removeProfile(profile)}>×</button>
+                </span>
+              ))}
+            </div>
+          )}
+          {profileError && <span className="foot-hint error-text">{profileError}</span>}
+        </div>
 
         <footer className="panel-foot route-actions">
           <button className="btn primary" type="button" disabled={busy} onClick={onSave}>保存并应用</button>

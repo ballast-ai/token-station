@@ -43,7 +43,7 @@ function hasErrorCode(error: unknown, code: string): boolean {
 }
 
 function emptyAgentRoute(state: StateView): AgentRouteView {
-  return { mode: "inherit", tiers: state.tiers, config_error: null };
+  return { mode: "inherit", tiers: state.tiers, config_error: null, profile: null };
 }
 
 export function configSaveStatus(state: StateView): string {
@@ -252,6 +252,7 @@ export default function App() {
           providerRecoveryError={state.provider_recovery_error ?? null}
           tiers={state.tiers}
           agentRoutes={state.agent_routes ?? {}}
+          profiles={state.profiles ?? []}
           registry={orderedRegistry}
           agents={agents}
           serveRunning={runtimeHealthy}
@@ -273,6 +274,7 @@ export default function App() {
           metadata={metadata}
           agent={agent}
           route={route}
+          profiles={state.profiles ?? []}
           providers={state.providers}
           serveRunning={runtimeHealthy}
           onStateChange={showState}

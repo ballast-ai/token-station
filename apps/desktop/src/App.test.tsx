@@ -20,6 +20,7 @@ const emptyRoute: AgentRouteView = {
     low: { upstream: null, model: null },
   },
   config_error: null,
+  profile: null,
 };
 
 const registryFixture: AgentUiMetadataView[] = [
@@ -55,6 +56,7 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
       low: { upstream: null, model: null },
     },
     agent_routes: Object.fromEntries(agentIds.map((id) => [id, structuredClone(emptyRoute)])),
+    profiles: [],
     serve: serveFixture(),
     draft_revision: 0,
     saved_revision: 0,
@@ -414,6 +416,51 @@ describe("desktop station navigation", () => {
       upstream: "deepseek",
       model: "deepseek-v4-pro",
     });
+  });
+
+  it("saves the home route as a reusable profile and mounts it from an Agent page", async () => {
+    const user = userEvent.setup();
+    const provider = { name: "deepseek", provider: "openai-compatible", base_url: "https://example.test/v1", models: ["deepseek-chat"], has_auth: true };
+    const configuredTiers = {
+      high: { upstream: "deepseek", model: "deepseek-chat" },
+      mid: { upstream: "deepseek", model: "deepseek-chat" },
+      low: { upstream: "deepseek", model: "deepseek-chat" },
+    };
+    let current = stateFixture({ providers: [provider], tiers: configuredTiers });
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "get_state") return current;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "save_home_route_as_profile") {
+        current = { ...current, profiles: [(args as { name: string }).name], config_dirty: true, draft_revision: 1 };
+        return current;
+      }
+      if (command === "mount_agent_profile") {
+        const { agentId, profile } = args as { agentId: string; profile: string };
+        current = {
+          ...current,
+          agent_routes: {
+            ...current.agent_routes,
+            [agentId]: { ...current.agent_routes[agentId], mode: "profile", profile, tiers: configuredTiers },
+          },
+          draft_revision: 2,
+        };
+        return current;
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.type(await screen.findByLabelText("策略组名称"), "日常开发");
+    await user.click(screen.getByRole("button", { name: "另存为策略组" }));
+    expect(invokeMock).toHaveBeenCalledWith("save_home_route_as_profile", { name: "日常开发" });
+    expect(await screen.findByText("策略组「日常开发」已加入草稿，请保存并应用")).toBeInTheDocument();
+
+    await user.click(navigation().getByRole("button", { name: "Codex" }));
+    await user.click(screen.getByRole("radio", { name: "挂载策略组" }));
+    expect(invokeMock).toHaveBeenCalledWith("mount_agent_profile", { agentId: "codex", profile: "日常开发" });
+    expect(await screen.findByText("已挂载策略组「日常开发」· 尚待保存并应用")).toBeInTheDocument();
+    expect(screen.getByLabelText("当前策略组")).toHaveValue("日常开发");
   });
 
   it("opens Add Provider as a separate page and returns to the source page after saving", async () => {

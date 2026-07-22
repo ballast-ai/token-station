@@ -60,6 +60,7 @@ const state: StateView = {
     low: { upstream: null, model: null },
   },
   agent_routes: {},
+  profiles: [],
   serve: {
     phase: "stopped", app_runtime: "stopped", listener_reachable: false,
     agent_connected: false, running_revision: null, instance_id: null,

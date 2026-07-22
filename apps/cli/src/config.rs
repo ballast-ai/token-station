@@ -53,6 +53,9 @@ pub struct ClientConfig {
     /// home router, keeping every pre-Agent-routes configuration compatible.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_routes: BTreeMap<String, AgentRouteConfig>,
+    /// Named reusable three-tier routes that multiple Agents can mount.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<String, AgentTierRoutes>,
     /// Where the request log and metrics store live. Optional; defaults apply.
     #[serde(default)]
     pub data: DataConfig,
@@ -75,6 +78,7 @@ pub struct ClientConfig {
 pub enum AgentRouteMode {
     Inherit,
     Custom,
+    Profile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +87,8 @@ pub struct AgentRouteConfig {
     pub mode: AgentRouteMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_route: Option<AgentTierRoutes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,7 +314,42 @@ impl ClientConfig {
                 .as_ref()
                 .ok_or_else(|| format!("Agent `{agent_id}` custom mode requires custom_route"))
                 .and_then(|tiers| tiers.materialize(&self.router).map(Some)),
+            AgentRouteMode::Profile => {
+                let name = route
+                    .profile
+                    .as_deref()
+                    .ok_or_else(|| format!("Agent `{agent_id}` profile mode requires a profile"))?;
+                self.profiles
+                    .get(name)
+                    .ok_or_else(|| format!("Agent `{agent_id}` mounts unknown profile `{name}`"))?
+                    .materialize(&self.router)
+                    .map(Some)
+            }
         }
+    }
+
+    fn validate_agent_tiers(&self, owner: &str, tiers: &AgentTierRoutes) -> Result<(), String> {
+        for (pool, target) in tiers.entries() {
+            UpstreamRef::new(target.upstream.clone())
+                .map_err(|error| format!("{owner} {pool} upstream: {error}"))?;
+            let upstream = self.upstreams.get(&target.upstream).ok_or_else(|| {
+                format!(
+                    "{owner} {pool} routes to upstream `{}`, which is not configured",
+                    target.upstream
+                )
+            })?;
+            if !upstream
+                .models
+                .iter()
+                .any(|capability| capability.model == target.model)
+            {
+                return Err(format!(
+                    "{owner} {pool} routes to model `{}` not declared by upstream `{}`",
+                    target.model, target.upstream
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Reads and structurally validates a configuration file.
@@ -435,28 +476,31 @@ impl ClientConfig {
                     "Agent `{agent_id}` custom mode requires custom_route"
                 ));
             }
-            if let Some(tiers) = &route.custom_route {
-                for (pool, target) in tiers.entries() {
-                    UpstreamRef::new(target.upstream.clone())
-                        .map_err(|error| format!("Agent `{agent_id}` {pool} upstream: {error}"))?;
-                    let upstream = self.upstreams.get(&target.upstream).ok_or_else(|| {
-                        format!(
-                            "Agent `{agent_id}` {pool} routes to upstream `{}`, which is not configured",
-                            target.upstream
-                        )
-                    })?;
-                    if !upstream
-                        .models
-                        .iter()
-                        .any(|capability| capability.model == target.model)
-                    {
-                        return Err(format!(
-                            "Agent `{agent_id}` {pool} routes to model `{}` not declared by upstream `{}`",
-                            target.model, target.upstream
-                        ));
-                    }
+            if route.mode == AgentRouteMode::Profile {
+                let profile = route
+                    .profile
+                    .as_deref()
+                    .ok_or_else(|| format!("Agent `{agent_id}` profile mode requires a profile"))?;
+                if !self.profiles.contains_key(profile) {
+                    return Err(format!(
+                        "Agent `{agent_id}` mounts unknown profile `{profile}`"
+                    ));
                 }
             }
+            if let Some(tiers) = &route.custom_route {
+                self.validate_agent_tiers(&format!("Agent `{agent_id}`"), tiers)?;
+            }
+        }
+
+        for (name, tiers) in &self.profiles {
+            if name.trim().is_empty()
+                || name.len() > 80
+                || name.trim() != name
+                || name.chars().any(char::is_control)
+            {
+                return Err("profile name is invalid".to_string());
+            }
+            self.validate_agent_tiers(&format!("profile `{name}`"), tiers)?;
         }
 
         Ok(())
@@ -582,8 +626,10 @@ mod tests {
     fn agent_routes_are_optional_and_empty_routes_do_not_serialize() {
         let config: ClientConfig = serde_json::from_value(example()).expect("example parses");
         assert!(config.agent_routes.is_empty());
+        assert!(config.profiles.is_empty());
         let encoded = serde_json::to_value(config).expect("config serializes");
         assert!(encoded.get("agent_routes").is_none());
+        assert!(encoded.get("profiles").is_none());
     }
 
     #[test]
@@ -617,6 +663,44 @@ mod tests {
                 .is_none()
         );
         assert!(config.agent_routes["opencode"].custom_route.is_some());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn several_agents_can_mount_one_named_profile() {
+        let mut value = example();
+        value["profiles"] = serde_json::json!({
+            "cheap-and-local": three_tiers("ollama_local", "llama3.3"),
+        });
+        value["agent_routes"] = serde_json::json!({
+            "codex": { "mode": "profile", "profile": "cheap-and-local" },
+            "opencode": { "mode": "profile", "profile": "cheap-and-local" },
+        });
+        let path = scratch("agent-profiles", &value.to_string());
+        let config = ClientConfig::load(&path).expect("profile routes validate");
+
+        for agent in ["codex", "opencode"] {
+            let router = config
+                .custom_router_for_agent(agent)
+                .unwrap()
+                .expect("mounted profile materializes");
+            for pool in ["tier_high", "tier_mid", "tier_low"] {
+                assert_eq!(router.pools[pool][0].upstream.as_str(), "ollama_local");
+                assert_eq!(router.pools[pool][0].model, "llama3.3");
+            }
+        }
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn mounting_an_unknown_profile_is_refused() {
+        let mut value = example();
+        value["agent_routes"] = serde_json::json!({
+            "codex": { "mode": "profile", "profile": "does-not-exist" },
+        });
+        let path = scratch("agent-profile-missing", &value.to_string());
+        let error = ClientConfig::load(&path).expect_err("missing profile is refused");
+        assert!(error.to_string().contains("does-not-exist"), "{error}");
         fs::remove_file(path).ok();
     }
 
