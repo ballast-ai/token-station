@@ -8,10 +8,10 @@
 //! would in production; only the far end of the wire is scripted.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{Value, json};
@@ -79,6 +79,7 @@ struct MockUpstream {
     port: u16,
     seen: Arc<Mutex<Vec<Seen>>>,
     hits: Arc<AtomicUsize>,
+    peer_closed: Arc<AtomicBool>,
 }
 
 impl MockUpstream {
@@ -90,6 +91,7 @@ impl MockUpstream {
         let port = listener.local_addr().expect("bound").port();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let hits = Arc::new(AtomicUsize::new(0));
+        let peer_closed = Arc::new(AtomicBool::new(false));
 
         let record = Arc::clone(&seen);
         let counter = Arc::clone(&hits);
@@ -112,7 +114,70 @@ impl MockUpstream {
             }
         });
 
-        Self { port, seen, hits }
+        Self {
+            port,
+            seen,
+            hits,
+            peer_closed,
+        }
+    }
+
+    /// Sends only the streaming response headers, then waits for the proxy to
+    /// close the upstream socket. This is the real blocked-read case used by
+    /// the drain/cancellation acceptance test.
+    fn start_hanging() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+        let port = listener.local_addr().expect("bound").port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let peer_closed = Arc::new(AtomicBool::new(false));
+        let record = Arc::clone(&seen);
+        let counter = Arc::clone(&hits);
+        let closed = Arc::clone(&peer_closed);
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("hanging upstream accepts");
+            record
+                .lock()
+                .expect("recorder")
+                .push(read_http_request(&mut stream));
+            counter.fetch_add(1, Ordering::SeqCst);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+                )
+                .expect("stream headers write");
+            stream.flush().expect("stream headers flush");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                .expect("read timeout sets");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut byte = [0_u8; 1];
+            while std::time::Instant::now() < deadline {
+                match stream.read(&mut byte) {
+                    Ok(0) => {
+                        closed.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => {
+                        closed.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
+            let _ = stream.shutdown(Shutdown::Both);
+        });
+        Self {
+            port,
+            seen,
+            hits,
+            peer_closed,
+        }
     }
 
     fn base_url(&self) -> String {
@@ -125,6 +190,10 @@ impl MockUpstream {
 
     fn hits(&self) -> usize {
         self.hits.load(Ordering::SeqCst)
+    }
+
+    fn peer_closed(&self) -> bool {
+        self.peer_closed.load(Ordering::SeqCst)
     }
 }
 
@@ -204,6 +273,7 @@ struct Proxy {
     url: String,
     data_dir: PathBuf,
     virtual_key: String,
+    control: server::ServerControl,
 }
 
 /// Starts the whole server against `upstream`, auth on — the default posture.
@@ -291,6 +361,7 @@ fn start_proxy_with_agents(
             plugins: config.plugins.clone(),
         }),
     );
+    let control = state.control.clone();
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
     listener.set_nonblocking(true).expect("nonblocking");
@@ -312,6 +383,7 @@ fn start_proxy_with_agents(
         url: format!("http://{address}"),
         data_dir,
         virtual_key,
+        control,
     }
 }
 
@@ -389,6 +461,7 @@ fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Pat
             plugins: config.plugins.clone(),
         }),
     );
+    let control = state.control.clone();
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
     listener.set_nonblocking(true).expect("nonblocking");
     let address = listener.local_addr().expect("bound");
@@ -407,6 +480,7 @@ fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Pat
         url: format!("http://{address}"),
         data_dir,
         virtual_key,
+        control,
     }
 }
 
@@ -628,6 +702,80 @@ fn a_chat_completion_round_trips_with_the_credential_injected() {
         "the file log is always written"
     );
 
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_records_499() {
+    let mock = MockUpstream::start_hanging();
+    let key = key_file("hung-drain", "sk-test-key-abc\n");
+    let proxy = start_proxy(&mock, &key);
+    let url = proxy.url.clone();
+    let virtual_key = proxy.virtual_key.clone();
+    let client = std::thread::spawn(move || {
+        let agent = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(15)))
+                .http_status_as_error(false)
+                .build(),
+        );
+        let response = agent
+            .post(format!("{url}/v1/chat/completions"))
+            .header("authorization", &format!("Bearer {virtual_key}"))
+            .send(
+                &json!({
+                    "model": "auto",
+                    "stream": true,
+                    "messages": [{"role": "user", "content": "hang"}]
+                })
+                .to_string(),
+            )
+            .expect("proxy sends stream headers");
+        let status = response.status().as_u16();
+        let _ = response.into_body().read_to_string();
+        status
+    });
+
+    let arrival_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while (mock.hits() == 0 || proxy.control.in_flight() == 0)
+        && std::time::Instant::now() < arrival_deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(mock.hits(), 1, "the hanging exchange reached its upstream");
+    assert_eq!(proxy.control.in_flight(), 1, "one request is in flight");
+
+    proxy.control.stop_accepting();
+    let grace_started = std::time::Instant::now();
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    assert_eq!(
+        proxy.control.in_flight(),
+        1,
+        "the blocked request remains alive throughout the approved grace"
+    );
+    proxy.control.cancel_in_flight();
+
+    let cleanup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while (proxy.control.in_flight() != 0 || !mock.peer_closed())
+        && std::time::Instant::now() < cleanup_deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(grace_started.elapsed() >= std::time::Duration::from_secs(5));
+    assert_eq!(
+        proxy.control.in_flight(),
+        0,
+        "the gateway worker exits after cancel"
+    );
+    assert!(
+        mock.peer_closed(),
+        "the cancelled worker closes the upstream socket"
+    );
+    assert_eq!(client.join().expect("client joins"), 200);
+
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(499)");
     std::fs::remove_file(key).ok();
 }
 
@@ -1772,6 +1920,7 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
             plugins: config.plugins.clone(),
         }),
     );
+    let control = state.control.clone();
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
     listener.set_nonblocking(true).expect("nonblocking");
@@ -1791,6 +1940,7 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
         url: format!("http://{address}"),
         data_dir,
         virtual_key,
+        control,
     }
 }
 

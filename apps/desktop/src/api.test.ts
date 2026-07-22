@@ -9,6 +9,7 @@ import {
   checkUpgrade,
   discoverProviderModels,
   getPlugins,
+  getRuntimeState,
   getRouterTable,
   getState,
   getStats,
@@ -31,6 +32,7 @@ import {
   setTier,
   updateProviderModels,
 } from "./api";
+import type { ServeView } from "./api";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -52,6 +54,14 @@ const forbiddenKeys = new Set([
   "argv",
   "executablePath",
 ]);
+
+function serveFixture(overrides: Partial<ServeView> = {}): ServeView {
+  return {
+    phase: "stopped", app_runtime: "stopped", listener_reachable: false,
+    agent_connected: false, running_revision: null, instance_id: null,
+    listen: "127.0.0.1:9999", virtual_key: null, error: null, ...overrides,
+  };
+}
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -158,6 +168,7 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
 
   it.each([
     ["get state", () => getState(), "get_state", undefined],
+    ["get runtime facts", () => getRuntimeState(), "get_runtime_state", undefined],
     ["add provider", () => addProvider("p", "https://p/v1", ["m"], "k"), "add_provider", { name: "p", baseUrl: "https://p/v1", models: ["m"], apiKey: "k" }],
     ["remove provider", () => removeProvider("p"), "remove_provider", { name: "p" }],
     ["discover models", () => discoverProviderModels("p", "https://p/v1", null), "discover_provider_models", { name: "p", baseUrl: "https://p/v1", apiKey: null }],
@@ -188,7 +199,7 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
           : { dir: "/plugins", agent: "a", dialects: [], listing: "" };
       return new Response(JSON.stringify(body), { status: 200 });
     });
-    setAdminEndpoint({ phase: "running", running: true, listen: "127.0.0.1:9999", virtual_key: "virtual", error: null });
+    setAdminEndpoint(serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, virtual_key: "virtual" }));
 
     await getStats("24h", "model");
     await getRouterTable();
@@ -202,13 +213,13 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
 
   it("fails clearly in browser mode when HTTP is unavailable or stopped", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
-    setAdminEndpoint({ phase: "running", running: true, listen: "127.0.0.1:9999", virtual_key: null, error: null });
+    setAdminEndpoint(serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true }));
     await expect(getStats("all", null)).rejects.toThrow("无法连接本地代理");
 
-    setAdminEndpoint({ phase: "stopped", running: false, listen: "127.0.0.1:9999", virtual_key: null, error: null });
+    setAdminEndpoint(serveFixture());
     await expect(getRouterTable()).rejects.toThrow("无法连接本地代理");
 
-    setAdminEndpoint({ phase: "starting", running: true, listen: "127.0.0.1:9999", virtual_key: "stale", error: null });
+    setAdminEndpoint(serveFixture({ phase: "starting", app_runtime: "running", virtual_key: "stale" }));
     await expect(getPlugins()).rejects.toThrow("无法连接本地代理");
   });
 });

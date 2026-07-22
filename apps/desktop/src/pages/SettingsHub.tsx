@@ -21,6 +21,7 @@ function VirtualKeyCard({ serve }: { serve: ServeView }) {
   const [copied, setCopied] = useState(false);
   const revealTimer = useRef<number | null>(null);
   const key = serve.virtual_key;
+  const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
 
   useEffect(() => () => {
     if (revealTimer.current != null) window.clearTimeout(revealTimer.current);
@@ -47,8 +48,8 @@ function VirtualKeyCard({ serve }: { serve: ServeView }) {
           <h2>虚拟 API Key</h2>
           <p className="sub">供本机 Agent 访问 Token Station。默认隐藏，复制时无需显示明文。</p>
         </div>
-        <span className={`status-chip ${serve.running && key ? "success" : ""}`}>
-          {serve.running && key ? "已生成" : "代理未运行"}
+        <span className={`status-chip ${runtimeHealthy && key ? "success" : ""}`}>
+          {runtimeHealthy && key ? "已生成" : "代理未运行"}
         </span>
       </div>
       <div className="secret-row">
@@ -106,6 +107,7 @@ interface SettingsHubProps {
 
 export default function SettingsHub({ settings, serve, onSaved }: SettingsHubProps) {
   const [section, setSection] = useState<SettingsSection>("general");
+  const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   return (
     <div className="settings-layout">
       <aside className="settings-nav" aria-label="设置分类">
@@ -129,7 +131,7 @@ export default function SettingsHub({ settings, serve, onSaved }: SettingsHubPro
         {section === "general" && (
           <>
             <VirtualKeyCard serve={serve} />
-            <Settings settings={settings} serveRunning={serve.running} onSaved={onSaved} />
+            <Settings settings={settings} serveRunning={runtimeHealthy} onSaved={onSaved} />
           </>
         )}
         {section === "router" && <RouterTable />}

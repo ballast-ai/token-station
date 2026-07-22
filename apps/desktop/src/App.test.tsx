@@ -3,8 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import App from "./App";
-import type { AgentRouteView, AgentUiMetadataView, AgentView, StateView } from "./api";
+import App, { configSaveStatus } from "./App";
+import type { AgentRouteView, AgentUiMetadataView, AgentView, ServeView, StateView } from "./api";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -31,6 +31,21 @@ const registryFixture: AgentUiMetadataView[] = [
   { agent_id: "future-agent", legacy_kind: null, display_name: "Future Agent", icon_key: "future", admission: "discovery_only" },
 ];
 
+function serveFixture(overrides: Partial<ServeView> = {}): ServeView {
+  return {
+    phase: "stopped",
+    app_runtime: "stopped",
+    listener_reachable: false,
+    agent_connected: false,
+    running_revision: null,
+    instance_id: null,
+    listen: "127.0.0.1:8787",
+    virtual_key: null,
+    error: null,
+    ...overrides,
+  };
+}
+
 function stateFixture(overrides: Partial<StateView> = {}): StateView {
   return {
     providers: [],
@@ -40,7 +55,7 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
       low: { upstream: null, model: null },
     },
     agent_routes: Object.fromEntries(agentIds.map((id) => [id, structuredClone(emptyRoute)])),
-    serve: { phase: "stopped", running: false, listen: "127.0.0.1:8787", virtual_key: null, error: null },
+    serve: serveFixture(),
     draft_revision: 0,
     saved_revision: 0,
     config_dirty: false,
@@ -125,6 +140,79 @@ beforeEach(() => {
 });
 
 describe("desktop station navigation", () => {
+  it("maps the four revision relationships to stable save copy", () => {
+    expect(configSaveStatus(stateFixture())).toBe("无改动");
+    expect(configSaveStatus(stateFixture({ config_dirty: true, draft_revision: 2, saved_revision: 1 }))).toBe("有未保存更改");
+    expect(configSaveStatus(stateFixture({
+      saved_revision: 2,
+      serve: serveFixture({ app_runtime: "running", listener_reachable: true, running_revision: 1 }),
+    }))).toBe("已保存尚未应用");
+    expect(configSaveStatus(stateFixture({
+      saved_revision: 2,
+      serve: serveFixture({ app_runtime: "running", listener_reachable: true, running_revision: 2 }),
+    }))).toBe("运行中 revision 2");
+  });
+
+  it("shows the revision save state and makes 保存并应用 start a real apply", async () => {
+    const user = userEvent.setup();
+    const dirty = stateFixture({ draft_revision: 2, saved_revision: 1, config_dirty: true });
+    const applying = stateFixture({
+      draft_revision: 2,
+      saved_revision: 2,
+      config_dirty: false,
+      serve: serveFixture({ phase: "starting" }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return dirty;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "serve_start") return applying;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    expect(await screen.findByTestId("config-save-status")).toHaveTextContent("有未保存更改");
+    await user.click(screen.getByRole("button", { name: "保存并应用" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("serve_start"));
+    expect(invokeMock).not.toHaveBeenCalledWith("save_config");
+  });
+
+  it("refreshes the independent Agent runtime fact within the 500ms poll", async () => {
+    const connected = stateFixture({
+      serve: serveFixture({
+        phase: "running",
+        app_runtime: "running",
+        listener_reachable: true,
+        agent_connected: true,
+        running_revision: 1,
+        instance_id: "runtime-a",
+      }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return connected;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "get_runtime_state") {
+        return serveFixture({
+          phase: "running",
+          app_runtime: "running",
+          listener_reachable: true,
+          agent_connected: false,
+          running_revision: 1,
+          instance_id: "runtime-a",
+        });
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    expect(await screen.findByTestId("agent-runtime-connection")).toHaveTextContent("Agent：已连接");
+    await waitFor(
+      () => expect(screen.getByTestId("agent-runtime-connection")).toHaveTextContent("Agent：未连接"),
+      { timeout: 1_500 },
+    );
+  });
+
   it("shows exactly five fixed Agents, no Gemini, and scans only on load or explicit rescan", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -177,13 +265,10 @@ describe("desktop station navigation", () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") {
         return stateFixture({
-          serve: {
-            phase: "running",
-            running: true,
-            listen: "127.0.0.1:8787",
-            virtual_key: "vk-overlap",
-            error: null,
-          },
+          serve: serveFixture({
+            phase: "running", app_runtime: "running", listener_reachable: true,
+            running_revision: 1, instance_id: "instance-overlap", virtual_key: "vk-overlap",
+          }),
         });
       }
       if (command === "list_agent_registry") return registryFixture;
@@ -265,7 +350,7 @@ describe("desktop station navigation", () => {
     const user = userEvent.setup();
     const writeText = vi.spyOn(navigator.clipboard, "writeText");
     const running = stateFixture({
-      serve: { phase: "running", running: true, listen: "127.0.0.1:8787", virtual_key: "vk-test-secret", error: null },
+      serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test-secret" }),
     });
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
@@ -356,7 +441,7 @@ describe("desktop station navigation", () => {
 
   it("performs a safe Agent connection in one click without a confirmation dialog", async () => {
     const user = userEvent.setup();
-    const running = stateFixture({ serve: { phase: "running", running: true, listen: "127.0.0.1:8787", virtual_key: "vk-test", error: null } });
+    const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
     let scans = 0;
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return running;
@@ -384,7 +469,7 @@ describe("desktop station navigation", () => {
 
   it("requires explicit confirmation for an unverified version and cancellation sends no IPC", async () => {
     const user = userEvent.setup();
-    const running = stateFixture({ serve: { phase: "running", running: true, listen: "127.0.0.1:8787", virtual_key: "vk-test", error: null } });
+    const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
     const unknown = experimentalClaude();
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return running;
@@ -437,7 +522,7 @@ describe("desktop station navigation", () => {
       status: "MULTIPLE_INSTALLATIONS",
       installations: [scannedClaude.installations[0], secondInstallation],
     };
-    const running = stateFixture({ serve: { phase: "running", running: true, listen: "127.0.0.1:8787", virtual_key: "vk-test", error: null } });
+    const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return running;
       if (command === "list_agent_registry") return registryFixture;

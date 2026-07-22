@@ -18,6 +18,7 @@ const LEDGER_FILE: &str = "token-station.state.json";
 #[derive(Clone, Debug)]
 pub(crate) struct ConfigState {
     saved: Value,
+    draft: Value,
     draft_fingerprint: String,
     saved_fingerprint: String,
     draft_revision: u64,
@@ -44,6 +45,7 @@ impl ConfigState {
         let fingerprint = fingerprint(draft).expect("serde_json::Value always serializes");
         Self {
             saved: draft.clone(),
+            draft: draft.clone(),
             draft_fingerprint: fingerprint.clone(),
             saved_fingerprint: fingerprint,
             draft_revision: 0,
@@ -111,6 +113,7 @@ impl ConfigState {
         }
         Ok(Self {
             saved: draft.clone(),
+            draft: draft.clone(),
             draft_fingerprint: fingerprint.clone(),
             saved_fingerprint: fingerprint,
             draft_revision: revision,
@@ -135,6 +138,11 @@ impl ConfigState {
         self.draft_fingerprint != self.saved_fingerprint
     }
 
+    #[must_use]
+    pub(crate) fn draft(&self) -> &Value {
+        &self.draft
+    }
+
     /// Records a successful in-memory edit. Repeating the same value keeps its
     /// revision; returning exactly to the saved content reuses saved_revision.
     pub(crate) fn observe_draft(&mut self, draft: &Value) -> Result<(), String> {
@@ -142,13 +150,22 @@ impl ConfigState {
         if next == self.draft_fingerprint {
             return Ok(());
         }
-        self.draft_fingerprint.clone_from(&next);
         if next == self.saved_fingerprint {
+            self.draft = draft.clone();
+            self.draft_fingerprint = next;
             self.draft_revision = self.saved_revision;
         } else {
-            self.ledger.last_allocated_revision =
-                self.ledger.last_allocated_revision.saturating_add(1).max(1);
-            self.draft_revision = self.ledger.last_allocated_revision;
+            // Reserve the identity durably before exposing it in memory. A
+            // crash with an unsaved draft must not allow a different draft to
+            // reuse the same revision after restart.
+            let mut ledger = self.ledger.clone();
+            ledger.last_allocated_revision =
+                ledger.last_allocated_revision.saturating_add(1).max(1);
+            write_ledger(&self.ledger_path, &ledger)?;
+            self.draft_revision = ledger.last_allocated_revision;
+            self.draft = draft.clone();
+            self.draft_fingerprint = next;
+            self.ledger = ledger;
         }
         Ok(())
     }
@@ -339,6 +356,46 @@ mod tests {
         fs::write(&config, serde_json::to_vec(&b).unwrap()).unwrap();
         let second = ConfigState::load(&config, &b).unwrap();
         assert!(second.saved_revision() > first.saved_revision());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn an_unsaved_draft_revision_is_never_reused_after_restart() {
+        let root = scratch("unsaved-restart");
+        let config = root.join("token-station.json");
+        let a = json!({"model": "a"});
+        let b = json!({"model": "b"});
+        let c = json!({"model": "c"});
+        fs::write(&config, serde_json::to_vec(&a).unwrap()).unwrap();
+
+        let mut first_session = ConfigState::load(&config, &a).unwrap();
+        first_session.observe_draft(&b).unwrap();
+        let abandoned_revision = first_session.draft_revision();
+        drop(first_session);
+
+        let mut second_session = ConfigState::load(&config, &a).unwrap();
+        assert_eq!(second_session.draft_revision(), second_session.saved_revision());
+        second_session.observe_draft(&c).unwrap();
+        assert!(second_session.draft_revision() > abandoned_revision);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_failed_revision_reservation_does_not_publish_the_draft_in_memory() {
+        let root = scratch("reservation-failure");
+        let config = root.join("token-station.json");
+        let ledger = root.join("token-station.state.json");
+        let a = json!({"model": "a"});
+        let b = json!({"model": "b"});
+        fs::write(&config, serde_json::to_vec(&a).unwrap()).unwrap();
+        let mut state = ConfigState::load(&config, &a).unwrap();
+        let revision = state.draft_revision();
+        fs::remove_file(&ledger).unwrap();
+        fs::create_dir(&ledger).unwrap();
+
+        assert!(state.observe_draft(&b).is_err());
+        assert_eq!(state.draft(), &a);
+        assert_eq!(state.draft_revision(), revision);
         fs::remove_dir_all(root).ok();
     }
 

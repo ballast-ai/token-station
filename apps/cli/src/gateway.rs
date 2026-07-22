@@ -20,10 +20,11 @@
 //! which is content-free by `router-core`'s construction.
 
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::fmt;
+use std::io::{self, Read};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use token_station_conformance::{AgentAdapter, ProviderAdapter};
@@ -39,6 +40,7 @@ use token_station_router_core::{
 };
 
 use crate::admission::Admission;
+use crate::cancel::CancelToken;
 use crate::request_context::RequestContext;
 
 use crate::config::ClientConfig;
@@ -48,6 +50,7 @@ use crate::secrets::SecretStore;
 const MAX_INBOUND_BODY: usize = 10 * 1024 * 1024;
 const MAX_UPSTREAM_BODY: u64 = 32 * 1024 * 1024;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(120);
+const CANCEL_READ_POLL: Duration = Duration::from_millis(100);
 
 /// Default overall budget for one request when the caller supplies no context.
 /// Long enough for slow generations, finite enough to bound an abandoned one.
@@ -85,16 +88,134 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 /// Every upstream and probe request goes through one of these, so where a
 /// request (and its credential) can go is a property of the code, not the
 /// ambient environment.
+fn egress_config(timeout: Duration) -> ureq::config::Config {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        // The pipeline maps upstream errors itself; a non-2xx is an answer,
+        // not a transport failure.
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .proxy(None)
+        .build()
+}
+
 fn egress_agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::new_with_config(
-        ureq::Agent::config_builder()
-            .timeout_global(Some(timeout))
-            // The pipeline maps upstream errors itself; a non-2xx is an answer,
-            // not a transport failure.
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .proxy(None)
-            .build(),
+    ureq::Agent::new_with_config(egress_config(timeout))
+}
+
+/// A request-scoped connector that turns a blocking socket read into short,
+/// retryable waits. The HTTP exchange still observes its original timeout,
+/// while a client disconnect or server drain interrupts a hung upstream in at
+/// most [`CANCEL_READ_POLL`].
+struct CancelConnector {
+    inner: ureq::unversioned::transport::DefaultConnector,
+    token: CancelToken,
+}
+
+impl fmt::Debug for CancelConnector {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CancelConnector")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ureq::unversioned::transport::Connector<()> for CancelConnector {
+    type Out = CancelTransport;
+
+    fn connect(
+        &self,
+        details: &ureq::unversioned::transport::ConnectionDetails<'_>,
+        chained: Option<()>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
+        self.inner.connect(details, chained).map(|transport| {
+            transport.map(|inner| CancelTransport {
+                inner,
+                token: self.token.clone(),
+            })
+        })
+    }
+}
+
+struct CancelTransport {
+    inner: Box<dyn ureq::unversioned::transport::Transport>,
+    token: CancelToken,
+}
+
+impl fmt::Debug for CancelTransport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CancelTransport")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ureq::unversioned::transport::Transport for CancelTransport {
+    fn buffers(&mut self) -> &mut dyn ureq::unversioned::transport::Buffers {
+        self.inner.buffers()
+    }
+
+    fn transmit_output(
+        &mut self,
+        amount: usize,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<(), ureq::Error> {
+        self.inner.transmit_output(amount, timeout)
+    }
+
+    fn await_input(
+        &mut self,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<bool, ureq::Error> {
+        use ureq::unversioned::transport::NextTimeout;
+
+        let deadline = match timeout.after {
+            ureq::unversioned::transport::time::Duration::Exact(after) => {
+                Instant::now().checked_add(after)
+            }
+            ureq::unversioned::transport::time::Duration::NotHappening => None,
+        };
+        loop {
+            if self.token.is_cancelled() {
+                return Err(ureq::Error::Io(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "request cancelled",
+                )));
+            }
+            let remaining = deadline.map_or(CANCEL_READ_POLL, |value| {
+                value.saturating_duration_since(Instant::now())
+            });
+            if deadline.is_some() && remaining.is_zero() {
+                return Err(ureq::Error::Timeout(timeout.reason));
+            }
+            let slice = remaining.min(CANCEL_READ_POLL);
+            match self.inner.await_input(NextTimeout {
+                after: slice.into(),
+                reason: timeout.reason,
+            }) {
+                Err(ureq::Error::Timeout(_)) if !self.token.is_cancelled() => {}
+                result => return result,
+            }
+        }
+    }
+
+    fn is_open(&mut self) -> bool {
+        self.inner.is_open()
+    }
+
+    fn is_tls(&self) -> bool {
+        self.inner.is_tls()
+    }
+}
+
+fn cancel_aware_agent(timeout: Duration, token: CancelToken) -> ureq::Agent {
+    ureq::Agent::with_parts(
+        egress_config(timeout),
+        CancelConnector {
+            inner: ureq::unversioned::transport::DefaultConnector::default(),
+            token,
+        },
+        ureq::unversioned::resolver::DefaultResolver::default(),
     )
 }
 
@@ -168,7 +289,6 @@ pub struct Gateway {
     /// Versioned per-model prices; the version travels onto each priced record.
     pricing: crate::pricing::PriceTable,
     secrets: SecretStore,
-    http: ureq::Agent,
     recorder: Arc<dyn Recorder>,
     /// `/v1/models`, rendered once: it changes only with the config.
     models_document: String,
@@ -500,7 +620,6 @@ impl Gateway {
             pricing: config.pricing.clone(),
             secrets: SecretStore::from_config(config),
             recorder,
-            http: egress_agent(UPSTREAM_TIMEOUT),
             models_document: json!({ "object": "list", "data": models_document }).to_string(),
         })
     }
@@ -1192,11 +1311,17 @@ impl Gateway {
             .authorize(&descriptor)
             .map_err(|refusal| ErrorEnvelope::new(ErrorCode::Internal, 500, refusal.to_string()))?;
 
-        let response = self.send(&descriptor, target.upstream.as_str())?;
+        let response = match self.send(ctx, &descriptor, target.upstream.as_str()) {
+            Err(_) if ctx.is_cancelled() => return Ok(StreamOutcome::ClientCancelled),
+            result => result?,
+        };
 
         if response.status >= 400 {
             // The adapter classifies; the catalog decides retriability.
             let parts: HttpResponseParts = response.into();
+            if ctx.is_cancelled() {
+                return Ok(StreamOutcome::ClientCancelled);
+            }
             return Err(upstream.plugin.map_provider_error(&parts)?);
         }
 
@@ -1219,6 +1344,9 @@ impl Gateway {
             ))
         } else {
             let parts: HttpResponseParts = response.into();
+            if ctx.is_cancelled() {
+                return Ok(StreamOutcome::ClientCancelled);
+            }
             let chat_response = upstream.plugin.parse_response(&parts)?;
             record.usage = Some(chat_response.usage);
             let render_context = json!({
@@ -1244,10 +1372,13 @@ impl Gateway {
     /// scope with the request. It never touches a log, an error, or the guest.
     fn send(
         &self,
+        ctx: &RequestContext,
         descriptor: &HttpRequestDescriptor,
         upstream_name: &str,
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
-        self.send_with(&self.http, descriptor, upstream_name)
+        let timeout = ctx.remaining().min(ctx.per_attempt_timeout());
+        let http = cancel_aware_agent(timeout, ctx.token());
+        self.send_with(&http, descriptor, upstream_name)
     }
 
     /// [`Gateway::send`] over a caller-chosen agent — the probe path brings
@@ -1384,6 +1515,10 @@ impl Gateway {
                 Ok(0) => break,
                 Ok(read) => read,
                 Err(error) => {
+                    if ctx.is_cancelled() {
+                        Self::clear_stream_state(agent, render_context);
+                        return StreamOutcome::ClientCancelled;
+                    }
                     // Mid-stream failure: already committed to SSE, so it goes
                     // out as a rendered error event rather than a status code —
                     // and into the outcome, where status 200 alone would lie.
