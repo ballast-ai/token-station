@@ -227,7 +227,6 @@ export type AgentPlatform = "macos" | "linux" | "windows" | "wsl";
 export type AgentStatus =
   | "NOT_DETECTED"
   | "DETECTED_VERIFIED"
-  | "DETECTED_INFERRED"
   | "DETECTED_UNKNOWN"
   | "DETECTED_BLOCKED"
   | "INSTALLED_BROKEN"
@@ -237,8 +236,7 @@ export type AgentPlanIntent = "connect" | "disconnect" | "restore";
 export type AgentConfirmationKind =
   | "installation"
   | "target_config"
-  | "configuration_diff"
-  | "experimental_compatibility";
+  | "configuration_diff";
 
 export interface AgentUiMetadataView {
   agent_id: AgentId;
@@ -297,7 +295,7 @@ export interface AgentView {
   status: AgentStatus;
   catalog_sequence: number;
   catalog_expires_at_ms: number | null;
-  catalog_source: "builtin" | "remote";
+  catalog_source: "builtin";
   catalog_warning: string | null;
 }
 
@@ -497,11 +495,9 @@ export const planAgentConnection = (
 export const applyAgentPlan = (
   operationId: string,
   confirmationToken: string,
-  experimentalCompatibilityConfirmed = false,
 ) => invoke<AgentOperationView>("apply_agent_plan", {
   operationId,
   confirmationToken,
-  ...(experimentalCompatibilityConfirmed ? { experimentalCompatibilityConfirmed: true } : {}),
 });
 
 export const planAgentDisconnect = (agentId: AgentId, installationPath: string) =>

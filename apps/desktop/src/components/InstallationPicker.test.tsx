@@ -27,7 +27,7 @@ function installation(path: string, version: string | null): AgentInstallationVi
       agent_id: "claude-code",
       installation_path: path,
       status: "DETECTED_VERIFIED",
-      reason_code: "VerifiedRangeMatch",
+      reason_code: "DefaultAdmission",
       message: "ok",
       matched_catalog_version: "fixture",
       connector_id: "claude-code-v1",

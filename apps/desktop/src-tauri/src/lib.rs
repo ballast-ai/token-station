@@ -120,12 +120,10 @@ struct AppInner {
 
 pub struct AppStateManaged(Mutex<AppInner>);
 
-/// OS application cache root injected by Tauri. Agent compatibility data is
-/// kept outside the repository and is not created until a valid signed remote
-/// catalog is actually accepted.
+/// OS application data roots injected by Tauri for Agent snapshots and
+/// ownership records.
 #[derive(Clone)]
 pub struct AgentIntegrationPaths {
-    pub compatibility_cache_dir: PathBuf,
     pub snapshot_root: PathBuf,
     pub ownership_root: PathBuf,
 }
@@ -2228,10 +2226,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let compatibility_cache_dir = app.path().app_cache_dir()?.join("agent-compatibility");
             let agent_data_root = app.path().app_data_dir()?.join("agent-integration");
             let paths = AgentIntegrationPaths {
-                compatibility_cache_dir,
                 snapshot_root: agent_data_root.join("snapshots"),
                 ownership_root: agent_data_root.join("ownership"),
             };
