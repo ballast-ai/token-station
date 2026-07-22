@@ -31,15 +31,35 @@ fn keyring_entry(upstream: &str, slot: &str) -> Result<keyring::Entry, String> {
         .map_err(|error| format!("keychain entry for `{upstream}/{slot}`: {error}"))
 }
 
-/// Writes a credential into the OS keychain (`key set`).
+/// Writes a credential into the OS keychain (`key set`), overwriting any prior
+/// value for the same slot.
+///
+/// This is an upsert. On macOS an in-place update can be rejected as a duplicate
+/// when the existing item was written under a different code signature (an
+/// unsigned dev rebuild) or carries an incompatible ACL — the very "The
+/// specified item already exists" failure. When the first write fails, the old
+/// item is deleted (best-effort) and the write retried once, so re-adding a
+/// provider whose key already lives in the keychain succeeds instead of dead-ending.
 ///
 /// # Errors
 ///
 /// The platform keychain's message, value-free.
 pub fn keyring_set(upstream: &str, slot: &str, value: &str) -> Result<(), String> {
-    keyring_entry(upstream, slot)?
-        .set_password(value)
-        .map_err(|error| format!("keychain write for `{upstream}/{slot}`: {error}"))
+    let entry = keyring_entry(upstream, slot)?;
+    let Err(first) = entry.set_password(value) else {
+        return Ok(());
+    };
+    // Replace: drop whatever is there (best-effort — a missing item is fine),
+    // then write once more. If this still fails, the item is genuinely
+    // unwritable and the operator sees why.
+    let _ = entry.delete_credential();
+    entry.set_password(value).map_err(|retry| {
+        format!(
+            "keychain write for `{upstream}/{slot}`: {retry} (首次写入失败: {first})。\
+             若为开发版反复重编导致的钥匙串归属冲突,可在「钥匙串访问」中删除服务 \
+             `{KEYRING_SERVICE}`、账户 `{upstream}/{slot}` 的条目后重试"
+        )
+    })
 }
 
 /// Deletes a credential from the OS keychain (`key remove`).
@@ -205,6 +225,12 @@ mod tests {
 
         let entry = super::keyring_entry("ts_test_upstream", "provider_api_key").expect("entry");
         assert_eq!(entry.get_password().expect("round-trips"), "sk-test-abc");
+
+        // Upsert: writing again over an existing slot overwrites, never fails
+        // with "already exists" (the re-add-a-provider bug).
+        super::keyring_set("ts_test_upstream", "provider_api_key", "sk-test-def")
+            .expect("overwrites an existing slot");
+        assert_eq!(entry.get_password().expect("round-trips"), "sk-test-def");
 
         super::keyring_remove("ts_test_upstream", "provider_api_key").expect("removes");
         assert!(entry.get_password().is_err());
