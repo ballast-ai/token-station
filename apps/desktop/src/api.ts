@@ -405,6 +405,25 @@ export const getStats = (since: string, by: string | null) =>
     () => invoke<StatsView>("get_stats", { since, by }),
   );
 
+/** One request's routing receipt — content-free. */
+export interface Receipt {
+  request_id: string;
+  started_at_ms: number;
+  latency_ms: number;
+  status: number;
+  error_code: string | null;
+  requested_model: string;
+  upstream: string | null;
+  model: string | null;
+  pool: string | null;
+  tier: string | null;
+  attempts: number;
+  cost_micros: number | null;
+}
+
+export const getReceipts = (limit: number) =>
+  invoke<Receipt[]>("get_receipts", { limit });
+
 // Note the semantic difference: HTTP returns the active routing table. IPC fallback returns the editable draft.
 // Use runtime state while the proxy runs. This is the correct data-plane fact.
 export const getRouterTable = () =>

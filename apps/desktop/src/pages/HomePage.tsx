@@ -9,6 +9,7 @@ import type {
 } from "../api";
 import TierRouteEditor from "../components/TierRouteEditor";
 import ProviderList from "../components/ProviderList";
+import RecentRequests from "../components/RecentRequests";
 
 interface HomePageProps {
   providers: ProviderView[];
@@ -102,6 +103,8 @@ export default function HomePage({
         onRemove={onRemoveProvider}
         onStateChange={onStateChange}
       />
+
+      <RecentRequests />
     </div>
   );
 }
