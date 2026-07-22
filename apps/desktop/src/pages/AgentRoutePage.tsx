@@ -170,6 +170,12 @@ export default function AgentRoutePage({
   };
 
   const mountProfile = async (name: string) => {
+    if (profiles.length === 0) {
+      setError("");
+      setNotice("");
+      setError("还没有策略组。先到主页把三档配好 →「另存为策略组」,再回这里挂载。");
+      return;
+    }
     if (!name) return;
     await runState(
       () => mountAgentProfile(metadata.agent_id, name),
@@ -285,7 +291,7 @@ export default function AgentRoutePage({
           <div className="mode-switch" role="radiogroup" aria-label="Agent 路由模式">
             <button type="button" role="radio" aria-checked={route.mode === "inherit"} className={route.mode === "inherit" ? "active" : ""} disabled={busy} onClick={() => void switchMode("inherit")}>跟随主页</button>
             <button type="button" role="radio" aria-checked={route.mode === "custom"} className={route.mode === "custom" ? "active" : ""} disabled={busy} onClick={() => void switchMode("custom")}>独立路由</button>
-            <button type="button" role="radio" aria-checked={route.mode === "profile"} className={route.mode === "profile" ? "active" : ""} disabled={busy || profiles.length === 0} title={profiles.length === 0 ? "先在主页把三档另存为策略组" : ""} onClick={() => void mountProfile(route.profile ?? profiles[0] ?? "")}>挂载策略组</button>
+            <button type="button" role="radio" aria-checked={route.mode === "profile"} className={route.mode === "profile" ? "active" : ""} disabled={busy} title={profiles.length === 0 ? "先在主页把三档另存为策略组" : ""} onClick={() => void mountProfile(route.profile ?? profiles[0] ?? "")}>挂载策略组</button>
           </div>
         </div>
 

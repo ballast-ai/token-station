@@ -916,6 +916,17 @@ impl AppInner {
         }
         Ok(())
     }
+
+    /// Write the current draft to disk and set it as the saved baseline. Named profiles are persistent library entries, like providers,
+    /// Cannot exist only in the in-memory draft, or a backend restart would remove it. The caller rolls back the draft on failure.
+    fn persist_draft(&mut self) -> Result<(), String> {
+        let config = self.materialize()?;
+        config
+            .save(&self.config_path)
+            .map_err(|e| format!("写配置失败: {e}"))?;
+        self.saved_config_hash = Some(config_hash(&config));
+        Ok(())
+    }
 }
 
 fn pool_key(slot: &str) -> Result<&'static str, String> {
@@ -1274,7 +1285,12 @@ fn save_home_route_as_profile(
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    let previous = inner.draft.clone();
     inner.save_home_route_as_profile(&name)?;
+    if let Err(error) = inner.persist_draft() {
+        inner.draft = previous;
+        return Err(error);
+    }
     Ok(inner.snapshot())
 }
 
@@ -1287,7 +1303,12 @@ fn mount_agent_profile(
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    let previous = inner.draft.clone();
     inner.set_agent_profile_value(&agent_id, &profile)?;
+    if let Err(error) = inner.persist_draft() {
+        inner.draft = previous;
+        return Err(error);
+    }
     Ok(inner.snapshot())
 }
 
@@ -1296,7 +1317,12 @@ fn mount_agent_profile(
 fn delete_profile(state: State<'_, AppStateManaged>, name: String) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    let previous = inner.draft.clone();
     inner.delete_profile_value(&name)?;
+    if let Err(error) = inner.persist_draft() {
+        inner.draft = previous;
+        return Err(error);
+    }
     Ok(inner.snapshot())
 }
 
