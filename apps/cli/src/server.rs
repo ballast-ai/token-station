@@ -136,6 +136,9 @@ pub struct AppState {
     pub virtual_key: Option<Arc<str>>,
     /// The read-only `/admin/*` data plane: a snapshot of the running config.
     pub admin: Arc<AdminContext>,
+    /// The immutable Desktop Runtime revision this server instance published.
+    /// Standalone CLI serve has no Desktop revision ledger and keeps `None`.
+    pub running_revision: Option<u64>,
     /// Server-owned accept/drain/request lifecycle.
     pub control: ServerControl,
 }
@@ -151,8 +154,15 @@ impl AppState {
             gateway,
             virtual_key,
             admin,
+            running_revision: None,
             control: ServerControl::new(),
         }
+    }
+
+    #[must_use]
+    pub const fn with_running_revision(mut self, revision: u64) -> Self {
+        self.running_revision = Some(revision);
+        self
     }
 }
 
@@ -173,11 +183,15 @@ pub async fn serve(state: AppState, listener: TcpListener) -> std::io::Result<()
     // paths — adding an inbound protocol is zero change here.
     let app = Router::new()
         .route("/v1/models", get(models))
-        // The read-only data plane. Explicit routes, not a nest: three
-        // endpoints is a surface small enough to enumerate, and enumerating
+        // The read-only data plane. Explicit routes, not a nest: these
+        // endpoints are a surface small enough to enumerate, and enumerating
         // them keeps `/admin/anything-else` falling through to the gateway's
         // 404 rather than growing an implicit namespace.
         .route("/admin/stats", get(admin_stats).options(admin_preflight))
+        .route(
+            "/admin/receipts",
+            get(admin_receipts).options(admin_preflight),
+        )
         .route(
             "/admin/router-table",
             get(admin_router_table).options(admin_preflight),
@@ -372,6 +386,13 @@ async fn admin_stats(State(state): State<AppState>, uri: Uri, headers: HeaderMap
     )
 }
 
+async fn admin_receipts(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admitted(&state, &headers) {
+        return with_cors(unauthorized("/admin/receipts"), loopback_origin(&headers));
+    }
+    admin_reply(state.admin.recent_receipts(), loopback_origin(&headers))
+}
+
 async fn admin_router_table(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !admitted(&state, &headers) {
         return with_cors(
@@ -412,6 +433,7 @@ async fn chat(
     let method = method.as_str().to_owned();
     let path = scoped.canonical_path.to_owned();
     let agent_id = scoped.agent_id.map(str::to_owned);
+    let running_revision = state.running_revision;
     // Owned copies for the blocking thread. Values that are not UTF-8 keep
     // their name and lose their value — same rule HeaderDigest applies.
     let headers: Vec<(String, String)> = headers
@@ -437,6 +459,7 @@ async fn chat(
         gateway.chat_scoped(
             &ctx,
             agent_id.as_deref(),
+            running_revision,
             &method,
             &path,
             &headers,

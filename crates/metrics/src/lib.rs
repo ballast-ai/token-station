@@ -31,7 +31,7 @@
 //! the named candidates).
 
 use serde::{Deserialize, Serialize};
-use token_station_protocol::{ErrorCode, Usage};
+use token_station_protocol::{ErrorCode, StreamOutcome, Usage};
 use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 
 /// The persisted shape's version. Stores stamp it (`SQLite` `user_version`, a
@@ -42,7 +42,114 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 /// - v1: the original record shape.
 /// - v2: adds `request_id` (the stable accounting id).
 /// - v3: adds `price_version` (the price table a cost was computed under).
-pub const SCHEMA_VERSION: u32 = 3;
+/// - v4: adds the normalized, content-free request receipt tables.
+pub const SCHEMA_VERSION: u32 = 4;
+
+/// Where the recorded cost came from. The local price table may only produce
+/// [`Self::Estimated`]; [`Self::Actual`] is reserved for future bill
+/// reconciliation. An unknown cost always persists without a numeric value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostKind {
+    Actual,
+    Estimated,
+    #[default]
+    Unknown,
+}
+
+impl CostKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Actual => "actual",
+            Self::Estimated => "estimated",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// A route decision frozen before the fallback sweep starts. Unlike
+/// [`RequestRecord::routing`], this record is never rewritten to name the
+/// upstream that ultimately served the request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecisionRecord {
+    pub upstream: String,
+    pub model: String,
+    pub pool: String,
+    pub decided_by: DecidedBy,
+    pub fallbacks: u32,
+    pub features: RequestFeatures,
+}
+
+impl From<&Decision> for DecisionRecord {
+    fn from(decision: &Decision) -> Self {
+        Self {
+            upstream: decision.chosen.upstream.as_str().to_owned(),
+            model: decision.chosen.model.clone(),
+            pool: decision.pool.clone(),
+            decided_by: decision.decided_by.clone(),
+            fallbacks: u32::try_from(decision.fallbacks.len()).unwrap_or(u32::MAX),
+            features: decision.features,
+        }
+    }
+}
+
+/// One real southbound attempt. A row is created only after the Provider
+/// admission permit has been obtained; local admission/budget refusals are not
+/// upstream attempts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptRecord {
+    pub ordinal: u32,
+    pub upstream: String,
+    pub model: String,
+    pub latency_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<ErrorCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_outcome: Option<StreamOutcome>,
+    pub fallback_allowed: bool,
+}
+
+/// The only conversion phases a receipt may name. Keeping this closed prevents
+/// a generic stage/detail field from becoming a content logging side channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversionStage {
+    InboundNormalize,
+    ProviderRequest,
+    ProviderResponse,
+    OutboundRender,
+    StreamTranslate,
+}
+
+impl ConversionStage {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InboundNormalize => "inbound_normalize",
+            Self::ProviderRequest => "provider_request",
+            Self::ProviderResponse => "provider_response",
+            Self::OutboundRender => "outbound_render",
+            Self::StreamTranslate => "stream_translate",
+        }
+    }
+}
+
+/// One content-free adapter conversion result. Protocol names are adapter
+/// manifest identifiers; no converted payload or arbitrary diagnostic text is
+/// retained.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversionRecord {
+    pub ordinal: u32,
+    pub stage: ConversionStage,
+    pub source_protocol: String,
+    pub target_protocol: String,
+    pub succeeded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<ErrorCode>,
+}
 
 /// Everything one request leaves behind. One per request, exactly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,6 +160,14 @@ pub struct RequestRecord {
     /// record written twice (a rebuild of a derived table) collapses to one row
     /// rather than double-counting.
     pub request_id: String,
+    /// The known Agent namespace (`codex`, `claude-code`, ...). The
+    /// backward-compatible unnamespaced route leaves this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// The Desktop runtime revision that actually served this request. A
+    /// standalone CLI serve has no revision ledger and leaves this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_revision: Option<u64>,
     /// Unix milliseconds, from the host clock, at request arrival.
     pub started_at_ms: u64,
     pub latency_ms: u64,
@@ -75,6 +190,16 @@ pub struct RequestRecord {
     /// `None` when the request failed before a routing decision existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<RoutingRecord>,
+    /// The immutable route decision before any fallback changed `routing` to
+    /// the final actual server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<DecisionRecord>,
+    /// Ordered real upstream attempts, never inferred from the legacy counter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempt_records: Vec<AttemptRecord>,
+    /// Ordered, content-free conversion stage outcomes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversion_reports: Vec<ConversionRecord>,
     /// `None` when the upstream reported none (or the stream carried no usage
     /// event). Absence is information; it is not zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,6 +208,10 @@ pub struct RequestRecord {
     /// (an unknown cost, never a claimed-free zero).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_micros: Option<i64>,
+    /// Whether `cost_micros` is billed, locally estimated, or unavailable.
+    /// `Unknown` requires both numeric cost fields to remain absent.
+    #[serde(default)]
+    pub cost_kind: CostKind,
     /// The price table version `cost_micros` was computed under, pinned so a
     /// later price change never re-values this request. `None` when unpriced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,6 +225,8 @@ impl RequestRecord {
     pub fn begin(started_at_ms: u64, protocol: impl Into<String>) -> Self {
         Self {
             request_id: String::new(),
+            agent_id: None,
+            running_revision: None,
             started_at_ms,
             latency_ms: 0,
             protocol: protocol.into(),
@@ -105,11 +236,54 @@ impl RequestRecord {
             error_code: None,
             attempts: 0,
             routing: None,
+            decision: None,
+            attempt_records: Vec::new(),
+            conversion_reports: Vec::new(),
             usage: None,
             cost_micros: None,
+            cost_kind: CostKind::Unknown,
             price_version: None,
         }
     }
+}
+
+/// The fixed read model returned by both local admin transports. It mirrors a
+/// request summary and its optional normalized children without exposing raw
+/// database rows or a generic JSON extension point.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReceiptView {
+    pub request_id: String,
+    pub started_at_ms: u64,
+    pub latency_ms: u64,
+    pub protocol: String,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub running_revision: Option<u64>,
+    pub requested_model: String,
+    pub stream: bool,
+    pub status: u16,
+    #[serde(default)]
+    pub error_code: Option<ErrorCode>,
+    /// Legacy flat attempt count, retained so migrated v1-v3 rows still have a
+    /// truthful summary even though no per-attempt history can be reconstructed.
+    pub attempts: u32,
+    #[serde(default)]
+    pub routing: Option<RoutingRecord>,
+    #[serde(default)]
+    pub usage: Option<Usage>,
+    #[serde(default)]
+    pub cost_kind: CostKind,
+    #[serde(default)]
+    pub cost_micros: Option<i64>,
+    #[serde(default)]
+    pub price_version: Option<u32>,
+    #[serde(default)]
+    pub decision: Option<DecisionRecord>,
+    #[serde(default)]
+    pub attempt_records: Vec<AttemptRecord>,
+    #[serde(default)]
+    pub conversion_reports: Vec<ConversionRecord>,
 }
 
 /// The routing decision, flattened for storage.

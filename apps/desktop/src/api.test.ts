@@ -10,6 +10,7 @@ import {
   discoverProviderModels,
   editProvider,
   getPlugins,
+  getRecentReceipts,
   getRuntimeState,
   getRouterTable,
   getState,
@@ -202,6 +203,8 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
       const url = String(input);
       const body = url.includes("stats")
         ? { total: {}, groups: [], by: null, empty: true }
+        : url.includes("receipts")
+          ? [{ request_id: "receipt-1", attempt_records: [], conversion_reports: [] }]
         : url.includes("router-table")
           ? { rules: [], hint_routes: [], bands: [], pools: [] }
           : { dir: "/plugins", agent: "a", dialects: [], listing: "" };
@@ -210,12 +213,15 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
     setAdminEndpoint(serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, virtual_key: "virtual" }));
 
     await getStats("24h", "model");
+    const receipts = await getRecentReceipts(5);
     await getRouterTable();
     await getPlugins();
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(receipts[0]?.request_id).toBe("receipt-1");
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(fetchMock.mock.calls[0]?.[0]).toBe("http://127.0.0.1:9999/admin/stats?since=24h&by=model");
     expect(fetchMock.mock.calls[0]?.[1]).toEqual({ headers: { authorization: "Bearer virtual" } });
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://127.0.0.1:9999/admin/receipts");
     expect(invokeMock).not.toHaveBeenCalled();
   });
 

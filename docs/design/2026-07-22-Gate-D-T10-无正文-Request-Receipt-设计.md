@@ -38,7 +38,7 @@ requests (1 / request_id)
 ## 3. 写入时序
 
 1. 请求入口产生随机 `request_id`，绑定 Agent 和 `running_revision`。Desktop 在 publish 新 Runtime 时把已成功发布的 revision 注入该 server 的 `AppState`；CLI 独立 serve 注入 `None`。
-2. normalize 成功或失败均追加 conversion 元数据；路由成功后同时初始化兼容 `routing` 和不可变 `decision`。fallback 只更新兼容 `routing`，不覆盖 `decision`。
+2. normalize 成功或失败均追加 conversion 元数据；路由成功后只固化不可变 `decision`。兼容 `routing` 只在真实 attempt 开始时写入当前目标，fallback 可更新它但不覆盖 `decision`；若一次 southbound 也未发生，`routing` 保持缺失。
 3. 每次获得 Provider permit、开始 southbound 后启动 attempt 计时；尝试结束时一次性追加 Provider/model、延迟、HTTP 终态、错误码、流式终态和 fallback 分类。admission、本地预算拒绝和排队等待不计 attempt。
 4. 转换阶段在阶段结束时写一条元数据；流式转换只在整个流终结时写一条，不按 chunk 落库。最终 `settle` 仍是成功唯一出口。
 5. Recorder 在请求结束后用一个 SQLite transaction 写四表：先 `INSERT OR IGNORE requests`，仅在确实插入父记录时继续写 children；如果 `request_id` 已存在，整个重放为 no-op。

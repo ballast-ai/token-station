@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fmt::Write as _;
 use std::io::{self, Read};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,7 +29,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use token_station_conformance::{AgentAdapter, ProviderAdapter};
-use token_station_metrics::{Recorder, RequestRecord, RoutingRecord};
+use token_station_metrics::{
+    AttemptRecord, ConversionRecord, ConversionStage, CostKind, DecisionRecord, Recorder,
+    RequestRecord, RoutingRecord,
+};
 use token_station_plugin_runtime::{AgentPlugin, NoSecrets, PluginRuntime, ProviderPlugin};
 use token_station_protocol::{
     AgentRequestEnvelope, Auth, ChatRequest, ChatResponse, Content, ErrorCode, ErrorEnvelope,
@@ -71,7 +75,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// parser on.
 const STREAM_READ: usize = 8 * 1024;
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_REQUEST_FALLBACK: AtomicU64 = AtomicU64::new(1);
+const CANONICAL_CHAT_PROTOCOL: &str = "token-station-chat";
 
 /// One logical request's fallback limits. Count, wall-clock and per-attempt
 /// timeout are always active. Cost is optional until the router has a trusted
@@ -394,19 +399,117 @@ fn cancel_aware_agent(timeout: Duration, token: CancelToken) -> ureq::Agent {
 /// One logical request gets one id; the dispatch fallback sweep reuses it, so
 /// internal retries are one accounting unit, and a record written twice
 /// collapses to one row instead of double-counting.
-fn begin_record(started_at_ms: u64, protocol: impl Into<String>) -> RequestRecord {
+fn begin_record(
+    started_at_ms: u64,
+    protocol: impl Into<String>,
+    agent_id: Option<&str>,
+    running_revision: Option<u64>,
+) -> RequestRecord {
     let mut record = RequestRecord::begin(started_at_ms, protocol);
-    record.request_id = format!(
-        "req_{started_at_ms}_{}",
-        NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
-    );
+    let mut random = [0_u8; 16];
+    if getrandom::fill(&mut random).is_err() {
+        // Metrics must never take the request path down. The operating system
+        // random source is the normal path; this process/time/counter mix is a
+        // last-resort uniqueness guard for an unavailable entropy device.
+        random[..8].copy_from_slice(&started_at_ms.to_be_bytes());
+        let fallback = NEXT_REQUEST_FALLBACK.fetch_add(1, Ordering::Relaxed)
+            ^ (u64::from(std::process::id()) << 32);
+        random[8..].copy_from_slice(&fallback.to_be_bytes());
+    }
+    let mut request_id = String::with_capacity(36);
+    request_id.push_str("req_");
+    for byte in random {
+        let _ = write!(request_id, "{byte:02x}");
+    }
+    record.request_id = request_id;
+    record.agent_id = agent_id.map(str::to_owned);
+    record.running_revision = running_revision;
     record
+}
+
+fn record_conversion(
+    record: &mut RequestRecord,
+    stage: ConversionStage,
+    source_protocol: impl Into<String>,
+    target_protocol: impl Into<String>,
+    succeeded: bool,
+    error_code: Option<ErrorCode>,
+) {
+    record.conversion_reports.push(ConversionRecord {
+        ordinal: u32::try_from(record.conversion_reports.len() + 1).unwrap_or(u32::MAX),
+        stage,
+        source_protocol: source_protocol.into(),
+        target_protocol: target_protocol.into(),
+        succeeded,
+        error_code,
+    });
+}
+
+fn attempt_receipt(
+    target: &UpstreamModel,
+    ordinal: u32,
+    latency_ms: u64,
+    upstream_http_status: Option<u16>,
+    result: Result<StreamOutcome, &ErrorEnvelope>,
+    record: &RequestRecord,
+) -> AttemptRecord {
+    match result {
+        Ok(outcome) => {
+            let error_code = match outcome {
+                StreamOutcome::Complete | StreamOutcome::ClientCancelled => None,
+                StreamOutcome::FailedAfterPartial | StreamOutcome::FailedBeforeOutput => {
+                    record.error_code
+                }
+            };
+            AttemptRecord {
+                ordinal,
+                upstream: target.upstream.as_str().to_owned(),
+                model: target.model.clone(),
+                latency_ms,
+                http_status: upstream_http_status,
+                error_code,
+                stream_outcome: Some(outcome),
+                fallback_allowed: matches!(outcome, StreamOutcome::FailedBeforeOutput)
+                    && error_code.is_some_and(ErrorCode::is_retriable_elsewhere),
+            }
+        }
+        Err(error) => AttemptRecord {
+            ordinal,
+            upstream: target.upstream.as_str().to_owned(),
+            model: target.model.clone(),
+            latency_ms,
+            http_status: upstream_http_status,
+            error_code: Some(error.code),
+            stream_outcome: Some(StreamOutcome::FailedBeforeOutput),
+            fallback_allowed: error.code.is_retriable_elsewhere(),
+        },
+    }
+}
+
+fn record_route_decision(record: &mut RequestRecord, decision: &Decision) {
+    record.decision = Some(DecisionRecord::from(decision));
+}
+
+fn record_actual_attempt_target(
+    record: &mut RequestRecord,
+    decision: &Decision,
+    target: &UpstreamModel,
+) {
+    let mut routing = RoutingRecord::from(decision);
+    target.upstream.as_str().clone_into(&mut routing.upstream);
+    routing.model.clone_from(&target.model);
+    record.routing = Some(routing);
 }
 
 /// One configured upstream, resolved and ready to serve.
 struct Upstream {
     config: ProviderConfig,
     plugin: Arc<ProviderPlugin>,
+}
+
+enum AttemptTerminal {
+    Outcome(StreamOutcome),
+    Error(ErrorEnvelope),
 }
 
 /// One loaded inbound adapter and the protocol its manifest declares. The
@@ -1383,7 +1486,7 @@ impl Gateway {
         // request by deadline; the server layer replaces it with a drain-child
         // that also carries the client-disconnect signal.
         let ctx = RequestContext::detached(REQUEST_DEADLINE, UPSTREAM_TIMEOUT);
-        self.chat_scoped(&ctx, None, method, path, headers, body, emit);
+        self.chat_scoped(&ctx, None, None, method, path, headers, body, emit);
     }
 
     /// The normal request pipeline with a host-validated Agent routing scope.
@@ -1394,6 +1497,7 @@ impl Gateway {
         &self,
         ctx: &RequestContext,
         agent_id: Option<&str>,
+        running_revision: Option<u64>,
         method: &str,
         path: &str,
         headers: &[(String, String)],
@@ -1414,7 +1518,7 @@ impl Gateway {
                 .get(agent_id)
                 .unwrap_or(&self.home_router),
             Some(agent_id) => {
-                let mut record = begin_record(started_at_ms, String::new());
+                let mut record = begin_record(started_at_ms, String::new(), None, running_revision);
                 let refusal = ErrorEnvelope::new(
                     ErrorCode::InvalidRequest,
                     404,
@@ -1445,7 +1549,7 @@ impl Gateway {
         // it through the chat pipeline.
         if is_embeddings_path(path) {
             let refusal = language_only_refusal();
-            let mut record = begin_record(started_at_ms, String::new());
+            let mut record = begin_record(started_at_ms, String::new(), agent_id, running_revision);
             record.status = refusal.http_status;
             record.error_code = Some(refusal.code);
             emit(Reply::BeginJson(JsonReply {
@@ -1468,11 +1572,11 @@ impl Gateway {
         // the whole exchange. Over a ceiling we refuse with 429 rather than pile
         // another request onto the upstreams.
         let Some(global_permit) = self.admission.enter_global() else {
-            self.refuse_concurrency(started_at_ms, &clock, emit);
+            self.refuse_concurrency(started_at_ms, agent_id, running_revision, &clock, emit);
             return;
         };
         let Some(agent_permit) = self.admission.enter_agent(agent_id.unwrap_or("")) else {
-            self.refuse_concurrency(started_at_ms, &clock, emit);
+            self.refuse_concurrency(started_at_ms, agent_id, running_revision, &clock, emit);
             return;
         };
         let _permits = (global_permit, agent_permit);
@@ -1482,7 +1586,7 @@ impl Gateway {
         // here serves, and no adapter exists to phrase the refusal in.
         let selected = self.select_agent(method, path, headers);
         let protocol = selected.map_or_else(String::new, |agent| agent.protocol.clone());
-        let mut record = begin_record(started_at_ms, protocol);
+        let mut record = begin_record(started_at_ms, protocol, agent_id, running_revision);
 
         if let Some(agent) = selected {
             match self.chat_inner(ctx, agent, router, headers, body, emit, &mut record) {
@@ -1527,6 +1631,8 @@ impl Gateway {
     fn refuse_concurrency(
         &self,
         started_at_ms: u64,
+        agent_id: Option<&str>,
+        running_revision: Option<u64>,
         clock: &std::time::Instant,
         emit: &mut dyn FnMut(Reply) -> bool,
     ) {
@@ -1535,7 +1641,7 @@ impl Gateway {
             429,
             "concurrency limit reached; retry shortly",
         );
-        let mut record = begin_record(started_at_ms, String::new());
+        let mut record = begin_record(started_at_ms, String::new(), agent_id, running_revision);
         record.status = refusal.http_status;
         record.error_code = Some(refusal.code);
         emit(Reply::BeginJson(JsonReply {
@@ -1582,35 +1688,59 @@ impl Gateway {
         None
     }
 
-    /// The pipeline. Returns `Err` only before anything was emitted, so the
-    /// caller can still shape a whole error response.
-    #[allow(clippy::too_many_arguments)] // the request pipeline's real surface
-    fn chat_inner(
-        &self,
-        ctx: &RequestContext,
+    fn normalize_request(
         agent: &LoadedAgent,
-        router: &Router,
         headers: &[(String, String)],
         body: &[u8],
-        emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
-    ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
+    ) -> Result<(ChatRequest, Vec<token_station_protocol::AgentHint>), ErrorEnvelope> {
+        let inbound_protocol = record.protocol.clone();
         if body.len() > MAX_INBOUND_BODY {
-            return Err(ErrorEnvelope::new(
+            let error = ErrorEnvelope::new(
                 ErrorCode::InvalidRequest,
                 413,
                 "request body exceeds the local proxy's limit",
-            ));
+            );
+            record_conversion(
+                record,
+                ConversionStage::InboundNormalize,
+                &inbound_protocol,
+                CANONICAL_CHAT_PROTOCOL,
+                false,
+                Some(error.code),
+            );
+            return Err(error);
         }
-        let body: Value = serde_json::from_slice(body).map_err(|error| {
-            ErrorEnvelope::new(
-                ErrorCode::InvalidRequest,
-                400,
-                format!("body is not JSON: {error}"),
-            )
-        })?;
+        let body: Value = match serde_json::from_slice(body) {
+            Ok(body) => body,
+            Err(parse_error) => {
+                let error = ErrorEnvelope::new(
+                    ErrorCode::InvalidRequest,
+                    400,
+                    format!("body is not JSON: {parse_error}"),
+                );
+                record_conversion(
+                    record,
+                    ConversionStage::InboundNormalize,
+                    &inbound_protocol,
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    Some(error.code),
+                );
+                return Err(error);
+            }
+        };
         if contains_non_language_content(&body) {
-            return Err(language_only_refusal());
+            let error = language_only_refusal();
+            record_conversion(
+                record,
+                ConversionStage::InboundNormalize,
+                &inbound_protocol,
+                CANONICAL_CHAT_PROTOCOL,
+                false,
+                Some(error.code),
+            );
+            return Err(error);
         }
 
         // The envelope an agent adapter is allowed to see: headers already
@@ -1635,8 +1765,48 @@ impl Gateway {
             extensions: token_station_protocol::Extensions::new(),
         };
 
-        let request = agent.plugin.normalize_inbound(&envelope)?;
+        let request = match agent.plugin.normalize_inbound(&envelope) {
+            Ok(request) => {
+                record_conversion(
+                    record,
+                    ConversionStage::InboundNormalize,
+                    &inbound_protocol,
+                    CANONICAL_CHAT_PROTOCOL,
+                    true,
+                    None,
+                );
+                request
+            }
+            Err(error) => {
+                record_conversion(
+                    record,
+                    ConversionStage::InboundNormalize,
+                    &inbound_protocol,
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    Some(error.code),
+                );
+                return Err(error);
+            }
+        };
         let hints = agent.plugin.extract_agent_hint(&envelope)?;
+        Ok((request, hints))
+    }
+
+    /// The pipeline. Returns `Err` only before anything was emitted, so the
+    /// caller can still shape a whole error response.
+    #[allow(clippy::too_many_arguments)] // the request pipeline's real surface
+    fn chat_inner(
+        &self,
+        ctx: &RequestContext,
+        agent: &LoadedAgent,
+        router: &Router,
+        headers: &[(String, String)],
+        body: &[u8],
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
+        let (request, hints) = Self::normalize_request(agent, headers, body, record)?;
         // Privacy boundary: the persisted requested model is a configured name
         // or a hashed `unlisted:` token — never the caller's raw string.
         let configured = self
@@ -1659,7 +1829,7 @@ impl Gateway {
             decision.decided_by,
             decision.fallbacks.len()
         );
-        record.routing = Some(RoutingRecord::from(&decision));
+        record_route_decision(record, &decision);
 
         self.dispatch(ctx, agent, &request, &decision, emit, record)
     }
@@ -1707,13 +1877,10 @@ impl Gateway {
                 break;
             }
             record.attempts = budget.attempts;
-            if let Some(routing) = record.routing.as_mut() {
-                // The record names who actually served (or last refused), not
-                // only who was chosen first.
-                target.upstream.as_str().clone_into(&mut routing.upstream);
-                routing.model.clone_from(&target.model);
-            }
-            match self.try_upstream(
+            record_actual_attempt_target(record, decision, target);
+            let attempt_clock = Instant::now();
+            let mut upstream_http_status = None;
+            let result = self.try_upstream(
                 ctx,
                 budget.per_attempt_timeout,
                 agent,
@@ -1721,7 +1888,29 @@ impl Gateway {
                 target,
                 emit,
                 record,
-            ) {
+                &mut upstream_http_status,
+            );
+            let latency_ms = u64::try_from(attempt_clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let attempt = match &result {
+                Ok(outcome) => attempt_receipt(
+                    target,
+                    budget.attempts,
+                    latency_ms,
+                    upstream_http_status,
+                    Ok(*outcome),
+                    record,
+                ),
+                Err(error) => attempt_receipt(
+                    target,
+                    budget.attempts,
+                    latency_ms,
+                    upstream_http_status,
+                    Err(error),
+                    record,
+                ),
+            };
+            record.attempt_records.push(attempt);
+            match result {
                 // The terminal health verdict and status are decided exactly
                 // once, in `settle`; here we only report who served and how the
                 // exchange ended. Per-attempt failures below still trip health so
@@ -1771,8 +1960,11 @@ impl Gateway {
         // leaves cost unknown (None), never a claimed-free zero.
         if let Some(usage) = record.usage {
             if let Some((cost, version)) = self.pricing.price(model, &usage) {
-                record.cost_micros = Some(cost);
-                record.price_version = Some(version);
+                if cost > 0 {
+                    record.cost_kind = CostKind::Estimated;
+                    record.cost_micros = Some(cost);
+                    record.price_version = Some(version);
+                }
             }
         }
         match outcome {
@@ -1799,6 +1991,242 @@ impl Gateway {
         }
     }
 
+    fn build_provider_request(
+        upstream: &Upstream,
+        request: &ChatRequest,
+        record: &mut RequestRecord,
+    ) -> Result<HttpRequestDescriptor, ErrorEnvelope> {
+        let provider_protocol = upstream.config.provider.as_str();
+        let descriptor = upstream
+            .plugin
+            .build_http_request(request, &upstream.config)
+            .inspect_err(|error| {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderRequest,
+                    CANONICAL_CHAT_PROTOCOL,
+                    provider_protocol,
+                    false,
+                    Some(error.code),
+                );
+            })?;
+        if let Err(refusal) = upstream.config.authorize(&descriptor) {
+            let error = ErrorEnvelope::new(ErrorCode::Internal, 500, refusal.to_string());
+            record_conversion(
+                record,
+                ConversionStage::ProviderRequest,
+                CANONICAL_CHAT_PROTOCOL,
+                provider_protocol,
+                false,
+                Some(error.code),
+            );
+            return Err(error);
+        }
+        record_conversion(
+            record,
+            ConversionStage::ProviderRequest,
+            CANONICAL_CHAT_PROTOCOL,
+            provider_protocol,
+            true,
+            None,
+        );
+        Ok(descriptor)
+    }
+
+    fn response_parts(
+        ctx: &RequestContext,
+        upstream: &Upstream,
+        response: UpstreamResponse,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<HttpResponseParts, AttemptTerminal> {
+        let provider_protocol = upstream.config.provider.as_str();
+        let parts = match response.into_parts() {
+            Err(_) if ctx.is_cancelled() => {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    provider_protocol,
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    None,
+                );
+                Self::emit_cancelled(emit);
+                return Err(AttemptTerminal::Outcome(StreamOutcome::ClientCancelled));
+            }
+            Err(error) => {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    provider_protocol,
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    Some(error.code),
+                );
+                return Err(AttemptTerminal::Error(error));
+            }
+            Ok(parts) => parts,
+        };
+        if ctx.is_cancelled() {
+            record_conversion(
+                record,
+                ConversionStage::ProviderResponse,
+                provider_protocol,
+                CANONICAL_CHAT_PROTOCOL,
+                false,
+                None,
+            );
+            Self::emit_cancelled(emit);
+            return Err(AttemptTerminal::Outcome(StreamOutcome::ClientCancelled));
+        }
+        Ok(parts)
+    }
+
+    fn classify_provider_error(
+        ctx: &RequestContext,
+        upstream: &Upstream,
+        response: UpstreamResponse,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<ErrorEnvelope, StreamOutcome> {
+        let parts = match Self::response_parts(ctx, upstream, response, emit, record) {
+            Ok(parts) => parts,
+            Err(AttemptTerminal::Outcome(outcome)) => return Err(outcome),
+            Err(AttemptTerminal::Error(error)) => return Ok(error),
+        };
+        let error = match upstream.plugin.map_provider_error(&parts) {
+            Ok(error) | Err(error) => error,
+        };
+        record_conversion(
+            record,
+            ConversionStage::ProviderResponse,
+            upstream.config.provider.as_str(),
+            CANONICAL_CHAT_PROTOCOL,
+            false,
+            Some(error.code),
+        );
+        Ok(error)
+    }
+
+    fn translate_stream_response(
+        ctx: &RequestContext,
+        agent: &LoadedAgent,
+        upstream: &Upstream,
+        response: UpstreamResponse,
+        target: &UpstreamModel,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<StreamOutcome, ErrorEnvelope> {
+        let sequence = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
+        let render_context = json!({
+            "protocol": record.protocol,
+            "stream_id": format!("stream-{sequence}"),
+            "response_id": format!("msg_token_station_{sequence}"),
+            "model": target.model,
+        });
+        let result = Self::relay_stream(
+            ctx,
+            agent,
+            upstream,
+            response,
+            &render_context,
+            emit,
+            record,
+        );
+        let (succeeded, error_code) = match &result {
+            Ok(StreamOutcome::Complete) => (true, None),
+            Ok(_) => (false, record.error_code),
+            Err(error) => (false, Some(error.code)),
+        };
+        record_conversion(
+            record,
+            ConversionStage::ProviderResponse,
+            upstream.config.provider.as_str(),
+            CANONICAL_CHAT_PROTOCOL,
+            succeeded,
+            error_code,
+        );
+        record_conversion(
+            record,
+            ConversionStage::StreamTranslate,
+            CANONICAL_CHAT_PROTOCOL,
+            agent.protocol.as_str(),
+            succeeded,
+            error_code,
+        );
+        result
+    }
+
+    fn translate_nonstream_response(
+        ctx: &RequestContext,
+        agent: &LoadedAgent,
+        upstream: &Upstream,
+        response: UpstreamResponse,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<StreamOutcome, ErrorEnvelope> {
+        let parts = match Self::response_parts(ctx, upstream, response, emit, record) {
+            Ok(parts) => parts,
+            Err(AttemptTerminal::Outcome(outcome)) => return Ok(outcome),
+            Err(AttemptTerminal::Error(error)) => return Err(error),
+        };
+        let chat_response = upstream
+            .plugin
+            .parse_response(&parts)
+            .inspect_err(|error| {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    upstream.config.provider.as_str(),
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    Some(error.code),
+                );
+            })?;
+        record_conversion(
+            record,
+            ConversionStage::ProviderResponse,
+            upstream.config.provider.as_str(),
+            CANONICAL_CHAT_PROTOCOL,
+            true,
+            None,
+        );
+        record.usage = Some(chat_response.usage);
+        let render_context = json!({
+            "protocol": record.protocol,
+            "response_id": chat_response.id,
+            "model": chat_response.model,
+        });
+        let rendered = agent
+            .plugin
+            .render_response(&chat_response, &render_context)
+            .inspect_err(|error| {
+                record_conversion(
+                    record,
+                    ConversionStage::OutboundRender,
+                    CANONICAL_CHAT_PROTOCOL,
+                    agent.protocol.as_str(),
+                    false,
+                    Some(error.code),
+                );
+            })?;
+        record_conversion(
+            record,
+            ConversionStage::OutboundRender,
+            CANONICAL_CHAT_PROTOCOL,
+            agent.protocol.as_str(),
+            true,
+            None,
+        );
+        if !emit(Reply::BeginJson(JsonReply {
+            status: 200,
+            body: rendered.to_string(),
+        })) {
+            return Ok(StreamOutcome::ClientCancelled);
+        }
+        Ok(StreamOutcome::Complete)
+    }
+
     /// One upstream attempt: build, authorize, inject, send, translate back.
     #[allow(clippy::too_many_arguments)] // one attempt's explicit protocol boundary
     fn try_upstream(
@@ -1810,6 +2238,7 @@ impl Gateway {
         target: &UpstreamModel,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
+        upstream_http_status: &mut Option<u16>,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         let upstream = self
             .upstreams
@@ -1825,90 +2254,60 @@ impl Gateway {
         // Routing may have picked a different model than the caller named.
         let mut request = request.clone();
         request.model.clone_from(&target.model);
-
-        let descriptor = upstream
-            .plugin
-            .build_http_request(&request, &upstream.config)?;
-
-        // The exfiltration gate, in the real request path: the plugin chose the
-        // URL and named the credential; nothing is resolved until this passes.
-        upstream
-            .config
-            .authorize(&descriptor)
-            .map_err(|refusal| ErrorEnvelope::new(ErrorCode::Internal, 500, refusal.to_string()))?;
+        let descriptor = Self::build_provider_request(upstream, &request, record)?;
 
         let response = match self.send(ctx, attempt_timeout, &descriptor, target.upstream.as_str())
         {
             Err(_) if ctx.is_cancelled() => {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    upstream.config.provider.as_str(),
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    None,
+                );
                 Self::emit_cancelled(emit);
                 return Ok(StreamOutcome::ClientCancelled);
             }
-            result => result?,
+            Err(error) => {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    upstream.config.provider.as_str(),
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    Some(error.code),
+                );
+                return Err(error);
+            }
+            Ok(response) => response,
         };
+        *upstream_http_status = Some(response.status);
+
+        if let Err(error) = EgressPolicy::reject_redirect(response.status) {
+            record_conversion(
+                record,
+                ConversionStage::ProviderResponse,
+                upstream.config.provider.as_str(),
+                CANONICAL_CHAT_PROTOCOL,
+                false,
+                Some(error.code),
+            );
+            return Err(error);
+        }
 
         if response.status >= 400 {
-            // The adapter classifies; the catalog decides retriability.
-            let parts = match response.into_parts() {
-                Err(_) if ctx.is_cancelled() => {
-                    Self::emit_cancelled(emit);
-                    return Ok(StreamOutcome::ClientCancelled);
-                }
-                result => result?,
+            return match Self::classify_provider_error(ctx, upstream, response, emit, record) {
+                Ok(error) => Err(error),
+                Err(outcome) => Ok(outcome),
             };
-            if ctx.is_cancelled() {
-                Self::emit_cancelled(emit);
-                return Ok(StreamOutcome::ClientCancelled);
-            }
-            return Err(upstream.plugin.map_provider_error(&parts)?);
         }
 
         if request.stream {
-            let sequence = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
-            let render_context = json!({
-                "protocol": record.protocol,
-                "stream_id": format!("stream-{sequence}"),
-                "response_id": format!("msg_token_station_{sequence}"),
-                "model": target.model,
-            });
-            Self::relay_stream(
-                ctx,
-                agent,
-                upstream,
-                response,
-                &render_context,
-                emit,
-                record,
-            )
+            Self::translate_stream_response(ctx, agent, upstream, response, target, emit, record)
         } else {
-            let parts = match response.into_parts() {
-                Err(_) if ctx.is_cancelled() => {
-                    Self::emit_cancelled(emit);
-                    return Ok(StreamOutcome::ClientCancelled);
-                }
-                result => result?,
-            };
-            if ctx.is_cancelled() {
-                Self::emit_cancelled(emit);
-                return Ok(StreamOutcome::ClientCancelled);
-            }
-            let chat_response = upstream.plugin.parse_response(&parts)?;
-            record.usage = Some(chat_response.usage);
-            let render_context = json!({
-                "protocol": record.protocol,
-                "response_id": chat_response.id,
-                "model": chat_response.model,
-            });
-            let rendered = agent
-                .plugin
-                .render_response(&chat_response, &render_context)?;
-            if !emit(Reply::BeginJson(JsonReply {
-                status: 200,
-                body: rendered.to_string(),
-            })) {
-                return Ok(StreamOutcome::ClientCancelled);
-            }
-            // A fully collected non-stream body is a complete exchange.
-            Ok(StreamOutcome::Complete)
+            Self::translate_nonstream_response(ctx, agent, upstream, response, emit, record)
         }
     }
 
@@ -1925,12 +2324,28 @@ impl Gateway {
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
         let timeout = ctx.remaining().min(attempt_timeout);
         let http = cancel_aware_agent(timeout, ctx.token());
-        self.send_with(&http, descriptor, upstream_name)
+        self.send_raw_with(&http, descriptor, upstream_name)
     }
 
     /// [`Gateway::send`] over a caller-chosen agent — the probe path brings
     /// its own, with a timeout sized for diagnostics rather than generation.
     fn send_with(
+        &self,
+        http: &ureq::Agent,
+        descriptor: &HttpRequestDescriptor,
+        upstream_name: &str,
+    ) -> Result<UpstreamResponse, ErrorEnvelope> {
+        let response = self.send_raw_with(http, descriptor, upstream_name)?;
+        EgressPolicy::reject_redirect(response.status)?;
+        Ok(response)
+    }
+
+    /// Performs the authorized first hop without following redirects. The
+    /// request path consumes the raw status before enforcing the redirect
+    /// rejection so its receipt can preserve the upstream's real terminal
+    /// response; probes use [`Gateway::send_with`] and retain the same
+    /// fail-closed behavior.
+    fn send_raw_with(
         &self,
         http: &ureq::Agent,
         descriptor: &HttpRequestDescriptor,
@@ -1979,10 +2394,8 @@ impl Gateway {
                 }
             }
         };
-        let response = sent.map_err(map_transport_error)?;
-        EgressPolicy::reject_redirect(response.status().as_u16())?;
-
-        Ok(UpstreamResponse::from(response))
+        sent.map(UpstreamResponse::from)
+            .map_err(map_transport_error)
     }
 
     /// `protocol::Auth` dialect -> one concrete header.
@@ -2597,6 +3010,68 @@ mod requested_model_privacy_tests {
         assert_ne!(
             canonical_requested_model("mystery-model-a", false),
             canonical_requested_model("mystery-model-b", false),
+        );
+    }
+}
+
+#[cfg(test)]
+mod request_receipt_tests {
+    use super::{begin_record, record_actual_attempt_target, record_route_decision};
+    use token_station_router_core::{
+        DecidedBy, Decision, RequestFeatures, UpstreamModel, UpstreamRef,
+    };
+
+    #[test]
+    fn request_ids_are_random_fixed_width_and_scope_is_bound_at_arrival() {
+        let first = begin_record(
+            1_752_000_000_000,
+            "openai-chat-completions",
+            Some("codex"),
+            Some(42),
+        );
+        let second = begin_record(
+            1_752_000_000_000,
+            "openai-chat-completions",
+            Some("codex"),
+            Some(42),
+        );
+
+        assert_eq!(first.request_id.len(), 36);
+        assert!(first.request_id.starts_with("req_"));
+        assert!(
+            first.request_id[4..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+        assert_ne!(first.request_id, second.request_id);
+        assert_eq!(first.agent_id.as_deref(), Some("codex"));
+        assert_eq!(first.running_revision, Some(42));
+    }
+
+    #[test]
+    fn a_decision_does_not_claim_an_actual_provider_until_an_attempt_starts() {
+        let chosen = UpstreamModel::new(UpstreamRef::new("primary").unwrap(), "model-a");
+        let fallback = UpstreamModel::new(UpstreamRef::new("fallback").unwrap(), "model-b");
+        let decision = Decision {
+            chosen,
+            decided_by: DecidedBy::Default,
+            fallbacks: vec![fallback.clone()],
+            features: RequestFeatures::default(),
+            pool: "main".to_owned(),
+        };
+        let mut record = begin_record(1, "openai-chat-completions", None, None);
+
+        record_route_decision(&mut record, &decision);
+        assert!(record.decision.is_some());
+        assert!(
+            record.routing.is_none(),
+            "a zero-attempt receipt has no actual server"
+        );
+
+        record_actual_attempt_target(&mut record, &decision, &fallback);
+        assert_eq!(
+            record.routing.as_ref().map(|route| route.upstream.as_str()),
+            Some("fallback")
         );
     }
 }

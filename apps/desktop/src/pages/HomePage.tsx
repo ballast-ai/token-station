@@ -9,6 +9,7 @@ import type {
 } from "../api";
 import TierRouteEditor from "../components/TierRouteEditor";
 import ProviderList from "../components/ProviderList";
+import RecentReceipts from "../components/RecentReceipts";
 
 interface HomePageProps {
   providers: ProviderView[];
@@ -103,6 +104,8 @@ export default function HomePage({
           {providers.length > 0 && configError && <span className="foot-hint">还有档位未完成，保存时会进行完整校验。</span>}
         </footer>
       </section>
+
+      <RecentReceipts />
 
       <ProviderList
         providers={providers}
