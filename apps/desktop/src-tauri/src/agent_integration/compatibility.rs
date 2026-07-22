@@ -1013,9 +1013,26 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_builtin_exact_versions_are_verified_and_other_versions_are_experimental() {
+    fn compatibility_builtin_verified_ranges_cover_the_patch_line_and_others_are_experimental() {
         let registry = AgentRegistry::builtin().unwrap();
         let catalog = CompatibilityCatalog::builtin(&registry).unwrap();
+
+        // The reported case (P1): a Claude Code whose patch differs from the one
+        // the catalog was cut against must still be one-click verified, not
+        // downgraded to experimental. The verified range is the 2.1 patch line.
+        let claude = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "claude-code")
+            .unwrap();
+        let local = evaluate_discovery(&catalog, claude, &discovery("claude-code", "2.1.173", None));
+        assert_eq!(local.status, CompatibilityStatus::DetectedVerified);
+        assert_eq!(local.connector_id.as_deref(), Some("claude-code-v1"));
+        assert!(local.allowed_actions.contains(&AllowedAction::PreviewConnect));
+        let next_minor =
+            evaluate_discovery(&catalog, claude, &discovery("claude-code", "2.2.0", None));
+        assert_eq!(next_minor.status, CompatibilityStatus::DetectedUnknown);
+
         let descriptor = registry
             .descriptors()
             .iter()
@@ -1083,13 +1100,20 @@ mod tests {
             hermes,
             &discovery("nous-hermes-agent", "0.18.0", None),
         );
-        let future = evaluate_discovery(
+        // A patch within the verified line is verified too (this is the widening).
+        let patch = evaluate_discovery(
             &catalog,
             hermes,
             &discovery("nous-hermes-agent", "0.18.2", None),
         );
+        let future = evaluate_discovery(
+            &catalog,
+            hermes,
+            &discovery("nous-hermes-agent", "0.19.0", None),
+        );
         assert_eq!(verified.status, CompatibilityStatus::DetectedVerified);
         assert_eq!(verified.connector_id.as_deref(), Some("hermes-v1"));
+        assert_eq!(patch.status, CompatibilityStatus::DetectedVerified);
         assert_eq!(future.status, CompatibilityStatus::DetectedUnknown);
         assert_eq!(future.connector_id.as_deref(), Some("hermes-v1"));
         assert!(future
@@ -1498,8 +1522,10 @@ mod tests {
             .iter_mut()
             .find(|entry| entry.agent_id == "opencode")
             .unwrap();
+        // A version outside the builtin's own verified range, so revoking this
+        // remote allow offline is observable (the builtin does not re-verify it).
         opencode.verified.push(CompatibilityRule {
-            version_requirement: "=1.18.3".to_string(),
+            version_requirement: "=1.19.5".to_string(),
             baseline_version: None,
             connector_id: Some("opencode-v1".to_string()),
             config_fingerprint: None,
@@ -1545,7 +1571,7 @@ mod tests {
             evaluate_discovery(
                 &selected.catalog,
                 opencode_descriptor,
-                &discovery("opencode", "1.18.3", None),
+                &discovery("opencode", "1.19.5", None),
             )
             .status,
             CompatibilityStatus::DetectedUnknown
