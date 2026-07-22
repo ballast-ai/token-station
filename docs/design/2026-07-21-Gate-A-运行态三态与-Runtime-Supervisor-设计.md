@@ -89,7 +89,7 @@ Gate A 只使用上游提供的 Contract A/B 类型，不另立同名协议类�
 base_url / models / fetched_at_ms
 ```
 
-发现成功、缓存回退和缓存写入 warning 均不得访问或更新 `ConfigState`。只有用户明确选择模型并写入配置，才属于草稿修改。
+发现成功、缓存回退和缓存写入 warning 可以从 `ConfigState` 提取只读的 discovery 输入，但不得修改 `ConfigState` 或分配 revision。只有用户明确选择模型并写入配置，才属于草稿修改。
 
 ## 5. Revision 持久化
 
