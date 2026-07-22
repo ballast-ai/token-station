@@ -411,20 +411,11 @@ fn load_provider_plugins(
 }
 
 impl Gateway {
-    /// Loads plugins, probes capabilities, validates the routing table, and
-    /// renders the model catalog.
+    /// Loads one inbound adapter, resolving builtin vs on-disk source.
     ///
     /// # Errors
     ///
-    /// A human-readable reason this configuration cannot serve. Startup
-    /// errors are for the operator; they are as specific as possible.
-    ///
-    /// # Panics
-    ///
-    /// Never for a [`ClientConfig`] that came through [`ClientConfig::load`]:
-    /// the `expect`s below restate what its validation already proved.
-    /// Loads one inbound adapter, resolving builtin vs on-disk source. Returns a
-    /// human reason on any failure so the caller can skip it and say why.
+    /// A human reason on any failure so the caller can skip it and say why.
     fn load_agent(
         runtime: &PluginRuntime,
         registry: &crate::plugins::PluginRegistry,
@@ -447,6 +438,18 @@ impl Gateway {
         Ok(LoadedAgent { plugin, protocol })
     }
 
+    /// Loads plugins, probes capabilities, validates the routing table, and
+    /// renders the model catalog.
+    ///
+    /// # Errors
+    ///
+    /// A human-readable reason this configuration cannot serve. Startup
+    /// errors are for the operator; they are as specific as possible.
+    ///
+    /// # Panics
+    ///
+    /// Never for a [`ClientConfig`] that came through [`ClientConfig::load`]:
+    /// the `expect`s below restate what its validation already proved.
     pub fn new(config: &ClientConfig, recorder: Arc<dyn Recorder>) -> Result<Self, String> {
         let runtime = PluginRuntime::new(token_station_plugin_runtime::RuntimeLimits::default())
             .map_err(|error| format!("wasm engine: {error}"))?;
