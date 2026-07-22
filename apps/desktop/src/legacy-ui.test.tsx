@@ -301,9 +301,21 @@ describe("model selection and provider model management", () => {
     vi.mocked(updateProviderModels)
       .mockResolvedValueOnce(state)
       .mockRejectedValueOnce(new Error("save down"));
+    vi.mocked(getStats).mockResolvedValue({
+      total: {
+        requests: 3, errors: 1, p50_latency_ms: 10, p95_latency_ms: 20,
+        input_tokens: 120, output_tokens: 30, cost_micros: 1_250_000,
+      },
+      groups: [["openai", {
+        requests: 3, errors: 1, p50_latency_ms: 10, p95_latency_ms: 20,
+        input_tokens: 120, output_tokens: 30, cost_micros: 1_250_000,
+      }]],
+      by: "upstream", empty: false,
+    });
     const onSaved = vi.fn();
     const user = userEvent.setup();
     render(<ProviderModelManager provider={provider} serveRunning onSaved={onSaved} />);
+    expect(await screen.findByText(/150 tokens · 估算成本 1\.2500/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "刷新模型" }));
     const discovered = await screen.findByRole("button", { name: /new/ });
     expect(discovered).toHaveAttribute("aria-pressed", "false");
@@ -319,6 +331,28 @@ describe("model selection and provider model management", () => {
     await user.click(screen.getByRole("button", { name: "保存模型" }));
     expect(await screen.findByText(/save down/)).toBeInTheDocument();
     expect(within(screen.getByText(/代理运行中/).parentElement!).getByRole("button")).toBeEnabled();
+  });
+
+  it("未定价 Provider 显示成本未知而不是零成本", async () => {
+    const provider: ProviderView = {
+      name: "local", provider: "openai-compatible", base_url: "http://127.0.0.1:11434/v1",
+      models: ["local-model"], has_auth: false,
+    };
+    vi.mocked(getStats).mockResolvedValue({
+      total: {
+        requests: 1, errors: 0, p50_latency_ms: 5, p95_latency_ms: 5,
+        input_tokens: 2, output_tokens: 3, cost_micros: null,
+      },
+      groups: [["local", {
+        requests: 1, errors: 0, p50_latency_ms: 5, p95_latency_ms: 5,
+        input_tokens: 2, output_tokens: 3, cost_micros: null,
+      }]],
+      by: "upstream", empty: false,
+    });
+
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    expect(await screen.findByText(/5 tokens · 成本未知/)).toBeInTheDocument();
+    expect(screen.queryByText(/零成本/)).not.toBeInTheDocument();
   });
 
   it("shows verified declared unsupported and unknown capability states", () => {

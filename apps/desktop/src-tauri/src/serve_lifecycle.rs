@@ -176,7 +176,6 @@ impl PreparedServer {
     pub(crate) fn bind_listener(listen: &str) -> Result<StdTcpListener, StartFailure> {
         bind_with_retry(listen)
     }
-
 }
 
 impl BoundPreparedServer {
@@ -201,8 +200,7 @@ impl BoundPreparedServer {
             .unwrap_or(listen);
         let instance_id = instance_id()?;
         let served_state = app_state.clone();
-        let serve_task =
-            runtime.spawn(async move { server::serve(served_state, listener).await });
+        let serve_task = runtime.spawn(async move { server::serve(served_state, listener).await });
         Ok(RunningServer {
             runtime,
             app_state,

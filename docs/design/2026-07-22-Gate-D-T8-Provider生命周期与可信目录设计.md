@@ -11,6 +11,7 @@
 4. 配置仍在引用的模型不能被静默删除。目录刷新只给 diff；用户保存模型集合时由后端重新校验主页与五个 Agent 的引用。
 5. 删除 Provider 必须先返回引用预览；存在引用时 fail-closed，不自动清空路由。确认删除后，原 Provider JSON 进入本地 tombstone sidecar，可恢复，不做不可逆硬删。
 6. Provider 详情页是生命周期入口：基本信息、分层测试、目录 diff、能力、用量摘要、删除影响在同一展开区域完成。
+7. 目录证据与 Provider 身份绑定：新增、URL/Key 变更、删除和恢复都先使旧目录失效；同名同 URL 也不得继承另一账号的 live 证据。
 
 ## 2. 目录账本
 
@@ -40,6 +41,7 @@ ProviderCatalog {
 2. UI 展示影响面；有引用时只给“先调整路由”指引，不允许确认。
 3. 无引用时 `remove_provider(name)` 再次校验，随后先原子写入 `provider-tombstones.json`，再从草稿移除并更新 revision。
 4. `restore_provider(name)` 从 tombstone 恢复；若同名 Provider 已存在则拒绝，避免覆盖用户新配置。
+5. tombstone 存在时同名新增必须拒绝，用户需先恢复再编辑；`archive` 自身也拒绝覆盖旧恢复点。
 
 ## 4. 分层测试与用量
 
@@ -54,3 +56,5 @@ Provider 用量按现有无正文 metrics 的 `upstream` 维度聚合，只显�
 3. 刷新目录不改变草稿 revision；保存移除被引用模型失败并指出引用。
 4. 删除前能预览全部主页/Agent 引用；有引用删除失败，无引用删除生成 tombstone，随后可恢复。
 5. Provider 详情页能看到最终 URL、能力、目录状态/diff、测试状态、用量和删除影响。
+6. 删除后同名同 URL 重加不得出现旧目录；旧 tombstone 不得被第二次删除覆盖。
+7. 通过 Provider 编辑和模型保存命令产生新 revision 后，下一条真实代理请求必须命中新 Provider 运行态。

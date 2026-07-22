@@ -1746,7 +1746,7 @@ mod tests {
             runtime: None,
         };
         let output_result = SystemProbeRunner.run(&output, &output, &output_probe, &context);
-        assert!(output_result.runnable);
+        assert!(output_result.runnable, "{:?}", output_result.diagnostics);
         assert!(output_result
             .version_raw
             .as_ref()

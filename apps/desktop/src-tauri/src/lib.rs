@@ -224,8 +224,8 @@ fn load_draft_state(
                 draft.clone(),
                 draft,
                 Some(format!(
-                "现有配置无法读取，已进入只读保护；请先修复或移走 {}：{error}",
-                config_path.display()
+                    "现有配置无法读取，已进入只读保护；请先修复或移走 {}：{error}",
+                    config_path.display()
                 )),
             )
         }
@@ -494,9 +494,7 @@ impl AppInner {
         });
         if load_error.is_none() {
             if let Err(error) = config_state.observe_draft(&draft) {
-                load_error = Some(format!(
-                    "配置版本状态无法持久化，已进入只读保护：{error}"
-                ));
+                load_error = Some(format!("配置版本状态无法持久化，已进入只读保护：{error}"));
                 draft = config_state.draft().clone();
             }
         }
@@ -1074,24 +1072,35 @@ fn add_provider(
     if inner.draft["upstreams"].get(&name).is_some() {
         return Err(format!("供应商 `{name}` 已存在，请在 Provider 详情中编辑"));
     }
+    let data_dir = inner.data_dir();
+    if provider_tombstones::contains(&data_dir, &name)? {
+        return Err(format!(
+            "Provider 回收站中已有 `{name}`，请先恢复它，再在详情中编辑"
+        ));
+    }
 
     let model_objs: Vec<Value> = models
         .iter()
         .filter(|m| !m.trim().is_empty())
-        .map(|m| json!({
-            "model": m,
-            "tool": false,
-            "vision": false,
-            "json_schema": false,
-            "tool_state": "unknown",
-            "vision_state": "unknown",
-            "json_schema_state": "unknown",
-            "context_window": 128000
-        }))
+        .map(|m| {
+            json!({
+                "model": m,
+                "tool": false,
+                "vision": false,
+                "json_schema": false,
+                "tool_state": "unknown",
+                "vision_state": "unknown",
+                "json_schema_state": "unknown",
+                "context_window": 128000
+            })
+        })
         .collect();
     if model_objs.is_empty() {
         return Err("至少填一个模型名".into());
     }
+    // A previous interrupted removal may have left only derived catalog data.
+    // New Provider identity must never inherit it, even with the same name/URL.
+    model_catalog::remove_provider(&data_dir, &name)?;
 
     let mut up = json!({
         "provider": "openai-compatible",
@@ -1155,6 +1164,14 @@ fn edit_provider(
         .map(str::trim)
         .filter(|key| !key.is_empty())
         .map(str::to_owned);
+    let identity_changed =
+        previous["base_url"].as_str() != Some(base_url.as_str()) || api_key.is_some();
+    if identity_changed {
+        // A URL or credential change may select a different Provider account.
+        // Invalidate first: losing derived cache on a later rollback is safe;
+        // presenting the old account's catalog as trusted is not.
+        model_catalog::remove_provider(&inner.data_dir(), &name)?;
+    }
     inner.draft["upstreams"][&name]["base_url"] = json!(base_url);
     if api_key.is_some() {
         inner.draft["upstreams"][&name]["auth"] =
@@ -1402,8 +1419,8 @@ fn replace_provider_models(
     let model_objects: Vec<Value> = normalized
         .into_iter()
         .map(|model| {
-            existing.get(&model).cloned().unwrap_or_else(
-                || json!({
+            existing.get(&model).cloned().unwrap_or_else(|| {
+                json!({
                     "model": model,
                     "tool": false,
                     "vision": false,
@@ -1412,8 +1429,8 @@ fn replace_provider_models(
                     "vision_state": "unknown",
                     "json_schema_state": "unknown",
                     "context_window": 128000
-                }),
-            )
+                })
+            })
         })
         .collect();
 
@@ -1442,7 +1459,11 @@ fn update_provider_models(
 
 fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {
     let mut references = Vec::new();
-    for (pool, label) in [(TIER_HIGH, "主页/上档"), (TIER_MID, "主页/中档"), (TIER_LOW, "主页/下档")] {
+    for (pool, label) in [
+        (TIER_HIGH, "主页/上档"),
+        (TIER_MID, "主页/中档"),
+        (TIER_LOW, "主页/下档"),
+    ] {
         for (index, member) in inner.draft["router"]["pools"][pool]
             .as_array()
             .into_iter()
@@ -1502,6 +1523,7 @@ fn remove_provider(state: State<'_, AppStateManaged>, name: String) -> Result<St
         .cloned()
         .ok_or_else(|| format!("供应商 `{name}` 不存在"))?;
     let data_dir = inner.data_dir();
+    model_catalog::remove_provider(&data_dir, name)?;
     provider_tombstones::archive(&data_dir, name, &provider)?;
     inner.draft["upstreams"]
         .as_object_mut()
@@ -1525,6 +1547,7 @@ fn restore_provider(state: State<'_, AppStateManaged>, name: String) -> Result<S
         return Err(format!("同名供应商 `{name}` 已存在，不能覆盖恢复"));
     }
     let data_dir = inner.data_dir();
+    model_catalog::remove_provider(&data_dir, name)?;
     let provider = provider_tombstones::take(&data_dir, name)?
         .ok_or_else(|| format!("Provider 回收站中没有 `{name}`"))?;
     inner.draft["upstreams"][name] = provider.clone();
@@ -1656,9 +1679,7 @@ fn complete_serve_start<R: Runtime>(
     // equally forbidden under the global lock. The reserved socket is only
     // installed if the same generation is still Applying.
     let mut resume_listener = if result.is_err() {
-        resume_listen
-            .as_deref()
-            .map(PreparedServer::bind_listener)
+        resume_listen.as_deref().map(PreparedServer::bind_listener)
     } else {
         None
     };
@@ -1714,10 +1735,7 @@ fn complete_serve_start<R: Runtime>(
                             let restore = resume_listener
                                 .take()
                                 .unwrap_or_else(|| {
-                                    Err(StartFailure::new(
-                                        "listen_restore",
-                                        "旧 listener 未能预留",
-                                    ))
+                                    Err(StartFailure::new("listen_restore", "旧 listener 未能预留"))
                                 })
                                 .and_then(|listener| old.resume_accepting(listener));
                             if let Err(restore) = restore {
@@ -2521,13 +2539,15 @@ mod tests {
         {
             let managed = app.state::<AppStateManaged>();
             let mut inner = managed.0.lock().unwrap();
-            inner.draft["upstreams"]["fixture"]["models"] =
-                json!([{"model": "model-a"}]);
+            inner.draft["upstreams"]["fixture"]["models"] = json!([{"model": "model-a"}]);
             inner.observe_draft().unwrap();
         }
         let explicitly_edited = get_state(app.state());
         assert!(explicitly_edited.draft_revision > initial_state.draft_revision);
-        assert_eq!(explicitly_edited.saved_revision, initial_state.saved_revision);
+        assert_eq!(
+            explicitly_edited.saved_revision,
+            initial_state.saved_revision
+        );
         assert!(explicitly_edited.config_dirty);
 
         let warning_root = scratch_home("discovery-cache-warning");
@@ -2618,12 +2638,8 @@ mod tests {
             prepared["data"]["dir"],
             json!(root.join("token-station-data"))
         );
-        let inner = AppInner::new_with_saved(
-            root.join("token-station.json"),
-            prepared,
-            saved,
-            None,
-        );
+        let inner =
+            AppInner::new_with_saved(root.join("token-station.json"), prepared, saved, None);
         assert!(inner.config_state.is_dirty());
         assert_ne!(
             inner.config_state.draft_revision(),
@@ -3140,13 +3156,13 @@ mod tests {
         assert!(chat_through_proxy(&listen).contains("revision-a"));
         fixture_a.join().unwrap();
 
-        {
-            let state = app.state::<AppStateManaged>();
-            let mut inner = state.0.lock().unwrap();
-            inner.draft["upstreams"]["fixture"]["base_url"] = json!(upstream_b);
-            inner.observe_draft().unwrap();
-            assert!(inner.config_state.is_dirty());
-        }
+        edit_provider(app.state(), "fixture".to_owned(), upstream_b, None).unwrap();
+        update_provider_models(
+            app.state(),
+            "fixture".to_owned(),
+            vec!["small".to_owned(), "extra".to_owned()],
+        )
+        .unwrap();
         let applying = begin_serve_start(
             app.handle().clone(),
             app.state::<AppStateManaged>().inner(),
@@ -3165,21 +3181,29 @@ mod tests {
         );
         assert!(chat_through_proxy(&listen).contains("revision-b"));
 
-        {
-            let state = app.state::<AppStateManaged>();
-            let mut inner = state.0.lock().unwrap();
-            inner.draft["upstreams"]["fixture"]["base_url"] =
-                json!("http://127.0.0.1:1/v1");
-            inner.observe_draft().unwrap();
-        }
+        edit_provider(
+            app.state(),
+            "fixture".to_owned(),
+            "http://127.0.0.1:1/v1".to_owned(),
+            None,
+        )
+        .unwrap();
         begin_serve_start(
             app.handle().clone(),
             app.state::<AppStateManaged>().inner(),
-            |_config| Err(StartFailure::new("gateway_init", "preflight fixture failure")),
+            |_config| {
+                Err(StartFailure::new(
+                    "gateway_init",
+                    "preflight fixture failure",
+                ))
+            },
         )
         .unwrap();
         let failed_apply = wait_for_serve_phase(&app, ServePhase::Running);
-        assert_eq!(failed_apply.serve.running_revision, second.serve.running_revision);
+        assert_eq!(
+            failed_apply.serve.running_revision,
+            second.serve.running_revision
+        );
         assert!(failed_apply.saved_revision > failed_apply.serve.running_revision.unwrap());
         assert!(failed_apply
             .serve
@@ -3197,11 +3221,8 @@ mod tests {
             };
             server.abort_task();
         }
-        let exited = wait_for_serve_phase_with_timeout(
-            &app,
-            ServePhase::Error,
-            Duration::from_secs(1),
-        );
+        let exited =
+            wait_for_serve_phase_with_timeout(&app, ServePhase::Error, Duration::from_secs(1));
         assert_eq!(exited.serve.app_runtime, AppRuntime::Stopped);
         assert!(!exited.serve.listener_reachable);
         assert_eq!(exited.serve.running_revision, None);
@@ -3412,24 +3433,82 @@ mod tests {
 
         let impact = preview_provider_removal(app.state(), "local".to_string()).unwrap();
         assert!(!impact.can_remove);
-        assert!(impact.references.iter().any(|item| item.contains("主页/上档")));
+        assert!(impact
+            .references
+            .iter()
+            .any(|item| item.contains("主页/上档")));
         assert!(remove_provider(app.state(), "local".to_string())
             .err()
             .expect("被引用的 Provider 必须拒绝删除")
             .contains("仍被引用"));
         set_tier(app.state(), "high".to_string(), None, None).unwrap();
         set_tier(app.state(), "low".to_string(), None, None).unwrap();
-        assert!(preview_provider_removal(app.state(), "local".to_string())
-            .unwrap()
-            .can_remove);
+        assert!(
+            preview_provider_removal(app.state(), "local".to_string())
+                .unwrap()
+                .can_remove
+        );
+
+        let catalog_path = root.join("data").join("model-catalog-cache.json");
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(
+            &catalog_path,
+            serde_json::to_vec_pretty(&json!({
+                "version": 2,
+                "providers": {
+                    "local": {
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "revision": 7,
+                        "models": [{
+                            "model": "old-account-private-model",
+                            "tool": "unknown",
+                            "vision": "unknown",
+                            "json_schema": "unknown",
+                            "source": "live",
+                            "last_seen_ms": 1,
+                            "catalog_state": "active"
+                        }],
+                        "fetched_at_ms": 1
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
 
         let removed = remove_provider(app.state(), "local".to_string()).unwrap();
         assert_eq!(removed.providers.len(), 1);
         assert_eq!(removed.deleted_providers, ["local"]);
         assert!(removed.tiers.values().all(|tier| tier.upstream.is_none()));
+        assert!(
+            !std::fs::read_to_string(&catalog_path)
+                .unwrap()
+                .contains("old-account-private-model"),
+            "deletion invalidates the old Provider identity's trusted catalog"
+        );
+        let Err(readd_error) = add_provider(
+            app.state(),
+            "local".to_owned(),
+            "http://127.0.0.1:11434/v1".to_owned(),
+            vec!["replacement".to_owned()],
+            None,
+        ) else {
+            panic!("a tombstoned Provider name must be restored, never silently replaced")
+        };
+        assert!(readd_error.contains("请先恢复"), "{readd_error}");
         let restored = restore_provider(app.state(), "local".to_string()).unwrap();
         assert_eq!(restored.providers.len(), 2);
         assert!(restored.deleted_providers.is_empty());
+        let restored_local = restored
+            .providers
+            .iter()
+            .find(|provider| provider.name == "local")
+            .unwrap();
+        assert_eq!(restored_local.catalog_revision, 0);
+        assert!(restored_local
+            .catalog
+            .iter()
+            .all(|model| model.source == model_catalog::CatalogSource::Configured));
         assert!(save_config(app.state())
             .err()
             .expect("empty routing config is rejected")

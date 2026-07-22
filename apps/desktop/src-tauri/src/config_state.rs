@@ -374,7 +374,10 @@ mod tests {
         drop(first_session);
 
         let mut second_session = ConfigState::load(&config, &a).unwrap();
-        assert_eq!(second_session.draft_revision(), second_session.saved_revision());
+        assert_eq!(
+            second_session.draft_revision(),
+            second_session.saved_revision()
+        );
         second_session.observe_draft(&c).unwrap();
         assert!(second_session.draft_revision() > abandoned_revision);
         fs::remove_dir_all(root).ok();
