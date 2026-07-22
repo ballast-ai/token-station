@@ -1622,6 +1622,19 @@ pub fn run() {
     // 绝不以空模板静默覆盖。旧版单 OpenAI 入站只在内存中升级为桌面三入站。
     let (draft, load_error) = load_draft(&config_path, &root);
 
+    // Migrate an existing metrics store up to the current schema at startup, so
+    // the read-only receipts/stats views (which cannot migrate themselves) never
+    // trip over an old version. Only an existing store is touched — nothing is
+    // created before the proxy first serves.
+    if let Some(dir) = draft["data"]["dir"].as_str() {
+        let metrics = std::path::Path::new(dir).join("metrics.sqlite");
+        if metrics.exists() {
+            if let Err(error) = token_station_cli::store::SqliteStore::open(&metrics) {
+                eprintln!("metrics migration on startup failed: {error}");
+            }
+        }
+    }
+
     // The on-disk baseline: a clean load means the draft equals what's saved, so
     // nothing shows as "unsaved" until the user edits. A load error leaves no
     // trustworthy baseline (None → treated as dirty).
