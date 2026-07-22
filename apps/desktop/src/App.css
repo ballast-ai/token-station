@@ -2196,3 +2196,7 @@ pre.block {
 .diag-message { margin: 2px 0 0; }
 .diag-suggestion { margin: 0; color: var(--muted, #888); font-size: 13px; }
 .error-text { color: #d05050; }
+
+/* 请求 ID 复制 (T9 闭环) */
+.req-id-cell { display: inline-flex; align-items: center; gap: 8px; }
+.btn.tiny { padding: 0 8px; height: 20px; line-height: 20px; font-size: 11px; }
