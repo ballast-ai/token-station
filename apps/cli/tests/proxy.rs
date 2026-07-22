@@ -10,13 +10,14 @@
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use token_station_cli::config::ClientConfig;
-use token_station_cli::gateway::Gateway;
+use token_station_cli::gateway::{Gateway, Reply, StageStatus};
 use token_station_cli::server;
 
 // -- plugin packages -------------------------------------------------------------
@@ -80,6 +81,95 @@ struct MockUpstream {
     seen: Arc<Mutex<Vec<Seen>>>,
     hits: Arc<AtomicUsize>,
     peer_closed: Arc<AtomicBool>,
+}
+
+/// A bounded local endpoint that distinguishes a direct TLS connection from
+/// an environment-proxy CONNECT without allowing either path onto the network.
+struct ConnectionTrap {
+    port: u16,
+    hits: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ConnectionTrap {
+    fn start(response: Option<Vec<u8>>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("connection trap binds");
+        listener.set_nonblocking(true).expect("nonblocking trap");
+        let port = listener.local_addr().expect("bound trap").port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_hits = Arc::clone(&hits);
+        let worker_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !worker_stop.load(Ordering::SeqCst) && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        worker_hits.fetch_add(1, Ordering::SeqCst);
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .expect("bounded trap read");
+                        let mut request = [0_u8; 4096];
+                        let read_deadline = Instant::now() + Duration::from_secs(10);
+                        loop {
+                            match stream.read(&mut request) {
+                                Err(error)
+                                    if matches!(
+                                        error.kind(),
+                                        std::io::ErrorKind::WouldBlock
+                                            | std::io::ErrorKind::TimedOut
+                                    ) && Instant::now() < read_deadline => {}
+                                Ok(_) | Err(_) => break,
+                            }
+                        }
+                        if let Some(response) = &response {
+                            let _ = stream.write_all(response);
+                        }
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("connection trap accept failed: {error}"),
+                }
+            }
+        });
+        Self {
+            port,
+            hits,
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    fn https_url(&self) -> String {
+        format!("https://127.0.0.1:{}/v1", self.port)
+    }
+
+    fn http_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    fn hits(&self) -> usize {
+        self.hits.load(Ordering::SeqCst)
+    }
+
+    fn finish(mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            worker.join().expect("connection trap exits cleanly");
+        }
+    }
+}
+
+impl Drop for ConnectionTrap {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            worker.join().expect("connection trap exits cleanly");
+        }
+    }
 }
 
 impl MockUpstream {
@@ -277,6 +367,10 @@ fn http_json_with_headers(status: u16, body: &str, headers: &[(&str, &str)]) -> 
         body.len()
     )
     .into_bytes()
+}
+
+fn http_redirect(location: &str) -> Vec<u8> {
+    http_json_with_headers(302, "redirect refused", &[("location", location)])
 }
 
 // -- the proxy under test ----------------------------------------------------------
@@ -679,6 +773,184 @@ fn read_marker_tool() -> Value {
     })
 }
 
+const EGRESS_CHILD_MODE: &str = "TOKEN_STATION_EGRESS_CHILD_MODE";
+const EGRESS_TARGET_URL: &str = "TOKEN_STATION_EGRESS_TARGET_URL";
+const EGRESS_PROXY_URL: &str = "TOKEN_STATION_EGRESS_PROXY_URL";
+const EGRESS_KEY_FILE: &str = "TOKEN_STATION_EGRESS_KEY_FILE";
+const EGRESS_PLUGIN_DIR: &str = "TOKEN_STATION_EGRESS_PLUGIN_DIR";
+const PROXY_ENV_VARS: [&str; 8] = [
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "NO_PROXY",
+    "no_proxy",
+];
+
+fn run_https_proxy_child(
+    mode: &str,
+    target_url: &str,
+    proxy_url: &str,
+    key_file: &Path,
+    plugin_dir: &Path,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut command = Command::new(std::env::current_exe().expect("test executable is known"));
+    command
+        .args([
+            "--exact",
+            "egress_https_proxy_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(EGRESS_CHILD_MODE, mode)
+        .env(EGRESS_TARGET_URL, target_url)
+        .env(EGRESS_PROXY_URL, proxy_url)
+        .env(EGRESS_KEY_FILE, key_file)
+        .env(EGRESS_PLUGIN_DIR, plugin_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for name in PROXY_ENV_VARS {
+        command.env_remove(name);
+    }
+    for name in &PROXY_ENV_VARS[..6] {
+        command.env(name, proxy_url);
+    }
+
+    let mut child = command.spawn().expect("isolated proxy test child starts");
+    let mut stdout = child.stdout.take().expect("child stdout is piped");
+    let mut stderr = child.stderr.take().expect("child stderr is piped");
+    let stdout_worker = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).expect("child stdout reads");
+        bytes
+    });
+    let stderr_worker = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).expect("child stderr reads");
+        bytes
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("child status polls") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("timed out child is killed");
+            let _ = child.wait();
+            let stdout = stdout_worker.join().expect("stdout reader exits");
+            let stderr = stderr_worker.join().expect("stderr reader exits");
+            panic!(
+                "isolated {mode} proxy child timed out\nstdout={}\nstderr={}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    let stdout = stdout_worker.join().expect("stdout reader exits");
+    let stderr = stderr_worker.join().expect("stderr reader exits");
+    assert!(
+        status.success(),
+        "isolated {mode} proxy child failed\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    (stdout, stderr)
+}
+
+#[test]
+fn production_and_probe_ignore_all_proxy_environment_variants() {
+    // Build plugins before injecting proxy variables into the child, so Cargo
+    // itself never participates in this network-path assertion.
+    let plugin_dir = plugins_dir().to_path_buf();
+
+    for mode in ["production", "probe"] {
+        let target = ConnectionTrap::start(None);
+        let proxy = ConnectionTrap::start(Some(
+            b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec(),
+        ));
+        let target_url = target.https_url();
+        let proxy_url = proxy.http_url();
+        let key_value = format!("sk-https-proxy-{mode}");
+        let key = key_file(&format!("https-proxy-{mode}"), &key_value);
+
+        let (stdout, stderr) =
+            run_https_proxy_child(mode, &target_url, &proxy_url, &key, &plugin_dir);
+
+        assert_eq!(target.hits(), 1, "{mode} connects directly to its target");
+        assert_eq!(proxy.hits(), 0, "{mode} must ignore HTTPS_PROXY");
+        for output in [&stdout, &stderr] {
+            assert!(
+                !String::from_utf8_lossy(output).contains(&key_value),
+                "{mode} child output must not disclose its credential"
+            );
+        }
+
+        target.finish();
+        proxy.finish();
+        std::fs::remove_file(key).ok();
+    }
+}
+
+#[test]
+#[ignore = "spawned by its parent to isolate proxy environment"]
+fn egress_https_proxy_child() {
+    let mode = std::env::var(EGRESS_CHILD_MODE).expect("child mode is provided");
+    let target_url = std::env::var(EGRESS_TARGET_URL).expect("child target is provided");
+    let expected_proxy = std::env::var(EGRESS_PROXY_URL).expect("child proxy is provided");
+    let key_file = PathBuf::from(std::env::var(EGRESS_KEY_FILE).expect("child key is provided"));
+    let plugin_dir =
+        PathBuf::from(std::env::var(EGRESS_PLUGIN_DIR).expect("child plugins are provided"));
+    for name in &PROXY_ENV_VARS[..6] {
+        assert_eq!(
+            std::env::var(name).as_deref(),
+            Ok(expected_proxy.as_str()),
+            "the isolated child must inherit hostile {name}"
+        );
+    }
+
+    let gateway = gateway_for_base_url(&target_url, &key_file, &plugin_dir);
+    match mode.as_str() {
+        "production" => {
+            let body = json!({
+                "model": "auto",
+                "messages": [{"role": "user", "content": "hi"}]
+            })
+            .to_string();
+            let mut result = None;
+            gateway.chat(
+                "POST",
+                "/v1/chat/completions",
+                &[],
+                body.as_bytes(),
+                &mut |reply| {
+                    if let Reply::BeginJson(reply) = reply {
+                        result = Some((reply.status, reply.body));
+                    }
+                    true
+                },
+            );
+            let (status, response_body) = result.expect("production emits a JSON refusal");
+            assert_eq!(status, 502, "{response_body}");
+        }
+        "probe" => {
+            let outcomes = gateway
+                .probe("mock_primary", None)
+                .expect("probe reaches the transport boundary");
+            let error = outcomes[0]
+                .latency_ms
+                .as_ref()
+                .expect_err("the local TLS trap cannot be a healthy provider");
+            assert!(error.contains("upstream"), "{error}");
+        }
+        other => panic!("unknown isolated child mode `{other}`"),
+    }
+}
+
 // -- the tests -----------------------------------------------------------------------
 
 #[test]
@@ -751,6 +1023,58 @@ fn a_chat_completion_round_trips_with_the_credential_injected() {
     );
 
     std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn redirects_to_other_hosts_loopback_and_metadata_never_receive_a_second_hop() {
+    let canary = MockUpstream::start(Vec::new());
+    // The metadata lure keeps the canonical path and IP literal in the URL,
+    // but resolves to our local canary. A redirect regression therefore fails
+    // deterministically without ever opening a socket to real link-local
+    // metadata infrastructure.
+    let locations = [
+        (
+            "other-host",
+            format!("http://localhost:{}/credential-canary", canary.port),
+        ),
+        (
+            "loopback",
+            format!("http://127.0.0.1:{}/credential-canary", canary.port),
+        ),
+        (
+            "metadata",
+            format!(
+                "http://127.0.0.1:{}/latest/meta-data/iam/security-credentials/?original-host=169.254.169.254",
+                canary.port
+            ),
+        ),
+    ];
+
+    for (label, location) in locations {
+        let source = MockUpstream::start(vec![vec![http_redirect(&location)]]);
+        let key_value = format!("sk-redirect-{label}");
+        let key = key_file(&format!("redirect-{label}"), &key_value);
+        let proxy = start_proxy(&source, &key);
+
+        let (status, body) = post_chat(
+            &proxy,
+            &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+            None,
+        );
+
+        assert_eq!(status, 502, "redirect must fail for {label}: {body}");
+        assert!(body.contains("upstream_unavailable"), "{body}");
+        assert_eq!(source.hits(), 1, "the authorized first hop is called once");
+        assert_eq!(canary.hits(), 0, "{label} target must not be contacted");
+        assert_eq!(
+            source.seen()[0].authorization.as_deref(),
+            Some(format!("Bearer {key_value}").as_str())
+        );
+        assert!(!body.contains(&key_value));
+        assert!(!body.contains(&location));
+
+        std::fs::remove_file(key).ok();
+    }
 }
 
 #[test]
@@ -2595,18 +2919,22 @@ fn auth_failures_never_eject_an_upstream() {
 
 /// A gateway with no server around it: `upstream test` runs exactly this.
 fn probe_gateway(upstream: &MockUpstream, key_file: &Path) -> Gateway {
+    gateway_for_base_url(&upstream.base_url(), key_file, plugins_dir())
+}
+
+fn gateway_for_base_url(base_url: &str, key_file: &Path, plugin_dir: &Path) -> Gateway {
     let config = json!({
         "version": 1,
         "server": { "listen": "127.0.0.1:0" },
         "plugins": {
-            "dir": plugins_dir(),
+            "dir": plugin_dir,
             "agent": "agent-openai",
             "providers": { "openai-compatible": "provider-openai-compatible" }
         },
         "upstreams": {
             "mock_primary": {
                 "provider": "openai-compatible",
-                "base_url": upstream.base_url(),
+                "base_url": base_url,
                 "auth": { "slot": "provider_api_key", "file": key_file },
                 "models": [ { "model": "gpt-5.5", "tool": true, "context_window": 400_000 } ]
             }
@@ -2652,6 +2980,51 @@ fn an_upstream_probe_runs_the_real_southbound_path() {
     );
     assert_eq!(seen[0].body["model"], json!("gpt-5.5"));
     assert_eq!(seen[0].body["max_tokens"], json!(1));
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn an_upstream_probe_refuses_redirects_without_a_second_hop() {
+    let canary = MockUpstream::start(Vec::new());
+    let location = format!("http://127.0.0.1:{}/probe-canary", canary.port);
+    let source = MockUpstream::start(vec![vec![http_redirect(&location)]]);
+    let key_value = "sk-probe-redirect-secret";
+    let key = key_file("probe-redirect", key_value);
+    let gateway = probe_gateway(&source, &key);
+
+    let outcomes = gateway.probe("mock_primary", None).expect("probe runs");
+    let error = outcomes[0]
+        .latency_ms
+        .as_ref()
+        .expect_err("redirect cannot be a successful probe");
+
+    assert!(error.contains("redirect refused"), "{error}");
+    assert_eq!(source.hits(), 1);
+    assert_eq!(canary.hits(), 0, "probe target stays untouched");
+    assert_eq!(
+        source.seen()[0].authorization.as_deref(),
+        Some(format!("Bearer {key_value}").as_str())
+    );
+    assert!(!error.contains(key_value));
+    assert!(!error.contains(&location));
+
+    let layered = gateway
+        .probe_layered("mock_primary", None)
+        .expect("layered probe runs");
+    assert_eq!(layered[0].stages[0].status, StageStatus::Fail);
+    assert!(
+        layered[0].stages[0]
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("redirect refused"))
+    );
+    assert_eq!(
+        source.hits(),
+        2,
+        "both probe surfaces hit only the first hop"
+    );
+    assert_eq!(canary.hits(), 0, "layered probe target stays untouched");
 
     std::fs::remove_file(key).ok();
 }
