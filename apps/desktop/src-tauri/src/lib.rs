@@ -38,6 +38,31 @@ const TIER_HIGH: &str = "tier_high";
 const TIER_MID: &str = "tier_mid";
 const TIER_LOW: &str = "tier_low";
 
+/// Stable id for each tier’s “keyword override” rule. Keywords added to a tier enter the corresponding rule’s
+/// `keywords_any`—a match selects this tier and overrides complexity tiers (highest priority in router-core layer 1).
+/// The id is stable because audit and decision records also use it as the `matched routing rule ID`.
+const KW_RULE_HIGH: &str = "kw-high";
+const KW_RULE_MID: &str = "kw-mid";
+const KW_RULE_LOW: &str = "kw-low";
+
+/// Map UI slots to pool names and keyword-rule IDs. Rule order is priority from
+/// high to mid to low, so phrases matching multiple tiers move upward safely.
+fn tier_pool_and_rule(slot: &str) -> Result<(&'static str, &'static str), String> {
+    match slot {
+        "high" => Ok((TIER_HIGH, KW_RULE_HIGH)),
+        "mid" => Ok((TIER_MID, KW_RULE_MID)),
+        "low" => Ok((TIER_LOW, KW_RULE_LOW)),
+        other => Err(format!("未知档位 `{other}`(应为 high/mid/low)")),
+    }
+}
+
+/// Three tiers from high to low as UI slot, pool name, and keyword-rule ID; preserve this order in router.rules.
+const TIER_ORDER: [(&str, &str, &str); 3] = [
+    ("high", TIER_HIGH, KW_RULE_HIGH),
+    ("mid", TIER_MID, KW_RULE_MID),
+    ("low", TIER_LOW, KW_RULE_LOW),
+];
+
 /// Tier thresholds mapping heuristic scores to tiers. Bands descend strictly by
 /// at_least, with a final zero fallback. Evaluation will calibrate these defaults later.
 const CUT_HIGH: u32 = 55;
@@ -304,6 +329,9 @@ struct ServeView {
 struct StateView {
     providers: Vec<ProviderView>,
     tiers: std::collections::BTreeMap<String, TierView>,
+    /// User keyword set for each tier (high/mid/low). A match forces that tier; this is the requested
+    /// A direct control for user routing; stored in `router.rules` as `keywords_any`.
+    keywords: std::collections::BTreeMap<String, Vec<String>>,
     agent_routes: std::collections::BTreeMap<String, AgentRouteView>,
     serve: ServeView,
     /// Whether the draft materializes as a valid config and can be saved or started.
@@ -500,6 +528,129 @@ impl AppInner {
         tiers.insert("mid".to_string(), self.tier(TIER_MID));
         tiers.insert("low".to_string(), self.tier(TIER_LOW));
         tiers
+    }
+
+    /// Whether a pool is configured (exists and is non-empty). Keyword rules may reference only existing pools; otherwise, saving
+    /// validation then fails with `UnknownPool`.
+    fn pool_present(&self, pool: &str) -> bool {
+        self.draft["router"]["pools"][pool]
+            .as_array()
+            .is_some_and(|members| !members.is_empty())
+    }
+
+    /// Read the current keywords_any list for a keyword-rule ID.
+    fn rule_keywords(&self, rule_id: &str) -> Vec<String> {
+        self.draft["router"]["rules"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|rule| rule["id"].as_str() == Some(rule_id))
+            .and_then(|rule| rule["when"]["keywords_any"].as_array())
+            .map(|words| {
+                words
+                    .iter()
+                    .filter_map(|w| w.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Keyword libraries for high, mid, and low tiers, exposed to the frontend.
+    fn home_keywords(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        TIER_ORDER
+            .iter()
+            .map(|(slot, _pool, rule_id)| ((*slot).to_string(), self.rule_keywords(rule_id)))
+            .collect()
+    }
+
+    /// Current mapping from tier slots to keyword lists, used as the pre-write snapshot.
+    fn keyword_map(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        self.home_keywords()
+    }
+
+    /// Rewrite `router.rules` from the given three-tier keyword mapping. Rule order is priority (high → mid → low),
+    /// Emit rules only for tiers that have both keywords and a configured pool. Preserve non-keyword rules written by the operator
+    /// Preserve them unchanged afterward. Do not emit rules for empty keyword sets or unconfigured tiers, to avoid references to missing pools.
+    fn apply_keyword_map(&mut self, map: &std::collections::BTreeMap<String, Vec<String>>) {
+        let mut rules: Vec<Value> = Vec::new();
+        for (slot, pool, rule_id) in TIER_ORDER {
+            let words = map.get(slot).cloned().unwrap_or_default();
+            if words.is_empty() || !self.pool_present(pool) {
+                continue;
+            }
+            rules.push(json!({
+                "id": rule_id,
+                "when": { "keywords_any": words },
+                "route_to": pool,
+            }));
+        }
+        // Preserve existing rules not managed by this module and append them afterward.
+        let managed = [KW_RULE_HIGH, KW_RULE_MID, KW_RULE_LOW];
+        if let Some(existing) = self.draft["router"]["rules"].as_array() {
+            for rule in existing {
+                let is_managed = rule["id"]
+                    .as_str()
+                    .is_some_and(|id| managed.contains(&id));
+                if !is_managed {
+                    rules.push(rule.clone());
+                }
+            }
+        }
+        self.draft["router"]["rules"] = Value::Array(rules);
+    }
+
+    /// Normalize keywords by trimming whitespace. Deduplicate case-insensitively
+    /// to match core keywords_any behavior while preserving original case for display.
+    fn add_tier_keyword(&mut self, slot: &str, keyword: &str) -> Result<(), String> {
+        let (pool, _rule_id) = tier_pool_and_rule(slot)?;
+        if !self.pool_present(pool) {
+            return Err("请先为该档配置供应商和模型,再添加关键词".to_string());
+        }
+        let word = keyword.trim();
+        if word.is_empty() {
+            return Err("关键词不能为空".to_string());
+        }
+        if word.chars().count() > 64 {
+            return Err("单个关键词过长(最多 64 字)".to_string());
+        }
+        let mut map = self.keyword_map();
+        let list = map.entry(slot.to_string()).or_default();
+        if list
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(word))
+        {
+            return Err(format!("关键词「{word}」已在该档"));
+        }
+        if list.len() >= 100 {
+            return Err("单档关键词过多(最多 100 个)".to_string());
+        }
+        list.push(word.to_string());
+        self.apply_keyword_map(&map);
+        Ok(())
+    }
+
+    fn remove_tier_keyword(&mut self, slot: &str, keyword: &str) -> Result<(), String> {
+        tier_pool_and_rule(slot)?;
+        let mut map = self.keyword_map();
+        if let Some(list) = map.get_mut(slot) {
+            list.retain(|existing| !existing.eq_ignore_ascii_case(keyword.trim()));
+        }
+        self.apply_keyword_map(&map);
+        Ok(())
+    }
+
+    /// Remove a pool's keyword rule when clearing it so route_to cannot reference an empty pool.
+    fn drop_keyword_rule_for_pool(&mut self, pool: &str) {
+        let Some(rule_id) = TIER_ORDER
+            .iter()
+            .find(|(_, p, _)| *p == pool)
+            .map(|(_, _, id)| *id)
+        else {
+            return;
+        };
+        if let Some(rules) = self.draft["router"]["rules"].as_array_mut() {
+            rules.retain(|rule| rule["id"].as_str() != Some(rule_id));
+        }
     }
 
     fn agent_route_mode(&self, agent_id: &str) -> &str {
@@ -706,6 +857,7 @@ impl AppInner {
         StateView {
             providers: self.upstreams(),
             tiers: self.home_tiers(),
+            keywords: self.home_keywords(),
             agent_routes: self.agent_routes_view(),
             serve: self.serve_view(),
             config_error: self.config_error(),
@@ -777,6 +929,8 @@ impl AppInner {
                 if let Some(pools) = self.draft["router"]["pools"].as_object_mut() {
                     pools.remove(pool);
                 }
+                // Remove the keyword rule with the pool so it cannot target an empty pool and break saving.
+                self.drop_keyword_rule_for_pool(pool);
             }
             _ => return Err("档位必须同时提供供应商和模型，或同时清空".to_string()),
         }
@@ -1244,6 +1398,32 @@ fn set_tier(
     inner.ensure_editable()?;
 
     inner.set_tier_value(pool, upstream, model)?;
+    Ok(inner.snapshot())
+}
+
+/// Add a keyword to a high, mid, or low tier; matches force that tier at router-core layer 1.
+#[tauri::command]
+fn add_keyword(
+    state: State<'_, AppStateManaged>,
+    slot: String,
+    keyword: String,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.add_tier_keyword(&slot, &keyword)?;
+    Ok(inner.snapshot())
+}
+
+/// Remove a keyword from a tier.
+#[tauri::command]
+fn remove_keyword(
+    state: State<'_, AppStateManaged>,
+    slot: String,
+    keyword: String,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.remove_tier_keyword(&slot, &keyword)?;
     Ok(inner.snapshot())
 }
 
@@ -1862,6 +2042,8 @@ pub fn run() {
             update_provider_models,
             remove_provider,
             set_tier,
+            add_keyword,
+            remove_keyword,
             set_agent_route_mode,
             set_agent_tier,
             save_home_route_as_profile,
@@ -2144,6 +2326,103 @@ mod tests {
                 .len(),
             2
         );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn tier_keywords_write_valid_rules_dedupe_and_require_a_configured_pool() {
+        let root = scratch_home("tier-keywords");
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft: template(&root),
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+            saved_config_hash: None,
+            running_config_hash: None,
+        };
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "m"}]
+        });
+
+        // Unconfigured tiers cannot accept keywords because the rule would target an empty pool.
+        let error = inner
+            .add_tier_keyword("low", "提交git")
+            .expect_err("adding to an unconfigured tier is refused");
+        assert!(error.contains("先"), "{error}");
+
+        inner
+            .set_tier_value(TIER_LOW, Some("provider".into()), Some("m".into()))
+            .unwrap();
+
+        inner.add_tier_keyword("low", "提交git").unwrap();
+        // Deduplicate case-insensitively.
+        let dup = inner
+            .add_tier_keyword("low", "提交GIT")
+            .expect_err("case-insensitive duplicate is refused");
+        assert!(dup.contains("已在"), "{dup}");
+
+        // The keyword enters the low-tier rule targeting tier_low, and the full config validates.
+        let keywords = inner.home_keywords();
+        assert_eq!(keywords["low"], vec!["提交git".to_string()]);
+        let config = inner.materialize().expect("keyword rule keeps config valid");
+        let rule = config
+            .router
+            .rules
+            .iter()
+            .find(|rule| rule.id == KW_RULE_LOW)
+            .expect("low keyword rule exists");
+        assert_eq!(rule.route_to, TIER_LOW);
+        assert_eq!(rule.matcher.keywords_any, vec!["提交git".to_string()]);
+
+        // Remove case-insensitively and delete the rule when its list empties instead of leaving empty keywords_any.
+        inner.remove_tier_keyword("low", "提交GIT").unwrap();
+        assert!(inner.home_keywords()["low"].is_empty());
+        assert!(inner.materialize().unwrap().router.rules.is_empty());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn clearing_a_tier_drops_its_keyword_rule_so_the_config_stays_valid() {
+        let root = scratch_home("tier-keywords-clear");
+        let mut inner = AppInner {
+            config_path: root.join("token-station.json"),
+            draft: template(&root),
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+            saved_config_hash: None,
+            running_config_hash: None,
+        };
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "m"}]
+        });
+        // Keep another fallback tier so clearing the only tier does not empty pools.
+        inner
+            .set_tier_value(TIER_HIGH, Some("provider".into()), Some("m".into()))
+            .unwrap();
+        inner
+            .set_tier_value(TIER_LOW, Some("provider".into()), Some("m".into()))
+            .unwrap();
+        inner.add_tier_keyword("low", "翻译").unwrap();
+        assert!(inner
+            .materialize()
+            .unwrap()
+            .router
+            .rules
+            .iter()
+            .any(|rule| rule.id == KW_RULE_LOW));
+
+        // Clearing the low tier must also remove its keyword rule or route_to would target an empty pool.
+        inner.set_tier_value(TIER_LOW, None, None).unwrap();
+        let config = inner
+            .materialize()
+            .expect("clearing a tier leaves a valid config, not a dangling rule");
+        assert!(config.router.rules.iter().all(|rule| rule.id != KW_RULE_LOW));
+
         std::fs::remove_dir_all(root).ok();
     }
 

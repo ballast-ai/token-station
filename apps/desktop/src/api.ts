@@ -68,6 +68,8 @@ export interface SettingsView {
 export interface StateView {
   providers: ProviderView[];
   tiers: Record<TierSlot, TierView>;
+  /** User keyword library for each tier; a match forces that tier at routing layer 1. */
+  keywords: Record<TierSlot, string[]>;
   agent_routes: Record<string, AgentRouteView>;
   serve: ServeView;
   config_error: string | null;
@@ -309,6 +311,14 @@ export const setTier = (
   upstream: string | null,
   model: string | null,
 ) => invoke<StateView>("set_tier", { slot, upstream, model });
+
+/** Add a keyword to a tier; matching it forces that tier. */
+export const addKeyword = (slot: TierSlot, keyword: string) =>
+  invoke<StateView>("add_keyword", { slot, keyword });
+
+/** Remove a keyword from a tier. */
+export const removeKeyword = (slot: TierSlot, keyword: string) =>
+  invoke<StateView>("remove_keyword", { slot, keyword });
 
 export const setAgentRouteMode = (agentId: AgentId, mode: AgentRouteMode) =>
   invoke<StateView>("set_agent_route_mode", { agentId, mode });

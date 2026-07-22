@@ -40,6 +40,7 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
       mid: { upstream: null, model: null },
       low: { upstream: null, model: null },
     },
+    keywords: { high: [], mid: [], low: [] },
     agent_routes: Object.fromEntries(agentIds.map((id) => [id, structuredClone(emptyRoute)])),
     serve: { phase: "stopped", running: false, listen: "127.0.0.1:8787", virtual_key: null, error: null },
     config_error: null,
