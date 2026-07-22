@@ -2212,3 +2212,6 @@ pre.block {
 .capability-table th { font-weight: 600; font-size: 11px; color: var(--muted, #888); }
 .cap-yes { color: #3a9d5a; font-weight: 600; }
 .cap-no { color: var(--muted, #aaa); }
+
+/* 供应商已存在提示 (add-provider) */
+.banner.info { color: var(--accent, #4a6cf7); background: color-mix(in srgb, var(--accent, #4a6cf7) 10%, var(--surface, #fff)); }
