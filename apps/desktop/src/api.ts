@@ -6,11 +6,23 @@ export interface TierView {
   model: string | null;
 }
 
+/** A model's declared four-state capabilities (what the router gates on). */
+export interface ModelCapabilityView {
+  model: string;
+  tool: boolean;
+  vision: boolean;
+  json_schema: boolean;
+  /** 0 表示适配器未申报(未知),路由据此不往这里发长上下文。 */
+  context_window: number;
+}
+
 export interface ProviderView {
   name: string;
   provider: string;
   base_url: string;
   models: string[];
+  /** 每个模型的四态能力;后端总会给,旧 mock 可能缺,UI 兜 `?? []`。 */
+  model_details?: ModelCapabilityView[];
   has_auth: boolean;
 }
 
