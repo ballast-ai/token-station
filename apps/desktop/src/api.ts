@@ -15,6 +15,8 @@ export interface ProviderView {
   catalog_revision?: number;
   catalog?: CatalogModelView[];
   has_auth: boolean;
+  /** Locally hosted provider, such as Ollama. Local-only routing uses this to keep traffic on the machine. */
+  local?: boolean;
 }
 
 export type CapabilityState = "verified" | "declared" | "unsupported" | "unknown";
@@ -217,6 +219,10 @@ export interface StateView {
   keywords: Record<TierSlot, string[]>;
   agent_routes: Record<string, AgentRouteView>;
   profiles: string[];
+  /** Local-only routing uses providers marked local and keeps requests on the machine. */
+  local_only: boolean;
+  /** Whether local_only may fall back to cloud when no local target is available; false means strict local routing. */
+  allow_cloud_fallback: boolean;
   serve: ServeView;
   draft_revision: number;
   saved_revision: number;
@@ -420,7 +426,22 @@ export const addProvider = (
   base_url: string,
   models: string[],
   api_key: string | null,
-) => invoke<StateView>("add_provider", { name, baseUrl: base_url, models, apiKey: api_key });
+  local = false,
+) =>
+  invoke<StateView>("add_provider", {
+    name,
+    baseUrl: base_url,
+    models,
+    apiKey: api_key,
+    local,
+  });
+
+/** Set local-only routing and cloud fallback in the home router; inherited Agents follow automatically. */
+export const setLocalRouting = (localOnly: boolean, allowCloudFallback: boolean) =>
+  invoke<StateView>("set_local_routing", {
+    localOnly,
+    allowCloudFallback,
+  });
 
 export const editProvider = (name: string, base_url: string, api_key: string | null) =>
   invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });

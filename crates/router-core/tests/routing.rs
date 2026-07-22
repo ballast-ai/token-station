@@ -71,6 +71,18 @@ fn config() -> RouterConfig {
         assumed_context_window: 8_192,
         honor_exact_model: false,
         recovery: RecoveryPolicy::Strict,
+        local_only: false,
+        allow_cloud_fallback: false,
+    }
+}
+
+/// The shared config, but locked to local upstreams. `cheap` holds the local
+/// model; `sota` holds only cloud upstreams.
+fn local_only_config(allow_cloud_fallback: bool) -> RouterConfig {
+    RouterConfig {
+        local_only: true,
+        allow_cloud_fallback,
+        ..config()
     }
 }
 
@@ -111,7 +123,8 @@ fn candidates() -> Vec<Candidate> {
                 ..ModelCapability::default()
             },
             Health::Healthy,
-        ),
+        )
+        .local(true),
         Candidate::new(
             target("openai_personal", "gpt-5.5"),
             capable(400_000),
@@ -543,4 +556,107 @@ fn ordered_recovery_naming_a_missing_tier_is_refused_at_build() {
         Router::new(config).is_err(),
         "a backup tier that does not exist is a config error, like any other pool reference"
     );
+}
+
+// -- T7: local-only routing keeps the data on the machine ---------------------
+
+#[test]
+fn local_only_serves_a_local_pool() {
+    // A summarize hint routes to `cheap`, whose member is the local model.
+    let hints = [AgentHint::new(HintKind::StepType, "summarize")];
+    let decision = Router::new(local_only_config(false))
+        .expect("validates")
+        .route(&ask("tl;dr this"), &hints, &candidates())
+        .expect("the local pool serves a local-only route");
+
+    assert_eq!(decision.chosen, target("ollama_local", "llama3.3"));
+}
+
+#[test]
+fn local_only_without_fallback_refuses_a_cloud_only_pool() {
+    // The Chinese keyword for "prove" routes to `sota`, which carries only cloud upstreams.
+    // Local-only with no fallback must refuse rather than leave the machine.
+    let error = Router::new(local_only_config(false))
+        .expect("validates")
+        .route(&ask("请给出这个命题的证明"), &[], &candidates())
+        .expect_err("a cloud-only pool cannot serve a local-only route");
+
+    assert_eq!(
+        error,
+        NoRoute::Unsatisfiable {
+            pool: "sota".to_owned(),
+            reason: UnmetRequirement::LocalOnly,
+        }
+    );
+    assert_eq!(error.error_code(), ErrorCode::Capability);
+}
+
+#[test]
+fn local_only_with_fallback_authorizes_a_cloud_pool() {
+    // Same route, but the operator authorized cloud fallback: the cloud pool now
+    // serves, because no local candidate could.
+    let decision = Router::new(local_only_config(true))
+        .expect("validates")
+        .route(&ask("请给出这个命题的证明"), &[], &candidates())
+        .expect("authorized fallback lets the cloud pool serve");
+
+    assert_eq!(decision.pool, "sota");
+    assert!(
+        matches!(
+            decision.chosen.upstream.as_str(),
+            "openai_personal" | "anthropic_personal"
+        ),
+        "fallback served a cloud upstream: {}",
+        decision.chosen.upstream.as_str()
+    );
+}
+
+#[test]
+fn local_only_prefers_local_then_falls_back_within_a_pool() {
+    // A pool carrying both a local and a cloud model. The local one is ejected;
+    // with fallback off the route is refused, and with it authorized the pool's
+    // cloud member serves — the escape hatch is explicit, never silent.
+    let mut base = local_only_config(false);
+    base.pools.insert(
+        "cheap".to_owned(),
+        vec![
+            target("ollama_local", "llama3.3"),
+            target("openai_personal", "gpt-5.5"),
+        ],
+    );
+
+    let ejected_local = vec![
+        Candidate::new(
+            target("ollama_local", "llama3.3"),
+            capable(128_000),
+            Health::Unavailable,
+        )
+        .local(true),
+        Candidate::new(
+            target("openai_personal", "gpt-5.5"),
+            capable(400_000),
+            Health::Healthy,
+        ),
+    ];
+    let hints = [AgentHint::new(HintKind::StepType, "summarize")];
+
+    // Off: the local model is ejected and the cloud one must not be used silently.
+    let refused = Router::new(base.clone())
+        .expect("validates")
+        .route(&ask("tl;dr"), &hints, &ejected_local)
+        .expect_err("local ejected and fallback off → refuse");
+    assert_eq!(
+        refused,
+        NoRoute::Unavailable {
+            pool: "cheap".to_owned(),
+        }
+    );
+
+    // On: once local cannot serve, the same pool's cloud member does.
+    base.allow_cloud_fallback = true;
+    let decision = Router::new(base)
+        .expect("validates")
+        .route(&ask("tl;dr"), &hints, &ejected_local)
+        .expect("local ejected and fallback on → cloud serves");
+    assert_eq!(decision.chosen, target("openai_personal", "gpt-5.5"));
 }

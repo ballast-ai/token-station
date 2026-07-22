@@ -263,6 +263,12 @@ pub struct UpstreamConfig {
     /// Absent for unauthenticated upstreams such as a local Ollama.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthConfig>,
+    /// This upstream runs on the local machine (a local Ollama / LM Studio, say).
+    /// The router honors `router.local_only` by keeping traffic on these; without
+    /// it a request may not leave the box. Default false, so an ordinary cloud
+    /// upstream is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local: bool,
     /// What this upstream serves. The provider adapter may refine it; with no
     /// network of its own it cannot replace it.
     pub models: Vec<ModelCapability>,

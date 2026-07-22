@@ -1377,6 +1377,13 @@ body {
 .form-span { grid-column: 1 / -1; }
 .mono { font-family: "SF Mono", Menlo, monospace; }
 .local-provider-note { padding: 10px 12px; border-radius: 8px; color: var(--success); background: color-mix(in srgb, var(--success) 8%, var(--surface)); font-size: 11px; }
+.switch-row { display: flex; align-items: flex-start; gap: 10px; padding: 8px 2px; font-size: 13px; cursor: pointer; }
+.switch-row input[type="checkbox"] { width: 15px; height: 15px; margin-top: 1px; flex-shrink: 0; cursor: pointer; accent-color: var(--signal); }
+.switch-row input[type="checkbox"]:disabled { cursor: not-allowed; opacity: 0.5; }
+.switch-row.switch-row-sub { padding-left: 24px; font-size: 12px; color: var(--muted); }
+.switch-row em { font-style: normal; color: var(--muted); }
+.checkbox-label { display: flex; flex-direction: row; align-items: flex-start; gap: 8px; cursor: pointer; font-size: 12px; }
+.checkbox-label input[type="checkbox"] { width: 15px; height: 15px; margin-top: 1px; flex-shrink: 0; cursor: pointer; accent-color: var(--signal); }
 .endpoint-preview { display: grid; gap: 5px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--muted); font-size: 10px; }
 .endpoint-preview span { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px; align-items: baseline; }
 .endpoint-preview code { overflow-wrap: anywhere; color: var(--ink); font-size: 10px; }

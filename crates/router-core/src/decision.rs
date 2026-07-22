@@ -232,6 +232,10 @@ pub enum UnmetRequirement {
     /// one the caller pinned. Refusing is the honest answer — substituting a
     /// different model would break the promise the pin makes.
     ExactModelUnavailable,
+    /// The route is locked to local upstreams (`local_only`), no local candidate
+    /// could serve the request, and cloud fallback was not authorized. Refusing
+    /// is the point: the data must not silently leave the machine.
+    LocalOnly,
 }
 
 impl fmt::Display for UnmetRequirement {
@@ -245,6 +249,7 @@ impl fmt::Display for UnmetRequirement {
                 write!(f, "has a context window of at least {needed} tokens")
             }
             Self::ExactModelUnavailable => f.write_str("carries the pinned model"),
+            Self::LocalOnly => f.write_str("runs locally, and cloud fallback is off"),
         }
     }
 }

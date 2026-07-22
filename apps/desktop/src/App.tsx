@@ -13,6 +13,7 @@ import {
   serveStart,
   serveStop,
   setAdminEndpoint,
+  setLocalRouting,
   setTier,
   type AgentRouteView,
   type AgentUiMetadataView,
@@ -262,6 +263,9 @@ export default function App() {
           configError={state.config_error}
           keywords={state.keywords}
           saveStatus={saveStatus}
+          localOnly={state.local_only}
+          allowCloudFallback={state.allow_cloud_fallback}
+          onSetLocalRouting={(localOnly, allowCloudFallback) => void run(() => setLocalRouting(localOnly, allowCloudFallback))}
           onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
           onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
           onRemoveKeyword={(slot, keyword) => void run(() => removeKeyword(slot, keyword))}

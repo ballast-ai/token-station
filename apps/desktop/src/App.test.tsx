@@ -58,6 +58,8 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
     keywords: { high: [], mid: [], low: [] },
     agent_routes: Object.fromEntries(agentIds.map((id) => [id, structuredClone(emptyRoute)])),
     profiles: [],
+    local_only: false,
+    allow_cloud_fallback: false,
     serve: serveFixture(),
     draft_revision: 0,
     saved_revision: 0,

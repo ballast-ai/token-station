@@ -92,5 +92,7 @@ pub(crate) fn config() -> RouterConfig {
         assumed_context_window: 8_192,
         honor_exact_model: false,
         recovery: crate::config::RecoveryPolicy::Strict,
+        local_only: false,
+        allow_cloud_fallback: false,
     }
 }
