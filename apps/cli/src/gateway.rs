@@ -233,10 +233,6 @@ fn input_contains_non_language_content(value: &Value) -> bool {
     }
 }
 
-/// A [`RequestRecord`] with a stable accounting id stamped on it at arrival.
-/// One logical request gets one id; the dispatch fallback sweep reuses it, so
-/// internal retries are one accounting unit, and a record written twice
-/// collapses to one row instead of double-counting.
 /// An outbound HTTP agent with an explicit, fail-closed egress policy (P1-6):
 ///
 /// - **No redirects.** Following a 3xx could carry the `Authorization` header to
@@ -245,22 +241,37 @@ fn input_contains_non_language_content(value: &Value) -> bool {
 /// - **No environment proxy.** `HTTP(S)_PROXY` is ignored, so traffic never
 ///   silently detours through a middlebox the operator did not configure here.
 ///
-/// Every upstream and probe request goes through one of these, so where a
+/// Every upstream and probe request goes through this policy, so where a
 /// request (and its credential) can go is a property of the code, not the
 /// ambient environment.
-fn egress_config(timeout: Duration) -> ureq::config::Config {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        // The pipeline maps upstream errors itself; a non-2xx is an answer,
-        // not a transport failure.
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .proxy(None)
-        .build()
-}
+struct EgressPolicy;
 
-fn egress_agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::new_with_config(egress_config(timeout))
+impl EgressPolicy {
+    fn config(timeout: Duration) -> ureq::config::Config {
+        ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            // The pipeline maps upstream errors itself; a non-2xx is an
+            // answer, not a transport failure.
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .proxy(None)
+            .build()
+    }
+
+    fn agent(timeout: Duration) -> ureq::Agent {
+        ureq::Agent::new_with_config(Self::config(timeout))
+    }
+
+    fn reject_redirect(status: u16) -> Result<(), ErrorEnvelope> {
+        if (300..400).contains(&status) {
+            return Err(ErrorEnvelope::new(
+                ErrorCode::UpstreamUnavailable,
+                502,
+                format!("upstream redirect refused: HTTP {status}"),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// A request-scoped connector that turns a blocking socket read into short,
@@ -370,7 +381,7 @@ impl ureq::unversioned::transport::Transport for CancelTransport {
 
 fn cancel_aware_agent(timeout: Duration, token: CancelToken) -> ureq::Agent {
     ureq::Agent::with_parts(
-        egress_config(timeout),
+        EgressPolicy::config(timeout),
         CancelConnector {
             inner: ureq::unversioned::transport::DefaultConnector::default(),
             token,
@@ -379,6 +390,10 @@ fn cancel_aware_agent(timeout: Duration, token: CancelToken) -> ureq::Agent {
     )
 }
 
+/// A [`RequestRecord`] with a stable accounting id stamped on it at arrival.
+/// One logical request gets one id; the dispatch fallback sweep reuses it, so
+/// internal retries are one accounting unit, and a record written twice
+/// collapses to one row instead of double-counting.
 fn begin_record(started_at_ms: u64, protocol: impl Into<String>) -> RequestRecord {
     let mut record = RequestRecord::begin(started_at_ms, protocol);
     record.request_id = format!(
@@ -865,7 +880,7 @@ impl Gateway {
             return Err(format!("upstream `{upstream_name}` declares no models"));
         }
 
-        let http = egress_agent(PROBE_TIMEOUT);
+        let http = EgressPolicy::agent(PROBE_TIMEOUT);
 
         Ok(models
             .into_iter()
@@ -959,7 +974,7 @@ impl Gateway {
             return Err(format!("upstream `{upstream_name}` declares no models"));
         }
 
-        let http = egress_agent(PROBE_TIMEOUT);
+        let http = EgressPolicy::agent(PROBE_TIMEOUT);
 
         Ok(models
             .into_iter()
@@ -1684,6 +1699,7 @@ impl Gateway {
             }
         };
         let response = sent.map_err(map_transport_error)?;
+        EgressPolicy::reject_redirect(response.status().as_u16())?;
 
         Ok(UpstreamResponse::from(response))
     }
@@ -2140,6 +2156,34 @@ mod attempt_budget_tests {
         let envelope = map_transport_error(ureq::Error::Timeout(ureq::Timeout::Global));
         assert_eq!(envelope.code, token_station_protocol::ErrorCode::Timeout);
         assert_eq!(envelope.http_status, 504);
+    }
+}
+
+#[cfg(test)]
+mod egress_policy_tests {
+    use super::EgressPolicy;
+    use std::time::Duration;
+    use token_station_protocol::ErrorCode;
+
+    #[test]
+    fn redirects_and_environment_proxies_are_disabled_explicitly() {
+        let agent = EgressPolicy::agent(Duration::from_secs(1));
+
+        assert_eq!(agent.config().max_redirects(), 0);
+        assert!(agent.config().proxy().is_none());
+    }
+
+    #[test]
+    fn every_redirect_status_is_rejected_before_provider_parsing() {
+        for status in [300, 302, 307, 399] {
+            let error = EgressPolicy::reject_redirect(status).unwrap_err();
+            assert_eq!(error.code, ErrorCode::UpstreamUnavailable);
+            assert_eq!(error.http_status, 502);
+            assert!(error.message.contains(&status.to_string()));
+        }
+        for status in [299, 400] {
+            EgressPolicy::reject_redirect(status).expect("non-redirect status continues");
+        }
     }
 }
 
