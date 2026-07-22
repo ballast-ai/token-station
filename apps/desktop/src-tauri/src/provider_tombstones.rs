@@ -40,6 +40,11 @@ impl Default for TombstoneFile {
 
 pub(crate) fn archive(data_dir: &Path, name: &str, provider: &Value) -> Result<(), String> {
     let mut file = load(data_dir)?;
+    if file.providers.contains_key(name) {
+        return Err(format!(
+            "Provider 回收站已有 `{name}`，请先恢复后再编辑，已拒绝覆盖旧恢复点"
+        ));
+    }
     file.providers.insert(
         name.to_owned(),
         Tombstone {
@@ -48,6 +53,10 @@ pub(crate) fn archive(data_dir: &Path, name: &str, provider: &Value) -> Result<(
         },
     );
     persist(data_dir, &file)
+}
+
+pub(crate) fn contains(data_dir: &Path, name: &str) -> Result<bool, String> {
+    Ok(load(data_dir)?.providers.contains_key(name))
 }
 
 pub(crate) fn take(data_dir: &Path, name: &str) -> Result<Option<Value>, String> {
@@ -127,7 +136,7 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{archive, discard, list, path, take};
+    use super::{archive, contains, discard, list, path, take};
     use serde_json::json;
 
     #[test]
@@ -144,7 +153,13 @@ mod tests {
         });
 
         archive(&root, "example", &provider).unwrap();
+        assert!(contains(&root, "example").unwrap());
+        let replacement = json!({"provider": "another-account"});
+        assert!(archive(&root, "example", &replacement)
+            .unwrap_err()
+            .contains("拒绝覆盖"));
         assert_eq!(take(&root, "example").unwrap(), Some(provider.clone()));
+        assert!(!contains(&root, "example").unwrap());
         assert_eq!(take(&root, "example").unwrap(), None);
         archive(&root, "example", &provider).unwrap();
         discard(&root, "example").unwrap();

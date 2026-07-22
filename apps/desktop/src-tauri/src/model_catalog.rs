@@ -111,18 +111,9 @@ pub(crate) fn discover_with_cache(
         Ok(models) => {
             let fetched_at_ms = now_ms();
             let previous = read_cached_entry(data_dir, name, base_url);
-            let (entry, added, removed) = merge_live_catalog(
-                base_url,
-                previous.as_ref(),
-                &models,
-                fetched_at_ms,
-            );
-            let warning = write_cache(
-                data_dir,
-                name,
-                entry.clone(),
-            )
-            .err();
+            let (entry, added, removed) =
+                merge_live_catalog(base_url, previous.as_ref(), &models, fetched_at_ms);
+            let warning = write_cache(data_dir, name, entry.clone()).err();
             Ok(ModelDiscoveryView {
                 models,
                 source: "live".to_owned(),
@@ -268,8 +259,8 @@ fn visible_models(catalog: &[CatalogModelView]) -> Vec<String> {
 }
 
 fn fetch_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>, String> {
-    let endpoint = ProviderEndpoint::try_new(base_url)
-        .map_err(|error| format!("Base URL 不合法：{error}"))?;
+    let endpoint =
+        ProviderEndpoint::try_new(base_url).map_err(|error| format!("Base URL 不合法：{error}"))?;
     let url = endpoint.resolve(ProviderApi::Models);
     let http = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
@@ -436,6 +427,29 @@ fn write_cache(data_dir: &Path, name: &str, entry: CacheEntry) -> Result<(), Str
     std::fs::create_dir_all(data_dir).map_err(|error| format!("创建数据目录失败：{error}"))?;
     let mut cache = load_cache(data_dir);
     cache.providers.insert(name.to_owned(), entry);
+    persist_cache(data_dir, &cache)
+}
+
+/// Invalidates every catalog fact tied to one Provider identity.
+///
+/// A deleted/re-added Provider may point at the same URL with a different
+/// account. Keeping the old live catalog would then turn another account's
+/// observations into trusted facts, so lifecycle changes fail closed by
+/// dropping this derived cache.
+pub(crate) fn remove_provider(data_dir: &Path, name: &str) -> Result<bool, String> {
+    let _guard = CACHE_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "模型缓存写锁已损坏".to_owned())?;
+    let mut cache = load_cache(data_dir);
+    if cache.providers.remove(name).is_none() {
+        return Ok(false);
+    }
+    persist_cache(data_dir, &cache)?;
+    Ok(true)
+}
+
+fn persist_cache(data_dir: &Path, cache: &CacheFile) -> Result<(), String> {
     let mut rendered = serde_json::to_string_pretty(&cache)
         .map_err(|error| format!("序列化模型缓存失败：{error}"))?;
     rendered.push('\n');
@@ -469,7 +483,8 @@ fn now_ms() -> u64 {
 mod tests {
     use super::{
         catalog_for_provider, discover_with_cache, fetch_models, parse_models, read_cached_entry,
-        status_message, unknown_catalog_model, write_cache, CacheEntry, CatalogSource, CatalogState,
+        remove_provider, status_message, unknown_catalog_model, write_cache, CacheEntry,
+        CatalogSource, CatalogState,
     };
     use serde_json::json;
     use std::io::{Read, Write};
@@ -631,6 +646,36 @@ mod tests {
     }
 
     #[test]
+    fn provider_identity_changes_invalidate_only_its_catalog() {
+        let dir = scratch("identity-invalidation");
+        write_cache(
+            &dir,
+            "old-account",
+            cache_entry("https://api.example.test/v1", &["private-model"], 1),
+        )
+        .unwrap();
+        write_cache(
+            &dir,
+            "other",
+            cache_entry("https://other.example.test/v1", &["other-model"], 2),
+        )
+        .unwrap();
+
+        assert!(remove_provider(&dir, "old-account").unwrap());
+        assert!(!remove_provider(&dir, "old-account").unwrap());
+        assert!(
+            read_cached_entry(&dir, "old-account", "https://api.example.test/v1").is_none(),
+            "a re-added Provider cannot inherit the deleted account's catalog"
+        );
+        assert!(
+            read_cached_entry(&dir, "other", "https://other.example.test/v1").is_some(),
+            "unrelated Provider catalogs remain intact"
+        );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn a_damaged_cache_is_treated_as_empty() {
         let dir = scratch("damaged");
         std::fs::create_dir_all(&dir).expect("scratch directory exists");
@@ -737,12 +782,8 @@ mod tests {
             ..ModelCapability::default()
         };
 
-        let (revision, catalog) = catalog_for_provider(
-            &dir,
-            "fixture",
-            "https://example.test/v1",
-            &[configured],
-        );
+        let (revision, catalog) =
+            catalog_for_provider(&dir, "fixture", "https://example.test/v1", &[configured]);
 
         assert_eq!(revision, 1);
         let cached = catalog

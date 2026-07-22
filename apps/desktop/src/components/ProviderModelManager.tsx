@@ -63,6 +63,12 @@ const probeLayerLabel = {
   json: "JSON Schema",
 } as const;
 
+function costLabel(costMicros: number | null): string {
+  return costMicros != null && costMicros > 0
+    ? `估算成本 ${(costMicros / 1_000_000).toFixed(4)}`
+    : "成本未知";
+}
+
 const resultStatus = (result: ModelDiscoveryView): CatalogStatus => {
   if (result.source === "live") {
     return {
@@ -121,7 +127,7 @@ export default function ProviderModelManager({
       .then((view) => {
         const aggregate = view.groups.find(([name]) => name === provider.name)?.[1];
         setUsage(aggregate
-          ? `${aggregate.requests} 次请求 · ${aggregate.errors} 次错误 · P95 ${aggregate.p95_latency_ms}ms · ${aggregate.input_tokens + aggregate.output_tokens} tokens`
+          ? `${aggregate.requests} 次请求 · ${aggregate.errors} 次错误 · P95 ${aggregate.p95_latency_ms}ms · ${aggregate.input_tokens + aggregate.output_tokens} tokens · ${costLabel(aggregate.cost_micros)}`
           : "暂无请求记录");
       })
       .catch(() => setUsage("用量暂不可读"));
