@@ -7,6 +7,12 @@ edition = "2021"
 license = "Apache-2.0"
 publish = false
 
+[features]
+# Official desktop artifacts enable this feature through scripts/build-desktop.sh.
+# It compiles the four trusted adapters into the executable; ordinary unit tests
+# keep it disabled so they do not require a staged WASI plugin directory.
+bundled-plugins = ["token-station-cli/builtin-plugins"]
+
 [lib]
 # The `_lib` suffix keeps the lib name distinct from the bin on Windows.
 name = "token_station_desktop_lib"
