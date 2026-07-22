@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   saveHomeRouteAsProfile,
   type AgentRouteView,
@@ -50,6 +51,23 @@ export default function HomePage({
   onStateChange,
 }: HomePageProps) {
   const scanned = new Map(agents.map((agent) => [agent.metadata.agent_id, agent]));
+  const [namingProfile, setNamingProfile] = useState(false);
+  const [profileName, setProfileName] = useState("");
+
+  const [profileError, setProfileError] = useState("");
+  const confirmSaveProfile = () => {
+    const name = profileName.trim();
+    if (!name) return;
+    void saveHomeRouteAsProfile(name)
+      .then((next) => {
+        onStateChange(next, `已另存为策略组「${name}」`);
+        setNamingProfile(false);
+        setProfileName("");
+        setProfileError("");
+      })
+      .catch((caught) => setProfileError(String(caught)));
+  };
+
   return (
     <div className="page-stack home-page">
       <header className="page-title-row">
@@ -96,22 +114,35 @@ export default function HomePage({
         <footer className="panel-foot route-actions">
           <button className="btn primary" type="button" disabled={busy} onClick={onSave}>保存并应用</button>
           <button className="btn" type="button" disabled={busy} onClick={onApplyAll}>应用到全部 Agent</button>
-          <button
-            className="btn"
-            type="button"
-            disabled={busy || Boolean(configError)}
-            title="把当前三档存成命名策略组,供多个 Agent 挂载共用"
-            onClick={() => {
-              const name = window.prompt("策略组名称(供多个 Agent 挂载共用):");
-              if (name?.trim()) {
-                void saveHomeRouteAsProfile(name.trim()).then((next) =>
-                  onStateChange(next, `已另存为策略组「${name.trim()}」`),
-                );
-              }
-            }}
-          >
-            另存为策略组
-          </button>
+          {namingProfile ? (
+            <span className="profile-save-inline">
+              <input
+                className="input"
+                autoFocus
+                placeholder="策略组名称"
+                value={profileName}
+                disabled={busy}
+                onChange={(event) => setProfileName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") confirmSaveProfile();
+                  if (event.key === "Escape") setNamingProfile(false);
+                }}
+              />
+              <button className="btn primary" type="button" disabled={busy || !profileName.trim()} onClick={confirmSaveProfile}>存</button>
+              <button className="btn" type="button" disabled={busy} onClick={() => { setNamingProfile(false); setProfileError(""); }}>取消</button>
+            </span>
+          ) : (
+            <button
+              className="btn"
+              type="button"
+              disabled={busy || Boolean(configError)}
+              title="把当前三档存成命名策略组,供多个 Agent 挂载共用"
+              onClick={() => { setNamingProfile(true); setProfileError(""); }}
+            >
+              另存为策略组
+            </button>
+          )}
+          {profileError && <span className="foot-hint error-text">{profileError}</span>}
           <span className={`save-state ${dirty ? "dirty" : !applied ? "unapplied" : "clean"}`}>
             {dirty
               ? "● 有未保存更改"

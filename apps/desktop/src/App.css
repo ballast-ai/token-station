@@ -2185,3 +2185,7 @@ pre.block {
 /* 策略组挂载 (T7) */
 .profile-mount { margin: 8px 0; }
 .profile-mount select { max-width: 320px; }
+
+/* 另存为策略组内联输入 (T7 fix) */
+.profile-save-inline { display: inline-flex; align-items: center; gap: 6px; }
+.profile-save-inline .input { width: 180px; }
