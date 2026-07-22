@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import {
   ModelDiscoveryView,
+  CapabilityState,
+  ModelCapabilityView,
   ProviderView,
   StateView,
   discoverProviderModels,
@@ -16,6 +18,20 @@ interface ProviderModelManagerProps {
 }
 
 const mergeModels = (...groups: string[][]) => [...new Set(groups.flat())];
+
+const capabilityLabel: Record<CapabilityState, string> = {
+  verified: "已验证",
+  declared: "已声明",
+  unsupported: "不支持",
+  unknown: "未知",
+};
+
+const unknownCapabilities = (model: string): ModelCapabilityView => ({
+  model,
+  tool: "unknown",
+  vision: "unknown",
+  json_schema: "unknown",
+});
 
 const resultStatus = (result: ModelDiscoveryView): CatalogStatus => {
   if (result.source === "live") {
@@ -51,6 +67,10 @@ export default function ProviderModelManager({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const capabilities = useMemo(() => {
+    const byModel = new Map((provider.model_capabilities ?? []).map((item) => [item.model, item]));
+    return provider.models.map((model) => byModel.get(model) ?? unknownCapabilities(model));
+  }, [provider.model_capabilities, provider.models]);
   const operationDisabled = disabled || refreshing || saving;
 
   const refresh = async () => {
@@ -86,6 +106,22 @@ export default function ProviderModelManager({
 
   return (
     <div className="provider-model-manager">
+      <div className="capability-table" aria-label="模型能力状态">
+        {capabilities.map((capability) => (
+          <div className="capability-row" key={capability.model}>
+            <code>{capability.model}</code>
+            {([
+              ["工具", capability.tool],
+              ["视觉", capability.vision],
+              ["JSON", capability.json_schema],
+            ] as const).map(([label, state]) => (
+              <span className={`capability-tag ${state}`} key={label}>
+                {label} · {capabilityLabel[state]}
+              </span>
+            ))}
+          </div>
+        ))}
+      </div>
       <ModelPicker
         models={models}
         selected={selected}

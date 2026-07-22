@@ -335,7 +335,7 @@ fn start_proxy_with_agents(
                 "base_url": upstream.base_url(),
                 "auth": { "slot": "provider_api_key", "file": key_file },
                 "models": [
-                    { "model": "gpt-5.5", "tool": true, "json_schema": true, "context_window": 400_000 }
+                    { "model": "gpt-5.5", "tool": true, "tool_state": "verified", "vision": true, "vision_state": "verified", "json_schema": true, "json_schema_state": "declared", "context_window": 400_000 }
                 ]
             }
         },
@@ -701,7 +701,12 @@ fn a_chat_completion_round_trips_with_the_credential_injected() {
         &proxy,
         &json!({
             "model": "auto",
-            "messages": [{ "role": "user", "content": "what is six times seven" }]
+            "messages": [{ "role": "user", "content": "what is six times seven" }],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "calculator", "parameters": {"type": "object"}}
+            }],
+            "metadata": {"type": "audio", "modalities": ["audio"]}
         }),
         None,
     );
@@ -726,6 +731,7 @@ fn a_chat_completion_round_trips_with_the_credential_injected() {
         json!("gpt-5.5"),
         "routing replaced `auto`"
     );
+    assert_eq!(seen[0].body["tools"][0]["function"]["name"], "calculator");
 
     // And what the exchange left behind: one row, decision and usage included.
     settle();
@@ -2028,26 +2034,55 @@ fn an_upstream_401_is_mapped_not_retried_and_never_leaks_the_key() {
 }
 
 #[test]
-fn a_request_the_pool_cannot_serve_is_refused_with_the_reason() {
-    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
+fn image_audio_and_embeddings_are_refused_at_the_language_only_boundary() {
+    let mock = MockUpstream::start(Vec::new());
     let key = key_file("capability", "sk-test-key-abc");
     let proxy = start_proxy(&mock, &key);
 
-    // The only model has no vision; an image request has nowhere to go.
-    let (status, body) = post_chat(
-        &proxy,
-        &json!({
+    // The configured Provider capability is deliberately verified for vision;
+    // the host's language-only product boundary must still win before routing.
+
+    for request in [
+        json!({
             "model": "auto",
             "messages": [{ "role": "user", "content": [
                 { "type": "image_url", "image_url": { "url": "https://example/cat.png" } }
             ]}]
         }),
-        None,
-    );
+        json!({
+            "model": "auto",
+            "messages": [{ "role": "user", "content": [
+                { "type": "input_audio", "input_audio": { "data": "AA==", "format": "wav" } }
+            ]}]
+        }),
+    ] {
+        let (status, body) = post_chat(&proxy, &request, None);
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains("language-model"), "{body}");
+        assert!(body.contains("capability"), "{body}");
+        settle();
+        let row = last_row(&proxy.data_dir);
+        assert_eq!(row["error_code"], "Text(\"capability\")");
+        assert_eq!(row["attempts"], "Integer(0)");
+    }
 
-    assert_eq!(status, 503, "{body}");
-    assert!(body.contains("vision"), "{body}");
-    assert_eq!(mock.hits(), 0, "nothing capable, so nothing was sent");
+    let response = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    )
+    .post(format!("{}/v1/embeddings", proxy.url))
+    .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+    .send(&json!({"model": "auto", "input": "hello"}).to_string())
+    .expect("the proxy returns a typed refusal");
+    assert_eq!(response.status().as_u16(), 400);
+    let body = response.into_body().read_to_string().expect("body reads");
+    assert!(body.contains("capability"), "{body}");
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["error_code"], "Text(\"capability\")");
+    assert_eq!(row["attempts"], "Integer(0)");
+    assert_eq!(mock.hits(), 0, "the language-only boundary is pre-upstream");
 
     std::fs::remove_file(key).ok();
 }

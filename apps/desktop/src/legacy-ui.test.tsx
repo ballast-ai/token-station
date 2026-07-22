@@ -295,4 +295,23 @@ describe("model selection and provider model management", () => {
     expect(await screen.findByText(/save down/)).toBeInTheDocument();
     expect(within(screen.getByText(/代理运行中/).parentElement!).getByRole("button")).toBeEnabled();
   });
+
+  it("shows verified declared unsupported and unknown capability states", () => {
+    const provider: ProviderView = {
+      name: "matrix",
+      provider: "openai-compatible",
+      base_url: "https://api.example/v1",
+      models: ["model-a", "model-b"],
+      model_capabilities: [
+        { model: "model-a", tool: "verified", vision: "declared", json_schema: "unsupported" },
+        { model: "model-b", tool: "unknown", vision: "unknown", json_schema: "unknown" },
+      ],
+      has_auth: true,
+    };
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    expect(screen.getByText("工具 · 已验证")).toBeInTheDocument();
+    expect(screen.getByText("视觉 · 已声明")).toBeInTheDocument();
+    expect(screen.getByText("JSON · 不支持")).toBeInTheDocument();
+    expect(screen.getAllByText(/· 未知/)).toHaveLength(3);
+  });
 });

@@ -349,13 +349,13 @@ impl Router {
     ) -> Option<UnmetRequirement> {
         let capability = &candidate.capability;
 
-        if features.tool_count > 0 && !capability.tool {
+        if features.tool_count > 0 && !capability.tool_state().is_supported() {
             return Some(UnmetRequirement::Tools);
         }
-        if features.has_images && !capability.vision {
+        if features.has_images && !capability.vision_state().is_supported() {
             return Some(UnmetRequirement::Vision);
         }
-        if features.requires_json_schema && !capability.json_schema {
+        if features.requires_json_schema && !capability.json_schema_state().is_supported() {
             return Some(UnmetRequirement::JsonSchema);
         }
 

@@ -32,8 +32,8 @@ use token_station_metrics::{Recorder, RequestRecord, RoutingRecord};
 use token_station_plugin_runtime::{AgentPlugin, NoSecrets, PluginRuntime, ProviderPlugin};
 use token_station_protocol::{
     AgentRequestEnvelope, Auth, ChatRequest, ErrorCode, ErrorEnvelope, HeaderDigest, HttpMethod,
-    HttpRequestDescriptor, HttpResponseParts, Principal, ProviderConfig, SecretRef, StreamChunk,
-    StreamEvent, StreamOutcome,
+    HttpRequestDescriptor, HttpResponseParts, ModelCapability, Principal, ProviderConfig,
+    SecretRef, StreamChunk, StreamEvent, StreamOutcome,
 };
 use token_station_router_core::{
     Candidate, Decision, HealthPolicy, HealthTracker, Router, UpstreamModel, UpstreamRef,
@@ -155,6 +155,81 @@ fn map_transport_error(error: ureq::Error) -> ErrorEnvelope {
             502,
             format!("upstream transport: {error}"),
         ),
+    }
+}
+
+fn language_only_refusal() -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorCode::Capability,
+        400,
+        "this proxy routes language-model text and tool requests only; image, audio, and embeddings are unsupported",
+    )
+}
+
+fn is_embeddings_path(path: &str) -> bool {
+    path.trim_end_matches('/').ends_with("/embeddings")
+}
+
+fn contains_non_language_content(value: &Value) -> bool {
+    let Value::Object(object) = value else {
+        return false;
+    };
+
+    let output_media = object
+        .get("modalities")
+        .and_then(Value::as_array)
+        .is_some_and(|modalities| {
+            modalities
+                .iter()
+                .any(|modality| modality.as_str().is_some_and(|kind| kind != "text"))
+        })
+        || object.contains_key("audio");
+    let message_media = object
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| messages.iter().any(message_contains_non_language_content));
+    let input_media = object
+        .get("input")
+        .is_some_and(input_contains_non_language_content);
+
+    output_media || message_media || input_media
+}
+
+fn message_contains_non_language_content(value: &Value) -> bool {
+    let Value::Object(message) = value else {
+        return false;
+    };
+    message.contains_key("audio")
+        || message
+            .get("content")
+            .is_some_and(input_contains_non_language_content)
+}
+
+fn input_contains_non_language_content(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(input_contains_non_language_content),
+        Value::Object(item) => {
+            let typed_media = item
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| {
+                    matches!(
+                        kind,
+                        "image_url"
+                            | "input_image"
+                            | "image"
+                            | "input_audio"
+                            | "audio"
+                            | "audio_url"
+                    )
+                });
+            typed_media
+                || item.contains_key("audio")
+                || item
+                    .get("content")
+                    .is_some_and(input_contains_non_language_content)
+        }
+        _ => false,
     }
 }
 
@@ -324,6 +399,47 @@ struct Upstream {
 struct LoadedAgent {
     plugin: AgentPlugin,
     protocol: String,
+}
+
+/// Keep evidence that was recorded by the host when a v1 provider plugin only
+/// understands the legacy capability booleans. Older plugins legitimately
+/// omit the optional `*_state` fields when they deserialize and re-serialize
+/// the catalog; allowing that round-trip to erase `unknown` could turn it into
+/// a positive `declared` result through the legacy `true` fallback.
+fn project_capability_evidence_for_v1(mut capability: ModelCapability) -> ModelCapability {
+    if let Some(state) = capability.tool_state {
+        capability.tool = state.is_supported();
+    }
+    if let Some(state) = capability.vision_state {
+        capability.vision = state.is_supported();
+    }
+    if let Some(state) = capability.json_schema_state {
+        capability.json_schema = state.is_supported();
+    }
+    capability
+}
+
+fn restore_configured_capability_evidence(
+    mut reported: ModelCapability,
+    configured: &[ModelCapability],
+) -> ModelCapability {
+    let Some(saved) = configured
+        .iter()
+        .find(|saved| saved.model == reported.model)
+    else {
+        return reported;
+    };
+
+    if reported.tool_state.is_none() && saved.tool_state.is_some() {
+        reported.tool_state = saved.tool_state;
+    }
+    if reported.vision_state.is_none() && saved.vision_state.is_some() {
+        reported.vision_state = saved.vision_state;
+    }
+    if reported.json_schema_state.is_none() && saved.json_schema_state.is_some() {
+        reported.json_schema_state = saved.json_schema_state;
+    }
+    reported
 }
 
 /// The assembled data plane.
@@ -620,13 +736,21 @@ impl Gateway {
             let mut provider_config =
                 ProviderConfig::new(entry.provider.clone(), entry.base_url.clone());
             provider_config.auth = entry.auth.as_ref().map(|auth| SecretRef::new(&auth.slot));
-            provider_config.models.clone_from(&entry.models);
+            provider_config.models = entry
+                .models
+                .iter()
+                .cloned()
+                .map(project_capability_evidence_for_v1)
+                .collect();
 
             // The adapter may refine the declared catalog; it cannot invent one,
             // having no network. This is `model_capabilities`' production call.
-            let capabilities = plugin
+            let capabilities: Vec<_> = plugin
                 .model_capabilities(&provider_config)
-                .map_err(|error| format!("upstream `{name}` capabilities: {}", error.message))?;
+                .map_err(|error| format!("upstream `{name}` capabilities: {}", error.message))?
+                .into_iter()
+                .map(|capability| restore_configured_capability_evidence(capability, &entry.models))
+                .collect();
 
             let reference = token_station_router_core::UpstreamRef::new(name.clone())
                 .expect("config validation checked the shape");
@@ -1019,6 +1143,31 @@ impl Gateway {
             }
         };
 
+        // The language-only product boundary belongs to the host, not an
+        // adapter. Reject embeddings before `match_inbound` so an old or
+        // third-party adapter cannot claim the path and accidentally forward
+        // it through the chat pipeline.
+        if is_embeddings_path(path) {
+            let refusal = language_only_refusal();
+            let mut record = begin_record(started_at_ms, String::new());
+            record.status = refusal.http_status;
+            record.error_code = Some(refusal.code);
+            emit(Reply::BeginJson(JsonReply {
+                status: refusal.http_status,
+                body: json!({
+                    "error": {
+                        "message": refusal.message,
+                        "type": refusal.code.as_str(),
+                        "code": refusal.code.as_str()
+                    }
+                })
+                .to_string(),
+            }));
+            record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+            self.recorder.record(&record);
+            return;
+        }
+
         // Concurrency admission: take a global and a per-Agent permit, held for
         // the whole exchange. Over a ceiling we refuse with 429 rather than pile
         // another request onto the upstreams.
@@ -1064,8 +1213,8 @@ impl Gateway {
                 body: json!({
                     "error": {
                         "message": refusal.message,
-                        "type": "invalid_request",
-                        "code": "invalid_request"
+                        "type": refusal.code.as_str(),
+                        "code": refusal.code.as_str()
                     }
                 })
                 .to_string(),
@@ -1164,6 +1313,9 @@ impl Gateway {
                 format!("body is not JSON: {error}"),
             )
         })?;
+        if contains_non_language_content(&body) {
+            return Err(language_only_refusal());
+        }
 
         // The envelope an agent adapter is allowed to see: headers already
         // redacted, principal already decided. (Inbound auth itself is C1#4.)
@@ -2104,5 +2256,114 @@ mod requested_model_privacy_tests {
             canonical_requested_model("mystery-model-a", false),
             canonical_requested_model("mystery-model-b", false),
         );
+    }
+}
+
+#[cfg(test)]
+mod capability_evidence_tests {
+    use super::{project_capability_evidence_for_v1, restore_configured_capability_evidence};
+    use token_station_protocol::{CapabilityState, ModelCapability};
+
+    #[test]
+    fn an_old_plugin_cannot_promote_explicit_unknown_to_declared() {
+        let configured = ModelCapability {
+            model: "legacy-model".to_owned(),
+            tool: true,
+            tool_state: Some(CapabilityState::Unknown),
+            ..ModelCapability::default()
+        };
+        let projected = project_capability_evidence_for_v1(configured.clone());
+        assert!(!projected.tool, "unknown projects to fail-closed for v1");
+        let reported = ModelCapability {
+            model: "legacy-model".to_owned(),
+            tool: projected.tool,
+            ..ModelCapability::default()
+        };
+
+        let merged = restore_configured_capability_evidence(reported, &[configured]);
+
+        assert_eq!(merged.tool_state(), CapabilityState::Unknown);
+        assert!(!merged.tool_state().is_supported());
+    }
+
+    #[test]
+    fn an_old_plugin_cannot_erase_verified_evidence() {
+        let configured = ModelCapability {
+            model: "legacy-model".to_owned(),
+            tool_state: Some(CapabilityState::Verified),
+            ..ModelCapability::default()
+        };
+        let projected = project_capability_evidence_for_v1(configured.clone());
+        assert!(projected.tool, "verified projects to true for v1");
+        let reported = ModelCapability {
+            model: "legacy-model".to_owned(),
+            tool: projected.tool,
+            ..ModelCapability::default()
+        };
+
+        let merged = restore_configured_capability_evidence(reported, &[configured]);
+
+        assert_eq!(merged.tool_state(), CapabilityState::Verified);
+        assert!(merged.tool_state().is_supported());
+    }
+
+    #[test]
+    fn a_new_plugin_explicit_report_is_not_overwritten_by_configuration() {
+        let configured = ModelCapability {
+            model: "modern-model".to_owned(),
+            tool_state: Some(CapabilityState::Declared),
+            ..ModelCapability::default()
+        };
+        let reported = ModelCapability {
+            model: "modern-model".to_owned(),
+            tool_state: Some(CapabilityState::Unsupported),
+            ..ModelCapability::default()
+        };
+
+        let merged = restore_configured_capability_evidence(reported, &[configured]);
+
+        assert_eq!(merged.tool_state(), CapabilityState::Unsupported);
+    }
+}
+
+#[cfg(test)]
+mod language_boundary_tests {
+    use super::{contains_non_language_content, is_embeddings_path};
+    use serde_json::json;
+
+    #[test]
+    fn only_the_canonical_embeddings_path_is_a_language_boundary() {
+        assert!(is_embeddings_path("/v1/embeddings"));
+        assert!(is_embeddings_path("/v1/embeddings/"));
+        assert!(!is_embeddings_path("/v1/not-embeddings"));
+    }
+
+    #[test]
+    fn protocol_content_and_top_level_output_modalities_are_rejected() {
+        assert!(contains_non_language_content(&json!({
+            "messages": [{"role": "user", "content": [{"type": "image_url"}]}]
+        })));
+        assert!(contains_non_language_content(&json!({
+            "input": [{"type": "message", "content": [{"type": "input_audio"}]}]
+        })));
+        assert!(contains_non_language_content(&json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "modalities": ["text", "audio"]
+        })));
+    }
+
+    #[test]
+    fn metadata_and_tool_schemas_do_not_trigger_the_media_boundary() {
+        assert!(!contains_non_language_content(&json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "metadata": {"type": "audio", "modalities": ["audio"]},
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "catalog",
+                    "parameters": {"type": "object", "properties": {"type": {"const": "image"}}}
+                }
+            }]
+        })));
     }
 }

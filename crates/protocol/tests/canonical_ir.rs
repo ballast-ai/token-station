@@ -230,7 +230,7 @@ fn rate_limit_error_is_retriable_on_another_upstream() {
 fn model_capability_expresses_what_the_router_filters_on() {
     let capability: ModelCapability = assert_exact_round_trip(CAPABILITY);
 
-    assert!(capability.tool);
+    assert!(capability.tool_state().is_supported());
     assert_eq!(capability.context_window, 400_000);
     assert!(capability.supported_parameters.contains("temperature"));
 }

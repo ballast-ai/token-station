@@ -3,6 +3,19 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import AddProviderPage from "./AddProviderPage";
 
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(async (command: string) => {
+    if (command === "preview_provider_endpoints") {
+      return {
+        chat: "https://api.minimaxi.com/v1/chat/completions",
+        responses: "https://api.minimaxi.com/v1/responses",
+        messages: "https://api.minimaxi.com/v1/messages",
+      };
+    }
+    throw new Error(`unexpected IPC command: ${command}`);
+  }),
+}));
+
 describe("AddProviderPage", () => {
   it("shows the endpoint and credential boundary for a catalog preset", async () => {
     const user = userEvent.setup();
@@ -13,5 +26,8 @@ describe("AddProviderPage", () => {
     expect(screen.getByDisplayValue("https://api.minimaxi.com/v1")).toBeDisabled();
     expect(screen.getByText("中国开放平台；与国际站 Key 不通用。")).toBeInTheDocument();
     expect(screen.getByText("MiniMax-M3")).toBeInTheDocument();
+    expect(await screen.findByText("https://api.minimaxi.com/v1/chat/completions")).toBeInTheDocument();
+    expect(screen.getByText("https://api.minimaxi.com/v1/responses")).toBeInTheDocument();
+    expect(screen.getByText("https://api.minimaxi.com/v1/messages")).toBeInTheDocument();
   });
 });

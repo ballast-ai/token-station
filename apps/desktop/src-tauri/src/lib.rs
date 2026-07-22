@@ -24,6 +24,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use token_station_cli::config::{ClientConfig, PluginsConfig, KNOWN_AGENT_IDS};
 use token_station_cli::plugins::{PluginRegistry, Receipts};
 use token_station_cli::{secrets, stats, upgrade};
+use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, ProviderEndpoint};
 use token_station_router_core::UpstreamRef;
 
 use agent_integration::commands::{
@@ -258,7 +259,23 @@ struct ProviderView {
     provider: String,
     base_url: String,
     models: Vec<String>,
+    model_capabilities: Vec<ModelCapabilityView>,
     has_auth: bool,
+}
+
+#[derive(Serialize)]
+struct ModelCapabilityView {
+    model: String,
+    tool: CapabilityState,
+    vision: CapabilityState,
+    json_schema: CapabilityState,
+}
+
+#[derive(Serialize)]
+struct ProviderEndpointPreview {
+    chat: String,
+    responses: String,
+    messages: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -500,19 +517,35 @@ impl AppInner {
             return vec![];
         };
         map.iter()
-            .map(|(name, up)| ProviderView {
-                name: name.clone(),
-                provider: up["provider"].as_str().unwrap_or_default().to_string(),
-                base_url: up["base_url"].as_str().unwrap_or_default().to_string(),
-                models: up["models"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|m| m["model"].as_str().map(str::to_string))
-                            .collect()
+            .map(|(name, up)| {
+                let model_values = up["models"].as_array().cloned().unwrap_or_default();
+                let models = model_values
+                    .iter()
+                    .filter_map(|model| model["model"].as_str().map(str::to_owned))
+                    .collect();
+                let model_capabilities = model_values
+                    .into_iter()
+                    .filter_map(|model| serde_json::from_value::<ModelCapability>(model).ok())
+                    .map(|capability| {
+                        let tool = capability.tool_state();
+                        let vision = capability.vision_state();
+                        let json_schema = capability.json_schema_state();
+                        ModelCapabilityView {
+                            model: capability.model,
+                            tool,
+                            vision,
+                            json_schema,
+                        }
                     })
-                    .unwrap_or_default(),
-                has_auth: up.get("auth").map(|a| !a.is_null()).unwrap_or(false),
+                    .collect();
+                ProviderView {
+                    name: name.clone(),
+                    provider: up["provider"].as_str().unwrap_or_default().to_string(),
+                    base_url: up["base_url"].as_str().unwrap_or_default().to_string(),
+                    models,
+                    model_capabilities,
+                    has_auth: up.get("auth").map(|a| !a.is_null()).unwrap_or(false),
+                }
             })
             .collect()
     }
@@ -959,6 +992,18 @@ fn get_runtime_state(
     state.0.lock().unwrap().serve_view()
 }
 
+/// Preview the provider URL selected by each inbound protocol before saving.
+#[tauri::command]
+fn preview_provider_endpoints(base_url: String) -> Result<ProviderEndpointPreview, String> {
+    let endpoint = ProviderEndpoint::try_new(base_url.trim())
+        .map_err(|error| format!("Base URL 不合法：{error}"))?;
+    Ok(ProviderEndpointPreview {
+        chat: endpoint.resolve(ProviderApi::ChatCompletions),
+        responses: endpoint.resolve(ProviderApi::Responses),
+        messages: endpoint.resolve(ProviderApi::Messages),
+    })
+}
+
 /// Add or update a provider (an OpenAI-compatible upstream). Store its key in the system keychain when provided.
 #[tauri::command]
 fn add_provider(
@@ -973,13 +1018,25 @@ fn add_provider(
     }
     let name = name.trim().to_string();
     UpstreamRef::new(name.clone()).map_err(|error| format!("供应商名不合法: {error}"))?;
+    let base_url = ProviderEndpoint::try_new(base_url.trim())
+        .map_err(|error| format!("Base URL 不合法：{error}"))?
+        .as_str();
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
 
     let model_objs: Vec<Value> = models
         .iter()
         .filter(|m| !m.trim().is_empty())
-        .map(|m| json!({ "model": m, "tool": true, "context_window": 128000 }))
+        .map(|m| json!({
+            "model": m,
+            "tool": false,
+            "vision": false,
+            "json_schema": false,
+            "tool_state": "unknown",
+            "vision_state": "unknown",
+            "json_schema_state": "unknown",
+            "context_window": 128000
+        }))
         .collect();
     if model_objs.is_empty() {
         return Err("至少填一个模型名".into());
@@ -1050,9 +1107,9 @@ async fn discover_provider_models(
     if name.is_empty() {
         return Err("请先填写供应商名称".to_owned());
     }
-    if !(base_url.starts_with("https://") || base_url.starts_with("http://")) {
-        return Err("Base URL 必须使用 http:// 或 https://".to_owned());
-    }
+    let base_url = ProviderEndpoint::try_new(&base_url)
+        .map_err(|error| format!("Base URL 不合法：{error}"))?
+        .as_str();
 
     let (data_dir, resolved_key) = {
         let inner = state.0.lock().unwrap();
@@ -1145,7 +1202,16 @@ fn replace_provider_models(
         .into_iter()
         .map(|model| {
             existing.get(&model).cloned().unwrap_or_else(
-                || json!({ "model": model, "tool": true, "context_window": 128000 }),
+                || json!({
+                    "model": model,
+                    "tool": false,
+                    "vision": false,
+                    "json_schema": false,
+                    "tool_state": "unknown",
+                    "vision_state": "unknown",
+                    "json_schema_state": "unknown",
+                    "context_window": 128000
+                }),
             )
         })
         .collect();
@@ -1886,6 +1952,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_state,
             get_runtime_state,
+            preview_provider_endpoints,
             add_provider,
             discover_provider_models,
             update_provider_models,
@@ -2881,6 +2948,20 @@ mod tests {
     }
 
     #[test]
+    fn provider_endpoint_preview_uses_the_protocol_resolver() {
+        for input in [
+            "https://api.example.com",
+            "https://api.example.com/v1",
+            "https://api.example.com/v1/chat/completions",
+        ] {
+            let preview = preview_provider_endpoints(input.to_owned()).unwrap();
+            assert_eq!(preview.chat, "https://api.example.com/v1/chat/completions");
+            assert_eq!(preview.responses, "https://api.example.com/v1/responses");
+            assert_eq!(preview.messages, "https://api.example.com/v1/messages");
+        }
+    }
+
+    #[test]
     fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views() {
         let root = scratch_home("command-lifecycle");
         let mut draft = template(&repo_root());
@@ -2910,7 +2991,23 @@ mod tests {
                 None,
             )
             .unwrap();
-            assert!(view.providers.iter().any(|provider| provider.name == name));
+            let provider = view
+                .providers
+                .iter()
+                .find(|provider| provider.name == name)
+                .expect("the added provider is visible");
+            assert_eq!(
+                provider.model_capabilities[0].tool,
+                CapabilityState::Unknown
+            );
+            assert_eq!(
+                provider.model_capabilities[0].vision,
+                CapabilityState::Unknown
+            );
+            assert_eq!(
+                provider.model_capabilities[0].json_schema,
+                CapabilityState::Unknown
+            );
         }
         assert!(add_provider(
             app.state(),

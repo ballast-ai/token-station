@@ -1,8 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   addProvider,
   discoverProviderModels,
+  previewProviderEndpoints,
   type ModelDiscoveryView,
+  type ProviderEndpointPreview,
   type StateView,
 } from "../api";
 import { CUSTOM_ID, PROVIDER_CATALOG, type ProviderPreset } from "../catalog";
@@ -25,6 +27,8 @@ export default function AddProviderPage({ onCancel, onAdded }: AddProviderPagePr
   const [discovering, setDiscovering] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [endpointPreview, setEndpointPreview] = useState<ProviderEndpointPreview | null>(null);
+  const [endpointError, setEndpointError] = useState("");
 
   const preset: ProviderPreset | null = useMemo(
     () => PROVIDER_CATALOG.find((item) => item.id === presetId) ?? null,
@@ -34,6 +38,30 @@ export default function AddProviderPage({ onCancel, onAdded }: AddProviderPagePr
   const needsKey = isCustom ? true : preset?.needsKey ?? true;
   const catalogModels = preset?.models ?? [];
   const allModels = [...new Set([...catalogModels, ...discoveredModels, ...extraModels])];
+
+  useEffect(() => {
+    const baseUrl = url.trim();
+    if (!baseUrl) {
+      setEndpointPreview(null);
+      setEndpointError("");
+      return;
+    }
+    let active = true;
+    void previewProviderEndpoints(baseUrl)
+      .then((preview) => {
+        if (!active) return;
+        setEndpointPreview(preview);
+        setEndpointError("");
+      })
+      .catch((caught) => {
+        if (!active) return;
+        setEndpointPreview(null);
+        setEndpointError(String(caught));
+      });
+    return () => {
+      active = false;
+    };
+  }, [url]);
 
   const catalogStatus: CatalogStatus = discovering
     ? { label: "正在获取…", tone: "loading" }
@@ -82,6 +110,7 @@ export default function AddProviderPage({ onCancel, onAdded }: AddProviderPagePr
   const submit = async () => {
     if (!presetId) return setError("请先选择供应商");
     if (!name.trim() || !url.trim()) return setError("供应商名称和 Base URL 不能为空");
+    if (!endpointPreview || endpointError) return setError(endpointError || "Base URL 尚未解析完成");
     if (picked.length === 0) return setError("请至少选择一个模型");
     setSaving(true);
     setError("");
@@ -134,6 +163,19 @@ export default function AddProviderPage({ onCancel, onAdded }: AddProviderPagePr
                   Base URL
                   <input className="input mono" value={url} disabled={disabled || !isCustom} onChange={(event) => setUrl(event.target.value)} />
                 </label>
+                <div className={`endpoint-preview form-span ${endpointError ? "invalid" : ""}`} aria-live="polite">
+                  {endpointError ? (
+                    <span>{endpointError}</span>
+                  ) : endpointPreview ? (
+                    <>
+                      <span><strong>Chat</strong><code>{endpointPreview.chat}</code></span>
+                      <span><strong>Responses</strong><code>{endpointPreview.responses}</code></span>
+                      <span><strong>Messages</strong><code>{endpointPreview.messages}</code></span>
+                    </>
+                  ) : (
+                    <span>填写 Base URL 后显示最终请求地址</span>
+                  )}
+                </div>
                 {needsKey ? (
                   <label className="field-label form-span">
                     API Key
@@ -167,7 +209,7 @@ export default function AddProviderPage({ onCancel, onAdded }: AddProviderPagePr
 
         <footer className="wizard-actions">
           <button className="btn" type="button" disabled={disabled} onClick={onCancel}>取消</button>
-          <button className="btn primary" type="button" disabled={disabled || !presetId} onClick={() => void submit()}>
+          <button className="btn primary" type="button" disabled={disabled || !presetId || !endpointPreview || Boolean(endpointError)} onClick={() => void submit()}>
             {saving ? "正在添加…" : "添加供应商"}
           </button>
         </footer>
