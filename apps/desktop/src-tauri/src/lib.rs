@@ -10,6 +10,7 @@
 //! saving or starting. Failed validation is reported to the user without writing.
 
 pub mod agent_integration;
+mod config_state;
 mod model_catalog;
 mod serve_lifecycle;
 
@@ -30,6 +31,7 @@ use agent_integration::commands::{
     plan_agent_connection, plan_agent_disconnect, plan_snapshot_restore, scan_agents,
     AgentCommandState,
 };
+use config_state::ConfigState;
 use model_catalog::ModelDiscoveryView;
 use serve_lifecycle::{prepare_server, PreparedServer, RunningServer, StartFailure};
 
@@ -97,6 +99,8 @@ struct AppInner {
     /// Preserve startup read or validation errors. Show a safe template but block
     /// writes so Save cannot silently overwrite the user's original file.
     load_error: Option<String>,
+    /// Persistent identity of the editable saved config; Runtime Supervisor owns the running revision.
+    config_state: ConfigState,
     /// Authoritative proxy-service lifecycle state.
     server: ServerLifecycle,
 }
@@ -272,6 +276,9 @@ struct StateView {
     tiers: std::collections::BTreeMap<String, TierView>,
     agent_routes: std::collections::BTreeMap<String, AgentRouteView>,
     serve: ServeView,
+    draft_revision: u64,
+    saved_revision: u64,
+    config_dirty: bool,
     /// Whether the draft materializes as a valid config and can be saved or started.
     config_error: Option<String>,
     /// Settings page read model: switches and read-only environment information.
@@ -389,6 +396,42 @@ struct UpgradeView {
 // ---- helpers ------------------------------------------------------------------
 
 impl AppInner {
+    fn new(config_path: PathBuf, draft: Value, mut load_error: Option<String>) -> Self {
+        let config_state = ConfigState::load(&config_path, &draft).unwrap_or_else(|error| {
+            load_error
+                .get_or_insert_with(|| format!("配置版本状态无法持久化，已进入只读保护：{error}"));
+            ConfigState::read_only(&config_path, &draft)
+        });
+        Self {
+            config_path,
+            draft,
+            load_error,
+            config_state,
+            server: ServerLifecycle::stopped(),
+        }
+    }
+
+    fn observe_draft(&mut self) -> Result<(), String> {
+        let draft = self.draft.clone();
+        self.config_state.observe_draft(&draft)
+    }
+
+    fn save_draft(&mut self) -> Result<u64, String> {
+        self.ensure_editable()?;
+        let config = self.materialize()?;
+        let draft = self.draft.clone();
+        let revision = self.config_state.prepare_save(&draft)?;
+        config
+            .save(&self.config_path)
+            .map_err(|error| format!("写配置失败: {error}"))?;
+        if let Err(error) = self.config_state.finish_save(&draft) {
+            // Configuration was committed atomically. The pending journal is promoted at the next start,
+            // Do not report a final state-write failure as a configuration-save failure.
+            eprintln!("configuration saved but revision finalization failed: {error}");
+        }
+        Ok(revision)
+    }
+
     fn ensure_editable(&self) -> Result<(), String> {
         match &self.load_error {
             Some(error) => Err(error.clone()),
@@ -594,6 +637,9 @@ impl AppInner {
             tiers: self.home_tiers(),
             agent_routes: self.agent_routes_view(),
             serve: self.serve_view(),
+            draft_revision: self.config_state.draft_revision(),
+            saved_revision: self.config_state.saved_revision(),
+            config_dirty: self.config_state.is_dirty(),
             config_error: self.config_error(),
             settings: self.settings_view(),
         }
@@ -810,6 +856,7 @@ fn add_provider(
     }
 
     inner.draft["upstreams"][&name] = up;
+    inner.observe_draft()?;
     Ok(inner.snapshot())
 }
 
@@ -963,14 +1010,12 @@ fn replace_provider_models(
         .collect();
 
     let previous = inner.draft["upstreams"][name]["models"].clone();
+    let previous_state = inner.config_state.clone();
     inner.draft["upstreams"][name]["models"] = json!(model_objects);
-    let save = inner.materialize().and_then(|config| {
-        config
-            .save(&inner.config_path)
-            .map_err(|error| error.to_string())
-    });
+    let save = inner.observe_draft().and_then(|()| inner.save_draft());
     if let Err(error) = save {
         inner.draft["upstreams"][name]["models"] = previous;
+        inner.config_state = previous_state;
         return Err(format!("保存供应商模型失败：{error}"));
     }
     Ok(())
@@ -1023,6 +1068,7 @@ fn remove_provider(state: State<'_, AppStateManaged>, name: String) -> Result<St
         }
     }
     inner.rebuild_routing();
+    inner.observe_draft()?;
     Ok(inner.snapshot())
 }
 
@@ -1039,6 +1085,7 @@ fn set_tier(
     inner.ensure_editable()?;
 
     inner.set_tier_value(pool, upstream, model)?;
+    inner.observe_draft()?;
     Ok(inner.snapshot())
 }
 
@@ -1055,6 +1102,7 @@ fn set_agent_route_mode(
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
     inner.set_agent_route_mode_value(&agent_id, &mode);
+    inner.observe_draft()?;
     Ok(inner.snapshot())
 }
 
@@ -1069,17 +1117,14 @@ fn set_agent_tier(
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
     inner.set_agent_tier_value(&agent_id, &slot, upstream, model)?;
+    inner.observe_draft()?;
     Ok(inner.snapshot())
 }
 
 #[tauri::command]
 fn save_agent_routes(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
-    let inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    let config = inner.materialize()?;
-    config
-        .save(&inner.config_path)
-        .map_err(|error| format!("写配置失败: {error}"))?;
+    let mut inner = state.0.lock().unwrap();
+    inner.save_draft()?;
     Ok(inner.snapshot())
 }
 
@@ -1090,17 +1135,15 @@ fn apply_home_route_to_all_agents(state: State<'_, AppStateManaged>) -> Result<S
     for agent_id in KNOWN_AGENT_IDS {
         inner.set_agent_route_mode_value(agent_id, "inherit");
     }
-    let config = inner.materialize()?;
-    config
-        .save(&inner.config_path)
-        .map_err(|error| format!("写配置失败: {error}"))?;
+    inner.observe_draft()?;
+    inner.save_draft()?;
     Ok(inner.snapshot())
 }
 
 /// Validate and write atomically. Return validation errors without writing, matching config edit semantics.
 #[tauri::command]
 fn save_config(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
-    let inner = state.0.lock().unwrap();
+    let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
     if inner.draft["router"]["pools"]
         .as_object()
@@ -1109,10 +1152,7 @@ fn save_config(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
     {
         return Err("请至少配置一档(供应商 + 模型)再保存".into());
     }
-    let config = inner.materialize()?;
-    config
-        .save(&inner.config_path)
-        .map_err(|e| format!("写配置失败: {e}"))?;
+    inner.save_draft()?;
     Ok(inner.snapshot())
 }
 
@@ -1369,10 +1409,9 @@ fn set_settings(
     inner.ensure_editable()?;
     inner.draft["server"]["auth"] = json!(auth);
     inner.draft["data"]["metrics"] = json!(metrics);
-    if let Ok(config) = inner.materialize() {
-        config
-            .save(&inner.config_path)
-            .map_err(|e| format!("写配置失败: {e}"))?;
+    inner.observe_draft()?;
+    if inner.materialize().is_ok() {
+        inner.save_draft()?;
     }
     Ok(inner.snapshot())
 }
@@ -1521,12 +1560,7 @@ pub fn run() {
     // Never silently overwrite with an empty template. Upgrade the legacy OpenAI-only inbound configuration in memory to three desktop inbounds.
     let (draft, load_error) = load_draft(&config_path, &root);
 
-    let managed = AppStateManaged(Mutex::new(AppInner {
-        config_path,
-        draft,
-        load_error,
-        server: ServerLifecycle::stopped(),
-    }));
+    let managed = AppStateManaged(Mutex::new(AppInner::new(config_path, draft, load_error)));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1718,12 +1752,14 @@ mod tests {
             serde_json::to_vec(&expected_draft).expect("saved config fixture serializes");
         std::fs::write(&config_path, &expected_config).expect("saved config fixture writes");
         let app = tauri::test::mock_app();
-        assert!(app.manage(AppStateManaged(Mutex::new(AppInner {
-            config_path: config_path.clone(),
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            config_path.clone(),
             draft,
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-        }))));
+            None,
+        )))));
+        let initial_state = get_state(app.state());
+        assert_eq!(initial_state.draft_revision, initial_state.saved_revision);
+        assert!(!initial_state.config_dirty);
 
         for _ in 0..3 {
             let result = tauri::async_runtime::block_on(discover_provider_models(
@@ -1748,6 +1784,10 @@ mod tests {
                 std::fs::read(&config_path).expect("saved config remains readable"),
                 expected_config
             );
+            let state = get_state(app.state());
+            assert_eq!(state.draft_revision, initial_state.draft_revision);
+            assert_eq!(state.saved_revision, initial_state.saved_revision);
+            assert!(!state.config_dirty);
         }
 
         let cached = tauri::async_runtime::block_on(discover_provider_models(
@@ -1772,6 +1812,10 @@ mod tests {
             std::fs::read(&config_path).expect("saved config remains readable"),
             expected_config
         );
+        let cached_state = get_state(app.state());
+        assert_eq!(cached_state.draft_revision, initial_state.draft_revision);
+        assert_eq!(cached_state.saved_revision, initial_state.saved_revision);
+        assert!(!cached_state.config_dirty);
         assert!(data_dir.join("model-catalog-cache.json").is_file());
         server.join().expect("model catalog fixture exits");
 
@@ -1794,12 +1838,12 @@ mod tests {
         std::fs::write(&warning_config, &expected_warning_config)
             .expect("warning config fixture writes");
         let warning_app = tauri::test::mock_app();
-        assert!(warning_app.manage(AppStateManaged(Mutex::new(AppInner {
-            config_path: warning_config.clone(),
-            draft: warning_draft,
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-        }))));
+        assert!(warning_app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            warning_config.clone(),
+            warning_draft,
+            None,
+        )))));
+        let warning_initial_state = get_state(warning_app.state());
 
         let warning = tauri::async_runtime::block_on(discover_provider_models(
             warning_app.state(),
@@ -1828,6 +1872,16 @@ mod tests {
             std::fs::read(&warning_config).expect("warning config remains readable"),
             expected_warning_config
         );
+        let warning_state = get_state(warning_app.state());
+        assert_eq!(
+            warning_state.draft_revision,
+            warning_initial_state.draft_revision
+        );
+        assert_eq!(
+            warning_state.saved_revision,
+            warning_initial_state.saved_revision
+        );
+        assert!(!warning_state.config_dirty);
         warning_server.join().expect("warning fixture exits");
 
         std::fs::remove_dir_all(root).ok();
@@ -1919,12 +1973,7 @@ mod tests {
         });
         draft["router"]["pools"][TIER_LOW] =
             json!([{ "upstream": "moonshot", "model": "moonshot-v1-8k" }]);
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft,
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-        };
+        let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
         inner.rebuild_routing();
 
         let error = replace_provider_models(&mut inner, "moonshot", vec!["kimi-k2.6".to_owned()])
@@ -1968,12 +2017,11 @@ mod tests {
             "models": [{"model": "keep"}]
         });
         let before = draft.clone();
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
             draft,
-            load_error: Some("只读保护".to_owned()),
-            server: ServerLifecycle::stopped(),
-        };
+            Some("只读保护".to_owned()),
+        );
 
         let error = replace_provider_models(&mut inner, "provider", vec!["replacement".to_owned()])
             .expect_err("read-only protection blocks model writes");
@@ -1987,12 +2035,7 @@ mod tests {
     #[test]
     fn provider_model_updates_protect_inactive_agent_route_drafts() {
         let root = scratch_home("model-update-agent-route");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&root),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-        };
+        let mut inner = AppInner::new(root.join("token-station.json"), template(&root), None);
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -2032,12 +2075,7 @@ mod tests {
             "auth": {"slot": "provider_api_key", "keyring": true},
             "models": [{"model": "model"}]
         });
-        let inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft,
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-        };
+        let inner = AppInner::new(root.join("token-station.json"), draft, None);
 
         let error = resolve_discovery_key(&inner, "provider", "https://attacker.example/v1", None)
             .expect_err("a stored credential is bound to its configured URL");
@@ -2057,12 +2095,7 @@ mod tests {
     #[test]
     fn tier_updates_refuse_unknown_provider_model_and_partial_values() {
         let root = scratch_home("tiers-invalid");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&root),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-        };
+        let mut inner = AppInner::new(root.join("token-station.json"), template(&root), None);
         inner.draft["upstreams"]["deepseek"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://api.deepseek.com",
@@ -2095,12 +2128,7 @@ mod tests {
     #[test]
     fn agent_route_drafts_seed_from_home_validate_targets_and_preserve_complete_profiles() {
         let root = scratch_home("agent-route-draft");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&root),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-        };
+        let mut inner = AppInner::new(root.join("token-station.json"), template(&root), None);
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -2157,12 +2185,7 @@ mod tests {
     #[test]
     fn returning_an_incomplete_agent_draft_to_inherit_cannot_poison_home_config() {
         let root = scratch_home("agent-route-incomplete");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&root),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-        };
+        let mut inner = AppInner::new(root.join("token-station.json"), template(&root), None);
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -2184,12 +2207,7 @@ mod tests {
     #[test]
     fn agent_route_commands_save_one_profile_and_apply_home_without_deleting_its_draft() {
         let root = scratch_home("agent-route-commands");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&root),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-        };
+        let mut inner = AppInner::new(root.join("token-station.json"), template(&root), None);
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -2220,12 +2238,7 @@ mod tests {
     #[test]
     fn one_two_and_three_tiers_always_end_with_a_zero_score_fallback() {
         let root = scratch_home("tiers-valid");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&root),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-        };
+        let mut inner = AppInner::new(root.join("token-station.json"), template(&root), None);
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -2252,12 +2265,11 @@ mod tests {
     #[test]
     fn startup_preparation_is_single_flight_lock_free_and_cancellable() {
         let root = scratch_home("nonblocking-start");
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: template(&repo_root()),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-        };
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template(&repo_root()),
+            None,
+        );
         inner.draft["data"]["dir"] = json!(root.join("data"));
         inner.draft["server"]["listen"] = json!("127.0.0.1:0");
         inner.draft["server"]["auth"] = json!(false);
@@ -2367,12 +2379,11 @@ mod tests {
         draft["data"]["dir"] = json!(root.join("data"));
         draft["server"]["listen"] = json!("127.0.0.1:0");
         let app = tauri::test::mock_app();
-        assert!(app.manage(AppStateManaged(Mutex::new(AppInner {
-            config_path: root.join("token-station.json"),
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
             draft,
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-        }))));
+            None,
+        )))));
 
         let initial = get_state(app.state());
         assert!(!initial.serve.running);
@@ -2545,15 +2556,14 @@ mod tests {
         assert_eq!(pool_key("mid").unwrap(), TIER_MID);
         assert_eq!(pool_key("low").unwrap(), TIER_LOW);
 
-        let mut inner = AppInner {
-            config_path: root.join("token-station.json"),
-            draft: json!({
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            json!({
                 "server": {}, "data": {}, "plugins": {}, "upstreams": [],
                 "router": {"pools": [], "rules": null, "hint_routes": null}
             }),
-            load_error: None,
-            server: ServerLifecycle::stopped(),
-        };
+            None,
+        );
         assert!(inner.upstreams().is_empty());
         assert_eq!(inner.pool_member("missing"), (None, None));
         inner.rebuild_routing();

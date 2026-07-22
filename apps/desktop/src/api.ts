@@ -56,6 +56,9 @@ export interface StateView {
   tiers: Record<TierSlot, TierView>;
   agent_routes: Record<string, AgentRouteView>;
   serve: ServeView;
+  draft_revision: number;
+  saved_revision: number;
+  config_dirty: boolean;
   config_error: string | null;
   settings: SettingsView;
 }
