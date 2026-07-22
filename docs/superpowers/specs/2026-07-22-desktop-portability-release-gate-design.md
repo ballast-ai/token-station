@@ -1,31 +1,31 @@
-# Desktop App Portability and Release Gate Design
+# 桌面 App 可移植性与发布门设计
 
-**Date:** 2026-07-22
-**Status:** Approved for implementation
-**Scope:** `apps/desktop/src-tauri/`, desktop release scripts, and desktop CI
+**日期：** 2026-07-22
+**状态：** 已确认，待实施
+**范围：** `apps/desktop/src-tauri/`、桌面版发布脚本和桌面版 CI
 
-## Goal
+## 目标
 
-Make the packaged token-station desktop application independent of the source checkout and usable on a clean computer. A release artifact must:
+打包后的 token-station 桌面 App 不再依赖源码目录，可以安装到一台没有源码的干净电脑上正常运行。正式发布的安装包必须满足以下要求：
 
-1. read and write configuration and runtime data only in OS application directories;
-2. contain the four official adapter packages without requiring `plugins-dist/` beside the app;
-3. have an auditable macOS/Windows signing path and reject incomplete release artifacts;
-4. preserve the existing gateway, configuration validation, keychain, Agent snapshot, transaction, and rollback behavior.
+1. 配置和运行数据只能读写操作系统分配的应用目录。
+2. 安装包包含四个官方适配器，不需要在 App 旁边额外放置 `plugins-dist/`。
+3. macOS 和 Windows 都有可审计的签名流程，发布门禁能拒绝不完整的安装包。
+4. 保留现有网关、配置校验、钥匙串、Agent 快照、事务和回滚逻辑。
 
-The immediate local installation on the author's Mac will also receive a one-time copy of the current repository-root configuration and data. That copy is an installation operation, not a legacy path embedded in product code. The original files remain untouched until the new installation has been verified.
+本次还会把作者 Mac 上现有的仓库根目录配置和数据一次性复制到新的系统目录。这属于安装操作，不会把旧路径写进产品代码。新版验证完成前，原文件保持不动。
 
-## Non-goals
+## 不在本次范围内
 
-- Do not teach the packaged app to search for a source checkout or a particular developer's home directory.
-- Do not make bundled resources writable.
-- Do not weaken configuration validation when migrating or loading data.
-- Do not store signing certificates, notarization credentials, or passwords in the repository.
-- Do not redesign the CLI release or plugin trust model.
+- 打包后的 App 不搜索源码目录，也不搜索某个开发者的个人目录。
+- App 内的资源目录保持只读，不用于存放运行数据。
+- 迁移和加载配置时不放宽现有校验规则。
+- 仓库中不保存签名证书、公证凭据或密码。
+- 不重构 CLI 发布流程和插件信任模型。
 
-## Runtime path model
+## 运行路径设计
 
-Introduce one resolved desktop path value created inside Tauri's `setup` callback:
+在 Tauri 的 `setup` 回调中解析并创建统一的桌面路径对象：
 
 ```text
 DesktopPaths
@@ -35,113 +35,113 @@ DesktopPaths
 └── agent roots  = app_data_dir/agent-integration/{snapshots,ownership}
 ```
 
-`config_file` and `data_dir` remain conceptually distinct even on platforms where Tauri resolves their parent directories to the same location. `plugins_dir` is a writable extension directory for user-installed packages; the official packages do not depend on it because they are compiled into the release binary.
+即使某个平台把 `config_file` 和 `data_dir` 的父目录解析到了同一位置，代码中仍把两者视为不同用途的路径。`plugins_dir` 是可写的扩展目录，供用户安装第三方插件。四个官方插件会编进正式版二进制，不依赖这个目录。
 
-The existing `repo_root()` and all production use of `env!("CARGO_MANIFEST_DIR")` are removed. Template generation accepts resolved data and plugin paths explicitly. Relative paths loaded from an existing configuration are anchored to the configuration file's parent, never to a source tree.
+删除现有的 `repo_root()`，生产代码不再使用 `env!("CARGO_MANIFEST_DIR")`。配置模板显式接收数据目录和插件目录。读取旧配置时，相对路径以配置文件所在目录为基准，不再以源码仓库为基准。
 
-### Startup ordering
+### 启动顺序
 
-The current application state is constructed before `tauri::Builder` exists, which prevents use of `app.path()`. Initialization moves into `setup`:
+当前代码在 `tauri::Builder` 创建前构造应用状态，因此无法调用 `app.path()`。修改后，初始化流程移入 `setup`：
 
-1. resolve Tauri `app_config_dir()` and `app_data_dir()`;
-2. create the required application-specific directories;
-3. load and validate the config from `config_file`, or create an in-memory template;
-4. construct and `app.manage(...)` the main state;
-5. construct the existing Agent integration state from the same `app_data_dir`;
-6. finish setup and expose commands.
+1. 通过 Tauri 解析 `app_config_dir()` 和 `app_data_dir()`。
+2. 创建应用所需目录。
+3. 从 `config_file` 读取并校验配置；文件不存在时，仅在内存中创建模板。
+4. 构造主应用状态，并通过 `app.manage(...)` 注册。
+5. 使用同一个 `app_data_dir` 构造现有的 Agent 集成状态。
+6. 完成初始化并注册命令。
 
-Failure to resolve or create these directories aborts startup with a path-specific error. An existing unreadable or invalid config retains the current read-only protection and is never overwritten by a template.
+路径解析或目录创建失败时，App 中止启动并返回包含具体路径的错误。已有配置无法读取或未通过校验时，继续沿用现在的只读保护，绝不使用模板覆盖原文件。
 
-Tests continue to construct state from explicit temporary paths. Path selection and draft anchoring are separated from Tauri so their behavior can be covered without launching a GUI.
+测试代码继续通过显式的临时路径构造状态。路径选择和草稿路径解析会从 Tauri 生命周期中拆出，因此不启动图形界面也能覆盖这些行为。
 
-## Official plugin embedding
+## 内嵌官方插件
 
-The desktop crate exposes an artifact-assembly feature that enables `token-station-cli/builtin-plugins`. Development and ordinary unit tests can keep the feature disabled; official desktop builds must use it.
+桌面 crate 增加一个仅用于组装安装包的 feature，由它启用 `token-station-cli/builtin-plugins`。日常开发和普通单元测试可以不启用该 feature，正式桌面版构建必须启用。
 
-A desktop release wrapper performs the required ordered build:
+新增桌面版发布脚本，按固定顺序完成以下工作：
 
-1. compile the four official WASI plugins;
-2. stage each `manifest.json` and `adapter.wasm` under a temporary/staging `plugins-dist`;
-3. set `TOKEN_STATION_PLUGINS_DIST` to that staging directory;
-4. invoke `tauri build` with the desktop builtin-plugin feature enabled;
-5. inspect the resulting package before it is accepted.
+1. 编译四个官方 WASI 插件。
+2. 把每个插件的 `manifest.json` 和 `adapter.wasm` 放入临时目录。
+3. 将 `TOKEN_STATION_PLUGINS_DIST` 指向该目录。
+4. 启用桌面版内嵌插件 feature，并执行 `tauri build`。
+5. 检查安装包，只有通过检查才能作为发布产物。
 
-This reuses the existing CLI `builtin-plugins` loader and trust semantics. Builtin packages remain trusted, cannot be shadowed by a local package, and are loaded from signed executable bytes. The writable `plugins_dir` continues to support optional third-party packages and receipts; a missing directory is valid.
+实现继续复用 CLI 已有的 `builtin-plugins` 加载与信任规则。内嵌插件保持可信，本地插件不能覆盖同名内嵌插件，运行时直接从已签名的可执行文件加载。可写的 `plugins_dir` 继续支持第三方插件及其收据；目录不存在也属于合法状态。
 
-Direct release packaging that does not use the wrapper is unsupported and is made visible through documentation and CI. The artifact audit proves that all four official packages are present, so a successful frontend/Rust compilation alone cannot be mistaken for a releasable desktop build.
+正式发布必须使用发布脚本。文档和 CI 会明确这一要求，安装包检查还会确认四个官方插件都已内嵌，避免把只完成前端和 Rust 编译的产物误当成可发布版本。
 
-## Signing, notarization, and publishing
+## 签名、公证与发布
 
-Desktop packaging is a separate job from the existing deterministic CLI tarball workflow. It uses platform-native runners and secrets supplied only by the CI secret store.
+桌面版使用独立的打包任务，不修改现有 CLI 确定性归档流程。打包任务在对应平台的原生 CI 运行器上执行，所有凭据只从 CI 密钥存储中读取。
 
 ### macOS
 
-- Build Apple Silicon and Intel artifacts on macOS runners.
-- Import a Developer ID Application certificate from CI secrets.
-- Pass the signing identity through `APPLE_SIGNING_IDENTITY`.
-- Authenticate notarization with App Store Connect API credentials or Apple ID app-specific credentials supported by Tauri.
-- Verify the app and installer with `codesign --verify --deep --strict`, Gatekeeper assessment, and notarization/stapling checks before upload.
+- 分别构建 Apple Silicon 和 Intel 安装包。
+- 从 CI 密钥导入 Developer ID Application 证书。
+- 通过 `APPLE_SIGNING_IDENTITY` 传入签名身份。
+- 使用 Tauri 支持的 App Store Connect API 凭据，或 Apple ID 专用密码完成公证。
+- 上传前执行 `codesign --verify --deep --strict`、Gatekeeper 评估、公证验证和票据装订验证。
 
-For local engineering tests without credentials, the wrapper may produce an ad-hoc-signed artifact. Such an artifact is clearly labelled as local-only and must never satisfy the production release gate.
+本地没有正式证书时，发布脚本可以生成 ad-hoc 签名的测试包。该产物必须标记为仅供本地测试，不能通过正式发布门禁。
 
 ### Windows
 
-- Build the Windows installer on a Windows runner.
-- Obtain the signing certificate/tool configuration from CI secrets or the selected external signing service.
-- Verify the produced executable and installer signature before upload.
+- 在 Windows 运行器上构建安装程序。
+- 从 CI 密钥或外部签名服务获取签名证书和工具配置。
+- 上传前验证可执行文件与安装程序的签名。
 
-The Windows job can be implemented structurally before credentials exist, but production publishing remains blocked until a valid signature is observed. Missing secrets must fail a release job rather than silently producing an unsigned public artifact.
+没有证书时可以先完成 Windows 构建任务的代码和结构，但不能发布。正式发布任务缺少密钥时必须失败，不能静默上传未签名安装包。
 
-## Artifact release gate
+## 安装包发布门禁
 
-The desktop artifact audit is the authoritative packaging check. It rejects an artifact when any of the following is true:
+桌面版安装包检查是打包完成后的最终判断依据。出现以下任一情况时，安装包不允许发布：
 
-- executable strings contain the checkout's absolute path or `CARGO_MANIFEST_DIR` value;
-- any official builtin plugin manifest/adapter is absent;
-- the app starts with config/data/plugin paths outside the Tauri application directories;
-- macOS production artifacts fail signature, Gatekeeper, notarization, or stapling verification;
-- Windows production artifacts lack a valid code signature;
-- the package cannot pass a clean-home startup smoke test.
+- 可执行文件包含当前源码目录的绝对路径，或包含 `CARGO_MANIFEST_DIR` 的实际值。
+- 缺少任一官方内嵌插件的清单或适配器。
+- App 启动后，配置、数据或插件路径位于 Tauri 应用目录之外。
+- macOS 正式安装包未通过签名、Gatekeeper、公证或票据装订检查。
+- Windows 正式安装包没有有效代码签名。
+- 安装包无法通过干净用户目录下的启动冒烟测试。
 
-Rust path tests use temporary directories and cover:
+Rust 路径测试使用临时目录，并覆盖以下场景：
 
-- a fresh install template;
-- relative path anchoring to the config directory;
-- invalid existing config entering read-only protection;
-- writable data/plugin directory creation;
-- no repository-root fallback.
+- 首次安装时生成内存配置模板。
+- 相对路径以配置文件所在目录为基准。
+- 已有配置损坏时进入只读保护。
+- 数据目录和插件目录可正常创建和写入。
+- 不存在回退到源码仓库的逻辑。
 
-Existing desktop Rust tests, clippy, TypeScript checking, and Vitest remain mandatory. The plugin-enabled artifact build additionally exercises the builtin registry tests.
+现有桌面端 Rust 测试、Clippy、TypeScript 类型检查和 Vitest 仍是必跑项。启用内嵌插件的安装包构建还需要运行内嵌插件注册表测试。
 
-## One-time local migration
+## 本机一次性数据迁移
 
-After the new app is built and before it is launched for the first time on this Mac:
+新版构建完成后、第一次启动前，按以下顺序迁移作者 Mac 上的现有数据：
 
-1. stop the currently running old app;
-2. resolve the new standard application directories from the same Tauri identifier;
-3. back up any pre-existing destination files;
-4. copy the current repository-root `token-station.json`, `token-station-data`, and relevant writable plugin receipts/configuration into their new destinations;
-5. do not copy `plugins-dist`, because official packages are embedded and third-party plugins require an explicit trust-preserving install;
-6. install and launch the new app;
-7. verify configuration loading, provider visibility, plugin registry contents, gateway startup, and one routed request;
-8. retain the source-root files and backup until the user separately authorizes deletion.
+1. 退出当前正在运行的旧版 App。
+2. 根据相同的 Tauri identifier 解析新的系统应用目录。
+3. 备份目标目录中可能已经存在的文件。
+4. 把仓库根目录中的 `token-station.json`、`token-station-data` 以及相关的可写插件收据和配置复制到新目录。
+5. 不复制 `plugins-dist`。四个官方插件已经内嵌，第三方插件仍需经过保留信任校验的安装流程。
+6. 安装并启动新版 App。
+7. 验证配置加载、供应商显示、插件注册表、网关启动和一次真实请求路由。
+8. 用户另行确认删除前，保留源码目录中的原文件和迁移备份。
 
-The migration never modifies the copied configuration to bypass validation. If absolute legacy paths are present inside the config, only the known desktop-owned `data.dir` and `plugins.dir` fields are rewritten to the resolved destinations; all other content is preserved and revalidated.
+迁移过程不会通过放宽校验来修改配置。配置中如果还存在旧版绝对路径，只改写桌面端负责管理的 `data.dir` 和 `plugins.dir`，其他内容保持不变，并重新执行完整校验。
 
-## Failure handling and rollback
+## 失败处理与回滚
 
-- Startup path/config failures leave existing files unchanged and produce a clear error.
-- Plugin build or artifact inspection failure prevents packaging.
-- Signing or notarization failure prevents publishing.
-- Local migration uses copy plus backup, not move or delete.
-- If the new app fails real testing, remove only the new app installation and restore the destination backup; the repository-root data remains available.
+- 启动时发生路径或配置错误，不修改已有文件，并返回明确错误。
+- 插件构建或安装包检查失败时，停止打包。
+- 签名或公证失败时，停止发布。
+- 本机迁移使用复制和备份，不移动或删除旧文件。
+- 新版真实测试失败时，只删除新安装的 App，并恢复目标目录备份；源码目录中的旧数据仍然可用。
 
-## External prerequisites
+## 外部条件
 
-The code, build wrapper, CI structure, and local ad-hoc package can be completed without signing credentials. A distributable macOS release still requires an Apple Developer ID certificate plus notarization credentials. A distributable Windows release requires an accepted Windows code-signing identity or service. These are deployment credentials, not code changes.
+路径代码、构建脚本、CI 结构和本地 ad-hoc 测试包不依赖正式签名凭据，可以直接完成。对外分发的 macOS 安装包仍需要 Apple Developer ID 证书和公证凭据；Windows 安装包需要受信任的代码签名身份或签名服务。这些属于发布凭据，不属于代码改动。
 
-## Reference
+## 参考资料
 
-- [Tauri application-specific file-system directories](https://v2.tauri.app/plugin/file-system/)
-- [Tauri macOS signing and notarization](https://v2.tauri.app/zh-cn/distribute/sign/macos/)
-- [Tauri GitHub Actions distribution](https://v2.tauri.app/zh-cn/distribute/pipelines/github/)
+- [Tauri 应用专用文件系统目录](https://v2.tauri.app/plugin/file-system/)
+- [Tauri macOS 签名与公证](https://v2.tauri.app/zh-cn/distribute/sign/macos/)
+- [Tauri GitHub Actions 发布流程](https://v2.tauri.app/zh-cn/distribute/pipelines/github/)
