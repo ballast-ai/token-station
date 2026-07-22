@@ -19,6 +19,7 @@ interface HomePageProps {
   serveRunning: boolean;
   busy: boolean;
   configError: string | null;
+  saveStatus: string;
   onTierChange: (slot: TierSlot, upstream: string | null, model: string | null) => void;
   onSave: () => void;
   onApplyAll: () => void;
@@ -36,6 +37,7 @@ export default function HomePage({
   serveRunning,
   busy,
   configError,
+  saveStatus,
   onTierChange,
   onSave,
   onApplyAll,
@@ -90,6 +92,7 @@ export default function HomePage({
         <footer className="panel-foot route-actions">
           <button className="btn primary" type="button" disabled={busy} onClick={onSave}>保存并应用</button>
           <button className="btn" type="button" disabled={busy} onClick={onApplyAll}>应用到全部 Agent</button>
+          <span className="foot-hint" data-testid="config-save-status">{saveStatus}</span>
           {providers.length === 0 && <span className="foot-hint">请先添加供应商，再配置三档。</span>}
           {providers.length > 0 && configError && <span className="foot-hint">还有档位未完成，保存时会进行完整校验。</span>}
         </footer>

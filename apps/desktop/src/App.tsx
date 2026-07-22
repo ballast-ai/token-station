@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyHomeRouteToAllAgents,
+  getRuntimeState,
   getState,
   listAgentRegistry,
   listenServeState,
   removeProvider,
-  saveConfig,
   scanAgents,
   serveStart,
   serveStop,
@@ -43,6 +43,18 @@ function hasErrorCode(error: unknown, code: string): boolean {
 
 function emptyAgentRoute(state: StateView): AgentRouteView {
   return { mode: "inherit", tiers: state.tiers, config_error: null };
+}
+
+export function configSaveStatus(state: StateView): string {
+  if (state.config_dirty) return "有未保存更改";
+  const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
+  if (runtimeHealthy && state.serve.running_revision !== state.saved_revision) {
+    return "已保存尚未应用";
+  }
+  if (runtimeHealthy && state.serve.running_revision === state.saved_revision) {
+    return `运行中 revision ${state.saved_revision}`;
+  }
+  return "无改动";
 }
 
 export default function App() {
@@ -140,6 +152,18 @@ export default function App() {
   }, [rescanAgents]);
 
   useEffect(() => {
+    const timer = window.setInterval(() => {
+      void getRuntimeState()
+        .then((serve) => {
+          pendingServeRef.current = serve;
+          setState((current) => current ? { ...current, serve } : current);
+        })
+        .catch(() => undefined);
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     if (state) setAdminEndpoint(state.serve);
   }, [state]);
 
@@ -171,7 +195,8 @@ export default function App() {
     setError("");
     setMessage("");
     try {
-      showState(await (state.serve.running || state.serve.phase === "starting" ? serveStop() : serveStart()));
+      const active = state.serve.app_runtime === "running" || state.serve.phase === "starting";
+      showState(await (active ? serveStop() : serveStart()));
     } catch (caught) {
       setError(errorText(caught));
     } finally {
@@ -200,6 +225,8 @@ export default function App() {
   const metadata = agentId ? orderedRegistry.find((item) => item.agent_id === agentId) : undefined;
   const agent = agentId ? agents.find((item) => item.metadata.agent_id === agentId) : undefined;
   const route = agentId ? (state.agent_routes?.[agentId] ?? emptyAgentRoute(state)) : undefined;
+  const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
+  const saveStatus = configSaveStatus(state);
 
   return (
     <AppShell
@@ -224,12 +251,13 @@ export default function App() {
           agentRoutes={state.agent_routes ?? {}}
           registry={orderedRegistry}
           agents={agents}
-          serveRunning={state.serve.running}
+          serveRunning={runtimeHealthy}
           busy={busy}
           configError={state.config_error}
+          saveStatus={saveStatus}
           onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
-          onSave={() => void run(saveConfig, state.serve.running ? "主页路由已保存 · 重启代理后生效" : "主页路由已保存")}
-          onApplyAll={() => void run(applyHomeRouteToAllAgents, state.serve.running ? "全部 Agent 已恢复跟随主页 · 重启代理后生效" : "全部 Agent 已恢复跟随主页")}
+          onSave={() => void run(serveStart, "正在保存并应用配置")}
+          onApplyAll={() => void run(applyHomeRouteToAllAgents, runtimeHealthy ? "全部 Agent 已恢复跟随主页 · 尚待应用" : "全部 Agent 已恢复跟随主页")}
           onOpenAgent={(id) => navigate(`agent:${id}`)}
           onRemoveProvider={(name) => void run(() => removeProvider(name), "供应商已删除")}
           onStateChange={showState}
@@ -242,7 +270,7 @@ export default function App() {
           agent={agent}
           route={route}
           providers={state.providers}
-          serveRunning={state.serve.running}
+          serveRunning={runtimeHealthy}
           onStateChange={showState}
           onRescan={rescanAgents}
         />

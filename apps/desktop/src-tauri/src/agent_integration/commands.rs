@@ -21,6 +21,7 @@ use super::compatibility::{
     evaluate_discovery, production_remote_config, select_catalog, CatalogSource,
     CompatibilityCatalog, UreqCatalogTransport,
 };
+use super::config_codec::parse_source_bytes;
 use super::connectors::{
     ClaudeCodeConnector, CodexConnector, ConnectInput, Connector, HermesConnector,
     OpenClawConnector, OpenCodeConnector,
@@ -290,6 +291,7 @@ struct CommandSession {
 }
 
 pub struct AgentProxyRuntime {
+    instance_id: String,
     claude_origin: String,
     codex_base: String,
     opencode_base: String,
@@ -302,9 +304,14 @@ pub struct AgentProxyRuntime {
 }
 
 impl AgentProxyRuntime {
+    pub(crate) fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
     fn fingerprint(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(b"token-station-agent-proxy-binding-v1\0");
+        hash_field(&mut hash, self.instance_id.as_bytes());
         hash_field(&mut hash, self.claude_origin.as_bytes());
         hash_field(&mut hash, self.codex_base.as_bytes());
         hash_field(&mut hash, self.opencode_base.as_bytes());
@@ -422,15 +429,46 @@ impl AgentCommandState {
         })
     }
 
+    #[cfg(test)]
     fn scan(&self) -> Result<Vec<AgentView>, AgentCommandError> {
+        self.scan_with_runtime(None)
+    }
+
+    fn scan_with_runtime(
+        &self,
+        runtime: Option<&AgentProxyRuntime>,
+    ) -> Result<Vec<AgentView>, AgentCommandError> {
         let _scan_guard = self.begin_scan()?;
         let snapshot = self.perform_scan()?;
-        let views = self.views(&snapshot)?;
+        let views = self.views(&snapshot, runtime)?;
         self.session
             .lock()
             .map_err(|_| AgentCommandError::boundary("state_poisoned", "Agent 会话状态不可用"))?
             .scan = Some(snapshot);
         Ok(views)
+    }
+
+    /// Re-reads managed Agent files and validates their projected values
+    /// against the currently published proxy. Ownership only locates files; it
+    /// is never accepted as proof that an Agent is still connected.
+    pub(crate) fn any_connected_to(
+        &self,
+        runtime: &AgentProxyRuntime,
+    ) -> Result<bool, AgentCommandError> {
+        let records = self
+            .session
+            .lock()
+            .map_err(|_| AgentCommandError::boundary("state_poisoned", "Agent 会话状态不可用"))?
+            .scan
+            .as_ref()
+            .map(|snapshot| snapshot.records.clone())
+            .unwrap_or_default();
+        for record in records {
+            if self.installation_connected(&record, runtime)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn perform_scan(&self) -> Result<ScanSnapshot, AgentCommandError> {
@@ -462,7 +500,11 @@ impl AgentCommandState {
         Ok(())
     }
 
-    fn views(&self, snapshot: &ScanSnapshot) -> Result<Vec<AgentView>, AgentCommandError> {
+    fn views(
+        &self,
+        snapshot: &ScanSnapshot,
+        runtime: Option<&AgentProxyRuntime>,
+    ) -> Result<Vec<AgentView>, AgentCommandError> {
         self.registry
             .descriptors()
             .iter()
@@ -472,11 +514,10 @@ impl AgentCommandState {
                     .iter()
                     .filter(|record| record.agent_id == descriptor.agent_id)
                     .map(|record| {
-                        let connected = !self
-                            .ownership
-                            .list_agent_installation(&record.agent_id, &record.canonical_path)
-                            .map_err(AgentCommandError::internal)?
-                            .is_empty();
+                        let connected = runtime.is_some_and(|runtime| {
+                            self.installation_connected(record, runtime)
+                                .unwrap_or(false)
+                        });
                         Ok(AgentInstallationView {
                             discovery: record.clone(),
                             compatibility: evaluate_discovery(
@@ -516,6 +557,37 @@ impl AgentCommandState {
                 })
             })
             .collect()
+    }
+
+    fn installation_connected(
+        &self,
+        record: &DiscoveryRecord,
+        runtime: &AgentProxyRuntime,
+    ) -> Result<bool, AgentCommandError> {
+        let ownership = self
+            .ownership
+            .list_agent_installation(&record.agent_id, &record.canonical_path)
+            .map_err(AgentCommandError::internal)?;
+        for owned in ownership {
+            let Ok(connector) = connector_for(&owned.connector_id) else {
+                continue;
+            };
+            let Ok(input) = runtime.input_for(&owned.connector_id) else {
+                continue;
+            };
+            let Ok(source) = read_config_source(Path::new(&owned.target_config_path)) else {
+                continue;
+            };
+            let bytes = source.existed.then_some(source.exact_bytes.as_slice());
+            let Ok(document) = parse_source_bytes(bytes, connector.format(), connector.label())
+            else {
+                continue;
+            };
+            if connector.validate_projected(&document, &input).is_ok() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn selected(
@@ -1225,7 +1297,9 @@ fn hash_field(hash: &mut Sha256, value: &[u8]) {
     hash.update(value);
 }
 
-fn runtime_from_app(state: &AppStateManaged) -> Result<AgentProxyRuntime, AgentCommandError> {
+pub(crate) fn runtime_from_app(
+    state: &AppStateManaged,
+) -> Result<AgentProxyRuntime, AgentCommandError> {
     let inner = state
         .0
         .lock()
@@ -1234,7 +1308,7 @@ fn runtime_from_app(state: &AppStateManaged) -> Result<AgentProxyRuntime, AgentC
         .ensure_editable()
         .map_err(AgentCommandError::internal)?;
     let serve = inner.serve_view();
-    if !serve.running {
+    if serve.app_runtime != crate::AppRuntime::Running || !serve.listener_reachable {
         return Err(AgentCommandError::boundary(
             "proxy_not_running",
             "请先启动代理再生成或应用连接计划",
@@ -1243,7 +1317,21 @@ fn runtime_from_app(state: &AppStateManaged) -> Result<AgentProxyRuntime, AgentC
     let origin = format!("http://{}", serve.listen)
         .trim_end_matches('/')
         .to_string();
+    let plugins = match &inner.server {
+        crate::ServerLifecycle::Running { server, .. } => server.plugins(),
+        crate::ServerLifecycle::Applying { old, .. } => old.plugins(),
+        _ => {
+            return Err(AgentCommandError::boundary(
+                "proxy_not_running",
+                "请先启动代理再生成或应用连接计划",
+            ));
+        }
+    };
+    let plugins = serde_json::to_value(plugins).unwrap_or_default();
     Ok(AgentProxyRuntime {
+        instance_id: serve.instance_id.ok_or_else(|| {
+            AgentCommandError::boundary("proxy_not_running", "代理运行实例身份不可用")
+        })?,
         claude_origin: format!("{origin}/agents/claude-code"),
         codex_base: format!("{origin}/agents/codex/v1"),
         opencode_base: format!("{origin}/agents/opencode/v1"),
@@ -1254,9 +1342,9 @@ fn runtime_from_app(state: &AppStateManaged) -> Result<AgentProxyRuntime, AgentC
                 .virtual_key
                 .unwrap_or_else(|| "token-station-no-auth".to_string()),
         ),
-        anthropic_ready: anthropic_inbound_ready(&inner.draft["plugins"]),
-        responses_ready: responses_inbound_ready(&inner.draft["plugins"]),
-        openai_ready: openai_inbound_ready(&inner.draft["plugins"]),
+        anthropic_ready: anthropic_inbound_ready(&plugins),
+        responses_ready: responses_inbound_ready(&plugins),
+        openai_ready: openai_inbound_ready(&plugins),
     })
 }
 
@@ -1268,8 +1356,10 @@ pub(crate) fn list_agent_registry(state: State<'_, AgentCommandState>) -> Vec<Ag
 #[tauri::command(async)]
 pub(crate) fn scan_agents(
     state: State<'_, AgentCommandState>,
+    app_state: State<'_, AppStateManaged>,
 ) -> Result<Vec<AgentView>, AgentCommandError> {
-    state.scan()
+    let runtime = runtime_from_app(app_state.inner()).ok();
+    state.scan_with_runtime(runtime.as_ref())
 }
 
 #[tauri::command(async)]
@@ -1468,6 +1558,7 @@ mod tests {
 
     fn runtime(token: &str) -> AgentProxyRuntime {
         AgentProxyRuntime {
+            instance_id: "fixture-runtime".to_string(),
             claude_origin: "http://127.0.0.1:8787/agents/claude-code".to_string(),
             codex_base: "http://127.0.0.1:8787/agents/codex/v1".to_string(),
             opencode_base: "http://127.0.0.1:8787/agents/opencode/v1".to_string(),
@@ -1626,7 +1717,7 @@ mod tests {
             warning: None,
             records: Vec::new(),
         };
-        let views = state.views(&empty).unwrap();
+        let views = state.views(&empty, None).unwrap();
         assert_eq!(views.len(), 5);
         assert!(views.iter().all(|view| {
             view.status == CompatibilityStatus::NotDetected && view.installations.is_empty()
@@ -2002,7 +2093,7 @@ mod tests {
             warning: Some("catalog warning".to_string()),
             records: vec![record(&target, false)],
         };
-        let views = state.views(&snapshot).unwrap();
+        let views = state.views(&snapshot, None).unwrap();
         let claude = views
             .iter()
             .find(|view| view.metadata.agent_id == "claude-code")
@@ -2190,6 +2281,18 @@ mod tests {
                 now_ms,
             )
             .unwrap();
+
+        assert!(state.any_connected_to(&runtime).unwrap());
+        let connected_bytes = std::fs::read(&target).unwrap();
+        let tampered = String::from_utf8(connected_bytes.clone())
+            .unwrap()
+            .replace("127.0.0.1:8787", "127.0.0.1:9999");
+        std::fs::write(&target, tampered).unwrap();
+        assert!(
+            !state.any_connected_to(&runtime).unwrap(),
+            "ownership alone must not report a tampered Agent config as connected"
+        );
+        std::fs::write(&target, connected_bytes).unwrap();
 
         install_scan(&state, catalog, vec![record(&target, false)]);
         let snapshots = state.list_snapshots("claude-code").unwrap();

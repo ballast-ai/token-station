@@ -28,8 +28,8 @@ use token_station_router_core::UpstreamRef;
 
 use agent_integration::commands::{
     apply_agent_plan, apply_snapshot_restore, list_agent_registry, list_agent_snapshots,
-    plan_agent_connection, plan_agent_disconnect, plan_snapshot_restore, scan_agents,
-    AgentCommandState,
+    plan_agent_connection, plan_agent_disconnect, plan_snapshot_restore, runtime_from_app,
+    scan_agents, AgentCommandState,
 };
 use config_state::ConfigState;
 use model_catalog::ModelDiscoveryView;
@@ -58,14 +58,22 @@ enum ServerLifecycle {
     Starting {
         generation: u64,
         listen: String,
+        revision: u64,
+    },
+    Applying {
+        generation: u64,
+        revision: u64,
+        old: RunningServer,
     },
     Stopping {
         generation: u64,
         listen: String,
+        draining: bool,
     },
     Running {
         generation: u64,
         server: RunningServer,
+        apply_error: Option<String>,
     },
     Failed {
         generation: u64,
@@ -83,6 +91,7 @@ impl ServerLifecycle {
         match self {
             Self::Stopped { generation }
             | Self::Starting { generation, .. }
+            | Self::Applying { generation, .. }
             | Self::Stopping { generation, .. }
             | Self::Running { generation, .. }
             | Self::Failed { generation, .. } => *generation,
@@ -187,22 +196,36 @@ fn prepare_desktop_draft(mut draft: Value, root: &std::path::Path) -> Value {
 
 /// Existing configurations must pass the CLI read, default filling, and structural validation flow. On failure, return a safe template for
 /// for display, with a read-only error gate that rejects later save and start operations to prevent overwriting the damaged file.
+#[cfg(test)]
 fn load_draft(config_path: &std::path::Path, root: &std::path::Path) -> (Value, Option<String>) {
+    let (draft, _saved, error) = load_draft_state(config_path, root);
+    (draft, error)
+}
+
+fn load_draft_state(
+    config_path: &std::path::Path,
+    root: &std::path::Path,
+) -> (Value, Value, Option<String>) {
     if !config_path.exists() {
-        return (template(root), None);
+        let draft = template(root);
+        return (draft.clone(), draft, None);
     }
     match ClientConfig::load(config_path) {
         Ok(config) => {
-            let draft = serde_json::to_value(config).expect("ClientConfig always serializes");
-            (prepare_desktop_draft(draft, root), None)
+            let saved = serde_json::to_value(config).expect("ClientConfig always serializes");
+            (prepare_desktop_draft(saved.clone(), root), saved, None)
         }
-        Err(error) => (
-            template(root),
-            Some(format!(
+        Err(error) => {
+            let draft = template(root);
+            (
+                draft.clone(),
+                draft,
+                Some(format!(
                 "现有配置无法读取，已进入只读保护；请先修复或移走 {}：{error}",
                 config_path.display()
-            )),
-        ),
+                )),
+            )
+        }
     }
 }
 
@@ -261,10 +284,21 @@ enum ServePhase {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AppRuntime {
+    Stopped,
+    Running,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct ServeView {
     phase: ServePhase,
-    running: bool,
+    app_runtime: AppRuntime,
+    listener_reachable: bool,
+    agent_connected: bool,
+    running_revision: Option<u64>,
+    instance_id: Option<String>,
     listen: String,
     virtual_key: Option<String>,
     error: Option<String>,
@@ -396,12 +430,30 @@ struct UpgradeView {
 // ---- helpers ------------------------------------------------------------------
 
 impl AppInner {
-    fn new(config_path: PathBuf, draft: Value, mut load_error: Option<String>) -> Self {
-        let config_state = ConfigState::load(&config_path, &draft).unwrap_or_else(|error| {
+    #[cfg(test)]
+    fn new(config_path: PathBuf, draft: Value, load_error: Option<String>) -> Self {
+        Self::new_with_saved(config_path, draft.clone(), draft, load_error)
+    }
+
+    fn new_with_saved(
+        config_path: PathBuf,
+        mut draft: Value,
+        saved: Value,
+        mut load_error: Option<String>,
+    ) -> Self {
+        let mut config_state = ConfigState::load(&config_path, &saved).unwrap_or_else(|error| {
             load_error
                 .get_or_insert_with(|| format!("配置版本状态无法持久化，已进入只读保护：{error}"));
-            ConfigState::read_only(&config_path, &draft)
+            ConfigState::read_only(&config_path, &saved)
         });
+        if load_error.is_none() {
+            if let Err(error) = config_state.observe_draft(&draft) {
+                load_error = Some(format!(
+                    "配置版本状态无法持久化，已进入只读保护：{error}"
+                ));
+                draft = config_state.draft().clone();
+            }
+        }
         Self {
             config_path,
             draft,
@@ -413,7 +465,11 @@ impl AppInner {
 
     fn observe_draft(&mut self) -> Result<(), String> {
         let draft = self.draft.clone();
-        self.config_state.observe_draft(&draft)
+        if let Err(error) = self.config_state.observe_draft(&draft) {
+            self.draft = self.config_state.draft().clone();
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn save_draft(&mut self) -> Result<u64, String> {
@@ -592,7 +648,11 @@ impl AppInner {
         match &self.server {
             ServerLifecycle::Stopped { .. } => ServeView {
                 phase: ServePhase::Stopped,
-                running: false,
+                app_runtime: AppRuntime::Stopped,
+                listener_reachable: false,
+                agent_connected: false,
+                running_revision: None,
+                instance_id: None,
                 listen: self.draft["server"]["listen"]
                     .as_str()
                     .unwrap_or("127.0.0.1:8787")
@@ -602,28 +662,83 @@ impl AppInner {
             },
             ServerLifecycle::Starting { listen, .. } => ServeView {
                 phase: ServePhase::Starting,
-                running: false,
+                app_runtime: AppRuntime::Stopped,
+                listener_reachable: false,
+                agent_connected: false,
+                running_revision: None,
+                instance_id: None,
                 listen: listen.clone(),
                 virtual_key: None,
                 error: None,
             },
+            ServerLifecycle::Applying { old, .. } => {
+                let alive = old.is_task_alive();
+                let reachable = alive && old.listener_reachable();
+                ServeView {
+                    phase: ServePhase::Starting,
+                    app_runtime: if alive {
+                        AppRuntime::Running
+                    } else {
+                        AppRuntime::Stopped
+                    },
+                    listener_reachable: reachable,
+                    agent_connected: false,
+                    running_revision: alive.then(|| old.running_revision()),
+                    instance_id: alive.then(|| old.instance_id().to_owned()),
+                    listen: old.listen().to_owned(),
+                    virtual_key: old.virtual_key().map(str::to_string),
+                    error: None,
+                }
+            }
             ServerLifecycle::Stopping { listen, .. } => ServeView {
                 phase: ServePhase::Stopping,
-                running: false,
+                app_runtime: AppRuntime::Stopped,
+                listener_reachable: false,
+                agent_connected: false,
+                running_revision: None,
+                instance_id: None,
                 listen: listen.clone(),
                 virtual_key: None,
                 error: None,
             },
-            ServerLifecycle::Running { server, .. } => ServeView {
-                phase: ServePhase::Running,
-                running: true,
-                listen: server.listen().to_string(),
-                virtual_key: server.virtual_key().map(str::to_string),
-                error: None,
-            },
+            ServerLifecycle::Running {
+                server,
+                apply_error,
+                ..
+            } => {
+                let alive = server.is_task_alive();
+                let reachable = alive && server.listener_reachable();
+                ServeView {
+                    phase: if alive {
+                        ServePhase::Running
+                    } else {
+                        ServePhase::Error
+                    },
+                    app_runtime: if alive {
+                        AppRuntime::Running
+                    } else {
+                        AppRuntime::Stopped
+                    },
+                    listener_reachable: reachable,
+                    agent_connected: false,
+                    running_revision: alive.then(|| server.running_revision()),
+                    instance_id: alive.then(|| server.instance_id().to_owned()),
+                    listen: server.listen().to_string(),
+                    virtual_key: server.virtual_key().map(str::to_string),
+                    error: if alive {
+                        apply_error.clone()
+                    } else {
+                        Some("serve_task_exited: 代理任务已退出".to_owned())
+                    },
+                }
+            }
             ServerLifecycle::Failed { listen, error, .. } => ServeView {
                 phase: ServePhase::Error,
-                running: false,
+                app_runtime: AppRuntime::Stopped,
+                listener_reachable: false,
+                agent_connected: false,
+                running_revision: None,
+                instance_id: None,
                 listen: listen.clone(),
                 virtual_key: None,
                 error: Some(error.clone()),
@@ -816,6 +931,32 @@ fn ensure_known_agent_id(agent_id: &str) -> Result<(), String> {
 #[tauri::command]
 fn get_state(state: State<'_, AppStateManaged>) -> StateView {
     state.0.lock().unwrap().snapshot()
+}
+
+#[tauri::command]
+fn get_runtime_state(
+    state: State<'_, AppStateManaged>,
+    agents: State<'_, AgentCommandState>,
+) -> ServeView {
+    // Agent config inspection is file I/O and therefore intentionally outside
+    // the App lock. Revalidate the immutable instance identity afterwards so
+    // a concurrent publish can never combine old Agent facts with a new
+    // running_revision/instance_id.
+    for _ in 0..3 {
+        let Ok(runtime) = runtime_from_app(state.inner()) else {
+            return state.0.lock().unwrap().serve_view();
+        };
+        let identity = runtime.instance_id().to_owned();
+        let agent_connected = agents.any_connected_to(&runtime).unwrap_or(false);
+        let mut view = state.0.lock().unwrap().serve_view();
+        if view.instance_id.as_deref() == Some(identity.as_str()) {
+            view.agent_connected = agent_connected;
+            return view;
+        }
+    }
+    // Continuous handoffs are rare; if all snapshots raced, return a truthful
+    // current runtime view with the conservative independent Agent fact.
+    state.0.lock().unwrap().serve_view()
 }
 
 /// Add or update a provider (an OpenAI-compatible upstream). Store its key in the system keychain when provided.
@@ -1165,76 +1306,199 @@ fn complete_serve_start<R: Runtime>(
     generation: u64,
     result: Result<PreparedServer, StartFailure>,
 ) {
-    match result {
-        Ok(prepared) => {
-            let mut prepared = Some(prepared);
-            let view = {
-                let state = app.state::<AppStateManaged>();
-                let mut inner = state.0.lock().unwrap();
-                match &inner.server {
-                    ServerLifecycle::Starting {
-                        generation: current,
-                        ..
-                    } if *current == generation => {
-                        let running = prepared
-                            .take()
-                            .expect("prepared server is present")
-                            .publish();
-                        inner.server = ServerLifecycle::Running {
-                            generation,
-                            server: running,
-                        };
-                        Some(inner.serve_view())
-                    }
-                    ServerLifecycle::Stopping {
-                        generation: current,
-                        ..
-                    } if *current == generation => {
-                        // Keep `Stopping` authoritative until the prepared listener
-                        // is dropped outside the mutex below.
-                        None
-                    }
-                    _ => None,
-                }
-            };
-            if let Some(prepared) = prepared {
-                prepared.discard();
-                complete_serve_stop(app, generation);
+    // Same-port handoff must first release the old accept socket. This state
+    // mutation is instant; the candidate bind/retry itself happens below,
+    // outside the App mutex.
+    let resume_listen = result.as_ref().ok().and_then(|prepared| {
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
+        match &inner.server {
+            ServerLifecycle::Applying {
+                generation: current,
+                old,
+                ..
+            } if *current == generation && old.listen() == prepared.listen() => {
+                old.stop_accepting();
+                Some(old.listen().to_owned())
             }
-            if let Some(view) = view {
-                emit_serve_state(app, &view);
-            }
+            _ => None,
         }
-        Err(failure) => {
-            let view = {
-                let state = app.state::<AppStateManaged>();
-                let mut inner = state.0.lock().unwrap();
-                match &inner.server {
-                    ServerLifecycle::Starting {
-                        generation: current,
+    });
+    let result = result.and_then(PreparedServer::bind);
+    // A failed candidate bind must restore the old listener, but that retry is
+    // equally forbidden under the global lock. The reserved socket is only
+    // installed if the same generation is still Applying.
+    let mut resume_listener = if result.is_err() {
+        resume_listen
+            .as_deref()
+            .map(PreparedServer::bind_listener)
+    } else {
+        None
+    };
+    let mut discard = None;
+    let mut retire = None;
+    let view = {
+        let state = app.state::<AppStateManaged>();
+        let mut inner = state.0.lock().unwrap();
+        let current = std::mem::replace(&mut inner.server, ServerLifecycle::Stopped { generation });
+        inner.server = match (current, result) {
+            (
+                ServerLifecycle::Starting {
+                    generation: current,
+                    listen,
+                    revision,
+                },
+                Ok(prepared),
+            ) if current == generation => match prepared.publish(revision) {
+                Ok(server) => ServerLifecycle::Running {
+                    generation,
+                    server,
+                    apply_error: None,
+                },
+                Err(failure) => ServerLifecycle::Failed {
+                    generation,
+                    listen,
+                    error: failure.public_message(),
+                },
+            },
+            (
+                ServerLifecycle::Applying {
+                    generation: current,
+                    revision,
+                    mut old,
+                    ..
+                },
+                Ok(prepared),
+            ) if current == generation => {
+                let same_listener = old.listen() == prepared.listen();
+                match prepared.publish(revision) {
+                    Ok(server) => {
+                        old.stop_accepting();
+                        retire = Some(old);
+                        ServerLifecycle::Running {
+                            generation,
+                            server,
+                            apply_error: None,
+                        }
+                    }
+                    Err(failure) => {
+                        let mut message = failure.public_message();
+                        if same_listener {
+                            let restore = resume_listener
+                                .take()
+                                .unwrap_or_else(|| {
+                                    Err(StartFailure::new(
+                                        "listen_restore",
+                                        "旧 listener 未能预留",
+                                    ))
+                                })
+                                .and_then(|listener| old.resume_accepting(listener));
+                            if let Err(restore) = restore {
+                                message = format!(
+                                    "切换失败且旧 listener 恢复失败：{message}; {}",
+                                    restore.public_message()
+                                );
+                                let listen = old.listen().to_owned();
+                                retire = Some(old);
+                                ServerLifecycle::Failed {
+                                    generation,
+                                    listen,
+                                    error: message,
+                                }
+                            } else {
+                                ServerLifecycle::Running {
+                                    generation,
+                                    server: old,
+                                    apply_error: Some(format!("已保存尚未应用：{message}")),
+                                }
+                            }
+                        } else {
+                            ServerLifecycle::Running {
+                                generation,
+                                server: old,
+                                apply_error: Some(format!("已保存尚未应用：{message}")),
+                            }
+                        }
+                    }
+                }
+            }
+            (
+                ServerLifecycle::Starting {
+                    generation: current,
+                    listen,
+                    ..
+                },
+                Err(failure),
+            ) if current == generation => ServerLifecycle::Failed {
+                generation,
+                listen,
+                error: failure.public_message(),
+            },
+            (
+                ServerLifecycle::Applying {
+                    generation: current,
+                    old,
+                    ..
+                },
+                Err(failure),
+            ) if current == generation => ServerLifecycle::Running {
+                generation,
+                server: old,
+                apply_error: Some(format!("已保存尚未应用：{}", failure.public_message())),
+            },
+            (
+                ServerLifecycle::Stopping {
+                    generation: current,
+                    listen,
+                    draining,
+                },
+                Ok(prepared),
+            ) if current == generation => {
+                discard = Some(prepared);
+                if draining {
+                    ServerLifecycle::Stopping {
+                        generation,
                         listen,
-                    } if *current == generation => {
-                        inner.server = ServerLifecycle::Failed {
-                            generation,
-                            listen: listen.clone(),
-                            error: failure.public_message(),
-                        };
-                        Some(inner.serve_view())
+                        draining,
                     }
-                    ServerLifecycle::Stopping {
-                        generation: current,
-                        ..
-                    } if *current == generation => {
-                        inner.server = ServerLifecycle::Stopped { generation };
-                        Some(inner.serve_view())
-                    }
-                    _ => None,
+                } else {
+                    ServerLifecycle::Stopped { generation }
                 }
-            };
-            if let Some(view) = view {
-                emit_serve_state(app, &view);
             }
-        }
+            (
+                ServerLifecycle::Stopping {
+                    generation: current,
+                    listen,
+                    draining,
+                },
+                Err(_),
+            ) if current == generation => {
+                if draining {
+                    ServerLifecycle::Stopping {
+                        generation,
+                        listen,
+                        draining,
+                    }
+                } else {
+                    ServerLifecycle::Stopped { generation }
+                }
+            }
+            (current, Ok(prepared)) => {
+                discard = Some(prepared);
+                current
+            }
+            (current, Err(_)) => current,
+        };
+        Some(inner.serve_view())
+    };
+    if let Some(prepared) = discard {
+        prepared.discard();
+    }
+    if let Some(old) = retire {
+        tauri::async_runtime::spawn_blocking(move || old.drain_and_shutdown());
+    }
+    if let Some(view) = view {
+        emit_serve_state(app, &view);
     }
 }
 
@@ -1251,24 +1515,39 @@ where
         let mut inner = state.0.lock().unwrap();
         inner.ensure_editable()?;
         match &inner.server {
-            ServerLifecycle::Starting { .. } | ServerLifecycle::Running { .. } => {
-                return Ok(inner.snapshot());
+            ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. } => {
+                return Err("apply_in_progress: 已有配置正在应用".to_owned());
             }
             ServerLifecycle::Stopping { .. } => {
                 return Err(
                     "startup_cleanup_in_progress: 上一次代理正在停止，请稍后重试".to_string(),
                 );
             }
-            ServerLifecycle::Stopped { .. } | ServerLifecycle::Failed { .. } => {}
+            ServerLifecycle::Stopped { .. }
+            | ServerLifecycle::Running { .. }
+            | ServerLifecycle::Failed { .. } => {}
         }
         let config = inner.materialize()?;
+        let revision = inner.save_draft()?;
         let generation = inner
             .server
             .generation()
             .checked_add(1)
             .ok_or_else(|| "代理启动 generation 已耗尽，请重启 App".to_string())?;
         let listen = config.server.listen.clone();
-        inner.server = ServerLifecycle::Starting { generation, listen };
+        let current = std::mem::replace(&mut inner.server, ServerLifecycle::Stopped { generation });
+        inner.server = match current {
+            ServerLifecycle::Running { server: old, .. } => ServerLifecycle::Applying {
+                generation,
+                revision,
+                old,
+            },
+            _ => ServerLifecycle::Starting {
+                generation,
+                listen,
+                revision,
+            },
+        };
         let snapshot = inner.snapshot();
         let serve_view = snapshot.serve.clone();
         (config, generation, snapshot, serve_view)
@@ -1280,7 +1559,10 @@ where
         let result = tauri::async_runtime::spawn_blocking(move || prepare(config))
             .await
             .unwrap_or_else(|error| Err(StartFailure::new("startup_task", error)));
-        complete_serve_start(&completion_app, generation, result);
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            complete_serve_start(&completion_app, generation, result);
+        })
+        .await;
     });
     Ok(snapshot)
 }
@@ -1317,18 +1599,33 @@ fn begin_serve_stop<R: Runtime>(app: AppHandle<R>, state: &AppStateManaged) -> S
         let current = std::mem::replace(&mut inner.server, ServerLifecycle::Stopped { generation });
         let mut running = None;
         let changed = match current {
-            ServerLifecycle::Running { server, .. } => {
+            ServerLifecycle::Running { server, .. }
+            | ServerLifecycle::Applying { old: server, .. } => {
                 let listen = server.listen().to_string();
-                inner.server = ServerLifecycle::Stopping { generation, listen };
+                inner.server = ServerLifecycle::Stopping {
+                    generation,
+                    listen,
+                    draining: true,
+                };
                 running = Some(server);
                 true
             }
             ServerLifecycle::Starting { listen, .. } => {
-                inner.server = ServerLifecycle::Stopping { generation, listen };
+                inner.server = ServerLifecycle::Stopping {
+                    generation,
+                    listen,
+                    draining: false,
+                };
                 true
             }
-            ServerLifecycle::Stopping { listen, .. } => {
-                inner.server = ServerLifecycle::Stopping { generation, listen };
+            ServerLifecycle::Stopping {
+                listen, draining, ..
+            } => {
+                inner.server = ServerLifecycle::Stopping {
+                    generation,
+                    listen,
+                    draining,
+                };
                 false
             }
             ServerLifecycle::Failed { .. } => true,
@@ -1345,7 +1642,8 @@ fn begin_serve_stop<R: Runtime>(app: AppHandle<R>, state: &AppStateManaged) -> S
     if let Some(running) = running {
         let completion_app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = tauri::async_runtime::spawn_blocking(move || running.shutdown()).await;
+            let _ =
+                tauri::async_runtime::spawn_blocking(move || running.drain_and_shutdown()).await;
             complete_serve_stop(&completion_app, generation);
         });
     }
@@ -1558,9 +1856,14 @@ pub fn run() {
 
     // Validate existing configuration and apply defaults through the CLI before reuse. Put damaged configuration into read-only protection,
     // Never silently overwrite with an empty template. Upgrade the legacy OpenAI-only inbound configuration in memory to three desktop inbounds.
-    let (draft, load_error) = load_draft(&config_path, &root);
+    let (draft, saved, load_error) = load_draft_state(&config_path, &root);
 
-    let managed = AppStateManaged(Mutex::new(AppInner::new(config_path, draft, load_error)));
+    let managed = AppStateManaged(Mutex::new(AppInner::new_with_saved(
+        config_path,
+        draft,
+        saved,
+        load_error,
+    )));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1582,6 +1885,7 @@ pub fn run() {
         .manage(managed)
         .invoke_handler(tauri::generate_handler![
             get_state,
+            get_runtime_state,
             add_provider,
             discover_provider_models,
             update_provider_models,
@@ -1682,6 +1986,69 @@ mod tests {
             }
         });
         (format!("http://{address}"), worker)
+    }
+
+    fn serve_chat_completion(
+        marker: &'static str,
+        requests: usize,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("chat fixture binds");
+        let address = listener.local_addr().expect("chat fixture has an address");
+        let worker = std::thread::spawn(move || {
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().expect("chat request arrives");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut request = [0_u8; 16 * 1024];
+                let read = stream
+                    .read(&mut request)
+                    .expect("chat fixture reads request");
+                assert!(
+                    String::from_utf8_lossy(&request[..read]).contains("/v1/chat/completions"),
+                    "gateway must call the configured chat endpoint"
+                );
+                let body = json!({
+                    "id": format!("fixture-{marker}"),
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "small",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": marker},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                })
+                .to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .expect("chat fixture responds");
+            }
+        });
+        (format!("http://{address}/v1"), worker)
+    }
+
+    fn chat_through_proxy(listen: &str) -> String {
+        let body = r#"{"model":"auto","messages":[{"role":"user","content":"ping"}]}"#;
+        let mut stream = std::net::TcpStream::connect(listen).expect("proxy listener is reachable");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        write!(
+            stream,
+            "POST /v1/chat/completions HTTP/1.1\r\nhost: {listen}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("proxy request writes");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("proxy response reads");
+        response
     }
 
     fn wait_for_serve_phase<R: Runtime>(app: &tauri::App<R>, expected: ServePhase) -> StateView {
@@ -1819,6 +2186,18 @@ mod tests {
         assert!(data_dir.join("model-catalog-cache.json").is_file());
         server.join().expect("model catalog fixture exits");
 
+        {
+            let managed = app.state::<AppStateManaged>();
+            let mut inner = managed.0.lock().unwrap();
+            inner.draft["upstreams"]["fixture"]["models"] =
+                json!([{"model": "model-a"}]);
+            inner.observe_draft().unwrap();
+        }
+        let explicitly_edited = get_state(app.state());
+        assert!(explicitly_edited.draft_revision > initial_state.draft_revision);
+        assert_eq!(explicitly_edited.saved_revision, initial_state.saved_revision);
+        assert!(explicitly_edited.config_dirty);
+
         let warning_root = scratch_home("discovery-cache-warning");
         let warning_data = warning_root.join("data");
         std::fs::create_dir_all(warning_data.join("model-catalog-cache.json"))
@@ -1897,6 +2276,7 @@ mod tests {
         draft["plugins"]["dir"] = json!("plugins-dist");
         draft["data"]["dir"] = json!("token-station-data");
 
+        let saved = draft.clone();
         let prepared = prepare_desktop_draft(draft, &root);
 
         assert_eq!(prepared["plugins"]["agents"], json!(DESKTOP_AGENTS));
@@ -1905,6 +2285,17 @@ mod tests {
         assert_eq!(
             prepared["data"]["dir"],
             json!(root.join("token-station-data"))
+        );
+        let inner = AppInner::new_with_saved(
+            root.join("token-station.json"),
+            prepared,
+            saved,
+            None,
+        );
+        assert!(inner.config_state.is_dirty());
+        assert_ne!(
+            inner.config_state.draft_revision(),
+            inner.config_state.saved_revision()
         );
         std::fs::remove_dir_all(root).ok();
     }
@@ -2320,8 +2711,9 @@ mod tests {
                 Err(StartFailure::new("duplicate", "must not run"))
             },
         )
-        .unwrap();
-        assert_eq!(duplicate.serve.phase, ServePhase::Starting);
+        .err()
+        .expect("a concurrent apply is rejected explicitly");
+        assert!(duplicate.contains("apply_in_progress"));
         assert_eq!(duplicate_calls.load(Ordering::SeqCst), 0);
         assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
 
@@ -2330,7 +2722,7 @@ mod tests {
         assert_eq!(stopping.serve.phase, ServePhase::Stopping);
         release_tx.send(()).unwrap();
         let stopped = wait_for_serve_phase(&app, ServePhase::Stopped);
-        assert!(!stopped.serve.running);
+        assert_eq!(stopped.serve.app_runtime, AppRuntime::Stopped);
         assert!(stopped.serve.error.is_none());
 
         let retrying = begin_serve_start(
@@ -2373,6 +2765,122 @@ mod tests {
     }
 
     #[test]
+    fn save_and_apply_hands_new_requests_to_the_new_revision() {
+        let root = scratch_home("live-apply");
+        let listen = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().to_string()
+        };
+        let (upstream_a, fixture_a) = serve_chat_completion("revision-a", 1);
+        let (upstream_b, fixture_b) = serve_chat_completion("revision-b", 2);
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template(&repo_root()),
+            None,
+        );
+        inner.draft["server"]["listen"] = json!(listen.clone());
+        inner.draft["server"]["auth"] = json!(false);
+        inner.draft["data"]["metrics"] = json!(false);
+        inner.draft["data"]["dir"] = json!(root.join("data"));
+        inner.draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": upstream_a,
+            "models": [{"model": "small"}]
+        });
+        inner
+            .set_tier_value(TIER_LOW, Some("fixture".into()), Some("small".into()))
+            .unwrap();
+        inner.observe_draft().unwrap();
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+        begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            prepare_server,
+        )
+        .unwrap();
+        let first =
+            wait_for_serve_phase_with_timeout(&app, ServePhase::Running, Duration::from_secs(180));
+        let revision_a = first.serve.running_revision.unwrap();
+        let instance_a = first.serve.instance_id.clone().unwrap();
+        assert_eq!(revision_a, first.saved_revision);
+        assert!(chat_through_proxy(&listen).contains("revision-a"));
+        fixture_a.join().unwrap();
+
+        {
+            let state = app.state::<AppStateManaged>();
+            let mut inner = state.0.lock().unwrap();
+            inner.draft["upstreams"]["fixture"]["base_url"] = json!(upstream_b);
+            inner.observe_draft().unwrap();
+            assert!(inner.config_state.is_dirty());
+        }
+        let applying = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            prepare_server,
+        )
+        .unwrap();
+        assert_eq!(applying.serve.app_runtime, AppRuntime::Running);
+        assert_eq!(applying.serve.running_revision, Some(revision_a));
+        let second =
+            wait_for_serve_phase_with_timeout(&app, ServePhase::Running, Duration::from_secs(180));
+        assert!(second.serve.running_revision.unwrap() > revision_a);
+        assert_eq!(second.serve.running_revision, Some(second.saved_revision));
+        assert_ne!(
+            second.serve.instance_id.as_deref(),
+            Some(instance_a.as_str())
+        );
+        assert!(chat_through_proxy(&listen).contains("revision-b"));
+
+        {
+            let state = app.state::<AppStateManaged>();
+            let mut inner = state.0.lock().unwrap();
+            inner.draft["upstreams"]["fixture"]["base_url"] =
+                json!("http://127.0.0.1:1/v1");
+            inner.observe_draft().unwrap();
+        }
+        begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            |_config| Err(StartFailure::new("gateway_init", "preflight fixture failure")),
+        )
+        .unwrap();
+        let failed_apply = wait_for_serve_phase(&app, ServePhase::Running);
+        assert_eq!(failed_apply.serve.running_revision, second.serve.running_revision);
+        assert!(failed_apply.saved_revision > failed_apply.serve.running_revision.unwrap());
+        assert!(failed_apply
+            .serve
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("已保存尚未应用")));
+        assert!(chat_through_proxy(&listen).contains("revision-b"));
+        fixture_b.join().unwrap();
+
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            let ServerLifecycle::Running { server, .. } = &inner.server else {
+                panic!("fixture server must still be published");
+            };
+            server.abort_task();
+        }
+        let exited = wait_for_serve_phase_with_timeout(
+            &app,
+            ServePhase::Error,
+            Duration::from_secs(1),
+        );
+        assert_eq!(exited.serve.app_runtime, AppRuntime::Stopped);
+        assert!(!exited.serve.listener_reachable);
+        assert_eq!(exited.serve.running_revision, None);
+        assert_eq!(exited.serve.instance_id, None);
+
+        begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+        wait_for_serve_phase(&app, ServePhase::Stopped);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views() {
         let root = scratch_home("command-lifecycle");
         let mut draft = template(&repo_root());
@@ -2386,7 +2894,7 @@ mod tests {
         )))));
 
         let initial = get_state(app.state());
-        assert!(!initial.serve.running);
+        assert_eq!(initial.serve.app_runtime, AppRuntime::Stopped);
         assert!(initial.providers.is_empty());
         assert_eq!(initial.settings.listen, "127.0.0.1:0");
 
@@ -2505,23 +3013,22 @@ mod tests {
             app.state::<AppStateManaged>().inner(),
             prepare_server,
         )
-        .unwrap();
-        assert!(matches!(
-            duplicate.serve.phase,
-            ServePhase::Starting | ServePhase::Running
-        ));
+        .err()
+        .expect("a concurrent apply is rejected explicitly");
+        assert!(duplicate.contains("apply_in_progress"));
         // Coverage instrumentation makes Wasmtime's first compilation much
         // slower on a cold Linux runner; this remains a bounded integration test.
         let running =
             wait_for_serve_phase_with_timeout(&app, ServePhase::Running, Duration::from_secs(180));
-        assert!(running.serve.running);
+        assert_eq!(running.serve.app_runtime, AppRuntime::Running);
+        assert!(running.serve.listener_reachable);
         assert!(running.serve.virtual_key.is_none());
         assert!(root.join("data").join("requests.log").exists());
         let stopping =
             begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
         assert_eq!(stopping.serve.phase, ServePhase::Stopping);
         let stopped = wait_for_serve_phase(&app, ServePhase::Stopped);
-        assert!(!stopped.serve.running);
+        assert_eq!(stopped.serve.app_runtime, AppRuntime::Stopped);
 
         let removed = remove_provider(app.state(), "local".to_string()).unwrap();
         assert_eq!(removed.providers.len(), 1);

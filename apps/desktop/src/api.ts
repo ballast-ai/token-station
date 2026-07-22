@@ -25,7 +25,11 @@ export type ServePhase = "stopped" | "starting" | "stopping" | "running" | "erro
 
 export interface ServeView {
   phase: ServePhase;
-  running: boolean;
+  app_runtime: "stopped" | "running";
+  listener_reachable: boolean;
+  agent_connected: boolean;
+  running_revision: number | null;
+  instance_id: string | null;
   listen: string;
   virtual_key: string | null;
   error: string | null;
@@ -299,6 +303,7 @@ export const applyHomeRouteToAllAgents = () =>
 
 export const saveConfig = () => invoke<StateView>("save_config");
 
+export const getRuntimeState = () => invoke<ServeView>("get_runtime_state");
 export const serveStart = () => invoke<StateView>("serve_start");
 export const serveStop = () => invoke<StateView>("serve_stop");
 
@@ -361,8 +366,9 @@ let adminKey: string | null = null;
 
 /** Synchronize the data-plane endpoint whenever App.tsx refreshes state. */
 export function setAdminEndpoint(serve: ServeView) {
-  adminBase = serve.phase === "running" ? `http://${serve.listen}` : null;
-  adminKey = serve.phase === "running" ? serve.virtual_key : null;
+  const reachable = serve.app_runtime === "running" && serve.listener_reachable;
+  adminBase = reachable ? `http://${serve.listen}` : null;
+  adminKey = reachable ? serve.virtual_key : null;
 }
 
 // Browser-only mode without a Tauri shell cannot call get_state. Read the endpoint from localStorage,
