@@ -1990,7 +1990,7 @@ mod tests {
             let root = scratch(label);
             let state = AppStateManaged(Mutex::new(crate::AppInner::new(
                 root.join("token-station.json"),
-                crate::template(&root),
+                crate::template(&root.join("data"), &root.join("plugins")),
                 load_error,
             )));
 

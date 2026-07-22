@@ -120,6 +120,40 @@ struct AppInner {
 
 pub struct AppStateManaged(Mutex<AppInner>);
 
+/// Writable runtime locations resolved from Tauri's per-application roots.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DesktopPaths {
+    config_file: PathBuf,
+    data_dir: PathBuf,
+    plugins_dir: PathBuf,
+    agent_data_root: PathBuf,
+}
+
+impl DesktopPaths {
+    fn from_app_roots(config_root: PathBuf, data_root: PathBuf) -> Self {
+        Self {
+            config_file: config_root.join("token-station.json"),
+            data_dir: data_root.join("token-station-data"),
+            plugins_dir: data_root.join("plugins"),
+            agent_data_root: data_root.join("agent-integration"),
+        }
+    }
+
+    fn create_writable_dirs(&self) -> Result<(), std::io::Error> {
+        for path in [
+            self.config_file
+                .parent()
+                .expect("desktop config file always has a parent"),
+            self.data_dir.as_path(),
+            self.plugins_dir.as_path(),
+            self.agent_data_root.as_path(),
+        ] {
+            std::fs::create_dir_all(path)?;
+        }
+        Ok(())
+    }
+}
+
 /// OS application data roots injected by Tauri for Agent snapshots and
 /// ownership records.
 #[derive(Clone)]
@@ -128,27 +162,15 @@ pub struct AgentIntegrationPaths {
     pub ownership_root: PathBuf,
 }
 
-// ---- Path anchor (repository root during development. Packaging handles it separately) -------------------------------
-
-/// Repository root: three levels above `apps/desktop/src-tauri`. The CWD for `tauri dev` is unstable,
-/// Therefore, anchor configuration, plugin, and data directories to this absolute path so serve can find `plugins-dist`.
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
 /// New-config template. Empty upstreams and pools are invalid ClientConfig but a
-/// remains valid until the user configures at least one tier. Absolute paths let serve find plugins from any CWD.
-fn template(root: &std::path::Path) -> Value {
+/// valid draft until the user configures one tier. Tauri injects runtime directories.
+fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value {
     json!({
         "version": 1,
         "server": { "listen": "127.0.0.1:8787", "auth": true },
-        "data": { "dir": root.join("token-station-data"), "metrics": true },
+        "data": { "dir": data_dir, "metrics": true },
         "plugins": {
-            "dir": root.join("plugins-dist"),
+            "dir": plugins_dir,
             "agents": DESKTOP_AGENTS,
             "providers": { "openai-compatible": "provider-openai-compatible" }
         },
@@ -165,8 +187,8 @@ fn template(root: &std::path::Path) -> Value {
 }
 
 /// Upgrade the CLI-era single Chat inbound configuration to the desktop three-inbound draft, and anchor relative runtime directories to
-/// Repository root that contains the configuration file. Change only the in-memory draft; do not touch the original file until the user saves.
-fn prepare_desktop_draft(mut draft: Value, root: &std::path::Path) -> Value {
+/// Directory that contains the configuration file. Change only the in-memory draft; do not touch the original file until the user saves.
+fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Value {
     let agents = draft["plugins"]["agents"].as_array();
     let legacy_alias = agents.is_none_or(Vec::is_empty)
         && draft["plugins"]["agent"].as_str() == Some("agent-openai");
@@ -182,17 +204,17 @@ fn prepare_desktop_draft(mut draft: Value, root: &std::path::Path) -> Value {
         draft["plugins"]["agents"] = json!(DESKTOP_AGENTS);
     }
 
-    fn anchor(path: &mut Value, root: &std::path::Path) {
+    fn anchor(path: &mut Value, config_dir: &std::path::Path) {
         let Some(raw) = path.as_str() else {
             return;
         };
         let value = PathBuf::from(raw);
         if value.is_relative() {
-            *path = json!(root.join(value));
+            *path = json!(config_dir.join(value));
         }
     }
-    anchor(&mut draft["plugins"]["dir"], root);
-    anchor(&mut draft["data"]["dir"], root);
+    anchor(&mut draft["plugins"]["dir"], config_dir);
+    anchor(&mut draft["data"]["dir"], config_dir);
     draft
 }
 
@@ -200,25 +222,37 @@ fn prepare_desktop_draft(mut draft: Value, root: &std::path::Path) -> Value {
 /// for display, with a read-only error gate that rejects later save and start operations to prevent overwriting the damaged file.
 #[cfg(test)]
 fn load_draft(config_path: &std::path::Path, root: &std::path::Path) -> (Value, Option<String>) {
-    let (draft, _saved, error) = load_draft_state(config_path, root);
+    let (draft, _saved, error) = load_draft_state(
+        config_path,
+        &root.join("token-station-data"),
+        &root.join("plugins"),
+    );
     (draft, error)
 }
 
 fn load_draft_state(
     config_path: &std::path::Path,
-    root: &std::path::Path,
+    data_dir: &std::path::Path,
+    plugins_dir: &std::path::Path,
 ) -> (Value, Value, Option<String>) {
     if !config_path.exists() {
-        let draft = template(root);
+        let draft = template(data_dir, plugins_dir);
         return (draft.clone(), draft, None);
     }
     match ClientConfig::load(config_path) {
         Ok(config) => {
             let saved = serde_json::to_value(config).expect("ClientConfig always serializes");
-            (prepare_desktop_draft(saved.clone(), root), saved, None)
+            let config_dir = config_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            (
+                prepare_desktop_draft(saved.clone(), config_dir),
+                saved,
+                None,
+            )
         }
         Err(error) => {
-            let draft = template(root);
+            let draft = template(data_dir, plugins_dir);
             (
                 draft.clone(),
                 draft,
@@ -1021,10 +1055,7 @@ impl AppInner {
 
     fn save_home_route_as_profile_value(&mut self, name: &str) -> Result<(), String> {
         let name = name.trim();
-        if name.is_empty()
-            || name.len() > 80
-            || name.chars().any(char::is_control)
-        {
+        if name.is_empty() || name.len() > 80 || name.chars().any(char::is_control) {
             return Err("策略组名称无效".to_string());
         }
         let mut tiers = serde_json::Map::new();
@@ -1034,7 +1065,10 @@ impl AppInner {
                 return Err(format!("{slot} 档尚未配置，无法另存为策略组"));
             };
             self.validate_route_target(&upstream, &model)?;
-            tiers.insert(slot.to_string(), json!({ "upstream": upstream, "model": model }));
+            tiers.insert(
+                slot.to_string(),
+                json!({ "upstream": upstream, "model": model }),
+            );
         }
         if !self.draft["profiles"].is_object() {
             self.draft["profiles"] = json!({});
@@ -2342,27 +2376,39 @@ fn check_upgrade() -> Result<UpgradeView, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let root = repo_root();
-    let config_path = root.join("token-station.json");
-
-    // Validate existing configuration and apply defaults through the CLI before reuse. Put damaged configuration into read-only protection,
-    // Never silently overwrite with an empty template. Upgrade the legacy OpenAI-only inbound configuration in memory to three desktop inbounds.
-    let (draft, saved, load_error) = load_draft_state(&config_path, &root);
-
-    let managed = AppStateManaged(Mutex::new(AppInner::new_with_saved(
-        config_path,
-        draft,
-        saved,
-        load_error,
-    )));
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let agent_data_root = app.path().app_data_dir()?.join("agent-integration");
+            let desktop_paths = DesktopPaths::from_app_roots(
+                app.path().app_config_dir()?,
+                app.path().app_data_dir()?,
+            );
+            desktop_paths.create_writable_dirs().map_err(|error| {
+                std::io::Error::other(format!(
+                    "初始化桌面应用目录失败（配置：{}，数据：{}，插件：{}）：{error}",
+                    desktop_paths.config_file.display(),
+                    desktop_paths.data_dir.display(),
+                    desktop_paths.plugins_dir.display()
+                ))
+            })?;
+
+            // Validate existing configuration and apply defaults through the CLI before reuse. Put damaged configuration into read-only
+            // Protection prevents silent overwrite with an empty template. Upgrade the legacy single OpenAI inbound config only in memory.
+            let (draft, saved, load_error) = load_draft_state(
+                &desktop_paths.config_file,
+                &desktop_paths.data_dir,
+                &desktop_paths.plugins_dir,
+            );
+            app.manage(AppStateManaged(Mutex::new(AppInner::new_with_saved(
+                desktop_paths.config_file.clone(),
+                draft,
+                saved,
+                load_error,
+            ))));
+
             let paths = AgentIntegrationPaths {
-                snapshot_root: agent_data_root.join("snapshots"),
-                ownership_root: agent_data_root.join("ownership"),
+                snapshot_root: desktop_paths.agent_data_root.join("snapshots"),
+                ownership_root: desktop_paths.agent_data_root.join("ownership"),
             };
             let agent_commands = AgentCommandState::new(paths.clone()).map_err(|message| {
                 std::io::Error::other(format!("初始化 Agent IPC 失败：{message}"))
@@ -2371,7 +2417,6 @@ pub fn run() {
             app.manage(agent_commands);
             Ok(())
         })
-        .manage(managed)
         .invoke_handler(tauri::generate_handler![
             get_state,
             get_runtime_state,
@@ -2434,6 +2479,17 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).expect("scratch home is writable");
         path
+    }
+
+    fn template_for_test(root: &std::path::Path) -> Value {
+        template(&root.join("token-station-data"), &root.join("plugins"))
+    }
+
+    fn gateway_template_for_test(root: &std::path::Path) -> Value {
+        let plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("plugins-dist");
+        template(&root.join("token-station-data"), &plugins_dir)
     }
 
     fn serve_model_catalog(
@@ -2618,12 +2674,36 @@ mod tests {
     #[test]
     fn the_desktop_template_enables_every_supported_inbound_protocol() {
         let root = PathBuf::from("/tmp/token-station-desktop-test");
-        let draft = template(&root);
+        let draft = template_for_test(&root);
 
         assert_eq!(
             draft["plugins"]["agents"],
             json!(["agent-openai", "agent-anthropic", "agent-openai-responses"])
         );
+    }
+
+    #[test]
+    fn desktop_paths_stay_inside_tauri_roots_and_create_writable_directories() {
+        let root = scratch_home("tauri-paths");
+        let config_root = root.join("config");
+        let data_root = root.join("data");
+        let paths = DesktopPaths::from_app_roots(config_root.clone(), data_root.clone());
+
+        assert_eq!(paths.config_file, config_root.join("token-station.json"));
+        assert_eq!(paths.data_dir, data_root.join("token-station-data"));
+        assert_eq!(paths.plugins_dir, data_root.join("plugins"));
+        assert_eq!(paths.agent_data_root, data_root.join("agent-integration"));
+
+        paths.create_writable_dirs().unwrap();
+        assert!(config_root.is_dir());
+        assert!(paths.data_dir.is_dir());
+        assert!(paths.plugins_dir.is_dir());
+        assert!(paths.agent_data_root.is_dir());
+
+        let draft = template(&paths.data_dir, &paths.plugins_dir);
+        assert_eq!(draft["data"]["dir"], json!(paths.data_dir));
+        assert_eq!(draft["plugins"]["dir"], json!(paths.plugins_dir));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -2639,7 +2719,7 @@ mod tests {
             (200, CATALOG),
             (503, r#"{"error":"offline"}"#),
         ]);
-        let mut draft = template(&root);
+        let mut draft = template_for_test(&root);
         draft["data"]["dir"] = json!(data_dir.clone());
         draft["upstreams"]["fixture"] = json!({
             "provider": "openai-compatible",
@@ -2740,7 +2820,7 @@ mod tests {
             .expect("directory fixture blocks the cache rename");
         let warning_config = warning_root.join("token-station.json");
         let (warning_base, warning_server) = serve_model_catalog(vec![(200, CATALOG)]);
-        let mut warning_draft = template(&warning_root);
+        let mut warning_draft = template_for_test(&warning_root);
         warning_draft["data"]["dir"] = json!(warning_data);
         warning_draft["upstreams"]["fixture"] = json!({
             "provider": "openai-compatible",
@@ -2806,7 +2886,7 @@ mod tests {
     #[test]
     fn a_legacy_chat_only_config_is_migrated_in_memory_with_absolute_runtime_paths() {
         let root = scratch_home("legacy");
-        let mut draft = template(&root);
+        let mut draft = template_for_test(&root);
         draft["plugins"].as_object_mut().unwrap().remove("agents");
         draft["plugins"]["agent"] = json!("agent-openai");
         draft["plugins"]["dir"] = json!("plugins-dist");
@@ -2835,7 +2915,7 @@ mod tests {
     #[test]
     fn a_desktop_v1_agent_list_is_migrated_to_every_supported_inbound_protocol() {
         let root = scratch_home("desktop-v1-agents");
-        let mut draft = template(&root);
+        let mut draft = template_for_test(&root);
         draft["plugins"]["agents"] = json!(["agent-openai"]);
 
         let prepared = prepare_desktop_draft(draft, &root);
@@ -2882,7 +2962,7 @@ mod tests {
     #[test]
     fn provider_model_updates_preserve_metadata_and_protect_routing_references() {
         let root = scratch_home("model-update");
-        let mut draft = template(&root);
+        let mut draft = template_for_test(&root);
         draft["upstreams"]["moonshot"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://api.moonshot.cn/v1",
@@ -2933,7 +3013,7 @@ mod tests {
     #[test]
     fn provider_model_updates_respect_broken_config_read_only_protection() {
         let root = scratch_home("model-update-read-only");
-        let mut draft = template(&root);
+        let mut draft = template_for_test(&root);
         draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -2958,7 +3038,11 @@ mod tests {
     #[test]
     fn provider_model_updates_protect_inactive_agent_route_drafts() {
         let root = scratch_home("model-update-agent-route");
-        let mut inner = AppInner::new(root.join("token-station.json"), template(&root), None);
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -2991,7 +3075,7 @@ mod tests {
     #[test]
     fn stored_discovery_credentials_cannot_be_redirected_to_another_base_url() {
         let root = scratch_home("model-discovery-url-binding");
-        let mut draft = template(&root);
+        let mut draft = template_for_test(&root);
         draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://trusted.example/v1",
@@ -3018,7 +3102,11 @@ mod tests {
     #[test]
     fn tier_updates_refuse_unknown_provider_model_and_partial_values() {
         let root = scratch_home("tiers-invalid");
-        let mut inner = AppInner::new(root.join("token-station.json"), template(&root), None);
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
         inner.draft["upstreams"]["deepseek"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://api.deepseek.com",
@@ -3051,7 +3139,11 @@ mod tests {
     #[test]
     fn agent_route_drafts_seed_from_home_validate_targets_and_preserve_complete_profiles() {
         let root = scratch_home("agent-route-draft");
-        let mut inner = AppInner::new(root.join("token-station.json"), template(&root), None);
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -3108,7 +3200,11 @@ mod tests {
     #[test]
     fn returning_an_incomplete_agent_draft_to_inherit_cannot_poison_home_config() {
         let root = scratch_home("agent-route-incomplete");
-        let mut inner = AppInner::new(root.join("token-station.json"), template(&root), None);
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -3130,7 +3226,11 @@ mod tests {
     #[test]
     fn agent_route_commands_save_one_profile_and_apply_home_without_deleting_its_draft() {
         let root = scratch_home("agent-route-commands");
-        let mut inner = AppInner::new(root.join("token-station.json"), template(&root), None);
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -3162,7 +3262,7 @@ mod tests {
     fn named_profiles_are_draft_only_until_saved_and_can_be_shared_by_agents() {
         let root = scratch_home("named-agent-profile");
         let config_path = root.join("token-station.json");
-        let mut inner = AppInner::new(config_path.clone(), template(&root), None);
+        let mut inner = AppInner::new(config_path.clone(), template_for_test(&root), None);
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -3178,32 +3278,31 @@ mod tests {
         let app = tauri::test::mock_app();
         assert!(app.manage(AppStateManaged(Mutex::new(inner))));
 
-        let missing = match mount_agent_profile(
-            app.state(),
-            "codex".to_string(),
-            "missing".to_string(),
-        ) {
-            Ok(_) => panic!("an unknown profile cannot be mounted"),
-            Err(error) => error,
-        };
+        let missing =
+            match mount_agent_profile(app.state(), "codex".to_string(), "missing".to_string()) {
+                Ok(_) => panic!("an unknown profile cannot be mounted"),
+                Err(error) => error,
+            };
         assert!(missing.contains("不存在"), "{missing}");
 
-        let profiled =
-            save_home_route_as_profile(app.state(), "daily".to_string()).unwrap();
+        let profiled = save_home_route_as_profile(app.state(), "daily".to_string()).unwrap();
         assert_eq!(profiled.profiles, vec!["daily"]);
         assert!(profiled.config_dirty);
         assert!(profiled.draft_revision > before_revision);
-        assert!(!config_path.exists(), "creating a profile must not bypass save");
+        assert!(
+            !config_path.exists(),
+            "creating a profile must not bypass save"
+        );
 
         for agent_id in ["codex", "opencode"] {
-            let mounted = mount_agent_profile(
-                app.state(),
-                agent_id.to_string(),
-                "daily".to_string(),
-            )
-            .unwrap();
+            let mounted =
+                mount_agent_profile(app.state(), agent_id.to_string(), "daily".to_string())
+                    .unwrap();
             assert_eq!(mounted.agent_routes[agent_id].mode, "profile");
-            assert_eq!(mounted.agent_routes[agent_id].profile.as_deref(), Some("daily"));
+            assert_eq!(
+                mounted.agent_routes[agent_id].profile.as_deref(),
+                Some("daily")
+            );
             assert_eq!(
                 mounted.agent_routes[agent_id].tiers["high"]
                     .model
@@ -3216,7 +3315,10 @@ mod tests {
             Ok(_) => panic!("mounted profiles cannot be deleted"),
             Err(error) => error,
         };
-        assert!(error.contains("codex") && error.contains("opencode"), "{error}");
+        assert!(
+            error.contains("codex") && error.contains("opencode"),
+            "{error}"
+        );
 
         {
             let managed = app.state::<AppStateManaged>();
@@ -3233,9 +3335,7 @@ mod tests {
         let updated = save_home_route_as_profile(app.state(), "daily".to_string()).unwrap();
         assert_eq!(updated.profiles, vec!["daily"]);
         assert_eq!(
-            updated.agent_routes["codex"].tiers["high"]
-                .model
-                .as_deref(),
+            updated.agent_routes["codex"].tiers["high"].model.as_deref(),
             Some("updated")
         );
 
@@ -3251,12 +3351,7 @@ mod tests {
         }
 
         for agent_id in ["codex", "opencode"] {
-            set_agent_route_mode(
-                app.state(),
-                agent_id.to_string(),
-                "inherit".to_string(),
-            )
-            .unwrap();
+            set_agent_route_mode(app.state(), agent_id.to_string(), "inherit".to_string()).unwrap();
         }
         let deleted = delete_profile(app.state(), "daily".to_string()).unwrap();
         assert!(deleted.profiles.is_empty());
@@ -3270,7 +3365,11 @@ mod tests {
     #[test]
     fn one_two_and_three_tiers_always_end_with_a_zero_score_fallback() {
         let root = scratch_home("tiers-valid");
-        let mut inner = AppInner::new(root.join("token-station.json"), template(&root), None);
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://example.com/v1",
@@ -3299,7 +3398,7 @@ mod tests {
         let root = scratch_home("nonblocking-start");
         let mut inner = AppInner::new(
             root.join("token-station.json"),
-            template(&repo_root()),
+            gateway_template_for_test(&root),
             None,
         );
         inner.draft["data"]["dir"] = json!(root.join("data"));
@@ -3416,7 +3515,7 @@ mod tests {
         let (upstream_b, fixture_b) = serve_chat_completion("revision-b", 2);
         let mut inner = AppInner::new(
             root.join("token-station.json"),
-            template(&repo_root()),
+            gateway_template_for_test(&root),
             None,
         );
         inner.draft["server"]["listen"] = json!(listen.clone());
@@ -3455,12 +3554,8 @@ mod tests {
         fixture_a.join().unwrap();
 
         save_home_route_as_profile(app.state(), "shared".to_string()).unwrap();
-        let mounted = mount_agent_profile(
-            app.state(),
-            "codex".to_string(),
-            "shared".to_string(),
-        )
-        .unwrap();
+        let mounted =
+            mount_agent_profile(app.state(), "codex".to_string(), "shared".to_string()).unwrap();
         assert!(mounted.config_dirty);
         assert_eq!(mounted.serve.running_revision, Some(revision_a));
 
@@ -3505,12 +3600,9 @@ mod tests {
         )
         .unwrap();
         save_home_route_as_profile(app.state(), "candidate".to_string()).unwrap();
-        let candidate = mount_agent_profile(
-            app.state(),
-            "opencode".to_string(),
-            "candidate".to_string(),
-        )
-        .unwrap();
+        let candidate =
+            mount_agent_profile(app.state(), "opencode".to_string(), "candidate".to_string())
+                .unwrap();
         assert_eq!(candidate.serve.running_revision, Some(second_revision));
         begin_serve_start(
             app.handle().clone(),
@@ -3580,7 +3672,7 @@ mod tests {
     #[test]
     fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views() {
         let root = scratch_home("command-lifecycle");
-        let mut draft = template(&repo_root());
+        let mut draft = gateway_template_for_test(&root);
         draft["data"]["dir"] = json!(root.join("data"));
         draft["server"]["listen"] = json!("127.0.0.1:0");
         let app = tauri::test::mock_app();
@@ -3856,7 +3948,7 @@ mod tests {
         assert_eq!(draft["server"]["auth"], json!(true));
 
         let absolute = root.join("already-absolute");
-        let mut shapes = template(&root);
+        let mut shapes = template_for_test(&root);
         shapes["plugins"]["dir"] = json!(absolute.clone());
         shapes["data"]["dir"] = json!(42);
         let shapes = prepare_desktop_draft(shapes, &root);
