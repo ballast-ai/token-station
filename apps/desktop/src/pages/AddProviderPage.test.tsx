@@ -19,7 +19,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 describe("AddProviderPage", () => {
   it("shows the endpoint and credential boundary for a catalog preset", async () => {
     const user = userEvent.setup();
-    render(<AddProviderPage onCancel={vi.fn()} onAdded={vi.fn()} />);
+    render(<AddProviderPage existingNames={[]} onCancel={vi.fn()} onAdded={vi.fn()} />);
 
     await user.selectOptions(screen.getByLabelText("选择供应商"), "minimax_cn");
 
@@ -29,5 +29,16 @@ describe("AddProviderPage", () => {
     expect(await screen.findByText("https://api.minimaxi.com/v1/chat/completions")).toBeInTheDocument();
     expect(screen.getByText("https://api.minimaxi.com/v1/responses")).toBeInTheDocument();
     expect(screen.getByText("https://api.minimaxi.com/v1/messages")).toBeInTheDocument();
+  });
+
+  it("frames an existing provider as a safe update", async () => {
+    const user = userEvent.setup();
+    render(<AddProviderPage existingNames={["deepseek"]} onCancel={vi.fn()} onAdded={vi.fn()} />);
+
+    await user.selectOptions(screen.getByLabelText("选择供应商"), "deepseek");
+
+    expect(screen.getByText(/已经存在/)).toBeInTheDocument();
+    expect(screen.getByText(/不会重复创建/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "更新供应商" })).toBeInTheDocument();
   });
 });

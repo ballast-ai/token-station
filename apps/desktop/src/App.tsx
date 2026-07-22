@@ -288,9 +288,10 @@ export default function App() {
       {view === "settings" && <SettingsHub settings={state.settings} serve={state.serve} onSaved={showState} />}
       {view === "add-provider" && (
         <AddProviderPage
+          existingNames={state.providers.map((provider) => provider.name)}
           onCancel={() => navigate(returnView)}
-          onAdded={(next) => {
-            showState(next, "供应商已添加");
+          onAdded={(next, message) => {
+            showState(next, message);
             setView(returnView);
           }}
         />
