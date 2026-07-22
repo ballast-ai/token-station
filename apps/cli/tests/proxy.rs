@@ -8,15 +8,16 @@
 //! would in production; only the far end of the wire is scripted.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use token_station_cli::config::ClientConfig;
-use token_station_cli::gateway::Gateway;
+use token_station_cli::gateway::{FeatureLayer, Gateway, Reply, StageStatus};
 use token_station_cli::server;
 
 // -- plugin packages -------------------------------------------------------------
@@ -79,6 +80,96 @@ struct MockUpstream {
     port: u16,
     seen: Arc<Mutex<Vec<Seen>>>,
     hits: Arc<AtomicUsize>,
+    peer_closed: Arc<AtomicBool>,
+}
+
+/// A bounded local endpoint that distinguishes a direct TLS connection from
+/// an environment-proxy CONNECT without allowing either path onto the network.
+struct ConnectionTrap {
+    port: u16,
+    hits: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ConnectionTrap {
+    fn start(response: Option<Vec<u8>>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("connection trap binds");
+        listener.set_nonblocking(true).expect("nonblocking trap");
+        let port = listener.local_addr().expect("bound trap").port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_hits = Arc::clone(&hits);
+        let worker_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !worker_stop.load(Ordering::SeqCst) && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        worker_hits.fetch_add(1, Ordering::SeqCst);
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .expect("bounded trap read");
+                        let mut request = [0_u8; 4096];
+                        let read_deadline = Instant::now() + Duration::from_secs(10);
+                        loop {
+                            match stream.read(&mut request) {
+                                Err(error)
+                                    if matches!(
+                                        error.kind(),
+                                        std::io::ErrorKind::WouldBlock
+                                            | std::io::ErrorKind::TimedOut
+                                    ) && Instant::now() < read_deadline => {}
+                                Ok(_) | Err(_) => break,
+                            }
+                        }
+                        if let Some(response) = &response {
+                            let _ = stream.write_all(response);
+                        }
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("connection trap accept failed: {error}"),
+                }
+            }
+        });
+        Self {
+            port,
+            hits,
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    fn https_url(&self) -> String {
+        format!("https://127.0.0.1:{}/v1", self.port)
+    }
+
+    fn http_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    fn hits(&self) -> usize {
+        self.hits.load(Ordering::SeqCst)
+    }
+
+    fn finish(mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            worker.join().expect("connection trap exits cleanly");
+        }
+    }
+}
+
+impl Drop for ConnectionTrap {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            worker.join().expect("connection trap exits cleanly");
+        }
+    }
 }
 
 impl MockUpstream {
@@ -90,6 +181,7 @@ impl MockUpstream {
         let port = listener.local_addr().expect("bound").port();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let hits = Arc::new(AtomicUsize::new(0));
+        let peer_closed = Arc::new(AtomicBool::new(false));
 
         let record = Arc::clone(&seen);
         let counter = Arc::clone(&hits);
@@ -112,7 +204,70 @@ impl MockUpstream {
             }
         });
 
-        Self { port, seen, hits }
+        Self {
+            port,
+            seen,
+            hits,
+            peer_closed,
+        }
+    }
+
+    /// Sends only the streaming response headers, then waits for the proxy to
+    /// close the upstream socket. This is the real blocked-read case used by
+    /// the drain/cancellation acceptance test.
+    fn start_hanging() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+        let port = listener.local_addr().expect("bound").port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let peer_closed = Arc::new(AtomicBool::new(false));
+        let record = Arc::clone(&seen);
+        let counter = Arc::clone(&hits);
+        let closed = Arc::clone(&peer_closed);
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("hanging upstream accepts");
+            record
+                .lock()
+                .expect("recorder")
+                .push(read_http_request(&mut stream));
+            counter.fetch_add(1, Ordering::SeqCst);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+                )
+                .expect("stream headers write");
+            stream.flush().expect("stream headers flush");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                .expect("read timeout sets");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut byte = [0_u8; 1];
+            while std::time::Instant::now() < deadline {
+                match stream.read(&mut byte) {
+                    Ok(0) => {
+                        closed.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => {
+                        closed.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
+            let _ = stream.shutdown(Shutdown::Both);
+        });
+        Self {
+            port,
+            seen,
+            hits,
+            peer_closed,
+        }
     }
 
     fn base_url(&self) -> String {
@@ -125,6 +280,10 @@ impl MockUpstream {
 
     fn hits(&self) -> usize {
         self.hits.load(Ordering::SeqCst)
+    }
+
+    fn peer_closed(&self) -> bool {
+        self.peer_closed.load(Ordering::SeqCst)
     }
 }
 
@@ -196,6 +355,24 @@ fn http_json(status: u16, body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+fn http_json_with_headers(status: u16, body: &str, headers: &[(&str, &str)]) -> Vec<u8> {
+    use std::fmt::Write as _;
+
+    let mut extra = String::new();
+    for (name, value) in headers {
+        write!(&mut extra, "{name}: {value}\r\n").expect("String writes cannot fail");
+    }
+    format!(
+        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{extra}connection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
+fn http_redirect(location: &str) -> Vec<u8> {
+    http_json_with_headers(302, "redirect refused", &[("location", location)])
+}
+
 // -- the proxy under test ----------------------------------------------------------
 
 /// A running proxy under test: where it listens, where it writes, and the
@@ -204,6 +381,7 @@ struct Proxy {
     url: String,
     data_dir: PathBuf,
     virtual_key: String,
+    control: server::ServerControl,
 }
 
 /// Starts the whole server against `upstream`, auth on — the default posture.
@@ -251,7 +429,7 @@ fn start_proxy_with_agents(
                 "base_url": upstream.base_url(),
                 "auth": { "slot": "provider_api_key", "file": key_file },
                 "models": [
-                    { "model": "gpt-5.5", "tool": true, "json_schema": true, "context_window": 400_000 }
+                    { "model": "gpt-5.5", "tool": true, "tool_state": "verified", "vision": true, "vision_state": "verified", "json_schema": true, "json_schema_state": "declared", "context_window": 400_000 }
                 ]
             }
         },
@@ -282,15 +460,16 @@ fn start_proxy_with_agents(
     let (virtual_key, created) =
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
     assert!(created, "each test gets a fresh data dir");
-    let state = server::AppState {
+    let state = server::AppState::new(
         gateway,
-        virtual_key: Some(Arc::from(virtual_key.as_str())),
-        admin: Arc::new(token_station_cli::admin::AdminContext {
+        Some(Arc::from(virtual_key.as_str())),
+        Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
             router: config.router.clone(),
             plugins: config.plugins.clone(),
         }),
-    };
+    );
+    let control = state.control.clone();
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
     listener.set_nonblocking(true).expect("nonblocking");
@@ -312,6 +491,7 @@ fn start_proxy_with_agents(
         url: format!("http://{address}"),
         data_dir,
         virtual_key,
+        control,
     }
 }
 
@@ -380,15 +560,16 @@ fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Pat
     let (virtual_key, created) =
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
     assert!(created);
-    let state = server::AppState {
+    let state = server::AppState::new(
         gateway,
-        virtual_key: Some(Arc::from(virtual_key.as_str())),
-        admin: Arc::new(token_station_cli::admin::AdminContext {
+        Some(Arc::from(virtual_key.as_str())),
+        Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
             router: config.router.clone(),
             plugins: config.plugins.clone(),
         }),
-    };
+    );
+    let control = state.control.clone();
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
     listener.set_nonblocking(true).expect("nonblocking");
     let address = listener.local_addr().expect("bound");
@@ -407,6 +588,7 @@ fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Pat
         url: format!("http://{address}"),
         data_dir,
         virtual_key,
+        control,
     }
 }
 
@@ -462,6 +644,18 @@ fn post_chat(proxy: &Proxy, body: &Value, hint: Option<(&str, &str)>) -> (u16, S
     let status = response.status().as_u16();
     let body = response.into_body().read_to_string().expect("body reads");
     (status, body)
+}
+
+fn post_chat_stream(proxy: &Proxy) -> (u16, String) {
+    post_chat(
+        proxy,
+        &json!({
+            "model": "auto",
+            "stream": true,
+            "messages": [{"role": "user", "content": "stream"}]
+        }),
+        None,
+    )
 }
 
 fn send_messages(proxy: &Proxy, body: &Value, token: &str) -> (u16, Option<String>, String) {
@@ -550,6 +744,22 @@ fn sse_events(body: &str) -> Vec<Value> {
         .collect()
 }
 
+fn assert_responses_terminal_is_unique_and_last(events: &[Value], body: &str) {
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "response.created")
+            .count(),
+        1,
+        "one logical stream has one response.created: {body}"
+    );
+    assert_eq!(
+        events.last().map(|event| &event["type"]),
+        Some(&json!("response.completed")),
+        "response.completed is terminal: {body}"
+    );
+}
+
 fn read_marker_tool() -> Value {
     json!({
         "type": "function",
@@ -561,6 +771,185 @@ fn read_marker_tool() -> Value {
             "required": ["path"]
         }
     })
+}
+
+const EGRESS_CHILD_MODE: &str = "TOKEN_STATION_EGRESS_CHILD_MODE";
+const EGRESS_TARGET_URL: &str = "TOKEN_STATION_EGRESS_TARGET_URL";
+const EGRESS_PROXY_URL: &str = "TOKEN_STATION_EGRESS_PROXY_URL";
+const EGRESS_KEY_FILE: &str = "TOKEN_STATION_EGRESS_KEY_FILE";
+const EGRESS_PLUGIN_DIR: &str = "TOKEN_STATION_EGRESS_PLUGIN_DIR";
+const EGRESS_CHILD_TIMEOUT: Duration = Duration::from_secs(120);
+const PROXY_ENV_VARS: [&str; 8] = [
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "NO_PROXY",
+    "no_proxy",
+];
+
+fn run_https_proxy_child(
+    mode: &str,
+    target_url: &str,
+    proxy_url: &str,
+    key_file: &Path,
+    plugin_dir: &Path,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut command = Command::new(std::env::current_exe().expect("test executable is known"));
+    command
+        .args([
+            "--exact",
+            "egress_https_proxy_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(EGRESS_CHILD_MODE, mode)
+        .env(EGRESS_TARGET_URL, target_url)
+        .env(EGRESS_PROXY_URL, proxy_url)
+        .env(EGRESS_KEY_FILE, key_file)
+        .env(EGRESS_PLUGIN_DIR, plugin_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for name in PROXY_ENV_VARS {
+        command.env_remove(name);
+    }
+    for name in &PROXY_ENV_VARS[..6] {
+        command.env(name, proxy_url);
+    }
+
+    let mut child = command.spawn().expect("isolated proxy test child starts");
+    let mut stdout = child.stdout.take().expect("child stdout is piped");
+    let mut stderr = child.stderr.take().expect("child stderr is piped");
+    let stdout_worker = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).expect("child stdout reads");
+        bytes
+    });
+    let stderr_worker = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).expect("child stderr reads");
+        bytes
+    });
+
+    let deadline = Instant::now() + EGRESS_CHILD_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("child status polls") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("timed out child is killed");
+            let _ = child.wait();
+            let stdout = stdout_worker.join().expect("stdout reader exits");
+            let stderr = stderr_worker.join().expect("stderr reader exits");
+            panic!(
+                "isolated {mode} proxy child timed out\nstdout={}\nstderr={}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    let stdout = stdout_worker.join().expect("stdout reader exits");
+    let stderr = stderr_worker.join().expect("stderr reader exits");
+    assert!(
+        status.success(),
+        "isolated {mode} proxy child failed\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    (stdout, stderr)
+}
+
+#[test]
+fn production_and_probe_ignore_all_proxy_environment_variants() {
+    // Build plugins before injecting proxy variables into the child, so Cargo
+    // itself never participates in this network-path assertion.
+    let plugin_dir = plugins_dir().to_path_buf();
+
+    for mode in ["production", "probe"] {
+        let target = ConnectionTrap::start(None);
+        let proxy = ConnectionTrap::start(Some(
+            b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec(),
+        ));
+        let target_url = target.https_url();
+        let proxy_url = proxy.http_url();
+        let key_value = format!("sk-https-proxy-{mode}");
+        let key = key_file(&format!("https-proxy-{mode}"), &key_value);
+
+        let (stdout, stderr) =
+            run_https_proxy_child(mode, &target_url, &proxy_url, &key, &plugin_dir);
+
+        assert_eq!(target.hits(), 1, "{mode} connects directly to its target");
+        assert_eq!(proxy.hits(), 0, "{mode} must ignore HTTPS_PROXY");
+        for output in [&stdout, &stderr] {
+            assert!(
+                !String::from_utf8_lossy(output).contains(&key_value),
+                "{mode} child output must not disclose its credential"
+            );
+        }
+
+        target.finish();
+        proxy.finish();
+        std::fs::remove_file(key).ok();
+    }
+}
+
+#[test]
+#[ignore = "spawned by its parent to isolate proxy environment"]
+fn egress_https_proxy_child() {
+    let mode = std::env::var(EGRESS_CHILD_MODE).expect("child mode is provided");
+    let target_url = std::env::var(EGRESS_TARGET_URL).expect("child target is provided");
+    let expected_proxy = std::env::var(EGRESS_PROXY_URL).expect("child proxy is provided");
+    let key_file = PathBuf::from(std::env::var(EGRESS_KEY_FILE).expect("child key is provided"));
+    let plugin_dir =
+        PathBuf::from(std::env::var(EGRESS_PLUGIN_DIR).expect("child plugins are provided"));
+    for name in &PROXY_ENV_VARS[..6] {
+        assert_eq!(
+            std::env::var(name).as_deref(),
+            Ok(expected_proxy.as_str()),
+            "the isolated child must inherit hostile {name}"
+        );
+    }
+
+    let gateway = gateway_for_base_url(&target_url, &key_file, &plugin_dir);
+    match mode.as_str() {
+        "production" => {
+            let body = json!({
+                "model": "auto",
+                "messages": [{"role": "user", "content": "hi"}]
+            })
+            .to_string();
+            let mut result = None;
+            gateway.chat(
+                "POST",
+                "/v1/chat/completions",
+                &[],
+                body.as_bytes(),
+                &mut |reply| {
+                    if let Reply::BeginJson(reply) = reply {
+                        result = Some((reply.status, reply.body));
+                    }
+                    true
+                },
+            );
+            let (status, response_body) = result.expect("production emits a JSON refusal");
+            assert_eq!(status, 502, "{response_body}");
+        }
+        "probe" => {
+            let outcomes = gateway
+                .probe("mock_primary", None)
+                .expect("probe reaches the transport boundary");
+            let error = outcomes[0]
+                .latency_ms
+                .as_ref()
+                .expect_err("the local TLS trap cannot be a healthy provider");
+            assert!(error.contains("upstream"), "{error}");
+        }
+        other => panic!("unknown isolated child mode `{other}`"),
+    }
 }
 
 // -- the tests -----------------------------------------------------------------------
@@ -585,7 +974,12 @@ fn a_chat_completion_round_trips_with_the_credential_injected() {
         &proxy,
         &json!({
             "model": "auto",
-            "messages": [{ "role": "user", "content": "what is six times seven" }]
+            "messages": [{ "role": "user", "content": "what is six times seven" }],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "calculator", "parameters": {"type": "object"}}
+            }],
+            "metadata": {"type": "audio", "modalities": ["audio"]}
         }),
         None,
     );
@@ -610,6 +1004,7 @@ fn a_chat_completion_round_trips_with_the_credential_injected() {
         json!("gpt-5.5"),
         "routing replaced `auto`"
     );
+    assert_eq!(seen[0].body["tools"][0]["function"]["name"], "calculator");
 
     // And what the exchange left behind: one row, decision and usage included.
     settle();
@@ -628,6 +1023,192 @@ fn a_chat_completion_round_trips_with_the_credential_injected() {
         "the file log is always written"
     );
 
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn redirects_to_other_hosts_loopback_and_metadata_never_receive_a_second_hop() {
+    let canary = MockUpstream::start(Vec::new());
+    // The metadata lure keeps the canonical path and IP literal in the URL,
+    // but resolves to our local canary. A redirect regression therefore fails
+    // deterministically without ever opening a socket to real link-local
+    // metadata infrastructure.
+    let locations = [
+        (
+            "other-host",
+            format!("http://localhost:{}/credential-canary", canary.port),
+        ),
+        (
+            "loopback",
+            format!("http://127.0.0.1:{}/credential-canary", canary.port),
+        ),
+        (
+            "metadata",
+            format!(
+                "http://127.0.0.1:{}/latest/meta-data/iam/security-credentials/?original-host=169.254.169.254",
+                canary.port
+            ),
+        ),
+    ];
+
+    for (label, location) in locations {
+        let source = MockUpstream::start(vec![vec![http_redirect(&location)]]);
+        let key_value = format!("sk-redirect-{label}");
+        let key = key_file(&format!("redirect-{label}"), &key_value);
+        let proxy = start_proxy(&source, &key);
+
+        let (status, body) = post_chat(
+            &proxy,
+            &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+            None,
+        );
+
+        assert_eq!(status, 502, "redirect must fail for {label}: {body}");
+        assert!(body.contains("upstream_unavailable"), "{body}");
+        assert_eq!(source.hits(), 1, "the authorized first hop is called once");
+        assert_eq!(canary.hits(), 0, "{label} target must not be contacted");
+        settle();
+        let db = rusqlite::Connection::open(proxy.data_dir.join("metrics.sqlite"))
+            .expect("receipt db opens");
+        let http_status: Option<u16> = db
+            .query_row("SELECT http_status FROM attempts", [], |row| row.get(0))
+            .expect("redirect attempt exists");
+        assert_eq!(
+            http_status,
+            Some(302),
+            "the refused redirect keeps its raw upstream status"
+        );
+        assert_eq!(
+            source.seen()[0].authorization.as_deref(),
+            Some(format!("Bearer {key_value}").as_str())
+        );
+        assert!(!body.contains(&key_value));
+        assert!(!body.contains(&location));
+
+        std::fs::remove_file(key).ok();
+    }
+}
+
+#[test]
+fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_records_499() {
+    let mock = MockUpstream::start_hanging();
+    let key = key_file("hung-drain", "sk-test-key-abc\n");
+    let proxy = start_proxy(&mock, &key);
+    let url = proxy.url.clone();
+    let virtual_key = proxy.virtual_key.clone();
+    let client = std::thread::spawn(move || {
+        let agent = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(15)))
+                .http_status_as_error(false)
+                .build(),
+        );
+        let response = agent
+            .post(format!("{url}/v1/chat/completions"))
+            .header("authorization", &format!("Bearer {virtual_key}"))
+            .send(
+                &json!({
+                    "model": "auto",
+                    "stream": true,
+                    "messages": [{"role": "user", "content": "hang"}]
+                })
+                .to_string(),
+            )
+            .expect("proxy sends stream headers");
+        let status = response.status().as_u16();
+        let _ = response.into_body().read_to_string();
+        status
+    });
+
+    let arrival_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while (mock.hits() == 0 || proxy.control.in_flight() == 0)
+        && std::time::Instant::now() < arrival_deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(mock.hits(), 1, "the hanging exchange reached its upstream");
+    assert_eq!(proxy.control.in_flight(), 1, "one request is in flight");
+
+    proxy.control.stop_accepting();
+    let grace_started = std::time::Instant::now();
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    assert_eq!(
+        proxy.control.in_flight(),
+        1,
+        "the blocked request remains alive throughout the approved grace"
+    );
+    proxy.control.cancel_in_flight();
+
+    let cleanup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while (proxy.control.in_flight() != 0 || !mock.peer_closed())
+        && std::time::Instant::now() < cleanup_deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(grace_started.elapsed() >= std::time::Duration::from_secs(5));
+    assert_eq!(
+        proxy.control.in_flight(),
+        0,
+        "the gateway worker exits after cancel"
+    );
+    assert!(
+        mock.peer_closed(),
+        "the cancelled worker closes the upstream socket"
+    );
+    assert_eq!(
+        client.join().expect("client joins"),
+        499,
+        "an uncommitted stream cancelled by drain is surfaced as cancellation"
+    );
+
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(499)");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn a_cancelled_non_stream_body_is_499_not_a_provider_failure() {
+    let mock = MockUpstream::start_hanging();
+    let key = key_file("hung-json-cancel", "sk-test-key-abc\n");
+    let proxy = start_proxy(&mock, &key);
+    let url = proxy.url.clone();
+    let virtual_key = proxy.virtual_key.clone();
+    let client = std::thread::spawn(move || {
+        let agent = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(5)))
+                .http_status_as_error(false)
+                .build(),
+        );
+        agent
+            .post(format!("{url}/v1/chat/completions"))
+            .header("authorization", &format!("Bearer {virtual_key}"))
+            .send(
+                &json!({
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "hang"}]
+                })
+                .to_string(),
+            )
+            .expect("proxy answers the cancelled request")
+            .status()
+            .as_u16()
+    });
+
+    let arrival_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while (mock.hits() == 0 || proxy.control.in_flight() == 0)
+        && std::time::Instant::now() < arrival_deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(mock.hits(), 1);
+    proxy.control.cancel_in_flight();
+    assert_eq!(client.join().expect("client joins"), 499);
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(499)");
+    assert_eq!(row["error_code"], "Null");
     std::fs::remove_file(key).ok();
 }
 
@@ -1043,6 +1624,7 @@ fn a_responses_stream_is_incremental_and_protocol_shaped() {
     assert!(body.contains("event: response.completed"), "{body}");
 
     let events = sse_events(&body);
+    assert_responses_terminal_is_unique_and_last(&events, &body);
     let added: Vec<_> = events
         .iter()
         .filter(|event| event["type"] == "response.output_item.added")
@@ -1439,7 +2021,21 @@ fn an_anthropic_stream_is_incremental_and_protocol_shaped() {
         "{body}"
     );
     assert!(body.contains("event: message_stop"), "{body}");
-    let usage = sse_events(&body)
+    let events = sse_events(&body);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "message_stop")
+            .count(),
+        1,
+        "message_stop appears exactly once: {body}"
+    );
+    assert_eq!(
+        events.last().map(|event| &event["type"]),
+        Some(&json!("message_stop")),
+        "message_stop is terminal: {body}"
+    );
+    let usage = events
         .into_iter()
         .filter(|event| event["type"] == "message_delta")
         .find_map(|event| event.get("usage").cloned())
@@ -1550,6 +2146,8 @@ fn a_streaming_completion_survives_awkward_tcp_split_points() {
     assert!(body.contains(r#""content":"Hel""#), "{body}");
     assert!(body.contains(r#""content":"lo""#), "{body}");
     assert!(body.contains("data: [DONE]"), "{body}");
+    assert_eq!(body.matches("data: [DONE]").count(), 1, "{body}");
+    assert!(body.trim_end().ends_with("data: [DONE]"), "{body}");
 
     // The usage event inside the stream reached the metrics row.
     settle();
@@ -1558,6 +2156,159 @@ fn a_streaming_completion_survives_awkward_tcp_split_points() {
     assert_eq!(row["input_tokens"], "Integer(7)");
     assert_eq!(row["output_tokens"], "Integer(2)");
 
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn sse_crlf_no_space_multiline_data_and_split_unicode_are_decoded_once() {
+    let sse = concat!(
+        "data:{\"choices\":[\r\n",
+        "data: {\"index\":0,\"delta\":{\"content\":\"你好😀\"}}]}\r\n\r\n",
+        "data:{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\r\n\r\n",
+        "data:[DONE]\r\n\r\n"
+    );
+    let header = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        sse.len()
+    );
+    let bytes = sse.as_bytes();
+    let unicode = sse.find('你').expect("Chinese payload exists");
+    let emoji = sse.find('😀').expect("emoji payload exists");
+    let chinese_split = unicode + 1;
+    let emoji_split = emoji + 2;
+    let segments = vec![
+        header.into_bytes(),
+        bytes[..chinese_split].to_vec(),
+        bytes[chinese_split..emoji_split].to_vec(),
+        bytes[emoji_split..].to_vec(),
+    ];
+    let mock = MockUpstream::start(vec![segments]);
+    let key = key_file("sse-rfc-boundaries", "sk-test-key");
+    let proxy = start_proxy(&mock, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("你好😀"), "{body}");
+    settle();
+    assert_eq!(last_row(&proxy.data_dir)["status"], "Integer(200)");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn an_sse_error_before_output_stays_uncommitted_and_typed() {
+    let sse = "event:error\n\n";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let key = key_file("sse-event-error", "sk-test-key");
+    let proxy = start_proxy(&mock, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 502, "{body}");
+    assert!(
+        !body.contains("data:"),
+        "the stream was never committed: {body}"
+    );
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["error_code"], "Text(\"provider_protocol_error\")");
+    assert_eq!(row["status"], "Integer(502)");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn an_empty_stream_choices_frame_cannot_become_a_successful_done() {
+    let sse = "data: {\"choices\":[]}\n\ndata: [DONE]\n\n";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let key = key_file("sse-empty-choices", "sk-test-key");
+    let proxy = start_proxy(&mock, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 502, "{body}");
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(502)");
+    assert_eq!(row["error_code"], "Text(\"provider_protocol_error\")");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn finish_reason_then_clean_eof_is_a_complete_stream() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"complete\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let key = key_file("sse-finish-eof", "sk-test-key");
+    let proxy = start_proxy(&mock, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("complete"), "{body}");
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(200)");
+    assert_eq!(row["error_code"], "Null");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn a_delta_followed_by_eof_is_partial_failure_not_success() {
+    let sse = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"half\"}}]}\n\n";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let key = key_file("sse-partial-eof", "sk-test-key");
+    let proxy = start_proxy(&mock, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "HTTP was already committed: {body}");
+    assert!(body.contains("half"), "{body}");
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(502)");
+    assert_eq!(row["error_code"], "Text(\"transport_truncated\")");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn invalid_first_sse_event_falls_back_before_stream_commit() {
+    let broken_sse = "data: not-json\n\n";
+    let broken = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{broken_sse}",
+        broken_sse.len()
+    )
+    .into_bytes();
+    let good_sse = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"fallback-stream\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let good = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{good_sse}",
+        good_sse.len()
+    )
+    .into_bytes();
+    let primary = MockUpstream::start(vec![vec![broken]]);
+    let fallback = MockUpstream::start(vec![vec![good]]);
+    let key = key_file("sse-precommit-fallback", "sk-test-key");
+    let proxy = start_proxy_two(&primary, &fallback, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("fallback-stream"), "{body}");
+    assert_eq!((primary.hits(), fallback.hits()), (1, 1));
+    settle();
+    assert_eq!(last_row(&proxy.data_dir)["attempts"], "Integer(2)");
     std::fs::remove_file(key).ok();
 }
 
@@ -1619,49 +2370,61 @@ fn an_upstream_401_is_mapped_not_retried_and_never_leaks_the_key() {
 }
 
 #[test]
-fn a_request_the_pool_cannot_serve_is_refused_with_the_reason() {
-    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
+fn image_audio_and_embeddings_are_refused_at_the_language_only_boundary() {
+    let mock = MockUpstream::start(Vec::new());
     let key = key_file("capability", "sk-test-key-abc");
     let proxy = start_proxy(&mock, &key);
 
-    // The only model has a 400k context window; a request asking for more output
-    // than that has nowhere to go. This exercises the router-layer four-state
-    // refusal (not the earlier multimodal gate), and the reason must survive to
-    // the receipt so the desktop can say *which* capability was missing.
-    let (status, body) = post_chat(
-        &proxy,
-        &json!({
+    // The configured Provider capability is deliberately verified for vision;
+    // the host's language-only product boundary must still win before routing.
+
+    for request in [
+        json!({
             "model": "auto",
-            "messages": [{ "role": "user", "content": "hello" }],
-            "max_tokens": 500_000
+            "messages": [{ "role": "user", "content": [
+                { "type": "image_url", "image_url": { "url": "https://example/cat.png" } }
+            ]}]
         }),
-        None,
-    );
+        json!({
+            "model": "auto",
+            "messages": [{ "role": "user", "content": [
+                { "type": "input_audio", "input_audio": { "data": "AA==", "format": "wav" } }
+            ]}]
+        }),
+    ] {
+        let (status, body) = post_chat(&proxy, &request, None);
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains("language-model"), "{body}");
+        assert!(body.contains("capability"), "{body}");
+        settle();
+        let row = last_row(&proxy.data_dir);
+        assert_eq!(row["error_code"], "Text(\"capability\")");
+        assert_eq!(row["attempts"], "Integer(0)");
+    }
 
-    assert_eq!(status, 503, "{body}");
-    assert!(body.contains("context window"), "{body}");
-    assert_eq!(mock.hits(), 0, "nothing capable, so nothing was sent");
-
+    let response = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    )
+    .post(format!("{}/v1/embeddings", proxy.url))
+    .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+    .send(&json!({"model": "auto", "input": "hello"}).to_string())
+    .expect("the proxy returns a typed refusal");
+    assert_eq!(response.status().as_u16(), 400);
+    let body = response.into_body().read_to_string().expect("body reads");
+    assert!(body.contains("capability"), "{body}");
     settle();
     let row = last_row(&proxy.data_dir);
-    assert_eq!(row["status"], "Integer(503)");
     assert_eq!(row["error_code"], "Text(\"capability\")");
-    // The specific unmet requirement is persisted, not just the coarse code.
-    assert!(
-        row["error_detail"].contains("context window"),
-        "{}",
-        row["error_detail"]
-    );
+    assert_eq!(row["attempts"], "Integer(0)");
+    assert_eq!(mock.hits(), 0, "the language-only boundary is pre-upstream");
 
     std::fs::remove_file(key).ok();
 }
 
 #[test]
 fn a_broken_agent_adapter_is_skipped_and_the_proxy_still_serves() {
-    // P0: the shared gateway must not be all-or-nothing. One configured adapter
-    // that cannot load (`does-not-exist` resolves to a missing plugin dir) is
-    // skipped; the working one still serves. Gateway::new panicking here would
-    // mean a single broken protocol sank the whole proxy.
     let upstream_answer = json!({
         "id": "chatcmpl-ok",
         "model": "gpt-5.5",
@@ -1686,7 +2449,6 @@ fn a_broken_agent_adapter_is_skipped_and_the_proxy_still_serves() {
     );
 
     assert_eq!(status, 200, "the surviving adapter still serves: {body}");
-
     std::fs::remove_file(key).ok();
 }
 
@@ -1699,11 +2461,11 @@ fn nothing_the_caller_wrote_reaches_disk() {
 
     let answer = json!({
         "id": "chatcmpl-1", "model": "gpt-5.5",
-        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "ok" }, "finish_reason": "stop" }],
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": CANARY }, "finish_reason": "stop" }],
         "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
-    let key = key_file("canary", "sk-test-key-abc");
+    let key = key_file("canary", &format!("sk-test-{CANARY}"));
     let proxy = start_proxy(&mock, &key);
 
     let (status, _) = post_chat(
@@ -1804,21 +2566,26 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
         }
     });
     let config: ClientConfig = serde_json::from_value(config).expect("test config parses");
-    let recorder = Arc::new(token_station_cli::filelog::Recorders(vec![Box::new(
-        token_station_cli::filelog::FileLog::open(&config.data.dir).expect("log opens"),
-    )]));
+    let recorder = Arc::new(token_station_cli::filelog::Recorders(vec![
+        Box::new(token_station_cli::filelog::FileLog::open(&config.data.dir).expect("log opens")),
+        Box::new(
+            token_station_cli::store::SqliteStore::open(&config.data.dir.join("metrics.sqlite"))
+                .expect("store opens"),
+        ),
+    ]));
     let gateway = Arc::new(Gateway::new(&config, recorder).expect("gateway assembles"));
     let (virtual_key, _) =
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
-    let state = server::AppState {
+    let state = server::AppState::new(
         gateway,
-        virtual_key: Some(Arc::from(virtual_key.as_str())),
-        admin: Arc::new(token_station_cli::admin::AdminContext {
+        Some(Arc::from(virtual_key.as_str())),
+        Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
             router: config.router.clone(),
             plugins: config.plugins.clone(),
         }),
-    };
+    );
+    let control = state.control.clone();
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
     listener.set_nonblocking(true).expect("nonblocking");
@@ -1838,7 +2605,308 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
         url: format!("http://{address}"),
         data_dir,
         virtual_key,
+        control,
     }
+}
+
+fn start_proxy_many(upstream: &MockUpstream, count: usize, key_file: &Path) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-proxy-many-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let mut upstreams = serde_json::Map::new();
+    let mut members = Vec::new();
+    for index in 0..count {
+        let name = format!("candidate_{index:02}");
+        upstreams.insert(
+            name.clone(),
+            json!({
+                "provider": "openai-compatible",
+                "base_url": upstream.base_url(),
+                "auth": {"slot": "provider_api_key", "file": key_file},
+                "models": [{"model": "gpt-5.5", "tool": true, "context_window": 400_000}]
+            }),
+        );
+        members.push(json!({"upstream": name, "model": "gpt-5.5"}));
+    }
+    let config: ClientConfig = serde_json::from_value(json!({
+        "version": 1,
+        "server": {"listen": "127.0.0.1:0"},
+        "data": {"dir": data_dir, "metrics": true},
+        "plugins": {
+            "dir": plugins_dir(),
+            "agent": "agent-openai",
+            "providers": {"openai-compatible": "provider-openai-compatible"}
+        },
+        "upstreams": upstreams,
+        "router": {
+            "version": 1,
+            "pools": {"main": members},
+            "default_pool": "main"
+        }
+    }))
+    .expect("many-upstream config parses");
+    let recorder = Arc::new(token_station_cli::filelog::Recorders(vec![
+        Box::new(token_station_cli::filelog::FileLog::open(&config.data.dir).expect("log opens")),
+        Box::new(
+            token_station_cli::store::SqliteStore::open(&config.data.dir.join("metrics.sqlite"))
+                .expect("store opens"),
+        ),
+    ]));
+    let gateway = Arc::new(Gateway::new(&config, recorder).expect("gateway assembles"));
+    let (virtual_key, _) =
+        token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
+    let state = server::AppState::new(
+        gateway,
+        Some(Arc::from(virtual_key.as_str())),
+        Arc::new(token_station_cli::admin::AdminContext {
+            data_dir: config.data.dir.clone(),
+            router: config.router.clone(),
+            plugins: config.plugins.clone(),
+        }),
+    );
+    let control = state.control.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let address = listener.local_addr().expect("bound");
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tokio builds");
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("listener converts");
+            server::serve(state, listener).await.expect("server runs");
+        });
+    });
+    Proxy {
+        url: format!("http://{address}"),
+        data_dir,
+        virtual_key,
+        control,
+    }
+}
+
+#[test]
+fn malformed_2xx_and_truncated_bodies_fallback_without_recording_empty_success() {
+    let valid = json!({
+        "id": "chatcmpl-fallback",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "fallback"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+    })
+    .to_string();
+    let truncated = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 999\r\nconnection: close\r\n\r\n{\"choices\":[".to_vec();
+    let cases = [
+        http_json(200, r#"{"error":{"message":"smuggled"}}"#),
+        http_json(200, r#"{"choices":[]}"#),
+        http_json(200, "not-json"),
+        truncated,
+    ];
+
+    for (index, primary_response) in cases.into_iter().enumerate() {
+        let primary = MockUpstream::start(vec![vec![primary_response]]);
+        let fallback = MockUpstream::start(vec![vec![http_json(200, &valid)]]);
+        let key = key_file(&format!("protocol-fallback-{index}"), "sk-test-key");
+        let proxy = start_proxy_two(&primary, &fallback, &key);
+
+        let (status, body) = post_chat(
+            &proxy,
+            &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+            None,
+        );
+        assert_eq!(status, 200, "case {index}: {body}");
+        assert!(body.contains("fallback"), "case {index}: {body}");
+        assert_eq!((primary.hits(), fallback.hits()), (1, 1));
+        settle();
+        let row = last_row(&proxy.data_dir);
+        assert_eq!(row["attempts"], "Integer(2)", "case {index}");
+        assert_eq!(row["error_code"], "Null", "case {index}");
+        assert_eq!(
+            row["upstream"], "Text(\"mock_fallback\")",
+            "legacy routing keeps the actual server"
+        );
+
+        let db = rusqlite::Connection::open(proxy.data_dir.join("metrics.sqlite"))
+            .expect("receipt db opens");
+        let original: String = db
+            .query_row("SELECT upstream FROM decisions", [], |row| row.get(0))
+            .expect("original decision exists");
+        assert_eq!(original, "mock_primary", "fallback cannot rewrite decision");
+        let mut statement = db
+            .prepare(
+                "SELECT ordinal, upstream, http_status, error_code, stream_outcome, fallback_allowed
+                   FROM attempts ORDER BY ordinal",
+            )
+            .expect("attempt query prepares");
+        let attempts = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<u16>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, bool>(5)?,
+                ))
+            })
+            .expect("attempts query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("attempt rows decode");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!((attempts[0].0, attempts[0].1.as_str()), (1, "mock_primary"));
+        assert_eq!(
+            attempts[0].2,
+            Some(200),
+            "attempt keeps the upstream HTTP status when its body is invalid"
+        );
+        assert!(attempts[0].3.is_some(), "first attempt keeps its error");
+        assert_eq!(attempts[0].4.as_deref(), Some("failed_before_output"));
+        assert!(attempts[0].5, "classified failure permits fallback");
+        assert_eq!(
+            (attempts[1].0, attempts[1].1.as_str()),
+            (2, "mock_fallback")
+        );
+        assert_eq!(attempts[1].2, Some(200));
+        assert_eq!(attempts[1].3, None);
+        assert_eq!(attempts[1].4.as_deref(), Some("complete"));
+        assert!(!attempts[1].5);
+        let conversions: i64 = db
+            .query_row("SELECT COUNT(*) FROM conversion_reports", [], |row| {
+                row.get(0)
+            })
+            .expect("conversion count");
+        assert!(conversions >= 6, "both attempts carry stage receipts");
+        std::fs::remove_file(key).ok();
+    }
+}
+
+#[test]
+fn malformed_2xx_and_truncated_bodies_have_stable_terminal_receipts() {
+    let truncated = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 999\r\nconnection: close\r\n\r\n{\"choices\":[".to_vec();
+    let cases = [
+        (
+            http_json(200, r#"{"error":{"message":"smuggled"}}"#),
+            "provider_protocol_error",
+        ),
+        (
+            http_json(200, r#"{"choices":[]}"#),
+            "provider_protocol_error",
+        ),
+        (http_json(200, "not-json"), "provider_protocol_error"),
+        (truncated, "transport_truncated"),
+    ];
+
+    for (index, (response, expected)) in cases.into_iter().enumerate() {
+        let mock = MockUpstream::start(vec![vec![response]]);
+        let key = key_file(&format!("protocol-terminal-{index}"), "sk-test-key");
+        let proxy = start_proxy(&mock, &key);
+        let (status, _) = post_chat(
+            &proxy,
+            &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+            None,
+        );
+        assert_eq!(status, 502, "case {index}");
+        settle();
+        let row = last_row(&proxy.data_dir);
+        assert_eq!(row["status"], "Integer(502)", "case {index}");
+        assert_eq!(
+            row["error_code"],
+            format!("Text(\"{expected}\")"),
+            "case {index}"
+        );
+        std::fs::remove_file(key).ok();
+    }
+}
+
+#[test]
+fn http_402_404_and_529_map_to_the_stable_error_catalog() {
+    let cases = [
+        (402, "", "payment_required"),
+        (404, "", "invalid_request"),
+        (529, "", "capacity"),
+        (400, "context_length_exceeded", "context_length"),
+    ];
+    for (status, provider_code, expected) in cases {
+        let mock = MockUpstream::start(vec![vec![http_json(
+            status,
+            &json!({"error": {"message": "fixture", "code": provider_code}}).to_string(),
+        )]]);
+        let key = key_file(&format!("status-{status}"), "sk-test-key");
+        let proxy = start_proxy(&mock, &key);
+        let (actual, _) = post_chat(
+            &proxy,
+            &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+            None,
+        );
+        assert_eq!(actual, status);
+        settle();
+        assert_eq!(
+            last_row(&proxy.data_dir)["error_code"],
+            format!("Text(\"{expected}\")")
+        );
+        std::fs::remove_file(key).ok();
+    }
+}
+
+#[test]
+fn retry_after_waits_within_the_budget_before_fallback() {
+    let primary = MockUpstream::start(vec![vec![http_json_with_headers(
+        429,
+        r#"{"error":{"message":"slow down"}}"#,
+        &[("retry-after", "1")],
+    )]]);
+    let answer = json!({
+        "id": "chatcmpl-ok", "model": "gpt-5.5",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+    });
+    let fallback = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("retry-after-budget", "sk-test-key");
+    let proxy = start_proxy_two(&primary, &fallback, &key);
+    let started = std::time::Instant::now();
+    let (status, _) = post_chat(
+        &proxy,
+        &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+        None,
+    );
+    assert_eq!(status, 200);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(900));
+    assert_eq!((primary.hits(), fallback.hits()), (1, 1));
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(200)");
+    assert_eq!(row["error_code"], "Null");
+    assert_eq!(row["attempts"], "Integer(2)");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn twenty_failing_upstreams_never_exceed_the_attempt_budget() {
+    let failure = r#"{"error":{"message":"unavailable"}}"#;
+    let mock = MockUpstream::start(vec![vec![http_json(503, failure)]]);
+    let key = key_file("twenty-upstreams", "sk-test-key");
+    let proxy = start_proxy_many(&mock, 20, &key);
+    let (status, _) = post_chat(
+        &proxy,
+        &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+        None,
+    );
+    assert_eq!(status, 503);
+    assert_eq!(mock.hits(), 6);
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["attempts"], "Integer(6)");
+    assert_eq!(row["status"], "Integer(503)");
+    assert_eq!(row["error_code"], "Text(\"upstream_unavailable\")");
+    std::fs::remove_file(key).ok();
 }
 
 #[test]
@@ -1947,18 +3015,22 @@ fn auth_failures_never_eject_an_upstream() {
 
 /// A gateway with no server around it: `upstream test` runs exactly this.
 fn probe_gateway(upstream: &MockUpstream, key_file: &Path) -> Gateway {
+    gateway_for_base_url(&upstream.base_url(), key_file, plugins_dir())
+}
+
+fn gateway_for_base_url(base_url: &str, key_file: &Path, plugin_dir: &Path) -> Gateway {
     let config = json!({
         "version": 1,
         "server": { "listen": "127.0.0.1:0" },
         "plugins": {
-            "dir": plugins_dir(),
+            "dir": plugin_dir,
             "agent": "agent-openai",
             "providers": { "openai-compatible": "provider-openai-compatible" }
         },
         "upstreams": {
             "mock_primary": {
                 "provider": "openai-compatible",
-                "base_url": upstream.base_url(),
+                "base_url": base_url,
                 "auth": { "slot": "provider_api_key", "file": key_file },
                 "models": [ { "model": "gpt-5.5", "tool": true, "context_window": 400_000 } ]
             }
@@ -2004,6 +3076,127 @@ fn an_upstream_probe_runs_the_real_southbound_path() {
     );
     assert_eq!(seen[0].body["model"], json!("gpt-5.5"));
     assert_eq!(seen[0].body["max_tokens"], json!(1));
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn provider_feature_probe_executes_stream_tool_and_json_requests() {
+    let sse = concat!(
+        "data: {\"id\":\"chatcmpl-stream\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-stream\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let stream = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let tool = json!({
+        "id": "chatcmpl-tool", "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant", "content": null,
+                "tool_calls": [{
+                    "id": "call_health", "type": "function",
+                    "function": {"name": "provider_health_check", "arguments": "{}"}
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let structured = json!({
+        "id": "chatcmpl-json", "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "{\"ok\":true}"},
+            "finish_reason": "stop"
+        }]
+    });
+    let mock = MockUpstream::start(vec![
+        vec![stream],
+        vec![http_json(200, &tool.to_string())],
+        vec![http_json(200, &structured.to_string())],
+    ]);
+    let key = key_file("probe-features", "sk-test-key-abc");
+    let gateway = probe_gateway(&mock, &key);
+
+    let result = gateway
+        .probe_features("mock_primary", "gpt-5.5")
+        .expect("feature probes run");
+    assert_eq!(
+        result
+            .stages
+            .iter()
+            .map(|stage| (stage.layer, stage.status))
+            .collect::<Vec<_>>(),
+        vec![
+            (FeatureLayer::Stream, StageStatus::Pass),
+            (FeatureLayer::Tool, StageStatus::Pass),
+            (FeatureLayer::Json, StageStatus::Pass),
+        ]
+    );
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0].body["stream"], json!(true));
+    assert_eq!(
+        seen[1].body["tools"][0]["function"]["name"],
+        json!("provider_health_check")
+    );
+    assert_eq!(
+        seen[2].body["response_format"]["type"],
+        json!("json_schema")
+    );
+    assert_eq!(
+        seen[2].body["response_format"]["json_schema"]["name"],
+        json!("provider_health_check")
+    );
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn an_upstream_probe_refuses_redirects_without_a_second_hop() {
+    let canary = MockUpstream::start(Vec::new());
+    let location = format!("http://127.0.0.1:{}/probe-canary", canary.port);
+    let source = MockUpstream::start(vec![vec![http_redirect(&location)]]);
+    let key_value = "sk-probe-redirect-secret";
+    let key = key_file("probe-redirect", key_value);
+    let gateway = probe_gateway(&source, &key);
+
+    let outcomes = gateway.probe("mock_primary", None).expect("probe runs");
+    let error = outcomes[0]
+        .latency_ms
+        .as_ref()
+        .expect_err("redirect cannot be a successful probe");
+
+    assert!(error.contains("redirect refused"), "{error}");
+    assert_eq!(source.hits(), 1);
+    assert_eq!(canary.hits(), 0, "probe target stays untouched");
+    assert_eq!(
+        source.seen()[0].authorization.as_deref(),
+        Some(format!("Bearer {key_value}").as_str())
+    );
+    assert!(!error.contains(key_value));
+    assert!(!error.contains(&location));
+
+    let layered = gateway
+        .probe_layered("mock_primary", None)
+        .expect("layered probe runs");
+    assert_eq!(layered[0].stages[0].status, StageStatus::Fail);
+    assert!(
+        layered[0].stages[0]
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("redirect refused"))
+    );
+    assert_eq!(
+        source.hits(),
+        2,
+        "both probe surfaces hit only the first hop"
+    );
+    assert_eq!(canary.hits(), 0, "layered probe target stays untouched");
 
     std::fs::remove_file(key).ok();
 }
@@ -2123,6 +3316,8 @@ fn admin_data_plane_sits_behind_the_virtual_key() {
     assert_eq!(status, 401, "no key, no data");
     let (status, _, _) = admin_get(&proxy, "/admin/stats?since=all", Some("wrong-key"), None);
     assert_eq!(status, 401, "a wrong key is a missing key");
+    let (status, _, _) = admin_get(&proxy, "/admin/receipts", None, None);
+    assert_eq!(status, 401, "receipts use the same admin gate");
     assert_eq!(
         upstream.hits(),
         0,
@@ -2132,9 +3327,21 @@ fn admin_data_plane_sits_behind_the_virtual_key() {
 
 #[test]
 fn admin_data_plane_serves_the_running_views() {
-    let upstream = MockUpstream::start(vec![]);
+    let answer = json!({
+        "id": "chatcmpl-admin", "model": "gpt-5.5",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+    });
+    let upstream = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let key_file = key_file("admin-views", "sk-admin-views");
     let proxy = start_proxy(&upstream, &key_file);
+    let (request_status, _) = post_chat(
+        &proxy,
+        &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+        None,
+    );
+    assert_eq!(request_status, 200);
+    settle();
 
     let (status, _, body) = admin_get(
         &proxy,
@@ -2159,6 +3366,21 @@ fn admin_data_plane_serves_the_running_views() {
     assert!(
         stats_view["total"]["requests"].is_u64(),
         "stats carry totals: {stats_view}"
+    );
+
+    let (status, _, body) = admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    assert_eq!(status, 200);
+    let receipts: Value = serde_json::from_str(&body).expect("receipts are JSON");
+    assert_eq!(receipts.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        receipts[0]["attempt_records"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert!(
+        receipts[0]["conversion_reports"]
+            .as_array()
+            .is_some_and(|reports| !reports.is_empty()),
+        "admin returns the normalized non-empty timeline: {receipts}"
     );
 
     let (status, _, body) = admin_get(

@@ -53,9 +53,13 @@ export default function AppShell({
   children,
 }: AppShellProps) {
   const scanned = new Map(agents.map((agent) => [agent.metadata.agent_id, agent]));
+  const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
+  const taskRunning = serve.app_runtime === "running";
   const serveLabel =
-    serve.phase === "running"
-      ? "代理运行中"
+    taskRunning && !serve.listener_reachable
+      ? "运行态未知"
+      : runtimeHealthy
+        ? "代理运行中"
       : serve.phase === "starting"
         ? "正在启动"
         : serve.phase === "stopping"
@@ -114,18 +118,21 @@ export default function AppShell({
       <div className="station-workspace">
         <header className="station-topbar">
           <div className="serve-cluster">
-            <span className={`serve-indicator ${serve.running ? "on" : ""}`} aria-hidden="true" />
+            <span className={`serve-indicator ${runtimeHealthy ? "on" : ""}`} aria-hidden="true" />
             <span className="serve-copy">
               <strong>{serveLabel}</strong>
               <small>{serve.listen}</small>
+              <small data-testid="agent-runtime-connection">
+                Agent：{serve.agent_connected ? "已连接" : "未连接"}
+              </small>
             </span>
             <button
-              className={`btn compact ${serve.running ? "" : "primary"}`}
+              className={`btn compact ${taskRunning ? "" : "primary"}`}
               type="button"
               disabled={commandBusy || serve.phase === "stopping"}
               onClick={onToggleServe}
             >
-              {serve.running ? "停止" : serve.phase === "starting" ? "取消" : serve.phase === "stopping" ? "停止中" : "启动"}
+              {taskRunning ? "停止" : serve.phase === "starting" ? "取消" : serve.phase === "stopping" ? "停止中" : "启动"}
             </button>
           </div>
 

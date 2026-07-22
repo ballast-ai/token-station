@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use token_station_protocol::{ModelCapability, ProviderEndpoint};
+use token_station_protocol::{CapabilityState, ModelCapability, ProviderEndpoint};
 use token_station_router_core::{Router, UpstreamModel, UpstreamRef};
 
 use crate::config::{AuthConfig, ClientConfig, UpstreamConfig};
@@ -388,9 +388,18 @@ fn parse_model_spec(raw: &str) -> Result<ModelCapability, String> {
     };
     for token in tokens {
         match token {
-            "tool" => capability.tool = true,
-            "vision" => capability.vision = true,
-            "json-schema" => capability.json_schema = true,
+            "tool" => {
+                capability.tool = true;
+                capability.tool_state = Some(CapabilityState::Declared);
+            }
+            "vision" => {
+                capability.vision = true;
+                capability.vision_state = Some(CapabilityState::Declared);
+            }
+            "json-schema" => {
+                capability.json_schema = true;
+                capability.json_schema_state = Some(CapabilityState::Declared);
+            }
             _ => {
                 if let Some(window) = token.strip_prefix("ctx=") {
                     capability.context_window = window.parse().map_err(|_| {
@@ -487,7 +496,7 @@ mod tests {
 
         let added = &config.upstreams["example_new"];
         assert_eq!(added.models[0].model, "m1");
-        assert!(added.models[0].tool);
+        assert!(added.models[0].tool_state().is_supported());
         assert_eq!(added.models[0].context_window, 8192);
         assert_eq!(
             added.auth.as_ref().expect("auth").env.as_deref(),

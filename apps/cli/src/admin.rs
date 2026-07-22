@@ -21,6 +21,7 @@ use token_station_router_core::RouterConfig;
 use crate::config::PluginsConfig;
 use crate::plugins::{PluginRegistry, Receipts};
 use crate::stats;
+use crate::store::SqliteStore;
 
 /// What the admin endpoints answer from: a snapshot taken when `serve`
 /// started. The routing table therefore reflects the *running* configuration
@@ -72,6 +73,18 @@ impl AdminContext {
             "by": by,
             "empty": false,
         }))
+    }
+
+    /// The newest content-free request receipts. The store enforces the hard
+    /// five-row ceiling and returns an empty list when metrics are disabled or
+    /// the database has not been created yet.
+    ///
+    /// # Errors
+    ///
+    /// An existing metrics store could not be opened, migrated, or read.
+    pub fn recent_receipts(&self) -> Result<Value, String> {
+        let receipts = SqliteStore::recent_receipts(&self.data_dir.join("metrics.sqlite"), 5)?;
+        serde_json::to_value(receipts).map_err(|error| format!("serialize receipts: {error}"))
     }
 
     /// The four routing layers of the *running* config, shaped like the

@@ -49,20 +49,10 @@ function errorText(error: unknown) {
   return String(error);
 }
 
-function isExperimentalCompatibility(installation: AgentInstallationView | undefined) {
-  if (!installation) return false;
-  return ["DETECTED_INFERRED", "DETECTED_UNKNOWN"].includes(installation.compatibility.status)
-    && Boolean(installation.discovery.version_normalized)
-    && Boolean(installation.compatibility.connector_id)
-    && installation.compatibility.allowed_actions.includes("run_read_only_preflight");
-}
-
 function statusCopy(agent: AgentView | undefined, installation: AgentInstallationView | undefined) {
   if (!agent || agent.installations.length === 0) return { tone: "idle", label: "未发现", detail: "没有在本机发现可管理的安装。" };
   if (installation?.connected) return { tone: "success", label: "已接入", detail: "请求已通过 Token Station。" };
-  if (installation && ["DETECTED_BLOCKED", "INSTALLED_BROKEN"].includes(installation.compatibility.status)) return { tone: "danger", label: "暂不可接入", detail: "当前版本或配置未通过安全准入。" };
-  if (isExperimentalCompatibility(installation)) return { tone: "ready", label: "可接入", detail: "此版本未在验证目录，但已通过只读预检；接入前会自动快照，失败可回滚。" };
-  if (installation?.compatibility.status === "DETECTED_UNKNOWN") return { tone: "warning", label: "版本待确认", detail: "兼容目录尚未确认当前版本。" };
+  if (installation && installation.compatibility.status !== "DETECTED_VERIFIED") return { tone: "danger", label: "暂不可接入", detail: installation.compatibility.message };
   return { tone: "ready", label: "可接入", detail: "已发现兼容安装，可以一键接入。" };
 }
 
@@ -90,14 +80,11 @@ export default function AgentRoutePage({
     () => agent?.installations.find((item) => item.discovery.canonical_path === selectedPath),
     [agent, selectedPath],
   );
-
   const status = statusCopy(agent, installation);
   const connected = installation?.connected ?? false;
-  const experimentalCompatibility = !connected && isExperimentalCompatibility(installation);
   const canConnect = Boolean(
     installation
-      && (["DETECTED_VERIFIED", "CONNECTED"].includes(installation.compatibility.status)
-        || experimentalCompatibility),
+      && ["DETECTED_VERIFIED", "CONNECTED"].includes(installation.compatibility.status),
   );
   const canOperate = connected ? Boolean(installation) : serveRunning && canConnect;
 
@@ -107,7 +94,7 @@ export default function AgentRoutePage({
     setError("");
     setNotice("");
     try {
-      onStateChange(await action(), message);
+      onStateChange(await action());
       if (message) setNotice(message);
     } catch (caught) {
       setError(errorText(caught));
@@ -116,11 +103,6 @@ export default function AgentRoutePage({
     }
   };
 
-  // cc-switch-style one-click: an unverified-but-preflight-passed version connects
-  // directly. The backend still runs the read-only preflight (the plan only
-  // becomes confirmable if it passes), snapshots before writing, and rolls back
-  // on failure — the safety is the pipeline, not a scary modal. The version note
-  // is shown inline so the click is still informed.
   const applyConnection = async () => {
     if (!installation || !canOperate || busy) return;
     setBusy(true);
@@ -132,20 +114,17 @@ export default function AgentRoutePage({
         : await planAgentConnection(
           metadata.agent_id,
           installation.discovery.canonical_path,
-          experimentalCompatibility
+          installation.discovery.version_normalized
             ? { expectedVersion: installation.discovery.version_normalized as string }
             : undefined,
         );
       await applyAgentPlan(
         plan.operation_id,
         plan.confirmation_token,
-        experimentalCompatibility,
       );
       setNotice(connected
         ? "已恢复接入前的 Agent 配置"
-        : experimentalCompatibility
-          ? "Agent 已接入（此版本未在验证目录，已快照可回滚）"
-          : "Agent 已接入，无需再次确认");
+        : "Agent 已接入，无需再次确认");
       await onRescan();
     } catch (caught) {
       setError(errorText(caught));
@@ -158,17 +137,14 @@ export default function AgentRoutePage({
     await runState(() => setAgentRouteMode(metadata.agent_id, mode));
   };
 
-  const mountProfile = async (name: string) => {
-    if (profiles.length === 0) {
-      setError("");
-      setNotice("");
-      setError("还没有策略组。先到主页把三档配好 →「另存为策略组」,再回这里挂载。");
+  const mountProfile = async (profile = route.profile ?? profiles[0]) => {
+    if (!profile) {
+      setError("还没有可挂载的策略组，请先在主页将三档路由另存为策略组。");
       return;
     }
-    if (!name) return;
     await runState(
-      () => mountAgentProfile(metadata.agent_id, name),
-      serveRunning ? "已挂载策略组 · 重启代理后生效" : "已挂载策略组",
+      () => mountAgentProfile(metadata.agent_id, profile),
+      `已挂载策略组「${profile}」· 尚待保存并应用`,
     );
   };
 
@@ -227,13 +203,6 @@ export default function AgentRoutePage({
         </div>
       </header>
 
-      {experimentalCompatibility && installation && !connected && (
-        <div className="inline-note">
-          {metadata.display_name} {installation.discovery.version_normalized ?? installation.discovery.version_raw ?? "此版本"} 未在验证目录中。
-          已通过只读配置预检；一键接入会先创建快照，失败自动回滚，不绕过任何安全准入。
-        </div>
-      )}
-
       {!serveRunning && !connected && <div className="inline-note">请先启动代理，再接入 Agent。路由仍可先行配置。</div>}
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner err">{error}</div>}
@@ -248,21 +217,23 @@ export default function AgentRoutePage({
           <div className="mode-switch" role="radiogroup" aria-label="Agent 路由模式">
             <button type="button" role="radio" aria-checked={route.mode === "inherit"} className={route.mode === "inherit" ? "active" : ""} disabled={busy} onClick={() => void switchMode("inherit")}>跟随主页</button>
             <button type="button" role="radio" aria-checked={route.mode === "custom"} className={route.mode === "custom" ? "active" : ""} disabled={busy} onClick={() => void switchMode("custom")}>独立路由</button>
-            <button type="button" role="radio" aria-checked={route.mode === "profile"} className={route.mode === "profile" ? "active" : ""} disabled={busy} title={profiles.length === 0 ? "先在主页把三档另存为策略组" : ""} onClick={() => void mountProfile(route.profile ?? profiles[0] ?? "")}>挂载策略组</button>
+            <button type="button" role="radio" aria-checked={route.mode === "profile"} className={route.mode === "profile" ? "active" : ""} disabled={busy} onClick={() => void mountProfile()}>挂载策略组</button>
           </div>
         </div>
 
-        {route.mode === "profile" ? (
-          <label className="field-label profile-mount">
-            策略组
-            <select className="input" disabled={busy} value={route.profile ?? ""} onChange={(event) => void mountProfile(event.target.value)}>
-              {profiles.map((name) => (
-                <option key={name} value={name}>{name}</option>
-              ))}
+        {route.mode === "profile" && (
+          <label className="profile-mount-select">
+            <span>当前策略组</span>
+            <select
+              className="select"
+              value={route.profile ?? ""}
+              disabled={busy}
+              onChange={(event) => void mountProfile(event.target.value)}
+            >
+              {profiles.map((profile) => <option key={profile} value={profile}>{profile}</option>)}
             </select>
-            <span className="sub">多个 Agent 挂同一个策略组即共用一套三档；改策略组一次,所有挂载的 Agent 一起变。</span>
           </label>
-        ) : null}
+        )}
 
         <TierRouteEditor
           tiers={route.tiers}
@@ -278,6 +249,8 @@ export default function AgentRoutePage({
               <button className="btn primary" type="button" disabled={busy || Boolean(route.config_error)} onClick={() => void saveRoute()}>保存独立路由</button>
               <button className="btn" type="button" disabled={busy} onClick={() => void restoreHome()}>恢复主页路由</button>
             </>
+          ) : route.mode === "profile" ? (
+            <span className="inherit-note">该 Agent 使用策略组「{route.profile}」。在主页管理策略组，保存并应用后生效。</span>
           ) : (
             <span className="inherit-note">主页路由更新后，此 Agent 会自动使用最新三档配置。</span>
           )}

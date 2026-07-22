@@ -1,0 +1,118 @@
+name: Desktop Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS (${{ matrix.target }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2,${{ matrix.target }}
+      - run: npm --prefix apps/desktop ci
+      - name: Require Apple signing and notarization secrets
+        run: |
+          test -n "$APPLE_CERTIFICATE"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_SIGNING_IDENTITY"
+          test -n "$APPLE_KEYCHAIN_PASSWORD"
+          test -n "$APPLE_API_ISSUER"
+          test -n "$APPLE_API_KEY"
+          test -n "$APPLE_API_KEY_CONTENT"
+      - name: Import Developer ID certificate
+        run: |
+          certificate="$RUNNER_TEMP/token-station-certificate.p12"
+          keychain="$RUNNER_TEMP/token-station-signing.keychain-db"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
+          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          security default-keychain -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_KEYCHAIN_PASSWORD" "$keychain"
+      - name: Prepare App Store Connect key
+        run: |
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s' "$APPLE_API_KEY_CONTENT" > "$key_path"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+      - name: Build, sign, notarize, and audit
+        run: scripts/build-desktop.sh --production --target "${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: token-station-desktop-${{ matrix.target }}
+          path: |
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
+          if-no-files-found: error
+
+  windows:
+    name: Windows (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    env:
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2,x86_64-pc-windows-msvc
+      - run: npm --prefix apps/desktop ci
+      - name: Require Windows signing secrets
+        shell: pwsh
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) { throw "WINDOWS_CERTIFICATE is required" }
+          if (-not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw "WINDOWS_CERTIFICATE_PASSWORD is required" }
+          if (-not $env:WINDOWS_TIMESTAMP_URL) { throw "WINDOWS_TIMESTAMP_URL is required" }
+      - name: Import Windows signing certificate
+        shell: pwsh
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP "token-station-certificate.pfx"
+          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          if (-not $certificate.Thumbprint) { throw "certificate import returned no thumbprint" }
+          "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build, sign, and audit
+        shell: bash
+        run: scripts/build-desktop.sh --production --target x86_64-pc-windows-msvc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: token-station-desktop-x86_64-pc-windows-msvc
+          path: |
+            apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          if-no-files-found: error

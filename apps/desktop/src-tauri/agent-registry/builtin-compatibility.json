@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_version": "builtin-2026-07-22.1",
+  "catalog_version": "builtin-2026-07-20.3",
   "sequence": 1,
   "issued_at_ms": 1784505600000,
   "expires_at_ms": null,
@@ -8,67 +8,22 @@
   "entries": [
     {
       "agent_id": "claude-code",
-      "verified": [
-        {
-          "version_requirement": ">=2.1.0, <2.2.0",
-          "baseline_version": null,
-          "connector_id": "claude-code-v1",
-          "config_fingerprint": null
-        }
-      ],
-      "inferred": [],
       "blocked": []
     },
     {
       "agent_id": "codex",
-      "verified": [
-        {
-          "version_requirement": ">=0.145.0-0, <0.146.0",
-          "baseline_version": null,
-          "connector_id": "codex-v1",
-          "config_fingerprint": null
-        }
-      ],
-      "inferred": [],
       "blocked": []
     },
     {
       "agent_id": "nous-hermes-agent",
-      "verified": [
-        {
-          "version_requirement": ">=0.18.0, <0.19.0",
-          "baseline_version": null,
-          "connector_id": "hermes-v1",
-          "config_fingerprint": null
-        }
-      ],
-      "inferred": [],
       "blocked": []
     },
     {
       "agent_id": "openclaw",
-      "verified": [
-        {
-          "version_requirement": ">=2026.6.0, <2026.7.0",
-          "baseline_version": null,
-          "connector_id": "openclaw-v1",
-          "config_fingerprint": null
-        }
-      ],
-      "inferred": [],
       "blocked": []
     },
     {
       "agent_id": "opencode",
-      "verified": [
-        {
-          "version_requirement": ">=1.18.0, <1.19.0",
-          "baseline_version": null,
-          "connector_id": "opencode-v1",
-          "config_fingerprint": null
-        }
-      ],
-      "inferred": [],
       "blocked": []
     }
   ]

@@ -727,12 +727,8 @@ impl<'a> TransactionEngine<'a> {
         now_ms: u64,
     ) -> Result<(), TransactionFailure> {
         let status_allowed = if plan.view.intent == PlanIntent::Connect {
-            matches!(
-                admission.status,
-                CompatibilityStatus::DetectedVerified
-                    | CompatibilityStatus::DetectedInferred
-                    | CompatibilityStatus::DetectedUnknown
-            ) && admission.status == plan.view.compatibility_evidence.status
+            admission.status == CompatibilityStatus::DetectedVerified
+                && admission.status == plan.view.compatibility_evidence.status
                 && plan
                     .view
                     .compatibility_expires_at_ms
@@ -1087,21 +1083,12 @@ mod tests {
             agent_id: "claude-code".to_string(),
             installation_path: Some("/opt/claude".to_string()),
             status: CompatibilityStatus::DetectedVerified,
-            reason_code: ReasonCode::VerifiedRangeMatch,
-            message: "verified".to_string(),
+            reason_code: ReasonCode::DefaultAdmission,
+            message: "admitted".to_string(),
             matched_catalog_version: Some("fixture".to_string()),
             connector_id: Some("claude-code-v1".to_string()),
             allowed_actions: BTreeSet::from([AllowedAction::PreviewConnect]),
         }
-    }
-
-    fn experimental_unknown() -> CompatibilityDecision {
-        let mut decision = verified();
-        decision.status = CompatibilityStatus::DetectedUnknown;
-        decision.reason_code = ReasonCode::NoCompatibilityEntry;
-        decision.message = "unverified".to_string();
-        decision.allowed_actions = BTreeSet::from([AllowedAction::ConfirmExperimentalConnect]);
-        decision
     }
 
     fn openclaw_discovery(target: &Path) -> DiscoveryRecord {
@@ -1132,8 +1119,8 @@ mod tests {
             agent_id: "openclaw".to_string(),
             installation_path: Some("/opt/openclaw".to_string()),
             status: CompatibilityStatus::DetectedVerified,
-            reason_code: ReasonCode::VerifiedRangeMatch,
-            message: "verified".to_string(),
+            reason_code: ReasonCode::DefaultAdmission,
+            message: "admitted".to_string(),
             matched_catalog_version: Some("fixture".to_string()),
             connector_id: Some("openclaw-v1".to_string()),
             allowed_actions: BTreeSet::from([AllowedAction::PreviewConnect]),
@@ -1168,8 +1155,8 @@ mod tests {
             agent_id: "nous-hermes-agent".to_string(),
             installation_path: Some("/opt/hermes".to_string()),
             status: CompatibilityStatus::DetectedVerified,
-            reason_code: ReasonCode::VerifiedRangeMatch,
-            message: "verified".to_string(),
+            reason_code: ReasonCode::DefaultAdmission,
+            message: "admitted".to_string(),
             matched_catalog_version: Some("fixture".to_string()),
             connector_id: Some("hermes-v1".to_string()),
             allowed_actions: BTreeSet::from([AllowedAction::PreviewConnect]),
@@ -1239,27 +1226,6 @@ mod tests {
         .unwrap()
     }
 
-    fn prepare_experimental_unknown(target: &Path, secret: &str) -> PreparedChangePlan {
-        let source = read_config_source(target).unwrap();
-        build_connection_plan(
-            &ClaudeCodeConnector,
-            &discovery(target),
-            &experimental_unknown(),
-            target,
-            &source,
-            &ConnectInput {
-                base_url: "http://127.0.0.1:8787",
-                token: Some(secret),
-                adapter_ready: true,
-            },
-            1,
-            None,
-            1_000,
-            "cd".repeat(16),
-        )
-        .unwrap()
-    }
-
     fn confirmation(plan: &PreparedChangePlan) -> ConfirmedOperation {
         confirmation_at(plan, 1_001)
     }
@@ -1290,12 +1256,12 @@ mod tests {
     }
 
     #[test]
-    fn transaction_experimental_unknown_requires_confirmation_and_preserves_zero_write_on_reject() {
-        let root = scratch("experimental-unknown");
+    fn transaction_rejects_non_connectable_runtime_admission_before_writing() {
+        let root = scratch("runtime-admission");
         let target = root.join("settings.json");
         let initial = br#"{"unowned":"keep"}"#;
         write_initial(&target, initial);
-        let plan = prepare_experimental_unknown(&target, "vk-experimental");
+        let plan = prepare(&target, "vk-admission");
         let keys = Arc::new(TestKeys::available());
         let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
         let ownership = FileOwnershipStore::new(root.join("ownership"));
@@ -1307,19 +1273,15 @@ mod tests {
             &ParseOnlyVerifier,
             &FixedClock(1_001),
         );
-        let mut missing = confirmation(&plan);
-        missing
-            .confirmations
-            .remove(&ConfirmationKind::ExperimentalCompatibility);
-        let admission = RuntimeAdmission {
+        let unknown = RuntimeAdmission {
             compatibility_sequence: 1,
             status: CompatibilityStatus::DetectedUnknown,
         };
 
         let failure = engine
-            .apply_connection(&plan, &missing, &admission, 1_001)
-            .expect_err("experimental confirmation is required");
-        assert_eq!(failure.stage, TransactionStage::Confirmation);
+            .apply_connection(&plan, &confirmation(&plan), &unknown, 1_001)
+            .expect_err("a non-connectable status must fail before writing");
+        assert_eq!(failure.stage, TransactionStage::Admission);
         assert_eq!(std::fs::read(&target).unwrap(), initial);
         assert!(snapshots.list_agent("claude-code").unwrap().is_empty());
 
@@ -1335,8 +1297,16 @@ mod tests {
         assert!(snapshots.list_agent("claude-code").unwrap().is_empty());
 
         engine
-            .apply_connection(&plan, &confirmation(&plan), &admission, 1_001)
-            .expect("confirmed experimental unknown may proceed");
+            .apply_connection(
+                &plan,
+                &confirmation(&plan),
+                &RuntimeAdmission {
+                    compatibility_sequence: 1,
+                    status: CompatibilityStatus::DetectedVerified,
+                },
+                1_001,
+            )
+            .expect("the single connectable status may proceed");
         assert_ne!(std::fs::read(&target).unwrap(), initial);
         std::fs::remove_dir_all(root).ok();
     }

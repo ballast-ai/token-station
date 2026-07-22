@@ -1,30 +1,41 @@
 import { useState } from "react";
-import type { ProviderView, StateView } from "../api";
+import { previewProviderRemoval } from "../api";
+import type { ProviderRemovalPreview, ProviderView, StateView } from "../api";
 import ProviderModelManager from "./ProviderModelManager";
 
 interface ProviderListProps {
   providers: ProviderView[];
+  deletedProviders: string[];
+  recoveryError: string | null;
   serveRunning: boolean;
   busy: boolean;
   onRemove: (name: string) => void;
+  onRestore: (name: string) => void;
   onStateChange: (state: StateView, message: string) => void;
-}
-
-function windowLabel(tokens: number): string {
-  if (tokens <= 0) return "未知";
-  if (tokens >= 1000) return `${Math.round(tokens / 1000)}k`;
-  return String(tokens);
 }
 
 export default function ProviderList({
   providers,
+  deletedProviders,
+  recoveryError,
   serveRunning,
   busy,
   onRemove,
+  onRestore,
   onStateChange,
 }: ProviderListProps) {
   const [managedProvider, setManagedProvider] = useState<string | null>(null);
-  const [detailProvider, setDetailProvider] = useState<string | null>(null);
+  const [removal, setRemoval] = useState<ProviderRemovalPreview | null>(null);
+  const [removalError, setRemovalError] = useState("");
+
+  const inspectRemoval = async (name: string) => {
+    setRemovalError("");
+    try {
+      setRemoval(await previewProviderRemoval(name));
+    } catch (caught) {
+      setRemovalError(String(caught));
+    }
+  };
 
   return (
     <section className="panel provider-panel">
@@ -38,6 +49,17 @@ export default function ProviderList({
       </div>
 
       <div className="provider-list">
+        {recoveryError && <div className="manager-error">{recoveryError}</div>}
+        {deletedProviders.length > 0 && (
+          <div className="provider-recovery" aria-label="Provider 回收站">
+            <strong>可恢复的 Provider</strong>
+            {deletedProviders.map((name) => (
+              <button className="btn tiny" type="button" disabled={busy} key={name} onClick={() => onRestore(name)}>
+                恢复 {name}
+              </button>
+            ))}
+          </div>
+        )}
         {providers.length === 0 && (
           <div className="empty-state">
             <strong>还没有供应商</strong>
@@ -63,53 +85,16 @@ export default function ProviderList({
                 <button
                   className="btn tiny"
                   type="button"
-                  onClick={() => setDetailProvider((current) => current === provider.name ? null : provider.name)}
-                >
-                  {detailProvider === provider.name ? "收起能力" : "能力"}
-                </button>
-                <button
-                  className="btn tiny"
-                  type="button"
                   disabled={busy}
                   onClick={() => setManagedProvider((current) => current === provider.name ? null : provider.name)}
                 >
                   {managedProvider === provider.name ? "收起" : "管理模型"}
                 </button>
-                <button className="btn tiny danger" type="button" disabled={busy} onClick={() => onRemove(provider.name)}>
+                <button className="btn tiny danger" type="button" disabled={busy} onClick={() => void inspectRemoval(provider.name)}>
                   删除
                 </button>
               </div>
             </div>
-            {detailProvider === provider.name && (
-              <div className="provider-capabilities">
-                {(provider.model_details ?? []).length === 0 ? (
-                  <p className="empty-note">该供应商还没有模型，或未申报能力。</p>
-                ) : (
-                  <table className="capability-table">
-                    <thead>
-                      <tr>
-                        <th>模型</th>
-                        <th title="是否支持函数/工具调用">工具</th>
-                        <th title="是否支持图像输入">视觉</th>
-                        <th title="是否支持严格 JSON Schema 结构化输出">JSON</th>
-                        <th title="最大上下文窗口(输入+输出),未知则路由不往此发长上下文">上下文</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(provider.model_details ?? []).map((cap) => (
-                        <tr key={cap.model}>
-                          <td className="mono">{cap.model}</td>
-                          <td className={cap.tool ? "cap-yes" : "cap-no"}>{cap.tool ? "✓" : "—"}</td>
-                          <td className={cap.vision ? "cap-yes" : "cap-no"}>{cap.vision ? "✓" : "—"}</td>
-                          <td className={cap.json_schema ? "cap-yes" : "cap-no"}>{cap.json_schema ? "✓" : "—"}</td>
-                          <td className={cap.context_window > 0 ? "" : "cap-no"}>{windowLabel(cap.context_window)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            )}
             {managedProvider === provider.name && (
               <ProviderModelManager
                 provider={provider}
@@ -118,8 +103,33 @@ export default function ProviderList({
                 onSaved={(next) => onStateChange(next, `${provider.name} 的模型已保存`)}
               />
             )}
+            {removal?.name === provider.name && (
+              <div className="provider-removal-preview" role="dialog" aria-label="删除影响预览">
+                <strong>删除影响</strong>
+                {removal.references.length > 0 ? (
+                  <>
+                    <p>以下路由仍在引用，必须先调整：</p>
+                    <ul>{removal.references.map((reference) => <li key={reference}>{reference}</li>)}</ul>
+                  </>
+                ) : (
+                  <p>没有路由引用。删除后会进入本地回收站，可恢复。</p>
+                )}
+                <div>
+                  <button className="btn tiny" type="button" onClick={() => setRemoval(null)}>取消</button>
+                  <button
+                    className="btn tiny danger"
+                    type="button"
+                    disabled={busy || !removal.can_remove}
+                    onClick={() => onRemove(provider.name)}
+                  >
+                    确认移入回收站
+                  </button>
+                </div>
+              </div>
+            )}
           </article>
         ))}
+        {removalError && <div className="manager-error">{removalError}</div>}
       </div>
     </section>
   );
