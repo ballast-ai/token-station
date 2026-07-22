@@ -11,11 +11,13 @@ import { CUSTOM_ID, PROVIDER_CATALOG, type ProviderPreset } from "../catalog";
 import ModelPicker, { type CatalogStatus } from "../components/ModelPicker";
 
 interface AddProviderPageProps {
+  /** Names already configured, so re-adding one reads as an update, not a duplicate. */
+  existingNames: string[];
   onCancel: () => void;
-  onAdded: (state: StateView) => void;
+  onAdded: (state: StateView, message: string) => void;
 }
 
-export default function AddProviderPage({ onCancel, onAdded }: AddProviderPageProps) {
+export default function AddProviderPage({ existingNames, onCancel, onAdded }: AddProviderPageProps) {
   const [presetId, setPresetId] = useState("");
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
@@ -64,6 +66,7 @@ export default function AddProviderPage({ onCancel, onAdded }: AddProviderPagePr
     [presetId],
   );
   const isCustom = presetId === CUSTOM_ID;
+  const isExisting = name.trim().length > 0 && existingNames.includes(name.trim());
   const needsKey = isCustom ? true : preset?.needsKey ?? true;
   const catalogModels = preset?.models ?? [];
   const allModels = [...new Set([...catalogModels, ...discoveredModels, ...extraModels])];
@@ -119,7 +122,8 @@ export default function AddProviderPage({ onCancel, onAdded }: AddProviderPagePr
     setSaving(true);
     setError("");
     try {
-      onAdded(await addProvider(name.trim(), url.trim(), picked, needsKey ? key : null));
+      const next = await addProvider(name.trim(), url.trim(), picked, needsKey ? key : null);
+      onAdded(next, isExisting ? `供应商「${name.trim()}」已更新` : "供应商已添加");
     } catch (caught) {
       setError(String(caught));
     } finally {
@@ -140,6 +144,11 @@ export default function AddProviderPage({ onCancel, onAdded }: AddProviderPagePr
       </header>
 
       {error && <div className="banner err">{error}</div>}
+      {isExisting && !error && (
+        <div className="banner info">
+          供应商「{name.trim()}」已经添加过了。继续保存会<strong>更新</strong>它的 Base URL、API Key 和模型（不会重复创建）。
+        </div>
+      )}
       <section className="panel provider-wizard">
         <div className="wizard-step">
           <div className="step-index">01</div>
@@ -208,7 +217,7 @@ export default function AddProviderPage({ onCancel, onAdded }: AddProviderPagePr
         <footer className="wizard-actions">
           <button className="btn" type="button" disabled={disabled} onClick={onCancel}>取消</button>
           <button className="btn primary" type="button" disabled={disabled || !presetId} onClick={() => void submit()}>
-            {saving ? "正在添加…" : "添加供应商"}
+            {saving ? "正在保存…" : isExisting ? "更新供应商" : "添加供应商"}
           </button>
         </footer>
       </section>
