@@ -243,7 +243,7 @@ impl SqliteStore {
                 record.status,
                 record
                     .error_code
-                    .map(|code| format!("{code:?}").to_lowercase()),
+                    .map(token_station_protocol::ErrorCode::as_str),
                 record.attempts,
                 routing.map(|r| r.upstream.clone()),
                 routing.map(|r| r.model.clone()),

@@ -43,12 +43,14 @@ struct ProviderStreamState {
 struct PendingFinish {
     seen: bool,
     reason: Option<FinishReason>,
+    done_emitted: bool,
 }
 
 impl PendingFinish {
     fn record(&mut self, raw: &str) {
         self.seen = true;
         self.reason = finish_reason(Some(raw));
+        self.done_emitted = false;
     }
 
     fn take_done(&mut self) -> Option<StreamEvent> {
@@ -56,9 +58,22 @@ impl PendingFinish {
             return None;
         }
         self.seen = false;
+        self.done_emitted = true;
         Some(StreamEvent::Done {
             finish_reason: self.reason.take(),
         })
+    }
+
+    fn finish_marker(&mut self) -> Option<StreamEvent> {
+        let done = self.take_done().or_else(|| {
+            (!self.done_emitted).then_some(StreamEvent::Done {
+                finish_reason: None,
+            })
+        });
+        self.seen = false;
+        self.reason = None;
+        self.done_emitted = false;
+        done
     }
 }
 
@@ -67,6 +82,7 @@ static STREAM_STATE: Mutex<ProviderStreamState> = Mutex::new(ProviderStreamState
     pending_finish: PendingFinish {
         seen: false,
         reason: None,
+        done_emitted: false,
     },
 });
 
@@ -87,6 +103,14 @@ fn internal(detail: impl std::fmt::Display) -> String {
         500,
         detail.to_string(),
     ))
+}
+
+fn provider_protocol_error(message: &'static str) -> ErrorEnvelope {
+    ErrorEnvelope::new(ErrorCode::ProviderProtocolError, 502, message)
+}
+
+fn protocol_error(message: &'static str) -> String {
+    fail(&provider_protocol_error(message))
 }
 
 fn parse_input<T: for<'de> serde::Deserialize<'de>>(input: &str) -> Result<T, String> {
@@ -216,10 +240,37 @@ fn events_of_frame(
     payload: &str,
     pending_finish: &mut PendingFinish,
 ) -> Result<Vec<StreamEvent>, String> {
-    let raw: Value = serde_json::from_str(payload).map_err(internal)?;
+    let raw: Value = serde_json::from_str(payload)
+        .map_err(|_| protocol_error("the upstream emitted invalid SSE JSON"))?;
+    if raw.get("error").is_some_and(|error| !error.is_null()) {
+        return Err(protocol_error(
+            "the upstream embedded an error in a successful SSE response",
+        ));
+    }
     let mut events = Vec::new();
 
-    for choice in raw["choices"].as_array().into_iter().flatten() {
+    let usage = match raw.get("usage") {
+        None | Some(Value::Null) => None,
+        Some(usage @ Value::Object(_)) => Some(usage),
+        Some(_) => {
+            return Err(protocol_error(
+                "the upstream SSE event has an invalid usage field",
+            ));
+        }
+    };
+    let choices = match raw.get("choices") {
+        Some(Value::Array(choices)) => Some(choices),
+        None if usage.is_some() => None,
+        _ => {
+            return Err(protocol_error(
+                "the upstream SSE event has an invalid choices field",
+            ));
+        }
+    };
+    if choices.is_some_and(Vec::is_empty) && usage.is_none() {
+        return Err(protocol_error("the upstream SSE event contains no choices"));
+    }
+    for choice in choices.into_iter().flatten() {
         let index = index_of(&choice["index"]);
         let delta = &choice["delta"];
 
@@ -247,7 +298,7 @@ fn events_of_frame(
         }
     }
 
-    if let Some(usage) = raw.get("usage").filter(|usage| !usage.is_null()) {
+    if let Some(usage) = usage {
         events.push(StreamEvent::Usage {
             usage: usage_of(usage),
         });
@@ -256,6 +307,18 @@ fn events_of_frame(
         }
     }
     Ok(events)
+}
+
+fn sse_frame_boundary(buffer: &str) -> Option<(usize, usize)> {
+    let bytes = buffer.as_bytes();
+    let lf = bytes.windows(2).position(|window| window == b"\n\n");
+    let crlf = bytes.windows(4).position(|window| window == b"\r\n\r\n");
+    match (lf, crlf) {
+        (Some(left), Some(right)) if left <= right => Some((left, 2)),
+        (_, Some(right)) => Some((right, 4)),
+        (Some(left), None) => Some((left, 2)),
+        (None, None) => None,
+    }
 }
 
 impl Guest for OpenAiCompatible {
@@ -300,10 +363,24 @@ impl Guest for OpenAiCompatible {
 
     fn parse_response(response_parts: String) -> Result<String, String> {
         let parts: HttpResponseParts = parse_input(&response_parts)?;
-        let raw: Value = serde_json::from_str(&parts.body).map_err(internal)?;
+        let raw: Value = serde_json::from_str(&parts.body)
+            .map_err(|_| protocol_error("the upstream returned invalid JSON in a 2xx response"))?;
+        if raw.get("error").is_some_and(|error| !error.is_null()) {
+            return Err(protocol_error(
+                "the upstream embedded an error in a successful response",
+            ));
+        }
+        let raw_choices = raw["choices"]
+            .as_array()
+            .ok_or_else(|| protocol_error("the upstream 2xx response has no choices array"))?;
+        if raw_choices.is_empty() {
+            return Err(protocol_error(
+                "the upstream 2xx response contains no choices",
+            ));
+        }
 
         let mut choices = Vec::new();
-        for choice in raw["choices"].as_array().into_iter().flatten() {
+        for choice in raw_choices {
             let message = &choice["message"];
             let tool_calls = message["tool_calls"]
                 .as_array()
@@ -352,24 +429,52 @@ impl Guest for OpenAiCompatible {
         let chunk: StreamChunk = parse_input(&chunk)?;
 
         let mut state = STREAM_STATE.lock().expect("single-threaded guest");
+        if chunk.data.is_empty() {
+            let events = state
+                .pending_finish
+                .take_done()
+                .into_iter()
+                .collect::<Vec<_>>();
+            return to_output(&events);
+        }
         state.tail.push_str(&chunk.data);
 
         let mut events = Vec::new();
-        while let Some(end) = state.tail.find("\n\n") {
-            let frame = state.tail[..end].to_owned();
-            state.tail.drain(..end + 2);
+        while let Some((end, separator)) = sse_frame_boundary(&state.tail) {
+            let frame = state.tail[..end].replace("\r\n", "\n");
+            state.tail.drain(..end + separator);
 
-            let Some(payload) = frame.strip_prefix("data: ") else {
+            let mut event_name = None;
+            let mut data_lines = Vec::new();
+            for line in frame.lines() {
+                if line.starts_with(':') {
+                    continue;
+                }
+                if let Some(value) = line.strip_prefix("event:") {
+                    event_name = Some(value.strip_prefix(' ').unwrap_or(value));
+                }
+                if let Some(value) = line.strip_prefix("data:") {
+                    data_lines.push(value.strip_prefix(' ').unwrap_or(value));
+                }
+            }
+            if event_name == Some("error") {
+                events.push(StreamEvent::Error {
+                    error: provider_protocol_error("the upstream emitted an SSE error event"),
+                });
                 continue;
-            };
+            }
+            if data_lines.is_empty() {
+                continue;
+            }
+            let payload = data_lines.join("\n");
             if payload == "[DONE]" {
-                if let Some(done) = state.pending_finish.take_done() {
+                if let Some(done) = state.pending_finish.finish_marker() {
                     events.push(done);
                 }
                 continue;
             }
             let ProviderStreamState { pending_finish, .. } = &mut *state;
-            events.extend(events_of_frame(payload, pending_finish)?);
+            events.extend(events_of_frame(&payload, pending_finish)?);
         }
         to_output(&events)
     }
@@ -378,14 +483,24 @@ impl Guest for OpenAiCompatible {
         let parts: HttpResponseParts = parse_input(&response_parts)?;
         let raw: Value = serde_json::from_str(&parts.body).unwrap_or(Value::Null);
 
-        let code = if raw["error"]["code"].as_str() == Some("content_policy_violation") {
+        let provider_code = raw["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let code = if provider_code == "content_policy_violation" {
             ErrorCode::ContentPolicy
+        } else if provider_code.contains("context_length")
+            || provider_code.contains("maximum_context")
+        {
+            ErrorCode::ContextLength
         } else {
             match parts.status {
                 400 | 404 | 422 => ErrorCode::InvalidRequest,
                 401 | 403 => ErrorCode::Auth,
+                402 => ErrorCode::PaymentRequired,
                 408 => ErrorCode::Timeout,
                 429 => ErrorCode::RateLimit,
+                529 => ErrorCode::Capacity,
                 500 | 502 | 503 | 504 => ErrorCode::UpstreamUnavailable,
                 _ => ErrorCode::Internal,
             }
@@ -394,7 +509,9 @@ impl Guest for OpenAiCompatible {
         let message = match code {
             ErrorCode::InvalidRequest => "the upstream refused the request as malformed",
             ErrorCode::Auth => "the upstream rejected the credential",
-            ErrorCode::PaymentRequired => "the upstream requires payment or the account is out of funds",
+            ErrorCode::PaymentRequired => {
+                "the upstream requires payment or the account is out of funds"
+            }
             ErrorCode::RateLimit => "the upstream rate limited this request",
             ErrorCode::ContentPolicy => "the upstream refused on content-policy grounds",
             ErrorCode::ContextLength => "the request exceeds the model's context window",
@@ -408,13 +525,15 @@ impl Guest for OpenAiCompatible {
         };
 
         let mut envelope = ErrorEnvelope::new(code, parts.status, message);
-        // The upstream's own words, never its body: a body may echo the request.
-        envelope.provider_message = raw["error"]["message"].as_str().map(str::to_owned);
+        envelope.provider_message = raw["error"]["message"]
+            .as_str()
+            .filter(|message| message.chars().count() <= 256)
+            .map(str::to_owned);
         envelope.retry_after_ms = parts
             .headers
             .get("retry-after")
             .and_then(|value| value.parse::<u64>().ok())
-            .map(|seconds| seconds * 1000);
+            .map(|seconds| seconds.saturating_mul(1000));
         to_output(&envelope)
     }
 }
