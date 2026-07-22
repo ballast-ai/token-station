@@ -1581,6 +1581,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
@@ -1597,6 +1598,56 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).expect("scratch home is writable");
         path
+    }
+
+    fn serve_model_catalog(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("model catalog fixture binds");
+        listener
+            .set_nonblocking(true)
+            .expect("model catalog fixture is nonblocking");
+        let address = listener
+            .local_addr()
+            .expect("model catalog fixture has an address");
+        let worker = std::thread::spawn(move || {
+            for (status, body) in responses {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "model catalog discovery request did not arrive before deadline"
+                            );
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("model catalog fixture accept failed: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("model catalog fixture read is bounded");
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .expect("model catalog fixture write is bounded");
+                let mut request = [0u8; 2048];
+                let read = stream
+                    .read(&mut request)
+                    .expect("model catalog fixture reads the request");
+                assert!(read > 0, "model catalog request must not be empty");
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("model catalog fixture responds");
+            }
+        });
+        (format!("http://{address}"), worker)
     }
 
     fn wait_for_serve_phase<R: Runtime>(app: &tauri::App<R>, expected: ServePhase) -> StateView {
@@ -1638,6 +1689,149 @@ mod tests {
             draft["plugins"]["agents"],
             json!(["agent-openai", "agent-anthropic", "agent-openai-responses"])
         );
+    }
+
+    #[test]
+    fn repeated_model_discovery_only_updates_the_catalog_cache() {
+        const CATALOG: &str = r#"{"data":[{"id":"model-b"},{"id":"model-a"}]}"#;
+
+        let root = scratch_home("discovery-isolation");
+        let data_dir = root.join("data");
+        let config_path = root.join("token-station.json");
+        let (base_url, server) = serve_model_catalog(vec![
+            (200, CATALOG),
+            (200, CATALOG),
+            (200, CATALOG),
+            (503, r#"{"error":"offline"}"#),
+        ]);
+        let mut draft = template(&root);
+        draft["data"]["dir"] = json!(data_dir.clone());
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": base_url,
+            "models": [{"model": "configured-model"}]
+        });
+        let expected_draft = draft.clone();
+        // Compact JSON is intentionally different from the normal pretty save
+        // format, so even a semantically identical rewrite fails this check.
+        let expected_config =
+            serde_json::to_vec(&expected_draft).expect("saved config fixture serializes");
+        std::fs::write(&config_path, &expected_config).expect("saved config fixture writes");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner {
+            config_path: config_path.clone(),
+            draft,
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+        }))));
+
+        for _ in 0..3 {
+            let result = tauri::async_runtime::block_on(discover_provider_models(
+                app.state(),
+                "fixture".to_owned(),
+                base_url.clone(),
+                None,
+            ))
+            .expect("live discovery succeeds");
+            assert_eq!(result.source, "live");
+            assert_eq!(result.models, ["model-a", "model-b"]);
+            assert_eq!(
+                app.state::<AppStateManaged>()
+                    .inner()
+                    .0
+                    .lock()
+                    .unwrap()
+                    .draft,
+                expected_draft
+            );
+            assert_eq!(
+                std::fs::read(&config_path).expect("saved config remains readable"),
+                expected_config
+            );
+        }
+
+        let cached = tauri::async_runtime::block_on(discover_provider_models(
+            app.state(),
+            "fixture".to_owned(),
+            base_url,
+            None,
+        ))
+        .expect("offline discovery falls back to its cache");
+        assert_eq!(cached.source, "cache");
+        assert_eq!(cached.models, ["model-a", "model-b"]);
+        assert_eq!(
+            app.state::<AppStateManaged>()
+                .inner()
+                .0
+                .lock()
+                .unwrap()
+                .draft,
+            expected_draft
+        );
+        assert_eq!(
+            std::fs::read(&config_path).expect("saved config remains readable"),
+            expected_config
+        );
+        assert!(data_dir.join("model-catalog-cache.json").is_file());
+        server.join().expect("model catalog fixture exits");
+
+        let warning_root = scratch_home("discovery-cache-warning");
+        let warning_data = warning_root.join("data");
+        std::fs::create_dir_all(warning_data.join("model-catalog-cache.json"))
+            .expect("directory fixture blocks the cache rename");
+        let warning_config = warning_root.join("token-station.json");
+        let (warning_base, warning_server) = serve_model_catalog(vec![(200, CATALOG)]);
+        let mut warning_draft = template(&warning_root);
+        warning_draft["data"]["dir"] = json!(warning_data);
+        warning_draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": warning_base,
+            "models": [{"model": "configured-model"}]
+        });
+        let expected_warning_draft = warning_draft.clone();
+        let expected_warning_config =
+            serde_json::to_vec(&expected_warning_draft).expect("warning config fixture serializes");
+        std::fs::write(&warning_config, &expected_warning_config)
+            .expect("warning config fixture writes");
+        let warning_app = tauri::test::mock_app();
+        assert!(warning_app.manage(AppStateManaged(Mutex::new(AppInner {
+            config_path: warning_config.clone(),
+            draft: warning_draft,
+            load_error: None,
+            server: ServerLifecycle::stopped(),
+        }))));
+
+        let warning = tauri::async_runtime::block_on(discover_provider_models(
+            warning_app.state(),
+            "fixture".to_owned(),
+            warning_base,
+            None,
+        ))
+        .expect("cache failure remains a live discovery result");
+        assert_eq!(warning.source, "live");
+        assert_eq!(warning.models, ["model-a", "model-b"]);
+        assert!(warning
+            .warning
+            .as_deref()
+            .is_some_and(|message| message.contains("保存模型缓存失败")));
+        assert_eq!(
+            warning_app
+                .state::<AppStateManaged>()
+                .inner()
+                .0
+                .lock()
+                .unwrap()
+                .draft,
+            expected_warning_draft
+        );
+        assert_eq!(
+            std::fs::read(&warning_config).expect("warning config remains readable"),
+            expected_warning_config
+        );
+        warning_server.join().expect("warning fixture exits");
+
+        std::fs::remove_dir_all(root).ok();
+        std::fs::remove_dir_all(warning_root).ok();
     }
 
     #[test]

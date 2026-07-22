@@ -273,8 +273,12 @@ describe("model selection and provider model management", () => {
     const user = userEvent.setup();
     render(<ProviderModelManager provider={provider} serveRunning onSaved={onSaved} />);
     await user.click(screen.getByRole("button", { name: "刷新模型" }));
-    expect(await screen.findByRole("button", { name: /new/ })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /new/ }));
+    const discovered = await screen.findByRole("button", { name: /new/ });
+    expect(discovered).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: /old/ })).toHaveAttribute("aria-pressed", "true");
+    expect(updateProviderModels).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
+    await user.click(discovered);
     await user.click(screen.getByRole("button", { name: "保存模型" }));
     await waitFor(() => expect(updateProviderModels).toHaveBeenCalledWith("openai", ["old", "new"]));
     expect(onSaved).toHaveBeenCalledWith(state);
