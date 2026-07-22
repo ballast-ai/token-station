@@ -6,6 +6,7 @@ import {
   type ReceiptRouteView,
   type ReceiptView,
 } from "../api";
+import { humanizeErrorCode } from "../errors";
 
 const MAX_RECEIPTS = 5;
 
@@ -65,8 +66,17 @@ function formatFeatures(features: ReceiptFeaturesView): string {
 function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
   const attempts = receipt.attempt_records ?? [];
   const conversions = receipt.conversion_reports ?? [];
+  const diagnosis = humanizeErrorCode(receipt.error_code);
   return (
     <div className="receipt-timeline">
+      {diagnosis && (
+        <section className="receipt-diagnosis" aria-label="错误诊断">
+          <h4>Diagnosis</h4>
+          <strong>{diagnosis.layer}</strong>
+          <span>{diagnosis.message}</span>
+          <small>下一步：{diagnosis.suggestion}</small>
+        </section>
+      )}
       <section aria-label="决策记录">
         <h4>Decision</h4>
         {receipt.decision ? (
@@ -117,6 +127,19 @@ function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
         )) : <p className="receipt-section-empty">没有转换记录</p>}
       </section>
     </div>
+  );
+}
+
+function CopyRequestId({ requestId }: { requestId: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    await navigator.clipboard?.writeText(requestId);
+    setCopied(true);
+  };
+  return (
+    <button type="button" className="btn ghost tiny receipt-copy" onClick={() => void copy()}>
+      {copied ? "已复制" : "复制请求 ID"}
+    </button>
   );
 }
 
@@ -177,6 +200,7 @@ export default function RecentReceipts() {
                 </summary>
                 <div className="receipt-meta">
                   <code title={receipt.request_id}>{receipt.request_id}</code>
+                  <CopyRequestId requestId={receipt.request_id} />
                   <span>{receipt.stream ? "流式" : "非流式"}</span>
                   <span>请求模型 {receipt.requested_model}</span>
                   <span>{receipt.attempts} 次尝试</span>

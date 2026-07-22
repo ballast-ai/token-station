@@ -1076,6 +1076,7 @@ body {
   font-size: 10px;
 }
 .receipt-meta code { max-width: 260px; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+.receipt-copy { margin-right: 4px; }
 .receipt-timeline {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1084,6 +1085,19 @@ body {
 }
 .receipt-timeline section { min-width: 0; }
 .receipt-timeline h4 { margin: 0 0 9px; color: var(--muted); font-size: 9px; letter-spacing: .12em; text-transform: uppercase; }
+.receipt-diagnosis {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--danger);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface));
+}
+.receipt-diagnosis h4 { margin-bottom: 2px; }
+.receipt-diagnosis strong { color: var(--danger); font-size: 11px; }
+.receipt-diagnosis span,
+.receipt-diagnosis small { color: var(--muted); font-size: 10px; }
 .receipt-event {
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr);
