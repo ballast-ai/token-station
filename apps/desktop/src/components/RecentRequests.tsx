@@ -18,6 +18,7 @@ export default function RecentRequests() {
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [error, setError] = useState("");
   const [open, setOpen] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
 
   const refresh = () => {
     getReceipts(5)
@@ -71,7 +72,22 @@ export default function RecentRequests() {
                   <dl className="receipt-detail">
                     <div>
                       <dt>请求 ID</dt>
-                      <dd className="mono">{r.request_id || "—"}</dd>
+                      <dd className="mono req-id-cell">
+                        {r.request_id || "—"}
+                        {r.request_id ? (
+                          <button
+                            type="button"
+                            className="btn ghost tiny"
+                            title="复制请求 ID"
+                            onClick={() => {
+                              void navigator.clipboard?.writeText(r.request_id);
+                              setCopied(r.request_id);
+                            }}
+                          >
+                            {copied === r.request_id ? "已复制" : "复制"}
+                          </button>
+                        ) : null}
+                      </dd>
                     </div>
                     <div>
                       <dt>实际 Provider</dt>
