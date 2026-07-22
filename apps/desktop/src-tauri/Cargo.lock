@@ -5020,7 +5020,6 @@ dependencies = [
  "token-station-cli",
  "token-station-metrics",
  "token-station-protocol",
- "token-station-release",
  "token-station-router-core",
  "tokio",
  "toml 0.8.2",

@@ -167,7 +167,6 @@ pub struct Diagnostic {
 pub enum CompatibilityStatus {
     NotDetected,
     DetectedVerified,
-    DetectedInferred,
     DetectedUnknown,
     DetectedBlocked,
     InstalledBroken,
@@ -179,10 +178,8 @@ pub enum CompatibilityStatus {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ReasonCode {
     AgentNotFound,
-    VerifiedRangeMatch,
-    PatchInferredFingerprintMatch,
-    NoCompatibilityEntry,
-    ConfigFingerprintChanged,
+    DefaultAdmission,
+    ConnectorBindingNotUnique,
     BlockedVersionMatch,
     ReadOnlyPreflightFailed,
     VersionProbeTimeout,
@@ -194,7 +191,6 @@ pub enum ReasonCode {
     ConfigReadFailed,
     ConfigParseFailed,
     InvalidEnvironmentOverride,
-    DiscoveryOnlyNotAdmitted,
     ConnectionOwnershipActive,
 }
 
@@ -204,9 +200,7 @@ pub enum AllowedAction {
     ViewDetails,
     Rescan,
     SelectInstallation,
-    RunReadOnlyPreflight,
     PreviewConnect,
-    ConfirmExperimentalConnect,
     Disconnect,
     ViewSnapshots,
     RestoreSnapshot,
@@ -299,7 +293,6 @@ pub enum ConfirmationKind {
     Installation,
     TargetConfig,
     ConfigurationDiff,
-    ExperimentalCompatibility,
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]

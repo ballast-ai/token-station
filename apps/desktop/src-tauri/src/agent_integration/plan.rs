@@ -172,17 +172,11 @@ pub fn build_connection_plan(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let mut required_confirmations = vec![
+    let required_confirmations = vec![
         ConfirmationKind::Installation,
         ConfirmationKind::TargetConfig,
         ConfirmationKind::ConfigurationDiff,
     ];
-    if matches!(
-        compatibility.status,
-        CompatibilityStatus::DetectedInferred | CompatibilityStatus::DetectedUnknown
-    ) {
-        required_confirmations.push(ConfirmationKind::ExperimentalCompatibility);
-    }
     let expires_at_ms = now_ms
         .saturating_add(DEFAULT_PLAN_TTL_MS)
         .min(compatibility_expires_at_ms.unwrap_or(u64::MAX));
@@ -502,12 +496,6 @@ fn validate_binding(
         CompatibilityStatus::DetectedVerified => compatibility
             .allowed_actions
             .contains(&AllowedAction::PreviewConnect),
-        CompatibilityStatus::DetectedInferred => compatibility
-            .allowed_actions
-            .contains(&AllowedAction::ConfirmExperimentalConnect),
-        CompatibilityStatus::DetectedUnknown => compatibility
-            .allowed_actions
-            .contains(&AllowedAction::ConfirmExperimentalConnect),
         _ => false,
     };
     if !allowed {
@@ -673,8 +661,8 @@ mod tests {
             agent_id: "claude-code".to_string(),
             installation_path: Some("/opt/claude".to_string()),
             status: CompatibilityStatus::DetectedVerified,
-            reason_code: ReasonCode::VerifiedRangeMatch,
-            message: "verified".to_string(),
+            reason_code: ReasonCode::DefaultAdmission,
+            message: "admitted".to_string(),
             matched_catalog_version: Some("fixture".to_string()),
             connector_id: Some("claude-code-v1".to_string()),
             allowed_actions: BTreeSet::from([
@@ -736,14 +724,14 @@ mod tests {
     }
 
     #[test]
-    fn plan_experimental_unknown_is_confirmable_but_blocked_broken_or_unselected_are_rejected() {
+    fn plan_only_connectable_status_is_accepted_and_unsafe_states_are_rejected() {
         let target = Path::new("/tmp/token-station-plan/settings.json");
         let source = ConfigSource::missing();
         let mut unknown = verified();
         unknown.status = CompatibilityStatus::DetectedUnknown;
-        unknown.reason_code = ReasonCode::NoCompatibilityEntry;
-        unknown.allowed_actions = BTreeSet::from([AllowedAction::ConfirmExperimentalConnect]);
-        let experimental = build_connection_plan(
+        unknown.reason_code = ReasonCode::ConnectorBindingNotUnique;
+        unknown.allowed_actions.clear();
+        let error = build_connection_plan(
             &ClaudeCodeConnector,
             &discovery(target),
             &unknown,
@@ -757,34 +745,10 @@ mod tests {
             1,
             None,
             10,
-            "02".repeat(16),
-        )
-        .expect("eligible unknown version should produce an experimental plan");
-        assert!(experimental
-            .view
-            .required_confirmations
-            .contains(&ConfirmationKind::ExperimentalCompatibility));
-
-        let mut unconfirmed_unknown = unknown.clone();
-        unconfirmed_unknown.allowed_actions.clear();
-        let error = build_connection_plan(
-            &ClaudeCodeConnector,
-            &discovery(target),
-            &unconfirmed_unknown,
-            target,
-            &source,
-            &ConnectInput {
-                base_url: "http://127.0.0.1:8787",
-                token: Some("hidden"),
-                adapter_ready: true,
-            },
-            1,
-            None,
-            10,
             "03".repeat(16),
         )
         .err()
-        .expect("unknown version without experimental permission is rejected");
+        .expect("a non-connectable status is rejected");
         assert!(error.contains("不允许"), "{error}");
 
         for status in [
