@@ -1444,6 +1444,19 @@ fn get_stats(
     })
 }
 
+/// 最近 N 条请求回执(谁请求 / 实际服务 / 为什么 / 终态 / 成本),纯读 metrics 库,无正文。
+#[tauri::command]
+fn get_receipts(
+    state: State<'_, AppStateManaged>,
+    limit: u32,
+) -> Result<Vec<stats::Receipt>, String> {
+    let db = {
+        let inner = state.0.lock().unwrap();
+        inner.data_dir().join("metrics.sqlite")
+    };
+    stats::recent(&db, limit.min(200))
+}
+
 /// 路由表页:把草稿里的四层路由(规则/提示/启发式档/兜底)整理成可视化视图。纯读,零 API。
 #[tauri::command]
 fn get_router_table(state: State<'_, AppStateManaged>) -> RouterTableView {
@@ -1596,6 +1609,7 @@ pub fn run() {
             apply_snapshot_restore,
             set_settings,
             get_stats,
+            get_receipts,
             get_router_table,
             get_plugins,
             check_upgrade,

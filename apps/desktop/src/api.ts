@@ -405,6 +405,25 @@ export const getStats = (since: string, by: string | null) =>
     () => invoke<StatsView>("get_stats", { since, by }),
   );
 
+/** One request's routing receipt — content-free. */
+export interface Receipt {
+  request_id: string;
+  started_at_ms: number;
+  latency_ms: number;
+  status: number;
+  error_code: string | null;
+  requested_model: string;
+  upstream: string | null;
+  model: string | null;
+  pool: string | null;
+  tier: string | null;
+  attempts: number;
+  cost_micros: number | null;
+}
+
+export const getReceipts = (limit: number) =>
+  invoke<Receipt[]>("get_receipts", { limit });
+
 // 注意语义差:HTTP 返回**运行中**配置的路由表,IPC 回退返回可编辑草稿。
 // 代理运行时以运行态为准,正是数据面该报告的事实。
 export const getRouterTable = () =>

@@ -2151,3 +2151,27 @@ pre.block {
 .endpoint-preview.error {
   color: var(--danger, #d05a5a);
 }
+
+/* 最近请求回执 (T10 Request Receipt) */
+.receipt-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.receipt-row { border-radius: 6px; }
+.receipt-summary {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: none; border: none; cursor: pointer; padding: 6px 8px;
+  font-size: 13px; color: inherit; text-align: left; border-radius: 6px;
+}
+.receipt-summary:hover { background: var(--surface-hover, rgba(127,127,127,0.08)); }
+.receipt-spacer { flex: 1; }
+.receipt-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #9aa; }
+.receipt-dot.ok { background: #3fb950; }
+.receipt-dot.err { background: #d05a5a; }
+.receipt-dot.cancel { background: #d0a24a; }
+.receipt-detail {
+  margin: 0; padding: 8px 12px 10px 24px; display: grid;
+  grid-template-columns: 1fr 1fr; gap: 4px 16px; font-size: 12px;
+}
+.receipt-detail div { display: flex; gap: 6px; }
+.receipt-detail dt { color: var(--muted, #8a8a8a); margin: 0; }
+.receipt-detail dd { margin: 0; }
+.chip { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--surface-hover, rgba(127,127,127,0.12)); color: var(--muted, #8a8a8a); }
+.empty-note { font-size: 13px; color: var(--muted, #8a8a8a); padding: 4px 2px; }
