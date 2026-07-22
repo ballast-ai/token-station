@@ -15,8 +15,11 @@ scripts/build-desktop.sh --local
 - 可执行文件不包含当前源码目录的绝对路径。
 - 四个官方插件都已进入内嵌插件层。
 - `.app` 通过 `codesign --verify --deep --strict`。
+- `.app` 包含 Wasmtime 执行 WASM 插件所需的可执行内存 entitlement。
 
 没有配置正式 Apple 证书时，本地模式使用 ad-hoc 签名。它适合当前电脑上的真实功能测试，但不能通过 Gatekeeper 正式发布门禁。
+
+桌面端使用 Wasmtime 在运行时编译 WASM 插件。当前 Wasmtime 版本没有使用 macOS 的 `MAP_JIT`，因此 hardened runtime 需要 `com.apple.security.cs.allow-unsigned-executable-memory`。安装包审计会检查这个 entitlement，缺失时直接失败，避免 App 只在启动网关时被 macOS 以 `Code Signature Invalid` 终止。
 
 指定 Rust 目标时使用：
 
