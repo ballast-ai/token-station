@@ -30,6 +30,7 @@ pub mod request_context;
 pub mod scaffold;
 pub mod secrets;
 pub mod server;
+mod sse;
 pub mod stats;
 pub mod store;
 pub mod upgrade;

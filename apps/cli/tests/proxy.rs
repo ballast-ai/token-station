@@ -265,6 +265,20 @@ fn http_json(status: u16, body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+fn http_json_with_headers(status: u16, body: &str, headers: &[(&str, &str)]) -> Vec<u8> {
+    use std::fmt::Write as _;
+
+    let mut extra = String::new();
+    for (name, value) in headers {
+        write!(&mut extra, "{name}: {value}\r\n").expect("String writes cannot fail");
+    }
+    format!(
+        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{extra}connection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
 // -- the proxy under test ----------------------------------------------------------
 
 /// A running proxy under test: where it listens, where it writes, and the
@@ -538,6 +552,18 @@ fn post_chat(proxy: &Proxy, body: &Value, hint: Option<(&str, &str)>) -> (u16, S
     (status, body)
 }
 
+fn post_chat_stream(proxy: &Proxy) -> (u16, String) {
+    post_chat(
+        proxy,
+        &json!({
+            "model": "auto",
+            "stream": true,
+            "messages": [{"role": "user", "content": "stream"}]
+        }),
+        None,
+    )
+}
+
 fn send_messages(proxy: &Proxy, body: &Value, token: &str) -> (u16, Option<String>, String) {
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
@@ -622,6 +648,22 @@ fn sse_events(body: &str) -> Vec<Value> {
                 .map(|data| serde_json::from_str(data).expect("SSE data is JSON"))
         })
         .collect()
+}
+
+fn assert_responses_terminal_is_unique_and_last(events: &[Value], body: &str) {
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "response.created")
+            .count(),
+        1,
+        "one logical stream has one response.created: {body}"
+    );
+    assert_eq!(
+        events.last().map(|event| &event["type"]),
+        Some(&json!("response.completed")),
+        "response.completed is terminal: {body}"
+    );
 }
 
 fn read_marker_tool() -> Value {
@@ -771,11 +813,60 @@ fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_records_49
         mock.peer_closed(),
         "the cancelled worker closes the upstream socket"
     );
-    assert_eq!(client.join().expect("client joins"), 200);
+    assert_eq!(
+        client.join().expect("client joins"),
+        499,
+        "an uncommitted stream cancelled by drain is surfaced as cancellation"
+    );
 
     settle();
     let row = last_row(&proxy.data_dir);
     assert_eq!(row["status"], "Integer(499)");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn a_cancelled_non_stream_body_is_499_not_a_provider_failure() {
+    let mock = MockUpstream::start_hanging();
+    let key = key_file("hung-json-cancel", "sk-test-key-abc\n");
+    let proxy = start_proxy(&mock, &key);
+    let url = proxy.url.clone();
+    let virtual_key = proxy.virtual_key.clone();
+    let client = std::thread::spawn(move || {
+        let agent = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(5)))
+                .http_status_as_error(false)
+                .build(),
+        );
+        agent
+            .post(format!("{url}/v1/chat/completions"))
+            .header("authorization", &format!("Bearer {virtual_key}"))
+            .send(
+                &json!({
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "hang"}]
+                })
+                .to_string(),
+            )
+            .expect("proxy answers the cancelled request")
+            .status()
+            .as_u16()
+    });
+
+    let arrival_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while (mock.hits() == 0 || proxy.control.in_flight() == 0)
+        && std::time::Instant::now() < arrival_deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(mock.hits(), 1);
+    proxy.control.cancel_in_flight();
+    assert_eq!(client.join().expect("client joins"), 499);
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(499)");
+    assert_eq!(row["error_code"], "Null");
     std::fs::remove_file(key).ok();
 }
 
@@ -1191,6 +1282,7 @@ fn a_responses_stream_is_incremental_and_protocol_shaped() {
     assert!(body.contains("event: response.completed"), "{body}");
 
     let events = sse_events(&body);
+    assert_responses_terminal_is_unique_and_last(&events, &body);
     let added: Vec<_> = events
         .iter()
         .filter(|event| event["type"] == "response.output_item.added")
@@ -1587,7 +1679,21 @@ fn an_anthropic_stream_is_incremental_and_protocol_shaped() {
         "{body}"
     );
     assert!(body.contains("event: message_stop"), "{body}");
-    let usage = sse_events(&body)
+    let events = sse_events(&body);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "message_stop")
+            .count(),
+        1,
+        "message_stop appears exactly once: {body}"
+    );
+    assert_eq!(
+        events.last().map(|event| &event["type"]),
+        Some(&json!("message_stop")),
+        "message_stop is terminal: {body}"
+    );
+    let usage = events
         .into_iter()
         .filter(|event| event["type"] == "message_delta")
         .find_map(|event| event.get("usage").cloned())
@@ -1698,6 +1804,8 @@ fn a_streaming_completion_survives_awkward_tcp_split_points() {
     assert!(body.contains(r#""content":"Hel""#), "{body}");
     assert!(body.contains(r#""content":"lo""#), "{body}");
     assert!(body.contains("data: [DONE]"), "{body}");
+    assert_eq!(body.matches("data: [DONE]").count(), 1, "{body}");
+    assert!(body.trim_end().ends_with("data: [DONE]"), "{body}");
 
     // The usage event inside the stream reached the metrics row.
     settle();
@@ -1706,6 +1814,159 @@ fn a_streaming_completion_survives_awkward_tcp_split_points() {
     assert_eq!(row["input_tokens"], "Integer(7)");
     assert_eq!(row["output_tokens"], "Integer(2)");
 
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn sse_crlf_no_space_multiline_data_and_split_unicode_are_decoded_once() {
+    let sse = concat!(
+        "data:{\"choices\":[\r\n",
+        "data: {\"index\":0,\"delta\":{\"content\":\"你好😀\"}}]}\r\n\r\n",
+        "data:{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\r\n\r\n",
+        "data:[DONE]\r\n\r\n"
+    );
+    let header = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        sse.len()
+    );
+    let bytes = sse.as_bytes();
+    let unicode = sse.find('你').expect("Chinese payload exists");
+    let emoji = sse.find('😀').expect("emoji payload exists");
+    let chinese_split = unicode + 1;
+    let emoji_split = emoji + 2;
+    let segments = vec![
+        header.into_bytes(),
+        bytes[..chinese_split].to_vec(),
+        bytes[chinese_split..emoji_split].to_vec(),
+        bytes[emoji_split..].to_vec(),
+    ];
+    let mock = MockUpstream::start(vec![segments]);
+    let key = key_file("sse-rfc-boundaries", "sk-test-key");
+    let proxy = start_proxy(&mock, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("你好😀"), "{body}");
+    settle();
+    assert_eq!(last_row(&proxy.data_dir)["status"], "Integer(200)");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn an_sse_error_before_output_stays_uncommitted_and_typed() {
+    let sse = "event:error\n\n";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let key = key_file("sse-event-error", "sk-test-key");
+    let proxy = start_proxy(&mock, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 502, "{body}");
+    assert!(
+        !body.contains("data:"),
+        "the stream was never committed: {body}"
+    );
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["error_code"], "Text(\"provider_protocol_error\")");
+    assert_eq!(row["status"], "Integer(502)");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn an_empty_stream_choices_frame_cannot_become_a_successful_done() {
+    let sse = "data: {\"choices\":[]}\n\ndata: [DONE]\n\n";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let key = key_file("sse-empty-choices", "sk-test-key");
+    let proxy = start_proxy(&mock, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 502, "{body}");
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(502)");
+    assert_eq!(row["error_code"], "Text(\"provider_protocol_error\")");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn finish_reason_then_clean_eof_is_a_complete_stream() {
+    let sse = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"complete\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let key = key_file("sse-finish-eof", "sk-test-key");
+    let proxy = start_proxy(&mock, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("complete"), "{body}");
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(200)");
+    assert_eq!(row["error_code"], "Null");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn a_delta_followed_by_eof_is_partial_failure_not_success() {
+    let sse = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"half\"}}]}\n\n";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let key = key_file("sse-partial-eof", "sk-test-key");
+    let proxy = start_proxy(&mock, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "HTTP was already committed: {body}");
+    assert!(body.contains("half"), "{body}");
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(502)");
+    assert_eq!(row["error_code"], "Text(\"transport_truncated\")");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn invalid_first_sse_event_falls_back_before_stream_commit() {
+    let broken_sse = "data: not-json\n\n";
+    let broken = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{broken_sse}",
+        broken_sse.len()
+    )
+    .into_bytes();
+    let good_sse = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"fallback-stream\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let good = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{good_sse}",
+        good_sse.len()
+    )
+    .into_bytes();
+    let primary = MockUpstream::start(vec![vec![broken]]);
+    let fallback = MockUpstream::start(vec![vec![good]]);
+    let key = key_file("sse-precommit-fallback", "sk-test-key");
+    let proxy = start_proxy_two(&primary, &fallback, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("fallback-stream"), "{body}");
+    assert_eq!((primary.hits(), fallback.hits()), (1, 1));
+    settle();
+    assert_eq!(last_row(&proxy.data_dir)["attempts"], "Integer(2)");
     std::fs::remove_file(key).ok();
 }
 
@@ -1905,9 +2166,13 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
         }
     });
     let config: ClientConfig = serde_json::from_value(config).expect("test config parses");
-    let recorder = Arc::new(token_station_cli::filelog::Recorders(vec![Box::new(
-        token_station_cli::filelog::FileLog::open(&config.data.dir).expect("log opens"),
-    )]));
+    let recorder = Arc::new(token_station_cli::filelog::Recorders(vec![
+        Box::new(token_station_cli::filelog::FileLog::open(&config.data.dir).expect("log opens")),
+        Box::new(
+            token_station_cli::store::SqliteStore::open(&config.data.dir.join("metrics.sqlite"))
+                .expect("store opens"),
+        ),
+    ]));
     let gateway = Arc::new(Gateway::new(&config, recorder).expect("gateway assembles"));
     let (virtual_key, _) =
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
@@ -1942,6 +2207,251 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
         virtual_key,
         control,
     }
+}
+
+fn start_proxy_many(upstream: &MockUpstream, count: usize, key_file: &Path) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-proxy-many-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let mut upstreams = serde_json::Map::new();
+    let mut members = Vec::new();
+    for index in 0..count {
+        let name = format!("candidate_{index:02}");
+        upstreams.insert(
+            name.clone(),
+            json!({
+                "provider": "openai-compatible",
+                "base_url": upstream.base_url(),
+                "auth": {"slot": "provider_api_key", "file": key_file},
+                "models": [{"model": "gpt-5.5", "tool": true, "context_window": 400_000}]
+            }),
+        );
+        members.push(json!({"upstream": name, "model": "gpt-5.5"}));
+    }
+    let config: ClientConfig = serde_json::from_value(json!({
+        "version": 1,
+        "server": {"listen": "127.0.0.1:0"},
+        "data": {"dir": data_dir, "metrics": true},
+        "plugins": {
+            "dir": plugins_dir(),
+            "agent": "agent-openai",
+            "providers": {"openai-compatible": "provider-openai-compatible"}
+        },
+        "upstreams": upstreams,
+        "router": {
+            "version": 1,
+            "pools": {"main": members},
+            "default_pool": "main"
+        }
+    }))
+    .expect("many-upstream config parses");
+    let recorder = Arc::new(token_station_cli::filelog::Recorders(vec![
+        Box::new(token_station_cli::filelog::FileLog::open(&config.data.dir).expect("log opens")),
+        Box::new(
+            token_station_cli::store::SqliteStore::open(&config.data.dir.join("metrics.sqlite"))
+                .expect("store opens"),
+        ),
+    ]));
+    let gateway = Arc::new(Gateway::new(&config, recorder).expect("gateway assembles"));
+    let (virtual_key, _) =
+        token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
+    let state = server::AppState::new(
+        gateway,
+        Some(Arc::from(virtual_key.as_str())),
+        Arc::new(token_station_cli::admin::AdminContext {
+            data_dir: config.data.dir.clone(),
+            router: config.router.clone(),
+            plugins: config.plugins.clone(),
+        }),
+    );
+    let control = state.control.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let address = listener.local_addr().expect("bound");
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tokio builds");
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("listener converts");
+            server::serve(state, listener).await.expect("server runs");
+        });
+    });
+    Proxy {
+        url: format!("http://{address}"),
+        data_dir,
+        virtual_key,
+        control,
+    }
+}
+
+#[test]
+fn malformed_2xx_and_truncated_bodies_fallback_without_recording_empty_success() {
+    let valid = json!({
+        "id": "chatcmpl-fallback",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "fallback"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+    })
+    .to_string();
+    let truncated = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 999\r\nconnection: close\r\n\r\n{\"choices\":[".to_vec();
+    let cases = [
+        http_json(200, r#"{"error":{"message":"smuggled"}}"#),
+        http_json(200, r#"{"choices":[]}"#),
+        http_json(200, "not-json"),
+        truncated,
+    ];
+
+    for (index, primary_response) in cases.into_iter().enumerate() {
+        let primary = MockUpstream::start(vec![vec![primary_response]]);
+        let fallback = MockUpstream::start(vec![vec![http_json(200, &valid)]]);
+        let key = key_file(&format!("protocol-fallback-{index}"), "sk-test-key");
+        let proxy = start_proxy_two(&primary, &fallback, &key);
+
+        let (status, body) = post_chat(
+            &proxy,
+            &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+            None,
+        );
+        assert_eq!(status, 200, "case {index}: {body}");
+        assert!(body.contains("fallback"), "case {index}: {body}");
+        assert_eq!((primary.hits(), fallback.hits()), (1, 1));
+        settle();
+        let row = last_row(&proxy.data_dir);
+        assert_eq!(row["attempts"], "Integer(2)", "case {index}");
+        assert_eq!(row["error_code"], "Null", "case {index}");
+        std::fs::remove_file(key).ok();
+    }
+}
+
+#[test]
+fn malformed_2xx_and_truncated_bodies_have_stable_terminal_receipts() {
+    let truncated = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 999\r\nconnection: close\r\n\r\n{\"choices\":[".to_vec();
+    let cases = [
+        (
+            http_json(200, r#"{"error":{"message":"smuggled"}}"#),
+            "provider_protocol_error",
+        ),
+        (
+            http_json(200, r#"{"choices":[]}"#),
+            "provider_protocol_error",
+        ),
+        (http_json(200, "not-json"), "provider_protocol_error"),
+        (truncated, "transport_truncated"),
+    ];
+
+    for (index, (response, expected)) in cases.into_iter().enumerate() {
+        let mock = MockUpstream::start(vec![vec![response]]);
+        let key = key_file(&format!("protocol-terminal-{index}"), "sk-test-key");
+        let proxy = start_proxy(&mock, &key);
+        let (status, _) = post_chat(
+            &proxy,
+            &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+            None,
+        );
+        assert_eq!(status, 502, "case {index}");
+        settle();
+        let row = last_row(&proxy.data_dir);
+        assert_eq!(row["status"], "Integer(502)", "case {index}");
+        assert_eq!(
+            row["error_code"],
+            format!("Text(\"{expected}\")"),
+            "case {index}"
+        );
+        std::fs::remove_file(key).ok();
+    }
+}
+
+#[test]
+fn http_402_404_and_529_map_to_the_stable_error_catalog() {
+    let cases = [
+        (402, "", "payment_required"),
+        (404, "", "invalid_request"),
+        (529, "", "capacity"),
+        (400, "context_length_exceeded", "context_length"),
+    ];
+    for (status, provider_code, expected) in cases {
+        let mock = MockUpstream::start(vec![vec![http_json(
+            status,
+            &json!({"error": {"message": "fixture", "code": provider_code}}).to_string(),
+        )]]);
+        let key = key_file(&format!("status-{status}"), "sk-test-key");
+        let proxy = start_proxy(&mock, &key);
+        let (actual, _) = post_chat(
+            &proxy,
+            &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+            None,
+        );
+        assert_eq!(actual, status);
+        settle();
+        assert_eq!(
+            last_row(&proxy.data_dir)["error_code"],
+            format!("Text(\"{expected}\")")
+        );
+        std::fs::remove_file(key).ok();
+    }
+}
+
+#[test]
+fn retry_after_waits_within_the_budget_before_fallback() {
+    let primary = MockUpstream::start(vec![vec![http_json_with_headers(
+        429,
+        r#"{"error":{"message":"slow down"}}"#,
+        &[("retry-after", "1")],
+    )]]);
+    let answer = json!({
+        "id": "chatcmpl-ok", "model": "gpt-5.5",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+    });
+    let fallback = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("retry-after-budget", "sk-test-key");
+    let proxy = start_proxy_two(&primary, &fallback, &key);
+    let started = std::time::Instant::now();
+    let (status, _) = post_chat(
+        &proxy,
+        &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+        None,
+    );
+    assert_eq!(status, 200);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(900));
+    assert_eq!((primary.hits(), fallback.hits()), (1, 1));
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(200)");
+    assert_eq!(row["error_code"], "Null");
+    assert_eq!(row["attempts"], "Integer(2)");
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn twenty_failing_upstreams_never_exceed_the_attempt_budget() {
+    let failure = r#"{"error":{"message":"unavailable"}}"#;
+    let mock = MockUpstream::start(vec![vec![http_json(503, failure)]]);
+    let key = key_file("twenty-upstreams", "sk-test-key");
+    let proxy = start_proxy_many(&mock, 20, &key);
+    let (status, _) = post_chat(
+        &proxy,
+        &json!({"model": "auto", "messages": [{"role": "user", "content": "hi"}]}),
+        None,
+    );
+    assert_eq!(status, 503);
+    assert_eq!(mock.hits(), 6);
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["attempts"], "Integer(6)");
+    assert_eq!(row["status"], "Integer(503)");
+    assert_eq!(row["error_code"], "Text(\"upstream_unavailable\")");
+    std::fs::remove_file(key).ok();
 }
 
 #[test]

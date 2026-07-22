@@ -34,9 +34,8 @@ impl Default for HealthPolicy {
 ///
 /// # Which failures count
 ///
-/// Only the ones that say the upstream is *unwell*: [`ErrorCode::Timeout`],
-/// [`ErrorCode::UpstreamUnavailable`], [`ErrorCode::Capacity`]. Deliberately
-/// not counted:
+/// Only the ones that say the upstream is *unwell*: transport/timeout/capacity
+/// failures and malformed Provider protocol responses. Deliberately not counted:
 ///
 /// - [`ErrorCode::Auth`] — a rejected credential is a configuration problem.
 ///   Ejecting on it would mask a typo in a key file as an outage, and the
@@ -139,13 +138,14 @@ impl HealthTracker {
     }
 }
 
-/// See the type-level docs for why this set is exactly these three.
+/// See the type-level docs for why these failures affect routing health.
 fn counts_toward_ejection(code: ErrorCode) -> bool {
     matches!(
         code,
         ErrorCode::Timeout
             | ErrorCode::UpstreamUnavailable
             | ErrorCode::TransportTruncated
+            | ErrorCode::ProviderProtocolError
             | ErrorCode::Capacity
     )
 }
@@ -236,6 +236,18 @@ mod tests {
             Health::Healthy,
             "429 must not become a 30-second outage"
         );
+    }
+
+    #[test]
+    fn repeated_malformed_provider_responses_eject_the_broken_model() {
+        let mut tracker = tracker();
+        let now = Instant::now();
+        let target = upstream();
+
+        for _ in 0..3 {
+            tracker.observe_failure(&target, MODEL, ErrorCode::ProviderProtocolError, now);
+        }
+        assert_eq!(tracker.health_of(&target, MODEL, now), Health::Unavailable);
     }
 
     #[test]

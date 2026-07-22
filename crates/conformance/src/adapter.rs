@@ -78,6 +78,19 @@ pub trait StreamParser {
     ///
     /// Returns the envelope the caller should be answered with.
     fn parse_chunk(&mut self, chunk: &StreamChunk) -> AdapterResult<Vec<StreamEvent>>;
+
+    /// Flushes a clean transport EOF. The v1 WIT has no separate finish
+    /// export, so the runtime represents EOF as an empty fragment, which a
+    /// successful network read can never produce.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed protocol failure when buffered state cannot finish.
+    fn finish(&mut self) -> AdapterResult<Vec<StreamEvent>> {
+        self.parse_chunk(&StreamChunk {
+            data: String::new(),
+        })
+    }
 }
 
 /// Southbound: the Canonical IR, in and out of one provider's HTTP dialect.

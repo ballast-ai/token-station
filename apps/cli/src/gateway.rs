@@ -42,6 +42,7 @@ use token_station_router_core::{
 use crate::admission::Admission;
 use crate::cancel::CancelToken;
 use crate::request_context::RequestContext;
+use crate::sse::SseFrameDecoder;
 
 use crate::config::ClientConfig;
 use crate::secrets::SecretStore;
@@ -62,7 +63,6 @@ const REQUEST_DEADLINE: Duration = Duration::from_secs(600);
 const MAX_ATTEMPTS: u32 = 6;
 /// A single honored `Retry-After` is capped so one upstream cannot park a
 /// request past anything useful; the request deadline caps it further.
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(5);
 /// `upstream test` answers "is it alive"; it should not take the data plane's
 /// word-count-sized timeout to say no.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -72,6 +72,91 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const STREAM_READ: usize = 8 * 1024;
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// One logical request's fallback limits. Count, wall-clock and per-attempt
+/// timeout are always active. Cost is optional until the router has a trusted
+/// preflight estimator; when configured, an unknown estimate fails closed.
+struct AttemptBudget {
+    max_attempts: u32,
+    max_elapsed: Duration,
+    per_attempt_timeout: Duration,
+    max_cost: Option<u64>,
+    started: Instant,
+    attempts: u32,
+    reserved_cost: u64,
+}
+
+impl AttemptBudget {
+    fn for_request(ctx: &RequestContext) -> Self {
+        Self {
+            max_attempts: MAX_ATTEMPTS,
+            max_elapsed: ctx.remaining(),
+            per_attempt_timeout: ctx.per_attempt_timeout(),
+            max_cost: None,
+            started: Instant::now(),
+            attempts: 0,
+            reserved_cost: 0,
+        }
+    }
+
+    fn try_begin(&mut self, estimated_cost: Option<u64>) -> bool {
+        if self.attempts >= self.max_attempts || self.remaining().is_zero() {
+            return false;
+        }
+        let reservation = match (self.max_cost, estimated_cost) {
+            (Some(_), None) => return false,
+            (_, None) => 0,
+            (_, Some(cost)) => cost,
+        };
+        if self
+            .max_cost
+            .is_some_and(|maximum| self.reserved_cost.saturating_add(reservation) > maximum)
+        {
+            return false;
+        }
+        self.attempts += 1;
+        self.reserved_cost = self.reserved_cost.saturating_add(reservation);
+        true
+    }
+
+    fn remaining(&self) -> Duration {
+        self.max_elapsed.saturating_sub(self.started.elapsed())
+    }
+
+    fn retry_delay(&self, requested: Duration, ctx: &RequestContext) -> Duration {
+        requested.min(self.remaining()).min(ctx.remaining())
+    }
+
+    const fn has_attempt_remaining(&self) -> bool {
+        self.attempts < self.max_attempts
+    }
+}
+
+fn wait_retry_delay(ctx: &RequestContext, wait: Duration) {
+    let deadline = Instant::now() + wait;
+    while !ctx.is_cancelled() && Instant::now() < deadline {
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(20)),
+        );
+    }
+}
+
+fn map_transport_error(error: ureq::Error) -> ErrorEnvelope {
+    match error {
+        ureq::Error::Timeout(timeout) => ErrorEnvelope::new(
+            ErrorCode::Timeout,
+            504,
+            format!("upstream attempt timed out: {timeout}"),
+        ),
+        error => ErrorEnvelope::new(
+            ErrorCode::UpstreamUnavailable,
+            502,
+            format!("upstream transport: {error}"),
+        ),
+    }
+}
 
 /// A [`RequestRecord`] with a stable accounting id stamped on it at arrival.
 /// One logical request gets one id; the dispatch fallback sweep reuses it, so
@@ -217,34 +302,6 @@ fn cancel_aware_agent(timeout: Duration, token: CancelToken) -> ureq::Agent {
         },
         ureq::unversioned::resolver::DefaultResolver::default(),
     )
-}
-
-/// Decodes the complete-UTF-8 prefix of `pending`, leaving any bytes of a
-/// character split across socket reads for the next call. This is what makes
-/// stream decoding is boundary-safe: a three-byte UTF-8 character split 2+1 across two reads is
-/// decoded once, whole, not mangled into replacement characters.
-///
-/// Genuinely invalid bytes (not a boundary split) are lossy-decoded so the
-/// stream makes progress instead of stalling on garbage.
-fn take_decodable(pending: &mut Vec<u8>) -> String {
-    match std::str::from_utf8(pending) {
-        Ok(_) => String::from_utf8(std::mem::take(pending)).expect("just validated as UTF-8"),
-        // No `error_len` means the tail is an incomplete-but-valid character:
-        // decode up to it, keep the rest for the next read.
-        Err(error) if error.error_len().is_none() => {
-            let boundary = error.valid_up_to();
-            let valid =
-                String::from_utf8(pending[..boundary].to_vec()).expect("valid up to the boundary");
-            pending.drain(..boundary);
-            valid
-        }
-        // Genuinely invalid bytes: lossy-decode everything so we do not stall.
-        Err(_) => {
-            let decoded = String::from_utf8_lossy(pending).into_owned();
-            pending.clear();
-            decoded
-        }
-    }
 }
 
 fn begin_record(started_at_ms: u64, protocol: impl Into<String>) -> RequestRecord {
@@ -730,7 +787,7 @@ impl Gateway {
             .send_with(http, &descriptor, upstream_name)
             .map_err(describe)?;
         let status = response.status;
-        let parts: HttpResponseParts = response.into();
+        let parts = response.into_parts().map_err(describe)?;
         if status >= 400 {
             let envelope = upstream
                 .plugin
@@ -833,7 +890,12 @@ impl Gateway {
         };
         let latency = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
         let status = response.status;
-        let parts: HttpResponseParts = response.into();
+        let parts = match response.into_parts() {
+            Ok(parts) => parts,
+            Err(envelope) => {
+                return (ProbeSignal::BadBody(describe(envelope)), Some(latency));
+            }
+        };
         if status >= 400 {
             let detail = match upstream.plugin.map_provider_error(&parts) {
                 Ok(envelope) | Err(envelope) => describe(envelope),
@@ -1166,18 +1228,17 @@ impl Gateway {
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
         let mut last_error = None;
+        let mut budget = AttemptBudget::for_request(ctx);
 
-        for target in std::iter::once(&decision.chosen).chain(&decision.fallbacks) {
+        let mut targets = std::iter::once(&decision.chosen)
+            .chain(&decision.fallbacks)
+            .peekable();
+        while let Some(target) = targets.next() {
             // A client that already hung up (or a fired drain) gets no further
             // upstreams tried on its behalf.
             if ctx.is_cancelled() {
+                Self::emit_cancelled(emit);
                 return Ok((target.clone(), StreamOutcome::ClientCancelled));
-            }
-            // Attempt budget: stop retrying once the count ceiling is reached,
-            // whatever the candidate list length. The deadline (ctx) bounds the
-            // wall-clock separately.
-            if record.attempts >= MAX_ATTEMPTS {
-                break;
             }
             // Per-Provider admission, held across this attempt. A provider at
             // its ceiling is skipped like a retriable failure — the next
@@ -1191,14 +1252,28 @@ impl Gateway {
                 ));
                 continue;
             };
-            record.attempts += 1;
+            // Only a request that obtained its Provider permit consumes an
+            // attempt. Local admission skips do not pretend an upstream call
+            // happened.
+            if !budget.try_begin(None) {
+                break;
+            }
+            record.attempts = budget.attempts;
             if let Some(routing) = record.routing.as_mut() {
                 // The record names who actually served (or last refused), not
                 // only who was chosen first.
                 target.upstream.as_str().clone_into(&mut routing.upstream);
                 routing.model.clone_from(&target.model);
             }
-            match self.try_upstream(ctx, agent, request, target, emit, record) {
+            match self.try_upstream(
+                ctx,
+                budget.per_attempt_timeout,
+                agent,
+                request,
+                target,
+                emit,
+                record,
+            ) {
                 // The terminal health verdict and status are decided exactly
                 // once, in `settle`; here we only report who served and how the
                 // exchange ended. Per-attempt failures below still trip health so
@@ -1215,14 +1290,15 @@ impl Gateway {
                         last_error = Some(error);
                         break;
                     }
-                    // Honor a `Retry-After` before the next candidate, capped by
-                    // both MAX_RETRY_AFTER and the request's remaining deadline.
-                    if let Some(retry_after_ms) = error.retry_after_ms {
-                        let wait = Duration::from_millis(retry_after_ms)
-                            .min(MAX_RETRY_AFTER)
-                            .min(ctx.remaining());
+                    // Honor a `Retry-After` only when another real attempt can
+                    // follow, bounded by both elapsed and request deadlines.
+                    if let Some(retry_after_ms) = error
+                        .retry_after_ms
+                        .filter(|_| targets.peek().is_some() && budget.has_attempt_remaining())
+                    {
+                        let wait = budget.retry_delay(Duration::from_millis(retry_after_ms), ctx);
                         if !wait.is_zero() && !ctx.is_cancelled() {
-                            std::thread::sleep(wait);
+                            wait_retry_delay(ctx, wait);
                         }
                     }
                     last_error = Some(error);
@@ -1276,9 +1352,11 @@ impl Gateway {
     }
 
     /// One upstream attempt: build, authorize, inject, send, translate back.
+    #[allow(clippy::too_many_arguments)] // one attempt's explicit protocol boundary
     fn try_upstream(
         &self,
         ctx: &RequestContext,
+        attempt_timeout: Duration,
         agent: &LoadedAgent,
         request: &ChatRequest,
         target: &UpstreamModel,
@@ -1311,15 +1389,26 @@ impl Gateway {
             .authorize(&descriptor)
             .map_err(|refusal| ErrorEnvelope::new(ErrorCode::Internal, 500, refusal.to_string()))?;
 
-        let response = match self.send(ctx, &descriptor, target.upstream.as_str()) {
-            Err(_) if ctx.is_cancelled() => return Ok(StreamOutcome::ClientCancelled),
+        let response = match self.send(ctx, attempt_timeout, &descriptor, target.upstream.as_str())
+        {
+            Err(_) if ctx.is_cancelled() => {
+                Self::emit_cancelled(emit);
+                return Ok(StreamOutcome::ClientCancelled);
+            }
             result => result?,
         };
 
         if response.status >= 400 {
             // The adapter classifies; the catalog decides retriability.
-            let parts: HttpResponseParts = response.into();
+            let parts = match response.into_parts() {
+                Err(_) if ctx.is_cancelled() => {
+                    Self::emit_cancelled(emit);
+                    return Ok(StreamOutcome::ClientCancelled);
+                }
+                result => result?,
+            };
             if ctx.is_cancelled() {
+                Self::emit_cancelled(emit);
                 return Ok(StreamOutcome::ClientCancelled);
             }
             return Err(upstream.plugin.map_provider_error(&parts)?);
@@ -1333,7 +1422,7 @@ impl Gateway {
                 "response_id": format!("msg_token_station_{sequence}"),
                 "model": target.model,
             });
-            Ok(Self::relay_stream(
+            Self::relay_stream(
                 ctx,
                 agent,
                 upstream,
@@ -1341,10 +1430,17 @@ impl Gateway {
                 &render_context,
                 emit,
                 record,
-            ))
+            )
         } else {
-            let parts: HttpResponseParts = response.into();
+            let parts = match response.into_parts() {
+                Err(_) if ctx.is_cancelled() => {
+                    Self::emit_cancelled(emit);
+                    return Ok(StreamOutcome::ClientCancelled);
+                }
+                result => result?,
+            };
             if ctx.is_cancelled() {
+                Self::emit_cancelled(emit);
                 return Ok(StreamOutcome::ClientCancelled);
             }
             let chat_response = upstream.plugin.parse_response(&parts)?;
@@ -1357,10 +1453,12 @@ impl Gateway {
             let rendered = agent
                 .plugin
                 .render_response(&chat_response, &render_context)?;
-            emit(Reply::BeginJson(JsonReply {
+            if !emit(Reply::BeginJson(JsonReply {
                 status: 200,
                 body: rendered.to_string(),
-            }));
+            })) {
+                return Ok(StreamOutcome::ClientCancelled);
+            }
             // A fully collected non-stream body is a complete exchange.
             Ok(StreamOutcome::Complete)
         }
@@ -1373,10 +1471,11 @@ impl Gateway {
     fn send(
         &self,
         ctx: &RequestContext,
+        attempt_timeout: Duration,
         descriptor: &HttpRequestDescriptor,
         upstream_name: &str,
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
-        let timeout = ctx.remaining().min(ctx.per_attempt_timeout());
+        let timeout = ctx.remaining().min(attempt_timeout);
         let http = cancel_aware_agent(timeout, ctx.token());
         self.send_with(&http, descriptor, upstream_name)
     }
@@ -1432,13 +1531,7 @@ impl Gateway {
                 }
             }
         };
-        let response = sent.map_err(|error| {
-            ErrorEnvelope::new(
-                ErrorCode::UpstreamUnavailable,
-                502,
-                format!("upstream transport: {error}"),
-            )
-        })?;
+        let response = sent.map_err(map_transport_error)?;
 
         Ok(UpstreamResponse::from(response))
     }
@@ -1474,8 +1567,9 @@ impl Gateway {
         }
     }
 
-    /// Streams the upstream body through the parse/render pair, chunk by
-    /// chunk, with the split points the network chose.
+    /// Streams complete byte-framed SSE events through the parse/render pair.
+    /// Nothing is committed to the client before the first valid event.
+    #[allow(clippy::too_many_lines)] // framing, checkpoint and terminal mapping stay one state machine
     fn relay_stream(
         ctx: &RequestContext,
         agent: &LoadedAgent,
@@ -1484,137 +1578,267 @@ impl Gateway {
         render_context: &Value,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
-    ) -> StreamOutcome {
+    ) -> Result<StreamOutcome, ErrorEnvelope> {
         let mut parser = upstream.plugin.stream_parser();
         let mut reader = response.reader;
-
-        if !emit(Reply::BeginStream) {
-            return StreamOutcome::ClientCancelled;
-        }
-
-        // `committed` flips once assistant output has left for the client; it
-        // decides whether a later break is FailedAfterPartial (a truncated
-        // answer) or FailedBeforeOutput (nothing sent, a candidate may retry).
+        let mut decoder = SseFrameDecoder::default();
         let mut committed = false;
-        let mut saw_done = false;
-
         let mut buffer = [0u8; STREAM_READ];
-        // Raw bytes not yet handed to the parser. A multibyte UTF-8 character
-        // (or a whole frame) that a socket read split in the middle waits here
-        // for the rest, instead of being mangled by a per-read lossy decode.
-        let mut pending: Vec<u8> = Vec::new();
+
         loop {
-            // Between reads is where a mid-stream cancel actually lands: the
-            // client hung up or the deadline passed, so stop paying for output
-            // nobody will read instead of draining the upstream to its end.
             if ctx.is_cancelled() {
                 Self::clear_stream_state(agent, render_context);
-                return StreamOutcome::ClientCancelled;
+                if !committed {
+                    Self::emit_cancelled(emit);
+                }
+                return Ok(StreamOutcome::ClientCancelled);
             }
             let read = match reader.read(&mut buffer) {
-                Ok(0) => break,
+                Ok(0) => {
+                    if let Err(envelope) = decoder.finish() {
+                        return Self::terminate_stream(
+                            agent,
+                            render_context,
+                            emit,
+                            record,
+                            envelope,
+                            committed,
+                        );
+                    }
+                    let events = match parser.finish() {
+                        Ok(events) => events,
+                        Err(envelope) => {
+                            return Self::terminate_stream(
+                                agent,
+                                render_context,
+                                emit,
+                                record,
+                                envelope,
+                                committed,
+                            );
+                        }
+                    };
+                    if let Some(error) = events.iter().find_map(|event| match event {
+                        StreamEvent::Error { error } => Some(error.clone()),
+                        _ => None,
+                    }) {
+                        return Self::terminate_stream(
+                            agent,
+                            render_context,
+                            emit,
+                            record,
+                            error,
+                            committed,
+                        );
+                    }
+                    let mut terminal = false;
+                    for event in events {
+                        let chunk = match agent.plugin.render_stream_event(&event, render_context) {
+                            Ok(chunk) => chunk,
+                            Err(envelope) => {
+                                return Self::terminate_stream(
+                                    agent,
+                                    render_context,
+                                    emit,
+                                    record,
+                                    envelope,
+                                    committed,
+                                );
+                            }
+                        };
+                        if !committed && !emit(Reply::BeginStream) {
+                            Self::clear_stream_state(agent, render_context);
+                            return Ok(StreamOutcome::ClientCancelled);
+                        }
+                        let data = chunk
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        if !emit(Reply::Chunk(data)) {
+                            Self::clear_stream_state(agent, render_context);
+                            return Ok(StreamOutcome::ClientCancelled);
+                        }
+                        committed = true;
+                        match event {
+                            StreamEvent::Usage { usage } => record.usage = Some(usage),
+                            StreamEvent::Done { .. } => terminal = true,
+                            _ => {}
+                        }
+                    }
+                    if terminal {
+                        Self::clear_stream_state(agent, render_context);
+                        return Ok(StreamOutcome::Complete);
+                    }
+                    return Self::terminate_stream(
+                        agent,
+                        render_context,
+                        emit,
+                        record,
+                        ErrorEnvelope::new(
+                            ErrorCode::TransportTruncated,
+                            502,
+                            "upstream SSE connection closed before a terminal event",
+                        ),
+                        committed,
+                    );
+                }
                 Ok(read) => read,
-                Err(error) => {
+                Err(_) => {
                     if ctx.is_cancelled() {
                         Self::clear_stream_state(agent, render_context);
-                        return StreamOutcome::ClientCancelled;
+                        if !committed {
+                            Self::emit_cancelled(emit);
+                        }
+                        return Ok(StreamOutcome::ClientCancelled);
                     }
-                    // Mid-stream failure: already committed to SSE, so it goes
-                    // out as a rendered error event rather than a status code —
-                    // and into the outcome, where status 200 alone would lie.
                     let envelope = ErrorEnvelope::new(
-                        ErrorCode::UpstreamUnavailable,
+                        ErrorCode::TransportTruncated,
                         502,
-                        format!("upstream stream broke: {error}"),
+                        "upstream connection broke while streaming",
                     );
-                    record.error_code = Some(envelope.code);
-                    let rendered = Self::render_stream_error(agent, &envelope, render_context);
-                    emit(Reply::Chunk(rendered));
-                    Self::clear_stream_state(agent, render_context);
-                    return Self::stream_failure(committed);
+                    return Self::terminate_stream(
+                        agent,
+                        render_context,
+                        emit,
+                        record,
+                        envelope,
+                        committed,
+                    );
                 }
             };
 
-            pending.extend_from_slice(&buffer[..read]);
-            let data = take_decodable(&mut pending);
-            if data.is_empty() {
-                // Only an incomplete multibyte character so far — read the rest
-                // before decoding, rather than emit a replacement char.
-                continue;
-            }
-            let events = match parser.parse_chunk(&StreamChunk { data }) {
-                Ok(events) => events,
+            let frames = match decoder.push(&buffer[..read]) {
+                Ok(frames) => frames,
                 Err(envelope) => {
-                    record.error_code = Some(envelope.code);
-                    let rendered = Self::render_stream_error(agent, &envelope, render_context);
-                    emit(Reply::Chunk(rendered));
-                    Self::clear_stream_state(agent, render_context);
-                    return Self::stream_failure(committed);
+                    return Self::terminate_stream(
+                        agent,
+                        render_context,
+                        emit,
+                        record,
+                        envelope,
+                        committed,
+                    );
                 }
             };
 
-            for event in events {
-                match &event {
-                    StreamEvent::Usage { usage } => record.usage = Some(*usage),
-                    StreamEvent::Done { .. } => saw_done = true,
-                    // An upstream error surfaced mid-stream is a failed exchange,
-                    // not a completed one: settle must not read it as success
-                    // even when bytes are already out.
-                    StreamEvent::Error { error } => {
-                        record.error_code = Some(error.code);
-                        let rendered = Self::render_stream_error(agent, error, render_context);
-                        emit(Reply::Chunk(rendered));
-                        Self::clear_stream_state(agent, render_context);
-                        return Self::stream_failure(committed);
-                    }
-                    _ => {}
-                }
-                let chunk = match agent.plugin.render_stream_event(&event, render_context) {
-                    Ok(chunk) => chunk,
+            for data in frames {
+                let events = match parser.parse_chunk(&StreamChunk { data }) {
+                    Ok(events) => events,
                     Err(envelope) => {
-                        record.error_code = Some(envelope.code);
-                        let rendered = Self::render_stream_error(agent, &envelope, render_context);
-                        emit(Reply::Chunk(rendered));
-                        Self::clear_stream_state(agent, render_context);
-                        return Self::stream_failure(committed);
+                        return Self::terminate_stream(
+                            agent,
+                            render_context,
+                            emit,
+                            record,
+                            envelope,
+                            committed,
+                        );
                     }
                 };
-                let data = chunk
-                    .get("data")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                if !emit(Reply::Chunk(data)) {
-                    Self::clear_stream_state(agent, render_context);
-                    return StreamOutcome::ClientCancelled; // Client hung up.
+                if let Some(error) = events.iter().find_map(|event| match event {
+                    StreamEvent::Error { error } => Some(error.clone()),
+                    _ => None,
+                }) {
+                    return Self::terminate_stream(
+                        agent,
+                        render_context,
+                        emit,
+                        record,
+                        error,
+                        committed,
+                    );
                 }
-                if matches!(
-                    event,
-                    StreamEvent::Delta { .. } | StreamEvent::ToolCallDelta { .. }
-                ) {
+
+                let mut rendered = Vec::with_capacity(events.len());
+                for event in &events {
+                    let chunk = match agent.plugin.render_stream_event(event, render_context) {
+                        Ok(chunk) => chunk,
+                        Err(envelope) => {
+                            return Self::terminate_stream(
+                                agent,
+                                render_context,
+                                emit,
+                                record,
+                                envelope,
+                                committed,
+                            );
+                        }
+                    };
+                    rendered.push(
+                        chunk
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                }
+                if rendered.is_empty() {
+                    continue;
+                }
+                if !committed && !emit(Reply::BeginStream) {
+                    Self::clear_stream_state(agent, render_context);
+                    return Ok(StreamOutcome::ClientCancelled);
+                }
+
+                let mut terminal = false;
+                for (event, data) in events.into_iter().zip(rendered) {
+                    if !emit(Reply::Chunk(data)) {
+                        Self::clear_stream_state(agent, render_context);
+                        return Ok(StreamOutcome::ClientCancelled);
+                    }
                     committed = true;
+                    match event {
+                        StreamEvent::Usage { usage } => record.usage = Some(usage),
+                        StreamEvent::Done { .. } => terminal = true,
+                        _ => {}
+                    }
+                }
+                if terminal {
+                    Self::clear_stream_state(agent, render_context);
+                    return Ok(StreamOutcome::Complete);
                 }
             }
-        }
-
-        Self::clear_stream_state(agent, render_context);
-        // Clean EOF: a terminal `done` is the only honest success. A stream that
-        // stops without one left the answer half-said, whatever it already sent.
-        if saw_done {
-            StreamOutcome::Complete
-        } else {
-            Self::stream_failure(committed)
         }
     }
 
-    /// A broken stream maps to a pre/post-output failure so `settle` can decide
-    /// retriability without ever recording success.
-    const fn stream_failure(committed: bool) -> StreamOutcome {
-        if committed {
-            StreamOutcome::FailedAfterPartial
-        } else {
-            StreamOutcome::FailedBeforeOutput
+    fn terminate_stream(
+        agent: &LoadedAgent,
+        render_context: &Value,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+        envelope: ErrorEnvelope,
+        committed: bool,
+    ) -> Result<StreamOutcome, ErrorEnvelope> {
+        if !committed {
+            Self::clear_stream_state(agent, render_context);
+            return Err(envelope);
         }
+        record.error_code = Some(envelope.code);
+        let rendered = Self::render_stream_error(agent, &envelope, render_context);
+        if !emit(Reply::Chunk(rendered)) {
+            Self::clear_stream_state(agent, render_context);
+            return Ok(StreamOutcome::ClientCancelled);
+        }
+        Self::clear_stream_state(agent, render_context);
+        Ok(StreamOutcome::FailedAfterPartial)
+    }
+
+    /// Complete the still-uncommitted HTTP exchange when a drain/deadline
+    /// cancels it. Without this reply the server would mistake the intentional
+    /// cancellation for a worker crash and manufacture a 500 response.
+    fn emit_cancelled(emit: &mut dyn FnMut(Reply) -> bool) {
+        emit(Reply::BeginJson(JsonReply {
+            status: 499,
+            body: json!({
+                "error": {
+                    "message": "request cancelled",
+                    "type": "cancelled",
+                    "code": "client_cancelled"
+                }
+            })
+            .to_string(),
+        }));
     }
 
     /// An error, rendered the way the matched inbound protocol spells it.
@@ -1699,55 +1923,71 @@ impl UpstreamResponse {
             reader: Box::new(reader),
         }
     }
-}
 
-impl From<UpstreamResponse> for HttpResponseParts {
-    fn from(mut response: UpstreamResponse) -> Self {
-        let mut body = String::new();
-        // A read failure mid-body surfaces as truncated JSON, which the
-        // adapter reports as a parse error attributed to the upstream.
-        let _ = response.reader.read_to_string(&mut body);
-        Self {
-            status: response.status,
-            headers: response.headers,
+    fn into_parts(mut self) -> Result<HttpResponseParts, ErrorEnvelope> {
+        let mut bytes = Vec::new();
+        self.reader.read_to_end(&mut bytes).map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorCode::TransportTruncated,
+                502,
+                "upstream connection closed before the response body completed",
+            )
+        })?;
+        let body = String::from_utf8(bytes).map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorCode::ProviderProtocolError,
+                502,
+                "upstream response body is not valid UTF-8",
+            )
+        })?;
+        Ok(HttpResponseParts {
+            status: self.status,
+            headers: self.headers,
             body,
             extensions: token_station_protocol::Extensions::new(),
-        }
+        })
     }
 }
 
 #[cfg(test)]
-mod sse_decode_tests {
-    use super::take_decodable;
+mod attempt_budget_tests {
+    use super::{AttemptBudget, map_transport_error};
+    use std::time::{Duration, Instant};
 
-    #[test]
-    fn a_multibyte_char_split_across_reads_is_decoded_whole() {
-        // The UTF-8 bytes for the Chinese character meaning you are E4 BD A0. A socket read ends after E4 BD.
-        let mut pending = vec![0xE4, 0xBD];
-        assert_eq!(take_decodable(&mut pending), "", "an incomplete char waits");
-        assert_eq!(pending, vec![0xE4, 0xBD], "its bytes are kept");
-
-        // The next read brings A0 and more.
-        pending.push(0xA0);
-        pending.extend_from_slice(b"ok");
-        assert_eq!(take_decodable(&mut pending), "你ok");
-        assert!(pending.is_empty());
+    fn budget(max_attempts: u32, max_cost: Option<u64>) -> AttemptBudget {
+        AttemptBudget {
+            max_attempts,
+            max_elapsed: Duration::from_secs(60),
+            per_attempt_timeout: Duration::from_secs(10),
+            max_cost,
+            started: Instant::now(),
+            attempts: 0,
+            reserved_cost: 0,
+        }
     }
 
     #[test]
-    fn a_four_byte_emoji_split_across_reads_survives() {
-        // "😀" is F0 9F 98 80.
-        let mut pending = vec![0xF0, 0x9F];
-        assert_eq!(take_decodable(&mut pending), "");
-        pending.extend_from_slice(&[0x98, 0x80]);
-        assert_eq!(take_decodable(&mut pending), "😀");
+    fn count_and_cost_are_consumed_before_each_attempt() {
+        let mut value = budget(2, Some(10));
+        assert!(value.try_begin(Some(4)));
+        assert!(value.try_begin(Some(6)));
+        assert!(!value.try_begin(Some(0)), "count ceiling wins");
     }
 
     #[test]
-    fn complete_ascii_decodes_immediately() {
-        let mut pending = b"data: {}\n\n".to_vec();
-        assert_eq!(take_decodable(&mut pending), "data: {}\n\n");
-        assert!(pending.is_empty());
+    fn configured_cost_budget_rejects_unknown_or_excess_cost() {
+        let mut unknown = budget(3, Some(10));
+        assert!(!unknown.try_begin(None));
+        let mut excess = budget(3, Some(10));
+        assert!(!excess.try_begin(Some(11)));
+        assert_eq!(excess.attempts, 0);
+    }
+
+    #[test]
+    fn a_transport_timeout_has_the_stable_timeout_classification() {
+        let envelope = map_transport_error(ureq::Error::Timeout(ureq::Timeout::Global));
+        assert_eq!(envelope.code, token_station_protocol::ErrorCode::Timeout);
+        assert_eq!(envelope.http_status, 504);
     }
 }
 
