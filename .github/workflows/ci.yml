@@ -5,6 +5,14 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+
+# A new push to the same PR makes every result from the older commit obsolete.
+# Cancel it immediately instead of letting several full Rust builds compete for
+# hosted-runner time and cache bandwidth.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -111,6 +119,10 @@ jobs:
       - run: npm --prefix apps/desktop run build
 
   rust-coverage:
+    # The PR already runs the complete Rust test suite in `rust`. Coverage
+    # instruments and repeats that suite, so keep it as a post-merge/manual
+    # quality gate instead of doubling every PR's slowest workload.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -139,6 +151,9 @@ jobs:
           --fail-under-lines 80
 
   desktop-coverage:
+    # `desktop-rust` remains the PR gate. Full line coverage still runs on main
+    # and from workflow_dispatch without delaying every review iteration.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
