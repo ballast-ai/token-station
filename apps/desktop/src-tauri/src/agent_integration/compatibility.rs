@@ -374,48 +374,49 @@ pub fn evaluate_discovery(
             &[],
         );
     }
-    let Some(entry) = catalog.entry(&descriptor.agent_id) else {
-        return decision(
-            CompatibilityStatus::DetectedUnknown,
-            ReasonCode::NoCompatibilityEntry,
-            "当前兼容目录没有该 Agent 的版本记录".to_string(),
-            None,
-            &[],
-        );
-    };
     let experimental_connector_id = match descriptor.local_connector_ids.as_slice() {
         [connector_id] => Some(connector_id.clone()),
         _ => None,
     };
-    if let Some(blocked) = entry
-        .blocked
-        .iter()
-        .find(|rule| blocked_requirement_matches(&rule.version_requirement, &version))
-    {
-        return decision(
-            CompatibilityStatus::DetectedBlocked,
-            ReasonCode::BlockedVersionMatch,
-            blocked.reason.clone(),
-            None,
-            &[],
-        );
+    // Default-allow (aligns with cc-switch): the catalog can DENY (blocklist) or
+    // fast-path (verified badge), but its ABSENCE never blocks. The safety is the
+    // pipeline — read-only preflight + snapshot + rollback + blocklist — not an
+    // allowlist. So a runnable install we know how to write (a unique connector)
+    // whose preflight passes is connectable whether or not it is catalogued.
+    let entry = catalog.entry(&descriptor.agent_id);
+    if let Some(entry) = entry {
+        if let Some(blocked) = entry
+            .blocked
+            .iter()
+            .find(|rule| blocked_requirement_matches(&rule.version_requirement, &version))
+        {
+            return decision(
+                CompatibilityStatus::DetectedBlocked,
+                ReasonCode::BlockedVersionMatch,
+                blocked.reason.clone(),
+                None,
+                &[],
+            );
+        }
+        if let Some(verified) = entry
+            .verified
+            .iter()
+            .find(|rule| requirement_matches(&rule.version_requirement, &version))
+        {
+            return decision(
+                CompatibilityStatus::DetectedVerified,
+                ReasonCode::VerifiedRangeMatch,
+                "版本命中已验证兼容范围".to_string(),
+                verified.connector_id.clone(),
+                &[
+                    AllowedAction::RunReadOnlyPreflight,
+                    AllowedAction::PreviewConnect,
+                ],
+            );
+        }
     }
-    if let Some(verified) = entry
-        .verified
-        .iter()
-        .find(|rule| requirement_matches(&rule.version_requirement, &version))
-    {
-        return decision(
-            CompatibilityStatus::DetectedVerified,
-            ReasonCode::VerifiedRangeMatch,
-            "版本命中已验证兼容范围".to_string(),
-            verified.connector_id.clone(),
-            &[
-                AllowedAction::RunReadOnlyPreflight,
-                AllowedAction::PreviewConnect,
-            ],
-        );
-    }
+    // The real safety gate, catalogued or not: if the config cannot be read or
+    // parsed, we do not write to it.
     if let Some(diagnostic) = discovery.diagnostics.iter().find(|diagnostic| {
         matches!(
             diagnostic.reason_code,
@@ -428,16 +429,17 @@ pub fn evaluate_discovery(
         return decision(
             CompatibilityStatus::DetectedUnknown,
             diagnostic.reason_code,
-            "只读配置预检未通过，当前安装不能试验性接入".to_string(),
+            "只读配置预检未通过，当前安装不能接入".to_string(),
             None,
             &[],
         );
     }
-    if let Some(inferred) = entry
-        .inferred
-        .iter()
-        .find(|rule| inferred_rule_matches(rule, &version))
-    {
+    if let Some(inferred) = entry.and_then(|entry| {
+        entry
+            .inferred
+            .iter()
+            .find(|rule| inferred_rule_matches(rule, &version))
+    }) {
         if inferred.config_fingerprint == discovery.config_fingerprint {
             return decision(
                 CompatibilityStatus::DetectedInferred,
@@ -447,30 +449,17 @@ pub fn evaluate_discovery(
                 &[AllowedAction::RunReadOnlyPreflight],
             );
         }
-        return decision(
-            CompatibilityStatus::DetectedUnknown,
-            ReasonCode::ConfigFingerprintChanged,
-            if experimental_connector_id.is_some() {
-                "版本可推定范围命中，但配置结构指纹已变化；可在只读预检后试验性接入"
-            } else {
-                "版本可推定范围命中，但配置结构指纹已变化且 Connector 绑定不唯一"
-            }
-            .to_string(),
-            experimental_connector_id.clone(),
-            if experimental_connector_id.is_some() {
-                &[AllowedAction::RunReadOnlyPreflight]
-            } else {
-                &[]
-            },
-        );
     }
+    // Default-allow fallthrough: not blocked, preflight passed. Connectable when
+    // we know a single way to write this agent's config; otherwise we honestly
+    // cannot pick a writer.
     decision(
         CompatibilityStatus::DetectedUnknown,
         ReasonCode::NoCompatibilityEntry,
         if experimental_connector_id.is_some() {
-            "版本未命中已验证、推定或阻断范围；可在只读预检后试验性接入"
+            "默认放行：版本未在验证目录，但已通过只读预检；接入前会创建快照，失败可回滚"
         } else {
-            "版本未命中兼容范围，且 Connector 绑定不唯一"
+            "无法确定该 Agent 的配置写法（Connector 绑定不唯一）"
         }
         .to_string(),
         experimental_connector_id.clone(),
@@ -1125,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_unknown_requires_parseable_version_catalog_entry_and_unique_connector() {
+    fn compatibility_default_allow_still_needs_parseable_version_unique_connector_and_preflight() {
         let registry = AgentRegistry::builtin().unwrap();
         let catalog = CompatibilityCatalog::builtin(&registry).unwrap();
         let descriptor = registry
@@ -1146,6 +1135,8 @@ mod tests {
             .allowed_actions
             .contains(&AllowedAction::RunReadOnlyPreflight));
 
+        // Default-allow: an agent with NO catalog entry still connects when it
+        // has a unique connector and preflight passes — absence never blocks.
         let mut missing_entry = catalog.clone();
         missing_entry
             .entries
@@ -1156,8 +1147,8 @@ mod tests {
             &discovery("codex", "0.146.0", None),
         );
         assert_eq!(missing_entry.reason_code, ReasonCode::NoCompatibilityEntry);
-        assert_eq!(missing_entry.connector_id, None);
-        assert!(!missing_entry
+        assert_eq!(missing_entry.connector_id.as_deref(), Some("codex-v1"));
+        assert!(missing_entry
             .allowed_actions
             .contains(&AllowedAction::RunReadOnlyPreflight));
 
@@ -1258,7 +1249,12 @@ mod tests {
                 AllowedAction::ExportDiagnostics,
             ])
         );
-        assert_eq!(changed.reason_code, ReasonCode::ConfigFingerprintChanged);
+        // Default-allow: a changed fingerprint no longer blocks — it falls
+        // through to the connectable default path (preflight passed), rather
+        // than the old ConfigFingerprintChanged refusal. The fingerprint match
+        // above still earns the DetectedInferred badge; the mismatch is simply
+        // "not catalogued", still connectable via the unique connector.
+        assert_eq!(changed.reason_code, ReasonCode::NoCompatibilityEntry);
         assert_eq!(changed.connector_id.as_deref(), Some("opencode-v1"));
         assert!(changed
             .allowed_actions
