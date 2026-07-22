@@ -29,6 +29,9 @@ interface HomePageProps {
   busy: boolean;
   configError: string | null;
   saveStatus: string;
+  localOnly: boolean;
+  allowCloudFallback: boolean;
+  onSetLocalRouting: (localOnly: boolean, allowCloudFallback: boolean) => void;
   onTierChange: (slot: TierSlot, upstream: string | null, model: string | null) => void;
   onAddKeyword: (slot: TierSlot, keyword: string) => void;
   onRemoveKeyword: (slot: TierSlot, keyword: string) => void;
@@ -62,6 +65,9 @@ export default function HomePage({
   busy,
   configError,
   saveStatus,
+  localOnly,
+  allowCloudFallback,
+  onSetLocalRouting,
   onTierChange,
   onAddKeyword,
   onRemoveKeyword,
@@ -77,6 +83,7 @@ export default function HomePage({
     mid: Boolean(tiers.mid?.upstream && tiers.mid?.model),
     low: Boolean(tiers.low?.upstream && tiers.low?.model),
   };
+  const hasLocalProvider = providers.some((provider) => provider.local);
   const [profileName, setProfileName] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileError, setProfileError] = useState("");
@@ -216,6 +223,48 @@ export default function HomePage({
           onAdd={onAddKeyword}
           onRemove={onRemoveKeyword}
         />
+      </section>
+
+      <section className="panel local-routing-panel">
+        <div className="panel-head split-heading">
+          <div>
+            <span className="eyebrow">LOCAL-ONLY · DATA STAYS HOME</span>
+            <h2>只走本地 · 数据不出本机</h2>
+            <p className="sub">
+              打开后,路由<strong>只用你标为「本地」的供应商</strong>,请求绝不出本机。
+              {hasLocalProvider
+                ? "改完按上方「保存并应用」生效。"
+                : "还没有本地供应商——去「添加供应商」时勾选「本地模型」。"}
+            </p>
+          </div>
+          <span className="default-route-chip">隐私优先</span>
+        </div>
+
+        <label className="switch-row">
+          <input
+            type="checkbox"
+            checked={localOnly}
+            disabled={busy || !hasLocalProvider}
+            onChange={(event) =>
+              onSetLocalRouting(event.target.checked, event.target.checked && allowCloudFallback)
+            }
+          />
+          <span>只走本地模型(请求不出本机)</span>
+        </label>
+        {localOnly && (
+          <label className="switch-row switch-row-sub">
+            <input
+              type="checkbox"
+              checked={allowCloudFallback}
+              disabled={busy}
+              onChange={(event) => onSetLocalRouting(true, event.target.checked)}
+            />
+            <span>
+              本地不可用时,允许退到云模型兜底
+              <em>(关=严格本地,本地挂了宁可失败也不外发)</em>
+            </span>
+          </label>
+        )}
       </section>
 
       <RecentReceipts />

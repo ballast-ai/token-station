@@ -114,6 +114,10 @@ enum UpstreamCommand {
         /// Also append the models to this pool, so routing can reach them.
         #[arg(long)]
         pool: Option<String>,
+        /// This upstream runs on the local machine (a local Ollama / LM Studio).
+        /// A `local_only` route keeps traffic on upstreams flagged this way.
+        #[arg(long)]
+        local: bool,
     },
     /// Remove an upstream (refused while a pool still routes to it).
     Remove { name: String },
@@ -256,6 +260,7 @@ fn run(cli: Cli) -> Result<(), String> {
             auth,
             slot,
             pool,
+            local,
         }) => mutate(&cli.config, |config| {
             // Refuse an unresolvable dialect now, at the terminal where the
             // operator can act on it — not at the next `serve`.
@@ -277,6 +282,7 @@ fn run(cli: Cli) -> Result<(), String> {
                     auth: auth.as_deref(),
                     slot: &slot,
                     pool: pool.as_deref(),
+                    local,
                 },
             )
         }),

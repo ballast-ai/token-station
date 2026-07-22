@@ -15,6 +15,8 @@ export interface ProviderView {
   catalog_revision?: number;
   catalog?: CatalogModelView[];
   has_auth: boolean;
+  /** 本机运行的供应商(如本地 Ollama);「只走本地」路由据此把流量锁在本机。 */
+  local?: boolean;
 }
 
 export type CapabilityState = "verified" | "declared" | "unsupported" | "unknown";
@@ -217,6 +219,10 @@ export interface StateView {
   keywords: Record<TierSlot, string[]>;
   agent_routes: Record<string, AgentRouteView>;
   profiles: string[];
+  /** 「只走本地」:锁定路由只用标了 local 的供应商,请求不出本机。 */
+  local_only: boolean;
+  /** `local_only` 下本地无可用时是否许可退到云(默认关=严格本地)。 */
+  allow_cloud_fallback: boolean;
   serve: ServeView;
   draft_revision: number;
   saved_revision: number;
@@ -420,7 +426,22 @@ export const addProvider = (
   base_url: string,
   models: string[],
   api_key: string | null,
-) => invoke<StateView>("add_provider", { name, baseUrl: base_url, models, apiKey: api_key });
+  local = false,
+) =>
+  invoke<StateView>("add_provider", {
+    name,
+    baseUrl: base_url,
+    models,
+    apiKey: api_key,
+    local,
+  });
+
+/** 设置「只走本地」及其云兜底许可(写进 home router,Agent inherit 自动跟随)。 */
+export const setLocalRouting = (localOnly: boolean, allowCloudFallback: boolean) =>
+  invoke<StateView>("set_local_routing", {
+    localOnly,
+    allowCloudFallback,
+  });
 
 export const editProvider = (name: string, base_url: string, api_key: string | null) =>
   invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });

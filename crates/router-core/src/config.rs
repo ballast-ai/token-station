@@ -68,6 +68,19 @@ pub struct RouterConfig {
     /// fails*.
     #[serde(default)]
     pub recovery: RecoveryPolicy,
+    /// Lock every route to upstreams declared `local`: the request must not
+    /// leave the machine. Off by default, so an ordinary config is unchanged.
+    /// When on, a pool's non-local candidates are skipped, and a request that no
+    /// local candidate can serve is refused — unless [`Self::allow_cloud_fallback`]
+    /// explicitly authorizes leaving the box.
+    #[serde(default)]
+    pub local_only: bool,
+    /// Under [`Self::local_only`], permit falling back to non-local (cloud)
+    /// candidates when no local one can serve the request. The privacy-vs-
+    /// availability escape hatch: off means local-or-nothing (fail closed), on
+    /// means try local first, then cloud. Ignored unless `local_only` is set.
+    #[serde(default)]
+    pub allow_cloud_fallback: bool,
 }
 
 /// Failover behavior once the selected tier is exhausted, decoupled from which

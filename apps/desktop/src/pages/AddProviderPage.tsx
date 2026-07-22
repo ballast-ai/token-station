@@ -27,6 +27,7 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
   const [discovery, setDiscovery] = useState<ModelDiscoveryView | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [local, setLocal] = useState(false);
   const [error, setError] = useState("");
   const [endpointPreview, setEndpointPreview] = useState<ProviderEndpointPreview | null>(null);
   const [endpointError, setEndpointError] = useState("");
@@ -117,7 +118,7 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
     setSaving(true);
     setError("");
     try {
-      const next = await addProvider(name.trim(), url.trim(), picked, needsKey ? key : null);
+      const next = await addProvider(name.trim(), url.trim(), picked, needsKey ? key : null, local);
       onAdded(next, isExisting ? `供应商「${name.trim()}」已更新` : "供应商已添加");
     } catch (caught) {
       setError(String(caught));
@@ -190,6 +191,15 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
                     <input className="input mono" type="password" autoComplete="off" placeholder="只保存在系统钥匙串" value={key} disabled={disabled} onChange={(event) => setKey(event.target.value)} />
                   </label>
                 ) : <div className="local-provider-note form-span">本地供应商，无需 API Key。</div>}
+                <label className="field-label form-span checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={local}
+                    disabled={disabled}
+                    onChange={(event) => setLocal(event.target.checked)}
+                  />
+                  <span>这是本机运行的本地模型(Ollama / LM Studio 等)——可被「只走本地」路由锁定，请求不出本机</span>
+                </label>
               </div>
             </div>
 

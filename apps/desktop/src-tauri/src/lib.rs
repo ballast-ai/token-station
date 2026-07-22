@@ -323,6 +323,8 @@ struct ProviderView {
     catalog_revision: u64,
     catalog: Vec<model_catalog::CatalogModelView>,
     has_auth: bool,
+    /// This upstream runs on the local machine; `local_only` routing keeps to it.
+    local: bool,
 }
 
 #[derive(Serialize)]
@@ -418,6 +420,10 @@ struct StateView {
     keywords: std::collections::BTreeMap<String, Vec<String>>,
     agent_routes: std::collections::BTreeMap<String, AgentRouteView>,
     profiles: Vec<String>,
+    /// 「只走本地」:锁定路由只用标了 local 的供应商,请求不出本机。
+    local_only: bool,
+    /// `local_only` 下,本地无可用时是否许可退到云(默认关=严格本地)。
+    allow_cloud_fallback: bool,
     serve: ServeView,
     draft_revision: u64,
     saved_revision: u64,
@@ -647,6 +653,7 @@ impl AppInner {
                     catalog_revision,
                     catalog,
                     has_auth: up.get("auth").map(|a| !a.is_null()).unwrap_or(false),
+                    local: up.get("local").and_then(Value::as_bool).unwrap_or(false),
                 }
             })
             .collect()
@@ -734,9 +741,7 @@ impl AppInner {
         let managed = [KW_RULE_HIGH, KW_RULE_MID, KW_RULE_LOW];
         if let Some(existing) = self.draft["router"]["rules"].as_array() {
             for rule in existing {
-                let is_managed = rule["id"]
-                    .as_str()
-                    .is_some_and(|id| managed.contains(&id));
+                let is_managed = rule["id"].as_str().is_some_and(|id| managed.contains(&id));
                 if !is_managed {
                     rules.push(rule.clone());
                 }
@@ -1042,6 +1047,12 @@ impl AppInner {
             keywords: self.home_keywords(),
             agent_routes: self.agent_routes_view(),
             profiles: self.profile_names(),
+            local_only: self.draft["router"]["local_only"]
+                .as_bool()
+                .unwrap_or(false),
+            allow_cloud_fallback: self.draft["router"]["allow_cloud_fallback"]
+                .as_bool()
+                .unwrap_or(false),
             serve: self.serve_view(),
             draft_revision: self.config_state.draft_revision(),
             saved_revision: self.config_state.saved_revision(),
@@ -1332,6 +1343,7 @@ fn add_provider(
     base_url: String,
     models: Vec<String>,
     api_key: Option<String>,
+    local: bool,
 ) -> Result<StateView, String> {
     if name.trim().is_empty() {
         return Err("供应商名不能为空".into());
@@ -1381,6 +1393,11 @@ fn add_provider(
         "base_url": base_url,
         "models": model_objs,
     });
+    // 只在标了本地时写 local 键,让普通云供应商的配置保持原样(与 serde 的
+    // skip_serializing_if 对齐)。local_only 路由据此把流量锁在本机。
+    if local {
+        up["local"] = json!(true);
+    }
     // 有 key → keychain,auth 指向 slot;没 key(如本地 Ollama)→ 省略 auth。
     let api_key = api_key
         .as_deref()
@@ -1412,6 +1429,32 @@ fn add_provider(
                 )),
             };
         }
+    }
+    Ok(inner.snapshot())
+}
+
+/// 设置「只走本地」及其云兜底许可。写进 home `router`,agent inherit 自动跟随。
+/// 关掉时把两个键一并移除,让普通配置保持原样(与 serde default=false 对齐)。
+#[tauri::command]
+fn set_local_routing(
+    state: State<'_, AppStateManaged>,
+    local_only: bool,
+    allow_cloud_fallback: bool,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let previous = inner.draft["router"].clone();
+    if local_only {
+        inner.draft["router"]["local_only"] = json!(true);
+        inner.draft["router"]["allow_cloud_fallback"] = json!(allow_cloud_fallback);
+    } else if let Some(router) = inner.draft["router"].as_object_mut() {
+        // 「只走本地」关掉后,云许可无意义,一并清除,避免残留误导。
+        router.remove("local_only");
+        router.remove("allow_cloud_fallback");
+    }
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["router"] = previous;
+        return Err(error);
     }
     Ok(inner.snapshot())
 }
@@ -2602,6 +2645,7 @@ pub fn run() {
             get_runtime_state,
             preview_provider_endpoints,
             add_provider,
+            set_local_routing,
             edit_provider,
             discover_provider_models,
             test_provider,
@@ -3319,7 +3363,9 @@ mod tests {
         // 词进了 low 档的规则,指向 tier_low,且整份配置能通过内核校验。
         let keywords = inner.home_keywords();
         assert_eq!(keywords["low"], vec!["提交git".to_string()]);
-        let config = inner.materialize().expect("keyword rule keeps config valid");
+        let config = inner
+            .materialize()
+            .expect("keyword rule keeps config valid");
         let rule = config
             .router
             .rules
@@ -3371,7 +3417,11 @@ mod tests {
         let config = inner
             .materialize()
             .expect("clearing a tier leaves a valid config, not a dangling rule");
-        assert!(config.router.rules.iter().all(|rule| rule.id != KW_RULE_LOW));
+        assert!(config
+            .router
+            .rules
+            .iter()
+            .all(|rule| rule.id != KW_RULE_LOW));
 
         std::fs::remove_dir_all(root).ok();
     }
@@ -4001,6 +4051,7 @@ mod tests {
                 url.to_string(),
                 models.into_iter().map(str::to_string).collect(),
                 None,
+                name == "local",
             )
             .unwrap();
             let provider = view
@@ -4027,6 +4078,7 @@ mod tests {
             "http://127.0.0.1:9999/v1".to_owned(),
             vec!["replacement".to_owned()],
             None,
+            false,
         )
         .err()
         .expect("重复名称不能绕过 Provider 编辑流程");
@@ -4045,6 +4097,7 @@ mod tests {
             "http://127.0.0.1/v1".to_string(),
             vec!["m".to_string()],
             None,
+            false,
         )
         .err()
         .expect("blank provider is rejected")
@@ -4055,6 +4108,7 @@ mod tests {
             "http://127.0.0.1/v1".to_string(),
             vec![" ".to_string()],
             None,
+            false,
         )
         .err()
         .expect("blank model set is rejected")
@@ -4066,6 +4120,7 @@ mod tests {
             "https://api.minimaxi.com/v1".to_string(),
             vec!["MiniMax-M3".to_string()],
             None,
+            false,
         ) {
             Err(error) => error,
             Ok(_) => panic!("invalid upstream reference names must be rejected before mutation"),
@@ -4218,6 +4273,7 @@ mod tests {
             "http://127.0.0.1:11434/v1".to_owned(),
             vec!["replacement".to_owned()],
             None,
+            false,
         ) else {
             panic!("a tombstoned Provider name must be restored, never silently replaced")
         };
@@ -4239,6 +4295,66 @@ mod tests {
             .err()
             .expect("empty routing config is rejected")
             .contains("至少配置一档"));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn local_only_routing_flags_local_providers_and_toggles_the_switch() {
+        let root = scratch_home("local-only-routing");
+        let inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+        // 一个本地供应商(标 local)和一个云供应商。
+        add_provider(
+            app.state(),
+            "ollama".to_owned(),
+            "http://127.0.0.1:11434/v1".to_owned(),
+            vec!["llama3".to_owned()],
+            None,
+            true,
+        )
+        .unwrap();
+        let view = add_provider(
+            app.state(),
+            "openai".to_owned(),
+            "https://api.openai.com/v1".to_owned(),
+            vec!["gpt-5".to_owned()],
+            None,
+            false,
+        )
+        .unwrap();
+
+        let ollama = view.providers.iter().find(|p| p.name == "ollama").unwrap();
+        assert!(
+            ollama.local,
+            "the local provider is flagged for local_only routing"
+        );
+        let openai = view.providers.iter().find(|p| p.name == "openai").unwrap();
+        assert!(!openai.local, "an ordinary cloud provider is not flagged");
+        assert!(!view.local_only, "local_only is off until asked for");
+        assert!(!view.allow_cloud_fallback);
+
+        // 打开「只走本地」+ 云兜底许可。
+        let on = set_local_routing(app.state(), true, true).unwrap();
+        assert!(on.local_only);
+        assert!(on.allow_cloud_fallback);
+
+        // 关掉后两个键都被清除,配置回到与默认一致的干净状态。
+        let off = set_local_routing(app.state(), false, false).unwrap();
+        assert!(!off.local_only);
+        assert!(!off.allow_cloud_fallback);
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            assert!(inner.draft["router"].get("local_only").is_none());
+            assert!(inner.draft["router"].get("allow_cloud_fallback").is_none());
+        }
 
         std::fs::remove_dir_all(root).ok();
     }

@@ -33,6 +33,10 @@ pub struct Candidate {
     pub target: UpstreamModel,
     pub capability: ModelCapability,
     pub health: Health,
+    /// Whether this upstream runs on the local machine. The host sets it from
+    /// the upstream's `local` declaration; the router uses it to honor a
+    /// `local_only` route without the data ever leaving the box.
+    pub local: bool,
 }
 
 impl Candidate {
@@ -42,7 +46,15 @@ impl Candidate {
             target,
             capability,
             health,
+            local: false,
         }
+    }
+
+    /// Marks this candidate as a local upstream, for `local_only` routing.
+    #[must_use]
+    pub fn local(mut self, local: bool) -> Self {
+        self.local = local;
+        self
     }
 }
 
@@ -301,6 +313,47 @@ impl Router {
             });
         }
 
+        // Local-only routing keeps the data on the machine: try the pool's local
+        // candidates first, and only reach for cloud when no local one can serve
+        // the request *and* the operator authorized it. Off by default, so an
+        // ordinary route runs the full-candidate path below unchanged.
+        if self.config.local_only {
+            let local: Vec<&Candidate> = installed.iter().copied().filter(|c| c.local).collect();
+            if local.is_empty() {
+                // Nothing local is installed for this pool. Without explicit
+                // authorization the request is refused rather than sent to cloud.
+                if !self.config.allow_cloud_fallback {
+                    return Err(NoRoute::Unsatisfiable {
+                        pool: pool.to_owned(),
+                        reason: UnmetRequirement::LocalOnly,
+                    });
+                }
+            } else {
+                match self.usable_targets(&local, features, pool) {
+                    Ok(targets) => return Ok(targets),
+                    // Local candidates exist but none can serve or all are ejected.
+                    // Leave the box only when cloud fallback was authorized.
+                    Err(err) => {
+                        if !self.config.allow_cloud_fallback {
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.usable_targets(&installed, features, pool)
+    }
+
+    /// Drops what cannot serve the request and what is out of rotation, then
+    /// orders the rest by health. The shared tail of `rank`, called once for the
+    /// full pool and — under `local_only` — once for its local subset first.
+    fn usable_targets<'a>(
+        &self,
+        installed: &[&'a Candidate],
+        features: &RequestFeatures,
+        pool: &str,
+    ) -> Result<Vec<&'a UpstreamModel>, NoRoute> {
         let capable: Vec<&Candidate> = installed
             .iter()
             .copied()

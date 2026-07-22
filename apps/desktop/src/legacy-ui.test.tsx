@@ -62,6 +62,8 @@ const state: StateView = {
   keywords: { high: [], mid: [], low: [] },
   agent_routes: {},
   profiles: [],
+  local_only: false,
+  allow_cloud_fallback: false,
   serve: {
     phase: "stopped", app_runtime: "stopped", listener_reachable: false,
     agent_connected: false, running_revision: null, instance_id: null,
