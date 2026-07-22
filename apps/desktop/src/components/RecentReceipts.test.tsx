@@ -137,6 +137,29 @@ describe("RecentReceipts", () => {
     expect(within(row).getByLabelText("协议转换记录")).toHaveTextContent("inbound_normalize");
   });
 
+  it("把结构化错误翻译为可执行诊断并可复制请求 ID", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    vi.mocked(getRecentReceipts).mockResolvedValue([receipt(1, {
+      status: 401,
+      error_code: "auth",
+    })]);
+    render(<RecentReceipts />);
+
+    const row = (await screen.findAllByTestId("receipt-row"))[0] as HTMLDetailsElement;
+    await user.click(row.querySelector("summary")!);
+    expect(within(row).getByLabelText("错误诊断")).toHaveTextContent("鉴权 · Key");
+    expect(within(row).getByLabelText("错误诊断")).toHaveTextContent("下一步");
+
+    await user.click(within(row).getByRole("button", { name: "复制请求 ID" }));
+    expect(writeText).toHaveBeenCalledWith("request-1");
+    expect(within(row).getByRole("button", { name: "已复制" })).toBeInTheDocument();
+  });
+
   it("覆盖 loading、error 与空态", async () => {
     let resolve!: (value: ReceiptView[]) => void;
     vi.mocked(getRecentReceipts).mockReturnValue(new Promise((done) => { resolve = done; }));
