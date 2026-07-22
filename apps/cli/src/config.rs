@@ -68,6 +68,12 @@ pub struct ClientConfig {
     /// unknown (never zero).
     #[serde(default)]
     pub pricing: crate::pricing::PriceTable,
+    /// Refuse requests carrying image/audio content with a typed capability
+    /// error, rather than routing them. This proxy guarantees *language* models
+    /// only; an honest refusal beats a pretend-support timeout. On by default;
+    /// set false to let multimodal requests flow to a capable model.
+    #[serde(default = "default_true")]
+    pub reject_multimodal: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
