@@ -383,7 +383,10 @@ describe("desktop station navigation", () => {
     expect(scans).toBe(2);
   });
 
-  it("requires explicit confirmation for an unverified version and cancellation sends no IPC", async () => {
+  it("connects an unverified-but-preflight-passed version in one click, no dialog", async () => {
+    // cc-switch-style: no scary modal. The version note is shown inline; clicking
+    // One-click connection runs the preflight-approved plan and confirms automatically. The backend still
+    // snapshots + rolls back). This is the P1 relaxation the user chose.
     const user = userEvent.setup();
     const running = stateFixture({ serve: { phase: "running", running: true, listen: "127.0.0.1:8787", virtual_key: "vk-test", error: null } });
     const unknown = experimentalClaude();
@@ -399,20 +402,11 @@ describe("desktop station navigation", () => {
     render(<App />);
     await screen.findByLabelText("主导航");
     await user.click(navigation().getByRole("button", { name: "Claude Code" }));
-    expect(await screen.findByText("版本未经验证")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "试验性接入" }));
-    const dialog = await screen.findByRole("alertdialog", { name: "确认试验性接入" });
-    expect(within(dialog).getByText(/2\.1\.210/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/\/opt\/claude/)).toBeInTheDocument();
-    expect(invokeMock.mock.calls.some(([command]) => command === "plan_agent_connection")).toBe(false);
+    // Honest inline note replaces the modal; the click is still informed.
+    expect(await screen.findByText(/一键接入会先创建快照/)).toBeInTheDocument();
 
-    await user.click(within(dialog).getByRole("button", { name: "取消" }));
-    expect(screen.queryByRole("alertdialog")).toBeNull();
-    expect(invokeMock.mock.calls.some(([command]) => command === "plan_agent_connection")).toBe(false);
-    expect(invokeMock.mock.calls.some(([command]) => command === "apply_agent_plan")).toBe(false);
-
-    await user.click(screen.getByRole("button", { name: "试验性接入" }));
-    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "确认试验性接入" }));
+    await user.click(screen.getByRole("button", { name: "一键接入" }));
+    // One click drives the whole preflight-gated, auto-confirmed pipeline.
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
       installationPath: "/opt/claude",
@@ -423,6 +417,7 @@ describe("desktop station navigation", () => {
       confirmationToken: "token-experimental",
       experimentalCompatibilityConfirmed: true,
     }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
   it("selects among multiple installations without displaying full paths", async () => {
