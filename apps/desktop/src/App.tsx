@@ -225,6 +225,8 @@ export default function App() {
           registry={orderedRegistry}
           agents={agents}
           serveRunning={state.serve.running}
+          dirty={state.dirty}
+          applied={state.applied}
           busy={busy}
           configError={state.config_error}
           onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}

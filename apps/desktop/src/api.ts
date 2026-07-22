@@ -58,6 +58,10 @@ export interface StateView {
   serve: ServeView;
   config_error: string | null;
   settings: SettingsView;
+  /** 草稿与已保存到磁盘的配置不同 = 有未保存更改。 */
+  dirty: boolean;
+  /** 运行中的代理用的正是已保存那份配置(未运行时 true)。false = 已保存尚未应用。 */
+  applied: boolean;
 }
 
 export type AgentId = string;

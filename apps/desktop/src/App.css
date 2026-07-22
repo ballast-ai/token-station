@@ -2175,3 +2175,9 @@ pre.block {
 .receipt-detail dd { margin: 0; }
 .chip { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--surface-hover, rgba(127,127,127,0.12)); color: var(--muted, #8a8a8a); }
 .empty-note { font-size: 13px; color: var(--muted, #8a8a8a); padding: 4px 2px; }
+
+/* 保存区四态文案 (T2 运行态诚实) */
+.save-state { font-size: 12px; padding: 0 4px; }
+.save-state.dirty { color: var(--warn, #d0a24a); }
+.save-state.unapplied { color: var(--danger, #d05a5a); }
+.save-state.clean { color: var(--muted, #8a8a8a); }

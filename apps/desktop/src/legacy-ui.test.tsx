@@ -54,6 +54,8 @@ const state: StateView = {
   serve: { phase: "stopped", running: false, listen: settings.listen, virtual_key: null, error: null },
   config_error: null,
   settings,
+  dirty: false,
+  applied: true,
 };
 
 beforeEach(() => {

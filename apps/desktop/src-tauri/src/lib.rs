@@ -99,6 +99,22 @@ struct AppInner {
     load_error: Option<String>,
     /// 代理服务的权威生命周期状态。
     server: ServerLifecycle,
+    /// 已保存到磁盘那份配置的哈希。草稿哈希与它不同 = 有未保存更改。
+    saved_config_hash: Option<u64>,
+    /// 正在运行的 server 启动时那份配置的哈希;None = 未运行。等于
+    /// `saved_config_hash` 才说明"运行中的就是已保存的",否则"保存了尚未应用"。
+    running_config_hash: Option<u64>,
+}
+
+/// 一份配置的内容哈希(进程内稳定,用于比较草稿/已存/运行三态是否一致)。
+fn config_hash(config: &ClientConfig) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // 序列化成规范 JSON 再哈希:字段顺序稳定,足以判"变没变"。
+    serde_json::to_string(config)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
 }
 
 pub struct AppStateManaged(Mutex<AppInner>);
@@ -276,6 +292,10 @@ struct StateView {
     config_error: Option<String>,
     /// 设置页读取面:开关 + 只读环境信息。
     settings: SettingsView,
+    /// 草稿与已保存到磁盘的配置不同 = 有未保存更改。
+    dirty: bool,
+    /// 运行中的代理用的正是已保存那份配置(未运行时为 true)。false = 已保存尚未应用。
+    applied: bool,
 }
 
 /// 设置页视图:两个可写开关(server.auth / data.metrics)+ 只读环境信息。
@@ -541,6 +561,32 @@ impl AppInner {
             .map_err(|e| format!("配置结构不合法: {e}"))
     }
 
+    /// 当前草稿物化后的配置哈希;草稿不合法时 None。
+    fn draft_config_hash(&self) -> Option<u64> {
+        self.materialize().ok().map(|config| config_hash(&config))
+    }
+
+    /// 草稿与已保存不同 = 有未保存更改。草稿不合法时视为有更改(至少不能说"无改动")。
+    fn is_dirty(&self) -> bool {
+        match (self.draft_config_hash(), self.saved_config_hash) {
+            (Some(draft), Some(saved)) => draft != saved,
+            // 草稿不合法或从没存过基线:保守当作有更改。
+            _ => true,
+        }
+    }
+
+    /// 运行中的 server 用的正是已保存那份配置。仅在真正 Running 时才有意义:
+    /// 没在跑就谈不上"待应用"。
+    fn is_applied(&self) -> bool {
+        if !matches!(self.server, ServerLifecycle::Running { .. }) {
+            return true;
+        }
+        match (self.running_config_hash, self.saved_config_hash) {
+            (Some(running), Some(saved)) => running == saved,
+            _ => false,
+        }
+    }
+
     fn config_error(&self) -> Option<String> {
         self.load_error.clone().or_else(|| self.materialize().err())
     }
@@ -596,6 +642,8 @@ impl AppInner {
             serve: self.serve_view(),
             config_error: self.config_error(),
             settings: self.settings_view(),
+            dirty: self.is_dirty(),
+            applied: self.is_applied(),
         }
     }
 
@@ -1125,7 +1173,7 @@ fn apply_home_route_to_all_agents(state: State<'_, AppStateManaged>) -> Result<S
 /// 校验 + 原子写盘。校验不过原样报错,不写盘(复刻 config edit 语义)。
 #[tauri::command]
 fn save_config(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
-    let inner = state.0.lock().unwrap();
+    let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
     if inner.draft["router"]["pools"]
         .as_object()
@@ -1138,6 +1186,10 @@ fn save_config(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
     config
         .save(&inner.config_path)
         .map_err(|e| format!("写配置失败: {e}"))?;
+    // The draft is now the saved baseline (so "unsaved" clears). If the proxy is
+    // running, it still holds the old config — `applied` will read false until it
+    // is restarted, which is the truth the save button used to hide.
+    inner.saved_config_hash = Some(config_hash(&config));
     Ok(inner.snapshot())
 }
 
@@ -1272,6 +1324,13 @@ where
 
 #[tauri::command]
 fn serve_start(app: AppHandle, state: State<'_, AppStateManaged>) -> Result<StateView, String> {
+    // Stamp the config the proxy is being started with, so `applied` can later
+    // tell whether a subsequent save has diverged from what is running.
+    {
+        let mut inner = state.0.lock().unwrap();
+        let hash = inner.draft_config_hash();
+        inner.running_config_hash = hash;
+    }
     begin_serve_start(app, state.inner(), prepare_server)
 }
 
@@ -1339,6 +1398,10 @@ fn begin_serve_stop<R: Runtime>(app: AppHandle<R>, state: &AppStateManaged) -> S
 
 #[tauri::command]
 fn serve_stop(app: AppHandle, state: State<'_, AppStateManaged>) -> StateView {
+    {
+        let mut inner = state.0.lock().unwrap();
+        inner.running_config_hash = None;
+    }
     begin_serve_stop(app, state.inner())
 }
 
@@ -1559,11 +1622,24 @@ pub fn run() {
     // 绝不以空模板静默覆盖。旧版单 OpenAI 入站只在内存中升级为桌面三入站。
     let (draft, load_error) = load_draft(&config_path, &root);
 
+    // The on-disk baseline: a clean load means the draft equals what's saved, so
+    // nothing shows as "unsaved" until the user edits. A load error leaves no
+    // trustworthy baseline (None → treated as dirty).
+    let saved_config_hash = if load_error.is_none() {
+        serde_json::from_value::<ClientConfig>(draft.clone())
+            .ok()
+            .map(|config| config_hash(&config))
+    } else {
+        None
+    };
+
     let managed = AppStateManaged(Mutex::new(AppInner {
         config_path,
         draft,
         load_error,
         server: ServerLifecycle::stopped(),
+        saved_config_hash,
+        running_config_hash: None,
     }));
 
     tauri::Builder::default()
@@ -1770,6 +1846,8 @@ mod tests {
             draft,
             load_error: None,
             server: ServerLifecycle::stopped(),
+            saved_config_hash: None,
+            running_config_hash: None,
         };
         inner.rebuild_routing();
 
@@ -1819,6 +1897,8 @@ mod tests {
             draft,
             load_error: Some("只读保护".to_owned()),
             server: ServerLifecycle::stopped(),
+            saved_config_hash: None,
+            running_config_hash: None,
         };
 
         let error = replace_provider_models(&mut inner, "provider", vec!["replacement".to_owned()])
@@ -1838,6 +1918,8 @@ mod tests {
             draft: template(&root),
             load_error: None,
             server: ServerLifecycle::stopped(),
+            saved_config_hash: None,
+            running_config_hash: None,
         };
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
@@ -1883,6 +1965,8 @@ mod tests {
             draft,
             load_error: None,
             server: ServerLifecycle::stopped(),
+            saved_config_hash: None,
+            running_config_hash: None,
         };
 
         let error = resolve_discovery_key(&inner, "provider", "https://attacker.example/v1", None)
@@ -1908,6 +1992,8 @@ mod tests {
             draft: template(&root),
             load_error: None,
             server: ServerLifecycle::stopped(),
+            saved_config_hash: None,
+            running_config_hash: None,
         };
         inner.draft["upstreams"]["deepseek"] = json!({
             "provider": "openai-compatible",
@@ -1946,6 +2032,8 @@ mod tests {
             draft: template(&root),
             load_error: None,
             server: ServerLifecycle::stopped(),
+            saved_config_hash: None,
+            running_config_hash: None,
         };
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
@@ -2008,6 +2096,8 @@ mod tests {
             draft: template(&root),
             load_error: None,
             server: ServerLifecycle::stopped(),
+            saved_config_hash: None,
+            running_config_hash: None,
         };
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
@@ -2035,6 +2125,8 @@ mod tests {
             draft: template(&root),
             load_error: None,
             server: ServerLifecycle::stopped(),
+            saved_config_hash: None,
+            running_config_hash: None,
         };
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
@@ -2071,6 +2163,8 @@ mod tests {
             draft: template(&root),
             load_error: None,
             server: ServerLifecycle::stopped(),
+            saved_config_hash: None,
+            running_config_hash: None,
         };
         inner.draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
@@ -2103,6 +2197,8 @@ mod tests {
             draft: template(&repo_root()),
             load_error: None,
             server: ServerLifecycle::stopped(),
+            saved_config_hash: None,
+            running_config_hash: None,
         };
         inner.draft["data"]["dir"] = json!(root.join("data"));
         inner.draft["server"]["listen"] = json!("127.0.0.1:0");
@@ -2218,6 +2314,8 @@ mod tests {
             draft,
             load_error: None,
             server: ServerLifecycle::stopped(),
+            saved_config_hash: None,
+            running_config_hash: None,
         }))));
 
         let initial = get_state(app.state());
@@ -2399,6 +2497,8 @@ mod tests {
             }),
             load_error: None,
             server: ServerLifecycle::stopped(),
+            saved_config_hash: None,
+            running_config_hash: None,
         };
         assert!(inner.upstreams().is_empty());
         assert_eq!(inner.pool_member("missing"), (None, None));

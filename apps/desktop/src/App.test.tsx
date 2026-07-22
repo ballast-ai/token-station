@@ -51,6 +51,8 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
       agent: "test-agent",
       version: "test-version",
     },
+    dirty: false,
+    applied: true,
     ...overrides,
   };
 }

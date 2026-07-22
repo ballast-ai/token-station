@@ -1981,6 +1981,8 @@ mod tests {
                 draft: crate::template(&root),
                 load_error,
                 server: crate::ServerLifecycle::stopped(),
+                saved_config_hash: None,
+                running_config_hash: None,
             }));
 
             let error = runtime_from_app(&state)
