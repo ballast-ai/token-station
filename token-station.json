@@ -1,0 +1,145 @@
+{
+  "version": 1,
+  "server": {
+    "listen": "127.0.0.1:8787",
+    "auth": true
+  },
+  "plugins": {
+    "dir": "/Users/5miles/Desktop/token-station/plugins-dist",
+    "agents": [
+      "agent-openai",
+      "agent-anthropic",
+      "agent-openai-responses"
+    ],
+    "providers": {
+      "openai-compatible": "provider-openai-compatible"
+    }
+  },
+  "upstreams": {
+    "deepseek": {
+      "provider": "openai-compatible",
+      "base_url": "https://api.deepseek.com/v1",
+      "auth": {
+        "slot": "provider_api_key",
+        "keyring": true
+      },
+      "models": [
+        {
+          "model": "deepseek-v4-flash",
+          "tool": true,
+          "vision": false,
+          "json_schema": false,
+          "context_window": 128000
+        },
+        {
+          "model": "deepseek-v4-pro",
+          "tool": true,
+          "vision": false,
+          "json_schema": false,
+          "context_window": 128000
+        }
+      ]
+    }
+  },
+  "router": {
+    "version": 1,
+    "pools": {
+      "tier_high": [
+        {
+          "upstream": "deepseek",
+          "model": "deepseek-v4-flash"
+        }
+      ],
+      "tier_low": [
+        {
+          "upstream": "deepseek",
+          "model": "deepseek-v4-flash"
+        }
+      ],
+      "tier_mid": [
+        {
+          "upstream": "deepseek",
+          "model": "deepseek-v4-flash"
+        }
+      ]
+    },
+    "heuristic": {
+      "weights": {
+        "tokens_per_point": 100,
+        "per_tool": 20,
+        "json_schema": 10,
+        "image": 15,
+        "per_code_block": 8,
+        "per_extra_turn": 3,
+        "per_reasoning_marker": 10,
+        "per_technical_term": 8,
+        "per_simple_indicator": 8,
+        "per_code_keyword": 6,
+        "per_math_term": 12,
+        "per_creative_term": 6,
+        "per_multi_step_point": 3,
+        "per_question": 2,
+        "system_format": 10,
+        "max_output_tokens_per_point": 0
+      },
+      "threshold": 22,
+      "above": "tier_high",
+      "below": "tier_low",
+      "bands": [
+        {
+          "at_least": 55,
+          "pool": "tier_high"
+        },
+        {
+          "at_least": 22,
+          "pool": "tier_mid"
+        },
+        {
+          "at_least": 0,
+          "pool": "tier_low"
+        }
+      ]
+    },
+    "default_pool": "tier_low",
+    "assumed_context_window": 8192,
+    "honor_exact_model": false,
+    "recovery": {
+      "policy": "strict"
+    }
+  },
+  "agent_routes": {
+    "claude-code": {
+      "mode": "inherit"
+    },
+    "codex": {
+      "mode": "inherit"
+    },
+    "nous-hermes-agent": {
+      "mode": "inherit"
+    },
+    "openclaw": {
+      "mode": "inherit"
+    },
+    "opencode": {
+      "mode": "inherit"
+    }
+  },
+  "data": {
+    "dir": "/Users/5miles/Desktop/token-station/token-station-data",
+    "metrics": true
+  },
+  "health": {
+    "eject_after": 3,
+    "cooldown_ms": 30000
+  },
+  "concurrency": {
+    "global": 0,
+    "per_agent": 0,
+    "per_provider": 0
+  },
+  "pricing": {
+    "version": 0,
+    "models": {}
+  },
+  "reject_multimodal": true
+}
