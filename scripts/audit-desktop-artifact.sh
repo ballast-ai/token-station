@@ -49,6 +49,11 @@ case "$(uname -s)" in
     app="$(find "$bundle_root/macos" -maxdepth 1 -type d -name '*.app' -print -quit)"
     [[ -n "$app" ]] || { echo "macOS app bundle missing under $bundle_root/macos" >&2; exit 1; }
     codesign --verify --deep --strict --verbose=2 "$app"
+    entitlements="$(codesign --display --entitlements :- "$app" 2>&1)"
+    grep -Fq "com.apple.security.cs.allow-unsigned-executable-memory" <<<"$entitlements" || {
+      echo "macOS app is missing the Wasmtime executable-memory entitlement" >&2
+      exit 1
+    }
     if [[ "$mode" == "production" ]]; then
       signature="$(codesign --display --verbose=4 "$app" 2>&1)"
       grep -Fq "Authority=Developer ID Application" <<<"$signature" || {
