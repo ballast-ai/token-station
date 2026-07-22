@@ -31,9 +31,9 @@ use token_station_conformance::{AgentAdapter, ProviderAdapter};
 use token_station_metrics::{Recorder, RequestRecord, RoutingRecord};
 use token_station_plugin_runtime::{AgentPlugin, NoSecrets, PluginRuntime, ProviderPlugin};
 use token_station_protocol::{
-    AgentRequestEnvelope, Auth, ChatRequest, ErrorCode, ErrorEnvelope, HeaderDigest, HttpMethod,
-    HttpRequestDescriptor, HttpResponseParts, ModelCapability, Principal, ProviderConfig,
-    SecretRef, StreamChunk, StreamEvent, StreamOutcome,
+    AgentRequestEnvelope, Auth, ChatRequest, ChatResponse, Content, ErrorCode, ErrorEnvelope,
+    HeaderDigest, HttpMethod, HttpRequestDescriptor, HttpResponseParts, ModelCapability, Principal,
+    ProviderConfig, ResponseFormat, SecretRef, StreamChunk, StreamEvent, StreamOutcome, ToolDef,
 };
 use token_station_router_core::{
     Candidate, Decision, HealthPolicy, HealthTracker, Router, UpstreamModel, UpstreamRef,
@@ -549,6 +549,28 @@ pub struct LayeredProbe {
     pub latency_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureLayer {
+    Stream,
+    Tool,
+    Json,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FeatureStageResult {
+    pub layer: FeatureLayer,
+    pub status: StageStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FeatureProbe {
+    pub model: String,
+    pub stages: Vec<FeatureStageResult>,
+}
+
 /// Where a single probe exchange ended — the raw signal the classifier turns
 /// into per-layer results. Kept separate from the networking so the mapping is
 /// a pure function that can be tested without a live upstream.
@@ -609,6 +631,18 @@ pub fn classify_layers(signal: &ProbeSignal) -> Vec<StageResult> {
             }
         })
         .collect()
+}
+
+fn validate_provider_health_json(text: &str) -> Result<(), String> {
+    let value: Value = serde_json::from_str(text)
+        .map_err(|_| "Provider structured output was not valid JSON".to_owned())?;
+    let object = value.as_object().ok_or_else(|| {
+        "Provider structured output did not satisfy the requested schema".to_owned()
+    })?;
+    if object.len() != 1 || object.get("ok").and_then(Value::as_bool).is_none() {
+        return Err("Provider structured output did not satisfy the requested schema".to_owned());
+    }
+    Ok(())
 }
 
 /// A stable, non-cryptographic hash to de-identify an unlisted model name: the
@@ -988,6 +1022,253 @@ impl Gateway {
                 }
             })
             .collect())
+    }
+
+    /// Runs the three capability-specific Provider checks after a normal
+    /// generation probe has passed. Each stage is a real southbound request;
+    /// no model-name heuristic is treated as evidence.
+    ///
+    /// # Errors
+    ///
+    /// The upstream/model selection is invalid. Per-stage failures are data so
+    /// one unsupported feature does not hide the other two.
+    pub fn probe_features(
+        &self,
+        upstream_name: &str,
+        only_model: &str,
+    ) -> Result<FeatureProbe, String> {
+        let upstream = self
+            .upstreams
+            .get(upstream_name)
+            .ok_or_else(|| format!("no upstream `{upstream_name}`"))?;
+        if !self.catalog.iter().any(|(target, _)| {
+            target.upstream.as_str() == upstream_name && target.model == only_model
+        }) {
+            return Err(format!(
+                "upstream `{upstream_name}` does not serve `{only_model}`"
+            ));
+        }
+
+        let http = EgressPolicy::agent(PROBE_TIMEOUT);
+        let stages = vec![
+            Self::feature_stage(
+                FeatureLayer::Stream,
+                self.probe_stream_feature(upstream_name, upstream, only_model, &http),
+            ),
+            Self::feature_stage(
+                FeatureLayer::Tool,
+                self.probe_tool_feature(upstream_name, upstream, only_model, &http),
+            ),
+            Self::feature_stage(
+                FeatureLayer::Json,
+                self.probe_json_feature(upstream_name, upstream, only_model, &http),
+            ),
+        ];
+        Ok(FeatureProbe {
+            model: only_model.to_owned(),
+            stages,
+        })
+    }
+
+    fn feature_stage(layer: FeatureLayer, result: Result<(), String>) -> FeatureStageResult {
+        match result {
+            Ok(()) => FeatureStageResult {
+                layer,
+                status: StageStatus::Pass,
+                detail: None,
+            },
+            Err(detail) => FeatureStageResult {
+                layer,
+                status: StageStatus::Fail,
+                detail: Some(detail),
+            },
+        }
+    }
+
+    fn probe_request(
+        &self,
+        upstream_name: &str,
+        upstream: &Upstream,
+        request: &ChatRequest,
+        http: &ureq::Agent,
+    ) -> Result<ChatResponse, String> {
+        let describe =
+            |envelope: ErrorEnvelope| format!("{} ({:?})", envelope.message, envelope.code);
+        let descriptor = upstream
+            .plugin
+            .build_http_request(request, &upstream.config)
+            .map_err(describe)?;
+        upstream
+            .config
+            .authorize(&descriptor)
+            .map_err(|refusal| refusal.to_string())?;
+        let response = self
+            .send_with(http, &descriptor, upstream_name)
+            .map_err(describe)?;
+        let status = response.status;
+        let parts = response.into_parts().map_err(describe)?;
+        if status >= 400 {
+            let envelope = upstream
+                .plugin
+                .map_provider_error(&parts)
+                .map_err(describe)?;
+            return Err(format!("HTTP {status}: {}", describe(envelope)));
+        }
+        upstream.plugin.parse_response(&parts).map_err(describe)
+    }
+
+    fn probe_tool_feature(
+        &self,
+        upstream_name: &str,
+        upstream: &Upstream,
+        model: &str,
+        http: &ureq::Agent,
+    ) -> Result<(), String> {
+        let mut request = ChatRequest::new(
+            model,
+            vec![token_station_protocol::Message::text(
+                token_station_protocol::Role::User,
+                "Call the provider_health_check tool now.",
+            )],
+        );
+        request.sampling.max_output_tokens = Some(32);
+        request.tools.push(ToolDef {
+            name: "provider_health_check".to_owned(),
+            description: Some("Return an empty health-check payload.".to_owned()),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        });
+        let response = self.probe_request(upstream_name, upstream, &request, http)?;
+        if response.choices.iter().any(|choice| {
+            choice
+                .message
+                .tool_calls
+                .iter()
+                .any(|call| call.name == "provider_health_check")
+        }) {
+            Ok(())
+        } else {
+            Err("Provider returned no requested tool call".to_owned())
+        }
+    }
+
+    fn probe_json_feature(
+        &self,
+        upstream_name: &str,
+        upstream: &Upstream,
+        model: &str,
+        http: &ureq::Agent,
+    ) -> Result<(), String> {
+        let mut request = ChatRequest::new(
+            model,
+            vec![token_station_protocol::Message::text(
+                token_station_protocol::Role::User,
+                r#"Return exactly {"ok":true}."#,
+            )],
+        );
+        request.sampling.max_output_tokens = Some(32);
+        request.response_format = Some(ResponseFormat::JsonSchema {
+            json_schema: json!({
+                "name": "provider_health_check",
+                "strict": true,
+                "schema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": false
+                }
+            }),
+        });
+        let response = self.probe_request(upstream_name, upstream, &request, http)?;
+        let text = response
+            .choices
+            .first()
+            .and_then(|choice| choice.message.content.as_ref())
+            .and_then(|content| match content {
+                Content::Text(text) => Some(text.as_str()),
+                Content::Parts(_) => None,
+            })
+            .ok_or_else(|| "Provider returned no structured text".to_owned())?;
+        validate_provider_health_json(text)
+    }
+
+    fn probe_stream_feature(
+        &self,
+        upstream_name: &str,
+        upstream: &Upstream,
+        model: &str,
+        http: &ureq::Agent,
+    ) -> Result<(), String> {
+        let describe =
+            |envelope: ErrorEnvelope| format!("{} ({:?})", envelope.message, envelope.code);
+        let mut request = ChatRequest::new(
+            model,
+            vec![token_station_protocol::Message::text(
+                token_station_protocol::Role::User,
+                "Reply with OK.",
+            )],
+        );
+        request.stream = true;
+        request.sampling.max_output_tokens = Some(8);
+        let descriptor = upstream
+            .plugin
+            .build_http_request(&request, &upstream.config)
+            .map_err(describe)?;
+        upstream
+            .config
+            .authorize(&descriptor)
+            .map_err(|refusal| refusal.to_string())?;
+        let mut response = self
+            .send_with(http, &descriptor, upstream_name)
+            .map_err(describe)?;
+        if response.status >= 400 {
+            let status = response.status;
+            let parts = response.into_parts().map_err(describe)?;
+            let envelope = upstream
+                .plugin
+                .map_provider_error(&parts)
+                .map_err(describe)?;
+            return Err(format!("HTTP {status}: {}", describe(envelope)));
+        }
+
+        let mut parser = upstream.plugin.stream_parser();
+        let mut decoder = SseFrameDecoder::default();
+        let mut buffer = [0u8; STREAM_READ];
+        loop {
+            let read = response
+                .reader
+                .read(&mut buffer)
+                .map_err(|_| "upstream connection broke while streaming".to_owned())?;
+            if read == 0 {
+                decoder.finish().map_err(describe)?;
+                for event in parser.finish().map_err(describe)? {
+                    match event {
+                        StreamEvent::Done { .. } => return Ok(()),
+                        StreamEvent::Error { error } => return Err(describe(error)),
+                        _ => {}
+                    }
+                }
+                return Err("upstream SSE connection closed before a terminal event".to_owned());
+            }
+            let mut events = Vec::new();
+            for data in decoder.push(&buffer[..read]).map_err(describe)? {
+                events.extend(
+                    parser
+                        .parse_chunk(&StreamChunk { data })
+                        .map_err(describe)?,
+                );
+            }
+            for event in events {
+                match event {
+                    StreamEvent::Done { .. } => return Ok(()),
+                    StreamEvent::Error { error } => return Err(describe(error)),
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// One probe exchange, reduced to the raw [`ProbeSignal`] the pure
@@ -2261,6 +2542,23 @@ mod layered_health_tests {
             status_of(&signal, HealthLayer::Generation),
             StageStatus::Fail
         );
+    }
+}
+
+#[cfg(test)]
+mod feature_probe_tests {
+    use super::validate_provider_health_json;
+
+    #[test]
+    fn structured_probe_requires_the_exact_requested_shape() {
+        for invalid in ["{}", "[]", r#"{"ok":"true"}"#, r#"{"ok":true,"extra":1}"#] {
+            assert!(
+                validate_provider_health_json(invalid).is_err(),
+                "must reject {invalid}"
+            );
+        }
+        assert!(validate_provider_health_json(r#"{"ok":true}"#).is_ok());
+        assert!(validate_provider_health_json(r#"{"ok":false}"#).is_ok());
     }
 }
 

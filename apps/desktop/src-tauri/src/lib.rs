@@ -12,16 +12,18 @@
 pub mod agent_integration;
 mod config_state;
 mod model_catalog;
+mod provider_tombstones;
 mod serve_lifecycle;
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 use token_station_cli::config::{ClientConfig, PluginsConfig, KNOWN_AGENT_IDS};
+use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, StageStatus};
 use token_station_cli::plugins::{PluginRegistry, Receipts};
 use token_station_cli::{secrets, stats, upgrade};
 use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, ProviderEndpoint};
@@ -260,6 +262,8 @@ struct ProviderView {
     base_url: String,
     models: Vec<String>,
     model_capabilities: Vec<ModelCapabilityView>,
+    catalog_revision: u64,
+    catalog: Vec<model_catalog::CatalogModelView>,
     has_auth: bool,
 }
 
@@ -276,6 +280,29 @@ struct ProviderEndpointPreview {
     chat: String,
     responses: String,
     messages: String,
+}
+
+#[derive(Serialize)]
+struct ProviderRemovalPreview {
+    name: String,
+    references: Vec<String>,
+    can_remove: bool,
+}
+
+#[derive(Serialize)]
+struct ProviderTestStage {
+    layer: String,
+    status: StageStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ProviderTestResult {
+    model: String,
+    stages: Vec<ProviderTestStage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_ms: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -324,6 +351,8 @@ struct ServeView {
 #[derive(Serialize)]
 struct StateView {
     providers: Vec<ProviderView>,
+    deleted_providers: Vec<String>,
+    provider_recovery_error: Option<String>,
     tiers: std::collections::BTreeMap<String, TierView>,
     agent_routes: std::collections::BTreeMap<String, AgentRouteView>,
     serve: ServeView,
@@ -523,27 +552,39 @@ impl AppInner {
                     .iter()
                     .filter_map(|model| model["model"].as_str().map(str::to_owned))
                     .collect();
-                let model_capabilities = model_values
+                let configured_capabilities: Vec<ModelCapability> = model_values
                     .into_iter()
                     .filter_map(|model| serde_json::from_value::<ModelCapability>(model).ok())
+                    .collect();
+                let model_capabilities = configured_capabilities
+                    .iter()
                     .map(|capability| {
                         let tool = capability.tool_state();
                         let vision = capability.vision_state();
                         let json_schema = capability.json_schema_state();
                         ModelCapabilityView {
-                            model: capability.model,
+                            model: capability.model.clone(),
                             tool,
                             vision,
                             json_schema,
                         }
                     })
                     .collect();
+                let base_url = up["base_url"].as_str().unwrap_or_default().to_string();
+                let (catalog_revision, catalog) = model_catalog::catalog_for_provider(
+                    &self.data_dir(),
+                    name,
+                    &base_url,
+                    &configured_capabilities,
+                );
                 ProviderView {
                     name: name.clone(),
                     provider: up["provider"].as_str().unwrap_or_default().to_string(),
-                    base_url: up["base_url"].as_str().unwrap_or_default().to_string(),
+                    base_url,
                     models,
                     model_capabilities,
+                    catalog_revision,
+                    catalog,
                     has_auth: up.get("auth").map(|a| !a.is_null()).unwrap_or(false),
                 }
             })
@@ -780,8 +821,15 @@ impl AppInner {
     }
 
     fn snapshot(&self) -> StateView {
+        let (deleted_providers, provider_recovery_error) =
+            match provider_tombstones::list(&self.data_dir()) {
+                Ok(providers) => (providers, None),
+                Err(error) => (Vec::new(), Some(error)),
+            };
         StateView {
             providers: self.upstreams(),
+            deleted_providers,
+            provider_recovery_error,
             tiers: self.home_tiers(),
             agent_routes: self.agent_routes_view(),
             serve: self.serve_view(),
@@ -1004,7 +1052,7 @@ fn preview_provider_endpoints(base_url: String) -> Result<ProviderEndpointPrevie
     })
 }
 
-/// Add or update a provider (an OpenAI-compatible upstream). Store its key in the system keychain when provided.
+/// Add an OpenAI-compatible upstream provider, storing its key in the system keychain when present.
 #[tauri::command]
 fn add_provider(
     state: State<'_, AppStateManaged>,
@@ -1023,6 +1071,9 @@ fn add_provider(
         .as_str();
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    if inner.draft["upstreams"].get(&name).is_some() {
+        return Err(format!("供应商 `{name}` 已存在，请在 Provider 详情中编辑"));
+    }
 
     let model_objs: Vec<Value> = models
         .iter()
@@ -1048,13 +1099,82 @@ fn add_provider(
         "models": model_objs,
     });
     // Store a key in the keychain and point auth to its slot; omit auth when no key exists, as with local Ollama.
-    if let Some(key) = api_key.as_ref().filter(|k| !k.trim().is_empty()) {
-        secrets::keyring_set(&name, "provider_api_key", key.trim())?;
+    let api_key = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned);
+    if api_key.is_some() {
         up["auth"] = json!({ "slot": "provider_api_key", "keyring": true });
     }
 
     inner.draft["upstreams"][&name] = up;
-    inner.observe_draft()?;
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["upstreams"]
+            .as_object_mut()
+            .expect("upstreams is an object")
+            .remove(&name);
+        return Err(error);
+    }
+    if let Some(key) = api_key {
+        if let Err(key_error) = secrets::keyring_set(&name, "provider_api_key", &key) {
+            inner.draft["upstreams"]
+                .as_object_mut()
+                .expect("upstreams is an object")
+                .remove(&name);
+            return match inner.observe_draft() {
+                Ok(()) => Err(key_error),
+                Err(rollback_error) => Err(format!(
+                    "{key_error}；同时回滚新增 Provider 草稿失败：{rollback_error}"
+                )),
+            };
+        }
+    }
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn edit_provider(
+    state: State<'_, AppStateManaged>,
+    name: String,
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<StateView, String> {
+    let name = name.trim().to_owned();
+    let base_url = ProviderEndpoint::try_new(base_url.trim())
+        .map_err(|error| format!("Base URL 不合法：{error}"))?
+        .as_str();
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let previous = inner.draft["upstreams"]
+        .get(&name)
+        .cloned()
+        .ok_or_else(|| format!("供应商 `{name}` 不存在"))?;
+    let api_key = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned);
+    inner.draft["upstreams"][&name]["base_url"] = json!(base_url);
+    if api_key.is_some() {
+        inner.draft["upstreams"][&name]["auth"] =
+            json!({ "slot": "provider_api_key", "keyring": true });
+    }
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["upstreams"][&name] = previous;
+        return Err(error);
+    }
+    if let Some(key) = api_key {
+        if let Err(key_error) = secrets::keyring_set(&name, "provider_api_key", &key) {
+            inner.draft["upstreams"][&name] = previous;
+            return match inner.observe_draft() {
+                Ok(()) => Err(key_error),
+                Err(rollback_error) => Err(format!(
+                    "{key_error}；同时回滚 Provider 草稿失败：{rollback_error}"
+                )),
+            };
+        }
+    }
     Ok(inner.snapshot())
 }
 
@@ -1122,6 +1242,87 @@ async fn discover_provider_models(
     })
     .await
     .map_err(|error| format!("模型目录任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn test_provider(
+    state: State<'_, AppStateManaged>,
+    name: String,
+) -> Result<Vec<ProviderTestResult>, String> {
+    let (config, name) = {
+        let inner = state.0.lock().unwrap();
+        let name = name.trim().to_owned();
+        if inner.draft["upstreams"].get(&name).is_none() {
+            return Err(format!("供应商 `{name}` 不存在"));
+        }
+        (inner.materialize()?, name)
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let recorder = Arc::new(token_station_cli::filelog::Recorders(Vec::new()));
+        let gateway = Gateway::new(&config, recorder)?;
+        let probes = gateway.probe_layered(&name, None)?;
+        Ok(probes
+            .into_iter()
+            .map(|probe| {
+                let generation_passed = probe
+                    .stages
+                    .last()
+                    .is_some_and(|stage| stage.status == StageStatus::Pass);
+                let mut stages: Vec<ProviderTestStage> = probe
+                    .stages
+                    .into_iter()
+                    .map(|stage| ProviderTestStage {
+                        layer: match stage.layer {
+                            HealthLayer::Network => "network",
+                            HealthLayer::Http => "http",
+                            HealthLayer::Auth => "auth",
+                            HealthLayer::Model => "model",
+                            HealthLayer::Generation => "generation",
+                        }
+                        .to_owned(),
+                        status: stage.status,
+                        detail: stage.detail,
+                    })
+                    .collect();
+                if generation_passed {
+                    match gateway.probe_features(&name, &probe.model) {
+                        Ok(features) => stages.extend(features.stages.into_iter().map(|stage| {
+                            ProviderTestStage {
+                                layer: match stage.layer {
+                                    FeatureLayer::Stream => "stream",
+                                    FeatureLayer::Tool => "tool",
+                                    FeatureLayer::Json => "json",
+                                }
+                                .to_owned(),
+                                status: stage.status,
+                                detail: stage.detail,
+                            }
+                        })),
+                        Err(error) => stages.extend(["stream", "tool", "json"].map(|layer| {
+                            ProviderTestStage {
+                                layer: layer.to_owned(),
+                                status: StageStatus::Fail,
+                                detail: Some(error.clone()),
+                            }
+                        })),
+                    }
+                } else {
+                    stages.extend(["stream", "tool", "json"].map(|layer| ProviderTestStage {
+                        layer: layer.to_owned(),
+                        status: StageStatus::Skipped,
+                        detail: Some("基础生成测试未通过".to_owned()),
+                    }));
+                }
+                ProviderTestResult {
+                    model: probe.model,
+                    stages,
+                    latency_ms: probe.latency_ms,
+                }
+            })
+            .collect())
+    })
+    .await
+    .map_err(|error| format!("Provider 测试任务异常结束：{error}"))?
 }
 
 /// Update an existing provider's model set while protecting models referenced by routing tiers.
@@ -1239,43 +1440,103 @@ fn update_provider_models(
     Ok(inner.snapshot())
 }
 
+fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {
+    let mut references = Vec::new();
+    for (pool, label) in [(TIER_HIGH, "主页/上档"), (TIER_MID, "主页/中档"), (TIER_LOW, "主页/下档")] {
+        for (index, member) in inner.draft["router"]["pools"][pool]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            if member["upstream"].as_str() == Some(name) {
+                references.push(format!("{label}#{}", index + 1));
+            }
+        }
+    }
+    for agent_id in KNOWN_AGENT_IDS {
+        for slot in ["high", "mid", "low"] {
+            if inner.draft["agent_routes"][agent_id]["custom_route"][slot]["upstream"].as_str()
+                == Some(name)
+            {
+                references.push(format!("Agent/{agent_id}/{slot}"));
+            }
+        }
+    }
+    references.sort();
+    references
+}
+
+#[tauri::command]
+fn preview_provider_removal(
+    state: State<'_, AppStateManaged>,
+    name: String,
+) -> Result<ProviderRemovalPreview, String> {
+    let inner = state.0.lock().unwrap();
+    let name = name.trim();
+    if inner.draft["upstreams"].get(name).is_none() {
+        return Err(format!("供应商 `{name}` 不存在"));
+    }
+    let references = provider_references(&inner, name);
+    Ok(ProviderRemovalPreview {
+        name: name.to_owned(),
+        can_remove: references.is_empty(),
+        references,
+    })
+}
+
 #[tauri::command]
 fn remove_provider(state: State<'_, AppStateManaged>, name: String) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
-    if let Some(obj) = inner.draft["upstreams"].as_object_mut() {
-        obj.remove(&name);
+    let name = name.trim();
+    let references = provider_references(&inner, name);
+    if !references.is_empty() {
+        return Err(format!(
+            "供应商仍被引用，不能删除：{}。请先调整这些路由",
+            references.join("、")
+        ));
     }
-    // Remove any tier that references it.
-    for pool in [TIER_HIGH, TIER_MID, TIER_LOW] {
-        let refers = inner.draft["router"]["pools"][pool]
-            .as_array()
-            .and_then(|a| a.first())
-            .and_then(|m| m["upstream"].as_str())
-            .map(|u| u == name)
-            .unwrap_or(false);
-        if refers {
-            if let Some(pools) = inner.draft["router"]["pools"].as_object_mut() {
-                pools.remove(pool);
-            }
-        }
-    }
-    // Independent Agent routes store only provider and model references. If a provider is deleted, an independent draft that references it
-    // It cannot be restored as valid configuration. Safely fall back to the home page and clear the invalid draft.
-    for agent_id in KNOWN_AGENT_IDS {
-        let refers = ["high", "mid", "low"].into_iter().any(|slot| {
-            inner.draft["agent_routes"][agent_id]["custom_route"][slot]["upstream"].as_str()
-                == Some(name.as_str())
-        });
-        if refers {
-            inner.draft["agent_routes"][agent_id]["mode"] = json!("inherit");
-            if let Some(route) = inner.draft["agent_routes"][agent_id].as_object_mut() {
-                route.remove("custom_route");
-            }
-        }
-    }
+    let provider = inner.draft["upstreams"]
+        .get(name)
+        .cloned()
+        .ok_or_else(|| format!("供应商 `{name}` 不存在"))?;
+    let data_dir = inner.data_dir();
+    provider_tombstones::archive(&data_dir, name, &provider)?;
+    inner.draft["upstreams"]
+        .as_object_mut()
+        .expect("upstreams is an object")
+        .remove(name);
     inner.rebuild_routing();
-    inner.observe_draft()?;
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["upstreams"][name] = provider;
+        provider_tombstones::discard(&data_dir, name).ok();
+        return Err(error);
+    }
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn restore_provider(state: State<'_, AppStateManaged>, name: String) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let name = name.trim();
+    if inner.draft["upstreams"].get(name).is_some() {
+        return Err(format!("同名供应商 `{name}` 已存在，不能覆盖恢复"));
+    }
+    let data_dir = inner.data_dir();
+    let provider = provider_tombstones::take(&data_dir, name)?
+        .ok_or_else(|| format!("Provider 回收站中没有 `{name}`"))?;
+    inner.draft["upstreams"][name] = provider.clone();
+    inner.rebuild_routing();
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["upstreams"]
+            .as_object_mut()
+            .expect("upstreams is an object")
+            .remove(name);
+        provider_tombstones::archive(&data_dir, name, &provider).ok();
+        return Err(error);
+    }
     Ok(inner.snapshot())
 }
 
@@ -1954,9 +2215,13 @@ pub fn run() {
             get_runtime_state,
             preview_provider_endpoints,
             add_provider,
+            edit_provider,
             discover_provider_models,
+            test_provider,
             update_provider_models,
+            preview_provider_removal,
             remove_provider,
+            restore_provider,
             set_tier,
             set_agent_route_mode,
             set_agent_tier,
@@ -3009,6 +3274,24 @@ mod tests {
                 CapabilityState::Unknown
             );
         }
+        let duplicate = add_provider(
+            app.state(),
+            "local".to_owned(),
+            "http://127.0.0.1:9999/v1".to_owned(),
+            vec!["replacement".to_owned()],
+            None,
+        )
+        .err()
+        .expect("重复名称不能绕过 Provider 编辑流程");
+        assert!(duplicate.contains("已存在"));
+        let unchanged = get_state(app.state());
+        let local = unchanged
+            .providers
+            .iter()
+            .find(|provider| provider.name == "local")
+            .unwrap();
+        assert_eq!(local.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(local.models, ["small", "large"]);
         assert!(add_provider(
             app.state(),
             " ".to_string(),
@@ -3127,9 +3410,26 @@ mod tests {
         let stopped = wait_for_serve_phase(&app, ServePhase::Stopped);
         assert_eq!(stopped.serve.app_runtime, AppRuntime::Stopped);
 
+        let impact = preview_provider_removal(app.state(), "local".to_string()).unwrap();
+        assert!(!impact.can_remove);
+        assert!(impact.references.iter().any(|item| item.contains("主页/上档")));
+        assert!(remove_provider(app.state(), "local".to_string())
+            .err()
+            .expect("被引用的 Provider 必须拒绝删除")
+            .contains("仍被引用"));
+        set_tier(app.state(), "high".to_string(), None, None).unwrap();
+        set_tier(app.state(), "low".to_string(), None, None).unwrap();
+        assert!(preview_provider_removal(app.state(), "local".to_string())
+            .unwrap()
+            .can_remove);
+
         let removed = remove_provider(app.state(), "local".to_string()).unwrap();
         assert_eq!(removed.providers.len(), 1);
+        assert_eq!(removed.deleted_providers, ["local"]);
         assert!(removed.tiers.values().all(|tier| tier.upstream.is_none()));
+        let restored = restore_provider(app.state(), "local".to_string()).unwrap();
+        assert_eq!(restored.providers.len(), 2);
+        assert!(restored.deleted_providers.is_empty());
         assert!(save_config(app.state())
             .err()
             .expect("empty routing config is rejected")

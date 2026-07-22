@@ -12,6 +12,8 @@ import ProviderList from "../components/ProviderList";
 
 interface HomePageProps {
   providers: ProviderView[];
+  deletedProviders: string[];
+  providerRecoveryError: string | null;
   tiers: Record<TierSlot, TierView>;
   agentRoutes: Record<string, AgentRouteView>;
   registry: AgentUiMetadataView[];
@@ -25,11 +27,14 @@ interface HomePageProps {
   onApplyAll: () => void;
   onOpenAgent: (agentId: string) => void;
   onRemoveProvider: (name: string) => void;
+  onRestoreProvider: (name: string) => void;
   onStateChange: (state: StateView, message: string) => void;
 }
 
 export default function HomePage({
   providers,
+  deletedProviders,
+  providerRecoveryError,
   tiers,
   agentRoutes,
   registry,
@@ -43,6 +48,7 @@ export default function HomePage({
   onApplyAll,
   onOpenAgent,
   onRemoveProvider,
+  onRestoreProvider,
   onStateChange,
 }: HomePageProps) {
   const scanned = new Map(agents.map((agent) => [agent.metadata.agent_id, agent]));
@@ -100,9 +106,12 @@ export default function HomePage({
 
       <ProviderList
         providers={providers}
+        deletedProviders={deletedProviders}
+        recoveryError={providerRecoveryError}
         serveRunning={serveRunning}
         busy={busy}
         onRemove={onRemoveProvider}
+        onRestore={onRestoreProvider}
         onStateChange={onStateChange}
       />
     </div>
