@@ -1017,6 +1017,28 @@ body {
 .route-actions { flex-wrap: wrap; }
 .inherit-note { color: var(--muted); font-size: 11.5px; }
 .error-text { color: var(--danger); }
+.profile-manager {
+  display: grid;
+  grid-template-columns: minmax(150px, .7fr) minmax(250px, 1fr);
+  gap: 10px 16px;
+  align-items: center;
+  margin-top: 16px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.profile-manager > div:first-child { display: grid; gap: 4px; }
+.profile-manager > div:first-child strong { font-size: 11.5px; }
+.profile-manager > div:first-child span { color: var(--muted); font-size: 10.5px; }
+.profile-create-row { display: flex; gap: 7px; }
+.profile-create-row .input { min-width: 0; flex: 1; }
+.profile-list { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; }
+.profile-list > span { display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink); font-size: 10.5px; }
+.profile-list button { padding: 0; border: 0; color: var(--muted); background: transparent; cursor: pointer; }
+.profile-manager > .error-text { grid-column: 1 / -1; }
+.profile-mount-select { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin: 14px 0 -4px; color: var(--muted); font-size: 10.5px; }
+.profile-mount-select .select { min-width: 180px; }
 
 .receipt-panel { padding: 21px 22px; }
 .receipt-state {
@@ -1370,6 +1392,9 @@ body {
   .station-content { padding-inline: 20px; }
   .agent-overview { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .agent-connect-box { flex-wrap: wrap; }
+  .profile-manager { grid-template-columns: 1fr; }
+  .profile-list,
+  .profile-manager > .error-text { grid-column: 1; }
 }
 
 /* ---- Agent 接入站 ------------------------------------------------------- */

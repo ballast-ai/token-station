@@ -315,6 +315,7 @@ struct AgentRouteView {
     mode: String,
     tiers: std::collections::BTreeMap<String, TierView>,
     config_error: Option<String>,
+    profile: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -354,6 +355,7 @@ struct StateView {
     provider_recovery_error: Option<String>,
     tiers: std::collections::BTreeMap<String, TierView>,
     agent_routes: std::collections::BTreeMap<String, AgentRouteView>,
+    profiles: Vec<String>,
     serve: ServeView,
     draft_revision: u64,
     saved_revision: u64,
@@ -619,14 +621,37 @@ impl AppInner {
     }
 
     fn agent_tier(&self, agent_id: &str, slot: &str) -> TierView {
-        if self.agent_route_mode(agent_id) != "custom" {
-            return self.tier(pool_key(slot).expect("known UI tier slot"));
-        }
-        let target = &self.draft["agent_routes"][agent_id]["custom_route"][slot];
+        let target = match self.agent_route_mode(agent_id) {
+            "custom" => &self.draft["agent_routes"][agent_id]["custom_route"][slot],
+            "profile" => {
+                let name = self.draft["agent_routes"][agent_id]["profile"]
+                    .as_str()
+                    .unwrap_or_default();
+                &self.draft["profiles"][name][slot]
+            }
+            _ => return self.tier(pool_key(slot).expect("known UI tier slot")),
+        };
         TierView {
             upstream: target["upstream"].as_str().map(str::to_string),
             model: target["model"].as_str().map(str::to_string),
         }
+    }
+
+    fn agent_profile(&self, agent_id: &str) -> Option<String> {
+        (self.agent_route_mode(agent_id) == "profile")
+            .then(|| {
+                self.draft["agent_routes"][agent_id]["profile"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .flatten()
+    }
+
+    fn profile_names(&self) -> Vec<String> {
+        self.draft["profiles"]
+            .as_object()
+            .map(|profiles| profiles.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     fn agent_routes_view(&self) -> std::collections::BTreeMap<String, AgentRouteView> {
@@ -638,7 +663,7 @@ impl AppInner {
                     .into_iter()
                     .map(|slot| (slot.to_string(), self.agent_tier(agent_id, slot)))
                     .collect();
-                let config_error = if mode == "custom" {
+                let config_error = if mode == "custom" || mode == "profile" {
                     ["high", "mid", "low"].into_iter().find_map(|slot| {
                         let tier = self.agent_tier(agent_id, slot);
                         (tier.upstream.is_none() || tier.model.is_none())
@@ -653,6 +678,7 @@ impl AppInner {
                         mode,
                         tiers,
                         config_error,
+                        profile: self.agent_profile(agent_id),
                     },
                 )
             })
@@ -829,6 +855,7 @@ impl AppInner {
             provider_recovery_error,
             tiers: self.home_tiers(),
             agent_routes: self.agent_routes_view(),
+            profiles: self.profile_names(),
             serve: self.serve_view(),
             draft_revision: self.config_state.draft_revision(),
             saved_revision: self.config_state.saved_revision(),
@@ -959,6 +986,11 @@ impl AppInner {
                 route.remove("custom_route");
             }
         }
+        if mode != "profile" {
+            if let Some(route) = self.draft["agent_routes"][agent_id].as_object_mut() {
+                route.remove("profile");
+            }
+        }
         self.draft["agent_routes"][agent_id]["mode"] = json!(mode);
     }
 
@@ -984,6 +1016,61 @@ impl AppInner {
             _ => return Err("档位必须同时提供供应商和模型，或同时清空".to_string()),
         }
         self.draft["agent_routes"][agent_id]["mode"] = json!("custom");
+        Ok(())
+    }
+
+    fn save_home_route_as_profile_value(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty()
+            || name.len() > 80
+            || name.chars().any(char::is_control)
+        {
+            return Err("策略组名称无效".to_string());
+        }
+        let mut tiers = serde_json::Map::new();
+        for (slot, pool) in [("high", TIER_HIGH), ("mid", TIER_MID), ("low", TIER_LOW)] {
+            let tier = self.tier(pool);
+            let (Some(upstream), Some(model)) = (tier.upstream, tier.model) else {
+                return Err(format!("{slot} 档尚未配置，无法另存为策略组"));
+            };
+            self.validate_route_target(&upstream, &model)?;
+            tiers.insert(slot.to_string(), json!({ "upstream": upstream, "model": model }));
+        }
+        if !self.draft["profiles"].is_object() {
+            self.draft["profiles"] = json!({});
+        }
+        self.draft["profiles"][name] = Value::Object(tiers);
+        Ok(())
+    }
+
+    fn mount_agent_profile_value(&mut self, agent_id: &str, profile: &str) -> Result<(), String> {
+        ensure_known_agent_id(agent_id)?;
+        if !self.draft["profiles"][profile].is_object() {
+            return Err(format!("策略组 `{profile}` 不存在"));
+        }
+        if !self.draft["agent_routes"][agent_id].is_object() {
+            self.draft["agent_routes"][agent_id] = json!({});
+        }
+        self.draft["agent_routes"][agent_id]["mode"] = json!("profile");
+        self.draft["agent_routes"][agent_id]["profile"] = json!(profile);
+        Ok(())
+    }
+
+    fn delete_profile_value(&mut self, name: &str) -> Result<(), String> {
+        let mounted: Vec<_> = KNOWN_AGENT_IDS
+            .iter()
+            .filter(|agent_id| self.agent_profile(agent_id).as_deref() == Some(name))
+            .copied()
+            .collect();
+        if !mounted.is_empty() {
+            return Err(format!("策略组 `{name}` 仍被挂载：{}", mounted.join(", ")));
+        }
+        let profiles = self.draft["profiles"]
+            .as_object_mut()
+            .ok_or_else(|| format!("策略组 `{name}` 不存在"))?;
+        if profiles.remove(name).is_none() {
+            return Err(format!("策略组 `{name}` 不存在"));
+        }
         Ok(())
     }
 }
@@ -1608,6 +1695,52 @@ fn set_agent_tier(
     inner.ensure_editable()?;
     inner.set_agent_tier_value(&agent_id, &slot, upstream, model)?;
     inner.observe_draft()?;
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn save_home_route_as_profile(
+    state: State<'_, AppStateManaged>,
+    name: String,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let previous = inner.draft.clone();
+    inner.save_home_route_as_profile_value(&name)?;
+    if let Err(error) = inner.observe_draft() {
+        inner.draft = previous;
+        return Err(error);
+    }
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn mount_agent_profile(
+    state: State<'_, AppStateManaged>,
+    agent_id: String,
+    profile: String,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let previous = inner.draft.clone();
+    inner.mount_agent_profile_value(&agent_id, &profile)?;
+    if let Err(error) = inner.observe_draft() {
+        inner.draft = previous;
+        return Err(error);
+    }
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn delete_profile(state: State<'_, AppStateManaged>, name: String) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let previous = inner.draft.clone();
+    inner.delete_profile_value(&name)?;
+    if let Err(error) = inner.observe_draft() {
+        inner.draft = previous;
+        return Err(error);
+    }
     Ok(inner.snapshot())
 }
 
@@ -2254,6 +2387,9 @@ pub fn run() {
             set_tier,
             set_agent_route_mode,
             set_agent_tier,
+            save_home_route_as_profile,
+            mount_agent_profile,
+            delete_profile,
             save_config,
             save_agent_routes,
             apply_home_route_to_all_agents,
@@ -3023,6 +3159,115 @@ mod tests {
     }
 
     #[test]
+    fn named_profiles_are_draft_only_until_saved_and_can_be_shared_by_agents() {
+        let root = scratch_home("named-agent-profile");
+        let config_path = root.join("token-station.json");
+        let mut inner = AppInner::new(config_path.clone(), template(&root), None);
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "shared"}]
+        });
+        for pool in [TIER_HIGH, TIER_MID, TIER_LOW] {
+            inner
+                .set_tier_value(pool, Some("provider".into()), Some("shared".into()))
+                .unwrap();
+        }
+        inner.observe_draft().unwrap();
+        let before_revision = inner.config_state.draft_revision();
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+        let missing = match mount_agent_profile(
+            app.state(),
+            "codex".to_string(),
+            "missing".to_string(),
+        ) {
+            Ok(_) => panic!("an unknown profile cannot be mounted"),
+            Err(error) => error,
+        };
+        assert!(missing.contains("不存在"), "{missing}");
+
+        let profiled =
+            save_home_route_as_profile(app.state(), "daily".to_string()).unwrap();
+        assert_eq!(profiled.profiles, vec!["daily"]);
+        assert!(profiled.config_dirty);
+        assert!(profiled.draft_revision > before_revision);
+        assert!(!config_path.exists(), "creating a profile must not bypass save");
+
+        for agent_id in ["codex", "opencode"] {
+            let mounted = mount_agent_profile(
+                app.state(),
+                agent_id.to_string(),
+                "daily".to_string(),
+            )
+            .unwrap();
+            assert_eq!(mounted.agent_routes[agent_id].mode, "profile");
+            assert_eq!(mounted.agent_routes[agent_id].profile.as_deref(), Some("daily"));
+            assert_eq!(
+                mounted.agent_routes[agent_id].tiers["high"]
+                    .model
+                    .as_deref(),
+                Some("shared")
+            );
+        }
+
+        let error = match delete_profile(app.state(), "daily".to_string()) {
+            Ok(_) => panic!("mounted profiles cannot be deleted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("codex") && error.contains("opencode"), "{error}");
+
+        {
+            let managed = app.state::<AppStateManaged>();
+            let mut inner = managed.0.lock().unwrap();
+            inner.draft["upstreams"]["provider"]["models"] =
+                json!([{"model": "shared"}, {"model": "updated"}]);
+            for pool in [TIER_HIGH, TIER_MID, TIER_LOW] {
+                inner
+                    .set_tier_value(pool, Some("provider".into()), Some("updated".into()))
+                    .unwrap();
+            }
+            inner.observe_draft().unwrap();
+        }
+        let updated = save_home_route_as_profile(app.state(), "daily".to_string()).unwrap();
+        assert_eq!(updated.profiles, vec!["daily"]);
+        assert_eq!(
+            updated.agent_routes["codex"].tiers["high"]
+                .model
+                .as_deref(),
+            Some("updated")
+        );
+
+        save_agent_routes(app.state()).unwrap();
+        let saved = ClientConfig::load(&config_path).unwrap();
+        assert!(saved.profiles.contains_key("daily"));
+        for agent_id in ["codex", "opencode"] {
+            let router = saved
+                .custom_router_for_agent(agent_id)
+                .unwrap()
+                .expect("mounted profile materializes");
+            assert_eq!(router.pools[TIER_HIGH][0].model, "updated");
+        }
+
+        for agent_id in ["codex", "opencode"] {
+            set_agent_route_mode(
+                app.state(),
+                agent_id.to_string(),
+                "inherit".to_string(),
+            )
+            .unwrap();
+        }
+        let deleted = delete_profile(app.state(), "daily".to_string()).unwrap();
+        assert!(deleted.profiles.is_empty());
+        assert!(deleted
+            .agent_routes
+            .values()
+            .all(|route| route.profile.is_none()));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn one_two_and_three_tiers_always_end_with_a_zero_score_fallback() {
         let root = scratch_home("tiers-valid");
         let mut inner = AppInner::new(root.join("token-station.json"), template(&root), None);
@@ -3184,9 +3429,11 @@ mod tests {
             "base_url": upstream_a,
             "models": [{"model": "small"}]
         });
-        inner
-            .set_tier_value(TIER_LOW, Some("fixture".into()), Some("small".into()))
-            .unwrap();
+        for pool in [TIER_HIGH, TIER_MID, TIER_LOW] {
+            inner
+                .set_tier_value(pool, Some("fixture".into()), Some("small".into()))
+                .unwrap();
+        }
         inner.observe_draft().unwrap();
         let app = tauri::test::mock_app();
         assert!(app.manage(AppStateManaged(Mutex::new(inner))));
@@ -3206,6 +3453,16 @@ mod tests {
         let first_receipts = wait_for_receipts(&metrics_path, 1);
         assert_eq!(first_receipts[0].running_revision, Some(revision_a));
         fixture_a.join().unwrap();
+
+        save_home_route_as_profile(app.state(), "shared".to_string()).unwrap();
+        let mounted = mount_agent_profile(
+            app.state(),
+            "codex".to_string(),
+            "shared".to_string(),
+        )
+        .unwrap();
+        assert!(mounted.config_dirty);
+        assert_eq!(mounted.serve.running_revision, Some(revision_a));
 
         edit_provider(app.state(), "fixture".to_owned(), upstream_b, None).unwrap();
         update_provider_models(
@@ -3247,6 +3504,14 @@ mod tests {
             None,
         )
         .unwrap();
+        save_home_route_as_profile(app.state(), "candidate".to_string()).unwrap();
+        let candidate = mount_agent_profile(
+            app.state(),
+            "opencode".to_string(),
+            "candidate".to_string(),
+        )
+        .unwrap();
+        assert_eq!(candidate.serve.running_revision, Some(second_revision));
         begin_serve_start(
             app.handle().clone(),
             app.state::<AppStateManaged>().inner(),
