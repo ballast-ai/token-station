@@ -282,15 +282,15 @@ fn start_proxy_with_agents(
     let (virtual_key, created) =
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
     assert!(created, "each test gets a fresh data dir");
-    let state = server::AppState {
+    let state = server::AppState::new(
         gateway,
-        virtual_key: Some(Arc::from(virtual_key.as_str())),
-        admin: Arc::new(token_station_cli::admin::AdminContext {
+        Some(Arc::from(virtual_key.as_str())),
+        Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
             router: config.router.clone(),
             plugins: config.plugins.clone(),
         }),
-    };
+    );
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
     listener.set_nonblocking(true).expect("nonblocking");
@@ -380,15 +380,15 @@ fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Pat
     let (virtual_key, created) =
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
     assert!(created);
-    let state = server::AppState {
+    let state = server::AppState::new(
         gateway,
-        virtual_key: Some(Arc::from(virtual_key.as_str())),
-        admin: Arc::new(token_station_cli::admin::AdminContext {
+        Some(Arc::from(virtual_key.as_str())),
+        Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
             router: config.router.clone(),
             plugins: config.plugins.clone(),
         }),
-    };
+    );
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
     listener.set_nonblocking(true).expect("nonblocking");
     let address = listener.local_addr().expect("bound");
@@ -1763,15 +1763,15 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
     let gateway = Arc::new(Gateway::new(&config, recorder).expect("gateway assembles"));
     let (virtual_key, _) =
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
-    let state = server::AppState {
+    let state = server::AppState::new(
         gateway,
-        virtual_key: Some(Arc::from(virtual_key.as_str())),
-        admin: Arc::new(token_station_cli::admin::AdminContext {
+        Some(Arc::from(virtual_key.as_str())),
+        Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
             router: config.router.clone(),
             plugins: config.plugins.clone(),
         }),
-    };
+    );
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
     listener.set_nonblocking(true).expect("nonblocking");

@@ -8,6 +8,7 @@
 
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -16,13 +17,14 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::Response;
 use axum::routing::get;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use std::time::Duration;
 
 use crate::admin::AdminContext;
+use crate::cancel::CancelToken;
 use crate::gateway::{Gateway, Reply};
 use crate::request_context::RequestContext;
 use crate::virtual_key;
@@ -32,10 +34,99 @@ use crate::virtual_key;
 /// backpressure end to end.
 const STREAM_BACKLOG: usize = 32;
 
-/// Default overall budget and per-attempt cap for a request's context until the
-/// supervised drain wiring (T2) replaces the detached one built here.
+/// Default overall budget and per-attempt cap for a supervised request.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(600);
 const PER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
+
+struct ServerControlInner {
+    drain: CancelToken,
+    stop_accepting: watch::Sender<bool>,
+    in_flight: AtomicUsize,
+}
+
+/// Lifecycle handle shared by the listener owner and every request handler.
+/// Stopping accepts is separate from cancelling work so a supervisor can grant
+/// old requests a bounded grace period during a live configuration handoff.
+#[derive(Clone)]
+pub struct ServerControl {
+    inner: Arc<ServerControlInner>,
+}
+
+impl Default for ServerControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ServerControl {
+    #[must_use]
+    pub fn new() -> Self {
+        let (stop_accepting, _) = watch::channel(false);
+        Self {
+            inner: Arc::new(ServerControlInner {
+                drain: CancelToken::root(),
+                stop_accepting,
+                in_flight: AtomicUsize::new(0),
+            }),
+        }
+    }
+
+    /// Releases the listener while allowing existing requests to finish.
+    pub fn stop_accepting(&self) {
+        self.inner.stop_accepting.send_replace(true);
+    }
+
+    /// Cancels every request context created under this server instance.
+    pub fn cancel_in_flight(&self) {
+        self.inner.drain.cancel();
+    }
+
+    #[must_use]
+    pub fn in_flight(&self) -> usize {
+        self.inner.in_flight.load(Ordering::SeqCst)
+    }
+
+    fn request_context(&self) -> RequestContext {
+        RequestContext::new(&self.inner.drain, REQUEST_DEADLINE, PER_ATTEMPT_TIMEOUT)
+    }
+
+    fn begin_request(&self) -> InFlightGuard {
+        self.inner.in_flight.fetch_add(1, Ordering::SeqCst);
+        InFlightGuard {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    async fn wait_for_stop(&self) {
+        let mut receiver = self.inner.stop_accepting.subscribe();
+        if *receiver.borrow() {
+            return;
+        }
+        while receiver.changed().await.is_ok() {
+            if *receiver.borrow() {
+                return;
+            }
+        }
+    }
+}
+
+struct InFlightGuard {
+    inner: Arc<ServerControlInner>,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.inner.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct CancelOnDrop(CancelToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
 
 /// Everything a handler needs: the data plane, and the door key.
 #[derive(Clone)]
@@ -45,6 +136,24 @@ pub struct AppState {
     pub virtual_key: Option<Arc<str>>,
     /// The read-only `/admin/*` data plane: a snapshot of the running config.
     pub admin: Arc<AdminContext>,
+    /// Server-owned accept/drain/request lifecycle.
+    pub control: ServerControl,
+}
+
+impl AppState {
+    #[must_use]
+    pub fn new(
+        gateway: Arc<Gateway>,
+        virtual_key: Option<Arc<str>>,
+        admin: Arc<AdminContext>,
+    ) -> Self {
+        Self {
+            gateway,
+            virtual_key,
+            admin,
+            control: ServerControl::new(),
+        }
+    }
 }
 
 /// Serves until `ctrl_c`.
@@ -56,6 +165,7 @@ pub struct AppState {
 ///
 /// Only from the accept loop itself; per-request failures are responses.
 pub async fn serve(state: AppState, listener: TcpListener) -> std::io::Result<()> {
+    let control = state.control.clone();
     // `/v1/models` stays an explicit GET; everything else is a fallback so any
     // inbound path an adapter might claim (OpenAI `/v1/chat/completions`,
     // Anthropic `/v1/messages`, …) reaches the gateway, which asks each
@@ -80,8 +190,11 @@ pub async fn serve(state: AppState, listener: TcpListener) -> std::io::Result<()
         .with_state(state);
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                () = control.wait_for_stop() => {}
+            }
         })
         .await
 }
@@ -316,12 +429,11 @@ async fn chat(
     // The pipeline owns its thread for the whole exchange; `blocking_send`
     // makes a slow reader slow the upstream read down, not buffer it.
     //
-    // TODO(T2/Contract B): build this context as a child of the RunningServer's
-    // drain token and fire `ctx.cancel()` when this axum connection closes, so a
-    // client disconnect and a save-and-apply drain both stop the exchange. For
-    // now a detached context still bounds the request by its overall deadline.
-    let ctx = RequestContext::detached(REQUEST_DEADLINE, PER_ATTEMPT_TIMEOUT);
+    let ctx = state.control.request_context();
+    let mut cancel_on_drop = Some(CancelOnDrop(ctx.token()));
+    let in_flight = state.control.begin_request();
     let worker = tokio::task::spawn_blocking(move || {
+        let _in_flight = in_flight;
         gateway.chat_scoped(
             &ctx,
             agent_id.as_deref(),
@@ -344,7 +456,11 @@ async fn chat(
                 .expect("a rendered response builds")
         }
         Some(Reply::BeginStream) => {
-            let chunks = ReceiverStream::new(rx).map(|reply| {
+            let cancel_on_drop = cancel_on_drop
+                .take()
+                .expect("request cancellation guard is present");
+            let chunks = ReceiverStream::new(rx).map(move |reply| {
+                let _keep_guard_alive = &cancel_on_drop;
                 Ok::<Bytes, Infallible>(match reply {
                     Reply::Chunk(data) => Bytes::from(data),
                     // A second Begin* would be a pipeline bug; starve it
@@ -372,7 +488,24 @@ async fn chat(
 
 #[cfg(test)]
 mod tests {
-    use super::{ScopedInboundPath, parse_inbound_path};
+    use super::{ScopedInboundPath, ServerControl, parse_inbound_path};
+
+    #[test]
+    fn accept_stop_and_request_drain_are_separate_lifecycle_steps() {
+        let control = ServerControl::new();
+        let context = control.request_context();
+        let request = control.begin_request();
+        assert_eq!(control.in_flight(), 1);
+        assert!(!context.is_cancelled());
+
+        control.stop_accepting();
+        assert!(!context.is_cancelled());
+        control.cancel_in_flight();
+        assert!(context.is_cancelled());
+
+        drop(request);
+        assert_eq!(control.in_flight(), 0);
+    }
 
     #[test]
     fn agent_namespaces_are_stripped_to_canonical_protocol_paths() {
