@@ -166,6 +166,10 @@ body {
   background: #fdeaea;
   color: #c0392b;
 }
+.banner.info {
+  background: var(--signal-soft);
+  color: var(--signal);
+}
 
 /* 面板 */
 .panel {
