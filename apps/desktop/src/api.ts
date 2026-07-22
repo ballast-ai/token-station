@@ -429,6 +429,8 @@ export interface Receipt {
   latency_ms: number;
   status: number;
   error_code: string | null;
+  /** The exact unmet capability dimension, which refines error_code. Use null when absent. */
+  error_detail: string | null;
   requested_model: string;
   upstream: string | null;
   model: string | null;

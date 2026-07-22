@@ -895,6 +895,14 @@ impl Gateway {
                     // the client can still receive; no upstream health verdict.
                     record.status = refusal.http_status;
                     record.error_code = Some(refusal.code);
+                    // A capability refusal names the specific unmet requirement
+                    // (which of tools / vision / JSON schema / context window) in
+                    // its message. That message is router/adapter-generated and
+                    // content-free, so persist it to explain the refusal in the
+                    // receipt — the bare `capability` code cannot say which.
+                    if refusal.code == ErrorCode::Capability {
+                        record.error_detail = Some(refusal.message.clone());
+                    }
                     let rendered = Self::render_error(agent, &refusal);
                     emit(Reply::BeginJson(rendered));
                 }

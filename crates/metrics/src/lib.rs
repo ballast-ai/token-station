@@ -42,7 +42,7 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 /// - v1: the original record shape.
 /// - v2: adds `request_id` (the stable accounting id).
 /// - v3: adds `price_version` (the price table a cost was computed under).
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Everything one request leaves behind. One per request, exactly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,6 +69,12 @@ pub struct RequestRecord {
     /// `status`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<ErrorCode>,
+    /// A short, machine-generated reason that refines `error_code` when the code
+    /// alone is too coarse — most usefully the specific unmet capability behind a
+    /// [`ErrorCode::Capability`] refusal (tools, vision, JSON schema, or a
+    /// context window). Never caller content; the router/adapter writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<String>,
     /// Upstreams tried, including the one that answered. Zero when routing
     /// itself refused.
     pub attempts: u32,
@@ -103,6 +109,7 @@ impl RequestRecord {
             stream: false,
             status: 0,
             error_code: None,
+            error_detail: None,
             attempts: 0,
             routing: None,
             usage: None,

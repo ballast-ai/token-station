@@ -47,6 +47,12 @@ const MIGRATIONS: &[Migration] = &[
         to: 3,
         sql: "ALTER TABLE requests ADD COLUMN price_version INTEGER;",
     },
+    Migration {
+        // v3 → v4: the specific unmet capability behind a coarse error code.
+        // NULL on existing rows: their reason was never captured.
+        to: 4,
+        sql: "ALTER TABLE requests ADD COLUMN error_detail TEXT;",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -61,6 +67,7 @@ CREATE TABLE IF NOT EXISTS requests (
     stream              INTEGER NOT NULL,
     status              INTEGER NOT NULL,
     error_code          TEXT,
+    error_detail        TEXT,
     attempts            INTEGER NOT NULL,
     -- routing (NULL row-wise when the request failed before a decision)
     upstream            TEXT,
@@ -221,7 +228,7 @@ impl SqliteStore {
             "INSERT OR IGNORE INTO requests (
                 request_id,
                 started_at_ms, latency_ms, protocol, requested_model, stream, status,
-                error_code, attempts,
+                error_code, error_detail, attempts,
                 upstream, model, pool, tier, rule_id, hint_kind, hint_value,
                 heuristic_score, heuristic_threshold, fallbacks,
                 est_input_tokens, message_count, tool_count, has_images,
@@ -230,7 +237,7 @@ impl SqliteStore {
                 reasoning_tokens, cost_micros, price_version
             ) VALUES (
                 ?33,
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?35, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                 ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
                 ?34
             )",
@@ -271,6 +278,7 @@ impl SqliteStore {
                 record.cost_micros,
                 record.request_id,
                 record.price_version,
+                record.error_detail,
             ],
         )?;
         Ok(())
