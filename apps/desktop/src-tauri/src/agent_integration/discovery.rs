@@ -17,8 +17,9 @@ use super::platform::{
 };
 use super::registry::AgentRegistry;
 use super::types::{
-    AgentDescriptor, ConfigFormat, Diagnostic, DiscoveryEvidence, DiscoveryRecord, DiscoverySource,
-    Platform, ProbeRuntime, ReasonCode, RuntimeResolutionSource, VersionProbe,
+    AgentDescriptor, BinarySource, ConfigFormat, Diagnostic, DiscoveryEvidence, DiscoveryRecord,
+    DiscoverySource, Platform, ProbeRuntime, ReasonCode, RuntimeResolutionSource,
+    VersionOutputMatcher, VersionProbe,
 };
 
 const CONFIG_READ_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
@@ -222,7 +223,13 @@ fn run_probe_once(
         };
     }
 
-    let normalized = raw.as_deref().and_then(normalize_version);
+    let (version_raw, normalized) = match probe.output_matcher {
+        VersionOutputMatcher::SemverAnywhere => {
+            let normalized = raw.as_deref().and_then(normalize_version);
+            (raw, normalized)
+        }
+        VersionOutputMatcher::SuccessOnly => (None, None),
+    };
     let mut diagnostics = Vec::new();
     if truncated {
         diagnostics.push(Diagnostic {
@@ -233,7 +240,7 @@ fn run_probe_once(
             ),
         });
     }
-    if normalized.is_none() {
+    if probe.output_matcher == VersionOutputMatcher::SemverAnywhere && normalized.is_none() {
         diagnostics.push(Diagnostic {
             reason_code: ReasonCode::VersionOutputUnparseable,
             message: "版本命令成功，但输出中没有可识别的 SemVer".to_string(),
@@ -241,7 +248,7 @@ fn run_probe_once(
     }
     ProbeOutcome {
         runnable: true,
-        version_raw: raw,
+        version_raw,
         version_normalized: normalized,
         diagnostics,
     }
@@ -535,6 +542,11 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
                     .evidence
                     .iter()
                     .any(|evidence| evidence.is_path_default);
+                let (binary_source, upgrade_command) = classify_binary_installation(
+                    &installation.canonical_path,
+                    &installation.evidence,
+                );
+                let (modified_at_ms, binary_sha256) = binary_facts(&installation.canonical_path);
                 DiscoveryRecord {
                     agent_id: descriptor.agent_id.clone(),
                     executable_path: installation
@@ -542,6 +554,10 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
                         .to_string_lossy()
                         .into_owned(),
                     canonical_path: installation.canonical_path.to_string_lossy().into_owned(),
+                    binary_source,
+                    modified_at_ms,
+                    binary_sha256,
+                    upgrade_command,
                     version_raw: probe.version_raw,
                     version_normalized: probe.version_normalized,
                     environment: self.environment.platform,
@@ -557,6 +573,140 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
             })
             .collect()
     }
+}
+
+fn classify_binary_installation(
+    canonical_path: &Path,
+    evidence: &[DiscoveryEvidence],
+) -> (BinarySource, Option<String>) {
+    if let Some(formula) = homebrew_formula(canonical_path) {
+        return (
+            BinarySource::Homebrew,
+            Some(format!("brew upgrade {formula}")),
+        );
+    }
+    if let Some(package) = npm_package_name(canonical_path) {
+        return (
+            BinarySource::NpmGlobal,
+            Some(format!("npm install --global {package}@latest")),
+        );
+    }
+    if evidence
+        .iter()
+        .any(|item| item.source == DiscoverySource::Path)
+    {
+        (BinarySource::Path, None)
+    } else if evidence
+        .iter()
+        .any(|item| item.source == DiscoverySource::EnvOverride)
+    {
+        (BinarySource::EnvOverride, None)
+    } else {
+        (BinarySource::KnownPath, None)
+    }
+}
+
+fn homebrew_formula(canonical_path: &Path) -> Option<String> {
+    let mut components = canonical_path.components();
+    while let Some(component) = components.next() {
+        if component.as_os_str() != "Cellar" {
+            continue;
+        }
+        let formula = components.next()?.as_os_str().to_str()?;
+        let safe = !formula.is_empty()
+            && formula.len() <= 100
+            && formula.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'-' | b'_' | b'.' | b'@' | b'+')
+            });
+        return safe.then(|| formula.to_string());
+    }
+    None
+}
+
+fn npm_package_name(canonical_path: &Path) -> Option<String> {
+    let components: Vec<_> = canonical_path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect();
+    let node_modules = components
+        .iter()
+        .rposition(|component| component == "node_modules")?;
+    let global_layout =
+        node_modules > 0 && matches!(components[node_modules - 1].as_str(), "lib" | "npm");
+    if !global_layout {
+        return None;
+    }
+    for directory in canonical_path.ancestors().skip(1).take(8) {
+        let package_path = directory.join("package.json");
+        let Ok(metadata) = std::fs::metadata(&package_path) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > 64 * 1024 {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(package_path) else {
+            continue;
+        };
+        let Ok(package) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        let Some(name) = package.get("name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if valid_npm_package_name(name) {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+fn valid_npm_package_name(name: &str) -> bool {
+    fn valid_part(part: &str) -> bool {
+        !part.is_empty()
+            && part.len() <= 100
+            && part.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'-' | b'_' | b'.')
+            })
+            && part
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    }
+
+    if let Some(scoped) = name.strip_prefix('@') {
+        let mut parts = scoped.split('/');
+        matches!((parts.next(), parts.next(), parts.next()), (Some(scope), Some(package), None) if valid_part(scope) && valid_part(package))
+    } else {
+        !name.contains('/') && valid_part(name)
+    }
+}
+
+fn binary_facts(path: &Path) -> (Option<u64>, Option<String>) {
+    let modified_at_ms = std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .and_then(|duration| duration.as_millis().try_into().ok());
+    let binary_sha256 = hash_file(path).ok();
+    (modified_at_ms, binary_sha256)
+}
+
+fn hash_file(path: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 struct Installation {
@@ -1037,6 +1187,12 @@ fn config_shape(candidate: &ResolvedConfigCandidate) -> Result<String, ReasonCod
             let value = semantic_json(&document).map_err(|_| ReasonCode::ConfigParseFailed)?;
             Ok(format!("yaml:{}", json_shape(&value)))
         }
+        ConfigFormat::Dotenv => {
+            let document = parse_rendered(text, DocumentFormat::Dotenv, "dotenv discovery")
+                .map_err(|_| ReasonCode::ConfigParseFailed)?;
+            let value = semantic_json(&document).map_err(|_| ReasonCode::ConfigParseFailed)?;
+            Ok(format!("dotenv:{}", json_shape(&value)))
+        }
     }
 }
 
@@ -1158,6 +1314,44 @@ mod tests {
         .is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn hermes_discovery_uses_a_local_only_probe_and_accepts_versionless_success() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch("hermes-local-probe");
+        let executable = root.join(".local/bin/hermes");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(
+            &executable,
+            b"#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then echo 'usage: hermes'; exit 0; fi\nsleep 5\necho 'Hermes Agent v0.18.0'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let registry = AgentRegistry::builtin().unwrap();
+        let mut descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "nous-hermes-agent")
+            .unwrap()
+            .clone();
+        descriptor.version_probe.timeout_ms = 2_000;
+        descriptor.version_probe.retry_on_timeout = false;
+        let mut context = environment(&root);
+        context.path_entries.clear();
+
+        let records =
+            DiscoveryScanner::new(context, SystemProbeRunner).scan_descriptor(&descriptor);
+
+        assert_eq!(records.len(), 1);
+        assert!(records[0].runnable, "{:?}", records[0].diagnostics);
+        assert_eq!(records[0].version_raw, None);
+        assert_eq!(records[0].version_normalized, None);
+        assert!(records[0].diagnostics.is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "token-station-discovery-{name}-{}-{}",
@@ -1275,6 +1469,102 @@ mod tests {
         assert_eq!(records[0].executable_path, path_alias.to_string_lossy());
         assert_eq!(records[0].evidence.len(), 2);
         assert_eq!(records[0].version_normalized.as_deref(), Some("1.2.3"));
+        assert_eq!(records[0].binary_source, BinarySource::Path);
+        assert!(records[0].modified_at_ms.is_some());
+        assert_eq!(
+            records[0].binary_sha256.as_deref(),
+            Some("6f1af2dfc4d7f16dacf404b1f6c9fd4a65cfffb8edde6dcf957463a0e41fb1ed")
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_identifies_an_npm_global_install_and_only_returns_a_copyable_upgrade_command() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch("npm-global-source");
+        let package = root.join("lib/node_modules/@anthropic-ai/claude-code");
+        let actual = package.join("cli.js");
+        executable(&actual);
+        std::fs::write(
+            package.join("package.json"),
+            br#"{"name":"@anthropic-ai/claude-code","version":"1.2.3"}"#,
+        )
+        .unwrap();
+        let path_alias = root.join("bin/claude");
+        std::fs::create_dir_all(path_alias.parent().unwrap()).unwrap();
+        symlink(&actual, &path_alias).unwrap();
+
+        let registry = AgentRegistry::builtin().unwrap();
+        let descriptor = registry.descriptors()[0].clone();
+        let scanner = DiscoveryScanner::new(environment(&root), FixedProbe);
+
+        let records = scanner.scan_descriptor(&descriptor);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].binary_source, BinarySource::NpmGlobal);
+        assert_eq!(
+            records[0].upgrade_command.as_deref(),
+            Some("npm install --global @anthropic-ai/claude-code@latest")
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_does_not_mislabel_a_project_node_modules_binary_as_npm_global() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch("npm-local-source");
+        let package = root.join("project/node_modules/@anthropic-ai/claude-code");
+        let actual = package.join("cli.js");
+        executable(&actual);
+        std::fs::write(
+            package.join("package.json"),
+            br#"{"name":"@anthropic-ai/claude-code","version":"1.2.3"}"#,
+        )
+        .unwrap();
+        let path_alias = root.join("bin/claude");
+        std::fs::create_dir_all(path_alias.parent().unwrap()).unwrap();
+        symlink(&actual, &path_alias).unwrap();
+
+        let registry = AgentRegistry::builtin().unwrap();
+        let descriptor = registry.descriptors()[0].clone();
+        let scanner = DiscoveryScanner::new(environment(&root), FixedProbe);
+
+        let records = scanner.scan_descriptor(&descriptor);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].binary_source, BinarySource::Path);
+        assert_eq!(records[0].upgrade_command, None);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_identifies_a_homebrew_cellar_install_without_invoking_brew() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch("homebrew-source");
+        let actual = root.join("Cellar/claude-code/1.2.3/bin/claude");
+        executable(&actual);
+        let path_alias = root.join("bin/claude");
+        std::fs::create_dir_all(path_alias.parent().unwrap()).unwrap();
+        symlink(&actual, &path_alias).unwrap();
+
+        let registry = AgentRegistry::builtin().unwrap();
+        let descriptor = registry.descriptors()[0].clone();
+        let scanner = DiscoveryScanner::new(environment(&root), FixedProbe);
+
+        let records = scanner.scan_descriptor(&descriptor);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].binary_source, BinarySource::Homebrew);
+        assert_eq!(
+            records[0].upgrade_command.as_deref(),
+            Some("brew upgrade claude-code")
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1301,7 +1591,12 @@ mod tests {
         symlink("/bin/sh", &sibling_node).unwrap();
 
         let registry = AgentRegistry::builtin().unwrap();
-        let mut descriptor = registry.descriptors()[3].clone();
+        let mut descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "openclaw")
+            .unwrap()
+            .clone();
         assert_eq!(descriptor.agent_id, "openclaw");
         descriptor.known_install_locations.insert(
             Platform::Macos,
@@ -1342,7 +1637,12 @@ mod tests {
         symlink("/bin/sh", &sibling_node).unwrap();
 
         let registry = AgentRegistry::builtin().unwrap();
-        let mut descriptor = registry.descriptors()[3].clone();
+        let mut descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "openclaw")
+            .unwrap()
+            .clone();
         descriptor.known_install_locations.insert(
             Platform::Macos,
             vec![observed_entry.to_string_lossy().into_owned()],
@@ -1609,19 +1909,19 @@ mod tests {
         let first = scanner.scan_registry(&registry);
         let second = scanner.scan_registry(&registry);
 
-        assert_eq!(
-            first
-                .iter()
-                .map(|record| record.agent_id.as_str())
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from([
-                "claude-code",
-                "codex",
-                "nous-hermes-agent",
-                "openclaw",
-                "opencode",
-            ])
-        );
+        let discovered = first
+            .iter()
+            .map(|record| record.agent_id.as_str())
+            .collect::<BTreeSet<_>>();
+        for fixture_agent in [
+            "claude-code",
+            "codex",
+            "nous-hermes-agent",
+            "openclaw",
+            "opencode",
+        ] {
+            assert!(discovered.contains(fixture_agent), "{fixture_agent}");
+        }
         assert_eq!(
             first
                 .iter()
@@ -1921,6 +2221,8 @@ mod tests {
                     "{}: {:?}",
                     record.agent_id, record.diagnostics
                 );
+            }
+            if record.agent_id == "openclaw" {
                 assert!(
                     record.version_normalized.is_some(),
                     "{}: {:?}",

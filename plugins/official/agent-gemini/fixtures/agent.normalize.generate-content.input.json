@@ -1,0 +1,13 @@
+{
+  "protocol": "google-gemini-generate-content",
+  "agent_tool": "gemini-cli",
+  "headers": {"names": ["content-type"], "values": {"content-type": "application/json"}},
+  "principal": {"subject": "local"},
+  "transport_path": "/agents/gemini-cli/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+  "body": {
+    "systemInstruction": {"parts": [{"text": "Be precise."}]},
+    "contents": [{"role": "user", "parts": [{"text": "Weather in Beijing?"}]}],
+    "generationConfig": {"temperature": 0.2, "topP": 0.9, "maxOutputTokens": 128, "stopSequences": ["END"]},
+    "tools": [{"functionDeclarations": [{"name": "get_weather", "description": "Look up weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}]}]
+  }
+}

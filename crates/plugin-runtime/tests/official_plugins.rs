@@ -81,6 +81,11 @@ fn responses_agent_package() -> &'static Path {
     DIR.get_or_init(|| build_package("agent-openai-responses"))
 }
 
+fn gemini_agent_package() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| build_package("agent-gemini"))
+}
+
 fn runtime() -> PluginRuntime {
     PluginRuntime::new(RuntimeLimits {
         memory_bytes: 64 * 1024 * 1024,
@@ -175,6 +180,37 @@ fn the_official_anthropic_agent_adapter_passes_the_full_suite_as_wasm() {
 
     assert!(report.is_passing(), "{report}");
     assert_eq!(report.suite(), plugin.manifest().conformance.required_suite);
+}
+
+#[test]
+fn the_official_gemini_agent_adapter_passes_the_full_suite_as_wasm() {
+    let plugin = AgentPlugin::load(&runtime(), gemini_agent_package()).expect("loads clean");
+    let fixtures = repo_root().join("plugins/official/agent-gemini/fixtures");
+    let pack: FixturePack<AgentFamily> =
+        FixturePack::load(&fixtures).expect("the shipped pack loads");
+
+    let report = run_agent_suite(&plugin, &pack);
+
+    assert!(report.is_passing(), "{report}");
+    assert_eq!(report.suite(), plugin.manifest().conformance.required_suite);
+}
+
+#[test]
+fn gemini_model_and_stream_mode_come_from_the_transport_path() {
+    let plugin = AgentPlugin::load(&runtime(), gemini_agent_package()).expect("loads clean");
+    let mut request = envelope(
+        "google-gemini-generate-content",
+        json!({"contents": [{"role": "user", "parts": [{"text": "hello"}]}]}),
+    );
+    request.extensions.insert(
+        "transport_path".to_owned(),
+        json!("/agents/gemini-cli/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"),
+    );
+
+    let normalized = plugin.normalize_inbound(&request).expect("normalizes");
+
+    assert_eq!(normalized.model, "gemini-2.5-pro");
+    assert!(normalized.stream);
 }
 
 #[test]

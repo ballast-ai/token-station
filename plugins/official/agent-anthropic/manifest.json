@@ -4,7 +4,7 @@
   "kind": "agent-adapter",
   "api_version": "agent-adapter-v1",
   "agent_protocols": ["anthropic-messages"],
-  "agent_tools": ["claude-code", "generic-anthropic-sdk"],
+  "agent_tools": ["claude-code", "claude-desktop", "generic-anthropic-sdk"],
   "capabilities": ["chat", "stream", "tool_call", "agent_hint"],
   "permissions": {
     "network": false,

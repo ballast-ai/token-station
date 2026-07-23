@@ -7,6 +7,8 @@
       "legacy_kind": "cc",
       "display_name": "Claude Code",
       "icon_key": "claude",
+      "ui_order": 10,
+      "nav_mark": "C",
       "admission": "supported",
       "executable_candidates": ["claude"],
       "known_install_locations": {
@@ -45,10 +47,49 @@
     },
     {
       "schema_version": 1,
+      "agent_id": "claude-desktop",
+      "legacy_kind": null,
+      "display_name": "Claude Desktop",
+      "icon_key": "claude-desktop",
+      "ui_order": 15,
+      "nav_mark": "CD",
+      "admission": "supported",
+      "executable_candidates": ["Claude", "Claude.exe"],
+      "known_install_locations": {
+        "macos": ["/Applications/Claude.app/Contents/MacOS/Claude"],
+        "windows": ["${LOCALAPPDATA}/AnthropicClaude/Claude.exe"]
+      },
+      "version_probe": {
+        "argv": ["--version"],
+        "timeout_ms": 2000,
+        "max_output_bytes": 65536,
+        "output_matcher": "SEMVER_ANYWHERE"
+      },
+      "config_locations": [
+        {
+          "env_override": null,
+          "platform_defaults": {
+            "macos": ["${HOME}/Library/Application Support/Claude-3p/configLibrary/7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2.json"],
+            "windows": ["${LOCALAPPDATA}/Claude-3p/configLibrary/7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2.json"]
+          },
+          "format": "json"
+        }
+      ],
+      "protocol_binding": {
+        "adapter_id": "agent-anthropic",
+        "base_url_shape": "origin"
+      },
+      "local_connector_ids": ["claude-desktop-3p-v1"],
+      "discovery_fingerprint_rules": ["json-shape-v1"]
+    },
+    {
+      "schema_version": 1,
       "agent_id": "codex",
       "legacy_kind": "codex",
       "display_name": "Codex",
       "icon_key": "codex",
+      "ui_order": 20,
+      "nav_mark": "X",
       "admission": "supported",
       "executable_candidates": ["codex"],
       "known_install_locations": {
@@ -85,10 +126,53 @@
     },
     {
       "schema_version": 1,
+      "agent_id": "gemini-cli",
+      "legacy_kind": null,
+      "display_name": "Gemini CLI",
+      "icon_key": "gemini",
+      "ui_order": 30,
+      "nav_mark": "G",
+      "admission": "supported",
+      "executable_candidates": ["gemini"],
+      "known_install_locations": {
+        "macos": ["${HOME}/.local/bin/gemini", "/opt/homebrew/bin/gemini", "/usr/local/bin/gemini"],
+        "linux": ["${HOME}/.local/bin/gemini", "/usr/local/bin/gemini", "/usr/bin/gemini"],
+        "windows": ["${APPDATA}/npm/gemini.cmd"],
+        "wsl": ["${HOME}/.local/bin/gemini", "/usr/local/bin/gemini", "/usr/bin/gemini"]
+      },
+      "version_probe": {
+        "argv": ["--version"],
+        "timeout_ms": 2000,
+        "max_output_bytes": 65536,
+        "output_matcher": "SEMVER_ANYWHERE"
+      },
+      "config_locations": [
+        {
+          "env_override": null,
+          "platform_defaults": {
+            "macos": ["${HOME}/.gemini/.env"],
+            "linux": ["${HOME}/.gemini/.env"],
+            "windows": ["${USERPROFILE}/.gemini/.env"],
+            "wsl": ["${HOME}/.gemini/.env"]
+          },
+          "format": "dotenv"
+        }
+      ],
+      "protocol_binding": {
+        "adapter_id": "agent-gemini",
+        "base_url_shape": "origin"
+      },
+      "local_connector_ids": ["gemini-cli-v1"],
+      "discovery_fingerprint_rules": ["dotenv-shape-v1"]
+    },
+    {
+      "schema_version": 1,
       "agent_id": "nous-hermes-agent",
       "legacy_kind": null,
       "display_name": "Hermes Agent",
       "icon_key": "hermes",
+      "ui_order": 60,
+      "nav_mark": "H",
       "admission": "supported",
       "executable_candidates": ["hermes"],
       "known_install_locations": {
@@ -97,11 +181,10 @@
         "wsl": ["${HOME}/.local/bin/hermes"]
       },
       "version_probe": {
-        "argv": ["version"],
+        "argv": ["--help"],
         "timeout_ms": 2000,
         "max_output_bytes": 65536,
-        "output_matcher": "SEMVER_ANYWHERE",
-        "retry_on_timeout": true
+        "output_matcher": "SUCCESS_ONLY"
       },
       "config_locations": [
         {
@@ -132,6 +215,8 @@
       "legacy_kind": null,
       "display_name": "OpenClaw",
       "icon_key": "openclaw",
+      "ui_order": 50,
+      "nav_mark": "OC",
       "admission": "supported",
       "executable_candidates": ["openclaw"],
       "known_install_locations": {
@@ -204,6 +289,8 @@
       "legacy_kind": "opencode",
       "display_name": "OpenCode",
       "icon_key": "opencode",
+      "ui_order": 40,
+      "nav_mark": "O",
       "admission": "supported",
       "executable_candidates": ["opencode"],
       "known_install_locations": {

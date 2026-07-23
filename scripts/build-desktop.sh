@@ -32,6 +32,7 @@ readonly plugins=(
   agent-openai
   agent-anthropic
   agent-openai-responses
+  agent-gemini
   provider-openai-compatible
 )
 stage="$(mktemp -d "${TMPDIR:-/tmp}/token-station-desktop.XXXXXX")"

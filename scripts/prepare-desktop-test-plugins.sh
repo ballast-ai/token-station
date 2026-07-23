@@ -8,6 +8,7 @@ readonly plugins=(
   agent-openai
   agent-anthropic
   agent-openai-responses
+  agent-gemini
   provider-openai-compatible
 )
 

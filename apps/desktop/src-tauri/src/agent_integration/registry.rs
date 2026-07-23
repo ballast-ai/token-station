@@ -2,9 +2,10 @@ use std::collections::{BTreeSet, HashSet};
 
 use serde::Deserialize;
 
+use super::connectors::find_connector;
 use super::types::{
-    AdmissionStatus, AgentDescriptor, AgentUiMetadata, ConfigFormat, EnvValueKind, ProbeRuntime,
-    RuntimeResolutionSource,
+    AdmissionStatus, AgentConnectorCapabilityView, AgentDescriptor, AgentUiMetadata, ConfigFormat,
+    EnvValueKind, ProbeRuntime, RuntimeResolutionSource,
 };
 
 pub const BUILTIN_REGISTRY_JSON: &str = include_str!("../../agent-registry/builtin-agents.json");
@@ -38,44 +39,11 @@ const ALLOWED_CONFIG_ENV: &[&str] = &[
     "OPENCLAW_HOME",
     "HERMES_HOME",
 ];
-const BUILTIN_AGENT_ADAPTERS: &[&str] =
-    &["agent-anthropic", "agent-openai", "agent-openai-responses"];
-const ALLOWED_FINGERPRINT_RULES: &[&str] = &["json-shape-v1", "toml-shape-v1", "yaml-shape-v1"];
-
-struct ConnectorCapability {
-    id: &'static str,
-    agent_id: &'static str,
-    adapter_id: &'static str,
-}
-
-// These IDs name the concrete host-side Connector implementations. This
-// catalog must never list a connector that has no local implementation.
-const BUILTIN_CONNECTOR_CAPABILITIES: &[ConnectorCapability] = &[
-    ConnectorCapability {
-        id: "claude-code-v1",
-        agent_id: "claude-code",
-        adapter_id: "agent-anthropic",
-    },
-    ConnectorCapability {
-        id: "codex-v1",
-        agent_id: "codex",
-        adapter_id: "agent-openai-responses",
-    },
-    ConnectorCapability {
-        id: "opencode-v1",
-        agent_id: "opencode",
-        adapter_id: "agent-openai",
-    },
-    ConnectorCapability {
-        id: "hermes-v1",
-        agent_id: "nous-hermes-agent",
-        adapter_id: "agent-openai",
-    },
-    ConnectorCapability {
-        id: "openclaw-v1",
-        agent_id: "openclaw",
-        adapter_id: "agent-openai",
-    },
+const ALLOWED_FINGERPRINT_RULES: &[&str] = &[
+    "json-shape-v1",
+    "toml-shape-v1",
+    "yaml-shape-v1",
+    "dotenv-shape-v1",
 ];
 
 #[derive(Clone, Debug)]
@@ -101,6 +69,7 @@ impl AgentRegistry {
 
         let mut agent_ids = HashSet::new();
         let mut legacy_kinds = HashSet::new();
+        let mut ui_orders = HashSet::new();
         for descriptor in &document.agents {
             validate_identifier("agent_id", &descriptor.agent_id)?;
             if !agent_ids.insert(descriptor.agent_id.as_str()) {
@@ -115,14 +84,22 @@ impl AgentRegistry {
                     return Err(format!("duplicate legacy_kind '{kind}' in Registry"));
                 }
             }
+            if !ui_orders.insert(descriptor.ui_order) {
+                return Err(format!(
+                    "duplicate ui_order '{}' in Registry",
+                    descriptor.ui_order
+                ));
+            }
         }
         for descriptor in &document.agents {
             validate_descriptor(descriptor)?;
         }
 
-        document
-            .agents
-            .sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
+        document.agents.sort_by(|left, right| {
+            left.ui_order
+                .cmp(&right.ui_order)
+                .then_with(|| left.agent_id.cmp(&right.agent_id))
+        });
         Ok(Self {
             descriptors: document.agents,
         })
@@ -139,7 +116,47 @@ impl AgentRegistry {
 
     #[must_use]
     pub fn ui_metadata(&self) -> Vec<AgentUiMetadata> {
-        self.descriptors.iter().map(AgentUiMetadata::from).collect()
+        self.descriptors
+            .iter()
+            .map(|descriptor| {
+                let mut metadata = AgentUiMetadata::from(descriptor);
+                metadata.connector_capabilities = descriptor
+                    .local_connector_ids
+                    .iter()
+                    .filter_map(|connector_id| find_connector(connector_id))
+                    .map(|connector| {
+                        let capability = connector.capabilities();
+                        AgentConnectorCapabilityView {
+                            connector_id: capability.connector_id.to_string(),
+                            adapter_id: capability.adapter_id.to_string(),
+                            base_url_shape: capability.base_url_shape,
+                            platforms: capability.platforms.to_vec(),
+                            config_format: document_format_name(capability.config_format)
+                                .to_string(),
+                            config_path_template: capability.config_path_template.to_string(),
+                            owned_fields: capability
+                                .owned_fields
+                                .iter()
+                                .map(|field| (*field).to_string())
+                                .collect(),
+                            requires_virtual_key: capability.requires_virtual_key,
+                            restart_required: capability.restart_required,
+                        }
+                    })
+                    .collect();
+                metadata
+            })
+            .collect()
+    }
+}
+
+fn document_format_name(format: super::config_codec::DocumentFormat) -> &'static str {
+    match format {
+        super::config_codec::DocumentFormat::Json => "json",
+        super::config_codec::DocumentFormat::Json5 => "json5",
+        super::config_codec::DocumentFormat::Toml => "toml",
+        super::config_codec::DocumentFormat::Yaml => "yaml",
+        super::config_codec::DocumentFormat::Dotenv => "dotenv",
     }
 }
 
@@ -153,6 +170,7 @@ fn validate_descriptor(descriptor: &AgentDescriptor) -> Result<(), String> {
     validate_identifier("agent_id", &descriptor.agent_id)?;
     validate_text("display_name", &descriptor.display_name, 80)?;
     validate_identifier("icon_key", &descriptor.icon_key)?;
+    validate_text("nav_mark", &descriptor.nav_mark, 4)?;
 
     if descriptor.executable_candidates.is_empty() || descriptor.executable_candidates.len() > 8 {
         return Err(format!(
@@ -201,6 +219,7 @@ fn validate_descriptor(descriptor: &AgentDescriptor) -> Result<(), String> {
             ConfigFormat::Json | ConfigFormat::Jsonc | ConfigFormat::Json5 => "json-shape-v1",
             ConfigFormat::Toml => "toml-shape-v1",
             ConfigFormat::Yaml => "yaml-shape-v1",
+            ConfigFormat::Dotenv => "dotenv-shape-v1",
         };
         if !descriptor
             .discovery_fingerprint_rules
@@ -418,12 +437,6 @@ fn validate_supported_capabilities(descriptor: &AgentDescriptor) -> Result<(), S
             descriptor.agent_id
         )
     })?;
-    if !BUILTIN_AGENT_ADAPTERS.contains(&binding.adapter_id.as_str()) {
-        return Err(format!(
-            "{}: Adapter '{}' is not a built-in Agent Adapter",
-            descriptor.agent_id, binding.adapter_id
-        ));
-    }
     if descriptor.local_connector_ids.is_empty() {
         return Err(format!(
             "{}: supported descriptor requires a local Connector",
@@ -436,16 +449,16 @@ fn validate_supported_capabilities(descriptor: &AgentDescriptor) -> Result<(), S
         &descriptor.local_connector_ids,
     )?;
     for connector_id in &descriptor.local_connector_ids {
-        let capability = BUILTIN_CONNECTOR_CAPABILITIES
-            .iter()
-            .find(|capability| capability.id == connector_id)
-            .ok_or_else(|| {
-                format!(
-                    "{}: Connector '{connector_id}' is not locally available",
-                    descriptor.agent_id
-                )
-            })?;
-        if capability.agent_id != descriptor.agent_id || capability.adapter_id != binding.adapter_id
+        let connector = find_connector(connector_id).ok_or_else(|| {
+            format!(
+                "{}: Connector '{connector_id}' is not locally available",
+                descriptor.agent_id
+            )
+        })?;
+        let capability = connector.capabilities();
+        if capability.agent_id != descriptor.agent_id
+            || capability.adapter_id != binding.adapter_id
+            || capability.base_url_shape != binding.base_url_shape
         {
             return Err(format!(
                 "{}: Connector '{connector_id}' does not match this Agent/Adapter binding",
@@ -617,10 +630,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_adapter_and_connector_references_are_rejected() {
+    fn mismatched_adapter_and_unknown_connector_references_are_rejected() {
         let mut adapter = fixture();
         adapter["agents"][0]["protocol_binding"]["adapter_id"] = json!("missing-adapter");
-        assert!(validate(&adapter).unwrap_err().contains("missing-adapter"));
+        assert!(validate(&adapter)
+            .unwrap_err()
+            .contains("does not match this Agent/Adapter binding"));
 
         let mut connector = fixture();
         connector["agents"][0]["local_connector_ids"] = json!(["missing-connector"]);
@@ -735,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_registry_is_stably_sorted_and_exposes_ui_metadata() {
+    fn builtin_registry_is_stably_ui_ordered_and_exposes_ui_metadata() {
         let registry = AgentRegistry::builtin().unwrap();
         let ids: Vec<_> = registry
             .descriptors()
@@ -746,10 +761,12 @@ mod tests {
             ids,
             [
                 "claude-code",
+                "claude-desktop",
                 "codex",
-                "nous-hermes-agent",
-                "openclaw",
+                "gemini-cli",
                 "opencode",
+                "openclaw",
+                "nous-hermes-agent",
             ]
         );
 
@@ -758,15 +775,27 @@ mod tests {
             .into_iter()
             .map(|metadata| (metadata.agent_id, metadata.display_name))
             .collect();
-        assert_eq!(labels.len(), 5);
+        assert_eq!(labels.len(), 7);
         assert_eq!(labels[0].1, "Claude Code");
-        assert_eq!(labels[2].1, "Hermes Agent");
+        assert_eq!(labels[6].1, "Hermes Agent");
 
-        let hermes = &registry.descriptors()[2];
+        let gemini = &registry.descriptors()[3];
+        assert_eq!(gemini.agent_id, "gemini-cli");
+        assert_eq!(gemini.local_connector_ids, ["gemini-cli-v1"]);
+        assert_eq!(
+            registry.ui_metadata()[3].connector_capabilities[0].config_format,
+            "dotenv"
+        );
+        let hermes = &registry.descriptors()[6];
         assert_eq!(hermes.admission, AdmissionStatus::Supported);
         assert_eq!(hermes.local_connector_ids, ["hermes-v1"]);
-        assert!(hermes.version_probe.retry_on_timeout);
-        let openclaw = &registry.descriptors()[3];
+        assert_eq!(hermes.version_probe.argv, ["--help"]);
+        assert_eq!(
+            hermes.version_probe.output_matcher,
+            super::super::types::VersionOutputMatcher::SuccessOnly
+        );
+        assert!(!hermes.version_probe.retry_on_timeout);
+        let openclaw = &registry.descriptors()[5];
         assert_eq!(openclaw.admission, AdmissionStatus::Supported);
         assert_eq!(openclaw.local_connector_ids, ["openclaw-v1"]);
         assert!(matches!(
@@ -781,7 +810,6 @@ mod tests {
         assert!(registry
             .descriptors()
             .iter()
-            .filter(|descriptor| descriptor.agent_id != "nous-hermes-agent")
             .all(|descriptor| !descriptor.version_probe.retry_on_timeout));
         assert_eq!(
             registry.descriptors()[0].known_install_locations

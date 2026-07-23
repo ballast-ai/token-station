@@ -1,0 +1,4 @@
+[
+  {"data": "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}],\"role\":\"model\"},\"index\":0}],\"modelVersion\":\"gemini-2.5-pro\"}\n\n"},
+  {"data": "data: {\"candidates\":[{\"content\":{\"parts\":[],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"modelVersion\":\"gemini-2.5-pro\"}\n\n"}
+]

@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { PROVIDER_CATALOG } from "./catalog";
+import { AGGREGATOR_CANDIDATES, PROVIDER_CATALOG } from "./catalog";
 
 const byId = new Map(PROVIDER_CATALOG.map((preset) => [preset.id, preset]));
 
 describe("provider catalog", () => {
+  it("ships at least fifty verified non-aggregator defaults", () => {
+    expect(PROVIDER_CATALOG.length).toBeGreaterThanOrEqual(50);
+    expect(PROVIDER_CATALOG.every((preset) => preset.serviceClass !== "aggregator")).toBe(true);
+    expect(AGGREGATOR_CANDIDATES.length).toBeGreaterThan(0);
+    expect(AGGREGATOR_CANDIDATES.every((preset) => preset.serviceClass === "aggregator")).toBe(true);
+  });
+
   it("keeps identifiers and suggested models unique", () => {
     expect(byId.size).toBe(PROVIDER_CATALOG.length);
     for (const preset of PROVIDER_CATALOG) {
@@ -11,14 +18,27 @@ describe("provider catalog", () => {
       expect(preset.label.length).toBeGreaterThan(0);
       expect(preset.models.length).toBeGreaterThan(0);
       expect(new Set(preset.models).size).toBe(preset.models.length);
+      expect(preset.protocol).toBe("openai_chat_completions");
+      expect(preset.region.length).toBeGreaterThan(0);
+      expect(preset.subscription.length).toBeGreaterThan(0);
+      expect(preset.officialDocs).toMatch(/^https:\/\//);
+      expect(preset.modelDocs).toMatch(/^https:\/\//);
+      expect(preset.verifiedAt).toBe("2026-07-22");
     }
   });
 
   it("uses normalized URLs for remote presets", () => {
-    for (const preset of PROVIDER_CATALOG.filter((entry) => entry.id !== "ollama")) {
+    for (const preset of PROVIDER_CATALOG.filter((entry) => entry.serviceClass !== "self_hosted")) {
       expect(preset.baseUrl).toMatch(/^https:\/\//);
       expect(preset.baseUrl.endsWith("/")).toBe(false);
       expect(preset.baseUrl.includes("{")).toBe(false);
+    }
+  });
+
+  it("uses loopback-only URLs for self-hosted defaults", () => {
+    for (const preset of PROVIDER_CATALOG.filter((entry) => entry.serviceClass === "self_hosted")) {
+      expect(preset.baseUrl).toMatch(/^http:\/\/(127\.0\.0\.1|localhost):\d+\//);
+      expect(preset.needsKey).toBe(false);
     }
   });
 
