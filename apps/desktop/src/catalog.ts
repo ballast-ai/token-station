@@ -40,6 +40,13 @@ const OFFICIAL_AND_MANAGED_PRESETS: ProviderPreset[] = [
     officialDocs: "https://developers.openai.com/api/docs/guides/latest-model",
   }),
   verified({
+    id: "anthropic", label: "Anthropic Claude", baseUrl: "https://api.anthropic.com/v1",
+    models: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"], needsKey: true,
+    region: "全球", subscription: "按量 API", serviceClass: "first_party",
+    officialDocs: "https://docs.claude.com/en/api/openai-sdk",
+    note: "经 Anthropic 官方 OpenAI SDK 兼容端点接入；prompt cache 等原生能力在兼容模式下不可用。",
+  }),
+  verified({
     id: "gemini", label: "Google Gemini API", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
     models: ["gemini-3.6-flash"], needsKey: true, region: "全球", subscription: "按量 API", serviceClass: "first_party",
     officialDocs: "https://ai.google.dev/gemini-api/docs/openai",
@@ -195,78 +202,36 @@ const OFFICIAL_AND_MANAGED_PRESETS: ProviderPreset[] = [
     id: "xiaomi_mimo", label: "Xiaomi MiMo", baseUrl: "https://api.xiaomimimo.com/v1", models: ["mimo-v2.5-pro"],
     needsKey: true, region: "全球", subscription: "按量 API", serviceClass: "first_party", officialDocs: "https://platform.xiaomimimo.com/docs/en-US/api/chat/openai-api",
   }),
+  verified({
+    id: "perplexity", label: "Perplexity Sonar", baseUrl: "https://api.perplexity.ai",
+    models: ["sonar", "sonar-pro", "sonar-reasoning-pro", "sonar-deep-research"], needsKey: true,
+    region: "全球", subscription: "按量 API", serviceClass: "first_party", officialDocs: "https://docs.perplexity.ai/docs/sonar/openai-compatibility",
+    note: "联网搜索增强模型;Sonar 系列 OpenAI 兼容。",
+  }),
+  verified({
+    id: "novita", label: "Novita AI", baseUrl: "https://api.novita.ai/v3/openai",
+    models: ["deepseek/deepseek-r1", "meta-llama/llama-3.1-70b-instruct"], needsKey: true,
+    region: "全球", subscription: "托管推理", serviceClass: "managed_inference", officialDocs: "https://novita.ai/docs/guides/llm-api",
+  }),
+  verified({
+    id: "hyperbolic", label: "Hyperbolic", baseUrl: "https://api.hyperbolic.xyz/v1",
+    models: ["deepseek-ai/DeepSeek-V3", "meta-llama/Meta-Llama-3.1-8B-Instruct"], needsKey: true,
+    region: "全球", subscription: "托管推理", serviceClass: "managed_inference", officialDocs: "https://docs.hyperbolic.xyz/docs/inference-api",
+  }),
+  verified({
+    id: "nebius", label: "Nebius AI Studio", baseUrl: "https://api.studio.nebius.com/v1",
+    models: ["meta-llama/Meta-Llama-3.3-70B-Instruct", "Qwen/Qwen3-235B-A22B"], needsKey: true,
+    region: "欧洲", subscription: "托管推理", serviceClass: "managed_inference", officialDocs: "https://docs.studio.nebius.com/quickstart",
+  }),
 ];
 
+// Local self-hosted: include only Ollama as the representative. Other local runtimes, such as LM Studio, vLLM, and llama.cpp
+// / LocalAI, and others) use the same OpenAI-compatible interface and local address. Select Custom configuration and Local model.
+// Connect without defining each preset.
 const SELF_HOSTED_PRESETS: ProviderPreset[] = [
   verified({
     id: "ollama", label: "本地 Ollama", baseUrl: "http://127.0.0.1:11434/v1", models: ["llama3.3", "qwen2.5", "deepseek-r1"],
     needsKey: false, local: true, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://docs.ollama.com/api/openai-compatibility",
-  }),
-  verified({
-    id: "lm_studio", label: "本地 LM Studio", baseUrl: "http://127.0.0.1:1234/v1", models: ["openai/gpt-oss-20b"],
-    needsKey: false, local: true, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://lmstudio.ai/docs/developer/openai-compat",
-  }),
-  verified({
-    id: "localai", label: "本地 LocalAI", baseUrl: "http://127.0.0.1:8080/v1", models: ["phi-2"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://localai.io/docs/overview/index.html",
-    modelDocs: "https://localai.io/docs/getting-started/customize-model/index.html",
-  }),
-  verified({
-    id: "llama_cpp", label: "本地 llama.cpp", baseUrl: "http://127.0.0.1:8080/v1", models: ["ggml-org/gemma-3-1b-it-GGUF"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md",
-  }),
-  verified({
-    id: "vllm", label: "本地 vLLM", baseUrl: "http://127.0.0.1:8000/v1", models: ["NousResearch/Meta-Llama-3-8B-Instruct"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://docs.vllm.ai/en/latest/serving/online_serving/openai_compatible_server/",
-  }),
-  verified({
-    id: "sglang", label: "本地 SGLang", baseUrl: "http://127.0.0.1:30000/v1", models: ["Qwen/Qwen3-4B"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://docs.sglang.ai/basic_usage/openai_api_completions.html",
-  }),
-  verified({
-    id: "jan", label: "本地 Jan", baseUrl: "http://127.0.0.1:1337/v1", models: ["jan-v3-4b-base-instruct"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://www.jan.ai/docs/desktop/api-server",
-    note: "Jan 如配置了本地 API Key，请改用自定义供应商以保存该 Key。",
-  }),
-  verified({
-    id: "gpt4all", label: "本地 GPT4All", baseUrl: "http://127.0.0.1:4891/v1", models: ["Phi-3 Mini Instruct"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://docs.gpt4all.io/gpt4all_api_server/home.html",
-  }),
-  verified({
-    id: "mlx_lm", label: "本地 MLX LM", baseUrl: "http://127.0.0.1:8080/v1", models: ["mlx-community/Mistral-7B-Instruct-v0.3-4bit"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/SERVER.md",
-  }),
-  verified({
-    id: "llama_cpp_python", label: "本地 llama-cpp-python", baseUrl: "http://127.0.0.1:8000/v1", models: ["llama-2-7b-chat"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://llama-cpp-python.readthedocs.io/en/latest/server/",
-  }),
-  verified({
-    id: "tgi", label: "本地 Hugging Face TGI", baseUrl: "http://127.0.0.1:3000/v1", models: ["tgi"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://huggingface.co/docs/text-generation-inference/en/reference/api_reference",
-  }),
-  verified({
-    id: "tabbyapi", label: "本地 TabbyAPI", baseUrl: "http://127.0.0.1:5000/v1", models: ["model"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://github.com/theroyallab/tabbyAPI",
-  }),
-  verified({
-    id: "koboldcpp", label: "本地 KoboldCpp", baseUrl: "http://127.0.0.1:5001/v1", models: ["local"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://github.com/LostRuins/koboldcpp",
-  }),
-  verified({
-    id: "aphrodite", label: "本地 Aphrodite Engine", baseUrl: "http://127.0.0.1:2242/v1", models: ["meta-llama/Meta-Llama-3.1-8B-Instruct"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://aphrodite.pygmalion.chat/usage/1-getting-started/",
-  }),
-  verified({
-    id: "nvidia_nim_local", label: "本地 NVIDIA NIM", baseUrl: "http://127.0.0.1:8000/v1", models: ["meta/llama-3.1-8b-instruct"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://docs.nvidia.com/nim/large-language-models/latest/reference/api-reference.html",
-  }),
-  verified({
-    id: "docker_model_runner", label: "本地 Docker Model Runner", baseUrl: "http://127.0.0.1:12434/engines/v1", models: ["ai/qwen2.5-coder", "ai/smollm2"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://docs.docker.com/ai/model-runner/api-reference/",
-  }),
-  verified({
-    id: "text_generation_webui", label: "本地 text-generation-webui", baseUrl: "http://127.0.0.1:5000/v1", models: ["gpt-3.5-turbo"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://github.com/oobabooga/text-generation-webui/wiki/12-%E2%80%90-OpenAI-API",
   }),
 ];
 

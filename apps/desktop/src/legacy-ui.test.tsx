@@ -449,7 +449,7 @@ describe("model selection and provider model management", () => {
     await user.click(screen.getByRole("button", { name: "刷新模型" }));
     expect(await screen.findByText("下架：old-model（仍保留引用）")).toBeInTheDocument();
     expect(screen.getByText("新增：new-model")).toBeInTheDocument();
-    expect(screen.getByText("已下架")).toBeInTheDocument();
+    expect(screen.getByText(/已下架/)).toBeInTheDocument();
   });
 
   it("展示 Provider 八层耗时、最近测试时间和绿色健康徽章", async () => {

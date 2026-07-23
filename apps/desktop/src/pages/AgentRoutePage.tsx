@@ -21,6 +21,7 @@ import {
 import TierRouteEditor from "../components/TierRouteEditor";
 import AgentDriftPanel from "../components/AgentDriftPanel";
 import InstallationPicker from "../components/InstallationPicker";
+import { AgentIcon } from "../brandIcons";
 
 interface AgentRoutePageProps {
   metadata: AgentUiMetadataView;
@@ -32,14 +33,6 @@ interface AgentRoutePageProps {
   onStateChange: (state: StateView, message?: string) => void;
   onRescan: () => void | Promise<void>;
 }
-
-const BINARY_SOURCE_LABELS: Record<AgentInstallationView["discovery"]["binary_source"], string> = {
-  homebrew: "Homebrew",
-  npm_global: "npm 全局",
-  path: "PATH",
-  known_path: "已知目录",
-  env_override: "环境变量",
-};
 
 /** Per-Agent key recording that connection changes were shown; localStorage makes it appear only once. */
 const diffShownKey = (agentId: string) => `ts:agent-connect-diff-shown:${agentId}`;
@@ -252,24 +245,16 @@ export default function AgentRoutePage({
     }
   };
 
-  const copyUpgradeCommand = async () => {
-    const command = installation?.discovery.upgrade_command;
-    if (!command) return;
-    try {
-      await navigator.clipboard.writeText(command);
-      setNotice("升级命令已复制；Token Station 不会自动执行");
-      setError("");
-    } catch (caught) {
-      setError(`复制升级命令失败：${errorText(caught)}`);
-    }
-  };
-
   return (
     <div className="page-stack agent-route-page">
       <header className="agent-route-hero panel">
         <div className="agent-identity">
           <span className="agent-large-mark" aria-hidden="true">
-            {metadata.nav_mark ?? metadata.display_name.slice(0, 1)}
+            <AgentIcon
+              id={metadata.agent_id}
+              fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)}
+              size={50}
+            />
           </span>
           <div>
             <span className="eyebrow">AGENT ROUTE</span>
@@ -296,6 +281,38 @@ export default function AgentRoutePage({
           </button>
         </div>
       </header>
+
+      {pendingPlan && (() => {
+        const changes = pendingPlan.changes ?? [];
+        return (
+          <section className="projection-inline" aria-label="配置改动确认">
+            <div className="projection-inline-head">
+              <span className="eyebrow">
+                即将写入 · {pendingPlan.intent === "connect" ? "接入" : "恢复"}
+                <code>{pendingPlan.target_config_path}</code>
+              </span>
+              <div className="projection-inline-actions">
+                <button className="btn tiny" type="button" disabled={busy} onClick={() => setPendingPlan(null)}>取消</button>
+                <button className="btn tiny primary" type="button" disabled={busy} onClick={() => void confirmProjection()}>
+                  {busy ? "应用中…" : "确认写入"}
+                </button>
+              </div>
+            </div>
+            {changes.length ? (
+              <ul className="projection-inline-list">
+                {changes.map((change, index) => (
+                  <li key={index}>
+                    <code>{change.path.segments.join(".")}</code>
+                    <span>{change.summary}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="projection-inline-empty">没有字段变化，确认后仅更新时间戳。</p>
+            )}
+          </section>
+        );
+      })()}
 
       {connectDiff && (() => {
         const changes = connectDiff.changes ?? [];
@@ -328,69 +345,11 @@ export default function AgentRoutePage({
         );
       })()}
 
-      {installation && (
-        <section className="agent-installation-facts panel" aria-label="当前 Agent 安装诊断">
-          <div className="agent-installation-facts-head">
-            <div>
-              <span className="eyebrow">INSTALLATION</span>
-              <strong>{installation.discovery.is_path_default ? "当前 PATH 生效安装" : "已选择精确安装"}</strong>
-            </div>
-            <span>{BINARY_SOURCE_LABELS[installation.discovery.binary_source]}</span>
-          </div>
-          <code className="agent-installation-path">{installation.discovery.canonical_path}</code>
-          <div className="agent-installation-metadata">
-            <span>{installation.discovery.environment.toUpperCase()}</span>
-            <span>{installation.discovery.modified_at_ms == null
-              ? "修改时间未知"
-              : `修改于 ${new Date(installation.discovery.modified_at_ms).toLocaleString()}`}</span>
-            <span>{installation.discovery.binary_sha256
-              ? `SHA-256 ${installation.discovery.binary_sha256}`
-              : "SHA-256 不可读"}</span>
-          </div>
-          {installation.discovery.upgrade_command && (
-            <div className="agent-upgrade-command">
-              <code>{installation.discovery.upgrade_command}</code>
-              <button className="btn tiny" type="button" disabled={busy} onClick={() => void copyUpgradeCommand()}>
-                复制升级命令
-              </button>
-            </div>
-          )}
-        </section>
-      )}
-
       {installation && <AgentDriftPanel views={drift} loading={driftLoading} error={driftError} />}
 
       {!serveRunning && !connected && <div className="inline-note">请先启动代理，再接入 Agent。路由仍可先行配置。</div>}
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner err">{error}</div>}
-
-      {pendingPlan && (
-        <div className="projection-dialog-backdrop">
-          <section
-            className="panel projection-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-label="配置投影预览"
-          >
-            <span className="eyebrow">CONNECTOR PROJECTION</span>
-            <h2>配置投影预览</h2>
-            <p>仅下列受管字段会变化；敏感值不会显示或进入前端计划。</p>
-            <code className="agent-installation-path">{pendingPlan.target_config_path}</code>
-            {(pendingPlan.related_config_paths ?? []).map((path) => (
-              <code className="agent-installation-path" key={path}>{path}</code>
-            ))}
-            <pre className="projection-diff">{pendingPlan.human_diff || "没有字段变化"}</pre>
-            <div className="projection-dialog-actions">
-              <button className="btn" type="button" disabled={busy} onClick={() => setPendingPlan(null)}>
-                取消
-              </button>
-              <button className="btn primary" type="button" disabled={busy} onClick={() => void confirmProjection()}>
-                {busy ? "应用中…" : "确认并应用"}
-              </button>
-            </div>
-          </section>
-        </div>
-      )}
 
       <section className="panel route-panel">
         <div className="panel-head split-heading">

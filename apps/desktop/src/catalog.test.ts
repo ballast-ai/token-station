@@ -4,8 +4,9 @@ import { AGGREGATOR_CANDIDATES, PROVIDER_CATALOG } from "./catalog";
 const byId = new Map(PROVIDER_CATALOG.map((preset) => [preset.id, preset]));
 
 describe("provider catalog", () => {
-  it("ships at least fifty verified non-aggregator defaults", () => {
-    expect(PROVIDER_CATALOG.length).toBeGreaterThanOrEqual(50);
+  it("ships a broad set of verified non-aggregator defaults", () => {
+    // Keep Ollama as the sole local self-hosted representative; connect others through custom config.
+    expect(PROVIDER_CATALOG.length).toBeGreaterThanOrEqual(40);
     expect(PROVIDER_CATALOG.every((preset) => preset.serviceClass !== "aggregator")).toBe(true);
     expect(AGGREGATOR_CANDIDATES.length).toBeGreaterThan(0);
     expect(AGGREGATOR_CANDIDATES.every((preset) => preset.serviceClass === "aggregator")).toBe(true);

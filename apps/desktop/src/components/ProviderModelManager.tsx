@@ -146,6 +146,16 @@ export default function ProviderModelManager({
     const byModel = new Map((provider.model_capabilities ?? []).map((item) => [item.model, item]));
     return provider.models.map((model) => byModel.get(model) ?? unknownCapabilities(model));
   }, [provider.model_capabilities, provider.models]);
+  // Merge catalog status and capabilities into one row per model to avoid duplicate tables.
+  const modelRows = useMemo(() => {
+    const catalogByModel = new Map(catalog.map((entry) => [entry.model, entry]));
+    const capByModel = new Map(capabilities.map((cap) => [cap.model, cap]));
+    return mergeModels(catalog.map((c) => c.model), capabilities.map((c) => c.model)).map((model) => ({
+      model,
+      catalog: catalogByModel.get(model) ?? null,
+      cap: capByModel.get(model) ?? unknownCapabilities(model),
+    }));
+  }, [catalog, capabilities]);
   const operationDisabled = disabled || refreshing || saving || testing || editing;
 
   useEffect(() => {
@@ -281,34 +291,31 @@ export default function ProviderModelManager({
           {diff.removed.length > 0 && <span className="removed">下架：{diff.removed.join("、")}（仍保留引用）</span>}
         </div>
       )}
-      {catalog.length > 0 && (
-        <div className="catalog-ledger" aria-label="可信模型目录">
-          {catalog.map((model) => (
-            <div className={`catalog-ledger-row ${model.catalog_state}`} key={model.model}>
-              <code>{model.model}</code>
-              <span>{catalogStateLabel[model.catalog_state]}</span>
-              <span>{catalogSourceLabel[model.source]}</span>
-              <span>{model.last_seen_ms ? `最后见到 ${new Date(model.last_seen_ms).toLocaleString()}` : "尚无实时记录"}</span>
+      {modelRows.length > 0 && (
+        <div className="model-ledger" aria-label="模型目录与能力">
+          {modelRows.map((row) => (
+            <div className={`model-ledger-row ${row.catalog?.catalog_state ?? ""}`} key={row.model}>
+              <code>{row.model}</code>
+              <div className="model-ledger-tags">
+                {row.catalog && (
+                  <span className="model-ledger-state">
+                    {catalogStateLabel[row.catalog.catalog_state]} · {catalogSourceLabel[row.catalog.source]}
+                  </span>
+                )}
+                {([
+                  ["工具", row.cap.tool],
+                  ["视觉", row.cap.vision],
+                  ["JSON", row.cap.json_schema],
+                ] as const).map(([label, state]) => (
+                  <span className={`capability-tag ${state}`} key={label}>
+                    {label} · {capabilityLabel[state]}
+                  </span>
+                ))}
+              </div>
             </div>
           ))}
         </div>
       )}
-      <div className="capability-table" aria-label="模型能力状态">
-        {capabilities.map((capability) => (
-          <div className="capability-row" key={capability.model}>
-            <code>{capability.model}</code>
-            {([
-              ["工具", capability.tool],
-              ["视觉", capability.vision],
-              ["JSON", capability.json_schema],
-            ] as const).map(([label, state]) => (
-              <span className={`capability-tag ${state}`} key={label}>
-                {label} · {capabilityLabel[state]}
-              </span>
-            ))}
-          </div>
-        ))}
-      </div>
       <ModelPicker
         models={models}
         selected={selected}

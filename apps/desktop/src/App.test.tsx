@@ -353,8 +353,8 @@ describe("desktop station navigation", () => {
     await waitFor(() => expect(scans).toBe(2));
     await user.click(navigation().getByRole("button", { name: "Claude Code" }));
     await user.click(screen.getByRole("button", { name: "一键接入" }));
-    await user.click(within(await screen.findByRole("dialog", { name: "配置投影预览" }))
-      .getByRole("button", { name: "确认并应用" }));
+    await user.click(within(await screen.findByRole("region", { name: "配置改动确认" }))
+      .getByRole("button", { name: "确认写入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
       "apply_agent_plan",
       { operationId: "op-overlap", confirmationToken: "token-overlap" },
@@ -581,7 +581,6 @@ describe("desktop station navigation", () => {
     render(<App />);
     await waitFor(() => expect(scans).toBe(1));
     await user.click(navigation().getByRole("button", { name: "Claude Code" }));
-    expect(screen.getByText("/opt/claude")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /选择安装/ })).toBeNull();
     await user.click(await screen.findByRole("button", { name: "一键接入" }));
     expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
@@ -589,14 +588,14 @@ describe("desktop station navigation", () => {
       installationPath: "/opt/claude",
       expectedVersion: "9.9.9",
     });
-    const preview = await screen.findByRole("dialog", { name: "配置投影预览" });
-    expect(preview).toHaveTextContent("/env/ANTHROPIC_BASE_URL");
+    const preview = await screen.findByRole("region", { name: "配置改动确认" });
+    expect(preview).toHaveTextContent("env.ANTHROPIC_BASE_URL");
     expect(preview).toHaveTextContent("敏感值已隐藏");
     expect(preview).not.toHaveTextContent("local-virtual-key");
     expect(invokeMock).not.toHaveBeenCalledWith("apply_agent_plan", expect.anything());
-    await user.click(within(preview).getByRole("button", { name: "确认并应用" }));
+    await user.click(within(preview).getByRole("button", { name: "确认写入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", { operationId: "op-1", confirmationToken: "token-1" }));
-    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("region", { name: "配置改动确认" })).toBeNull();
     expect(await screen.findByText("Agent 已接入")).toBeInTheDocument();
     expect(scans).toBe(2);
   });
@@ -626,13 +625,13 @@ describe("desktop station navigation", () => {
       expectedVersion: "2.1.210",
     }));
     expect(invokeMock).not.toHaveBeenCalledWith("apply_agent_plan", expect.anything());
-    await user.click(within(await screen.findByRole("dialog", { name: "配置投影预览" }))
-      .getByRole("button", { name: "确认并应用" }));
+    await user.click(within(await screen.findByRole("region", { name: "配置改动确认" }))
+      .getByRole("button", { name: "确认写入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
       operationId: "op-admitted",
       confirmationToken: "token-admitted",
     }));
-    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("region", { name: "配置改动确认" })).toBeNull();
   });
 
   it("previews and confirms one-click restoration to the encrypted baseline", async () => {
@@ -650,6 +649,12 @@ describe("desktop station navigation", () => {
         return {
           ...projectionPlan("op-restore", "token-restore", "disconnect"),
           human_diff: "~ /env/ANTHROPIC_AUTH_TOKEN: <恢复受管敏感值，内容已隐藏>",
+          changes: [{
+            operation: "replace",
+            path: { segments: ["env", "ANTHROPIC_AUTH_TOKEN"] },
+            sensitive: true,
+            summary: "<恢复受管敏感值，内容已隐藏>",
+          }],
         };
       }
       if (command === "apply_agent_plan") return { operation_id: "op-restore", maintenance_warning: null };
@@ -664,9 +669,9 @@ describe("desktop station navigation", () => {
       agentId: "claude-code",
       installationPath: "/opt/claude",
     });
-    const preview = await screen.findByRole("dialog", { name: "配置投影预览" });
+    const preview = await screen.findByRole("region", { name: "配置改动确认" });
     expect(preview).toHaveTextContent("恢复受管敏感值，内容已隐藏");
-    await user.click(within(preview).getByRole("button", { name: "确认并应用" }));
+    await user.click(within(preview).getByRole("button", { name: "确认写入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
       operationId: "op-restore",
       confirmationToken: "token-restore",
@@ -722,7 +727,7 @@ describe("desktop station navigation", () => {
     expect(screen.queryByRole("button", { name: /覆盖|保留外部改动/ })).toBeNull();
   });
 
-  it("selects an exact installation and only copies its source-specific upgrade command", async () => {
+  it("selects an exact installation and plans against its path", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
@@ -757,10 +762,6 @@ describe("desktop station navigation", () => {
     await user.click(await screen.findByRole("button", { name: /选择安装/ }));
     await user.click(screen.getByRole("option", { name: "claude.exe · v10.0.0" }));
     expect(screen.queryByRole("listbox")).toBeNull();
-    expect(document.body).toHaveTextContent(secondInstallation.discovery.canonical_path);
-    expect(screen.getByText("npm install --global @anthropic-ai/claude-code@latest")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "复制升级命令" }));
-    expect(writeText).toHaveBeenCalledWith("npm install --global @anthropic-ai/claude-code@latest");
     await user.click(screen.getByRole("button", { name: "一键接入" }));
     expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
