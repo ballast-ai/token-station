@@ -58,6 +58,31 @@ const TIER_HIGH: &str = "tier_high";
 const TIER_MID: &str = "tier_mid";
 const TIER_LOW: &str = "tier_low";
 
+/// 每档一条「关键词覆盖」规则的稳定 id。用户在某档加的关键词落进对应规则的
+/// `keywords_any`——命中即走该档,压过复杂度分档(router-core 第 1 层最高优先级)。
+/// id 稳定,因为它同时是决策记录/审计里 `路由命中规则 ID` 的取值。
+const KW_RULE_HIGH: &str = "kw-high";
+const KW_RULE_MID: &str = "kw-mid";
+const KW_RULE_LOW: &str = "kw-low";
+
+/// UI 档位槽(high/mid/low)→(池名, 关键词规则 id)。规则顺序即优先级:
+/// 高→中→低,同一句话若同时命中两档的词,向上升档(更安全)。
+fn tier_pool_and_rule(slot: &str) -> Result<(&'static str, &'static str), String> {
+    match slot {
+        "high" => Ok((TIER_HIGH, KW_RULE_HIGH)),
+        "mid" => Ok((TIER_MID, KW_RULE_MID)),
+        "low" => Ok((TIER_LOW, KW_RULE_LOW)),
+        other => Err(format!("未知档位 `{other}`(应为 high/mid/low)")),
+    }
+}
+
+/// 从高到低的三档(UI 槽名, 池名, 关键词规则 id),写回 `router.rules` 时按此定序。
+const TIER_ORDER: [(&str, &str, &str); 3] = [
+    ("high", TIER_HIGH, KW_RULE_HIGH),
+    ("mid", TIER_MID, KW_RULE_MID),
+    ("low", TIER_LOW, KW_RULE_LOW),
+];
+
 /// 分档切点(启发式分数 → 档)。band 从高到低,`at_least` 严格递减,末档 0 兜底。
 /// 这些默认值将来由评测中心校准替换;现在给个能跑的合理值。
 const CUT_HIGH: u32 = 55;
@@ -340,6 +365,8 @@ struct ProviderView {
     catalog_revision: u64,
     catalog: Vec<model_catalog::CatalogModelView>,
     has_auth: bool,
+    /// This upstream runs on the local machine; `local_only` routing keeps to it.
+    local: bool,
 }
 
 #[derive(Serialize)]
@@ -436,6 +463,13 @@ struct StateView {
     tiers: std::collections::BTreeMap<String, TierView>,
     agent_routes: std::collections::BTreeMap<String, AgentRouteView>,
     profiles: Vec<String>,
+    /// 三档(high/mid/low)各自的用户关键词库。「用户在控制路由」的抓手,直接
+    /// 落进 `router.rules` 的 `keywords_any`。
+    keywords: std::collections::BTreeMap<String, Vec<String>>,
+    /// 「只走本地」:锁定路由只用标了 local 的供应商,请求不出本机。
+    local_only: bool,
+    /// `local_only` 下,本地无可用时是否许可退到云(默认关=严格本地)。
+    allow_cloud_fallback: bool,
     serve: ServeView,
     draft_revision: u64,
     saved_revision: u64,
@@ -693,6 +727,7 @@ impl AppInner {
                     catalog_revision,
                     catalog,
                     has_auth: up.get("auth").map(|a| !a.is_null()).unwrap_or(false),
+                    local: up.get("local").and_then(Value::as_bool).unwrap_or(false),
                 }
             })
             .collect()
@@ -720,6 +755,126 @@ impl AppInner {
         tiers.insert("mid".to_string(), self.tier(TIER_MID));
         tiers.insert("low".to_string(), self.tier(TIER_LOW));
         tiers
+    }
+
+    /// 某档的池是否已配置(有非空成员)。加关键词前必须成立,否则规则会指向空池。
+    fn pool_present(&self, pool: &str) -> bool {
+        self.draft["router"]["pools"][pool]
+            .as_array()
+            .is_some_and(|members| !members.is_empty())
+    }
+
+    /// 读某条关键词规则(按 id)当前的 `keywords_any`。
+    fn rule_keywords(&self, rule_id: &str) -> Vec<String> {
+        self.draft["router"]["rules"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|rule| rule["id"].as_str() == Some(rule_id))
+            .and_then(|rule| rule["when"]["keywords_any"].as_array())
+            .map(|words| {
+                words
+                    .iter()
+                    .filter_map(|w| w.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 三档(high/mid/low)各自的关键词库,给前端展示。
+    fn home_keywords(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        TIER_ORDER
+            .iter()
+            .map(|(slot, _pool, rule_id)| ((*slot).to_string(), self.rule_keywords(rule_id)))
+            .collect()
+    }
+
+    /// 当前三档的关键词映射(槽名 → 词表),作为写回前的快照来源。
+    fn keyword_map(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        self.home_keywords()
+    }
+
+    /// 用给定的三档关键词映射,重写 `router.rules`。规则顺序=优先级(高→中→低),
+    /// 只为「有关键词且池已配置」的档发规则;非关键词规则(操作员手写的其它规则)
+    /// 原样保留在后面。空词表或未配置的档不发规则,避免指向不存在的池。
+    fn apply_keyword_map(&mut self, map: &std::collections::BTreeMap<String, Vec<String>>) {
+        let mut rules: Vec<Value> = Vec::new();
+        for (slot, pool, rule_id) in TIER_ORDER {
+            let words = map.get(slot).cloned().unwrap_or_default();
+            if words.is_empty() || !self.pool_present(pool) {
+                continue;
+            }
+            rules.push(json!({
+                "id": rule_id,
+                "when": { "keywords_any": words },
+                "route_to": pool,
+            }));
+        }
+        // 保留任何非本模块管理的既有规则(id 不在三档之列),接在后面。
+        let managed = [KW_RULE_HIGH, KW_RULE_MID, KW_RULE_LOW];
+        if let Some(existing) = self.draft["router"]["rules"].as_array() {
+            for rule in existing {
+                let is_managed = rule["id"].as_str().is_some_and(|id| managed.contains(&id));
+                if !is_managed {
+                    rules.push(rule.clone());
+                }
+            }
+        }
+        self.draft["router"]["rules"] = Value::Array(rules);
+    }
+
+    /// 关键词归一:去首尾空白。用于去重(大小写不敏感,与内核 `keywords_any`
+    /// 的匹配一致)与存储(保留用户原样大小写用于展示)。
+    fn add_tier_keyword(&mut self, slot: &str, keyword: &str) -> Result<(), String> {
+        let (pool, _rule_id) = tier_pool_and_rule(slot)?;
+        if !self.pool_present(pool) {
+            return Err("请先为该档配置供应商和模型,再添加关键词".to_string());
+        }
+        let word = keyword.trim();
+        if word.is_empty() {
+            return Err("关键词不能为空".to_string());
+        }
+        if word.chars().count() > 64 {
+            return Err("单个关键词过长(最多 64 字)".to_string());
+        }
+        let mut map = self.keyword_map();
+        let list = map.entry(slot.to_string()).or_default();
+        if list
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(word))
+        {
+            return Err(format!("关键词「{word}」已在该档"));
+        }
+        if list.len() >= 100 {
+            return Err("单档关键词过多(最多 100 个)".to_string());
+        }
+        list.push(word.to_string());
+        self.apply_keyword_map(&map);
+        Ok(())
+    }
+
+    fn remove_tier_keyword(&mut self, slot: &str, keyword: &str) -> Result<(), String> {
+        tier_pool_and_rule(slot)?;
+        let mut map = self.keyword_map();
+        if let Some(list) = map.get_mut(slot) {
+            list.retain(|existing| !existing.eq_ignore_ascii_case(keyword.trim()));
+        }
+        self.apply_keyword_map(&map);
+        Ok(())
+    }
+
+    /// 清空某池时同步删掉它的关键词规则(否则规则 `route_to` 会指向空池,保存失败)。
+    fn drop_keyword_rule_for_pool(&mut self, pool: &str) {
+        let Some(rule_id) = TIER_ORDER
+            .iter()
+            .find(|(_, p, _)| *p == pool)
+            .map(|(_, _, id)| *id)
+        else {
+            return;
+        };
+        if let Some(rules) = self.draft["router"]["rules"].as_array_mut() {
+            rules.retain(|rule| rule["id"].as_str() != Some(rule_id));
+        }
     }
 
     fn agent_route_mode(&self, agent_id: &str) -> &str {
@@ -964,6 +1119,13 @@ impl AppInner {
             tiers: self.home_tiers(),
             agent_routes: self.agent_routes_view(),
             profiles: self.profile_names(),
+            keywords: self.home_keywords(),
+            local_only: self.draft["router"]["local_only"]
+                .as_bool()
+                .unwrap_or(false),
+            allow_cloud_fallback: self.draft["router"]["allow_cloud_fallback"]
+                .as_bool()
+                .unwrap_or(false),
             serve: self.serve_view(),
             draft_revision: self.config_state.draft_revision(),
             saved_revision: self.config_state.saved_revision(),
@@ -1057,6 +1219,8 @@ impl AppInner {
                 if let Some(pools) = self.draft["router"]["pools"].as_object_mut() {
                     pools.remove(pool);
                 }
+                // 池没了,它的关键词规则会指向空池,保存必失败——同步删掉。
+                self.drop_keyword_rule_for_pool(pool);
             }
             _ => return Err("档位必须同时提供供应商和模型，或同时清空".to_string()),
         }
@@ -1285,6 +1449,7 @@ fn add_provider(
     base_url: String,
     models: Vec<String>,
     api_key: Option<String>,
+    local: bool,
 ) -> Result<StateView, String> {
     if name.trim().is_empty() {
         return Err("供应商名不能为空".into());
@@ -1334,6 +1499,11 @@ fn add_provider(
         "base_url": base_url,
         "models": model_objs,
     });
+    // 只在标了本地时写 local 键,让普通云供应商的配置保持原样(与 serde 的
+    // skip_serializing_if 对齐)。local_only 路由据此把流量锁在本机。
+    if local {
+        up["local"] = json!(true);
+    }
     // 有 key → keychain,auth 指向 slot;没 key(如本地 Ollama)→ 省略 auth。
     let api_key = api_key
         .as_deref()
@@ -1365,6 +1535,32 @@ fn add_provider(
                 )),
             };
         }
+    }
+    Ok(inner.snapshot())
+}
+
+/// 设置「只走本地」及其云兜底许可。写进 home `router`,agent inherit 自动跟随。
+/// 关掉时把两个键一并移除,让普通配置保持原样(与 serde default=false 对齐)。
+#[tauri::command]
+fn set_local_routing(
+    state: State<'_, AppStateManaged>,
+    local_only: bool,
+    allow_cloud_fallback: bool,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let previous = inner.draft["router"].clone();
+    if local_only {
+        inner.draft["router"]["local_only"] = json!(true);
+        inner.draft["router"]["allow_cloud_fallback"] = json!(allow_cloud_fallback);
+    } else if let Some(router) = inner.draft["router"].as_object_mut() {
+        // 「只走本地」关掉后,云许可无意义,一并清除,避免残留误导。
+        router.remove("local_only");
+        router.remove("allow_cloud_fallback");
+    }
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["router"] = previous;
+        return Err(error);
     }
     Ok(inner.snapshot())
 }
@@ -1827,6 +2023,32 @@ fn set_tier(
 
     inner.set_tier_value(pool, upstream, model)?;
     inner.observe_draft()?;
+    Ok(inner.snapshot())
+}
+
+/// 往某档(high/mid/low)的关键词库加一个词。命中即强制走该档(router-core 第 1 层)。
+#[tauri::command]
+fn add_keyword(
+    state: State<'_, AppStateManaged>,
+    slot: String,
+    keyword: String,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.add_tier_keyword(&slot, &keyword)?;
+    Ok(inner.snapshot())
+}
+
+/// 从某档关键词库删除一个词。
+#[tauri::command]
+fn remove_keyword(
+    state: State<'_, AppStateManaged>,
+    slot: String,
+    keyword: String,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.remove_tier_keyword(&slot, &keyword)?;
     Ok(inner.snapshot())
 }
 
@@ -2890,7 +3112,9 @@ pub fn run() {
                 saved,
                 load_error,
             );
-            if inner.load_error.is_none() && seed_builtin_pricing(&mut inner.draft).map_err(std::io::Error::other)? {
+            if inner.load_error.is_none()
+                && seed_builtin_pricing(&mut inner.draft).map_err(std::io::Error::other)?
+            {
                 inner.observe_draft().map_err(std::io::Error::other)?;
                 inner.save_draft().map_err(std::io::Error::other)?;
             }
@@ -2919,6 +3143,7 @@ pub fn run() {
             get_runtime_state,
             preview_provider_endpoints,
             add_provider,
+            set_local_routing,
             edit_provider,
             discover_provider_models,
             test_provider,
@@ -2927,6 +3152,8 @@ pub fn run() {
             remove_provider,
             restore_provider,
             set_tier,
+            add_keyword,
+            remove_keyword,
             set_agent_route_mode,
             set_agent_tier,
             save_home_route_as_profile,
@@ -3613,6 +3840,103 @@ mod tests {
     }
 
     #[test]
+    fn tier_keywords_write_valid_rules_dedupe_and_require_a_configured_pool() {
+        let root = scratch_home("tier-keywords");
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "m"}]
+        });
+
+        // 未配置的档不能加词(否则规则会指向空池,保存失败)。
+        let error = inner
+            .add_tier_keyword("low", "提交git")
+            .expect_err("adding to an unconfigured tier is refused");
+        assert!(error.contains("先"), "{error}");
+
+        inner
+            .set_tier_value(TIER_LOW, Some("provider".into()), Some("m".into()))
+            .unwrap();
+
+        inner.add_tier_keyword("low", "提交git").unwrap();
+        // 大小写不敏感去重。
+        let dup = inner
+            .add_tier_keyword("low", "提交GIT")
+            .expect_err("case-insensitive duplicate is refused");
+        assert!(dup.contains("已在"), "{dup}");
+
+        // 词进了 low 档的规则,指向 tier_low,且整份配置能通过内核校验。
+        let keywords = inner.home_keywords();
+        assert_eq!(keywords["low"], vec!["提交git".to_string()]);
+        let config = inner
+            .materialize()
+            .expect("keyword rule keeps config valid");
+        let rule = config
+            .router
+            .rules
+            .iter()
+            .find(|rule| rule.id == KW_RULE_LOW)
+            .expect("low keyword rule exists");
+        assert_eq!(rule.route_to, TIER_LOW);
+        assert_eq!(rule.matcher.keywords_any, vec!["提交git".to_string()]);
+
+        // 删词(大小写不敏感);词表空后规则整条移除,不留空 keywords_any。
+        inner.remove_tier_keyword("low", "提交GIT").unwrap();
+        assert!(inner.home_keywords()["low"].is_empty());
+        assert!(inner.materialize().unwrap().router.rules.is_empty());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn clearing_a_tier_drops_its_keyword_rule_so_the_config_stays_valid() {
+        let root = scratch_home("tier-keywords-clear");
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "m"}]
+        });
+        // 需要另一档兜底,否则清空唯一的档会让 pools 变空。
+        inner
+            .set_tier_value(TIER_HIGH, Some("provider".into()), Some("m".into()))
+            .unwrap();
+        inner
+            .set_tier_value(TIER_LOW, Some("provider".into()), Some("m".into()))
+            .unwrap();
+        inner.add_tier_keyword("low", "翻译").unwrap();
+        assert!(inner
+            .materialize()
+            .unwrap()
+            .router
+            .rules
+            .iter()
+            .any(|rule| rule.id == KW_RULE_LOW));
+
+        // 清空 low 档:其关键词规则必须同步消失,否则 route_to 指向空池、校验失败。
+        inner.set_tier_value(TIER_LOW, None, None).unwrap();
+        let config = inner
+            .materialize()
+            .expect("clearing a tier leaves a valid config, not a dangling rule");
+        assert!(config
+            .router
+            .rules
+            .iter()
+            .all(|rule| rule.id != KW_RULE_LOW));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn stored_discovery_credentials_cannot_be_redirected_to_another_base_url() {
         let root = scratch_home("model-discovery-url-binding");
         let mut draft = template_for_test(&root);
@@ -4262,6 +4586,7 @@ mod tests {
                 url.to_string(),
                 models.into_iter().map(str::to_string).collect(),
                 None,
+                name == "local",
             )
             .unwrap();
             let provider = view
@@ -4288,6 +4613,7 @@ mod tests {
             "http://127.0.0.1:9999/v1".to_owned(),
             vec!["replacement".to_owned()],
             None,
+            false,
         )
         .err()
         .expect("重复名称不能绕过 Provider 编辑流程");
@@ -4306,6 +4632,7 @@ mod tests {
             "http://127.0.0.1/v1".to_string(),
             vec!["m".to_string()],
             None,
+            false,
         )
         .err()
         .expect("blank provider is rejected")
@@ -4316,6 +4643,7 @@ mod tests {
             "http://127.0.0.1/v1".to_string(),
             vec![" ".to_string()],
             None,
+            false,
         )
         .err()
         .expect("blank model set is rejected")
@@ -4327,6 +4655,7 @@ mod tests {
             "https://api.minimaxi.com/v1".to_string(),
             vec!["MiniMax-M3".to_string()],
             None,
+            false,
         ) {
             Err(error) => error,
             Ok(_) => panic!("invalid upstream reference names must be rejected before mutation"),
@@ -4490,6 +4819,7 @@ mod tests {
             "http://127.0.0.1:11434/v1".to_owned(),
             vec!["replacement".to_owned()],
             None,
+            false,
         ) else {
             panic!("a tombstoned Provider name must be restored, never silently replaced")
         };
@@ -4564,7 +4894,8 @@ mod tests {
         use token_station_metrics::{CostKind, Recorder, RequestRecord};
 
         let root = scratch_home("model-price-editor");
-        let draft = gateway_template_for_test(&root);
+        let mut draft = gateway_template_for_test(&root);
+        draft["pricing"] = json!({ "version": 0, "models": {} });
         let data_dir = PathBuf::from(draft["data"]["dir"].as_str().unwrap());
         std::fs::create_dir_all(&data_dir).unwrap();
         let store = SqliteStore::open(&data_dir.join("metrics.sqlite")).unwrap();
@@ -4658,6 +4989,66 @@ mod tests {
         assert_eq!(table.version, 1);
         assert!(table.models.contains_key("deepseek-v4-pro"));
         assert!(!seed_builtin_pricing(&mut draft).unwrap());
+    }
+
+    #[test]
+    fn local_only_routing_flags_local_providers_and_toggles_the_switch() {
+        let root = scratch_home("local-only-routing");
+        let inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+        // 一个本地供应商(标 local)和一个云供应商。
+        add_provider(
+            app.state(),
+            "ollama".to_owned(),
+            "http://127.0.0.1:11434/v1".to_owned(),
+            vec!["llama3".to_owned()],
+            None,
+            true,
+        )
+        .unwrap();
+        let view = add_provider(
+            app.state(),
+            "openai".to_owned(),
+            "https://api.openai.com/v1".to_owned(),
+            vec!["gpt-5".to_owned()],
+            None,
+            false,
+        )
+        .unwrap();
+
+        let ollama = view.providers.iter().find(|p| p.name == "ollama").unwrap();
+        assert!(
+            ollama.local,
+            "the local provider is flagged for local_only routing"
+        );
+        let openai = view.providers.iter().find(|p| p.name == "openai").unwrap();
+        assert!(!openai.local, "an ordinary cloud provider is not flagged");
+        assert!(!view.local_only, "local_only is off until asked for");
+        assert!(!view.allow_cloud_fallback);
+
+        // 打开「只走本地」+ 云兜底许可。
+        let on = set_local_routing(app.state(), true, true).unwrap();
+        assert!(on.local_only);
+        assert!(on.allow_cloud_fallback);
+
+        // 关掉后两个键都被清除,配置回到与默认一致的干净状态。
+        let off = set_local_routing(app.state(), false, false).unwrap();
+        assert!(!off.local_only);
+        assert!(!off.allow_cloud_fallback);
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            assert!(inner.draft["router"].get("local_only").is_none());
+            assert!(inner.draft["router"].get("allow_cloud_fallback").is_none());
+        }
+
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

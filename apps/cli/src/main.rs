@@ -114,6 +114,10 @@ enum UpstreamCommand {
         /// Also append the models to this pool, so routing can reach them.
         #[arg(long)]
         pool: Option<String>,
+        /// This upstream runs on the local machine (a local Ollama / LM Studio).
+        /// A `local_only` route keeps traffic on upstreams flagged this way.
+        #[arg(long)]
+        local: bool,
     },
     /// Remove an upstream (refused while a pool still routes to it).
     Remove { name: String },
@@ -270,6 +274,7 @@ fn run(cli: Cli) -> Result<(), String> {
             auth,
             slot,
             pool,
+            local,
         }) => mutate(&cli.config, |config| {
             // Refuse an unresolvable dialect now, at the terminal where the
             // operator can act on it — not at the next `serve`.
@@ -291,6 +296,7 @@ fn run(cli: Cli) -> Result<(), String> {
                     auth: auth.as_deref(),
                     slot: &slot,
                     pool: pool.as_deref(),
+                    local,
                 },
             )
         }),
@@ -321,25 +327,7 @@ fn run(cli: Cli) -> Result<(), String> {
             print!("{}", manage::rule_list(&config));
             Ok(())
         }
-        Command::Stats(args) => {
-            let config = load(&cli.config)?;
-            let cutoff = stats::cutoff_from_since(&args.since, now_ms())?;
-            let group_by = args.by.map(stats::GroupBy::from);
-            let report = stats::collect_filtered(
-                &config.data.dir.join("metrics.sqlite"),
-                cutoff,
-                None,
-                group_by,
-                stats::StatsFilter {
-                    agent_id: args.agent.as_deref(),
-                    source: args.source.as_deref(),
-                    upstream: args.upstream.as_deref(),
-                    model: args.model.as_deref(),
-                },
-            )?;
-            print!("{}", stats::render(&report, group_by));
-            Ok(())
-        }
+        Command::Stats(args) => stats_command(&cli.config, &args),
         Command::Upgrade { yes, check_only } => upgrade_command(yes, check_only),
         Command::Backup { dest } => {
             let config = load(&cli.config)?;
@@ -357,6 +345,26 @@ fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+fn stats_command(config_path: &Path, args: &StatsArgs) -> Result<(), String> {
+    let config = load(config_path)?;
+    let cutoff = stats::cutoff_from_since(&args.since, now_ms())?;
+    let group_by = args.by.map(stats::GroupBy::from);
+    let report = stats::collect_filtered(
+        &config.data.dir.join("metrics.sqlite"),
+        cutoff,
+        None,
+        group_by,
+        stats::StatsFilter {
+            agent_id: args.agent.as_deref(),
+            source: args.source.as_deref(),
+            upstream: args.upstream.as_deref(),
+            model: args.model.as_deref(),
+        },
+    )?;
+    print!("{}", stats::render(&report, group_by));
+    Ok(())
 }
 
 fn plugin(command: PluginCommand, config_path: &Path) -> Result<(), String> {

@@ -51,6 +51,7 @@ impl PluginRuntime {
     pub fn new(limits: RuntimeLimits) -> wasmtime::Result<Self> {
         let mut config = Config::new();
         config.epoch_interruption(true);
+        config.wasm_component_model(true);
         let engine = Engine::new(&config)?;
 
         let ticker = TickerGuard::start(engine.clone());

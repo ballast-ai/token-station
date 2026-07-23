@@ -30,6 +30,9 @@ pub struct AddUpstream<'a> {
     pub slot: &'a str,
     /// Append the added models to this pool so routing can reach them.
     pub pool: Option<&'a str>,
+    /// This upstream runs on the local machine; a `local_only` route keeps
+    /// traffic on it.
+    pub local: bool,
 }
 
 /// Adds an upstream to the configuration; the caller saves.
@@ -102,6 +105,7 @@ pub fn upstream_add(config: &mut ClientConfig, spec: &AddUpstream) -> Result<Str
             provider: spec.provider.to_owned(),
             base_url,
             auth,
+            local: spec.local,
             models,
         },
     );
@@ -478,7 +482,31 @@ mod tests {
             auth: None,
             slot: "provider_api_key",
             pool: None,
+            local: false,
         }
+    }
+
+    #[test]
+    fn a_local_upstream_is_flagged_for_local_only_routing() {
+        let mut config = example();
+        let models = vec!["qwen3,tool".to_owned()];
+        let spec = AddUpstream {
+            local: true,
+            ..add_spec("lmstudio_local", &models)
+        };
+
+        upstream_add(&mut config, &spec).expect("adds a local upstream");
+        assert!(
+            config.upstreams["lmstudio_local"].local,
+            "the upstream is flagged local so local_only routing can keep to it"
+        );
+        // The flag survives a save/load round-trip like any other config field.
+        let path =
+            std::env::temp_dir().join(format!("ts-manage-local-{}.json", std::process::id()));
+        config.save(&path).expect("saves");
+        let reloaded = ClientConfig::load(&path).expect("reloads");
+        assert!(reloaded.upstreams["lmstudio_local"].local);
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

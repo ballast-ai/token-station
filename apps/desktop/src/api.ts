@@ -15,6 +15,8 @@ export interface ProviderView {
   catalog_revision?: number;
   catalog?: CatalogModelView[];
   has_auth: boolean;
+  /** 本机运行的供应商(如本地 Ollama);「只走本地」路由据此把流量锁在本机。 */
+  local?: boolean;
 }
 
 export type CapabilityState = "verified" | "declared" | "unsupported" | "unknown";
@@ -252,8 +254,14 @@ export interface StateView {
   deleted_providers?: string[];
   provider_recovery_error?: string | null;
   tiers: Record<TierSlot, TierView>;
+  /** 每档(弱/中/强)的用户关键词库;命中即强制走该档(路由第 1 层覆盖)。 */
+  keywords: Record<TierSlot, string[]>;
   agent_routes: Record<string, AgentRouteView>;
   profiles: string[];
+  /** 「只走本地」:锁定路由只用标了 local 的供应商,请求不出本机。 */
+  local_only: boolean;
+  /** `local_only` 下本地无可用时是否许可退到云(默认关=严格本地)。 */
+  allow_cloud_fallback: boolean;
   serve: ServeView;
   draft_revision: number;
   saved_revision: number;
@@ -599,7 +607,22 @@ export const addProvider = (
   base_url: string,
   models: string[],
   api_key: string | null,
-) => invoke<StateView>("add_provider", { name, baseUrl: base_url, models, apiKey: api_key });
+  local = false,
+) =>
+  invoke<StateView>("add_provider", {
+    name,
+    baseUrl: base_url,
+    models,
+    apiKey: api_key,
+    local,
+  });
+
+/** 设置「只走本地」及其云兜底许可(写进 home router,Agent inherit 自动跟随)。 */
+export const setLocalRouting = (localOnly: boolean, allowCloudFallback: boolean) =>
+  invoke<StateView>("set_local_routing", {
+    localOnly,
+    allowCloudFallback,
+  });
 
 export const editProvider = (name: string, base_url: string, api_key: string | null) =>
   invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });
@@ -635,6 +658,14 @@ export const setTier = (
   upstream: string | null,
   model: string | null,
 ) => invoke<StateView>("set_tier", { slot, upstream, model });
+
+/** 往某档(弱/中/强)关键词库加一个词;命中即强制走该档。 */
+export const addKeyword = (slot: TierSlot, keyword: string) =>
+  invoke<StateView>("add_keyword", { slot, keyword });
+
+/** 从某档关键词库删除一个词。 */
+export const removeKeyword = (slot: TierSlot, keyword: string) =>
+  invoke<StateView>("remove_keyword", { slot, keyword });
 
 export const setAgentRouteMode = (agentId: AgentId, mode: AgentRouteMode) =>
   invoke<StateView>("set_agent_route_mode", { agentId, mode });
