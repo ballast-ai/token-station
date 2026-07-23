@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   applyAgentPlan,
-  getAgentDrift,
+  forceForgetAgent,
   mountAgentProfile,
   planAgentConnection,
   planAgentDisconnect,
@@ -9,7 +9,6 @@ import {
   setAgentRouteMode,
   setAgentTier,
   type AgentInstallationView,
-  type AgentDriftView,
   type ConfigPlanView,
   type AgentRouteView,
   type AgentUiMetadataView,
@@ -19,7 +18,6 @@ import {
   type TierSlot,
 } from "../api";
 import TierRouteEditor from "../components/TierRouteEditor";
-import AgentDriftPanel from "../components/AgentDriftPanel";
 import InstallationPicker from "../components/InstallationPicker";
 import { AgentIcon } from "../brandIcons";
 
@@ -99,9 +97,6 @@ export default function AgentRoutePage({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
-  const [drift, setDrift] = useState<AgentDriftView[] | null>(null);
-  const [driftLoading, setDriftLoading] = useState(false);
-  const [driftError, setDriftError] = useState("");
   const [pendingPlan, setPendingPlan] = useState<ConfigPlanView | null>(null);
   // Show configuration changes after the first connection, then persist dismissal in localStorage.
   const [connectDiff, setConnectDiff] = useState<ConfigPlanView | null>(null);
@@ -117,33 +112,6 @@ export default function AgentRoutePage({
     [agent, selectedPath],
   );
 
-  useEffect(() => {
-    if (!installation) {
-      setDrift(null);
-      setDriftError("");
-      setDriftLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setDriftLoading(true);
-    setDriftError("");
-    void getAgentDrift(metadata.agent_id, installation.discovery.canonical_path)
-      .then((views) => {
-        if (!cancelled) setDrift(views);
-      })
-      .catch((caught) => {
-        if (!cancelled) {
-          setDrift(null);
-          setDriftError(errorText(caught));
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setDriftLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [installation, metadata.agent_id]);
   const status = statusCopy(agent, installation);
   const managed = installation?.managed ?? false;
   const canConnect = Boolean(
@@ -207,6 +175,27 @@ export default function AgentRoutePage({
       }
       setPendingPlan(null);
       setNotice(restored ? "已恢复接入前的 Agent 配置" : "Agent 已接入");
+      await onRescan();
+    } catch (caught) {
+      setError(errorText(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const forceForget = async () => {
+    if (!installation || busy) return;
+    if (!window.confirm(
+      "强制断开会移除 Token Station 注入的字段并清除接管记录,但无法精确还原被覆盖的原配置值。仅在正常「恢复原始配置」因密钥/快照不可用而失败时使用。确定继续?",
+    )) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      await forceForgetAgent(metadata.agent_id, installation.discovery.canonical_path);
+      setNotice("已强制断开:受管字段已移除,接管记录已清除。");
       await onRescan();
     } catch (caught) {
       setError(errorText(caught));
@@ -286,6 +275,17 @@ export default function AgentRoutePage({
           >
             {busy ? "处理中…" : managed ? "恢复 Agent 原始配置" : "一键接入"}
           </button>
+          {managed && (
+            <button
+              className="btn tiny agent-force-forget"
+              type="button"
+              disabled={busy}
+              onClick={() => void forceForget()}
+              title="正常「恢复原始配置」因密钥/快照不可用而失败时用:直接移除注入字段并清除接管记录(无法精确还原被覆盖的原值)。"
+            >
+              强制断开
+            </button>
+          )}
         </div>
       </header>
 
@@ -352,7 +352,6 @@ export default function AgentRoutePage({
         );
       })()}
 
-      {installation && <AgentDriftPanel views={drift} loading={driftLoading} error={driftError} />}
 
       {!serveRunning && !managed && <div className="inline-note">请先启动代理，再接入 Agent。路由仍可先行配置。</div>}
       {notice && <div className="banner ok">{notice}</div>}

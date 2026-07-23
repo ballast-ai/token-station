@@ -1315,6 +1315,7 @@ body {
   gap: 9px;
 }
 .agent-connect-box small { max-width: 150px; color: var(--muted); font-size: 10px; }
+.agent-force-forget { flex: 0 0 auto; color: var(--danger); white-space: nowrap; }
 .agent-primary-action {
   min-width: 92px;
   flex: 0 0 auto;
@@ -1434,7 +1435,10 @@ body {
 .agent-drift-head strong { display: block; margin-top: 2px; font-size: 12px; }
 .agent-drift-head > span { color: var(--muted); font-size: 9.5px; }
 .agent-drift-empty { color: var(--muted); font-size: 10.5px; }
-.agent-drift-record { display: grid; gap: 9px; padding-top: 10px; border-top: 1px solid var(--line); }
+.agent-drift-record { display: grid; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
+.agent-drift-record p { margin: 0; font-size: 12.5px; color: var(--ink); }
+.agent-drift-record.warn p:first-child { color: var(--warning); }
+.agent-drift-fields { font-size: 11px !important; color: var(--muted) !important; }
 .agent-drift-record-head code { overflow-wrap: anywhere; color: var(--ink); font-size: 10px; }
 .agent-drift-record-head span { color: var(--warning); font-size: 10px; font-weight: 700; }
 .agent-drift-record.in_sync .agent-drift-record-head span { color: var(--success); }

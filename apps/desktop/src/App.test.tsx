@@ -705,54 +705,6 @@ describe("desktop station navigation", () => {
     expect(await screen.findByText("已恢复接入前的 Agent 配置")).toBeInTheDocument();
   });
 
-  it("shows a read-only three-way drift ledger without configuration values", async () => {
-    const user = userEvent.setup();
-    invokeMock.mockImplementation(async (command, args) => {
-      if (command === "get_state") return stateFixture();
-      if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [scannedClaude];
-      if (command === "get_agent_drift") {
-        expect(args).toEqual({ agentId: "claude-code", installationPath: "/opt/claude" });
-        return [{
-          agent_id: "claude-code",
-          installation_path: "/opt/claude",
-          target_config_path: "/tmp/settings.json",
-          connector_id: "claude-code-v1",
-          status: "managed_changes",
-          baseline_hash: "a".repeat(64),
-          managed_hash: "b".repeat(64),
-          current_hash: "c".repeat(64),
-          checked_at_ms: 1_784_700_000_000,
-          changes: [{
-            path: { segments: ["env", "ANTHROPIC_BASE_URL"] },
-            scope: "managed",
-            kind: "changed",
-            current_matches_managed: false,
-          }],
-          truncated: false,
-          message: "外部修改触及 Token Station 受管字段",
-        }];
-      }
-      throw new Error(`unexpected IPC command: ${command}`);
-    });
-
-    render(<App />);
-    const nav = within(await screen.findByLabelText("主导航"));
-    await user.click(nav.getByRole("button", { name: "Claude Code" }));
-
-    const panel = await screen.findByLabelText("配置漂移对账");
-    expect(within(panel).getByText("接管前")).toBeInTheDocument();
-    expect(within(panel).getByText("最后写入")).toBeInTheDocument();
-    expect(within(panel).getByText("当前磁盘")).toBeInTheDocument();
-    expect(within(panel).getByText("aaaaaaaaaaaa")).toBeInTheDocument();
-    expect(within(panel).getByText("bbbbbbbbbbbb")).toBeInTheDocument();
-    expect(within(panel).getByText("cccccccccccc")).toBeInTheDocument();
-    expect(within(panel).getByText("/env/ANTHROPIC_BASE_URL")).toBeInTheDocument();
-    expect(panel).not.toHaveTextContent("managed-secret");
-    expect(panel).not.toHaveTextContent("external-secret");
-    expect(screen.queryByRole("button", { name: /覆盖|保留外部改动/ })).toBeNull();
-  });
-
   it("selects an exact installation and plans against its path", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);

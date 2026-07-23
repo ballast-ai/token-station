@@ -771,6 +771,10 @@ export const applyAgentPlan = (
 export const planAgentDisconnect = (agentId: AgentId, installationPath: string) =>
   invoke<ConfigPlanView>("plan_agent_disconnect", { agentId, installationPath });
 
+/** Forced-disconnect fallback: if a lost key prevents snapshot decryption and recovery fails, remove managed fields and clear ownership. */
+export const forceForgetAgent = (agentId: AgentId, installationPath: string) =>
+  invoke<void>("force_forget_agent", { agentId, installationPath });
+
 export const listAgentSnapshots = (agentId: AgentId) =>
   invoke<SnapshotView[]>("list_agent_snapshots", { agentId });
 

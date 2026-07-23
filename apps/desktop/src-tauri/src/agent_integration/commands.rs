@@ -18,7 +18,7 @@ use tauri::{State, WebviewWindow};
 use zeroize::Zeroizing;
 
 use super::compatibility::{evaluate_discovery, CatalogSource, CompatibilityCatalog};
-use super::config_codec::parse_source_bytes;
+use super::config_codec::{apply_patch, parse_source_bytes, render_document, DocumentFormat};
 use super::connectors::{builtin_connectors, find_connector, ConnectInput, Connector};
 use super::discovery::DiscoveryScanner;
 use super::drift::analyze_drift;
@@ -29,7 +29,9 @@ use super::plan::{
     ConfigSource, PreparedChangePlan,
 };
 use super::registry::AgentRegistry;
-use super::snapshot::{FileSnapshotStore, MasterKeyStore, OsKeychainMasterKeyStore, SnapshotStore};
+use super::snapshot::{
+    FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, OsKeychainMasterKeyStore, SnapshotStore,
+};
 use super::transaction::{
     Clock, ConfirmedOperation, FsAtomicConfigWriter, ParseOnlyVerifier, RecoveryStatus,
     RuntimeAdmission, SystemClock, TransactionEngine, TransactionFailure, TransactionOutcome,
@@ -37,7 +39,7 @@ use super::transaction::{
 };
 use super::types::{
     AgentDriftView, AgentUiMetadata, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan,
-    DiscoveryRecord, DriftStatus, PlanIntent, ReasonCode, SnapshotRecord,
+    DiscoveryRecord, DriftStatus, PatchKind, PatchOperation, PlanIntent, ReasonCode, SnapshotRecord,
 };
 use crate::{inbound_adapter_ready, AgentIntegrationPaths, AppStateManaged};
 
@@ -383,9 +385,90 @@ impl Drop for ScanInFlightGuard<'_> {
     }
 }
 
+fn snapshot_master_key_path(paths: &AgentIntegrationPaths) -> PathBuf {
+    // Store beside snapshots under the agent-integration data root with private 0600 permissions.
+    paths
+        .snapshot_root
+        .parent()
+        .unwrap_or(paths.snapshot_root.as_path())
+        .join("snapshot-master.key")
+}
+
+/// Migrate the snapshot master key once from the OS keychain to a local file, only if the file does not exist. The keychain remains readable
+/// → copy unchanged so existing snapshots remain decryptable; invalid keychain → generate a new file key (old snapshots then
+/// cannot be decrypted, but the old key was already lost). Non-destructive: does not delete snapshots or ownership records.
+fn migrate_master_key_off_keychain(key_path: &Path) {
+    if key_path.exists() {
+        return;
+    }
+    let store = FileMasterKeyStore::new(key_path.to_path_buf());
+    if let Ok(existing) = OsKeychainMasterKeyStore.load() {
+        if let Some(dir) = key_path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if std::fs::write(key_path, existing.as_ref()).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    } else {
+        let _ = store.load_or_create(true);
+    }
+}
+
+/// Apply `removals` (a set of Remove operations) to the `target` configuration and write it atomically while preserving original permissions.
+/// Return success when the file does not exist. Used for force disconnect: remove only managed fields and preserve all other user content.
+fn force_strip_owned(
+    target: &Path,
+    format: DocumentFormat,
+    label: &str,
+    removals: &[PatchOperation],
+) -> Result<(), AgentCommandError> {
+    let source = read_config_source(target).map_err(AgentCommandError::internal)?;
+    if !source.existed {
+        return Ok(());
+    }
+    let mut document = parse_source_bytes(Some(source.exact_bytes.as_slice()), format, label)
+        .map_err(AgentCommandError::internal)?;
+    apply_patch(&mut document, removals).map_err(AgentCommandError::internal)?;
+    let rendered = render_document(&document, label).map_err(AgentCommandError::internal)?;
+    write_config_atomic(target, rendered.as_bytes(), source.original_permissions)
+        .map_err(AgentCommandError::internal)
+}
+
+/// Atomically rewrite a config through a sibling temporary file and rename, preserving permissions when possible.
+fn write_config_atomic(target: &Path, bytes: &[u8], permissions: Option<u32>) -> Result<(), String> {
+    let dir = target.parent().ok_or_else(|| "配置路径缺少父目录".to_string())?;
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "配置路径缺少文件名".to_string())?;
+    let tmp = dir.join(format!(".{file_name}.ts-force"));
+    std::fs::write(&tmp, bytes).map_err(|_| "写入临时配置失败".to_string())?;
+    #[cfg(unix)]
+    if let Some(mode) = permissions {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = permissions;
+    if let Err(error) = super::safe_fs::atomic_replace(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("原子替换配置失败：{error}"));
+    }
+    Ok(())
+}
+
 impl AgentCommandState {
     pub fn new(paths: AgentIntegrationPaths) -> Result<Self, String> {
-        Self::new_with_master_key(paths, Arc::new(OsKeychainMasterKeyStore))
+        // Store the snapshot master key in a private local file (0600) instead of the OS keychain. Development re-signing can
+        // Keychain entries become invalid and block recovery or disconnect. User reports show code=agent_operation_rejected.
+        // Snapshots are encrypted and back up configuration already stored as plaintext on disk. File key storage does not change security.
+        let key_path = snapshot_master_key_path(&paths);
+        migrate_master_key_off_keychain(&key_path);
+        Self::new_with_master_key(paths, Arc::new(FileMasterKeyStore::new(key_path)))
     }
 
     fn new_with_master_key(
@@ -752,6 +835,61 @@ impl AgentCommandState {
         attach_disconnect_companions(&mut prepared, connector, &ownership, &self.snapshots, &key)
             .map_err(AgentCommandError::internal)?;
         self.issue_plan(prepared, &record, session_label, None)
+    }
+
+    /// Force disconnect (fallback): does not depend on the keychain or baseline snapshot. Use ownership records to remove fields injected by Token Station
+    /// Remove managed fields from the current configuration, clear ownership records, and unpin the baseline snapshot. Use this when a snapshot key
+    /// is lost and snapshots cannot be decrypted, or normal “restore original configuration” is rejected. It cannot recover overwritten original values exactly.
+    fn force_forget(&self, agent_id: &str, installation_path: &str) -> Result<(), AgentCommandError> {
+        validate_short_identifier(agent_id, "agent_id")?;
+        let owned = self
+            .ownership
+            .list_agent_installation(agent_id, installation_path)
+            .map_err(AgentCommandError::internal)?;
+        if owned.is_empty() {
+            return Err(AgentCommandError::boundary(
+                "ownership_missing",
+                "该安装实例没有可清除的接管记录",
+            ));
+        }
+        for ownership in owned {
+            let connector = connector_for(&ownership.connector_id)?;
+            // Primary config: use the connector disconnect_patch, which uses the same Remove operations as normal disconnect.
+            force_strip_owned(
+                Path::new(&ownership.target_config_path),
+                connector.format(),
+                connector.label(),
+                &connector.disconnect_patch(),
+            )?;
+            // companion data, currently only claude-desktop JSON _meta: remove paths listed in owned_paths.
+            for companion in &ownership.companion_files {
+                let removals: Vec<PatchOperation> = companion
+                    .owned_paths
+                    .iter()
+                    .map(|owned_path| PatchOperation {
+                        operation: PatchKind::Remove,
+                        path: owned_path.clone(),
+                        value: None,
+                    })
+                    .collect();
+                force_strip_owned(
+                    Path::new(&companion.target_config_path),
+                    DocumentFormat::Json,
+                    "companion 配置",
+                    &removals,
+                )?;
+                let _ = self
+                    .snapshots
+                    .set_pinned(&companion.baseline_snapshot_id, false);
+            }
+            let _ = self
+                .snapshots
+                .set_pinned(&ownership.baseline_snapshot_id, false);
+            self.ownership
+                .remove(&ownership.key(), ownership.revision)
+                .map_err(AgentCommandError::internal)?;
+        }
+        Ok(())
     }
 
     fn list_snapshots(&self, agent_id: &str) -> Result<Vec<SnapshotView>, AgentCommandError> {
@@ -1513,6 +1651,17 @@ pub(crate) fn plan_agent_disconnect(
 ) -> Result<ConfigPlanView, AgentCommandError> {
     state.refresh_scan()?;
     state.plan_disconnect(&agent_id, &installation_path, window.label())
+}
+
+/// Force-disconnect fallback: remove managed fields and ownership when a lost key blocks normal snapshot restoration.
+#[tauri::command(async)]
+pub(crate) fn force_forget_agent(
+    state: State<'_, AgentCommandState>,
+    agent_id: String,
+    installation_path: String,
+) -> Result<(), AgentCommandError> {
+    state.refresh_scan()?;
+    state.force_forget(&agent_id, &installation_path)
 }
 
 #[tauri::command]
@@ -2450,6 +2599,95 @@ mod tests {
             state.session.lock().unwrap().plans.len(),
             MAX_PENDING_PLANS - 1
         );
+    }
+
+    #[test]
+    fn force_forget_strips_owned_fields_and_clears_ownership_without_keychain() {
+        let state = state("force-forget");
+        let root = scratch("force-forget-target");
+        let target = root.join("settings.json");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&target, br#"{"unowned":"keep"}"#).unwrap();
+        let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+        install_scan(&state, catalog, vec![record(&target, false)]);
+
+        // Establish management by writing managed fields, ownership records, and a snapshot.
+        let runtime = runtime("vk-force-forget");
+        let connection = state
+            .plan_connection("claude-code", "/opt/claude", Some("2.1.211"), "main", &runtime)
+            .unwrap();
+        let taken = state
+            .take_plan(
+                &connection.plan.operation_id,
+                &connection.confirmation_token,
+                "main",
+                &[PlanIntent::Connect],
+            )
+            .unwrap();
+        let now_ms = state.clock.now_ms();
+        let engine = TransactionEngine::new(
+            &state.snapshots,
+            &state.ownership,
+            state.keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &state.clock,
+        );
+        engine
+            .apply_connection(
+                &taken.prepared,
+                &ConfirmedOperation {
+                    operation_id: taken.prepared.view.operation_id.clone(),
+                    confirmed_at_ms: now_ms,
+                    confirmations: taken
+                        .prepared
+                        .view
+                        .required_confirmations
+                        .iter()
+                        .copied()
+                        .collect(),
+                },
+                &RuntimeAdmission {
+                    compatibility_sequence: 1,
+                    status: CompatibilityStatus::DetectedVerified,
+                },
+                now_ms,
+            )
+            .unwrap();
+
+        let after_connect = String::from_utf8(std::fs::read(&target).unwrap()).unwrap();
+        assert!(after_connect.contains("ANTHROPIC_BASE_URL"), "接管应写入受管字段");
+        assert_eq!(
+            state
+                .ownership
+                .list_agent_installation("claude-code", "/opt/claude")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // force_forget does not access the keychain; it removes managed fields only according to ownership.
+        state.force_forget("claude-code", "/opt/claude").unwrap();
+
+        let after_forget = String::from_utf8(std::fs::read(&target).unwrap()).unwrap();
+        assert!(!after_forget.contains("ANTHROPIC_BASE_URL"), "受管字段应被删除");
+        assert!(after_forget.contains("keep"), "用户自己的字段必须保留");
+        assert!(
+            state
+                .ownership
+                .list_agent_installation("claude-code", "/opt/claude")
+                .unwrap()
+                .is_empty(),
+            "归属记录应被清除"
+        );
+        assert!(
+            state.force_forget("claude-code", "/opt/claude").is_err(),
+            "已无归属时再次强制断开应报错"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&state.paths.snapshot_root).ok();
+        std::fs::remove_dir_all(&state.paths.ownership_root).ok();
     }
 
     #[test]
