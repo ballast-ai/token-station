@@ -210,6 +210,12 @@ struct StatsArgs {
     /// Keep only receipts from this inbound protocol source.
     #[arg(long)]
     source: Option<String>,
+    /// Keep only receipts routed to this upstream.
+    #[arg(long)]
+    upstream: Option<String>,
+    /// Keep only receipts served by this resolved model.
+    #[arg(long)]
+    model: Option<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -321,24 +327,7 @@ fn run(cli: Cli) -> Result<(), String> {
             print!("{}", manage::rule_list(&config));
             Ok(())
         }
-        Command::Stats(args) => {
-            let config = load(&cli.config)?;
-            let window = stats::parse_since(&args.since)?;
-            let cutoff = window.map(|window| now_ms().saturating_sub(window));
-            let group_by = args.by.map(stats::GroupBy::from);
-            let report = stats::collect_filtered(
-                &config.data.dir.join("metrics.sqlite"),
-                cutoff,
-                None,
-                group_by,
-                stats::StatsFilter {
-                    agent_id: args.agent.as_deref(),
-                    source: args.source.as_deref(),
-                },
-            )?;
-            print!("{}", stats::render(&report, group_by));
-            Ok(())
-        }
+        Command::Stats(args) => stats_command(&cli.config, &args),
         Command::Upgrade { yes, check_only } => upgrade_command(yes, check_only),
         Command::Backup { dest } => {
             let config = load(&cli.config)?;
@@ -356,6 +345,26 @@ fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+fn stats_command(config_path: &Path, args: &StatsArgs) -> Result<(), String> {
+    let config = load(config_path)?;
+    let cutoff = stats::cutoff_from_since(&args.since, now_ms())?;
+    let group_by = args.by.map(stats::GroupBy::from);
+    let report = stats::collect_filtered(
+        &config.data.dir.join("metrics.sqlite"),
+        cutoff,
+        None,
+        group_by,
+        stats::StatsFilter {
+            agent_id: args.agent.as_deref(),
+            source: args.source.as_deref(),
+            upstream: args.upstream.as_deref(),
+            model: args.model.as_deref(),
+        },
+    )?;
+    print!("{}", stats::render(&report, group_by));
+    Ok(())
 }
 
 fn plugin(command: PluginCommand, config_path: &Path) -> Result<(), String> {

@@ -29,7 +29,7 @@
 Gate A 不实现：
 
 - SSE 字节解析、`StreamOutcome` settle、错误分类和重试预算；
-- 能力四态、多模态拒绝和 Provider 生命周期；
+- 能力四态、多模态能力路由和 Provider 生命周期；
 - Profile、Agent 挂载板和 Request Receipt；
 - 实时配置文件监听；
 - 可由用户调整的 drain 时间；

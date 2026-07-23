@@ -163,11 +163,11 @@ fn map_transport_error(error: ureq::Error) -> ErrorEnvelope {
     }
 }
 
-fn language_only_refusal() -> ErrorEnvelope {
+fn unsupported_media_refusal() -> ErrorEnvelope {
     ErrorEnvelope::new(
         ErrorCode::Capability,
         400,
-        "this proxy routes language-model text and tool requests only; image, audio, and embeddings are unsupported",
+        "audio and embeddings are unsupported",
     )
 }
 
@@ -175,7 +175,7 @@ fn is_embeddings_path(path: &str) -> bool {
     path.trim_end_matches('/').ends_with("/embeddings")
 }
 
-fn contains_non_language_content(value: &Value) -> bool {
+fn contains_unsupported_media(value: &Value) -> bool {
     let Value::Object(object) = value else {
         return false;
     };
@@ -192,47 +192,37 @@ fn contains_non_language_content(value: &Value) -> bool {
     let message_media = object
         .get("messages")
         .and_then(Value::as_array)
-        .is_some_and(|messages| messages.iter().any(message_contains_non_language_content));
+        .is_some_and(|messages| messages.iter().any(message_contains_unsupported_media));
     let input_media = object
         .get("input")
-        .is_some_and(input_contains_non_language_content);
+        .is_some_and(input_contains_unsupported_media);
 
     output_media || message_media || input_media
 }
 
-fn message_contains_non_language_content(value: &Value) -> bool {
+fn message_contains_unsupported_media(value: &Value) -> bool {
     let Value::Object(message) = value else {
         return false;
     };
     message.contains_key("audio")
         || message
             .get("content")
-            .is_some_and(input_contains_non_language_content)
+            .is_some_and(input_contains_unsupported_media)
 }
 
-fn input_contains_non_language_content(value: &Value) -> bool {
+fn input_contains_unsupported_media(value: &Value) -> bool {
     match value {
-        Value::Array(items) => items.iter().any(input_contains_non_language_content),
+        Value::Array(items) => items.iter().any(input_contains_unsupported_media),
         Value::Object(item) => {
             let typed_media = item
                 .get("type")
                 .and_then(Value::as_str)
-                .is_some_and(|kind| {
-                    matches!(
-                        kind,
-                        "image_url"
-                            | "input_image"
-                            | "image"
-                            | "input_audio"
-                            | "audio"
-                            | "audio_url"
-                    )
-                });
+                .is_some_and(|kind| matches!(kind, "input_audio" | "audio" | "audio_url"));
             typed_media
                 || item.contains_key("audio")
                 || item
                     .get("content")
-                    .is_some_and(input_contains_non_language_content)
+                    .is_some_and(input_contains_unsupported_media)
         }
         _ => false,
     }
@@ -1713,12 +1703,12 @@ impl Gateway {
             }
         };
 
-        // The language-only product boundary belongs to the host, not an
-        // adapter. Reject embeddings before `match_inbound` so an old or
+        // Embeddings stay outside the synchronous generation protocols.
+        // Reject them before `match_inbound` so an old or
         // third-party adapter cannot claim the path and accidentally forward
         // it through the chat pipeline.
         if is_embeddings_path(path) {
-            let refusal = language_only_refusal();
+            let refusal = unsupported_media_refusal();
             let mut record = begin_record(started_at_ms, String::new(), agent_id, running_revision);
             record.status = refusal.http_status;
             record.error_code = Some(refusal.code);
@@ -1912,8 +1902,8 @@ impl Gateway {
                 return Err(error);
             }
         };
-        if contains_non_language_content(&body) {
-            let error = language_only_refusal();
+        if contains_unsupported_media(&body) {
+            let error = unsupported_media_refusal();
             record_conversion(
                 record,
                 ConversionStage::InboundNormalize,
@@ -2007,7 +1997,13 @@ impl Gateway {
         let decision = router
             .route(&request, &hints, &candidates)
             .map_err(|no_route| {
-                ErrorEnvelope::new(no_route.error_code(), 503, no_route.to_string())
+                let code = no_route.error_code();
+                let status = if code == ErrorCode::Capability {
+                    400
+                } else {
+                    503
+                };
+                ErrorEnvelope::new(code, status, no_route.to_string())
             })?;
         eprintln!(
             "route {} -> {} ({:?}), {} fallback(s)",
@@ -2147,11 +2143,9 @@ impl Gateway {
         // leaves cost unknown (None), never a claimed-free zero.
         if let Some(usage) = record.usage {
             if let Some((cost, version)) = self.pricing.price(model, &usage) {
-                if cost > 0 {
-                    record.cost_kind = CostKind::Estimated;
-                    record.cost_micros = Some(cost);
-                    record.price_version = Some(version);
-                }
+                record.cost_kind = CostKind::Estimated;
+                record.cost_micros = Some(cost);
+                record.price_version = Some(version);
             }
         }
         match outcome {
@@ -3447,26 +3441,26 @@ mod capability_evidence_tests {
 }
 
 #[cfg(test)]
-mod language_boundary_tests {
-    use super::{contains_non_language_content, is_embeddings_path};
+mod unsupported_media_tests {
+    use super::{contains_unsupported_media, is_embeddings_path};
     use serde_json::json;
 
     #[test]
-    fn only_the_canonical_embeddings_path_is_a_language_boundary() {
+    fn only_the_canonical_embeddings_path_is_rejected() {
         assert!(is_embeddings_path("/v1/embeddings"));
         assert!(is_embeddings_path("/v1/embeddings/"));
         assert!(!is_embeddings_path("/v1/not-embeddings"));
     }
 
     #[test]
-    fn protocol_content_and_top_level_output_modalities_are_rejected() {
-        assert!(contains_non_language_content(&json!({
+    fn audio_content_and_top_level_output_modalities_are_rejected() {
+        assert!(!contains_unsupported_media(&json!({
             "messages": [{"role": "user", "content": [{"type": "image_url"}]}]
         })));
-        assert!(contains_non_language_content(&json!({
+        assert!(contains_unsupported_media(&json!({
             "input": [{"type": "message", "content": [{"type": "input_audio"}]}]
         })));
-        assert!(contains_non_language_content(&json!({
+        assert!(contains_unsupported_media(&json!({
             "messages": [{"role": "user", "content": "hello"}],
             "modalities": ["text", "audio"]
         })));
@@ -3474,7 +3468,7 @@ mod language_boundary_tests {
 
     #[test]
     fn metadata_and_tool_schemas_do_not_trigger_the_media_boundary() {
-        assert!(!contains_non_language_content(&json!({
+        assert!(!contains_unsupported_media(&json!({
             "messages": [{"role": "user", "content": "hello"}],
             "metadata": {"type": "audio", "modalities": ["audio"]},
             "tools": [{

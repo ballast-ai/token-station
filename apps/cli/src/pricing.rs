@@ -67,8 +67,13 @@ impl ModelPrice {
             u128::from(tokens).saturating_mul(u128::from(rate)) / 1_000_000
         };
         let reasoning_rate = self.reasoning_per_mtok.unwrap_or(self.output_per_mtok);
-        let total = per(usage.input_tokens, self.input_per_mtok)
-            .saturating_add(per(usage.output_tokens, self.output_per_mtok))
+        let fresh_input = usage
+            .input_tokens
+            .saturating_sub(usage.cache_read_tokens)
+            .saturating_sub(usage.cache_write_tokens);
+        let fresh_output = usage.output_tokens.saturating_sub(usage.reasoning_tokens);
+        let total = per(fresh_input, self.input_per_mtok)
+            .saturating_add(per(fresh_output, self.output_per_mtok))
             .saturating_add(per(usage.cache_read_tokens, self.cache_read_per_mtok))
             .saturating_add(per(usage.cache_write_tokens, self.cache_write_per_mtok))
             .saturating_add(per(usage.reasoning_tokens, reasoning_rate));
@@ -89,12 +94,83 @@ pub struct PriceTable {
 }
 
 impl PriceTable {
+    /// Built-in public list prices for common models. Rates are micro-USD per
+    /// one million tokens and intentionally form a versioned estimate, not a
+    /// claim about a provider's final invoice.
+    #[must_use]
+    pub fn builtin() -> Self {
+        let price = |input, output, cache_read, cache_write| ModelPrice {
+            input_per_mtok: input,
+            output_per_mtok: output,
+            cache_read_per_mtok: cache_read,
+            cache_write_per_mtok: cache_write,
+            reasoning_per_mtok: None,
+        };
+        Self {
+            version: 1,
+            models: BTreeMap::from([
+                (
+                    "claude-opus-4-8".to_owned(),
+                    price(5_000_000, 25_000_000, 500_000, 6_250_000),
+                ),
+                (
+                    "claude-sonnet-4".to_owned(),
+                    price(3_000_000, 15_000_000, 300_000, 3_750_000),
+                ),
+                (
+                    "claude-sonnet-4-6".to_owned(),
+                    price(3_000_000, 15_000_000, 300_000, 3_750_000),
+                ),
+                (
+                    "deepseek-chat".to_owned(),
+                    price(270_000, 1_100_000, 28_000, 0),
+                ),
+                (
+                    "deepseek-reasoner".to_owned(),
+                    price(550_000, 2_190_000, 140_000, 0),
+                ),
+                (
+                    "deepseek-v4-flash".to_owned(),
+                    price(140_000, 280_000, 2_800, 0),
+                ),
+                (
+                    "deepseek-v4-pro".to_owned(),
+                    price(435_000, 870_000, 3_625, 0),
+                ),
+                ("glm-5".to_owned(), price(1_000_000, 3_200_000, 200_000, 0)),
+                (
+                    "gpt-5.5".to_owned(),
+                    price(5_000_000, 30_000_000, 500_000, 0),
+                ),
+                (
+                    "minimax-m3".to_owned(),
+                    price(600_000, 2_400_000, 120_000, 0),
+                ),
+            ]),
+        }
+    }
+
     /// The cost of `usage` under `model`, and the table version that priced it.
     /// `None` when the model has no entry — an unknown cost, never a zero one.
     #[must_use]
     pub fn price(&self, model: &str, usage: &Usage) -> Option<(i64, u32)> {
+        let normalized = normalize_model_id(model);
         self.models
             .get(model)
+            .or_else(|| self.models.get(&normalized))
+            .or_else(|| {
+                self.models
+                    .iter()
+                    .filter_map(|(candidate, price)| {
+                        let candidate = normalize_model_id(candidate);
+                        normalized
+                            .strip_prefix(&candidate)
+                            .filter(|suffix| suffix.starts_with('-'))
+                            .map(|_| (candidate.len(), price))
+                    })
+                    .max_by_key(|(candidate_len, _)| *candidate_len)
+                    .map(|(_, price)| price)
+            })
             .map(|price| (price.cost_micros(usage), self.version))
     }
 
@@ -159,6 +235,22 @@ impl PriceTable {
     }
 }
 
+fn normalize_model_id(model: &str) -> String {
+    let mut normalized = model
+        .rsplit_once('/')
+        .map_or(model, |(_, tail)| tail)
+        .split(':')
+        .next()
+        .unwrap_or(model)
+        .trim()
+        .replace('@', "-")
+        .to_ascii_lowercase();
+    if normalized.starts_with("claude-") {
+        normalized = normalized.replace('.', "-");
+    }
+    normalized
+}
+
 fn validate_model_id(model: &str) -> Result<(), String> {
     if model.is_empty()
         || model.len() > 256
@@ -194,6 +286,91 @@ mod tests {
         };
         // 1M input + 1M output = 3_000_000 + 15_000_000 micro-units.
         assert_eq!(price.cost_micros(&usage(1_000_000, 1_000_000)), 18_000_000);
+    }
+
+    #[test]
+    fn cache_and_reasoning_subsets_are_not_billed_twice() {
+        let price = ModelPrice {
+            input_per_mtok: 1_000_000,
+            output_per_mtok: 2_000_000,
+            cache_read_per_mtok: 100_000,
+            cache_write_per_mtok: 1_250_000,
+            reasoning_per_mtok: None,
+        };
+        let value = Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read_tokens: 60,
+            cache_write_tokens: 20,
+            reasoning_tokens: 15,
+        };
+
+        assert_eq!(price.cost_micros(&value), 91);
+    }
+
+    #[test]
+    fn provider_namespaced_models_match_the_normalized_builtin_price() {
+        let table = PriceTable {
+            version: 3,
+            models: BTreeMap::from([(
+                "claude-opus-4-8".to_owned(),
+                ModelPrice {
+                    input_per_mtok: 5_000_000,
+                    ..ModelPrice::default()
+                },
+            )]),
+        };
+
+        assert_eq!(
+            table.price("anthropic/Claude-Opus-4.8", &usage(1_000_000, 0)),
+            Some((5_000_000, 3)),
+        );
+    }
+
+    #[test]
+    fn dated_and_reasoning_variant_suffixes_use_the_longest_matching_base_model() {
+        let table = PriceTable {
+            version: 4,
+            models: BTreeMap::from([
+                (
+                    "claude-sonnet-4".to_owned(),
+                    ModelPrice {
+                        input_per_mtok: 3_000_000,
+                        ..ModelPrice::default()
+                    },
+                ),
+                (
+                    "claude-sonnet-4-6".to_owned(),
+                    ModelPrice {
+                        input_per_mtok: 4_000_000,
+                        ..ModelPrice::default()
+                    },
+                ),
+            ]),
+        };
+
+        assert_eq!(
+            table.price(
+                "anthropic/claude-sonnet-4.6-20260217-thinking",
+                &usage(1_000_000, 0),
+            ),
+            Some((4_000_000, 4)),
+        );
+    }
+
+    #[test]
+    fn builtin_catalog_prices_current_claude_deepseek_openai_minimax_and_glm_models() {
+        let table = PriceTable::builtin();
+
+        assert_eq!(table.version, 1);
+        assert_eq!(
+            table.price("deepseek-v4-pro", &usage(1_000_000, 0)),
+            Some((435_000, 1)),
+        );
+        assert!(table.models.contains_key("claude-opus-4-8"));
+        assert!(table.models.contains_key("gpt-5.5"));
+        assert!(table.models.contains_key("minimax-m3"));
+        assert!(table.models.contains_key("glm-5"));
     }
 
     #[test]

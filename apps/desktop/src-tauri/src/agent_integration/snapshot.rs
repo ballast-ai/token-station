@@ -54,8 +54,8 @@ impl MasterKeyStore for FileMasterKeyStore {
         use std::os::unix::fs::PermissionsExt;
 
         if self.path.exists() {
-            let raw = std::fs::read(&self.path)
-                .map_err(|_| "无法读取快照主密钥文件".to_string())?;
+            let raw =
+                std::fs::read(&self.path).map_err(|_| "无法读取快照主密钥文件".to_string())?;
             let key: [u8; 32] = raw
                 .try_into()
                 .map_err(|_| "快照主密钥文件长度无效,或已损坏".to_string())?;
@@ -65,11 +65,9 @@ impl MasterKeyStore for FileMasterKeyStore {
             return Err("快照主密钥缺失,已有快照不可安全解密".to_string());
         }
         let mut generated = Zeroizing::new([0_u8; 32]);
-        getrandom::fill(generated.as_mut())
-            .map_err(|_| "生成快照主密钥失败".to_string())?;
+        getrandom::fill(generated.as_mut()).map_err(|_| "生成快照主密钥失败".to_string())?;
         if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)
-                .map_err(|_| "创建快照主密钥父目录失败".to_string())?;
+            std::fs::create_dir_all(dir).map_err(|_| "创建快照主密钥父目录失败".to_string())?;
         }
         std::fs::write(&self.path, generated.as_ref())
             .map_err(|_| "写入快照主密钥文件失败".to_string())?;
@@ -79,8 +77,7 @@ impl MasterKeyStore for FileMasterKeyStore {
     }
 
     fn load(&self) -> Result<Zeroizing<[u8; 32]>, String> {
-        let raw = std::fs::read(&self.path)
-            .map_err(|_| "无法读取快照主密钥文件".to_string())?;
+        let raw = std::fs::read(&self.path).map_err(|_| "无法读取快照主密钥文件".to_string())?;
         let key: [u8; 32] = raw
             .try_into()
             .map_err(|_| "快照主密钥文件长度无效,或已损坏".to_string())?;
@@ -92,8 +89,8 @@ impl MasterKeyStore for FileMasterKeyStore {
 impl MasterKeyStore for FileMasterKeyStore {
     fn load_or_create(&self, allow_create: bool) -> Result<Zeroizing<[u8; 32]>, String> {
         if self.path.exists() {
-            let raw = std::fs::read(&self.path)
-                .map_err(|_| "无法读取快照主密钥文件".to_string())?;
+            let raw =
+                std::fs::read(&self.path).map_err(|_| "无法读取快照主密钥文件".to_string())?;
             let key: [u8; 32] = raw
                 .try_into()
                 .map_err(|_| "快照主密钥文件长度无效,或已损坏".to_string())?;
@@ -103,11 +100,9 @@ impl MasterKeyStore for FileMasterKeyStore {
             return Err("快照主密钥缺失,已有快照不可安全解密".to_string());
         }
         let mut generated = Zeroizing::new([0_u8; 32]);
-        getrandom::fill(generated.as_mut())
-            .map_err(|_| "生成快照主密钥失败".to_string())?;
+        getrandom::fill(generated.as_mut()).map_err(|_| "生成快照主密钥失败".to_string())?;
         if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)
-                .map_err(|_| "创建快照主密钥父目录失败".to_string())?;
+            std::fs::create_dir_all(dir).map_err(|_| "创建快照主密钥父目录失败".to_string())?;
         }
         std::fs::write(&self.path, generated.as_ref())
             .map_err(|_| "写入快照主密钥文件失败".to_string())?;
@@ -115,8 +110,7 @@ impl MasterKeyStore for FileMasterKeyStore {
     }
 
     fn load(&self) -> Result<Zeroizing<[u8; 32]>, String> {
-        let raw = std::fs::read(&self.path)
-            .map_err(|_| "无法读取快照主密钥文件".to_string())?;
+        let raw = std::fs::read(&self.path).map_err(|_| "无法读取快照主密钥文件".to_string())?;
         let key: [u8; 32] = raw
             .try_into()
             .map_err(|_| "快照主密钥文件长度无效,或已损坏".to_string())?;

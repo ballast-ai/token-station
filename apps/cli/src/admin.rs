@@ -14,6 +14,7 @@
 //! a write is a user's `~/.claude/settings.json`.
 
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use token_station_router_core::RouterConfig;
@@ -48,6 +49,8 @@ impl AdminContext {
         by: Option<&str>,
         agent_id: Option<&str>,
         source: Option<&str>,
+        upstream: Option<&str>,
+        model: Option<&str>,
     ) -> Result<Value, String> {
         let db = self.data_dir.join("metrics.sqlite");
         if !db.exists() {
@@ -58,7 +61,12 @@ impl AdminContext {
                 "empty": true,
             }));
         }
-        let cutoff = stats::parse_since(since)?;
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| {
+                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+            });
+        let cutoff = stats::cutoff_from_since(since, now_ms)?;
         let group = match by {
             None | Some("") => None,
             Some("agent") => Some(stats::GroupBy::Agent),
@@ -66,6 +74,8 @@ impl AdminContext {
             Some("model") => Some(stats::GroupBy::Model),
             Some("pool") => Some(stats::GroupBy::Pool),
             Some("status") => Some(stats::GroupBy::Status),
+            Some("hour") => Some(stats::GroupBy::Hour),
+            Some("day") => Some(stats::GroupBy::Day),
             Some(other) => return Err(format!("unknown grouping `{other}`")),
         };
         let report = stats::collect_filtered(
@@ -73,7 +83,12 @@ impl AdminContext {
             cutoff,
             None,
             group,
-            stats::StatsFilter { agent_id, source },
+            stats::StatsFilter {
+                agent_id,
+                source,
+                upstream,
+                model,
+            },
         )?;
         let groups: Vec<Value> = report
             .groups
@@ -183,6 +198,9 @@ fn agg_view(aggregate: &stats::Aggregate) -> Value {
         "p95_latency_ms": aggregate.p95_latency_ms,
         "input_tokens": aggregate.input_tokens,
         "output_tokens": aggregate.output_tokens,
+        "cache_read_tokens": aggregate.cache_read_tokens,
+        "cache_write_tokens": aggregate.cache_write_tokens,
+        "reasoning_tokens": aggregate.reasoning_tokens,
         "cost_micros": aggregate.cost_micros,
         "priced_requests": aggregate.priced_requests,
         "unpriced_requests": aggregate.unpriced_requests,
@@ -197,6 +215,9 @@ fn agg_zero() -> Value {
         "p95_latency_ms": 0,
         "input_tokens": 0,
         "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "reasoning_tokens": 0,
         "cost_micros": null,
         "priced_requests": 0,
         "unpriced_requests": 0,
