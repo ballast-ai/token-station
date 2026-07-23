@@ -92,11 +92,30 @@ impl Default for CacheFile {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn discover_with_cache(
     data_dir: &Path,
     name: &str,
     base_url: &str,
     api_key: Option<&str>,
+) -> Result<ModelDiscoveryView, String> {
+    discover_with_cache_egress(
+        data_dir,
+        name,
+        base_url,
+        api_key,
+        &token_station_cli::config::EgressConfig::default(),
+        &token_station_cli::secrets::SecretStore::default(),
+    )
+}
+
+pub(crate) fn discover_with_cache_egress(
+    data_dir: &Path,
+    name: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+    egress: &token_station_cli::config::EgressConfig,
+    secrets: &token_station_cli::secrets::SecretStore,
 ) -> Result<ModelDiscoveryView, String> {
     let name = name.trim();
     let base_url = base_url.trim().trim_end_matches('/');
@@ -107,7 +126,7 @@ pub(crate) fn discover_with_cache(
         return Err("请先填写 Base URL".to_owned());
     }
 
-    match fetch_models(base_url, api_key) {
+    match fetch_models_with_egress(base_url, api_key, egress, secrets) {
         Ok(models) => {
             let fetched_at_ms = now_ms();
             let previous = read_cached_entry(data_dir, name, base_url);
@@ -258,16 +277,55 @@ fn visible_models(catalog: &[CatalogModelView]) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn fetch_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>, String> {
+    fetch_models_with_egress(
+        base_url,
+        api_key,
+        &token_station_cli::config::EgressConfig::default(),
+        &token_station_cli::secrets::SecretStore::default(),
+    )
+}
+
+fn fetch_models_with_egress(
+    base_url: &str,
+    api_key: Option<&str>,
+    egress: &token_station_cli::config::EgressConfig,
+    secrets: &token_station_cli::secrets::SecretStore,
+) -> Result<Vec<String>, String> {
     let endpoint =
         ProviderEndpoint::try_new(base_url).map_err(|error| format!("Base URL 不合法：{error}"))?;
     let url = endpoint.resolve(ProviderApi::Models);
+    let proxy = if let Some((scheme, host, port)) = egress.proxy_parts()? {
+        let protocol = match scheme.as_str() {
+            "http" => ureq::ProxyProtocol::Http,
+            "https" => ureq::ProxyProtocol::Https,
+            "socks5" => ureq::ProxyProtocol::Socks5,
+            "socks5h" => ureq::ProxyProtocol::Socks5h,
+            _ => return Err("不支持的出站代理协议".to_string()),
+        };
+        let mut builder = ureq::Proxy::builder(protocol).host(&host).port(port);
+        for entry in &egress.no_proxy {
+            builder = builder.no_proxy(entry);
+        }
+        if let Some(auth) = &egress.auth {
+            let password = secrets.resolve_egress(&auth.credential.slot)?;
+            builder = builder.username(&auth.username).password(&password);
+        }
+        Some(
+            builder
+                .build()
+                .map_err(|_| "出站代理配置无效".to_string())?,
+        )
+    } else {
+        None
+    };
     let http = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .timeout_global(Some(DISCOVERY_TIMEOUT))
             .http_status_as_error(false)
             .max_redirects(0)
-            .proxy(None)
+            .proxy(proxy)
             .build(),
     );
     let mut request = http

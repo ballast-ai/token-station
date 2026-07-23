@@ -1,0 +1,6 @@
+{
+  "protocol": "google-gemini-generate-content",
+  "headers": {},
+  "principal": {"subject": "local"},
+  "body": {}
+}

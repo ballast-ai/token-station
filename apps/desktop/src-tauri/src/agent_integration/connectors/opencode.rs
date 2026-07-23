@@ -2,13 +2,35 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::{path, ConnectInput, Connector};
+use super::{path, ConnectInput, Connector, ConnectorCapabilities};
 use crate::agent_integration::config_codec::{ConfigDocument, DocumentFormat};
 use crate::agent_integration::types::{ConfigPath, PatchKind, PatchOperation};
 
 pub struct OpenCodeConnector;
+pub(super) static CONNECTOR: OpenCodeConnector = OpenCodeConnector;
+static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
+    connector_id: "opencode-v1",
+    agent_id: "opencode",
+    label: "OpenCode opencode.json",
+    adapter_id: "agent-openai",
+    base_url_shape: crate::agent_integration::types::BaseUrlShape::OriginV1,
+    platforms: &[
+        crate::agent_integration::types::Platform::Macos,
+        crate::agent_integration::types::Platform::Linux,
+        crate::agent_integration::types::Platform::Windows,
+        crate::agent_integration::types::Platform::Wsl,
+    ],
+    config_format: DocumentFormat::Json,
+    config_path_template: "${HOME}/.config/opencode/opencode.json",
+    owned_fields: &["provider.tokenstation", "model"],
+    requires_virtual_key: true,
+    restart_required: false,
+};
 
 impl Connector for OpenCodeConnector {
+    fn capabilities(&self) -> &'static ConnectorCapabilities {
+        &CAPABILITIES
+    }
     fn connector_id(&self) -> &'static str {
         "opencode-v1"
     }
@@ -42,15 +64,17 @@ impl Connector for OpenCodeConnector {
     }
 
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String> {
-        if input.adapter_ready {
-            Ok(())
-        } else {
-            Err(
+        if !input.adapter_ready {
+            return Err(
                 "暂不能接入 OpenCode：网关未加载 agent-openai，/v1/chat/completions \
                  无入站适配器。本次未修改 ~/.config/opencode/opencode.json。"
                     .to_string(),
-            )
+            );
         }
+        input
+            .token
+            .map(|_| ())
+            .ok_or_else(|| "OpenCode 接入缺少虚拟 Key".to_string())
     }
 
     fn validate_source(&self, document: &ConfigDocument) -> Result<(), String> {

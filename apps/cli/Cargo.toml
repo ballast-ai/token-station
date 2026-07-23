@@ -11,7 +11,7 @@ publish.workspace = true
 axum = "0.8.9"
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
 getrandom = "0.4.3"
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.40.1", features = ["backup", "bundled"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 token-station-conformance = { path = "../../crates/conformance" }
@@ -23,7 +23,7 @@ token-station-release = { path = "../../crates/release" }
 token-station-router-core = { path = "../../crates/router-core" }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "signal"] }
 tokio-stream = "0.1.18"
-ureq = "=3.3.0"
+ureq = { version = "=3.3.0", features = ["socks-proxy"] }
 
 # The OS keychain, one backend per platform. Linux uses the desktop
 # secret-service over D-Bus; headless boxes fall back to `auth.file`.

@@ -70,6 +70,10 @@ mod builtin {
             wasm: include_bytes!(env!("TS_BUILTIN_AGENT_OPENAI_RESPONSES_WASM")),
         },
         Package {
+            manifest_source: include_str!(env!("TS_BUILTIN_AGENT_GEMINI_MANIFEST")),
+            wasm: include_bytes!(env!("TS_BUILTIN_AGENT_GEMINI_WASM")),
+        },
+        Package {
             manifest_source: include_str!(env!("TS_BUILTIN_PROVIDER_OPENAI_MANIFEST")),
             wasm: include_bytes!(env!("TS_BUILTIN_PROVIDER_OPENAI_WASM")),
         },

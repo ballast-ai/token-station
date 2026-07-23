@@ -1,0 +1,18 @@
+{
+  "name": "agent-gemini",
+  "version": "1.0.0",
+  "kind": "agent-adapter",
+  "api_version": "agent-adapter-v1",
+  "agent_protocols": ["google-gemini-generate-content"],
+  "agent_tools": ["gemini-cli", "generic-google-genai-sdk"],
+  "capabilities": ["chat", "stream", "tool_call", "agent_hint"],
+  "permissions": {
+    "network": false,
+    "filesystem": false,
+    "secrets": []
+  },
+  "conformance": {
+    "required_suite": "agent-protocol-v1",
+    "fixtures": "fixtures/"
+  }
+}

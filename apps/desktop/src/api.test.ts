@@ -12,6 +12,10 @@ import {
   deleteProfile,
   editProvider,
   getPlugins,
+  getEgress,
+  getAgentDrift,
+  getAgentBudgets,
+  getPriceTable,
   getRecentReceipts,
   getRuntimeState,
   getRouterTable,
@@ -36,10 +40,19 @@ import {
   setAdminEndpoint,
   setSettings,
   setAgentRouteMode,
+  setAgentBudget,
+  setModelPrice,
   setAgentTier,
   setTier,
   testProvider,
   updateProviderModels,
+  removeAgentBudget,
+  removeModelPrice,
+  exportRecoveryBundle,
+  getRecoveryDiagnostics,
+  getRecoveryState,
+  openRecoveryFolder,
+  recordFrontendDiagnostic,
 } from "./api";
 import type { ServeView } from "./api";
 
@@ -116,6 +129,12 @@ describe("structured Agent IPC", () => {
       { agentId: "opencode" },
     ],
     [
+      "get read-only drift facts",
+      () => getAgentDrift("claude-code", "/opt/claude"),
+      "get_agent_drift",
+      { agentId: "claude-code", installationPath: "/opt/claude" },
+    ],
+    [
       "plan snapshot restore",
       () => planSnapshotRestore("snapshot"),
       "plan_snapshot_restore",
@@ -159,6 +178,52 @@ describe("structured Agent IPC", () => {
 });
 
 describe("desktop API mapping and read-only HTTP data plane", () => {
+  it("maps display-only Agent budget commands to named IPC fields", async () => {
+    await getAgentBudgets();
+    expect(invokeMock).toHaveBeenLastCalledWith("get_agent_budgets");
+
+    await setAgentBudget("codex", 2_500_000, 80, 1_700_000_000_000, 1_800_000_000_000, 7);
+    expect(invokeMock).toHaveBeenLastCalledWith("set_agent_budget", {
+      agentId: "codex",
+      limitMicros: 2_500_000,
+      warningPercent: 80,
+      periodStartMs: 1_700_000_000_000,
+      periodEndMs: 1_800_000_000_000,
+      expiryWarningDays: 7,
+    });
+
+    await removeAgentBudget("codex");
+    expect(invokeMock).toHaveBeenLastCalledWith("remove_agent_budget", { agentId: "codex" });
+  });
+
+  it("maps versioned model price edits with optimistic concurrency", async () => {
+    await getPriceTable();
+    expect(invokeMock).toHaveBeenLastCalledWith("get_price_table");
+
+    await setModelPrice("gpt-5", {
+      input_per_mtok: 1_000_000,
+      output_per_mtok: 2_000_000,
+      cache_read_per_mtok: 300_000,
+      cache_write_per_mtok: 4_000_000,
+      reasoning_per_mtok: null,
+    }, 7);
+    expect(invokeMock).toHaveBeenLastCalledWith("set_model_price", {
+      model: "gpt-5",
+      inputPerMtok: 1_000_000,
+      outputPerMtok: 2_000_000,
+      cacheReadPerMtok: 300_000,
+      cacheWritePerMtok: 4_000_000,
+      reasoningPerMtok: null,
+      expectedVersion: 7,
+    });
+
+    await removeModelPrice("gpt-5", 8);
+    expect(invokeMock).toHaveBeenLastCalledWith("remove_model_price", {
+      model: "gpt-5",
+      expectedVersion: 8,
+    });
+  });
+
   it("subscribes to the stable proxy lifecycle event", async () => {
     const handler = vi.fn();
     await listenServeState(handler);
@@ -190,8 +255,29 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
     ["apply home to all Agents", () => applyHomeRouteToAllAgents(), "apply_home_route_to_all_agents", undefined],
     ["start", () => serveStart(), "serve_start", undefined],
     ["stop", () => serveStop(), "serve_stop", undefined],
-    ["settings", () => setSettings(false, true), "set_settings", { auth: false, metrics: true }],
+    ["settings", () => setSettings(false, true, {
+      egress_mode: "http",
+      egress_proxy_url: "http://proxy.internal:8080",
+      egress_no_proxy: ["localhost"],
+      egress_auth_username: "x",
+      egress_auth_slot: "proxy_password",
+    }), "set_settings", {
+      auth: false,
+      metrics: true,
+      egressMode: "http",
+      egressProxyUrl: "http://proxy.internal:8080",
+      egressNoProxy: ["localhost"],
+      egressAuthUsername: "x",
+      egressAuthSlot: "proxy_password",
+    }],
     ["upgrade", () => checkUpgrade(), "check_upgrade", undefined],
+    ["recovery state", () => getRecoveryState(), "get_recovery_state", undefined],
+    ["recovery diagnostics", () => getRecoveryDiagnostics(), "get_recovery_diagnostics", undefined],
+    ["recovery folder", () => openRecoveryFolder(), "open_recovery_folder", undefined],
+    ["confirmed recovery export", () => exportRecoveryBundle(true), "export_recovery_bundle", { confirmed: true }],
+    ["frontend diagnostic", () => recordFrontendDiagnostic({ kind: "window_error", message: "boom", stack: null, component_stack: null }), "record_frontend_diagnostic", {
+      event: { kind: "window_error", message: "boom", stack: null, component_stack: null },
+    }],
   ])("maps %s to the stable IPC contract", async (_label, call, command, payload) => {
     await call();
     if (payload === undefined) expect(invokeMock).toHaveBeenCalledWith(command);
@@ -207,19 +293,22 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
           ? [{ request_id: "receipt-1", attempt_records: [], conversion_reports: [] }]
         : url.includes("router-table")
           ? { rules: [], hint_routes: [], bands: [], pools: [] }
+          : url.includes("egress")
+            ? { mode: "direct", proxy_url: null, no_proxy: [], auth_slot: null, routes: [], fixed_direct_classes: ["update_check"] }
           : { dir: "/plugins", agent: "a", dialects: [], listing: "" };
       return new Response(JSON.stringify(body), { status: 200 });
     });
     setAdminEndpoint(serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, virtual_key: "virtual" }));
 
-    await getStats("24h", "model");
+    await getStats("24h", "model", "codex", "openai-responses");
     const receipts = await getRecentReceipts(5);
     await getRouterTable();
     await getPlugins();
+    await getEgress();
 
     expect(receipts[0]?.request_id).toBe("receipt-1");
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://127.0.0.1:9999/admin/stats?since=24h&by=model");
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://127.0.0.1:9999/admin/stats?since=24h&by=model&agent=codex&source=openai-responses");
     expect(fetchMock.mock.calls[0]?.[1]).toEqual({ headers: { authorization: "Bearer virtual" } });
     expect(fetchMock.mock.calls[1]?.[0]).toBe("http://127.0.0.1:9999/admin/receipts");
     expect(invokeMock).not.toHaveBeenCalled();

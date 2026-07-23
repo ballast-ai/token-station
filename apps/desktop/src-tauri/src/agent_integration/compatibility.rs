@@ -44,7 +44,18 @@ pub struct BlockedRule {
 
 impl CompatibilityCatalog {
     pub fn builtin(registry: &AgentRegistry) -> Result<Self, String> {
-        let catalog = parse_catalog(BUILTIN_COMPATIBILITY_JSON.as_bytes())?;
+        let mut catalog = parse_catalog(BUILTIN_COMPATIBILITY_JSON.as_bytes())?;
+        for descriptor in registry.descriptors() {
+            if catalog.entry(&descriptor.agent_id).is_none() {
+                catalog.entries.push(AgentCompatibilityEntry {
+                    agent_id: descriptor.agent_id.clone(),
+                    blocked: Vec::new(),
+                });
+            }
+        }
+        catalog
+            .entries
+            .sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
         validate_catalog(&catalog, registry)?;
         Ok(catalog)
     }
@@ -273,7 +284,7 @@ mod tests {
 
     use super::*;
     use crate::agent_integration::types::{
-        Diagnostic, DiscoveryEvidence, DiscoverySource, Platform,
+        BinarySource, Diagnostic, DiscoveryEvidence, DiscoverySource, Platform,
     };
 
     fn discovery(agent_id: &str, version: Option<&str>) -> DiscoveryRecord {
@@ -281,6 +292,10 @@ mod tests {
             agent_id: agent_id.to_string(),
             executable_path: format!("/tmp/{agent_id}"),
             canonical_path: format!("/tmp/{agent_id}"),
+            binary_source: BinarySource::Path,
+            modified_at_ms: None,
+            binary_sha256: None,
+            upgrade_command: None,
             version_raw: version.map(str::to_string),
             version_normalized: version.map(str::to_string),
             environment: Platform::Macos,
@@ -432,7 +447,7 @@ mod tests {
         assert!(validate_catalog(&catalog, &registry).is_err());
 
         let mut unknown = CompatibilityCatalog::builtin(&registry).unwrap();
-        unknown.entries[2].agent_id = "hermes-unknown".to_string();
+        unknown.entries.last_mut().unwrap().agent_id = "zz-unknown".to_string();
         assert!(validate_catalog(&unknown, &registry)
             .unwrap_err()
             .contains("未知 Agent"));

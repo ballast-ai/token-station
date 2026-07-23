@@ -20,6 +20,23 @@ function normalizedVersion(installation: AgentInstallationView) {
   return version.startsWith("v") ? version : `v${version}`;
 }
 
+const sourceLabels: Record<AgentInstallationView["discovery"]["binary_source"], string> = {
+  homebrew: "Homebrew",
+  npm_global: "npm 全局",
+  path: "PATH",
+  known_path: "已知目录",
+  env_override: "环境变量",
+};
+
+function modifiedLabel(modifiedAtMs: number | null) {
+  if (modifiedAtMs == null) return "修改时间未知";
+  return `修改于 ${new Date(modifiedAtMs).toLocaleString()}`;
+}
+
+function hashLabel(hash: string | null) {
+  return hash ? `SHA-256 ${hash.slice(0, 12)}` : "SHA-256 不可读";
+}
+
 export function installationLabels(installations: AgentInstallationView[]) {
   const baseLabels = installations.map((installation) => {
     const name = executableName(installation.discovery.canonical_path);
@@ -87,21 +104,29 @@ export default function InstallationPicker({
       </button>
       {open && (
         <div className="installation-picker-menu" role="listbox" aria-label={`${agentName} 安装列表`}>
-          {options.map((option) => {
+          {options.map((option, index) => {
             const selected = option.path === selectedPath;
+            const discovery = installations[index].discovery;
             return (
               <button
                 key={option.path}
                 className={selected ? "selected" : ""}
                 type="button"
                 role="option"
+                aria-label={option.label}
                 aria-selected={selected}
                 onClick={() => {
                   onSelect(option.path);
                   setOpen(false);
                 }}
               >
-                <span>{option.label}</span>
+                <span className="installation-option-title">{option.label}</span>
+                <code className="installation-option-path">{discovery.canonical_path}</code>
+                <span className="installation-option-facts">
+                  {sourceLabels[discovery.binary_source]}
+                  {discovery.is_path_default ? " · 当前生效" : ""}
+                  {` · ${modifiedLabel(discovery.modified_at_ms)} · ${hashLabel(discovery.binary_sha256)}`}
+                </span>
                 {selected && <span className="installation-check" aria-hidden="true">✓</span>}
               </button>
             );

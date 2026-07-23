@@ -612,7 +612,11 @@ impl Guest for AnthropicClient {
         vec![
             exports::token_station::adapter::agent_adapter::AgentProtocolCapability {
                 protocol: "anthropic-messages".to_owned(),
-                agent_tools: vec!["claude-code".to_owned(), "generic-anthropic-sdk".to_owned()],
+                agent_tools: vec![
+                    "claude-code".to_owned(),
+                    "claude-desktop".to_owned(),
+                    "generic-anthropic-sdk".to_owned(),
+                ],
             },
         ]
     }
