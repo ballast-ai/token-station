@@ -18,6 +18,7 @@ mod serve_lifecycle;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -450,6 +451,9 @@ struct AggView {
     p95_latency_ms: u64,
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    reasoning_tokens: u64,
     cost_micros: Option<i64>,
     priced_requests: u64,
     unpriced_requests: u64,
@@ -464,6 +468,9 @@ impl AggView {
             p95_latency_ms: 0,
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
             cost_micros: None,
             priced_requests: 0,
             unpriced_requests: 0,
@@ -477,6 +484,9 @@ impl AggView {
             p95_latency_ms: a.p95_latency_ms,
             input_tokens: a.input_tokens,
             output_tokens: a.output_tokens,
+            cache_read_tokens: a.cache_read_tokens,
+            cache_write_tokens: a.cache_write_tokens,
+            reasoning_tokens: a.reasoning_tokens,
             cost_micros: a.cost_micros,
             priced_requests: a.priced_requests,
             unpriced_requests: a.unpriced_requests,
@@ -2544,7 +2554,7 @@ fn remove_model_price(
     Ok(next)
 }
 
-/// Usage page: read-only aggregate metrics database. `since` = all / <N>h / <N>d; `by` = agent/upstream/model/pool/status
+/// Usage page: read-only aggregate metrics database. `since` = all / <N>h / <N>d; `by` = agent/upstream/model/pool/status/hour/day
 /// or empty. Return `empty=true` when the metrics database does not exist; do not report an error.
 #[tauri::command]
 fn get_stats(
@@ -2553,6 +2563,8 @@ fn get_stats(
     by: Option<String>,
     agent_id: Option<String>,
     source: Option<String>,
+    upstream: Option<String>,
+    model: Option<String>,
 ) -> Result<StatsView, String> {
     let db = {
         let inner = state.0.lock().unwrap();
@@ -2566,7 +2578,12 @@ fn get_stats(
             empty: true,
         });
     }
-    let cutoff = stats::parse_since(&since)?;
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        });
+    let cutoff = stats::cutoff_from_since(&since, now_ms)?;
     let group = match by.as_deref() {
         None | Some("") => None,
         Some("agent") => Some(stats::GroupBy::Agent),
@@ -2574,6 +2591,8 @@ fn get_stats(
         Some("model") => Some(stats::GroupBy::Model),
         Some("pool") => Some(stats::GroupBy::Pool),
         Some("status") => Some(stats::GroupBy::Status),
+        Some("hour") => Some(stats::GroupBy::Hour),
+        Some("day") => Some(stats::GroupBy::Day),
         Some(other) => return Err(format!("未知分组 `{other}`")),
     };
     let report = stats::collect_filtered(
@@ -2584,6 +2603,8 @@ fn get_stats(
         stats::StatsFilter {
             agent_id: agent_id.as_deref(),
             source: source.as_deref(),
+            upstream: upstream.as_deref(),
+            model: model.as_deref(),
         },
     )?;
     Ok(StatsView {
@@ -4277,7 +4298,8 @@ mod tests {
             .any(|dialect| dialect == "openai-compatible"));
         assert!(plugins.listing.contains("provider-openai-compatible"));
 
-        let empty_stats = get_stats(app.state(), "all".to_string(), None, None, None).unwrap();
+        let empty_stats =
+            get_stats(app.state(), "all".to_string(), None, None, None, None, None).unwrap();
         assert!(empty_stats.empty);
         assert_eq!(empty_stats.total.requests, 0);
 
@@ -4511,6 +4533,8 @@ mod tests {
             None,
             None,
             Some("openai-responses".to_string()),
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(source_filtered.total.requests, 1);
@@ -4519,6 +4543,8 @@ mod tests {
             "all".to_string(),
             None,
             Some("codex".to_string()),
+            None,
+            None,
             None,
         )
         .unwrap();

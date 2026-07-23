@@ -12,10 +12,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::Response;
 use axum::routing::get;
+use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::StreamExt;
@@ -366,31 +367,37 @@ fn admin_reply(result: Result<serde_json::Value, String>, origin: Option<String>
     with_cors(response, origin)
 }
 
-async fn admin_stats(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> Response {
+#[derive(Debug, Default, Deserialize)]
+struct AdminStatsQuery {
+    #[serde(default = "default_stats_since")]
+    since: String,
+    by: Option<String>,
+    agent: Option<String>,
+    source: Option<String>,
+    upstream: Option<String>,
+    model: Option<String>,
+}
+
+fn default_stats_since() -> String {
+    "all".to_owned()
+}
+
+async fn admin_stats(
+    State(state): State<AppState>,
+    Query(query): Query<AdminStatsQuery>,
+    headers: HeaderMap,
+) -> Response {
     if !admitted(&state, &headers) {
         return with_cors(unauthorized("/admin/stats"), loopback_origin(&headers));
     }
-    // `since` and `by` are single tokens (`all`, `24h`, `upstream`, …), so a
-    // split on `&`/`=` is a full parser here — no percent-decoding to get wrong.
-    let mut since = "all".to_owned();
-    let mut by = None;
-    let mut agent_id = None;
-    let mut source = None;
-    for pair in uri.query().unwrap_or_default().split('&') {
-        match pair.split_once('=') {
-            Some(("since", value)) if !value.is_empty() => value.clone_into(&mut since),
-            Some(("by", value)) if !value.is_empty() => by = Some(value.to_owned()),
-            Some(("agent", value)) if !value.is_empty() => agent_id = Some(value.to_owned()),
-            Some(("source", value)) if !value.is_empty() => source = Some(value.to_owned()),
-            _ => {}
-        }
-    }
     admin_reply(
         state.admin.stats(
-            &since,
-            by.as_deref(),
-            agent_id.as_deref(),
-            source.as_deref(),
+            &query.since,
+            query.by.as_deref(),
+            query.agent.as_deref(),
+            query.source.as_deref(),
+            query.upstream.as_deref(),
+            query.model.as_deref(),
         ),
         loopback_origin(&headers),
     )

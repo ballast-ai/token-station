@@ -327,6 +327,7 @@ export interface AgentCompatibilityView {
 export interface AgentInstallationView {
   discovery: AgentDiscoveryView;
   compatibility: AgentCompatibilityView;
+  managed: boolean;
   connected: boolean;
 }
 
@@ -446,6 +447,9 @@ export interface AggView {
   p95_latency_ms: number;
   input_tokens: number;
   output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
   cost_micros: number | null;
   priced_requests: number;
   unpriced_requests: number;
@@ -793,13 +797,24 @@ export const getStats = (
   by: string | null,
   agentId: string | null = null,
   source: string | null = null,
+  upstream: string | null = null,
+  model: string | null = null,
 ) =>
   dataGet<StatsView>(
     `/admin/stats?since=${encodeURIComponent(since)}`
       + `${by ? `&by=${encodeURIComponent(by)}` : ""}`
       + `${agentId ? `&agent=${encodeURIComponent(agentId)}` : ""}`
-      + `${source ? `&source=${encodeURIComponent(source)}` : ""}`,
-    () => invoke<StatsView>("get_stats", { since, by, agentId, source }),
+      + `${source ? `&source=${encodeURIComponent(source)}` : ""}`
+      + `${upstream ? `&upstream=${encodeURIComponent(upstream)}` : ""}`
+      + `${model ? `&model=${encodeURIComponent(model)}` : ""}`,
+    () => invoke<StatsView>("get_stats", {
+      since,
+      by,
+      agentId,
+      source,
+      upstream,
+      model,
+    }),
   );
 
 export const getRecentReceipts = (limit = 5) => {

@@ -101,7 +101,8 @@ beforeEach(() => {
   vi.mocked(getStats).mockResolvedValue({
     total: {
       requests: 0, errors: 0, p50_latency_ms: 0, p95_latency_ms: 0,
-      input_tokens: 0, output_tokens: 0, cost_micros: null,
+      input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+      reasoning_tokens: 0, cost_micros: null,
       priced_requests: 0, unpriced_requests: 0,
     },
     groups: [], by: "upstream", empty: true,
@@ -153,7 +154,7 @@ describe("legacy desktop read-only pages", () => {
     expect(await screen.findByText(/router down/)).toBeInTheDocument();
   });
 
-  it("loads grouped stats, changes both filters, and formats nullable cost", async () => {
+  it("loads grouped stats, changes scope and detail view, and formats nullable cost", async () => {
     vi.mocked(getStats).mockResolvedValue({
       total: {
         requests: 10,
@@ -162,6 +163,9 @@ describe("legacy desktop read-only pages", () => {
         p95_latency_ms: 80,
         input_tokens: 100,
         output_tokens: 50,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
         cost_micros: 1_250_000,
         priced_requests: 10,
         unpriced_requests: 0,
@@ -173,6 +177,9 @@ describe("legacy desktop read-only pages", () => {
         p95_latency_ms: 80,
         input_tokens: 100,
         output_tokens: 50,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
         cost_micros: null,
         priced_requests: 0,
         unpriced_requests: 10,
@@ -183,24 +190,32 @@ describe("legacy desktop read-only pages", () => {
     const user = userEvent.setup();
     render(<Stats />);
     expect(await screen.findByText("1.2500")).toBeInTheDocument();
-    expect(screen.getByText("openai")).toBeInTheDocument();
-    const selectors = screen.getAllByRole("combobox");
-    await user.selectOptions(selectors[0], "24h");
-    await user.selectOptions(selectors[1], "upstream");
-    await waitFor(() => expect(getStats).toHaveBeenLastCalledWith("24h", "upstream", null, null));
+    expect(screen.getAllByText("openai").length).toBeGreaterThan(0);
+    await user.selectOptions(screen.getByRole("combobox", { name: "时间范围" }), "7d");
+    await user.selectOptions(screen.getByRole("combobox", { name: "供应商过滤" }), "openai");
+    await user.click(screen.getByRole("tab", { name: "供应商" }));
+    await waitFor(() => expect(getStats).toHaveBeenCalledWith(
+      "7d",
+      "upstream",
+      null,
+      null,
+      "openai",
+      null,
+    ));
   });
 
   it("shows stats empty and error states", async () => {
     vi.mocked(getStats).mockResolvedValueOnce({
       total: {
         requests: 0, errors: 0, p50_latency_ms: 0, p95_latency_ms: 0,
-        input_tokens: 0, output_tokens: 0, cost_micros: null,
+        input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+        reasoning_tokens: 0, cost_micros: null,
         priced_requests: 0, unpriced_requests: 0,
       },
       groups: [], by: null, empty: true,
     });
     const first = render(<Stats />);
-    expect(await screen.findByText(/指标库还没建/)).toBeInTheDocument();
+    expect(await screen.findByText(/还没有本地用量记录/)).toBeInTheDocument();
     first.unmount();
     vi.mocked(getStats).mockRejectedValueOnce(new Error("stats down"));
     render(<Stats />);
@@ -344,12 +359,14 @@ describe("model selection and provider model management", () => {
     vi.mocked(getStats).mockResolvedValue({
       total: {
         requests: 3, errors: 1, p50_latency_ms: 10, p95_latency_ms: 20,
-        input_tokens: 120, output_tokens: 30, cost_micros: 1_250_000,
+        input_tokens: 120, output_tokens: 30, cache_read_tokens: 0, cache_write_tokens: 0,
+        reasoning_tokens: 0, cost_micros: 1_250_000,
         priced_requests: 3, unpriced_requests: 0,
       },
       groups: [["openai", {
         requests: 3, errors: 1, p50_latency_ms: 10, p95_latency_ms: 20,
-        input_tokens: 120, output_tokens: 30, cost_micros: 1_250_000,
+        input_tokens: 120, output_tokens: 30, cache_read_tokens: 0, cache_write_tokens: 0,
+        reasoning_tokens: 0, cost_micros: 1_250_000,
         priced_requests: 3, unpriced_requests: 0,
       }]],
       by: "upstream", empty: false,
@@ -383,12 +400,14 @@ describe("model selection and provider model management", () => {
     vi.mocked(getStats).mockResolvedValue({
       total: {
         requests: 1, errors: 0, p50_latency_ms: 5, p95_latency_ms: 5,
-        input_tokens: 2, output_tokens: 3, cost_micros: null,
+        input_tokens: 2, output_tokens: 3, cache_read_tokens: 0, cache_write_tokens: 0,
+        reasoning_tokens: 0, cost_micros: null,
         priced_requests: 0, unpriced_requests: 1,
       },
       groups: [["local", {
         requests: 1, errors: 0, p50_latency_ms: 5, p95_latency_ms: 5,
-        input_tokens: 2, output_tokens: 3, cost_micros: null,
+        input_tokens: 2, output_tokens: 3, cache_read_tokens: 0, cache_write_tokens: 0,
+        reasoning_tokens: 0, cost_micros: null,
         priced_requests: 0, unpriced_requests: 1,
       }]],
       by: "upstream", empty: false,

@@ -96,6 +96,7 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
 const scannedClaude: AgentView = {
   metadata: registryFixture[0],
   installations: [{
+    managed: false,
     connected: false,
     discovery: {
       agent_id: "claude-code",
@@ -397,7 +398,7 @@ describe("desktop station navigation", () => {
     await screen.findByRole("heading", { name: "主页路由" });
 
     await user.click(screen.getByRole("button", { name: "用量" }));
-    expect(await screen.findByRole("heading", { name: "用量" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "用量统计" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "设置" }));
     expect(await screen.findByRole("heading", { name: "设置", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /路由表/ })).toBeInTheDocument();
@@ -634,6 +635,7 @@ describe("desktop station navigation", () => {
   it("previews and confirms one-click restoration to the encrypted baseline", async () => {
     const user = userEvent.setup();
     const connected = structuredClone(scannedClaude);
+    connected.installations[0].managed = true;
     connected.installations[0].connected = true;
     connected.installations[0].compatibility.status = "CONNECTED";
     connected.status = "CONNECTED";
