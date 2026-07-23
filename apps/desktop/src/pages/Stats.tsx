@@ -11,6 +11,7 @@ import {
   setAgentBudget,
 } from "../api";
 import PricingEditor from "../components/PricingEditor";
+import PageBackButton from "../components/PageBackButton";
 import UsageRequestLog from "../components/UsageRequestLog";
 import UsageTrendChart, { type UsageTrendRange } from "../components/UsageTrendChart";
 
@@ -132,7 +133,7 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
   );
 }
 
-export default function Stats() {
+export default function Stats({ onBack }: { onBack?: () => void }) {
   const [since, setSince] = useState("24h");
   const [activeGroup, setActiveGroup] = useState<GroupValue>("agent");
   const [agentFilter, setAgentFilter] = useState("");
@@ -304,6 +305,7 @@ export default function Stats() {
     <section className="usage-page">
       <header className="usage-page-head">
         <div>
+          {onBack && <PageBackButton onClick={onBack} />}
           <span className="usage-eyebrow">LOCAL RECEIPT LEDGER</span>
           <h1>用量统计</h1>
           <p>查看 AI 模型的消耗、成本与稳定性。只聚合本地请求元数据，不含 prompt 或 response 内容。</p>

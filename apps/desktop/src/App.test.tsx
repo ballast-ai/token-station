@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App, { configSaveStatus } from "./App";
 import type { AgentRouteView, AgentUiMetadataView, AgentView, ServeView, StateView } from "./api";
+import { LANGUAGE_STORAGE_KEY } from "./components/LanguageProvider";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -175,6 +176,7 @@ function navigation() {
 }
 
 beforeEach(() => {
+  window.localStorage.removeItem(LANGUAGE_STORAGE_KEY);
   listenMock.mockReset();
   listenMock.mockResolvedValue(vi.fn());
   const initial = stateFixture();
@@ -408,6 +410,28 @@ describe("desktop station navigation", () => {
     expect(screen.getByRole("button", { name: /插件/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /关于/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /用量/ })).not.toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /返回/ }));
+    expect(await screen.findByRole("heading", { name: "用量统计" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /返回/ }));
+    expect(await screen.findByRole("heading", { name: "主页路由" })).toBeInTheDocument();
+  });
+
+  it("switches and persists the interface language from Settings", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    await user.click(screen.getByRole("button", { name: /语言/ }));
+    expect(screen.getByRole("heading", { name: "界面语言" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("radio", { name: /English/ }));
+
+    expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /English/ })).toHaveAttribute("aria-checked", "true");
+    expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("en");
+    expect(document.documentElement).toHaveAttribute("lang", "en");
   });
 
   it("moves virtual key to Settings, masks it, and starts or stops the proxy from the top bar", async () => {
