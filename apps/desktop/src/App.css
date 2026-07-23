@@ -718,6 +718,8 @@ body {
 .capability-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
 .capability-row code { margin-right: auto; color: var(--ink); font-size: 11px; }
 .capability-tag { padding: 2px 6px; border-radius: 999px; font-size: 9.5px; font-weight: 650; }
+.capability-tag-button { border: 0; font-family: inherit; cursor: pointer; }
+.capability-tag-button:disabled { cursor: default; opacity: 0.8; }
 .capability-tag.verified { color: var(--success); background: color-mix(in srgb, var(--success) 12%, var(--surface)); }
 .capability-tag.declared { color: var(--signal); background: color-mix(in srgb, var(--signal) 10%, var(--surface)); }
 .capability-tag.unsupported { color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, var(--surface)); }

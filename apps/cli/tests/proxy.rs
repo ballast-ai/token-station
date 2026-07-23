@@ -2467,37 +2467,120 @@ fn an_upstream_401_is_mapped_not_retried_and_never_leaks_the_key() {
 }
 
 #[test]
-fn image_audio_and_embeddings_are_refused_at_the_language_only_boundary() {
+fn opencode_and_hermes_images_reach_a_vision_capable_upstream() {
+    let answer = json!({
+        "id": "chatcmpl-vision",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "VISION_OK" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 12, "completion_tokens": 2 }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("vision-agents", "sk-test-key-abc");
+    let proxy = start_proxy(&mock, &key);
+    let token = proxy.virtual_key.clone();
+    let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB";
+    let request = json!({
+        "model": "auto",
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "Read this image." },
+                { "type": "image_url", "image_url": { "url": image_url, "detail": "low" } }
+            ]
+        }]
+    });
+
+    for agent_id in ["opencode", "nous-hermes-agent"] {
+        let (status, body) = post_scoped(
+            &proxy,
+            &format!("/agents/{agent_id}/v1/chat/completions"),
+            &request,
+            &token,
+            false,
+        );
+        assert_eq!(status, 200, "{agent_id}: {body}");
+    }
+
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 2);
+    for request in seen {
+        assert_eq!(request.path, "/v1/chat/completions");
+        assert_eq!(
+            request.body["messages"][0]["content"][1],
+            json!({
+                "type": "image_url",
+                "image_url": { "url": image_url, "detail": "low" }
+            })
+        );
+    }
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn opencode_and_hermes_images_are_refused_before_a_non_vision_upstream() {
+    let home = MockUpstream::start(Vec::new());
+    let custom = MockUpstream::start(Vec::new());
+    let key = key_file("vision-agents-unsupported", "sk-test-key-abc");
+    let proxy = start_scoped_proxy(&home, &custom, &key);
+    let token = proxy.virtual_key.clone();
+    let request = json!({
+        "model": "auto",
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": { "url": "https://example.test/cat.png" }
+            }]
+        }]
+    });
+
+    for agent_id in ["opencode", "nous-hermes-agent"] {
+        let (status, body) = post_scoped(
+            &proxy,
+            &format!("/agents/{agent_id}/v1/chat/completions"),
+            &request,
+            &token,
+            false,
+        );
+        assert_eq!(status, 400, "{agent_id}: {body}");
+        assert!(body.contains("capability"), "{agent_id}: {body}");
+        assert!(body.contains("supports vision"), "{agent_id}: {body}");
+    }
+
+    assert_eq!(home.hits(), 0);
+    assert_eq!(custom.hits(), 0);
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn audio_and_embeddings_are_refused_before_the_upstream() {
     let mock = MockUpstream::start(Vec::new());
     let key = key_file("capability", "sk-test-key-abc");
     let proxy = start_proxy(&mock, &key);
 
-    // The configured Provider capability is deliberately verified for vision;
-    // the host's language-only product boundary must still win before routing.
-
-    for request in [
-        json!({
-            "model": "auto",
-            "messages": [{ "role": "user", "content": [
-                { "type": "image_url", "image_url": { "url": "https://example/cat.png" } }
-            ]}]
-        }),
-        json!({
-            "model": "auto",
-            "messages": [{ "role": "user", "content": [
-                { "type": "input_audio", "input_audio": { "data": "AA==", "format": "wav" } }
-            ]}]
-        }),
-    ] {
-        let (status, body) = post_chat(&proxy, &request, None);
-        assert_eq!(status, 400, "{body}");
-        assert!(body.contains("language-model"), "{body}");
-        assert!(body.contains("capability"), "{body}");
-        settle();
-        let row = last_row(&proxy.data_dir);
-        assert_eq!(row["error_code"], "Text(\"capability\")");
-        assert_eq!(row["attempts"], "Integer(0)");
-    }
+    let request = json!({
+        "model": "auto",
+        "messages": [{ "role": "user", "content": [
+            { "type": "input_audio", "input_audio": { "data": "AA==", "format": "wav" } }
+        ]}]
+    });
+    let (status, body) = post_chat(&proxy, &request, None);
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.contains("audio and embeddings are unsupported"),
+        "{body}"
+    );
+    assert!(!body.contains("image"), "{body}");
+    assert!(body.contains("capability"), "{body}");
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["error_code"], "Text(\"capability\")");
+    assert_eq!(row["attempts"], "Integer(0)");
 
     let response = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
@@ -2511,11 +2594,16 @@ fn image_audio_and_embeddings_are_refused_at_the_language_only_boundary() {
     assert_eq!(response.status().as_u16(), 400);
     let body = response.into_body().read_to_string().expect("body reads");
     assert!(body.contains("capability"), "{body}");
+    assert!(
+        body.contains("audio and embeddings are unsupported"),
+        "{body}"
+    );
+    assert!(!body.contains("image"), "{body}");
     settle();
     let row = last_row(&proxy.data_dir);
     assert_eq!(row["error_code"], "Text(\"capability\")");
     assert_eq!(row["attempts"], "Integer(0)");
-    assert_eq!(mock.hits(), 0, "the language-only boundary is pre-upstream");
+    assert_eq!(mock.hits(), 0, "unsupported media is refused pre-upstream");
 
     std::fs::remove_file(key).ok();
 }
