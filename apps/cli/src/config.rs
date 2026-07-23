@@ -22,14 +22,6 @@ use serde::{Deserialize, Serialize};
 use token_station_protocol::{ModelCapability, ProviderEndpoint};
 use token_station_router_core::{ConfigSource, RouterConfig, UpstreamModel, UpstreamRef};
 
-pub const KNOWN_AGENT_IDS: [&str; 5] = [
-    "claude-code",
-    "codex",
-    "opencode",
-    "openclaw",
-    "nous-hermes-agent",
-];
-
 const TIER_HIGH: &str = "tier_high";
 const TIER_MID: &str = "tier_mid";
 const TIER_LOW: &str = "tier_low";
@@ -71,6 +63,174 @@ pub struct ClientConfig {
     /// unknown (never zero).
     #[serde(default)]
     pub pricing: crate::pricing::PriceTable,
+    /// Display-only per-Agent spend and expiry thresholds. These values are
+    /// intentionally absent from gateway admission/routing decisions.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_budgets: BTreeMap<String, crate::budget::AgentBudget>,
+    /// Explicit outbound network policy. Defaults to direct and never reads
+    /// ambient proxy environment variables.
+    #[serde(default)]
+    pub egress: EgressConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressMode {
+    #[default]
+    Direct,
+    Http,
+    Socks5,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressConfig {
+    #[serde(default)]
+    pub mode: EgressMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_proxy: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ProxyAuthConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyAuthConfig {
+    pub username: String,
+    pub credential: AuthConfig,
+}
+
+impl AuthConfig {
+    fn source_count(&self) -> usize {
+        usize::from(self.keyring)
+            + usize::from(self.env.is_some())
+            + usize::from(self.file.is_some())
+    }
+}
+
+impl EgressConfig {
+    /// Validated `(scheme, host, port)` for the configured proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the mode and URL disagree, credentials are
+    /// embedded in the URL, or an auth/no-proxy field is malformed.
+    pub fn proxy_parts(&self) -> Result<Option<(String, String, u16)>, String> {
+        if self.mode == EgressMode::Direct {
+            if self.proxy_url.is_some() || self.auth.is_some() || !self.no_proxy.is_empty() {
+                return Err(
+                    "egress direct mode cannot carry proxy_url, auth, or no_proxy".to_string(),
+                );
+            }
+            return Ok(None);
+        }
+        let raw = self
+            .proxy_url
+            .as_deref()
+            .ok_or_else(|| "egress proxy mode requires proxy_url".to_string())?;
+        let uri: ureq::http::Uri = raw
+            .parse()
+            .map_err(|_| "egress proxy_url is invalid".to_string())?;
+        let scheme = uri
+            .scheme_str()
+            .ok_or_else(|| "egress proxy_url requires an explicit scheme".to_string())?;
+        let allowed = match self.mode {
+            EgressMode::Http => matches!(scheme, "http" | "https"),
+            EgressMode::Socks5 => matches!(scheme, "socks5" | "socks5h"),
+            EgressMode::Direct => false,
+        };
+        if !allowed {
+            return Err("egress proxy_url scheme does not match mode".to_string());
+        }
+        let authority = uri
+            .authority()
+            .ok_or_else(|| "egress proxy_url requires a host".to_string())?;
+        if authority.as_str().contains('@') {
+            return Err(
+                "egress proxy_url must not contain credentials; use auth.credential slot"
+                    .to_string(),
+            );
+        }
+        if uri
+            .path_and_query()
+            .is_some_and(|value| value.as_str() != "/")
+        {
+            return Err("egress proxy_url must not contain a path, query, or fragment".to_string());
+        }
+        let host = uri
+            .host()
+            .ok_or_else(|| "egress proxy_url requires a host".to_string())?;
+        let port = uri.port_u16().unwrap_or(match scheme {
+            "https" => 443,
+            "socks5" | "socks5h" => 1080,
+            _ => 80,
+        });
+        for entry in &self.no_proxy {
+            let body = entry
+                .strip_prefix("*.")
+                .or_else(|| entry.strip_prefix('.'))
+                .unwrap_or(entry);
+            if entry != "*"
+                && (entry.is_empty()
+                    || entry.len() > 253
+                    || body.is_empty()
+                    || body.starts_with('.')
+                    || body.ends_with('.')
+                    || entry.contains(',')
+                    || entry.chars().any(char::is_whitespace)
+                    || !body.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':')
+                    }))
+            {
+                return Err(format!("egress no_proxy entry `{entry}` is invalid"));
+            }
+        }
+        if let Some(auth) = &self.auth {
+            if auth.username.is_empty()
+                || auth.username.len() > 128
+                || auth.username.chars().any(char::is_control)
+                || auth.credential.source_count() != 1
+            {
+                return Err(
+                    "egress proxy auth requires a safe username and exactly one credential source"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(Some((scheme.to_string(), host.to_string(), port)))
+    }
+
+    /// Whether `target` bypasses the configured proxy under the exact ureq
+    /// matcher used by the data plane. Direct mode always returns true.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either the egress policy or target URL is invalid.
+    pub fn bypasses_proxy(&self, target: &str) -> Result<bool, String> {
+        let Some((scheme, host, port)) = self.proxy_parts()? else {
+            return Ok(true);
+        };
+        let protocol = match scheme.as_str() {
+            "http" => ureq::ProxyProtocol::Http,
+            "https" => ureq::ProxyProtocol::Https,
+            "socks5" => ureq::ProxyProtocol::Socks5,
+            "socks5h" => ureq::ProxyProtocol::Socks5h,
+            _ => return Err("unsupported egress proxy protocol".to_string()),
+        };
+        let mut builder = ureq::Proxy::builder(protocol).host(&host).port(port);
+        for entry in &self.no_proxy {
+            builder = builder.no_proxy(entry);
+        }
+        let proxy = builder
+            .build()
+            .map_err(|_| "invalid egress proxy configuration".to_string())?;
+        let uri = target
+            .parse::<ureq::http::Uri>()
+            .map_err(|_| "egress target URL is invalid".to_string())?;
+        Ok(proxy.is_no_proxy(&uri))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,8 +449,15 @@ pub struct AuthConfig {
 
 impl ClientConfig {
     #[must_use]
-    pub fn is_known_agent_id(agent_id: &str) -> bool {
-        KNOWN_AGENT_IDS.contains(&agent_id)
+    pub fn is_valid_agent_id(agent_id: &str) -> bool {
+        !agent_id.is_empty()
+            && agent_id.len() <= 64
+            && !agent_id.starts_with('-')
+            && !agent_id.ends_with('-')
+            && !agent_id.contains("--")
+            && agent_id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
     }
 
     /// Returns a validated custom router document for `agent_id`, or `None`
@@ -301,8 +468,8 @@ impl ClientConfig {
     /// The Agent ID is unknown, custom mode has no three-tier route, or one of
     /// its upstream references cannot be represented safely.
     pub fn custom_router_for_agent(&self, agent_id: &str) -> Result<Option<RouterConfig>, String> {
-        if !Self::is_known_agent_id(agent_id) {
-            return Err(format!("unknown Agent route id `{agent_id}`"));
+        if !Self::is_valid_agent_id(agent_id) {
+            return Err(format!("invalid Agent route id `{agent_id}`"));
         }
         let Some(route) = self.agent_routes.get(agent_id) else {
             return Ok(None);
@@ -441,9 +608,7 @@ impl ClientConfig {
             token_station_router_core::UpstreamRef::new(name.clone())
                 .map_err(|error| error.to_string())?;
             if let Some(auth) = &upstream.auth {
-                let sources = usize::from(auth.keyring)
-                    + usize::from(auth.env.is_some())
-                    + usize::from(auth.file.is_some());
+                let sources = auth.source_count();
                 if sources != 1 {
                     return Err(format!(
                         "upstream `{name}` auth for slot `{}` must name exactly one source                          (keyring / env / file), found {sources}",
@@ -451,6 +616,17 @@ impl ClientConfig {
                     ));
                 }
             }
+        }
+
+        self.egress.proxy_parts()?;
+
+        for (agent_id, budget) in &self.agent_budgets {
+            if !Self::is_valid_agent_id(agent_id) {
+                return Err(format!("invalid Agent budget id `{agent_id}`"));
+            }
+            budget
+                .validate()
+                .map_err(|error| format!("Agent `{agent_id}` budget: {error}"))?;
         }
 
         // Every pool member must name a configured upstream. Router::new
@@ -468,8 +644,8 @@ impl ClientConfig {
         }
 
         for (agent_id, route) in &self.agent_routes {
-            if !Self::is_known_agent_id(agent_id) {
-                return Err(format!("unknown Agent route id `{agent_id}`"));
+            if !Self::is_valid_agent_id(agent_id) {
+                return Err(format!("invalid Agent route id `{agent_id}`"));
             }
             if route.mode == AgentRouteMode::Custom && route.custom_route.is_none() {
                 return Err(format!(
@@ -551,7 +727,7 @@ impl ConfigSource for FileRouterSource {
 
 #[cfg(test)]
 mod tests {
-    use super::ClientConfig;
+    use super::{ClientConfig, EgressConfig, EgressMode};
     use std::fs;
     use std::path::PathBuf;
 
@@ -566,6 +742,38 @@ mod tests {
 
     fn example() -> serde_json::Value {
         serde_json::from_str(crate::EXAMPLE_CONFIG).expect("the shipped example parses")
+    }
+
+    #[test]
+    fn egress_policy_supports_direct_http_socks_and_rejects_inline_credentials() {
+        assert_eq!(EgressConfig::default().proxy_parts().unwrap(), None);
+        let http = EgressConfig {
+            mode: EgressMode::Http,
+            proxy_url: Some("http://proxy.internal:8080".to_string()),
+            no_proxy: vec!["localhost".to_string(), "*.corp.internal".to_string()],
+            auth: None,
+        };
+        assert_eq!(
+            http.proxy_parts().unwrap(),
+            Some(("http".to_string(), "proxy.internal".to_string(), 8080))
+        );
+        let socks = EgressConfig {
+            mode: EgressMode::Socks5,
+            proxy_url: Some("socks5h://proxy.internal:1080".to_string()),
+            no_proxy: Vec::new(),
+            auth: None,
+        };
+        assert_eq!(socks.proxy_parts().unwrap().unwrap().0, "socks5h");
+        let inline = EgressConfig {
+            mode: EgressMode::Http,
+            proxy_url: Some("http://user:secret@proxy.internal:8080".to_string()),
+            no_proxy: Vec::new(),
+            auth: None,
+        };
+        assert!(inline.proxy_parts().unwrap_err().contains("credentials"));
+        let mut invalid_direct = EgressConfig::default();
+        invalid_direct.no_proxy.push("localhost".to_string());
+        assert!(invalid_direct.proxy_parts().is_err());
     }
 
     #[test]
@@ -630,6 +838,43 @@ mod tests {
         let encoded = serde_json::to_value(config).expect("config serializes");
         assert!(encoded.get("agent_routes").is_none());
         assert!(encoded.get("profiles").is_none());
+    }
+
+    #[test]
+    fn per_agent_budgets_round_trip_and_reject_invalid_agents_or_thresholds() {
+        let mut value = example();
+        value["agent_budgets"] = serde_json::json!({
+            "codex": {
+                "limit_micros": 25_000_000,
+                "warning_percent": 75,
+                "period_start_ms": 1000,
+                "period_end_ms": 2000,
+                "expiry_warning_days": 3
+            }
+        });
+        let config: ClientConfig = serde_json::from_value(value.clone()).expect("budget validates");
+        config
+            .validate()
+            .expect("cross-field budget validation passes");
+        assert_eq!(config.agent_budgets["codex"].warning_percent, 75);
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["agent_budgets"],
+            value["agent_budgets"]
+        );
+
+        value["agent_budgets"]["codex"]["warning_percent"] = serde_json::json!(0);
+        let invalid: ClientConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(invalid.validate().unwrap_err().contains("warning_percent"));
+        value["agent_budgets"] = serde_json::json!({
+            "bad agent!": { "limit_micros": 1 }
+        });
+        let invalid: ClientConfig = serde_json::from_value(value).unwrap();
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .contains("invalid Agent budget id")
+        );
     }
 
     #[test]
@@ -708,11 +953,11 @@ mod tests {
     fn agent_route_ids_modes_and_targets_fail_closed() {
         let cases = [
             (
-                "unknown-agent",
+                "malformed-agent-id",
                 serde_json::json!({
-                    "future-agent": { "mode": "inherit" }
+                    "Future/Agent": { "mode": "inherit" }
                 }),
-                "unknown Agent route id",
+                "invalid Agent route id",
             ),
             (
                 "custom-without-route",
@@ -751,6 +996,25 @@ mod tests {
             assert!(error.to_string().contains(expected), "{error}");
             fs::remove_file(path).ok();
         }
+    }
+
+    #[test]
+    fn registry_driven_future_agent_route_ids_need_no_cli_enum_change() {
+        let mut value = example();
+        value["agent_routes"] = serde_json::json!({
+            "future-agent": { "mode": "inherit" }
+        });
+        let path = scratch("future-agent-route", &value.to_string());
+
+        let config = ClientConfig::load(&path).expect("valid dynamic Agent id is accepted");
+
+        assert!(
+            config
+                .custom_router_for_agent("future-agent")
+                .expect("valid dynamic Agent id")
+                .is_none()
+        );
+        fs::remove_file(path).ok();
     }
 
     #[test]

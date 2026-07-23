@@ -16,7 +16,9 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{Connection, OptionalExtension, Row, Transaction, named_params, types::Type};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Row, Transaction, named_params, types::Type,
+};
 use token_station_metrics::{
     AttemptRecord, ConversionRecord, ConversionStage, CostKind, DecisionRecord, ReceiptView,
     Recorder, RequestRecord, RoutingRecord, SCHEMA_VERSION,
@@ -28,6 +30,72 @@ use token_station_router_core::{DecidedBy, RequestFeatures};
 struct Migration {
     to: u32,
     sql: &'static str,
+}
+
+/// Read-only compatibility result used by recovery surfaces before the data
+/// plane is allowed to open or migrate the metrics store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchemaCompatibility {
+    Missing,
+    Current { version: u32 },
+    Older { found: u32, supported: u32 },
+    Newer { found: u32, supported: u32 },
+}
+
+/// Inspects only `PRAGMA user_version` through a read-only `SQLite` connection.
+/// It never creates or migrates the store.
+///
+/// # Errors
+///
+/// Returns an error when an existing store cannot be opened read-only or its
+/// schema version cannot be read.
+pub fn inspect_schema(path: &Path) -> Result<SchemaCompatibility, String> {
+    if !path.exists() {
+        return Ok(SchemaCompatibility::Missing);
+    }
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("metrics store `{}`: {error}", path.display()))?;
+    let found: u32 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|error| format!("metrics store version: {error}"))?;
+    Ok(match found.cmp(&SCHEMA_VERSION) {
+        std::cmp::Ordering::Less => SchemaCompatibility::Older {
+            found,
+            supported: SCHEMA_VERSION,
+        },
+        std::cmp::Ordering::Equal => SchemaCompatibility::Current { version: found },
+        std::cmp::Ordering::Greater => SchemaCompatibility::Newer {
+            found,
+            supported: SCHEMA_VERSION,
+        },
+    })
+}
+
+/// Creates a consistent `SQLite` snapshot without interpreting or migrating the
+/// source schema. This remains usable for a database written by a newer build.
+///
+/// # Errors
+///
+/// Returns an error when the source cannot be opened read-only or `SQLite`'s
+/// online backup cannot write the destination.
+pub fn snapshot_database(source: &Path, destination: &Path) -> Result<(), String> {
+    let connection = Connection::open_with_flags(
+        source,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("metrics store `{}`: {error}", source.display()))?;
+    connection
+        .backup(rusqlite::MAIN_DB, destination, None)
+        .map_err(|error| {
+            format!(
+                "metrics snapshot `{}` -> `{}`: {error}",
+                source.display(),
+                destination.display()
+            )
+        })
 }
 
 /// The ordered migration registry. An older store is brought up to
@@ -64,10 +132,10 @@ const MIGRATIONS: &[Migration] = &[
 
             UPDATE requests
                SET cost_micros = NULL, price_version = NULL, cost_kind = 'unknown'
-             WHERE cost_micros IS NULL OR cost_micros <= 0;
+             WHERE cost_micros IS NULL OR cost_micros < 0 OR price_version IS NULL;
             UPDATE requests
                SET cost_kind = 'estimated'
-             WHERE cost_micros > 0;
+             WHERE cost_micros >= 0 AND price_version IS NOT NULL;
 
             CREATE TABLE decisions (
                 request_id TEXT PRIMARY KEY,
@@ -340,10 +408,10 @@ fn decision_columns(decided_by: &DecidedBy) -> DecisionColumns {
 
 fn normalized_cost(record: &RequestRecord) -> (CostKind, Option<i64>, Option<u32>) {
     match (record.cost_kind, record.cost_micros) {
-        (CostKind::Actual, Some(cost)) if cost > 0 => {
+        (CostKind::Actual, Some(cost)) if cost >= 0 => {
             (CostKind::Actual, Some(cost), record.price_version)
         }
-        (CostKind::Estimated, Some(cost)) if cost > 0 && record.price_version.is_some() => {
+        (CostKind::Estimated, Some(cost)) if cost >= 0 && record.price_version.is_some() => {
             (CostKind::Estimated, Some(cost), record.price_version)
         }
         _ => (CostKind::Unknown, None, None),
@@ -1289,8 +1357,9 @@ mod tests {
         assert!(recent[0].attempt_records.is_empty());
         assert!(recent[0].conversion_reports.is_empty());
         assert_eq!(recent[1].attempts, 3);
-        assert_eq!(recent[1].cost_kind, CostKind::Unknown);
-        assert_eq!(recent[1].cost_micros, None);
+        assert_eq!(recent[1].cost_kind, CostKind::Estimated);
+        assert_eq!(recent[1].cost_micros, Some(0));
+        assert_eq!(recent[1].price_version, Some(1));
         assert!(recent[1].request_id.starts_with("legacy-"));
         let legacy_json = serde_json::to_value(&recent[1]).expect("receipt serializes");
         assert!(legacy_json["decision"].is_null());
@@ -1356,8 +1425,8 @@ mod tests {
     }
 
     #[test]
-    fn unknown_or_zero_cost_is_persisted_as_null() {
-        let path = scratch("unknown-cost");
+    fn an_explicit_free_price_is_persisted_instead_of_becoming_unknown() {
+        let path = scratch("free-cost");
         std::fs::remove_file(&path).ok();
         let store = SqliteStore::open(&path).expect("creates");
         let mut record = receipt("req-cost", 1);
@@ -1376,9 +1445,26 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("reads");
-        assert_eq!(kind, "unknown");
-        assert_eq!(cost, None);
-        assert_eq!(version, None);
+        assert_eq!(kind, "estimated");
+        assert_eq!(cost, Some(0));
+        assert_eq!(version, Some(9));
+
+        let mut invalid = receipt("req-negative-cost", 2);
+        invalid.cost_kind = CostKind::Estimated;
+        invalid.cost_micros = Some(-1);
+        invalid.price_version = Some(9);
+        store.record(&invalid);
+        let (kind, cost, version): (String, Option<i64>, Option<u32>) = store
+            .connection
+            .lock()
+            .expect("lock")
+            .query_row(
+                "SELECT cost_kind, cost_micros, price_version FROM requests WHERE request_id = ?1",
+                ["req-negative-cost"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("reads invalid shape");
+        assert_eq!((kind.as_str(), cost, version), ("unknown", None, None));
 
         std::fs::remove_file(path).ok();
     }
@@ -1435,5 +1521,58 @@ mod tests {
         assert!(error.contains("99"), "{error}");
 
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn schema_inspection_is_read_only_and_classifies_a_future_database() {
+        let path = scratch("inspect-newer");
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .pragma_update(None, "user_version", super::SCHEMA_VERSION + 7)
+                .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+
+        assert_eq!(
+            super::inspect_schema(&path).unwrap(),
+            super::SchemaCompatibility::Newer {
+                found: super::SCHEMA_VERSION + 7,
+                supported: super::SCHEMA_VERSION,
+            }
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn online_snapshot_copies_a_future_schema_without_migrating_the_source() {
+        let path = scratch("snapshot-future");
+        let snapshot = path.with_extension("snapshot.sqlite");
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute("CREATE TABLE future_data(value TEXT)", [])
+                .unwrap();
+            connection
+                .execute("INSERT INTO future_data VALUES ('kept')", [])
+                .unwrap();
+            connection
+                .pragma_update(None, "user_version", super::SCHEMA_VERSION + 1)
+                .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        super::snapshot_database(&path, &snapshot).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let copied = rusqlite::Connection::open(&snapshot).unwrap();
+        assert_eq!(
+            copied
+                .query_row("SELECT value FROM future_data", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "kept"
+        );
+        std::fs::remove_file(path).ok();
+        std::fs::remove_file(snapshot).ok();
     }
 }

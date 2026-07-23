@@ -1,0 +1,7 @@
+{
+  "context": {"protocol": "google-gemini-generate-content", "stream_id": "gemini-stream-1", "model": "gemini-2.5-pro"},
+  "events": [
+    {"type": "delta", "index": 0, "content": "hello"},
+    {"type": "done", "finish_reason": "stop"}
+  ]
+}

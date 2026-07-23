@@ -12,6 +12,7 @@ use crate::config::{AuthConfig, ClientConfig};
 /// The keychain service every entry lives under; the user is
 /// `<upstream>/<slot>`.
 pub const KEYRING_SERVICE: &str = "token-station";
+const EGRESS_SECRET_OWNER: &str = "egress-proxy";
 
 /// Where each slot's value lives.
 #[derive(Debug, Clone)]
@@ -87,6 +88,22 @@ impl SecretStore {
                 sources.insert((upstream.clone(), slot.clone()), source);
             }
         }
+        if let Some(auth) = &config.egress.auth {
+            let credential = &auth.credential;
+            let source = if credential.keyring {
+                Source::Keyring
+            } else {
+                match (&credential.env, &credential.file) {
+                    (Some(name), _) => Source::Env(name.clone()),
+                    (_, Some(path)) => Source::File(path.clone()),
+                    (None, None) => return Self { sources },
+                }
+            };
+            sources.insert(
+                (EGRESS_SECRET_OWNER.to_string(), credential.slot.clone()),
+                source,
+            );
+        }
         Self { sources }
     }
 
@@ -122,6 +139,16 @@ impl SecretStore {
             return Err(format!("secret `{slot}` resolved to an empty value"));
         }
         Ok(value.to_owned())
+    }
+
+    /// Resolve the configured proxy credential without coupling it to an
+    /// upstream name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the slot is unknown, inaccessible, or empty.
+    pub fn resolve_egress(&self, slot: &str) -> Result<String, String> {
+        self.resolve(EGRESS_SECRET_OWNER, slot)
     }
 }
 

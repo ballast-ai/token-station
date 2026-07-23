@@ -1,0 +1,13 @@
+{
+  "context": {"protocol": "google-gemini-generate-content"},
+  "response": {
+    "id": "response-1",
+    "model": "gemini-2.5-pro",
+    "choices": [{
+      "index": 0,
+      "message": {"role": "assistant", "tool_calls": [{"id": "call-1", "name": "get_weather", "arguments": "{\"city\":\"Beijing\"}"}]},
+      "finish_reason": "tool_calls"
+    }],
+    "usage": {"input_tokens": 8, "output_tokens": 4, "cache_read_tokens": 2}
+  }
+}

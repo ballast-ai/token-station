@@ -7,8 +7,16 @@ import {
   type ProviderEndpointPreview,
   type StateView,
 } from "../api";
-import { CUSTOM_ID, PROVIDER_CATALOG, type ProviderPreset } from "../catalog";
+import { CUSTOM_ID, PROVIDER_CATALOG, catalogGroupLabel, type ProviderPreset } from "../catalog";
 import ModelPicker, { type CatalogStatus } from "../components/ModelPicker";
+
+const CATALOG_GROUPS = [...PROVIDER_CATALOG.reduce((groups, preset) => {
+  const label = catalogGroupLabel(preset);
+  const entries = groups.get(label) ?? [];
+  entries.push(preset);
+  groups.set(label, entries);
+  return groups;
+}, new Map<string, ProviderPreset[]>())];
 
 interface AddProviderPageProps {
   existingNames: string[];
@@ -151,7 +159,11 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
             <label className="field-label" htmlFor="provider-preset">选择供应商</label>
             <select id="provider-preset" className="select" value={presetId} disabled={disabled} onChange={(event) => selectPreset(event.target.value)}>
               <option value="">— 选择供应商 —</option>
-              {PROVIDER_CATALOG.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              {CATALOG_GROUPS.map(([group, entries]) => (
+                <optgroup key={group} label={group}>
+                  {entries.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                </optgroup>
+              ))}
               <option value={CUSTOM_ID}>自定义…</option>
             </select>
           </div>
@@ -159,7 +171,12 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
 
         {presetId && (
           <>
-            {preset?.note && <div className="preset-note">{preset.note}</div>}
+            {preset && (
+              <div className="preset-note">
+                <span>{preset.note ?? `${preset.region} · ${preset.subscription}`}</span>
+                <a href={preset.officialDocs} target="_blank" rel="noreferrer">官方接入文档</a>
+              </div>
+            )}
             <div className="wizard-step">
               <div className="step-index">02</div>
               <div className="step-body form-grid">

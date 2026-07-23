@@ -38,6 +38,7 @@ fn plugins_dir() -> &'static Path {
             "agent-openai",
             "agent-openai-responses",
             "agent-anthropic",
+            "agent-gemini",
             "provider-openai-compatible",
         ] {
             let source = repo_root().join("plugins/official").join(plugin);
@@ -408,13 +409,23 @@ fn start_proxy_with_agents(
     metrics: bool,
     agent_plugins: &[&str],
 ) -> Proxy {
+    start_proxy_with_agents_and_budgets(upstream, key_file, metrics, agent_plugins, None)
+}
+
+fn start_proxy_with_agents_and_budgets(
+    upstream: &MockUpstream,
+    key_file: &Path,
+    metrics: bool,
+    agent_plugins: &[&str],
+    agent_budgets: Option<Value>,
+) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
         "ts-proxy-data-{}-{}",
         std::process::id(),
         SEQ.fetch_add(1, Ordering::SeqCst)
     ));
-    let config = json!({
+    let mut config = json!({
         "version": 1,
         "server": { "listen": "127.0.0.1:0" },
         "data": { "dir": data_dir, "metrics": metrics },
@@ -442,6 +453,9 @@ fn start_proxy_with_agents(
             "default_pool": "main"
         }
     });
+    if let Some(agent_budgets) = agent_budgets {
+        config["agent_budgets"] = agent_budgets;
+    }
     let config: ClientConfig = serde_json::from_value(config).expect("test config parses");
 
     let mut sinks: Vec<Box<dyn token_station_metrics::Recorder>> = vec![Box::new(
@@ -705,6 +719,25 @@ fn send_responses(proxy: &Proxy, body: &Value, token: &str) -> (u16, Option<Stri
         .map(str::to_owned);
     let body = response.into_body().read_to_string().expect("body reads");
     (status, content_type, body)
+}
+
+fn post_gemini(proxy: &Proxy, body: &Value, token: &str) -> (u16, String) {
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    let response = agent
+        .post(format!(
+            "{}/agents/gemini-cli/v1beta/models/gemini-2.5-pro:generateContent",
+            proxy.url
+        ))
+        .header("authorization", &format!("Bearer {token}"))
+        .send(&body.to_string())
+        .expect("the proxy answers");
+    let status = response.status().as_u16();
+    let body = response.into_body().read_to_string().expect("body reads");
+    (status, body)
 }
 
 fn post_scoped(
@@ -1213,7 +1246,7 @@ fn a_cancelled_non_stream_body_is_499_not_a_provider_failure() {
 }
 
 #[test]
-fn all_three_inbound_agents_coexist_in_declared_match_order() {
+fn all_four_inbound_protocols_coexist_in_declared_match_order() {
     let upstream_answer = json!({
         "id": "chatcmpl-shared",
         "model": "gpt-5.5",
@@ -1225,12 +1258,17 @@ fn all_three_inbound_agents_coexist_in_declared_match_order() {
         "usage": {"prompt_tokens": 1, "completion_tokens": 1}
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
-    let key = key_file("three-inbound-agents", "sk-test-key-abc");
+    let key = key_file("four-inbound-agents", "sk-test-key-abc");
     let proxy = start_proxy_with_agents(
         &mock,
         &key,
         true,
-        &["agent-openai", "agent-anthropic", "agent-openai-responses"],
+        &[
+            "agent-openai",
+            "agent-anthropic",
+            "agent-openai-responses",
+            "agent-gemini",
+        ],
     );
 
     let (chat_status, _) = post_chat(
@@ -1250,12 +1288,71 @@ fn all_three_inbound_agents_coexist_in_declared_match_order() {
         }),
         &token,
     );
+    let (gemini_status, gemini_body) = post_gemini(
+        &proxy,
+        &json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]}),
+        &token,
+    );
 
     assert_eq!(
-        (chat_status, responses_status, messages_status),
-        (200, 200, 200)
+        (
+            chat_status,
+            responses_status,
+            messages_status,
+            gemini_status
+        ),
+        (200, 200, 200, 200)
     );
-    assert_eq!(mock.hits(), 3);
+    assert_eq!(
+        serde_json::from_str::<Value>(&gemini_body).unwrap()["candidates"][0]["content"]["parts"]
+            [0]["text"],
+        "OK"
+    );
+    assert_eq!(mock.hits(), 4);
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn exceeded_agent_budget_is_observe_only_and_never_blocks_routing() {
+    let answer = json!({
+        "id": "chatcmpl-budget-observe-only",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "still routed" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("budget-observe-only", "sk-test-key-abc");
+    let proxy = start_proxy_with_agents_and_budgets(
+        &mock,
+        &key,
+        true,
+        &["agent-openai-responses"],
+        Some(json!({
+            "codex": {
+                "limit_micros": 1,
+                "warning_percent": 1
+            }
+        })),
+    );
+
+    let token = proxy.virtual_key.clone();
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/codex/v1/responses",
+        &json!({ "model": "auto", "input": "hi", "stream": false }),
+        &token,
+        false,
+    );
+
+    assert_eq!(
+        status, 200,
+        "a display-only budget cannot reject requests: {body}"
+    );
+    assert_eq!(mock.hits(), 1, "the request must still reach the provider");
     std::fs::remove_file(key).ok();
 }
 
@@ -3137,6 +3234,14 @@ fn provider_feature_probe_executes_stream_tool_and_json_requests() {
             (FeatureLayer::Json, StageStatus::Pass),
         ]
     );
+    let serialized = serde_json::to_value(&result).expect("feature probe is serializable");
+    assert!(
+        serialized["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|stage| stage["duration_ms"].is_u64())
+    );
     let seen = mock.seen();
     assert_eq!(seen.len(), 3);
     assert_eq!(seen[0].body["stream"], json!(true));
@@ -3368,6 +3473,26 @@ fn admin_data_plane_serves_the_running_views() {
         "stats carry totals: {stats_view}"
     );
 
+    let (_, _, body) = admin_get(
+        &proxy,
+        "/admin/stats?since=all&source=openai-chat-completions",
+        Some(&proxy.virtual_key),
+        None,
+    );
+    let source_filtered: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(source_filtered["total"]["requests"], 1);
+    let (_, _, body) = admin_get(
+        &proxy,
+        "/admin/stats?since=all&agent=codex&source=openai-chat-completions",
+        Some(&proxy.virtual_key),
+        None,
+    );
+    let agent_filtered: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        agent_filtered["total"]["requests"], 0,
+        "the unnamespaced fixture must not be misattributed to Codex"
+    );
+
     let (status, _, body) = admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
     assert_eq!(status, 200);
     let receipts: Value = serde_json::from_str(&body).expect("receipts are JSON");
@@ -3397,6 +3522,20 @@ fn admin_data_plane_serves_the_running_views() {
     assert!(
         plugins["listing"].is_string(),
         "plugins carry the listing: {plugins}"
+    );
+
+    let (status, _, body) = admin_get(&proxy, "/admin/egress", Some(&proxy.virtual_key), None);
+    assert_eq!(status, 200);
+    let egress: Value = serde_json::from_str(&body).expect("egress view is JSON");
+    assert_eq!(egress["mode"], "direct");
+    assert_eq!(egress["fixed_direct_classes"][0], "update_check");
+    assert!(
+        egress["routes"]
+            .as_array()
+            .is_some_and(|routes| routes.iter().any(|route| {
+                route["request_class"] == "provider_request" && route["route"] == "direct"
+            })),
+        "egress exposes the actual provider route: {egress}"
     );
 }
 

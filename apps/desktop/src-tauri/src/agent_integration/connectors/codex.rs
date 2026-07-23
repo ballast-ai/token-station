@@ -2,13 +2,35 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::{path, ConnectInput, Connector};
+use super::{path, ConnectInput, Connector, ConnectorCapabilities};
 use crate::agent_integration::config_codec::{ConfigDocument, DocumentFormat};
 use crate::agent_integration::types::{ConfigPath, PatchKind, PatchOperation};
 
 pub struct CodexConnector;
+pub(super) static CONNECTOR: CodexConnector = CodexConnector;
+static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
+    connector_id: "codex-v1",
+    agent_id: "codex",
+    label: "Codex config.toml",
+    adapter_id: "agent-openai-responses",
+    base_url_shape: crate::agent_integration::types::BaseUrlShape::OriginV1,
+    platforms: &[
+        crate::agent_integration::types::Platform::Macos,
+        crate::agent_integration::types::Platform::Linux,
+        crate::agent_integration::types::Platform::Windows,
+        crate::agent_integration::types::Platform::Wsl,
+    ],
+    config_format: DocumentFormat::Toml,
+    config_path_template: "${HOME}/.codex/config.toml",
+    owned_fields: &["model_provider", "model_providers.tokenstation"],
+    requires_virtual_key: false,
+    restart_required: false,
+};
 
 impl Connector for CodexConnector {
+    fn capabilities(&self) -> &'static ConnectorCapabilities {
+        &CAPABILITIES
+    }
     fn connector_id(&self) -> &'static str {
         "codex-v1"
     }

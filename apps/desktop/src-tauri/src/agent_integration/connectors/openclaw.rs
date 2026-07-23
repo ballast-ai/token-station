@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::{path, ConnectInput, Connector};
+use super::{path, ConnectInput, Connector, ConnectorCapabilities};
 use crate::agent_integration::config_codec::{semantic_json, ConfigDocument, DocumentFormat};
 use crate::agent_integration::types::{ConfigPath, PatchKind, PatchOperation};
 
@@ -10,8 +10,30 @@ const PROVIDER_PATH: &[&str] = &["models", "providers", "tokenstation"];
 const PRIMARY_PATH: &[&str] = &["agents", "defaults", "model", "primary"];
 
 pub struct OpenClawConnector;
+pub(super) static CONNECTOR: OpenClawConnector = OpenClawConnector;
+static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
+    connector_id: "openclaw-v1",
+    agent_id: "openclaw",
+    label: "OpenClaw openclaw.json",
+    adapter_id: "agent-openai",
+    base_url_shape: crate::agent_integration::types::BaseUrlShape::OriginV1,
+    platforms: &[
+        crate::agent_integration::types::Platform::Macos,
+        crate::agent_integration::types::Platform::Linux,
+        crate::agent_integration::types::Platform::Windows,
+        crate::agent_integration::types::Platform::Wsl,
+    ],
+    config_format: DocumentFormat::Json5,
+    config_path_template: "${HOME}/.openclaw/openclaw.json",
+    owned_fields: &["models.providers.tokenstation", "agents.defaults.model.primary"],
+    requires_virtual_key: true,
+    restart_required: false,
+};
 
 impl Connector for OpenClawConnector {
+    fn capabilities(&self) -> &'static ConnectorCapabilities {
+        &CAPABILITIES
+    }
     fn connector_id(&self) -> &'static str {
         "openclaw-v1"
     }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   applyAgentPlan,
+  getAgentDrift,
   mountAgentProfile,
   planAgentConnection,
   planAgentDisconnect,
@@ -8,6 +9,8 @@ import {
   setAgentRouteMode,
   setAgentTier,
   type AgentInstallationView,
+  type AgentDriftView,
+  type ConfigPlanView,
   type AgentRouteView,
   type AgentUiMetadataView,
   type AgentView,
@@ -16,6 +19,7 @@ import {
   type TierSlot,
 } from "../api";
 import TierRouteEditor from "../components/TierRouteEditor";
+import AgentDriftPanel from "../components/AgentDriftPanel";
 import InstallationPicker from "../components/InstallationPicker";
 
 interface AgentRoutePageProps {
@@ -29,12 +33,12 @@ interface AgentRoutePageProps {
   onRescan: () => void | Promise<void>;
 }
 
-const AGENT_MARKS: Record<string, string> = {
-  "claude-code": "C",
-  codex: "X",
-  opencode: "O",
-  openclaw: "OC",
-  "nous-hermes-agent": "H",
+const BINARY_SOURCE_LABELS: Record<AgentInstallationView["discovery"]["binary_source"], string> = {
+  homebrew: "Homebrew",
+  npm_global: "npm 全局",
+  path: "PATH",
+  known_path: "已知目录",
+  env_override: "环境变量",
 };
 
 function errorText(error: unknown) {
@@ -51,9 +55,28 @@ function errorText(error: unknown) {
 
 function statusCopy(agent: AgentView | undefined, installation: AgentInstallationView | undefined) {
   if (!agent || agent.installations.length === 0) return { tone: "idle", label: "未发现", detail: "没有在本机发现可管理的安装。" };
+  if (agent.installations.length > 1 && !installation) {
+    return { tone: "idle", label: "待选择", detail: "检测到多份安装，请先选择要接管的精确路径。" };
+  }
   if (installation?.connected) return { tone: "success", label: "已接入", detail: "请求已通过 Token Station。" };
+  if (isExactMultiInstallSelection(agent, installation)) {
+    return { tone: "ready", label: "可接入", detail: "已选择精确安装，可以一键接入。" };
+  }
   if (installation && installation.compatibility.status !== "DETECTED_VERIFIED") return { tone: "danger", label: "暂不可接入", detail: installation.compatibility.message };
   return { tone: "ready", label: "可接入", detail: "已发现兼容安装，可以一键接入。" };
+}
+
+function isExactMultiInstallSelection(
+  agent: AgentView | undefined,
+  installation: AgentInstallationView | undefined,
+) {
+  return Boolean(
+    agent
+      && agent.installations.length > 1
+      && installation
+      && installation.compatibility.status === "MULTIPLE_INSTALLATIONS"
+      && installation.discovery.conflict_group,
+  );
 }
 
 export default function AgentRoutePage({
@@ -70,21 +93,54 @@ export default function AgentRoutePage({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [drift, setDrift] = useState<AgentDriftView[] | null>(null);
+  const [driftLoading, setDriftLoading] = useState(false);
+  const [driftError, setDriftError] = useState("");
+  const [pendingPlan, setPendingPlan] = useState<ConfigPlanView | null>(null);
 
   useEffect(() => {
     const paths = agent?.installations.map((item) => item.discovery.canonical_path) ?? [];
-    setSelectedPath((current) => paths.includes(current) ? current : paths[0] ?? "");
+    setSelectedPath((current) => paths.includes(current) ? current : paths.length === 1 ? paths[0] : "");
   }, [agent]);
 
   const installation = useMemo(
     () => agent?.installations.find((item) => item.discovery.canonical_path === selectedPath),
     [agent, selectedPath],
   );
+
+  useEffect(() => {
+    if (!installation) {
+      setDrift(null);
+      setDriftError("");
+      setDriftLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setDriftLoading(true);
+    setDriftError("");
+    void getAgentDrift(metadata.agent_id, installation.discovery.canonical_path)
+      .then((views) => {
+        if (!cancelled) setDrift(views);
+      })
+      .catch((caught) => {
+        if (!cancelled) {
+          setDrift(null);
+          setDriftError(errorText(caught));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setDriftLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [installation, metadata.agent_id]);
   const status = statusCopy(agent, installation);
   const connected = installation?.connected ?? false;
   const canConnect = Boolean(
     installation
-      && ["DETECTED_VERIFIED", "CONNECTED"].includes(installation.compatibility.status),
+      && (["DETECTED_VERIFIED", "CONNECTED"].includes(installation.compatibility.status)
+        || isExactMultiInstallSelection(agent, installation)),
   );
   const canOperate = connected ? Boolean(installation) : serveRunning && canConnect;
 
@@ -118,13 +174,24 @@ export default function AgentRoutePage({
             ? { expectedVersion: installation.discovery.version_normalized as string }
             : undefined,
         );
-      await applyAgentPlan(
-        plan.operation_id,
-        plan.confirmation_token,
-      );
-      setNotice(connected
-        ? "已恢复接入前的 Agent 配置"
-        : "Agent 已接入，无需再次确认");
+      setPendingPlan(plan);
+    } catch (caught) {
+      setError(errorText(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmProjection = async () => {
+    if (!pendingPlan || busy) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      await applyAgentPlan(pendingPlan.operation_id, pendingPlan.confirmation_token);
+      const restored = pendingPlan.intent !== "connect";
+      setPendingPlan(null);
+      setNotice(restored ? "已恢复接入前的 Agent 配置" : "Agent 已接入");
       await onRescan();
     } catch (caught) {
       setError(errorText(caught));
@@ -170,12 +237,24 @@ export default function AgentRoutePage({
     }
   };
 
+  const copyUpgradeCommand = async () => {
+    const command = installation?.discovery.upgrade_command;
+    if (!command) return;
+    try {
+      await navigator.clipboard.writeText(command);
+      setNotice("升级命令已复制；Token Station 不会自动执行");
+      setError("");
+    } catch (caught) {
+      setError(`复制升级命令失败：${errorText(caught)}`);
+    }
+  };
+
   return (
     <div className="page-stack agent-route-page">
       <header className="agent-route-hero panel">
         <div className="agent-identity">
           <span className="agent-large-mark" aria-hidden="true">
-            {AGENT_MARKS[metadata.agent_id] ?? metadata.display_name.slice(0, 1)}
+            {metadata.nav_mark ?? metadata.display_name.slice(0, 1)}
           </span>
           <div>
             <span className="eyebrow">AGENT ROUTE</span>
@@ -203,9 +282,69 @@ export default function AgentRoutePage({
         </div>
       </header>
 
+      {installation && (
+        <section className="agent-installation-facts panel" aria-label="当前 Agent 安装诊断">
+          <div className="agent-installation-facts-head">
+            <div>
+              <span className="eyebrow">INSTALLATION</span>
+              <strong>{installation.discovery.is_path_default ? "当前 PATH 生效安装" : "已选择精确安装"}</strong>
+            </div>
+            <span>{BINARY_SOURCE_LABELS[installation.discovery.binary_source]}</span>
+          </div>
+          <code className="agent-installation-path">{installation.discovery.canonical_path}</code>
+          <div className="agent-installation-metadata">
+            <span>{installation.discovery.environment.toUpperCase()}</span>
+            <span>{installation.discovery.modified_at_ms == null
+              ? "修改时间未知"
+              : `修改于 ${new Date(installation.discovery.modified_at_ms).toLocaleString()}`}</span>
+            <span>{installation.discovery.binary_sha256
+              ? `SHA-256 ${installation.discovery.binary_sha256}`
+              : "SHA-256 不可读"}</span>
+          </div>
+          {installation.discovery.upgrade_command && (
+            <div className="agent-upgrade-command">
+              <code>{installation.discovery.upgrade_command}</code>
+              <button className="btn tiny" type="button" disabled={busy} onClick={() => void copyUpgradeCommand()}>
+                复制升级命令
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+
+      {installation && <AgentDriftPanel views={drift} loading={driftLoading} error={driftError} />}
+
       {!serveRunning && !connected && <div className="inline-note">请先启动代理，再接入 Agent。路由仍可先行配置。</div>}
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner err">{error}</div>}
+
+      {pendingPlan && (
+        <div className="projection-dialog-backdrop">
+          <section
+            className="panel projection-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="配置投影预览"
+          >
+            <span className="eyebrow">CONNECTOR PROJECTION</span>
+            <h2>配置投影预览</h2>
+            <p>仅下列受管字段会变化；敏感值不会显示或进入前端计划。</p>
+            <code className="agent-installation-path">{pendingPlan.target_config_path}</code>
+            {(pendingPlan.related_config_paths ?? []).map((path) => (
+              <code className="agent-installation-path" key={path}>{path}</code>
+            ))}
+            <pre className="projection-diff">{pendingPlan.human_diff || "没有字段变化"}</pre>
+            <div className="projection-dialog-actions">
+              <button className="btn" type="button" disabled={busy} onClick={() => setPendingPlan(null)}>
+                取消
+              </button>
+              <button className="btn primary" type="button" disabled={busy} onClick={() => void confirmProjection()}>
+                {busy ? "应用中…" : "确认并应用"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       <section className="panel route-panel">
         <div className="panel-head split-heading">

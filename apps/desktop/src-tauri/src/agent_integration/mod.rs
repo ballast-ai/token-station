@@ -9,6 +9,7 @@ pub mod compatibility;
 pub mod config_codec;
 pub mod connectors;
 pub mod discovery;
+pub mod drift;
 pub mod ownership;
 pub mod plan;
 pub mod platform;

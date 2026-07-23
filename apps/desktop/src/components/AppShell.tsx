@@ -21,14 +21,6 @@ interface AppShellProps {
   children: ReactNode;
 }
 
-const AGENT_MARKS: Record<string, string> = {
-  "claude-code": "C",
-  codex: "X",
-  opencode: "O",
-  openclaw: "OC",
-  "nous-hermes-agent": "H",
-};
-
 function agentTone(agent: AgentView | undefined) {
   if (agent?.status === "CONNECTED") return "connected";
   if (agent?.status === "DETECTED_BLOCKED" || agent?.status === "INSTALLED_BROKEN") return "blocked";
@@ -101,7 +93,7 @@ export default function AppShell({
                 aria-current={selected ? "page" : undefined}
                 title={`${metadata.display_name} · ${agentTone(agent)}`}
               >
-                <NavGlyph>{AGENT_MARKS[metadata.agent_id] ?? metadata.display_name.slice(0, 1)}</NavGlyph>
+                <NavGlyph>{metadata.nav_mark ?? metadata.display_name.slice(0, 1)}</NavGlyph>
                 <span className={`agent-status-dot ${agentTone(agent)}`} aria-hidden="true" />
                 <span>{metadata.display_name.replace(" Agent", "")}</span>
               </button>

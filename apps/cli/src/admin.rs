@@ -42,7 +42,13 @@ impl AdminContext {
     ///
     /// An unparseable `since` window, an unknown `by` grouping, or an
     /// unreadable store.
-    pub fn stats(&self, since: &str, by: Option<&str>) -> Result<Value, String> {
+    pub fn stats(
+        &self,
+        since: &str,
+        by: Option<&str>,
+        agent_id: Option<&str>,
+        source: Option<&str>,
+    ) -> Result<Value, String> {
         let db = self.data_dir.join("metrics.sqlite");
         if !db.exists() {
             return Ok(json!({
@@ -55,13 +61,20 @@ impl AdminContext {
         let cutoff = stats::parse_since(since)?;
         let group = match by {
             None | Some("") => None,
+            Some("agent") => Some(stats::GroupBy::Agent),
             Some("upstream") => Some(stats::GroupBy::Upstream),
             Some("model") => Some(stats::GroupBy::Model),
             Some("pool") => Some(stats::GroupBy::Pool),
             Some("status") => Some(stats::GroupBy::Status),
             Some(other) => return Err(format!("unknown grouping `{other}`")),
         };
-        let report = stats::collect(&db, cutoff, group)?;
+        let report = stats::collect_filtered(
+            &db,
+            cutoff,
+            None,
+            group,
+            stats::StatsFilter { agent_id, source },
+        )?;
         let groups: Vec<Value> = report
             .groups
             .iter()
@@ -171,6 +184,8 @@ fn agg_view(aggregate: &stats::Aggregate) -> Value {
         "input_tokens": aggregate.input_tokens,
         "output_tokens": aggregate.output_tokens,
         "cost_micros": aggregate.cost_micros,
+        "priced_requests": aggregate.priced_requests,
+        "unpriced_requests": aggregate.unpriced_requests,
     })
 }
 
@@ -183,5 +198,7 @@ fn agg_zero() -> Value {
         "input_tokens": 0,
         "output_tokens": 0,
         "cost_micros": null,
+        "priced_requests": 0,
+        "unpriced_requests": 0,
     })
 }

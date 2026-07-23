@@ -11,6 +11,10 @@ function installation(path: string, version: string | null): AgentInstallationVi
       agent_id: "claude-code",
       executable_path: path,
       canonical_path: path,
+      binary_source: "path",
+      modified_at_ms: null,
+      binary_sha256: null,
+      upgrade_command: null,
       version_raw: version,
       version_normalized: version,
       environment: "macos",
@@ -67,7 +71,7 @@ describe("InstallationPicker", () => {
     ]);
   });
 
-  it("returns the hidden canonical path and closes after selection", async () => {
+  it("returns the exact visible canonical path and closes after selection", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
     const installations = [
@@ -86,9 +90,45 @@ describe("InstallationPicker", () => {
     expect(screen.queryByText("/Users/x/bin/claude")).toBeNull();
     await user.click(screen.getByRole("button", { name: /选择安装/ }));
     expect(screen.getByRole("option", { name: "claude · v1.2.3" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.queryByText("C:\\Tools\\claude.exe")).toBeNull();
+    expect(screen.getByText("C:\\Tools\\claude.exe")).toBeInTheDocument();
     await user.click(screen.getByRole("option", { name: "claude.exe · v2.0.0" }));
     expect(onSelect).toHaveBeenCalledWith("C:\\Tools\\claude.exe");
     expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("lists the exact source and immutable binary facts for every installation", async () => {
+    const user = userEvent.setup();
+    const pathDefault = installation("/opt/homebrew/bin/claude", "2.0.0");
+    Object.assign(pathDefault.discovery, {
+      binary_source: "homebrew",
+      modified_at_ms: 1_784_700_000_000,
+      binary_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      upgrade_command: "brew upgrade claude-code",
+      is_path_default: true,
+    });
+    const npm = installation("/Users/x/.npm/bin/claude", "1.2.3");
+    Object.assign(npm.discovery, {
+      binary_source: "npm_global",
+      modified_at_ms: 1_784_600_000_000,
+      binary_sha256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+      upgrade_command: "npm install --global @anthropic-ai/claude-code@latest",
+    });
+
+    render(
+      <InstallationPicker
+        agentName="Claude Code"
+        installations={[pathDefault, npm]}
+        selectedPath={pathDefault.discovery.canonical_path}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /选择安装/ }));
+    expect(screen.getByText("/opt/homebrew/bin/claude")).toBeInTheDocument();
+    expect(screen.getByText("/Users/x/.npm/bin/claude")).toBeInTheDocument();
+    expect(screen.getByText(/Homebrew · 当前生效/)).toBeInTheDocument();
+    expect(screen.getByText(/npm 全局/)).toBeInTheDocument();
+    expect(screen.getByText(/SHA-256 0123456789ab/)).toBeInTheDocument();
+    expect(screen.getByText(/SHA-256 abcdef012345/)).toBeInTheDocument();
   });
 });

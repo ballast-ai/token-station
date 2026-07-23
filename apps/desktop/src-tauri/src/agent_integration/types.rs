@@ -11,6 +11,8 @@ pub struct AgentDescriptor {
     pub legacy_kind: Option<String>,
     pub display_name: String,
     pub icon_key: String,
+    pub ui_order: u16,
+    pub nav_mark: String,
     pub admission: AdmissionStatus,
     pub executable_candidates: Vec<String>,
     pub known_install_locations: BTreeMap<Platform, Vec<String>>,
@@ -71,6 +73,7 @@ pub enum RuntimeResolutionSource {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum VersionOutputMatcher {
     SemverAnywhere,
+    SuccessOnly,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -104,6 +107,7 @@ pub enum ConfigFormat {
     Json5,
     Toml,
     Yaml,
+    Dotenv,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -126,6 +130,10 @@ pub struct DiscoveryRecord {
     pub agent_id: String,
     pub executable_path: String,
     pub canonical_path: String,
+    pub binary_source: BinarySource,
+    pub modified_at_ms: Option<u64>,
+    pub binary_sha256: Option<String>,
+    pub upgrade_command: Option<String>,
     pub version_raw: Option<String>,
     pub version_normalized: Option<String>,
     pub environment: Platform,
@@ -137,6 +145,16 @@ pub struct DiscoveryRecord {
     pub conflict_group: Option<String>,
     pub diagnostics: Vec<Diagnostic>,
     pub scanned_at_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BinarySource {
+    Homebrew,
+    NpmGlobal,
+    Path,
+    KnownPath,
+    EnvOverride,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -231,11 +249,14 @@ pub struct ConfigChangePlan {
     pub agent_id: String,
     pub installation_path: String,
     pub target_config_path: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_config_paths: Vec<String>,
     pub target_existed: bool,
     pub before_hash: String,
     pub expected_after_hash: String,
     pub owned_paths: Vec<ConfigPath>,
     pub changes: Vec<RedactedChange>,
+    pub projection: ConnectorProjection,
     pub human_diff: String,
     pub connector_id: String,
     pub compatibility_evidence: CompatibilityDecision,
@@ -244,6 +265,43 @@ pub struct ConfigChangePlan {
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
     pub required_confirmations: Vec<ConfirmationKind>,
+}
+
+/// Public, value-free contract for one reversible Connector projection.
+/// Exact patch values stay exclusively in the server-held prepared plan.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorProjection {
+    pub schema_version: u32,
+    pub files: Vec<ConnectorFileProjection>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorFileProjection {
+    pub target_config_path: String,
+    pub format: String,
+    pub target_existed: bool,
+    pub before_hash: String,
+    pub expected_after_hash: String,
+    pub owned_paths: Vec<ConfigPath>,
+    pub forward_changes: Vec<RedactedChange>,
+    pub reverse_changes: Vec<RedactedChange>,
+    pub credential_bindings: Vec<CredentialBinding>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialBinding {
+    pub path: ConfigPath,
+    pub source: CredentialSource,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialSource {
+    LocalVirtualKey,
+    EncryptedSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -295,6 +353,59 @@ pub enum ConfirmationKind {
     ConfigurationDiff,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriftStatus {
+    Unmanaged,
+    InSync,
+    UnownedChanges,
+    ManagedChanges,
+    Missing,
+    Unreadable,
+    Unparseable,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriftScope {
+    Managed,
+    Unowned,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriftChangeKind {
+    Added,
+    Removed,
+    Changed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DriftChange {
+    pub path: ConfigPath,
+    pub scope: DriftScope,
+    pub kind: DriftChangeKind,
+    pub current_matches_managed: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentDriftView {
+    pub agent_id: String,
+    pub installation_path: String,
+    pub target_config_path: String,
+    pub connector_id: String,
+    pub status: DriftStatus,
+    pub baseline_hash: String,
+    pub managed_hash: String,
+    pub current_hash: Option<String>,
+    pub checked_at_ms: u64,
+    pub changes: Vec<DriftChange>,
+    pub truncated: bool,
+    pub message: String,
+}
+
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotRecord {
@@ -321,7 +432,24 @@ pub struct AgentUiMetadata {
     pub legacy_kind: Option<String>,
     pub display_name: String,
     pub icon_key: String,
+    pub ui_order: u16,
+    pub nav_mark: String,
     pub admission: AdmissionStatus,
+    pub connector_capabilities: Vec<AgentConnectorCapabilityView>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConnectorCapabilityView {
+    pub connector_id: String,
+    pub adapter_id: String,
+    pub base_url_shape: BaseUrlShape,
+    pub platforms: Vec<Platform>,
+    pub config_format: String,
+    pub config_path_template: String,
+    pub owned_fields: Vec<String>,
+    pub requires_virtual_key: bool,
+    pub restart_required: bool,
 }
 
 impl From<&AgentDescriptor> for AgentUiMetadata {
@@ -331,7 +459,10 @@ impl From<&AgentDescriptor> for AgentUiMetadata {
             legacy_kind: descriptor.legacy_kind.clone(),
             display_name: descriptor.display_name.clone(),
             icon_key: descriptor.icon_key.clone(),
+            ui_order: descriptor.ui_order,
+            nav_mark: descriptor.nav_mark.clone(),
             admission: descriptor.admission,
+            connector_capabilities: Vec::new(),
         }
     }
 }

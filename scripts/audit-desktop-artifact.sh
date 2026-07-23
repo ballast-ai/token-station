@@ -37,6 +37,7 @@ for plugin in \
   agent-openai \
   agent-anthropic \
   agent-openai-responses \
+  agent-gemini \
   provider-openai-compatible; do
   grep -Fq "$plugin" "$strings_file" || {
     echo "desktop executable is missing builtin plugin marker: $plugin" >&2

@@ -16,6 +16,7 @@ use token_station_metrics::SCHEMA_VERSION;
 /// What `--by` groups on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupBy {
+    Agent,
     Upstream,
     Model,
     Pool,
@@ -26,6 +27,7 @@ impl GroupBy {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            Self::Agent => "agent",
             Self::Upstream => "upstream",
             Self::Model => "model",
             Self::Pool => "pool",
@@ -34,9 +36,17 @@ impl GroupBy {
     }
 }
 
+/// Optional exact-match dimensions applied before aggregation. `source` is
+/// the inbound adapter protocol stored on the Receipt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StatsFilter<'a> {
+    pub agent_id: Option<&'a str>,
+    pub source: Option<&'a str>,
+}
+
 /// One bucket's numbers. `requests` counts every exchange, including the ones
 /// that failed before a routing decision existed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Aggregate {
     pub requests: u64,
     /// Failed exchanges: an error code was recorded *or* the caller saw >= 400.
@@ -48,6 +58,10 @@ pub struct Aggregate {
     pub output_tokens: u64,
     /// `None` until any row carries a cost (the pricing table is C2#4).
     pub cost_micros: Option<i64>,
+    /// Requests carrying a stable numeric cost versus requests whose model
+    /// was not covered by the price table.
+    pub priced_requests: u64,
+    pub unpriced_requests: u64,
 }
 
 /// The whole answer: totals, plus one bucket per group when `--by` was given.
@@ -92,6 +106,44 @@ pub fn collect(
     cutoff_ms: Option<u64>,
     group_by: Option<GroupBy>,
 ) -> Result<Report, String> {
+    collect_range(db_path, cutoff_ms, None, group_by)
+}
+
+/// Aggregates the half-open time range `[start_ms, end_ms)`. This is used by
+/// fixed budget periods so receipts from a later period cannot inflate an
+/// expired period's usage.
+///
+/// # Errors
+///
+/// Returns the same read/schema errors as [`collect`], and rejects a reversed
+/// range before opening the store.
+pub fn collect_range(
+    db_path: &Path,
+    start_ms: Option<u64>,
+    end_ms: Option<u64>,
+    group_by: Option<GroupBy>,
+) -> Result<Report, String> {
+    collect_filtered(db_path, start_ms, end_ms, group_by, StatsFilter::default())
+}
+
+/// Aggregates a half-open time range after exact Agent/source filters.
+///
+/// # Errors
+///
+/// Returns the same range, store, and schema errors as [`collect_range`].
+pub fn collect_filtered(
+    db_path: &Path,
+    start_ms: Option<u64>,
+    end_ms: Option<u64>,
+    group_by: Option<GroupBy>,
+    filter: StatsFilter<'_>,
+) -> Result<Report, String> {
+    if start_ms
+        .zip(end_ms)
+        .is_some_and(|(start, end)| start >= end)
+    {
+        return Err("stats range end_ms must be after start_ms".to_string());
+    }
     if !db_path.exists() {
         return Err(format!(
             "no metrics store at `{}` — it is created when `serve` first runs with data.metrics \
@@ -117,14 +169,23 @@ pub fn collect(
 
     let mut statement = connection
         .prepare(
-            "SELECT latency_ms, status, error_code, upstream, model, pool,
+            "SELECT latency_ms, status, error_code, agent_id, upstream, model, pool,
                     input_tokens, output_tokens, cost_micros
-             FROM requests WHERE started_at_ms >= ?1",
+             FROM requests
+             WHERE started_at_ms >= ?1
+               AND (?2 IS NULL OR started_at_ms < ?2)
+               AND (?3 IS NULL OR agent_id = ?3)
+               AND (?4 IS NULL OR protocol = ?4)",
         )
         .map_err(|error| format!("metrics query: {error}"))?;
     let rows = statement
         .query_map(
-            [i64::try_from(cutoff_ms.unwrap_or(0)).unwrap_or(i64::MAX)],
+            rusqlite::params![
+                i64::try_from(start_ms.unwrap_or(0)).unwrap_or(i64::MAX),
+                end_ms.map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
+                filter.agent_id,
+                filter.source,
+            ],
             |row| {
                 // SQLite integers are i64; the store wrote these as saturating
                 // non-negatives, so the narrowing back is total.
@@ -133,12 +194,13 @@ pub fn collect(
                     latency_ms: narrow(row.get::<_, i64>(0)?),
                     status: row.get::<_, u16>(1)?,
                     error_code: row.get::<_, Option<String>>(2)?,
-                    upstream: row.get::<_, Option<String>>(3)?,
-                    model: row.get::<_, Option<String>>(4)?,
-                    pool: row.get::<_, Option<String>>(5)?,
-                    input_tokens: row.get::<_, Option<i64>>(6)?.map(narrow),
-                    output_tokens: row.get::<_, Option<i64>>(7)?.map(narrow),
-                    cost_micros: row.get::<_, Option<i64>>(8)?,
+                    agent_id: row.get::<_, Option<String>>(3)?,
+                    upstream: row.get::<_, Option<String>>(4)?,
+                    model: row.get::<_, Option<String>>(5)?,
+                    pool: row.get::<_, Option<String>>(6)?,
+                    input_tokens: row.get::<_, Option<i64>>(7)?.map(narrow),
+                    output_tokens: row.get::<_, Option<i64>>(8)?.map(narrow),
+                    cost_micros: row.get::<_, Option<i64>>(9)?,
                 })
             },
         )
@@ -237,6 +299,7 @@ struct Row {
     latency_ms: u64,
     status: u16,
     error_code: Option<String>,
+    agent_id: Option<String>,
     upstream: Option<String>,
     model: Option<String>,
     pool: Option<String>,
@@ -255,6 +318,7 @@ impl Row {
     fn key(&self, by: GroupBy) -> String {
         let unrouted = || "(unrouted)".to_owned();
         match by {
+            GroupBy::Agent => self.agent_id.clone().unwrap_or_else(unrouted),
             GroupBy::Upstream => self.upstream.clone().unwrap_or_else(unrouted),
             GroupBy::Model => self.model.clone().unwrap_or_else(unrouted),
             GroupBy::Pool => self.pool.clone().unwrap_or_else(unrouted),
@@ -273,6 +337,8 @@ fn aggregate<'a>(rows: impl Iterator<Item = &'a Row>) -> Aggregate {
         input_tokens: 0,
         output_tokens: 0,
         cost_micros: None,
+        priced_requests: 0,
+        unpriced_requests: 0,
     };
     for row in rows {
         bucket.requests += 1;
@@ -286,6 +352,9 @@ fn aggregate<'a>(rows: impl Iterator<Item = &'a Row>) -> Aggregate {
             .saturating_add(row.output_tokens.unwrap_or(0));
         if let Some(cost) = row.cost_micros {
             bucket.cost_micros = Some(bucket.cost_micros.unwrap_or(0).saturating_add(cost));
+            bucket.priced_requests = bucket.priced_requests.saturating_add(1);
+        } else {
+            bucket.unpriced_requests = bucket.unpriced_requests.saturating_add(1);
         }
     }
     latencies.sort_unstable();
@@ -312,7 +381,7 @@ fn percentage(part: u64, whole: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{GroupBy, collect, parse_since};
+    use super::{GroupBy, StatsFilter, collect, parse_since};
     use crate::store::SqliteStore;
     use std::path::PathBuf;
     use token_station_metrics::{Recorder, RequestRecord, RoutingRecord};
@@ -416,6 +485,25 @@ mod tests {
     }
 
     #[test]
+    fn fixed_budget_window_excludes_receipts_at_or_after_its_end() {
+        let path = std::env::temp_dir().join(format!(
+            "ts-stats-{}-fixed-budget-window.sqlite",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        for started_at_ms in [99, 100, 199, 200] {
+            store.record(&record(started_at_ms, 1, 200, Some("provider"), None));
+        }
+
+        let report = super::collect_range(&path, Some(100), Some(200), None)
+            .expect("collects a half-open fixed period");
+        assert_eq!(report.total.requests, 2);
+        assert!(super::collect_range(&path, Some(200), Some(100), None).is_err());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn grouping_buckets_unrouted_requests_visibly() {
         let path = fixture("groups");
 
@@ -426,6 +514,91 @@ mod tests {
         assert_eq!(primary.requests, 19);
         assert_eq!(primary.errors, 0);
 
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn agent_groups_keep_priced_and_unpriced_request_counts_distinct() {
+        let path = std::env::temp_dir().join(format!(
+            "ts-stats-{}-agent-budgets.sqlite",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        let mut priced = record(10, 1, 200, Some("provider"), None);
+        priced.agent_id = Some("codex".to_string());
+        priced.cost_kind = token_station_metrics::CostKind::Estimated;
+        priced.cost_micros = Some(750_000);
+        priced.price_version = Some(1);
+        store.record(&priced);
+        let mut unknown = record(10, 1, 200, Some("provider"), None);
+        unknown.agent_id = Some("codex".to_string());
+        store.record(&unknown);
+        let mut other = priced.clone();
+        other.request_id = "other-agent".to_string();
+        other.agent_id = Some("opencode".to_string());
+        other.cost_micros = Some(5);
+        store.record(&other);
+
+        let report = collect(&path, None, Some(GroupBy::Agent)).expect("groups by Agent");
+        let codex = report
+            .groups
+            .iter()
+            .find(|(agent, _)| agent == "codex")
+            .map(|(_, aggregate)| aggregate)
+            .unwrap();
+        assert_eq!(codex.cost_micros, Some(750_000));
+        assert_eq!(codex.priced_requests, 1);
+        assert_eq!(codex.unpriced_requests, 1);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn agent_and_inbound_source_filters_are_exact_and_composable() {
+        let path = std::env::temp_dir().join(format!(
+            "ts-stats-{}-agent-source-filters.sqlite",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        for (request_id, agent, protocol) in [
+            ("codex-responses", "codex", "openai-responses"),
+            ("codex-chat", "codex", "openai-chat-completions"),
+            ("opencode-chat", "opencode", "openai-chat-completions"),
+        ] {
+            let mut value = record(10, 1, 200, Some("provider"), None);
+            value.request_id = request_id.to_string();
+            value.agent_id = Some(agent.to_string());
+            value.protocol = protocol.to_string();
+            store.record(&value);
+        }
+
+        let report = super::collect_filtered(
+            &path,
+            None,
+            None,
+            None,
+            StatsFilter {
+                agent_id: Some("codex"),
+                source: Some("openai-chat-completions"),
+            },
+        )
+        .expect("filters exact Agent and inbound protocol source");
+        assert_eq!(report.total.requests, 1);
+
+        let source_only = super::collect_filtered(
+            &path,
+            None,
+            None,
+            Some(GroupBy::Agent),
+            StatsFilter {
+                agent_id: None,
+                source: Some("openai-chat-completions"),
+            },
+        )
+        .unwrap();
+        assert_eq!(source_only.total.requests, 2);
+        assert_eq!(source_only.groups.len(), 2);
         std::fs::remove_file(path).ok();
     }
 

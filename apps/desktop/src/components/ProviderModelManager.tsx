@@ -63,6 +63,35 @@ const probeLayerLabel = {
   json: "JSON Schema",
 } as const;
 
+type ProviderHealth = "untested" | "healthy" | "degraded" | "unavailable";
+
+const healthLabel: Record<ProviderHealth, string> = {
+  untested: "未测试",
+  healthy: "健康",
+  degraded: "能力退化",
+  unavailable: "不可用",
+};
+
+const baseLayers = new Set(["network", "http", "auth", "model", "generation"]);
+
+function providerHealth(results: ProviderTestResult[]): ProviderHealth {
+  if (results.length === 0) return "untested";
+  const stages = results.flatMap((result) => result.stages);
+  const base = stages.filter((stage) => baseLayers.has(stage.layer));
+  if (base.length !== results.length * 5 || base.some((stage) => stage.status !== "pass")) {
+    return "unavailable";
+  }
+  return stages.some((stage) => !baseLayers.has(stage.layer) && stage.status !== "pass")
+    ? "degraded"
+    : "healthy";
+}
+
+function stageTiming(stage: ProviderTestResult["stages"][number]) {
+  if (stage.status === "skipped") return "未执行";
+  if (stage.duration_ms == null) return "未计时";
+  return `${stage.timing_kind === "cumulative" ? "≤" : ""}${stage.duration_ms}ms`;
+}
+
 function costLabel(costMicros: number | null): string {
   return costMicros != null && costMicros > 0
     ? `估算成本 ${(costMicros / 1_000_000).toFixed(4)}`
@@ -106,6 +135,7 @@ export default function ProviderModelManager({
   const [diff, setDiff] = useState<{ added: string[]; removed: string[] } | null>(null);
   const [endpointPreview, setEndpointPreview] = useState<ProviderEndpointPreview | null>(null);
   const [testResults, setTestResults] = useState<ProviderTestResult[]>([]);
+  const [testedAtMs, setTestedAtMs] = useState<number | null>(null);
   const [testing, setTesting] = useState(false);
   const [usage, setUsage] = useState<string>("正在读取无正文用量…");
   const [editBaseUrl, setEditBaseUrl] = useState(provider.base_url);
@@ -152,7 +182,9 @@ export default function ProviderModelManager({
     setTesting(true);
     setError("");
     try {
-      setTestResults(await testProvider(provider.name));
+      const results = await testProvider(provider.name);
+      setTestResults(results);
+      setTestedAtMs(Date.now());
     } catch (caught) {
       setError(String(caught));
     } finally {
@@ -200,9 +232,19 @@ export default function ProviderModelManager({
           <strong>Provider 详情</strong>
           <span>{usage}</span>
         </div>
-        <button className="btn tiny" type="button" disabled={operationDisabled} onClick={() => void runProviderTest()}>
-          {testing ? "测试中…" : "运行分层测试"}
-        </button>
+        <div className="provider-health-actions">
+          <div
+            className={`provider-health-badge ${providerHealth(testResults)}`}
+            aria-label={`Provider 健康状态：${healthLabel[providerHealth(testResults)]}`}
+          >
+            <i aria-hidden="true" />
+            <span>{healthLabel[providerHealth(testResults)]}</span>
+            {testedAtMs != null && <small>最近测试 {new Date(testedAtMs).toLocaleString()}</small>}
+          </div>
+          <button className="btn tiny" type="button" disabled={operationDisabled} onClick={() => void runProviderTest()}>
+            {testing ? "测试中…" : "运行分层测试"}
+          </button>
+        </div>
       </div>
       <div className="provider-edit-fields">
         <input className="input mono" aria-label="编辑 Base URL" value={editBaseUrl} disabled={operationDisabled} onChange={(event) => setEditBaseUrl(event.target.value)} />
@@ -220,11 +262,14 @@ export default function ProviderModelManager({
       )}
       {testResults.length > 0 && (
         <div className="provider-test-results" aria-label="Provider 分层测试结果">
+          <p>基础五层显示同一次真实生成探测的累计耗时（≤）；能力层显示各自真实请求耗时。</p>
           {testResults.map((result) => (
             <div key={result.model}>
               <strong>{result.model}</strong>
               {result.stages.map((stage) => (
-                <span className={stage.status} key={stage.layer} title={stage.detail}>{probeLayerLabel[stage.layer]} · {stage.status}</span>
+                <span className={stage.status} key={stage.layer} title={stage.detail}>
+                  {probeLayerLabel[stage.layer]} · {stage.status} · {stageTiming(stage)}
+                </span>
               ))}
             </div>
           ))}
