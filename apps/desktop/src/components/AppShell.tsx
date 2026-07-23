@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { AgentUiMetadataView, AgentView, ServeView } from "../api";
 import { AgentIcon } from "../brandIcons";
+import { useLanguage } from "./LanguageProvider";
 
 export type AppView =
   | "home"
@@ -45,26 +46,27 @@ export default function AppShell({
   onToggleServe,
   children,
 }: AppShellProps) {
+  const { t } = useLanguage();
   const scanned = new Map(agents.map((agent) => [agent.metadata.agent_id, agent]));
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   const taskRunning = serve.app_runtime === "running";
   const serveLabel =
     taskRunning && !serve.listener_reachable
-      ? "运行态未知"
+      ? t("serve.unknown")
       : runtimeHealthy
-        ? "代理运行中"
+        ? t("serve.running")
       : serve.phase === "starting"
-        ? "正在启动"
+        ? t("serve.starting")
         : serve.phase === "stopping"
-          ? "正在停止"
+          ? t("serve.stopping")
           : serve.phase === "error"
-            ? "重试启动"
-            : "启动代理";
+            ? t("serve.retry")
+            : t("serve.startProxy");
 
   return (
     <div className="station-shell">
-      <aside className="station-rail" aria-label="主导航">
-        <button className="station-brand" type="button" onClick={() => onNavigate("home")} aria-label="Token Station 主页">
+      <aside className="station-rail" aria-label={t("nav.main")}>
+        <button className="station-brand" type="button" onClick={() => onNavigate("home")} aria-label={t("nav.homeLabel")}>
           <span className="brand-signal" aria-hidden="true"><i /><i /><i /></span>
           <span className="brand-word">Token<br />Station</span>
         </button>
@@ -77,7 +79,7 @@ export default function AppShell({
             aria-current={view === "home" ? "page" : undefined}
           >
             <NavGlyph>⌂</NavGlyph>
-            <span>主页</span>
+            <span>{t("nav.home")}</span>
           </button>
 
           <div className="rail-label">AGENTS</div>
@@ -110,7 +112,7 @@ export default function AppShell({
 
         <button className="rail-rescan" type="button" disabled={scanBusy} onClick={onRescan}>
           <span aria-hidden="true">↻</span>
-          <span>{scanBusy ? "扫描中" : "重新扫描"}</span>
+          <span>{scanBusy ? t("nav.scanning") : t("nav.rescan")}</span>
         </button>
       </aside>
 
@@ -122,7 +124,7 @@ export default function AppShell({
               <strong>{serveLabel}</strong>
               <small>{serve.listen}</small>
               <small data-testid="agent-runtime-connection">
-                Agent：{serve.agent_connected ? "已连接" : "未连接"}
+                {t("serve.agent")}：{serve.agent_connected ? t("serve.connected") : t("serve.disconnected")}
               </small>
             </span>
             <button
@@ -131,7 +133,13 @@ export default function AppShell({
               disabled={commandBusy || serve.phase === "stopping"}
               onClick={onToggleServe}
             >
-              {taskRunning ? "停止" : serve.phase === "starting" ? "取消" : serve.phase === "stopping" ? "停止中" : "启动"}
+              {taskRunning
+                ? t("serve.stop")
+                : serve.phase === "starting"
+                  ? t("serve.cancel")
+                  : serve.phase === "stopping"
+                    ? t("serve.stoppingShort")
+                    : t("serve.start")}
             </button>
           </div>
 
@@ -140,8 +148,8 @@ export default function AppShell({
               className={`icon-action ${view === "usage" ? "active" : ""}`}
               type="button"
               onClick={() => onNavigate("usage")}
-              aria-label="用量"
-              title="用量"
+              aria-label={t("nav.usage")}
+              title={t("nav.usage")}
             >
               <svg className="usage-icon" viewBox="0 0 18 18" aria-hidden="true">
                 <path d="M3 14.5V9.5M9 14.5V4.5M15 14.5V7" />
@@ -152,14 +160,14 @@ export default function AppShell({
               className={`icon-action ${view === "settings" ? "active" : ""}`}
               type="button"
               onClick={() => onNavigate("settings")}
-              aria-label="设置"
-              title="设置"
+              aria-label={t("nav.settings")}
+              title={t("nav.settings")}
             >
               <span aria-hidden="true">⚙</span>
             </button>
             {view !== "add-provider" && (
               <button className="btn primary add-provider-action" type="button" onClick={() => onNavigate("add-provider")}>
-                <span aria-hidden="true">＋</span> 添加供应商
+                <span aria-hidden="true">＋</span> {t("nav.addProvider")}
               </button>
             )}
           </div>

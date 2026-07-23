@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { UpgradeView, checkUpgrade } from "../api";
+import { LanguageBoundary, useLanguage } from "../components/LanguageProvider";
 
 /// About/Updates page. Perform only an anonymous version check, the core’s only permitted outbound connection, and do not replace the binary.
-export default function About({ version }: { version: string }) {
+function AboutContent({ version }: { version: string }) {
+  const { t } = useLanguage();
   const [uv, setUv] = useState<UpgradeView | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -30,14 +32,12 @@ export default function About({ version }: { version: string }) {
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>关于 · 更新</h2>
-        <p className="sub">
-          匿名检查最新发布(唯一非上游的外联,serve 永不主动联网)。只比对版本,不自动下载替换。
-        </p>
+        <h2>{t("about.title")}</h2>
+        <p className="sub">{t("about.description")}</p>
       </div>
 
       <div className="kv-grid">
-        <div className="kv-k">当前版本</div>
+        <div className="kv-k">{t("about.currentVersion")}</div>
         <div className="kv-v mono">{version}</div>
       </div>
 
@@ -46,17 +46,15 @@ export default function About({ version }: { version: string }) {
       {uv && (
         <div className={`banner ${uv.newer ? "warn" : "ok"}`}>
           {uv.newer ? (
-            <>
-              有新版本 <b>{uv.latest_tag}</b>(当前 {uv.current})。
-            </>
+            <>{t("about.newVersion", { latest: uv.latest_tag, current: uv.current })}</>
           ) : (
-            <>已是最新({uv.current},最新发布 {uv.latest_tag})。</>
+            <>{t("about.latest", { current: uv.current, latest: uv.latest_tag })}</>
           )}
           {uv.html_url && (
             <span className="inline-url">
               <span className="mono">{uv.html_url}</span>
               <button className="btn tiny" onClick={() => copy(uv.html_url)}>
-                {copied ? "已复制" : "复制链接"}
+                {copied ? t("about.copied") : t("about.copyLink")}
               </button>
             </span>
           )}
@@ -65,9 +63,17 @@ export default function About({ version }: { version: string }) {
 
       <div className="panel-foot">
         <button className="btn primary" disabled={busy} onClick={check}>
-          {busy ? "检查中…" : "检查更新"}
+          {busy ? t("about.checking") : t("about.check")}
         </button>
       </div>
     </section>
+  );
+}
+
+export default function About(props: Parameters<typeof AboutContent>[0]) {
+  return (
+    <LanguageBoundary>
+      <AboutContent {...props} />
+    </LanguageBoundary>
   );
 }

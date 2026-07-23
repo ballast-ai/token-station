@@ -1,22 +1,35 @@
 import { useEffect, useRef, useState } from "react";
 import type { ServeView, SettingsView, StateView } from "../api";
+import {
+  LanguageBoundary,
+  useLanguage,
+  type Language,
+  type TranslationKey,
+} from "../components/LanguageProvider";
+import PageBackButton from "../components/PageBackButton";
 import { useTheme, type Theme } from "../components/ThemeProvider";
 import About from "./About";
 import Plugins from "./Plugins";
 import RouterTable from "./RouterTable";
 import Settings from "./Settings";
 
-type SettingsSection = "general" | "router" | "plugins" | "appearance" | "about";
+type SettingsSection = "general" | "router" | "plugins" | "appearance" | "language" | "about";
 
-const SECTIONS: Array<{ id: SettingsSection; label: string; description: string }> = [
-  { id: "general", label: "通用", description: "代理、鉴权和环境" },
-  { id: "router", label: "路由表", description: "只读决策结构" },
-  { id: "plugins", label: "插件", description: "已加载的能力" },
-  { id: "appearance", label: "外观", description: "明暗主题" },
-  { id: "about", label: "关于", description: "版本与更新" },
+const SECTIONS: Array<{
+  id: SettingsSection;
+  label: TranslationKey;
+  description: TranslationKey;
+}> = [
+  { id: "general", label: "settings.general", description: "settings.generalHint" },
+  { id: "router", label: "settings.router", description: "settings.routerHint" },
+  { id: "plugins", label: "settings.plugins", description: "settings.pluginsHint" },
+  { id: "appearance", label: "settings.appearance", description: "settings.appearanceHint" },
+  { id: "language", label: "settings.language", description: "settings.languageHint" },
+  { id: "about", label: "settings.about", description: "settings.aboutHint" },
 ];
 
 function VirtualKeyCard({ serve }: { serve: ServeView }) {
+  const { t } = useLanguage();
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState(false);
   const revealTimer = useRef<number | null>(null);
@@ -44,21 +57,23 @@ function VirtualKeyCard({ serve }: { serve: ServeView }) {
     <section className="panel key-settings-card">
       <div className="panel-head split-heading">
         <div>
-          <span className="eyebrow">LOCAL AUTH</span>
-          <h2>虚拟 API Key</h2>
-          <p className="sub">供本机 Agent 访问 Token Station。默认隐藏，复制时无需显示明文。</p>
+          <span className="eyebrow">{t("key.eyebrow")}</span>
+          <h2>{t("key.title")}</h2>
+          <p className="sub">{t("key.description")}</p>
         </div>
         <span className={`status-chip ${runtimeHealthy && key ? "success" : ""}`}>
-          {runtimeHealthy && key ? "已生成" : "代理未运行"}
+          {runtimeHealthy && key ? t("key.generated") : t("key.proxyStopped")}
         </span>
       </div>
       <div className="secret-row">
-        <code aria-label="虚拟 API Key">{key ? (revealed ? key : "ts-••••••••••••••••••••••••") : "启动代理后生成"}</code>
+        <code aria-label={t("key.ariaLabel")}>
+          {key ? (revealed ? key : "ts-••••••••••••••••••••••••") : t("key.startToGenerate")}
+        </code>
         <button className="btn tiny" type="button" disabled={!key} onClick={revealed ? () => setRevealed(false) : reveal}>
-          {revealed ? "隐藏" : "显示 15 秒"}
+          {revealed ? t("key.hide") : t("key.show")}
         </button>
         <button className="btn tiny" type="button" disabled={!key} onClick={() => void copy()}>
-          {copied ? "已复制" : "复制"}
+          {copied ? t("key.copied") : t("key.copy")}
         </button>
       </div>
     </section>
@@ -67,19 +82,26 @@ function VirtualKeyCard({ serve }: { serve: ServeView }) {
 
 function AppearancePanel() {
   const { theme, resolvedTheme, setTheme } = useTheme();
+  const { t } = useLanguage();
   const choices: Array<{ value: Theme; label: string; hint: string }> = [
-    { value: "light", label: "浅色", hint: "稳定使用明亮界面" },
-    { value: "dark", label: "深色", hint: "稳定使用暗色界面" },
-    { value: "system", label: "跟随系统", hint: `当前系统为${resolvedTheme === "dark" ? "深色" : "浅色"}` },
+    { value: "light", label: t("appearance.light"), hint: t("appearance.lightHint") },
+    { value: "dark", label: t("appearance.dark"), hint: t("appearance.darkHint") },
+    {
+      value: "system",
+      label: t("appearance.system"),
+      hint: t("appearance.systemHint", {
+        theme: t(resolvedTheme === "dark" ? "appearance.systemDark" : "appearance.systemLight"),
+      }),
+    },
   ];
   return (
     <section className="panel appearance-panel">
       <div className="panel-head">
-        <span className="eyebrow">APPEARANCE</span>
-        <h2>外观</h2>
-        <p className="sub">主题会同步应用到主页、Agent、用量和设置中的所有页面。</p>
+        <span className="eyebrow">{t("appearance.eyebrow")}</span>
+        <h2>{t("appearance.title")}</h2>
+        <p className="sub">{t("appearance.description")}</p>
       </div>
-      <div className="theme-options" role="radiogroup" aria-label="界面主题">
+      <div className="theme-options" role="radiogroup" aria-label={t("appearance.groupLabel")}>
         {choices.map((choice) => (
           <button
             key={choice.value}
@@ -99,21 +121,68 @@ function AppearancePanel() {
   );
 }
 
+const LANGUAGE_OPTIONS: Array<{
+  value: Language;
+  label: string;
+  mark: string;
+  hint: TranslationKey;
+}> = [
+  { value: "zh-CN", label: "简体中文", mark: "简", hint: "language.zhCNHint" },
+  { value: "zh-TW", label: "繁體中文", mark: "繁", hint: "language.zhTWHint" },
+  { value: "en", label: "English", mark: "EN", hint: "language.enHint" },
+  { value: "ja", label: "日本語", mark: "日", hint: "language.jaHint" },
+];
+
+function LanguagePanel() {
+  const { language, setLanguage, t } = useLanguage();
+  return (
+    <section className="panel language-panel">
+      <div className="panel-head">
+        <span className="eyebrow">{t("language.eyebrow")}</span>
+        <h2>{t("language.title")}</h2>
+        <p className="sub">{t("language.description")}</p>
+      </div>
+      <div className="language-options" role="radiogroup" aria-label={t("language.groupLabel")}>
+        {LANGUAGE_OPTIONS.map((option) => (
+          <button
+            key={option.value}
+            className={`language-option ${language === option.value ? "selected" : ""}`}
+            type="button"
+            role="radio"
+            aria-checked={language === option.value}
+            onClick={() => setLanguage(option.value)}
+          >
+            <span className="language-mark" aria-hidden="true">{option.mark}</span>
+            <span>
+              <strong>{option.label}</strong>
+              <small>{t(option.hint)}</small>
+            </span>
+            <i className="language-selected-dot" aria-hidden="true" />
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 interface SettingsHubProps {
   settings: SettingsView;
   serve: ServeView;
   onSaved: (state: StateView) => void;
+  onBack?: () => void;
 }
 
-export default function SettingsHub({ settings, serve, onSaved }: SettingsHubProps) {
+function SettingsHubContent({ settings, serve, onSaved, onBack }: SettingsHubProps) {
   const [section, setSection] = useState<SettingsSection>("general");
+  const { t } = useLanguage();
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   return (
     <div className="settings-layout">
-      <aside className="settings-nav" aria-label="设置分类">
+      <aside className="settings-nav" aria-label={t("settings.navLabel")}>
         <div className="settings-nav-title">
-          <span className="eyebrow">CONTROL ROOM</span>
-          <h1>设置</h1>
+          {onBack && <PageBackButton onClick={onBack} />}
+          <span className="eyebrow">{t("settings.controlRoom")}</span>
+          <h1>{t("settings.title")}</h1>
         </div>
         {SECTIONS.map((item) => (
           <button
@@ -122,8 +191,8 @@ export default function SettingsHub({ settings, serve, onSaved }: SettingsHubPro
             type="button"
             onClick={() => setSection(item.id)}
           >
-            <strong>{item.label}</strong>
-            <small>{item.description}</small>
+            <strong>{t(item.label)}</strong>
+            <small>{t(item.description)}</small>
           </button>
         ))}
       </aside>
@@ -137,8 +206,17 @@ export default function SettingsHub({ settings, serve, onSaved }: SettingsHubPro
         {section === "router" && <RouterTable />}
         {section === "plugins" && <Plugins />}
         {section === "appearance" && <AppearancePanel />}
+        {section === "language" && <LanguagePanel />}
         {section === "about" && <About version={settings.version} />}
       </div>
     </div>
+  );
+}
+
+export default function SettingsHub(props: SettingsHubProps) {
+  return (
+    <LanguageBoundary>
+      <SettingsHubContent {...props} />
+    </LanguageBoundary>
   );
 }

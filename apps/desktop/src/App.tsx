@@ -23,6 +23,7 @@ import {
   type TierSlot,
 } from "./api";
 import AppShell, { type AppView } from "./components/AppShell";
+import { LanguageBoundary } from "./components/LanguageProvider";
 import AddProviderPage from "./pages/AddProviderPage";
 import AgentRoutePage from "./pages/AgentRoutePage";
 import HomePage from "./pages/HomePage";
@@ -59,10 +60,9 @@ export function configSaveStatus(state: StateView): string {
   return "无改动";
 }
 
-export default function App() {
+function StationApp() {
   const [state, setState] = useState<StateView | null>(null);
   const [view, setView] = useState<AppView>("home");
-  const [returnView, setReturnView] = useState<AppView>("home");
   const [registry, setRegistry] = useState<AgentUiMetadataView[]>([]);
   const [agents, setAgents] = useState<AgentView[]>([]);
   const [scanBusy, setScanBusy] = useState(false);
@@ -75,6 +75,7 @@ export default function App() {
   const scanQueuedRef = useRef(false);
   const scanGenerationRef = useRef(0);
   const pendingServeRef = useRef<ServeView | null>(null);
+  const viewHistoryRef = useRef<AppView[]>([]);
 
   const orderedRegistry = useMemo(
     () => registry
@@ -211,9 +212,19 @@ export default function App() {
   };
 
   const navigate = (next: AppView) => {
-    if (next === "add-provider") setReturnView(view);
+    if (next === view) return;
+    if (next === "usage" || next === "settings" || next === "add-provider") {
+      viewHistoryRef.current.push(view);
+    } else {
+      viewHistoryRef.current = [];
+    }
     setView(next);
     setMessage("");
+    setError("");
+  };
+
+  const navigateBack = () => {
+    setView(viewHistoryRef.current.pop() ?? "home");
     setError("");
   };
 
@@ -297,18 +308,33 @@ export default function App() {
         <section className="panel"><div className="panel-head"><h2>未知 Agent</h2><p className="sub">该 Agent 不在当前 Registry 的受支持列表中。</p></div></section>
       )}
 
-      {view === "usage" && <Stats />}
-      {view === "settings" && <SettingsHub settings={state.settings} serve={state.serve} onSaved={showState} />}
+      {view === "usage" && <Stats onBack={navigateBack} />}
+      {view === "settings" && (
+        <SettingsHub
+          settings={state.settings}
+          serve={state.serve}
+          onSaved={showState}
+          onBack={navigateBack}
+        />
+      )}
       {view === "add-provider" && (
         <AddProviderPage
           existingNames={state.providers.map((provider) => provider.name)}
-          onCancel={() => navigate(returnView)}
+          onCancel={navigateBack}
           onAdded={(next, message) => {
             showState(next, message);
-            setView(returnView);
+            setView(viewHistoryRef.current.pop() ?? "home");
           }}
         />
       )}
     </AppShell>
+  );
+}
+
+export default function App() {
+  return (
+    <LanguageBoundary>
+      <StationApp />
+    </LanguageBoundary>
   );
 }
