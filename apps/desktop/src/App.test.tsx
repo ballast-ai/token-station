@@ -68,8 +68,11 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
       mid: { upstream: null, model: null },
       low: { upstream: null, model: null },
     },
+    keywords: { high: [], mid: [], low: [] },
     agent_routes: Object.fromEntries(agentIds.map((id) => [id, structuredClone(emptyRoute)])),
     profiles: [],
+    local_only: false,
+    allow_cloud_fallback: false,
     serve: serveFixture(),
     draft_revision: 0,
     saved_revision: 0,
@@ -545,7 +548,8 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "添加供应商" })).toHaveLength(1);
-    await user.selectOptions(screen.getByLabelText("选择供应商"), "openai");
+    // The provider selector is now a brand-card grid with role=radiogroup. Select a visible card label.
+    await user.click(screen.getByText("OpenAI", { selector: ".preset-card-label" }));
     await user.type(screen.getByPlaceholderText("只保存在系统钥匙串"), "secret-test");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "OpenCode" })).toBeInTheDocument();

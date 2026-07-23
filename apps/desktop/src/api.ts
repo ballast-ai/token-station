@@ -15,6 +15,8 @@ export interface ProviderView {
   catalog_revision?: number;
   catalog?: CatalogModelView[];
   has_auth: boolean;
+  /** Locally hosted provider, such as Ollama. Local-only routing uses this to keep traffic on the machine. */
+  local?: boolean;
 }
 
 export type CapabilityState = "verified" | "declared" | "unsupported" | "unknown";
@@ -252,8 +254,14 @@ export interface StateView {
   deleted_providers?: string[];
   provider_recovery_error?: string | null;
   tiers: Record<TierSlot, TierView>;
+  /** User keyword library for each tier; a match forces that tier at routing layer 1. */
+  keywords: Record<TierSlot, string[]>;
   agent_routes: Record<string, AgentRouteView>;
   profiles: string[];
+  /** Local-only routing uses providers marked local and keeps requests on the machine. */
+  local_only: boolean;
+  /** Whether local_only may fall back to cloud when no local target is available; false means strict local routing. */
+  allow_cloud_fallback: boolean;
   serve: ServeView;
   draft_revision: number;
   saved_revision: number;
@@ -599,7 +607,22 @@ export const addProvider = (
   base_url: string,
   models: string[],
   api_key: string | null,
-) => invoke<StateView>("add_provider", { name, baseUrl: base_url, models, apiKey: api_key });
+  local = false,
+) =>
+  invoke<StateView>("add_provider", {
+    name,
+    baseUrl: base_url,
+    models,
+    apiKey: api_key,
+    local,
+  });
+
+/** Set local-only routing and cloud fallback in the home router; inherited Agents follow automatically. */
+export const setLocalRouting = (localOnly: boolean, allowCloudFallback: boolean) =>
+  invoke<StateView>("set_local_routing", {
+    localOnly,
+    allowCloudFallback,
+  });
 
 export const editProvider = (name: string, base_url: string, api_key: string | null) =>
   invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });
@@ -635,6 +658,14 @@ export const setTier = (
   upstream: string | null,
   model: string | null,
 ) => invoke<StateView>("set_tier", { slot, upstream, model });
+
+/** Add a keyword to a tier; matching it forces that tier. */
+export const addKeyword = (slot: TierSlot, keyword: string) =>
+  invoke<StateView>("add_keyword", { slot, keyword });
+
+/** Remove a keyword from a tier. */
+export const removeKeyword = (slot: TierSlot, keyword: string) =>
+  invoke<StateView>("remove_keyword", { slot, keyword });
 
 export const setAgentRouteMode = (agentId: AgentId, mode: AgentRouteMode) =>
   invoke<StateView>("set_agent_route_mode", { agentId, mode });

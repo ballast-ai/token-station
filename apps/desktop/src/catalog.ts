@@ -10,6 +10,7 @@ export interface ProviderPreset {
   models: string[];
   needsKey: boolean;
   note?: string;
+  local?: boolean; // Locally hosted provider such as Ollama or LM Studio; selected presets default to local models.
   protocol: "openai_chat_completions";
   region: string;
   subscription: string;
@@ -199,11 +200,11 @@ const OFFICIAL_AND_MANAGED_PRESETS: ProviderPreset[] = [
 const SELF_HOSTED_PRESETS: ProviderPreset[] = [
   verified({
     id: "ollama", label: "本地 Ollama", baseUrl: "http://127.0.0.1:11434/v1", models: ["llama3.3", "qwen2.5", "deepseek-r1"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://docs.ollama.com/api/openai-compatibility",
+    needsKey: false, local: true, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://docs.ollama.com/api/openai-compatibility",
   }),
   verified({
     id: "lm_studio", label: "本地 LM Studio", baseUrl: "http://127.0.0.1:1234/v1", models: ["openai/gpt-oss-20b"],
-    needsKey: false, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://lmstudio.ai/docs/developer/openai-compat",
+    needsKey: false, local: true, region: "本机", subscription: "自托管", serviceClass: "self_hosted", officialDocs: "https://lmstudio.ai/docs/developer/openai-compat",
   }),
   verified({
     id: "localai", label: "本地 LocalAI", baseUrl: "http://127.0.0.1:8080/v1", models: ["phi-2"],

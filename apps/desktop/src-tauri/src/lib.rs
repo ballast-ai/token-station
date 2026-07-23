@@ -58,6 +58,31 @@ const TIER_HIGH: &str = "tier_high";
 const TIER_MID: &str = "tier_mid";
 const TIER_LOW: &str = "tier_low";
 
+/// Stable id for each tier’s “keyword override” rule. Keywords added to a tier enter the corresponding rule’s
+/// `keywords_any`—a match selects this tier and overrides complexity tiers (highest priority in router-core layer 1).
+/// The id is stable because audit and decision records also use it as the `matched routing rule ID`.
+const KW_RULE_HIGH: &str = "kw-high";
+const KW_RULE_MID: &str = "kw-mid";
+const KW_RULE_LOW: &str = "kw-low";
+
+/// Map UI slots to pool names and keyword-rule IDs. Rule order is priority from
+/// high to mid to low, so phrases matching multiple tiers move upward safely.
+fn tier_pool_and_rule(slot: &str) -> Result<(&'static str, &'static str), String> {
+    match slot {
+        "high" => Ok((TIER_HIGH, KW_RULE_HIGH)),
+        "mid" => Ok((TIER_MID, KW_RULE_MID)),
+        "low" => Ok((TIER_LOW, KW_RULE_LOW)),
+        other => Err(format!("未知档位 `{other}`(应为 high/mid/low)")),
+    }
+}
+
+/// Three tiers from high to low as UI slot, pool name, and keyword-rule ID; preserve this order in router.rules.
+const TIER_ORDER: [(&str, &str, &str); 3] = [
+    ("high", TIER_HIGH, KW_RULE_HIGH),
+    ("mid", TIER_MID, KW_RULE_MID),
+    ("low", TIER_LOW, KW_RULE_LOW),
+];
+
 /// Tier thresholds mapping heuristic scores to tiers. Bands descend strictly by
 /// at_least, with a final zero fallback. Evaluation will calibrate these defaults later.
 const CUT_HIGH: u32 = 55;
@@ -340,6 +365,8 @@ struct ProviderView {
     catalog_revision: u64,
     catalog: Vec<model_catalog::CatalogModelView>,
     has_auth: bool,
+    /// This upstream runs on the local machine; `local_only` routing keeps to it.
+    local: bool,
 }
 
 #[derive(Serialize)]
@@ -436,6 +463,13 @@ struct StateView {
     tiers: std::collections::BTreeMap<String, TierView>,
     agent_routes: std::collections::BTreeMap<String, AgentRouteView>,
     profiles: Vec<String>,
+    /// User keyword sets for each tier (high/mid/low). A direct control for user routing, stored
+    /// stored in `router.rules` as `keywords_any`.
+    keywords: std::collections::BTreeMap<String, Vec<String>>,
+    /// Local-only routing uses providers marked local and keeps requests on the machine.
+    local_only: bool,
+    /// Whether local_only can use cloud fallback when no local target is available; false is strict local routing.
+    allow_cloud_fallback: bool,
     serve: ServeView,
     draft_revision: u64,
     saved_revision: u64,
@@ -693,6 +727,7 @@ impl AppInner {
                     catalog_revision,
                     catalog,
                     has_auth: up.get("auth").map(|a| !a.is_null()).unwrap_or(false),
+                    local: up.get("local").and_then(Value::as_bool).unwrap_or(false),
                 }
             })
             .collect()
@@ -720,6 +755,126 @@ impl AppInner {
         tiers.insert("mid".to_string(), self.tier(TIER_MID));
         tiers.insert("low".to_string(), self.tier(TIER_LOW));
         tiers
+    }
+
+    /// Whether a tier pool has members. Keywords require this or their rule would target an empty pool.
+    fn pool_present(&self, pool: &str) -> bool {
+        self.draft["router"]["pools"][pool]
+            .as_array()
+            .is_some_and(|members| !members.is_empty())
+    }
+
+    /// Read the current keywords_any list for a keyword-rule ID.
+    fn rule_keywords(&self, rule_id: &str) -> Vec<String> {
+        self.draft["router"]["rules"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|rule| rule["id"].as_str() == Some(rule_id))
+            .and_then(|rule| rule["when"]["keywords_any"].as_array())
+            .map(|words| {
+                words
+                    .iter()
+                    .filter_map(|w| w.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Keyword libraries for high, mid, and low tiers, exposed to the frontend.
+    fn home_keywords(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        TIER_ORDER
+            .iter()
+            .map(|(slot, _pool, rule_id)| ((*slot).to_string(), self.rule_keywords(rule_id)))
+            .collect()
+    }
+
+    /// Current mapping from tier slots to keyword lists, used as the pre-write snapshot.
+    fn keyword_map(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        self.home_keywords()
+    }
+
+    /// Rewrite `router.rules` from the given three-tier keyword mapping. Rule order is priority (high → mid → low),
+    /// Emit rules only for tiers that have both keywords and a configured pool. Preserve non-keyword rules written by the operator
+    /// Preserve them unchanged afterward. Do not emit rules for empty keyword sets or unconfigured tiers, to avoid references to missing pools.
+    fn apply_keyword_map(&mut self, map: &std::collections::BTreeMap<String, Vec<String>>) {
+        let mut rules: Vec<Value> = Vec::new();
+        for (slot, pool, rule_id) in TIER_ORDER {
+            let words = map.get(slot).cloned().unwrap_or_default();
+            if words.is_empty() || !self.pool_present(pool) {
+                continue;
+            }
+            rules.push(json!({
+                "id": rule_id,
+                "when": { "keywords_any": words },
+                "route_to": pool,
+            }));
+        }
+        // Preserve existing rules not managed by this module and append them afterward.
+        let managed = [KW_RULE_HIGH, KW_RULE_MID, KW_RULE_LOW];
+        if let Some(existing) = self.draft["router"]["rules"].as_array() {
+            for rule in existing {
+                let is_managed = rule["id"].as_str().is_some_and(|id| managed.contains(&id));
+                if !is_managed {
+                    rules.push(rule.clone());
+                }
+            }
+        }
+        self.draft["router"]["rules"] = Value::Array(rules);
+    }
+
+    /// Normalize keywords by trimming whitespace. Deduplicate case-insensitively
+    /// to match core keywords_any behavior while preserving original case for display.
+    fn add_tier_keyword(&mut self, slot: &str, keyword: &str) -> Result<(), String> {
+        let (pool, _rule_id) = tier_pool_and_rule(slot)?;
+        if !self.pool_present(pool) {
+            return Err("请先为该档配置供应商和模型,再添加关键词".to_string());
+        }
+        let word = keyword.trim();
+        if word.is_empty() {
+            return Err("关键词不能为空".to_string());
+        }
+        if word.chars().count() > 64 {
+            return Err("单个关键词过长(最多 64 字)".to_string());
+        }
+        let mut map = self.keyword_map();
+        let list = map.entry(slot.to_string()).or_default();
+        if list
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(word))
+        {
+            return Err(format!("关键词「{word}」已在该档"));
+        }
+        if list.len() >= 100 {
+            return Err("单档关键词过多(最多 100 个)".to_string());
+        }
+        list.push(word.to_string());
+        self.apply_keyword_map(&map);
+        Ok(())
+    }
+
+    fn remove_tier_keyword(&mut self, slot: &str, keyword: &str) -> Result<(), String> {
+        tier_pool_and_rule(slot)?;
+        let mut map = self.keyword_map();
+        if let Some(list) = map.get_mut(slot) {
+            list.retain(|existing| !existing.eq_ignore_ascii_case(keyword.trim()));
+        }
+        self.apply_keyword_map(&map);
+        Ok(())
+    }
+
+    /// Remove a pool's keyword rule when clearing it so route_to cannot reference an empty pool.
+    fn drop_keyword_rule_for_pool(&mut self, pool: &str) {
+        let Some(rule_id) = TIER_ORDER
+            .iter()
+            .find(|(_, p, _)| *p == pool)
+            .map(|(_, _, id)| *id)
+        else {
+            return;
+        };
+        if let Some(rules) = self.draft["router"]["rules"].as_array_mut() {
+            rules.retain(|rule| rule["id"].as_str() != Some(rule_id));
+        }
     }
 
     fn agent_route_mode(&self, agent_id: &str) -> &str {
@@ -964,6 +1119,13 @@ impl AppInner {
             tiers: self.home_tiers(),
             agent_routes: self.agent_routes_view(),
             profiles: self.profile_names(),
+            keywords: self.home_keywords(),
+            local_only: self.draft["router"]["local_only"]
+                .as_bool()
+                .unwrap_or(false),
+            allow_cloud_fallback: self.draft["router"]["allow_cloud_fallback"]
+                .as_bool()
+                .unwrap_or(false),
             serve: self.serve_view(),
             draft_revision: self.config_state.draft_revision(),
             saved_revision: self.config_state.saved_revision(),
@@ -1057,6 +1219,8 @@ impl AppInner {
                 if let Some(pools) = self.draft["router"]["pools"].as_object_mut() {
                     pools.remove(pool);
                 }
+                // Remove the keyword rule with the pool so it cannot target an empty pool and break saving.
+                self.drop_keyword_rule_for_pool(pool);
             }
             _ => return Err("档位必须同时提供供应商和模型，或同时清空".to_string()),
         }
@@ -1285,6 +1449,7 @@ fn add_provider(
     base_url: String,
     models: Vec<String>,
     api_key: Option<String>,
+    local: bool,
 ) -> Result<StateView, String> {
     if name.trim().is_empty() {
         return Err("供应商名不能为空".into());
@@ -1334,6 +1499,11 @@ fn add_provider(
         "base_url": base_url,
         "models": model_objs,
     });
+    // Write the local key only for providers marked local. Keep normal cloud-provider config unchanged and align with serde
+    // Align with skip_serializing_if. local_only uses this value to keep traffic on the local machine.
+    if local {
+        up["local"] = json!(true);
+    }
     // Store a key in the keychain and point auth to its slot; omit auth when no key exists, as with local Ollama.
     let api_key = api_key
         .as_deref()
@@ -1365,6 +1535,32 @@ fn add_provider(
                 )),
             };
         }
+    }
+    Ok(inner.snapshot())
+}
+
+/// Set “local only” and its cloud fallback permission. Write both to the home `router` so inherited Agent routes follow them automatically.
+/// When disabled, remove both keys so normal configurations remain unchanged, consistent with serde default=false.
+#[tauri::command]
+fn set_local_routing(
+    state: State<'_, AppStateManaged>,
+    local_only: bool,
+    allow_cloud_fallback: bool,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let previous = inner.draft["router"].clone();
+    if local_only {
+        inner.draft["router"]["local_only"] = json!(true);
+        inner.draft["router"]["allow_cloud_fallback"] = json!(allow_cloud_fallback);
+    } else if let Some(router) = inner.draft["router"].as_object_mut() {
+        // Cloud fallback is meaningless when local-only is off, so clear both to avoid stale state.
+        router.remove("local_only");
+        router.remove("allow_cloud_fallback");
+    }
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["router"] = previous;
+        return Err(error);
     }
     Ok(inner.snapshot())
 }
@@ -1827,6 +2023,32 @@ fn set_tier(
 
     inner.set_tier_value(pool, upstream, model)?;
     inner.observe_draft()?;
+    Ok(inner.snapshot())
+}
+
+/// Add a keyword to a high, mid, or low tier; matches force that tier at router-core layer 1.
+#[tauri::command]
+fn add_keyword(
+    state: State<'_, AppStateManaged>,
+    slot: String,
+    keyword: String,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.add_tier_keyword(&slot, &keyword)?;
+    Ok(inner.snapshot())
+}
+
+/// Remove a keyword from a tier.
+#[tauri::command]
+fn remove_keyword(
+    state: State<'_, AppStateManaged>,
+    slot: String,
+    keyword: String,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.remove_tier_keyword(&slot, &keyword)?;
     Ok(inner.snapshot())
 }
 
@@ -2890,7 +3112,9 @@ pub fn run() {
                 saved,
                 load_error,
             );
-            if inner.load_error.is_none() && seed_builtin_pricing(&mut inner.draft).map_err(std::io::Error::other)? {
+            if inner.load_error.is_none()
+                && seed_builtin_pricing(&mut inner.draft).map_err(std::io::Error::other)?
+            {
                 inner.observe_draft().map_err(std::io::Error::other)?;
                 inner.save_draft().map_err(std::io::Error::other)?;
             }
@@ -2919,6 +3143,7 @@ pub fn run() {
             get_runtime_state,
             preview_provider_endpoints,
             add_provider,
+            set_local_routing,
             edit_provider,
             discover_provider_models,
             test_provider,
@@ -2927,6 +3152,8 @@ pub fn run() {
             remove_provider,
             restore_provider,
             set_tier,
+            add_keyword,
+            remove_keyword,
             set_agent_route_mode,
             set_agent_tier,
             save_home_route_as_profile,
@@ -3613,6 +3840,103 @@ mod tests {
     }
 
     #[test]
+    fn tier_keywords_write_valid_rules_dedupe_and_require_a_configured_pool() {
+        let root = scratch_home("tier-keywords");
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "m"}]
+        });
+
+        // Unconfigured tiers cannot accept keywords because the rule would target an empty pool.
+        let error = inner
+            .add_tier_keyword("low", "提交git")
+            .expect_err("adding to an unconfigured tier is refused");
+        assert!(error.contains("先"), "{error}");
+
+        inner
+            .set_tier_value(TIER_LOW, Some("provider".into()), Some("m".into()))
+            .unwrap();
+
+        inner.add_tier_keyword("low", "提交git").unwrap();
+        // Deduplicate case-insensitively.
+        let dup = inner
+            .add_tier_keyword("low", "提交GIT")
+            .expect_err("case-insensitive duplicate is refused");
+        assert!(dup.contains("已在"), "{dup}");
+
+        // The keyword enters the low-tier rule targeting tier_low, and the full config validates.
+        let keywords = inner.home_keywords();
+        assert_eq!(keywords["low"], vec!["提交git".to_string()]);
+        let config = inner
+            .materialize()
+            .expect("keyword rule keeps config valid");
+        let rule = config
+            .router
+            .rules
+            .iter()
+            .find(|rule| rule.id == KW_RULE_LOW)
+            .expect("low keyword rule exists");
+        assert_eq!(rule.route_to, TIER_LOW);
+        assert_eq!(rule.matcher.keywords_any, vec!["提交git".to_string()]);
+
+        // Remove case-insensitively and delete the rule when its list empties instead of leaving empty keywords_any.
+        inner.remove_tier_keyword("low", "提交GIT").unwrap();
+        assert!(inner.home_keywords()["low"].is_empty());
+        assert!(inner.materialize().unwrap().router.rules.is_empty());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn clearing_a_tier_drops_its_keyword_rule_so_the_config_stays_valid() {
+        let root = scratch_home("tier-keywords-clear");
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "m"}]
+        });
+        // Keep another fallback tier so clearing the only tier does not empty pools.
+        inner
+            .set_tier_value(TIER_HIGH, Some("provider".into()), Some("m".into()))
+            .unwrap();
+        inner
+            .set_tier_value(TIER_LOW, Some("provider".into()), Some("m".into()))
+            .unwrap();
+        inner.add_tier_keyword("low", "翻译").unwrap();
+        assert!(inner
+            .materialize()
+            .unwrap()
+            .router
+            .rules
+            .iter()
+            .any(|rule| rule.id == KW_RULE_LOW));
+
+        // Clearing the low tier must also remove its keyword rule or route_to would target an empty pool.
+        inner.set_tier_value(TIER_LOW, None, None).unwrap();
+        let config = inner
+            .materialize()
+            .expect("clearing a tier leaves a valid config, not a dangling rule");
+        assert!(config
+            .router
+            .rules
+            .iter()
+            .all(|rule| rule.id != KW_RULE_LOW));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn stored_discovery_credentials_cannot_be_redirected_to_another_base_url() {
         let root = scratch_home("model-discovery-url-binding");
         let mut draft = template_for_test(&root);
@@ -4262,6 +4586,7 @@ mod tests {
                 url.to_string(),
                 models.into_iter().map(str::to_string).collect(),
                 None,
+                name == "local",
             )
             .unwrap();
             let provider = view
@@ -4288,6 +4613,7 @@ mod tests {
             "http://127.0.0.1:9999/v1".to_owned(),
             vec!["replacement".to_owned()],
             None,
+            false,
         )
         .err()
         .expect("重复名称不能绕过 Provider 编辑流程");
@@ -4306,6 +4632,7 @@ mod tests {
             "http://127.0.0.1/v1".to_string(),
             vec!["m".to_string()],
             None,
+            false,
         )
         .err()
         .expect("blank provider is rejected")
@@ -4316,6 +4643,7 @@ mod tests {
             "http://127.0.0.1/v1".to_string(),
             vec![" ".to_string()],
             None,
+            false,
         )
         .err()
         .expect("blank model set is rejected")
@@ -4327,6 +4655,7 @@ mod tests {
             "https://api.minimaxi.com/v1".to_string(),
             vec!["MiniMax-M3".to_string()],
             None,
+            false,
         ) {
             Err(error) => error,
             Ok(_) => panic!("invalid upstream reference names must be rejected before mutation"),
@@ -4490,6 +4819,7 @@ mod tests {
             "http://127.0.0.1:11434/v1".to_owned(),
             vec!["replacement".to_owned()],
             None,
+            false,
         ) else {
             panic!("a tombstoned Provider name must be restored, never silently replaced")
         };
@@ -4564,7 +4894,8 @@ mod tests {
         use token_station_metrics::{CostKind, Recorder, RequestRecord};
 
         let root = scratch_home("model-price-editor");
-        let draft = gateway_template_for_test(&root);
+        let mut draft = gateway_template_for_test(&root);
+        draft["pricing"] = json!({ "version": 0, "models": {} });
         let data_dir = PathBuf::from(draft["data"]["dir"].as_str().unwrap());
         std::fs::create_dir_all(&data_dir).unwrap();
         let store = SqliteStore::open(&data_dir.join("metrics.sqlite")).unwrap();
@@ -4658,6 +4989,66 @@ mod tests {
         assert_eq!(table.version, 1);
         assert!(table.models.contains_key("deepseek-v4-pro"));
         assert!(!seed_builtin_pricing(&mut draft).unwrap());
+    }
+
+    #[test]
+    fn local_only_routing_flags_local_providers_and_toggles_the_switch() {
+        let root = scratch_home("local-only-routing");
+        let inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+        // One local provider marked local and one cloud provider.
+        add_provider(
+            app.state(),
+            "ollama".to_owned(),
+            "http://127.0.0.1:11434/v1".to_owned(),
+            vec!["llama3".to_owned()],
+            None,
+            true,
+        )
+        .unwrap();
+        let view = add_provider(
+            app.state(),
+            "openai".to_owned(),
+            "https://api.openai.com/v1".to_owned(),
+            vec!["gpt-5".to_owned()],
+            None,
+            false,
+        )
+        .unwrap();
+
+        let ollama = view.providers.iter().find(|p| p.name == "ollama").unwrap();
+        assert!(
+            ollama.local,
+            "the local provider is flagged for local_only routing"
+        );
+        let openai = view.providers.iter().find(|p| p.name == "openai").unwrap();
+        assert!(!openai.local, "an ordinary cloud provider is not flagged");
+        assert!(!view.local_only, "local_only is off until asked for");
+        assert!(!view.allow_cloud_fallback);
+
+        // Enable local-only routing with cloud fallback.
+        let on = set_local_routing(app.state(), true, true).unwrap();
+        assert!(on.local_only);
+        assert!(on.allow_cloud_fallback);
+
+        // Disabling clears both keys and returns the config to clean default-equivalent state.
+        let off = set_local_routing(app.state(), false, false).unwrap();
+        assert!(!off.local_only);
+        assert!(!off.allow_cloud_fallback);
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            assert!(inner.draft["router"].get("local_only").is_none());
+            assert!(inner.draft["router"].get("allow_cloud_fallback").is_none());
+        }
+
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

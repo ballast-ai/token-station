@@ -8,6 +8,7 @@ import {
   type StateView,
 } from "../api";
 import { CUSTOM_ID, PROVIDER_CATALOG, catalogGroupLabel, type ProviderPreset } from "../catalog";
+import { ProviderIcon } from "../brandIcons";
 import ModelPicker, { type CatalogStatus } from "../components/ModelPicker";
 
 const CATALOG_GROUPS = [...PROVIDER_CATALOG.reduce((groups, preset) => {
@@ -35,6 +36,7 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
   const [discovery, setDiscovery] = useState<ModelDiscoveryView | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [local, setLocal] = useState(false);
   const [error, setError] = useState("");
   const [endpointPreview, setEndpointPreview] = useState<ProviderEndpointPreview | null>(null);
   const [endpointError, setEndpointError] = useState("");
@@ -88,6 +90,7 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
     const selected = PROVIDER_CATALOG.find((item) => item.id === id);
     setName(selected?.id ?? "");
     setUrl(selected?.baseUrl ?? "");
+    setLocal(selected?.local ?? false);
     setPicked(selected ? [...selected.models] : []);
     setExtraModels([]);
     setDiscoveredModels([]);
@@ -125,7 +128,7 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
     setSaving(true);
     setError("");
     try {
-      const next = await addProvider(name.trim(), url.trim(), picked, needsKey ? key : null);
+      const next = await addProvider(name.trim(), url.trim(), picked, needsKey ? key : null, local);
       onAdded(next, isExisting ? `供应商「${name.trim()}」已更新` : "供应商已添加");
     } catch (caught) {
       setError(String(caught));
@@ -156,16 +159,36 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
         <div className="wizard-step">
           <div className="step-index">01</div>
           <div className="step-body">
-            <label className="field-label" htmlFor="provider-preset">选择供应商</label>
-            <select id="provider-preset" className="select" value={presetId} disabled={disabled} onChange={(event) => selectPreset(event.target.value)}>
-              <option value="">— 选择供应商 —</option>
-              {CATALOG_GROUPS.map(([group, entries]) => (
-                <optgroup key={group} label={group}>
-                  {entries.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-                </optgroup>
+            <label className="field-label">选择供应商</label>
+            <div className="preset-grid" role="radiogroup" aria-label="选择供应商">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={presetId === CUSTOM_ID}
+                className={`preset-card ${presetId === CUSTOM_ID ? "active" : ""}`}
+                disabled={disabled}
+                onClick={() => selectPreset(CUSTOM_ID)}
+              >
+                <span className="preset-card-glyph custom">✎</span>
+                <span className="preset-card-label">自定义配置</span>
+              </button>
+              {CATALOG_GROUPS.flatMap(([, entries]) => entries).map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={presetId === item.id}
+                  className={`preset-card ${presetId === item.id ? "active" : ""}`}
+                  disabled={disabled}
+                  onClick={() => selectPreset(item.id)}
+                >
+                  <span className="preset-card-glyph">
+                    <ProviderIcon id={item.id} label={item.label} size={26} />
+                  </span>
+                  <span className="preset-card-label">{item.label}</span>
+                </button>
               ))}
-              <option value={CUSTOM_ID}>自定义…</option>
-            </select>
+            </div>
           </div>
         </div>
 
@@ -207,6 +230,15 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
                     <input className="input mono" type="password" autoComplete="off" placeholder="只保存在系统钥匙串" value={key} disabled={disabled} onChange={(event) => setKey(event.target.value)} />
                   </label>
                 ) : <div className="local-provider-note form-span">本地供应商，无需 API Key。</div>}
+                <label className="field-label form-span checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={local}
+                    disabled={disabled}
+                    onChange={(event) => setLocal(event.target.checked)}
+                  />
+                  <span>这是本机运行的本地模型(Ollama / LM Studio 等)——可被「只走本地」路由锁定，请求不出本机</span>
+                </label>
               </div>
             </div>
 

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { AgentUiMetadataView, AgentView, ServeView } from "../api";
+import { AgentIcon } from "../brandIcons";
 
 export type AppView =
   | "home"
@@ -93,7 +94,13 @@ export default function AppShell({
                 aria-current={selected ? "page" : undefined}
                 title={`${metadata.display_name} · ${agentTone(agent)}`}
               >
-                <NavGlyph>{metadata.nav_mark ?? metadata.display_name.slice(0, 1)}</NavGlyph>
+                <NavGlyph>
+                  <AgentIcon
+                    id={metadata.agent_id}
+                    fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)}
+                    size={22}
+                  />
+                </NavGlyph>
                 <span className={`agent-status-dot ${agentTone(agent)}`} aria-hidden="true" />
                 <span>{metadata.display_name.replace(" Agent", "")}</span>
               </button>

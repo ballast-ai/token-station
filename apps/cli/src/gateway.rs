@@ -631,6 +631,9 @@ pub struct Gateway {
     /// syntactically-valid name inherit the home router.
     supported_agent_ids: std::collections::BTreeSet<String>,
     upstreams: BTreeMap<String, Upstream>,
+    /// Names of upstreams declared `local`. Consulted when building candidates so
+    /// the router can honor `local_only` without the data leaving the machine.
+    local_upstreams: std::collections::BTreeSet<String>,
     /// What each upstream serves; health is applied per request from the
     /// tracker, because it changes and this does not.
     catalog: Vec<(UpstreamModel, token_station_protocol::ModelCapability)>,
@@ -1038,6 +1041,13 @@ impl Gateway {
             );
         }
 
+        let local_upstreams: std::collections::BTreeSet<String> = config
+            .upstreams
+            .iter()
+            .filter(|(_, entry)| entry.local)
+            .map(|(name, _)| name.clone())
+            .collect();
+
         let home_router = Router::new(config.router.clone()).map_err(|error| error.to_string())?;
         let mut agent_routers = BTreeMap::new();
         for agent_id in config.agent_routes.keys() {
@@ -1055,6 +1065,7 @@ impl Gateway {
             agent_routers,
             supported_agent_ids,
             upstreams,
+            local_upstreams,
             catalog,
             health: std::sync::Mutex::new(HealthTracker::new(HealthPolicy {
                 eject_after: config.health.eject_after,
@@ -1601,6 +1612,7 @@ impl Gateway {
                     capability.clone(),
                     health.health_of(&target.upstream, &target.model, now),
                 )
+                .local(self.local_upstreams.contains(target.upstream.as_str()))
             })
             .collect()
     }
