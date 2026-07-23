@@ -63,7 +63,7 @@ function formatFeatures(features: ReceiptFeaturesView): string {
   }`;
 }
 
-function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
+export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
   const attempts = receipt.attempt_records ?? [];
   const conversions = receipt.conversion_reports ?? [];
   const diagnosis = humanizeErrorCode(receipt.error_code);

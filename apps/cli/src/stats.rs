@@ -109,6 +109,11 @@ pub fn parse_since(spec: &str) -> Result<Option<u64>, String> {
 /// Keeping this conversion beside [`parse_since`] prevents UI/admin callers
 /// from accidentally treating a duration such as `86_400_000` as a Unix
 /// timestamp near the epoch.
+///
+/// # Errors
+///
+/// Returns the same validation error as [`parse_since`] when `spec` is not
+/// `all`, `<N>h`, or `<N>d`.
 pub fn cutoff_from_since(spec: &str, now_ms: u64) -> Result<Option<u64>, String> {
     parse_since(spec).map(|window| window.map(|duration| now_ms.saturating_sub(duration)))
 }

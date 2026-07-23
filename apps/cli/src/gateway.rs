@@ -2135,11 +2135,9 @@ impl Gateway {
         // leaves cost unknown (None), never a claimed-free zero.
         if let Some(usage) = record.usage {
             if let Some((cost, version)) = self.pricing.price(model, &usage) {
-                if cost > 0 {
-                    record.cost_kind = CostKind::Estimated;
-                    record.cost_micros = Some(cost);
-                    record.price_version = Some(version);
-                }
+                record.cost_kind = CostKind::Estimated;
+                record.cost_micros = Some(cost);
+                record.price_version = Some(version);
             }
         }
         match outcome {

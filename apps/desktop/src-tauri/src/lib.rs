@@ -29,7 +29,11 @@ use token_station_cli::config::{ClientConfig, PluginsConfig};
 use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, StageStatus};
 use token_station_cli::plugins::{PluginRegistry, Receipts};
 use token_station_cli::pricing::{ModelPrice, PriceTable};
-use token_station_cli::{secrets, stats, store::SqliteStore, upgrade};
+use token_station_cli::{
+    secrets, stats,
+    store::{ReceiptQuery, SqliteStore},
+    upgrade,
+};
 use token_station_metrics::ReceiptView;
 use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, ProviderEndpoint};
 use token_station_router_core::UpstreamRef;
@@ -184,6 +188,8 @@ pub struct AgentIntegrationPaths {
 /// New-config template. Empty upstreams and pools are invalid ClientConfig but a
 /// valid draft until the user configures one tier. Tauri injects runtime directories.
 fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value {
+    let pricing = serde_json::to_value(PriceTable::builtin())
+        .expect("the built-in price table always serializes");
     json!({
         "version": 1,
         "server": { "listen": "127.0.0.1:8787", "auth": true },
@@ -194,6 +200,7 @@ fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value 
             "providers": { "openai-compatible": "provider-openai-compatible" }
         },
         "upstreams": {},
+        "pricing": pricing,
         "router": {
             "version": 1,
             "pools": {},
@@ -203,6 +210,22 @@ fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value 
             "assumed_context_window": 8192
         }
     })
+}
+
+fn seed_builtin_pricing(draft: &mut Value) -> Result<bool, String> {
+    let current: PriceTable = draft
+        .get("pricing")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("定价表配置不合法：{error}"))?
+        .unwrap_or_default();
+    if current.version != 0 || !current.models.is_empty() {
+        return Ok(false);
+    }
+    draft["pricing"] =
+        serde_json::to_value(PriceTable::builtin()).map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 /// Upgrade the CLI-era single Chat inbound configuration to the desktop three-inbound draft, and anchor relative runtime directories to
@@ -502,6 +525,14 @@ struct StatsView {
     groups: Vec<(String, AggView)>,
     by: Option<String>,
     empty: bool,
+}
+
+#[derive(Serialize)]
+struct ReceiptPageView {
+    items: Vec<ReceiptView>,
+    total: u64,
+    page: usize,
+    page_size: usize,
 }
 
 /// Four-layer routing-table view in order: rules, hint routes, heuristic bands,
@@ -2529,6 +2560,8 @@ fn set_model_price(
     inner.draft["pricing"] = serde_json::to_value(&next).map_err(|error| error.to_string())?;
     inner.observe_draft()?;
     inner.save_draft()?;
+    let db = inner.data_dir().join("metrics.sqlite");
+    SqliteStore::backfill_unknown_costs(&db, &next)?;
     Ok(next)
 }
 
@@ -2631,6 +2664,57 @@ fn get_recent_receipts(
         inner.data_dir().join("metrics.sqlite")
     };
     SqliteStore::recent_receipts(&db, limit)
+}
+
+/// Read the complete body-free Request Receipt ledger with pagination for the usage page.
+#[tauri::command]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Tauri maps the dashboard filters to named command fields"
+)]
+fn get_request_receipts(
+    state: State<'_, AppStateManaged>,
+    since: String,
+    agent_id: Option<String>,
+    upstream: Option<String>,
+    model: Option<String>,
+    status: Option<String>,
+    page: usize,
+    page_size: usize,
+) -> Result<ReceiptPageView, String> {
+    let (db, now_ms) = {
+        let inner = state.0.lock().unwrap();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| {
+                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+            });
+        (inner.data_dir().join("metrics.sqlite"), now_ms)
+    };
+    let since_ms = stats::cutoff_from_since(&since, now_ms)?;
+    let bounded_page_size = page_size.clamp(1, 50);
+    let bounded_page = page.max(1);
+    let offset = bounded_page
+        .saturating_sub(1)
+        .saturating_mul(bounded_page_size);
+    let result = SqliteStore::receipt_page(
+        &db,
+        &ReceiptQuery {
+            since_ms,
+            agent_id,
+            upstream,
+            model,
+            status,
+        },
+        bounded_page_size,
+        offset,
+    )?;
+    Ok(ReceiptPageView {
+        items: result.items,
+        total: result.total,
+        page: bounded_page,
+        page_size: bounded_page_size,
+    })
 }
 
 /// Convert the draft's rules, hints, heuristic tiers, and fallback into a read-only routing-table view with no API calls.
@@ -2800,12 +2884,24 @@ pub fn run() {
                 &desktop_paths.data_dir,
                 &desktop_paths.plugins_dir,
             );
-            app.manage(AppStateManaged(Mutex::new(AppInner::new_with_saved(
+            let mut inner = AppInner::new_with_saved(
                 desktop_paths.config_file.clone(),
                 draft,
                 saved,
                 load_error,
-            ))));
+            );
+            if inner.load_error.is_none() && seed_builtin_pricing(&mut inner.draft).map_err(std::io::Error::other)? {
+                inner.observe_draft().map_err(std::io::Error::other)?;
+                inner.save_draft().map_err(std::io::Error::other)?;
+            }
+            let pricing = draft_price_table(&inner).map_err(std::io::Error::other)?;
+            if let Err(error) = SqliteStore::backfill_unknown_costs(
+                &desktop_paths.data_dir.join("metrics.sqlite"),
+                &pricing,
+            ) {
+                eprintln!("历史未知成本回填失败：{error}");
+            }
+            app.manage(AppStateManaged(Mutex::new(inner)));
 
             let paths = AgentIntegrationPaths {
                 snapshot_root: desktop_paths.agent_data_root.join("snapshots"),
@@ -2860,6 +2956,7 @@ pub fn run() {
             set_model_price,
             remove_model_price,
             get_recent_receipts,
+            get_request_receipts,
             get_router_table,
             get_plugins,
             check_upgrade,
@@ -4550,6 +4647,17 @@ mod tests {
         .unwrap();
         assert_eq!(agent_filtered.total.requests, 0);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn legacy_empty_price_table_receives_builtin_catalog_once() {
+        let mut draft = json!({ "pricing": { "version": 0, "models": {} } });
+
+        assert!(seed_builtin_pricing(&mut draft).unwrap());
+        let table: PriceTable = serde_json::from_value(draft["pricing"].clone()).unwrap();
+        assert_eq!(table.version, 1);
+        assert!(table.models.contains_key("deepseek-v4-pro"));
+        assert!(!seed_builtin_pricing(&mut draft).unwrap());
     }
 
     #[test]

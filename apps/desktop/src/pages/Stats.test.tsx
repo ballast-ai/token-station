@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getAgentBudgets,
+  getRequestReceipts,
   getStats,
   listAgentRegistry,
   removeAgentBudget,
@@ -17,6 +18,7 @@ vi.mock("../api", async (loadOriginal) => {
   return {
     ...original,
     getAgentBudgets: vi.fn(),
+    getRequestReceipts: vi.fn(),
     getStats: vi.fn(),
     listAgentRegistry: vi.fn(),
     removeAgentBudget: vi.fn(),
@@ -64,7 +66,7 @@ beforeEach(() => {
       : by === "model"
         ? [["gpt-5", aggregate]]
         : by === "hour" || by === "day"
-          ? [[String(1_800_000_000_000), aggregate]]
+          ? [[String(Date.now()), aggregate]]
           : [["codex", aggregate]],
     by,
     empty: false,
@@ -86,6 +88,12 @@ beforeEach(() => {
     },
   ]);
   vi.mocked(getAgentBudgets).mockReset().mockResolvedValue([approaching]);
+  vi.mocked(getRequestReceipts).mockReset().mockResolvedValue({
+    items: [],
+    total: 0,
+    page: 1,
+    page_size: 20,
+  });
   vi.mocked(setAgentBudget).mockReset().mockResolvedValue([approaching]);
   vi.mocked(removeAgentBudget).mockReset().mockResolvedValue([]);
 });
@@ -115,7 +123,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
 
     expect(await screen.findByText("1,500")).toBeInTheDocument();
     expect(screen.getByText(/缓存读 400 · 缓存写 100 · 推理 80/)).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: /Token 趋势/ })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /用量趋势/ })).toBeInTheDocument();
   });
 
   it("switches the detail grouping without exposing a technical group-by select", async () => {

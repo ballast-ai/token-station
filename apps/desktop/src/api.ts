@@ -175,6 +175,23 @@ export interface ReceiptView {
   conversion_reports: ReceiptConversionView[];
 }
 
+export interface ReceiptPageView {
+  items: ReceiptView[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface ReceiptPageQuery {
+  since: string;
+  agentId?: string | null;
+  upstream?: string | null;
+  model?: string | null;
+  status?: "success" | "error" | null;
+  page: number;
+  pageSize?: number;
+}
+
 export type ServePhase = "stopped" | "starting" | "stopping" | "running" | "error";
 
 export interface ServeView {
@@ -823,6 +840,25 @@ export const getRecentReceipts = (limit = 5) => {
     invoke<ReceiptView[]>("get_recent_receipts", { limit: bounded }),
   );
 };
+
+export const getRequestReceipts = ({
+  since,
+  agentId = null,
+  upstream = null,
+  model = null,
+  status = null,
+  page,
+  pageSize = 20,
+}: ReceiptPageQuery) =>
+  invoke<ReceiptPageView>("get_request_receipts", {
+    since,
+    agentId,
+    upstream,
+    model,
+    status,
+    page,
+    pageSize,
+  });
 
 // Note the semantic difference: HTTP returns the active routing table. IPC fallback returns the editable draft.
 // Use runtime state while the proxy runs. This is the correct data-plane fact.
