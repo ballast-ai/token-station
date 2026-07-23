@@ -206,6 +206,12 @@ struct StatsArgs {
     /// Keep only receipts from this inbound protocol source.
     #[arg(long)]
     source: Option<String>,
+    /// Keep only receipts routed to this upstream.
+    #[arg(long)]
+    upstream: Option<String>,
+    /// Keep only receipts served by this resolved model.
+    #[arg(long)]
+    model: Option<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -317,8 +323,7 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Stats(args) => {
             let config = load(&cli.config)?;
-            let window = stats::parse_since(&args.since)?;
-            let cutoff = window.map(|window| now_ms().saturating_sub(window));
+            let cutoff = stats::cutoff_from_since(&args.since, now_ms())?;
             let group_by = args.by.map(stats::GroupBy::from);
             let report = stats::collect_filtered(
                 &config.data.dir.join("metrics.sqlite"),
@@ -328,6 +333,8 @@ fn run(cli: Cli) -> Result<(), String> {
                 stats::StatsFilter {
                     agent_id: args.agent.as_deref(),
                     source: args.source.as_deref(),
+                    upstream: args.upstream.as_deref(),
+                    model: args.model.as_deref(),
                 },
             )?;
             print!("{}", stats::render(&report, group_by));

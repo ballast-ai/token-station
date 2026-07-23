@@ -6,6 +6,7 @@ import InstallationPicker, { installationLabels } from "./InstallationPicker";
 
 function installation(path: string, version: string | null): AgentInstallationView {
   return {
+    managed: false,
     connected: false,
     discovery: {
       agent_id: "claude-code",

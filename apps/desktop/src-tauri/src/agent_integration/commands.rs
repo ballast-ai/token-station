@@ -50,6 +50,7 @@ const CONFIRMATION_TOKEN_BYTES: usize = 32;
 pub struct AgentInstallationView {
     pub discovery: DiscoveryRecord,
     pub compatibility: CompatibilityDecision,
+    pub managed: bool,
     pub connected: bool,
 }
 
@@ -509,6 +510,11 @@ impl AgentCommandState {
                     .iter()
                     .filter(|record| record.agent_id == descriptor.agent_id)
                     .map(|record| {
+                        let managed = !self
+                            .ownership
+                            .list_agent_installation(&record.agent_id, &record.canonical_path)
+                            .map_err(AgentCommandError::internal)?
+                            .is_empty();
                         let connected = runtime.is_some_and(|runtime| {
                             self.installation_connected(record, runtime)
                                 .unwrap_or(false)
@@ -520,6 +526,7 @@ impl AgentCommandState {
                                 descriptor,
                                 record,
                             ),
+                            managed,
                             connected,
                         })
                     })
@@ -616,6 +623,17 @@ impl AgentCommandState {
         validate_session_label(session_label)?;
         let (record, decision, sequence, catalog_expiry) =
             self.selected(agent_id, installation_path)?;
+        if !self
+            .ownership
+            .list_agent_installation(agent_id, installation_path)
+            .map_err(AgentCommandError::internal)?
+            .is_empty()
+        {
+            return Err(AgentCommandError::boundary(
+                "ownership_repair_required",
+                "该安装已有 Token Station 接管记录，但当前运行态不一致；请先恢复 Agent 原始配置，再重新接入",
+            ));
+        }
         if record.diagnostics.iter().any(|diagnostic| {
             matches!(
                 diagnostic.reason_code,
@@ -1872,6 +1890,86 @@ mod tests {
             .err()
             .expect("expired plan is rejected");
         assert_eq!(error.code, "plan_already_expired");
+    }
+
+    #[test]
+    fn commands_reject_reconnect_plan_when_ownership_exists_for_an_old_runtime() {
+        let state = state("owned-old-runtime");
+        let root = scratch("owned-old-runtime-target");
+        let target = root.join("opencode.json");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&target, br#"{"unowned":"keep"}"#).unwrap();
+
+        let mut installation = record(&target, false);
+        installation.agent_id = "opencode".to_string();
+        installation.executable_path = "/opt/opencode".to_string();
+        installation.canonical_path = "/opt/opencode".to_string();
+        installation.version_raw = Some("1.18.2".to_string());
+        installation.version_normalized = Some("1.18.2".to_string());
+        let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+        install_scan(&state, catalog, vec![installation]);
+
+        let old_runtime = runtime("vk-opencode-old-runtime");
+        let connection = state
+            .plan_connection(
+                "opencode",
+                "/opt/opencode",
+                Some("1.18.2"),
+                "main",
+                &old_runtime,
+            )
+            .unwrap();
+        let taken = state
+            .take_plan(
+                &connection.plan.operation_id,
+                &connection.confirmation_token,
+                "main",
+                &[PlanIntent::Connect],
+            )
+            .unwrap();
+        let now_ms = state.clock.now_ms();
+        let engine = TransactionEngine::new(
+            &state.snapshots,
+            &state.ownership,
+            state.keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &state.clock,
+        );
+        engine
+            .apply_connection(
+                &taken.prepared,
+                &ConfirmedOperation {
+                    operation_id: taken.prepared.view.operation_id.clone(),
+                    confirmed_at_ms: now_ms,
+                    confirmations: taken
+                        .prepared
+                        .view
+                        .required_confirmations
+                        .iter()
+                        .copied()
+                        .collect(),
+                },
+                &RuntimeAdmission {
+                    compatibility_sequence: 1,
+                    status: CompatibilityStatus::DetectedVerified,
+                },
+                now_ms,
+            )
+            .unwrap();
+
+        let changed_runtime = runtime("vk-opencode-new-runtime");
+        let error = state
+            .plan_connection(
+                "opencode",
+                "/opt/opencode",
+                Some("1.18.2"),
+                "main",
+                &changed_runtime,
+            )
+            .err()
+            .expect("active ownership must block a second connect plan");
+        assert_eq!(error.code, "ownership_repair_required");
     }
 
     #[test]

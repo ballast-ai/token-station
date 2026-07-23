@@ -59,6 +59,13 @@ function statusCopy(agent: AgentView | undefined, installation: AgentInstallatio
     return { tone: "idle", label: "待选择", detail: "检测到多份安装，请先选择要接管的精确路径。" };
   }
   if (installation?.connected) return { tone: "success", label: "已接入", detail: "请求已通过 Token Station。" };
+  if (installation?.managed) {
+    return {
+      tone: "danger",
+      label: "需修复",
+      detail: "已有接管记录，但当前运行态不一致。请先恢复原始配置，再重新接入。",
+    };
+  }
   if (isExactMultiInstallSelection(agent, installation)) {
     return { tone: "ready", label: "可接入", detail: "已选择精确安装，可以一键接入。" };
   }
@@ -136,13 +143,13 @@ export default function AgentRoutePage({
     };
   }, [installation, metadata.agent_id]);
   const status = statusCopy(agent, installation);
-  const connected = installation?.connected ?? false;
+  const managed = installation?.managed ?? false;
   const canConnect = Boolean(
     installation
       && (["DETECTED_VERIFIED", "CONNECTED"].includes(installation.compatibility.status)
         || isExactMultiInstallSelection(agent, installation)),
   );
-  const canOperate = connected ? Boolean(installation) : serveRunning && canConnect;
+  const canOperate = managed ? Boolean(installation) : serveRunning && canConnect;
 
   const runState = async (action: () => Promise<StateView>, message?: string) => {
     if (busy) return;
@@ -165,7 +172,7 @@ export default function AgentRoutePage({
     setError("");
     setNotice("");
     try {
-      const plan = connected
+      const plan = managed
         ? await planAgentDisconnect(metadata.agent_id, installation.discovery.canonical_path)
         : await planAgentConnection(
           metadata.agent_id,
@@ -272,12 +279,12 @@ export default function AgentRoutePage({
             onSelect={setSelectedPath}
           />
           <button
-            className={`btn agent-primary-action ${connected ? "" : "primary"}`}
+            className={`btn agent-primary-action ${managed ? "" : "primary"}`}
             type="button"
             disabled={busy || !canOperate}
             onClick={() => void applyConnection()}
           >
-            {busy ? "处理中…" : connected ? "恢复 Agent 原始配置" : "一键接入"}
+            {busy ? "处理中…" : managed ? "恢复 Agent 原始配置" : "一键接入"}
           </button>
         </div>
       </header>
@@ -314,7 +321,7 @@ export default function AgentRoutePage({
 
       {installation && <AgentDriftPanel views={drift} loading={driftLoading} error={driftError} />}
 
-      {!serveRunning && !connected && <div className="inline-note">请先启动代理，再接入 Agent。路由仍可先行配置。</div>}
+      {!serveRunning && !managed && <div className="inline-note">请先启动代理，再接入 Agent。路由仍可先行配置。</div>}
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner err">{error}</div>}
 

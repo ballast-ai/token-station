@@ -41,23 +41,34 @@ const approaching = {
   routing_affected: false as const,
 };
 
+const aggregate = {
+  requests: 10,
+  errors: 1,
+  p50_latency_ms: 120,
+  p95_latency_ms: 480,
+  input_tokens: 1_000,
+  output_tokens: 500,
+  cache_read_tokens: 400,
+  cache_write_tokens: 100,
+  reasoning_tokens: 80,
+  cost_micros: 1_250_000,
+  priced_requests: 9,
+  unpriced_requests: 1,
+};
+
 beforeEach(() => {
-  vi.mocked(getStats).mockReset().mockResolvedValue({
-    total: {
-      requests: 0,
-      errors: 0,
-      p50_latency_ms: 0,
-      p95_latency_ms: 0,
-      input_tokens: 0,
-      output_tokens: 0,
-      cost_micros: null,
-      priced_requests: 0,
-      unpriced_requests: 0,
-    },
-    groups: [],
-    by: null,
-    empty: true,
-  });
+  vi.mocked(getStats).mockReset().mockImplementation(async (_since, by) => ({
+    total: aggregate,
+    groups: by === "upstream"
+      ? [["openai", aggregate]]
+      : by === "model"
+        ? [["gpt-5", aggregate]]
+        : by === "hour" || by === "day"
+          ? [[String(1_800_000_000_000), aggregate]]
+          : [["codex", aggregate]],
+    by,
+    empty: false,
+  }));
   vi.mocked(listAgentRegistry).mockReset().mockResolvedValue([
     {
       agent_id: "codex",
@@ -79,20 +90,47 @@ beforeEach(() => {
   vi.mocked(removeAgentBudget).mockReset().mockResolvedValue([]);
 });
 
-describe("display-only Agent budgets", () => {
-  it("filters usage by exact Agent and inbound protocol source", async () => {
+describe("usage dashboard and display-only Agent budgets", () => {
+  it("applies Agent, upstream, and model filters to the whole dashboard", async () => {
     const user = userEvent.setup();
     render(<Stats />);
     expect(await screen.findAllByRole("option", { name: "Codex" })).toHaveLength(2);
 
     await user.selectOptions(screen.getByRole("combobox", { name: "Agent 过滤" }), "codex");
-    await user.selectOptions(screen.getByRole("combobox", { name: "来源过滤" }), "openai-responses");
+    await user.selectOptions(await screen.findByRole("combobox", { name: "供应商过滤" }), "openai");
+    await user.selectOptions(await screen.findByRole("combobox", { name: "模型过滤" }), "gpt-5");
 
-    await waitFor(() => expect(getStats).toHaveBeenLastCalledWith(
-      "all",
-      null,
+    await waitFor(() => expect(getStats).toHaveBeenCalledWith(
+      "24h",
+      "agent",
       "codex",
-      "openai-responses",
+      null,
+      "openai",
+      "gpt-5",
+    ));
+  });
+
+  it("keeps cache and reasoning as subsets instead of double-counting total tokens", async () => {
+    render(<Stats />);
+
+    expect(await screen.findByText("1,500")).toBeInTheDocument();
+    expect(screen.getByText(/缓存读 400 · 缓存写 100 · 推理 80/)).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /Token 趋势/ })).toBeInTheDocument();
+  });
+
+  it("switches the detail grouping without exposing a technical group-by select", async () => {
+    const user = userEvent.setup();
+    render(<Stats />);
+    await screen.findByRole("tab", { name: "模型" });
+    await user.click(screen.getByRole("tab", { name: "模型" }));
+
+    await waitFor(() => expect(getStats).toHaveBeenCalledWith(
+      "24h",
+      "model",
+      null,
+      null,
+      null,
+      null,
     ));
   });
 
