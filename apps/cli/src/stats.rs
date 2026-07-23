@@ -21,6 +21,8 @@ pub enum GroupBy {
     Model,
     Pool,
     Status,
+    Hour,
+    Day,
 }
 
 impl GroupBy {
@@ -32,6 +34,8 @@ impl GroupBy {
             Self::Model => "model",
             Self::Pool => "pool",
             Self::Status => "status",
+            Self::Hour => "hour",
+            Self::Day => "day",
         }
     }
 }
@@ -42,6 +46,8 @@ impl GroupBy {
 pub struct StatsFilter<'a> {
     pub agent_id: Option<&'a str>,
     pub source: Option<&'a str>,
+    pub upstream: Option<&'a str>,
+    pub model: Option<&'a str>,
 }
 
 /// One bucket's numbers. `requests` counts every exchange, including the ones
@@ -56,6 +62,12 @@ pub struct Aggregate {
     pub p95_latency_ms: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Provider-side cache reads and writes partition `input_tokens`; they are
+    /// exposed for efficiency analysis and must not be added to total tokens.
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    /// Hidden reasoning is a subset of `output_tokens` for supported providers.
+    pub reasoning_tokens: u64,
     /// `None` until any row carries a cost (the pricing table is C2#4).
     pub cost_micros: Option<i64>,
     /// Requests carrying a stable numeric cost versus requests whose model
@@ -90,6 +102,20 @@ pub fn parse_since(spec: &str) -> Result<Option<u64>, String> {
         _ => return Err(refused()),
     };
     Ok(Some(hours.saturating_mul(60 * 60 * 1000)))
+}
+
+/// Resolve a relative window into an absolute inclusive cutoff.
+///
+/// Keeping this conversion beside [`parse_since`] prevents UI/admin callers
+/// from accidentally treating a duration such as `86_400_000` as a Unix
+/// timestamp near the epoch.
+///
+/// # Errors
+///
+/// Returns the same validation error as [`parse_since`] when `spec` is not
+/// `all`, `<N>h`, or `<N>d`.
+pub fn cutoff_from_since(spec: &str, now_ms: u64) -> Result<Option<u64>, String> {
+    parse_since(spec).map(|window| window.map(|duration| now_ms.saturating_sub(duration)))
 }
 
 /// Aggregates the store at `db_path`, keeping rows with
@@ -170,12 +196,21 @@ pub fn collect_filtered(
     let mut statement = connection
         .prepare(
             "SELECT latency_ms, status, error_code, agent_id, upstream, model, pool,
-                    input_tokens, output_tokens, cost_micros
+                    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                    reasoning_tokens, cost_micros,
+                    CAST(strftime('%s',
+                        strftime('%Y-%m-%d %H:00:00', started_at_ms / 1000, 'unixepoch', 'localtime'),
+                        'utc') AS INTEGER) * 1000,
+                    CAST(strftime('%s',
+                        date(started_at_ms / 1000, 'unixepoch', 'localtime'),
+                        'utc') AS INTEGER) * 1000
              FROM requests
              WHERE started_at_ms >= ?1
                AND (?2 IS NULL OR started_at_ms < ?2)
                AND (?3 IS NULL OR agent_id = ?3)
-               AND (?4 IS NULL OR protocol = ?4)",
+               AND (?4 IS NULL OR protocol = ?4)
+               AND (?5 IS NULL OR upstream = ?5)
+               AND (?6 IS NULL OR model = ?6)",
         )
         .map_err(|error| format!("metrics query: {error}"))?;
     let rows = statement
@@ -185,6 +220,8 @@ pub fn collect_filtered(
                 end_ms.map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
                 filter.agent_id,
                 filter.source,
+                filter.upstream,
+                filter.model,
             ],
             |row| {
                 // SQLite integers are i64; the store wrote these as saturating
@@ -200,7 +237,12 @@ pub fn collect_filtered(
                     pool: row.get::<_, Option<String>>(6)?,
                     input_tokens: row.get::<_, Option<i64>>(7)?.map(narrow),
                     output_tokens: row.get::<_, Option<i64>>(8)?.map(narrow),
-                    cost_micros: row.get::<_, Option<i64>>(9)?,
+                    cache_read_tokens: row.get::<_, Option<i64>>(9)?.map(narrow),
+                    cache_write_tokens: row.get::<_, Option<i64>>(10)?.map(narrow),
+                    reasoning_tokens: row.get::<_, Option<i64>>(11)?.map(narrow),
+                    cost_micros: row.get::<_, Option<i64>>(12)?,
+                    hour_bucket_ms: narrow(row.get::<_, i64>(13)?),
+                    day_bucket_ms: narrow(row.get::<_, i64>(14)?),
                 })
             },
         )
@@ -305,7 +347,12 @@ struct Row {
     pool: Option<String>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
     cost_micros: Option<i64>,
+    hour_bucket_ms: u64,
+    day_bucket_ms: u64,
 }
 
 impl Row {
@@ -323,6 +370,8 @@ impl Row {
             GroupBy::Model => self.model.clone().unwrap_or_else(unrouted),
             GroupBy::Pool => self.pool.clone().unwrap_or_else(unrouted),
             GroupBy::Status => self.status.to_string(),
+            GroupBy::Hour => self.hour_bucket_ms.to_string(),
+            GroupBy::Day => self.day_bucket_ms.to_string(),
         }
     }
 }
@@ -336,6 +385,9 @@ fn aggregate<'a>(rows: impl Iterator<Item = &'a Row>) -> Aggregate {
         p95_latency_ms: 0,
         input_tokens: 0,
         output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
         cost_micros: None,
         priced_requests: 0,
         unpriced_requests: 0,
@@ -350,6 +402,15 @@ fn aggregate<'a>(rows: impl Iterator<Item = &'a Row>) -> Aggregate {
         bucket.output_tokens = bucket
             .output_tokens
             .saturating_add(row.output_tokens.unwrap_or(0));
+        bucket.cache_read_tokens = bucket
+            .cache_read_tokens
+            .saturating_add(row.cache_read_tokens.unwrap_or(0));
+        bucket.cache_write_tokens = bucket
+            .cache_write_tokens
+            .saturating_add(row.cache_write_tokens.unwrap_or(0));
+        bucket.reasoning_tokens = bucket
+            .reasoning_tokens
+            .saturating_add(row.reasoning_tokens.unwrap_or(0));
         if let Some(cost) = row.cost_micros {
             bucket.cost_micros = Some(bucket.cost_micros.unwrap_or(0).saturating_add(cost));
             bucket.priced_requests = bucket.priced_requests.saturating_add(1);
@@ -455,6 +516,54 @@ mod tests {
         assert_eq!(report.total.cost_micros, None, "no pricing table yet");
 
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn cache_and_reasoning_are_aggregated_without_changing_total_token_semantics() {
+        let path = std::env::temp_dir().join(format!(
+            "ts-stats-{}-usage-breakdown.sqlite",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        let mut value = record(
+            1_800_000_000_000,
+            20,
+            200,
+            Some("provider"),
+            Some((1_000, 300)),
+        );
+        value.request_id = "usage-breakdown".to_string();
+        value.usage = Some(token_station_protocol::Usage {
+            input_tokens: 1_000,
+            output_tokens: 300,
+            cache_read_tokens: 400,
+            cache_write_tokens: 120,
+            reasoning_tokens: 80,
+        });
+        store.record(&value);
+
+        let report = collect(&path, None, None).expect("collects");
+        assert_eq!(
+            report.total.input_tokens + report.total.output_tokens,
+            1_300
+        );
+        assert_eq!(report.total.cache_read_tokens, 400);
+        assert_eq!(report.total.cache_write_tokens, 120);
+        assert_eq!(report.total.reasoning_tokens, 80);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn relative_windows_resolve_to_absolute_cutoffs() {
+        assert_eq!(
+            super::cutoff_from_since("24h", 2 * 86_400_000).unwrap(),
+            Some(86_400_000)
+        );
+        assert_eq!(
+            super::cutoff_from_since("all", 2 * 86_400_000).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -581,6 +690,7 @@ mod tests {
             StatsFilter {
                 agent_id: Some("codex"),
                 source: Some("openai-chat-completions"),
+                ..StatsFilter::default()
             },
         )
         .expect("filters exact Agent and inbound protocol source");
@@ -594,11 +704,55 @@ mod tests {
             StatsFilter {
                 agent_id: None,
                 source: Some("openai-chat-completions"),
+                ..StatsFilter::default()
             },
         )
         .unwrap();
         assert_eq!(source_only.total.requests, 2);
         assert_eq!(source_only.groups.len(), 2);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn upstream_and_model_filters_compose_and_time_groups_are_ordered() {
+        let path = std::env::temp_dir().join(format!(
+            "ts-stats-{}-dashboard-filters.sqlite",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        for (request_id, timestamp, upstream, model) in [
+            ("wanted-1", 1_800_000_000_000, "openai", "gpt-5"),
+            ("wanted-2", 1_800_090_000_000, "openai", "gpt-5"),
+            ("other-model", 1_800_180_000_000, "openai", "gpt-4"),
+            ("other-upstream", 1_800_270_000_000, "backup", "gpt-5"),
+        ] {
+            let mut value = record(timestamp, 1, 200, Some(upstream), Some((10, 2)));
+            value.request_id = request_id.to_string();
+            if let Some(routing) = &mut value.routing {
+                routing.model = model.to_string();
+            }
+            store.record(&value);
+        }
+
+        let filtered = super::collect_filtered(
+            &path,
+            None,
+            None,
+            Some(GroupBy::Hour),
+            StatsFilter {
+                upstream: Some("openai"),
+                model: Some("gpt-5"),
+                ..StatsFilter::default()
+            },
+        )
+        .expect("filters exact upstream and model");
+        assert_eq!(filtered.total.requests, 2);
+        assert_eq!(filtered.groups.len(), 2);
+        assert!(filtered.groups[0].0 < filtered.groups[1].0);
+
+        let days = collect(&path, None, Some(GroupBy::Day)).expect("groups by local day");
+        assert!(days.groups.len() >= 2);
         std::fs::remove_file(path).ok();
     }
 

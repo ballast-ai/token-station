@@ -5,6 +5,7 @@ import AgentRoutePage from "./AgentRoutePage";
 import {
   getAgentDrift,
   planAgentConnection,
+  planAgentDisconnect,
   type AgentInstallationView,
   type AgentView,
 } from "../api";
@@ -22,6 +23,7 @@ vi.mock("../api", () => ({
 
 function installation(path: string, version: string): AgentInstallationView {
   return {
+    managed: false,
     connected: false,
     discovery: {
       agent_id: "claude-code",
@@ -60,6 +62,7 @@ describe("AgentRoutePage multi-install admission", () => {
   beforeEach(() => {
     vi.mocked(getAgentDrift).mockReset().mockResolvedValue([]);
     vi.mocked(planAgentConnection).mockReset().mockReturnValue(new Promise(() => undefined));
+    vi.mocked(planAgentDisconnect).mockReset().mockReturnValue(new Promise(() => undefined));
   });
 
   it("lets the user connect the exact Claude Code installation they selected", async () => {
@@ -121,5 +124,73 @@ describe("AgentRoutePage multi-install admission", () => {
       "/Users/x/.local/bin/claude",
       { expectedVersion: "2.1.211" },
     ));
+  });
+
+  it("offers recovery instead of another connect plan when ownership exists but runtime validation fails", async () => {
+    const user = userEvent.setup();
+    const owned = installation("/opt/homebrew/bin/opencode", "1.18.2");
+    owned.managed = true;
+    owned.discovery.agent_id = "opencode";
+    owned.discovery.is_path_default = true;
+    owned.discovery.conflict_group = null;
+    owned.discovery.diagnostics = [];
+    owned.compatibility = {
+      agent_id: "opencode",
+      installation_path: owned.discovery.canonical_path,
+      status: "DETECTED_VERIFIED",
+      reason_code: "DEFAULT_ADMISSION",
+      message: "已发现兼容安装",
+      matched_catalog_version: "builtin",
+      connector_id: "opencode-v1",
+      allowed_actions: ["preview_connect"],
+    };
+    const agent: AgentView = {
+      metadata: {
+        agent_id: "opencode",
+        legacy_kind: "opencode",
+        display_name: "OpenCode",
+        icon_key: "opencode",
+        admission: "supported",
+        ui_order: 50,
+        nav_mark: "O",
+      },
+      installations: [owned],
+      status: "DETECTED_VERIFIED",
+      catalog_sequence: 1,
+      catalog_expires_at_ms: null,
+      catalog_source: "builtin",
+      catalog_warning: null,
+    };
+
+    render(
+      <AgentRoutePage
+        metadata={agent.metadata}
+        agent={agent}
+        route={{
+          mode: "inherit",
+          tiers: {
+            high: { upstream: null, model: null },
+            mid: { upstream: null, model: null },
+            low: { upstream: null, model: null },
+          },
+          config_error: null,
+          profile: null,
+        }}
+        providers={[]}
+        profiles={[]}
+        serveRunning
+        onStateChange={vi.fn()}
+        onRescan={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("需修复")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "恢复 Agent 原始配置" }));
+
+    await waitFor(() => expect(planAgentDisconnect).toHaveBeenCalledWith(
+      "opencode",
+      "/opt/homebrew/bin/opencode",
+    ));
+    expect(planAgentConnection).not.toHaveBeenCalled();
   });
 });

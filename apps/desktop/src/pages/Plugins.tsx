@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { PluginsView, getPlugins } from "../api";
+import { LanguageBoundary, useLanguage } from "../components/LanguageProvider";
 
 /// Plugins page: discovered plugin directory plus the monospace list shared with CLI `plugin list`.
-export default function Plugins() {
+function PluginsContent() {
+  const { t } = useLanguage();
   const [pv, setPv] = useState<PluginsView | null>(null);
   const [err, setErr] = useState("");
 
@@ -17,10 +19,8 @@ export default function Plugins() {
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>插件</h2>
-        <p className="sub">
-          provider / agent 适配器都是 WASM 沙箱(无网络、拿不到明文 Key)。安装/开发走 CLI,这里只读展示。
-        </p>
+        <h2>{t("plugins.title")}</h2>
+        <p className="sub">{t("plugins.description")}</p>
       </div>
 
       {err && <div className="banner err">{err}</div>}
@@ -28,11 +28,11 @@ export default function Plugins() {
       {pv && (
         <>
           <div className="kv-grid">
-            <div className="kv-k">插件目录</div>
+            <div className="kv-k">{t("plugins.directory")}</div>
             <div className="kv-v mono">{pv.dir}</div>
-            <div className="kv-k">入站适配器</div>
+            <div className="kv-k">{t("plugins.adapter")}</div>
             <div className="kv-v mono">{pv.agent}</div>
-            <div className="kv-k">支持方言</div>
+            <div className="kv-k">{t("plugins.dialects")}</div>
             <div className="kv-v">
               {pv.dialects.length ? (
                 pv.dialects.map((d) => (
@@ -41,24 +41,32 @@ export default function Plugins() {
                   </span>
                 ))
               ) : (
-                <span className="muted">无</span>
+                <span className="muted">{t("plugins.none")}</span>
               )}
             </div>
           </div>
 
           <div className="layer">
             <div className="layer-head">plugin list</div>
-            <pre className="mono block">{pv.listing.trimEnd() || "(空)"}</pre>
+            <pre className="mono block">{pv.listing.trimEnd() || t("plugins.empty")}</pre>
           </div>
 
           <div className="panel-foot">
             <button className="btn" onClick={load}>
-              刷新
+              {t("plugins.refresh")}
             </button>
-            <span className="foot-hint">安装:CLI `token-station plugin install &lt;路径&gt;`</span>
+            <span className="foot-hint">{t("plugins.installHint")}</span>
           </div>
         </>
       )}
     </section>
+  );
+}
+
+export default function Plugins() {
+  return (
+    <LanguageBoundary>
+      <PluginsContent />
+    </LanguageBoundary>
   );
 }

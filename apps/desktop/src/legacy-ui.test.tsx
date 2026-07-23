@@ -5,6 +5,7 @@ import type { ProviderView, SettingsView, StateView } from "./api";
 import {
   checkUpgrade,
   discoverProviderModels,
+  getState,
   getPlugins,
   getRouterTable,
   getStats,
@@ -12,6 +13,7 @@ import {
   previewProviderEndpoints,
   previewProviderRemoval,
   setSettings,
+  setProviderModelVision,
   testProvider,
   updateProviderModels,
 } from "./api";
@@ -32,6 +34,7 @@ vi.mock("./api", async (loadOriginal) => {
     ...original,
     checkUpgrade: vi.fn(),
     discoverProviderModels: vi.fn(),
+    getState: vi.fn(),
     getPlugins: vi.fn(),
     getRouterTable: vi.fn(),
     getStats: vi.fn(),
@@ -40,6 +43,7 @@ vi.mock("./api", async (loadOriginal) => {
     previewProviderEndpoints: vi.fn(),
     previewProviderRemoval: vi.fn(),
     setSettings: vi.fn(),
+    setProviderModelVision: vi.fn(),
     testProvider: vi.fn(),
     updateProviderModels: vi.fn(),
   };
@@ -87,6 +91,8 @@ const state: StateView = {
 beforeEach(() => {
   vi.mocked(checkUpgrade).mockReset();
   vi.mocked(discoverProviderModels).mockReset();
+  vi.mocked(getState).mockReset();
+  vi.mocked(getState).mockResolvedValue(state);
   vi.mocked(getPlugins).mockReset();
   vi.mocked(getRouterTable).mockReset();
   vi.mocked(getStats).mockReset();
@@ -94,6 +100,7 @@ beforeEach(() => {
   vi.mocked(previewProviderEndpoints).mockReset();
   vi.mocked(previewProviderRemoval).mockReset();
   vi.mocked(setSettings).mockReset();
+  vi.mocked(setProviderModelVision).mockReset();
   vi.mocked(testProvider).mockReset();
   vi.mocked(updateProviderModels).mockReset();
   vi.mocked(previewProviderEndpoints).mockResolvedValue({
@@ -104,7 +111,8 @@ beforeEach(() => {
   vi.mocked(getStats).mockResolvedValue({
     total: {
       requests: 0, errors: 0, p50_latency_ms: 0, p95_latency_ms: 0,
-      input_tokens: 0, output_tokens: 0, cost_micros: null,
+      input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+      reasoning_tokens: 0, cost_micros: null,
       priced_requests: 0, unpriced_requests: 0,
     },
     groups: [], by: "upstream", empty: true,
@@ -156,7 +164,7 @@ describe("legacy desktop read-only pages", () => {
     expect(await screen.findByText(/router down/)).toBeInTheDocument();
   });
 
-  it("loads grouped stats, changes both filters, and formats nullable cost", async () => {
+  it("loads grouped stats, changes scope and detail view, and formats nullable cost", async () => {
     vi.mocked(getStats).mockResolvedValue({
       total: {
         requests: 10,
@@ -165,6 +173,9 @@ describe("legacy desktop read-only pages", () => {
         p95_latency_ms: 80,
         input_tokens: 100,
         output_tokens: 50,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
         cost_micros: 1_250_000,
         priced_requests: 10,
         unpriced_requests: 0,
@@ -176,6 +187,9 @@ describe("legacy desktop read-only pages", () => {
         p95_latency_ms: 80,
         input_tokens: 100,
         output_tokens: 50,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
         cost_micros: null,
         priced_requests: 0,
         unpriced_requests: 10,
@@ -186,24 +200,32 @@ describe("legacy desktop read-only pages", () => {
     const user = userEvent.setup();
     render(<Stats />);
     expect(await screen.findByText("1.2500")).toBeInTheDocument();
-    expect(screen.getByText("openai")).toBeInTheDocument();
-    const selectors = screen.getAllByRole("combobox");
-    await user.selectOptions(selectors[0], "24h");
-    await user.selectOptions(selectors[1], "upstream");
-    await waitFor(() => expect(getStats).toHaveBeenLastCalledWith("24h", "upstream", null, null));
+    expect(screen.getAllByText("openai").length).toBeGreaterThan(0);
+    await user.selectOptions(screen.getByRole("combobox", { name: "时间范围" }), "7d");
+    await user.selectOptions(screen.getByRole("combobox", { name: "供应商过滤" }), "openai");
+    await user.click(screen.getByRole("tab", { name: "供应商" }));
+    await waitFor(() => expect(getStats).toHaveBeenCalledWith(
+      "7d",
+      "upstream",
+      null,
+      null,
+      "openai",
+      null,
+    ));
   });
 
   it("shows stats empty and error states", async () => {
     vi.mocked(getStats).mockResolvedValueOnce({
       total: {
         requests: 0, errors: 0, p50_latency_ms: 0, p95_latency_ms: 0,
-        input_tokens: 0, output_tokens: 0, cost_micros: null,
+        input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+        reasoning_tokens: 0, cost_micros: null,
         priced_requests: 0, unpriced_requests: 0,
       },
       groups: [], by: null, empty: true,
     });
     const first = render(<Stats />);
-    expect(await screen.findByText(/指标库还没建/)).toBeInTheDocument();
+    expect(await screen.findByText(/还没有本地用量记录/)).toBeInTheDocument();
     first.unmount();
     vi.mocked(getStats).mockRejectedValueOnce(new Error("stats down"));
     render(<Stats />);
@@ -347,12 +369,14 @@ describe("model selection and provider model management", () => {
     vi.mocked(getStats).mockResolvedValue({
       total: {
         requests: 3, errors: 1, p50_latency_ms: 10, p95_latency_ms: 20,
-        input_tokens: 120, output_tokens: 30, cost_micros: 1_250_000,
+        input_tokens: 120, output_tokens: 30, cache_read_tokens: 0, cache_write_tokens: 0,
+        reasoning_tokens: 0, cost_micros: 1_250_000,
         priced_requests: 3, unpriced_requests: 0,
       },
       groups: [["openai", {
         requests: 3, errors: 1, p50_latency_ms: 10, p95_latency_ms: 20,
-        input_tokens: 120, output_tokens: 30, cost_micros: 1_250_000,
+        input_tokens: 120, output_tokens: 30, cache_read_tokens: 0, cache_write_tokens: 0,
+        reasoning_tokens: 0, cost_micros: 1_250_000,
         priced_requests: 3, unpriced_requests: 0,
       }]],
       by: "upstream", empty: false,
@@ -364,7 +388,7 @@ describe("model selection and provider model management", () => {
     await user.click(screen.getByRole("button", { name: "刷新模型" }));
     const discovered = await screen.findByRole("button", { name: /new/ });
     expect(discovered).toHaveAttribute("aria-pressed", "false");
-    expect(screen.getByRole("button", { name: /old/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "✓old" })).toHaveAttribute("aria-pressed", "true");
     expect(updateProviderModels).not.toHaveBeenCalled();
     expect(onSaved).not.toHaveBeenCalled();
     await user.click(discovered);
@@ -386,12 +410,14 @@ describe("model selection and provider model management", () => {
     vi.mocked(getStats).mockResolvedValue({
       total: {
         requests: 1, errors: 0, p50_latency_ms: 5, p95_latency_ms: 5,
-        input_tokens: 2, output_tokens: 3, cost_micros: null,
+        input_tokens: 2, output_tokens: 3, cache_read_tokens: 0, cache_write_tokens: 0,
+        reasoning_tokens: 0, cost_micros: null,
         priced_requests: 0, unpriced_requests: 1,
       },
       groups: [["local", {
         requests: 1, errors: 0, p50_latency_ms: 5, p95_latency_ms: 5,
-        input_tokens: 2, output_tokens: 3, cost_micros: null,
+        input_tokens: 2, output_tokens: 3, cache_read_tokens: 0, cache_write_tokens: 0,
+        reasoning_tokens: 0, cost_micros: null,
         priced_requests: 0, unpriced_requests: 1,
       }]],
       by: "upstream", empty: false,
@@ -419,6 +445,30 @@ describe("model selection and provider model management", () => {
     expect(screen.getByText("视觉 · 已声明")).toBeInTheDocument();
     expect(screen.getByText("JSON · 不支持")).toBeInTheDocument();
     expect(screen.getAllByText(/· 未知/)).toHaveLength(3);
+  });
+
+  it("allows an unknown model to be declared vision-capable", async () => {
+    const provider: ProviderView = {
+      name: "matrix",
+      provider: "openai-compatible",
+      base_url: "https://api.example/v1",
+      models: ["model-a"],
+      model_capabilities: [
+        { model: "model-a", tool: "unknown", vision: "unknown", json_schema: "unknown" },
+      ],
+      has_auth: true,
+    };
+    vi.mocked(setProviderModelVision).mockResolvedValue(state);
+    const onSaved = vi.fn();
+    const user = userEvent.setup();
+
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={onSaved} />);
+    await user.click(screen.getByRole("button", { name: "为 model-a 声明视觉支持" }));
+
+    await waitFor(() =>
+      expect(setProviderModelVision).toHaveBeenCalledWith("matrix", "model-a", true),
+    );
+    expect(onSaved).toHaveBeenCalledWith(state);
   });
 
   it("保留已下架模型并展示本次目录差异", async () => {
@@ -450,6 +500,43 @@ describe("model selection and provider model management", () => {
     expect(await screen.findByText("下架：old-model（仍保留引用）")).toBeInTheDocument();
     expect(screen.getByText("新增：new-model")).toBeInTheDocument();
     expect(screen.getByText(/已下架/)).toBeInTheDocument();
+  });
+
+  it("refreshes public state after trusted model capabilities are synchronized", async () => {
+    const provider: ProviderView = {
+      name: "openrouter",
+      provider: "openai-compatible",
+      base_url: "https://openrouter.ai/api/v1",
+      models: ["vision-model"],
+      model_capabilities: [{
+        model: "vision-model", tool: "unknown", vision: "unknown", json_schema: "unknown",
+      }],
+      has_auth: true,
+    };
+    vi.mocked(discoverProviderModels).mockResolvedValue({
+      models: ["vision-model"],
+      source: "live",
+      fetched_at_ms: 42,
+      warning: null,
+      capabilities_updated: true,
+      catalog: [{
+        model: "vision-model",
+        tool: "unknown",
+        vision: "verified",
+        json_schema: "unknown",
+        source: "live",
+        last_seen_ms: 42,
+        catalog_state: "active",
+      }],
+    });
+    const onSaved = vi.fn();
+    const user = userEvent.setup();
+
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={onSaved} />);
+    await user.click(screen.getByRole("button", { name: "刷新模型" }));
+
+    await waitFor(() => expect(getState).toHaveBeenCalled());
+    expect(onSaved).toHaveBeenCalledWith(state);
   });
 
   it("展示 Provider 八层耗时、最近测试时间和绿色健康徽章", async () => {

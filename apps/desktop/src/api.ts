@@ -68,6 +68,7 @@ export interface ModelDiscoveryView {
   source: "live" | "cache" | "none";
   fetched_at_ms: number | null;
   warning: string | null;
+  capabilities_updated?: boolean;
   revision?: number;
   catalog?: CatalogModelView[];
   added?: string[];
@@ -175,6 +176,23 @@ export interface ReceiptView {
   decision: ReceiptRouteView | null;
   attempt_records: ReceiptAttemptView[];
   conversion_reports: ReceiptConversionView[];
+}
+
+export interface ReceiptPageView {
+  items: ReceiptView[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface ReceiptPageQuery {
+  since: string;
+  agentId?: string | null;
+  upstream?: string | null;
+  model?: string | null;
+  status?: "success" | "error" | null;
+  page: number;
+  pageSize?: number;
 }
 
 export type ServePhase = "stopped" | "starting" | "stopping" | "running" | "error";
@@ -335,6 +353,7 @@ export interface AgentCompatibilityView {
 export interface AgentInstallationView {
   discovery: AgentDiscoveryView;
   compatibility: AgentCompatibilityView;
+  managed: boolean;
   connected: boolean;
 }
 
@@ -454,6 +473,9 @@ export interface AggView {
   p95_latency_ms: number;
   input_tokens: number;
   output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
   cost_micros: number | null;
   priced_requests: number;
   unpriced_requests: number;
@@ -628,6 +650,9 @@ export const discoverProviderModels = (
 
 export const testProvider = (name: string) =>
   invoke<ProviderTestResult[]>("test_provider", { name });
+
+export const setProviderModelVision = (name: string, model: string, supported: boolean) =>
+  invoke<StateView>("set_provider_model_vision", { name, model, supported });
 
 export const updateProviderModels = (name: string, models: string[]) =>
   invoke<StateView>("update_provider_models", { name, models });
@@ -824,13 +849,24 @@ export const getStats = (
   by: string | null,
   agentId: string | null = null,
   source: string | null = null,
+  upstream: string | null = null,
+  model: string | null = null,
 ) =>
   dataGet<StatsView>(
     `/admin/stats?since=${encodeURIComponent(since)}`
       + `${by ? `&by=${encodeURIComponent(by)}` : ""}`
       + `${agentId ? `&agent=${encodeURIComponent(agentId)}` : ""}`
-      + `${source ? `&source=${encodeURIComponent(source)}` : ""}`,
-    () => invoke<StatsView>("get_stats", { since, by, agentId, source }),
+      + `${source ? `&source=${encodeURIComponent(source)}` : ""}`
+      + `${upstream ? `&upstream=${encodeURIComponent(upstream)}` : ""}`
+      + `${model ? `&model=${encodeURIComponent(model)}` : ""}`,
+    () => invoke<StatsView>("get_stats", {
+      since,
+      by,
+      agentId,
+      source,
+      upstream,
+      model,
+    }),
   );
 
 export const getRecentReceipts = (limit = 5) => {
@@ -839,6 +875,25 @@ export const getRecentReceipts = (limit = 5) => {
     invoke<ReceiptView[]>("get_recent_receipts", { limit: bounded }),
   );
 };
+
+export const getRequestReceipts = ({
+  since,
+  agentId = null,
+  upstream = null,
+  model = null,
+  status = null,
+  page,
+  pageSize = 20,
+}: ReceiptPageQuery) =>
+  invoke<ReceiptPageView>("get_request_receipts", {
+    since,
+    agentId,
+    upstream,
+    model,
+    status,
+    page,
+    pageSize,
+  });
 
 // Note the semantic difference: HTTP returns the active routing table. IPC fallback returns the editable draft.
 // Use runtime state while the proxy runs. This is the correct data-plane fact.

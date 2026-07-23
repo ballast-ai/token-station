@@ -23,6 +23,7 @@ pub(crate) struct ModelDiscoveryView {
     pub(crate) source: String,
     pub(crate) fetched_at_ms: Option<u64>,
     pub(crate) warning: Option<String>,
+    pub(crate) capabilities_updated: bool,
     pub(crate) revision: u64,
     pub(crate) catalog: Vec<CatalogModelView>,
     pub(crate) added: Vec<String>,
@@ -127,17 +128,19 @@ pub(crate) fn discover_with_cache_egress(
     }
 
     match fetch_models_with_egress(base_url, api_key, egress, secrets) {
-        Ok(models) => {
+        Ok(live_catalog) => {
             let fetched_at_ms = now_ms();
             let previous = read_cached_entry(data_dir, name, base_url);
             let (entry, added, removed) =
-                merge_live_catalog(base_url, previous.as_ref(), &models, fetched_at_ms);
+                merge_live_catalog(base_url, previous.as_ref(), &live_catalog, fetched_at_ms);
+            let models = visible_models(&entry.models);
             let warning = write_cache(data_dir, name, entry.clone()).err();
             Ok(ModelDiscoveryView {
                 models,
                 source: "live".to_owned(),
                 fetched_at_ms: Some(fetched_at_ms),
                 warning,
+                capabilities_updated: false,
                 revision: entry.revision,
                 catalog: entry.models,
                 added,
@@ -152,6 +155,7 @@ pub(crate) fn discover_with_cache_egress(
                     source: "cache".to_owned(),
                     fetched_at_ms: Some(entry.fetched_at_ms),
                     warning: Some(warning),
+                    capabilities_updated: false,
                     revision: entry.revision,
                     catalog,
                     added: Vec::new(),
@@ -163,6 +167,7 @@ pub(crate) fn discover_with_cache_egress(
                 source: "none".to_owned(),
                 fetched_at_ms: None,
                 warning: Some(warning),
+                capabilities_updated: false,
                 revision: 0,
                 catalog: Vec::new(),
                 added: Vec::new(),
@@ -192,7 +197,7 @@ fn unknown_catalog_model(
 fn merge_live_catalog(
     base_url: &str,
     previous: Option<&CacheEntry>,
-    live_models: &[String],
+    live_models: &[CatalogModelView],
     fetched_at_ms: u64,
 ) -> (CacheEntry, Vec<String>, Vec<String>) {
     let previous_by_model: BTreeMap<&str, &CatalogModelView> = previous
@@ -200,20 +205,19 @@ fn merge_live_catalog(
         .flat_map(|entry| &entry.models)
         .map(|model| (model.model.as_str(), model))
         .collect();
-    let live: BTreeSet<&str> = live_models.iter().map(String::as_str).collect();
+    let live: BTreeSet<&str> = live_models
+        .iter()
+        .map(|model| model.model.as_str())
+        .collect();
     let mut added = Vec::new();
     let mut catalog = Vec::new();
 
-    for model in live_models {
+    for live_model in live_models {
+        let model = &live_model.model;
         let mut record = previous_by_model.get(model.as_str()).map_or_else(
             || {
                 added.push(model.clone());
-                unknown_catalog_model(
-                    model.clone(),
-                    CatalogSource::Live,
-                    Some(fetched_at_ms),
-                    CatalogState::Active,
-                )
+                live_model.clone()
             },
             |existing| (*existing).clone(),
         );
@@ -223,6 +227,15 @@ fn merge_live_catalog(
         record.source = CatalogSource::Live;
         record.last_seen_ms = Some(fetched_at_ms);
         record.catalog_state = CatalogState::Active;
+        if live_model.tool != CapabilityState::Unknown {
+            record.tool = live_model.tool;
+        }
+        if live_model.vision != CapabilityState::Unknown {
+            record.vision = live_model.vision;
+        }
+        if live_model.json_schema != CapabilityState::Unknown {
+            record.json_schema = live_model.json_schema;
+        }
         catalog.push(record);
     }
 
@@ -278,7 +291,7 @@ fn visible_models(catalog: &[CatalogModelView]) -> Vec<String> {
 }
 
 #[cfg(test)]
-fn fetch_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>, String> {
+fn fetch_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<CatalogModelView>, String> {
     fetch_models_with_egress(
         base_url,
         api_key,
@@ -292,7 +305,7 @@ fn fetch_models_with_egress(
     api_key: Option<&str>,
     egress: &token_station_cli::config::EgressConfig,
     secrets: &token_station_cli::secrets::SecretStore,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<CatalogModelView>, String> {
     let endpoint =
         ProviderEndpoint::try_new(base_url).map_err(|error| format!("Base URL 不合法：{error}"))?;
     let url = endpoint.resolve(ProviderApi::Models);
@@ -360,19 +373,79 @@ fn fetch_models_with_egress(
     parse_models(&document)
 }
 
-fn parse_models(document: &Value) -> Result<Vec<String>, String> {
+fn parse_models(document: &Value) -> Result<Vec<CatalogModelView>, String> {
     let data = document
         .get("data")
         .and_then(Value::as_array)
         .ok_or_else(|| "厂商未返回 OpenAI-compatible 的 data 模型列表".to_owned())?;
-    let models: BTreeSet<String> = data
-        .iter()
-        .filter_map(|item| item.get("id").and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(str::to_owned)
-        .collect();
-    Ok(models.into_iter().collect())
+    let mut models = BTreeMap::<String, CatalogModelView>::new();
+    for item in data {
+        let Some(model) = item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        let vision = explicit_image_input_state(item);
+        models
+            .entry(model.to_owned())
+            .and_modify(|existing| {
+                if vision != CapabilityState::Unknown {
+                    existing.vision = vision;
+                }
+            })
+            .or_insert_with(|| CatalogModelView {
+                model: model.to_owned(),
+                tool: CapabilityState::Unknown,
+                vision,
+                json_schema: CapabilityState::Unknown,
+                source: CatalogSource::Live,
+                last_seen_ms: None,
+                catalog_state: CatalogState::Active,
+            });
+    }
+    Ok(models.into_values().collect())
+}
+
+fn explicit_image_input_state(model: &Value) -> CapabilityState {
+    if let Some(supported) = model
+        .get("supportsImage")
+        .or_else(|| model.get("supports_image"))
+        .or_else(|| model.get("vision"))
+        .and_then(Value::as_bool)
+    {
+        return if supported {
+            CapabilityState::Verified
+        } else {
+            CapabilityState::Unsupported
+        };
+    }
+
+    [
+        model.pointer("/architecture/input_modalities"),
+        model.pointer("/modalities/input"),
+        model.get("input_modalities"),
+        model.get("inputModalities"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|value| {
+        value.as_array().map(|modalities| {
+            if modalities.iter().any(|modality| {
+                modality
+                    .as_str()
+                    .map(str::trim)
+                    .is_some_and(|modality| modality.eq_ignore_ascii_case("image"))
+            }) {
+                CapabilityState::Verified
+            } else {
+                CapabilityState::Unsupported
+            }
+        })
+    })
+    .unwrap_or(CapabilityState::Unknown)
 }
 
 fn status_message(status: u16) -> String {
@@ -617,18 +690,27 @@ mod tests {
     }
 
     #[test]
-    fn standard_model_directories_are_trimmed_deduplicated_and_sorted() {
+    fn standard_model_directories_preserve_explicit_image_modalities() {
         let models = parse_models(&json!({
             "data": [
-                {"id": "z-model"},
-                {"id": " a-model "},
+                {
+                    "id": "z-model",
+                    "architecture": {"input_modalities": ["text", "image"]}
+                },
+                {
+                    "id": " a-model ",
+                    "architecture": {"input_modalities": ["text"]}
+                },
                 {"id": "z-model"},
                 {"object": "model"}
             ]
         }))
         .expect("standard model list parses");
 
-        assert_eq!(models, ["a-model", "z-model"]);
+        assert_eq!(models[0].model, "a-model");
+        assert_eq!(models[0].vision, CapabilityState::Unsupported);
+        assert_eq!(models[1].model, "z-model");
+        assert_eq!(models[1].vision, CapabilityState::Verified);
     }
 
     #[test]
@@ -645,7 +727,13 @@ mod tests {
         let base = serve_once(200, r#"{"data":[{"id":"model-b"},{"id":"model-a"}]}"#);
 
         let models = fetch_models(&base, Some("sk-test-only")).expect("live directory parses");
-        assert_eq!(models, ["model-a", "model-b"]);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.model.as_str())
+                .collect::<Vec<_>>(),
+            ["model-a", "model-b"]
+        );
     }
 
     #[test]

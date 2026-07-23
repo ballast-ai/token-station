@@ -228,6 +228,41 @@ mod tests {
     }
 
     #[test]
+    fn opencode_connection_advertises_image_attachments_for_the_auto_route() {
+        let connector = find_connector("opencode-v1").unwrap();
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/opencode/v1",
+            token: Some("fixture-virtual-key"),
+            adapter_ready: true,
+        };
+        let mut document = parse_source_bytes(None, connector.format(), connector.label()).unwrap();
+        apply_patch(&mut document, &connector.connect_patch(&input).unwrap()).unwrap();
+        connector.validate_projected(&document, &input).unwrap();
+
+        let projected = crate::agent_integration::config_codec::semantic_json(&document).unwrap();
+        let model = &projected["provider"]["tokenstation"]["models"]["auto"];
+        assert_eq!(model["attachment"], json!(true));
+        assert_eq!(
+            model["modalities"],
+            json!({
+                "input": ["text", "image"],
+                "output": ["text"]
+            })
+        );
+
+        let mut missing_capability = projected;
+        missing_capability["provider"]["tokenstation"]["models"]["auto"]
+            .as_object_mut()
+            .unwrap()
+            .remove("attachment");
+        let stale = ConfigDocument::Json(missing_capability);
+        assert!(
+            connector.validate_projected(&stale, &input).is_err(),
+            "a legacy text-only projection must require a safe reconnect"
+        );
+    }
+
+    #[test]
     fn connector_fixture_matrix_preserves_unknown_fields_and_handles_missing_or_invalid_config() {
         type ConnectorFixture<'a> = (&'a dyn Connector, &'a [u8], &'a str, &'a str, &'a str);
         let fixtures: [ConnectorFixture<'_>; 4] = [

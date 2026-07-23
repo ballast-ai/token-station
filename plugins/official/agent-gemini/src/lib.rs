@@ -102,7 +102,7 @@ fn text_parts(parts: &Value, context: &str) -> Result<Option<Content>, String> {
             || object.contains_key("videoMetadata")
         {
             return Err(capability(
-                "Gemini multimodal parts are outside Token Station's language-only boundary",
+                "Gemini multimodal parts are not supported by this adapter",
             ));
         } else if !object.contains_key("functionCall") && !object.contains_key("functionResponse") {
             return Err(capability("unsupported Gemini content part"));

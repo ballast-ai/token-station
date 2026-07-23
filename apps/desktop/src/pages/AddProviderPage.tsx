@@ -10,6 +10,7 @@ import {
 import { CUSTOM_ID, PROVIDER_CATALOG, catalogGroupLabel, type ProviderPreset } from "../catalog";
 import { ProviderIcon } from "../brandIcons";
 import ModelPicker, { type CatalogStatus } from "../components/ModelPicker";
+import PageBackButton from "../components/PageBackButton";
 
 const CATALOG_GROUPS = [...PROVIDER_CATALOG.reduce((groups, preset) => {
   const label = catalogGroupLabel(preset);
@@ -142,7 +143,7 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
     <div className="page-stack add-provider-page">
       <header className="page-title-row">
         <div>
-          <button className="text-back" type="button" onClick={onCancel}>← 返回</button>
+          <PageBackButton onClick={onCancel} />
           <span className="eyebrow">NEW UPSTREAM</span>
           <h1>添加供应商</h1>
           <p>接入新的模型服务，并把模型加入主页和 Agent 共用的供应商目录。</p>
