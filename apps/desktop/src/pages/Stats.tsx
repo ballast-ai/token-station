@@ -11,7 +11,8 @@ import {
   setAgentBudget,
 } from "../api";
 import PricingEditor from "../components/PricingEditor";
-import UsageTrendChart, { type UsageTrendMode } from "../components/UsageTrendChart";
+import UsageRequestLog from "../components/UsageRequestLog";
+import UsageTrendChart, { type UsageTrendRange } from "../components/UsageTrendChart";
 
 const SINCE = [
   { value: "24h", label: "近 24 小时" },
@@ -138,7 +139,6 @@ export default function Stats() {
   const [upstreamFilter, setUpstreamFilter] = useState("");
   const [modelFilter, setModelFilter] = useState("");
   const [refreshInterval, setRefreshInterval] = useState(0);
-  const [trendMode, setTrendMode] = useState<UsageTrendMode>("tokens");
   const [data, setData] = useState<StatsView | null>(null);
   const [trend, setTrend] = useState<StatsView | null>(null);
   const [upstreams, setUpstreams] = useState<string[]>([]);
@@ -146,6 +146,7 @@ export default function Stats() {
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [receiptRefreshKey, setReceiptRefreshKey] = useState(0);
   const requestGeneration = useRef(0);
 
   const [agents, setAgents] = useState<AgentUiMetadataView[]>([]);
@@ -199,6 +200,7 @@ export default function Stats() {
       setTrend(nextTrend);
       setUpstreams(upstreamData.groups.map(([name]) => name).filter((name) => name !== "(unrouted)"));
       setModels(modelData.groups.map(([name]) => name).filter((name) => name !== "(unrouted)"));
+      setReceiptRefreshKey((value) => value + 1);
     } catch (error) {
       if (generation === requestGeneration.current) setErr(String(error));
     } finally {
@@ -413,26 +415,23 @@ export default function Stats() {
           <section className="usage-trend-panel">
             <header>
               <div>
-                <span className="usage-section-index">01</span>
                 <div><h2>使用趋势</h2><p>{SINCE.find((range) => range.value === since)?.label} · {since === "24h" ? "按小时" : "按天"}</p></div>
               </div>
-              <div className="usage-segmented" role="tablist" aria-label="趋势指标">
-                <button type="button" role="tab" aria-selected={trendMode === "tokens"} className={trendMode === "tokens" ? "active" : ""} onClick={() => setTrendMode("tokens")}>Token</button>
-                <button type="button" role="tab" aria-selected={trendMode === "cost"} className={trendMode === "cost" ? "active" : ""} onClick={() => setTrendMode("cost")}>成本</button>
-              </div>
+              <span className="usage-dual-axis-note">左轴 Token · 右轴成本</span>
             </header>
             <div className="usage-chart-legend">
-              {trendMode === "tokens"
-                ? <><span><i className="tone-input" />输入</span><span><i className="tone-output" />输出</span></>
-                : <span><i className="tone-cost" />已定价成本</span>}
+              <span><i className="tone-input" />输入</span>
+              <span><i className="tone-output" />输出</span>
+              <span><i className="tone-cache-write" />缓存写入</span>
+              <span><i className="tone-cache-read" />缓存命中</span>
+              <span><i className="tone-cost" />成本</span>
             </div>
-            <UsageTrendChart groups={trend?.groups ?? []} mode={trendMode} />
+            <UsageTrendChart groups={trend?.groups ?? []} range={since as UsageTrendRange} />
           </section>
 
           <section className="usage-detail-panel">
             <header>
               <div>
-                <span className="usage-section-index">02</span>
                 <div><h2>贡献明细</h2><p>{groupLabel} · 当前筛选范围</p></div>
               </div>
               <div className="usage-segmented" role="tablist" aria-label="统计视角">
@@ -469,13 +468,21 @@ export default function Stats() {
               {(data?.groups.length ?? 0) === 0 && <div className="usage-table-empty">当前视角没有可显示的分组。</div>}
             </div>
           </section>
+
+          <UsageRequestLog
+            since={since}
+            agentId={agentFilter}
+            upstream={upstreamFilter}
+            model={modelFilter}
+            refreshKey={receiptRefreshKey}
+          />
         </>
       )}
 
       {selectedBudgets.length > 0 && (
         <section className="usage-budget-overview">
           <header>
-            <div><span className="usage-section-index">03</span><div><h2>预算状态</h2><p>仅提醒，不影响路由</p></div></div>
+            <div><div><h2>预算状态</h2><p>仅提醒，不影响路由</p></div></div>
             <span className="budget-observe-badge">OBSERVE ONLY</span>
           </header>
           <div className="usage-budget-list">

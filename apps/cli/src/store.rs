@@ -327,6 +327,22 @@ pub struct SqliteStore {
     connection: Mutex<Connection>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReceiptQuery {
+    pub since_ms: Option<u64>,
+    pub agent_id: Option<String>,
+    pub upstream: Option<String>,
+    pub model: Option<String>,
+    /// `success`, `error`, or absent.
+    pub status: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct ReceiptPage {
+    pub items: Vec<ReceiptView>,
+    pub total: u64,
+}
+
 fn wide(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
@@ -419,6 +435,184 @@ fn normalized_cost(record: &RequestRecord) -> (CostKind, Option<i64>, Option<u32
 }
 
 impl SqliteStore {
+    /// Reads one filtered page from the complete metadata-only Receipt ledger.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operator-facing message when the query cannot be validated,
+    /// opened, or decoded.
+    pub fn receipt_page(
+        path: &Path,
+        query: &ReceiptQuery,
+        limit: usize,
+        offset: usize,
+    ) -> Result<ReceiptPage, String> {
+        if !matches!(query.status.as_deref(), None | Some("success" | "error")) {
+            return Err("request receipt status must be `success` or `error`".to_owned());
+        }
+        if !path.exists() {
+            return Ok(ReceiptPage {
+                items: Vec::new(),
+                total: 0,
+            });
+        }
+        let store = Self::open(path)?;
+        let connection = store
+            .connection
+            .lock()
+            .map_err(|_| "request receipt store lock is poisoned".to_owned())?;
+        let since_ms = query
+            .since_ms
+            .map(|value| i64::try_from(value).unwrap_or(i64::MAX));
+        let where_sql = "
+             WHERE (?1 IS NULL OR started_at_ms >= ?1)
+               AND (?2 IS NULL OR agent_id = ?2)
+               AND (?3 IS NULL OR upstream = ?3)
+               AND (?4 IS NULL OR model = ?4)
+               AND (
+                    ?5 IS NULL
+                    OR (?5 = 'success' AND status >= 200 AND status < 400 AND error_code IS NULL)
+                    OR (?5 = 'error' AND (status < 200 OR status >= 400 OR error_code IS NOT NULL))
+               )";
+        let total = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM requests {where_sql}"),
+                rusqlite::params![
+                    since_ms,
+                    query.agent_id.as_deref(),
+                    query.upstream.as_deref(),
+                    query.model.as_deref(),
+                    query.status.as_deref(),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(narrow)
+            .map_err(|error| format!("request receipt count: {error}"))?;
+        let bounded_limit = limit.clamp(1, 50);
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT id, request_id, started_at_ms, latency_ms, protocol, requested_model,
+                        stream, status, error_code, agent_id, running_revision,
+                        upstream, model, pool, tier, rule_id, hint_kind, hint_value,
+                        heuristic_score, heuristic_threshold, fallbacks,
+                        est_input_tokens, message_count, tool_count, has_images,
+                        requires_json_schema, code_block_count, requested_max_output_tokens,
+                        hint_count, input_tokens, output_tokens, cache_read_tokens,
+                        cache_write_tokens, reasoning_tokens, cost_kind, cost_micros, price_version,
+                        attempts
+                   FROM requests
+                  {where_sql}
+                  ORDER BY started_at_ms DESC, request_id DESC, id DESC
+                  LIMIT ?6 OFFSET ?7"
+            ))
+            .map_err(|error| format!("request receipt page query: {error}"))?;
+        let mut seeds = statement
+            .query_map(
+                rusqlite::params![
+                    since_ms,
+                    query.agent_id.as_deref(),
+                    query.upstream.as_deref(),
+                    query.model.as_deref(),
+                    query.status.as_deref(),
+                    i64::try_from(bounded_limit).unwrap_or(50),
+                    i64::try_from(offset).unwrap_or(i64::MAX),
+                ],
+                receipt_seed,
+            )
+            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+            .map_err(|error| format!("request receipt page decode: {error}"))?;
+        drop(statement);
+        for seed in &mut seeds {
+            if seed.persisted_request_id.is_empty() {
+                continue;
+            }
+            seed.view.decision = read_decision(&connection, &seed.persisted_request_id)
+                .map_err(|error| format!("request decision decode: {error}"))?;
+            seed.view.attempt_records = read_attempts(&connection, &seed.persisted_request_id)
+                .map_err(|error| format!("request attempts decode: {error}"))?;
+            seed.view.conversion_reports =
+                read_conversions(&connection, &seed.persisted_request_id)
+                    .map_err(|error| format!("request conversions decode: {error}"))?;
+        }
+        Ok(ReceiptPage {
+            items: seeds.into_iter().map(|seed| seed.view).collect(),
+            total,
+        })
+    }
+
+    /// Applies the current price table only to historical rows that never had
+    /// a cost. Existing actual or estimated values remain immutable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operator-facing message when the ledger cannot be opened,
+    /// queried, or updated.
+    pub fn backfill_unknown_costs(
+        path: &Path,
+        pricing: &crate::pricing::PriceTable,
+    ) -> Result<usize, String> {
+        if !path.exists() || pricing.models.is_empty() {
+            return Ok(0);
+        }
+        let store = Self::open(path)?;
+        let mut connection = store
+            .connection
+            .lock()
+            .map_err(|_| "cost backfill store lock is poisoned".to_owned())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("cost backfill transaction: {error}"))?;
+        let candidates = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT id, model,
+                            COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
+                            COALESCE(cache_read_tokens, 0), COALESCE(cache_write_tokens, 0),
+                            COALESCE(reasoning_tokens, 0)
+                       FROM requests
+                      WHERE cost_kind = 'unknown'
+                        AND model IS NOT NULL
+                        AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL)",
+                )
+                .map_err(|error| format!("cost backfill query: {error}"))?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        Usage {
+                            input_tokens: narrow(row.get::<_, i64>(2)?),
+                            output_tokens: narrow(row.get::<_, i64>(3)?),
+                            cache_read_tokens: narrow(row.get::<_, i64>(4)?),
+                            cache_write_tokens: narrow(row.get::<_, i64>(5)?),
+                            reasoning_tokens: narrow(row.get::<_, i64>(6)?),
+                        },
+                    ))
+                })
+                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                .map_err(|error| format!("cost backfill decode: {error}"))?
+        };
+
+        let mut updated = 0;
+        for (id, model, usage) in candidates {
+            let Some((cost, version)) = pricing.price(&model, &usage) else {
+                continue;
+            };
+            updated += transaction
+                .execute(
+                    "UPDATE requests
+                        SET cost_kind = 'estimated', cost_micros = ?1, price_version = ?2
+                      WHERE id = ?3 AND cost_kind = 'unknown'",
+                    rusqlite::params![cost, version, id],
+                )
+                .map_err(|error| format!("cost backfill update: {error}"))?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("cost backfill commit: {error}"))?;
+        Ok(updated)
+    }
+
     /// Opens (or creates) the database and brings the schema up.
     ///
     /// # Errors
@@ -1090,7 +1284,7 @@ impl Recorder for SqliteStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{SqliteStore, recent_receipts};
+    use super::{ReceiptQuery, SqliteStore, recent_receipts};
     use token_station_metrics::{
         AttemptRecord, ConversionRecord, ConversionStage, CostKind, DecisionRecord, Recorder,
         RequestRecord, RoutingRecord,
@@ -1465,6 +1659,124 @@ mod tests {
             )
             .expect("reads invalid shape");
         assert_eq!((kind.as_str(), cost, version), ("unknown", None, None));
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn builtin_prices_backfill_only_previously_unknown_receipts() {
+        let path = scratch("price-backfill");
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        let mut unknown = receipt("req-unpriced", 1);
+        unknown.routing.as_mut().unwrap().model = "deepseek-v4-pro".to_owned();
+        unknown.usage = Some(Usage {
+            input_tokens: 1_000_000,
+            ..Usage::default()
+        });
+        unknown.cost_kind = CostKind::Unknown;
+        unknown.cost_micros = None;
+        unknown.price_version = None;
+        store.record(&unknown);
+
+        let mut existing = unknown.clone();
+        existing.request_id = "req-existing".to_owned();
+        existing.started_at_ms = 2;
+        existing.cost_kind = CostKind::Actual;
+        existing.cost_micros = Some(123);
+        existing.price_version = None;
+        store.record(&existing);
+        drop(store);
+
+        let updated =
+            SqliteStore::backfill_unknown_costs(&path, &crate::pricing::PriceTable::builtin())
+                .expect("backfills");
+        assert_eq!(updated, 1);
+
+        let store = SqliteStore::open(&path).expect("reopens");
+        let rows: Vec<(String, String, Option<i64>, Option<u32>)> = {
+            let connection = store.connection.lock().expect("lock");
+            let mut statement = connection
+                .prepare(
+                    "SELECT request_id, cost_kind, cost_micros, price_version
+                       FROM requests ORDER BY request_id",
+                )
+                .expect("prepares");
+            statement
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .expect("queries")
+                .collect::<Result<_, _>>()
+                .expect("decodes")
+        };
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "req-existing".to_owned(),
+                    "actual".to_owned(),
+                    Some(123),
+                    None
+                ),
+                (
+                    "req-unpriced".to_owned(),
+                    "estimated".to_owned(),
+                    Some(435_000),
+                    Some(1),
+                ),
+            ],
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn receipt_page_filters_and_paginates_the_full_ledger() {
+        let path = scratch("receipt-page");
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        for index in 0..6 {
+            let mut record = receipt(&format!("req-{index}"), 100 + index);
+            record.agent_id = Some(
+                if index % 2 == 0 {
+                    "codex"
+                } else {
+                    "claude-code"
+                }
+                .to_owned(),
+            );
+            record.status = if index == 4 { 500 } else { 200 };
+            record.error_code = if index == 4 {
+                Some(ErrorCode::UpstreamUnavailable)
+            } else {
+                None
+            };
+            record.routing.as_mut().unwrap().model = if index < 3 {
+                "deepseek-v4-pro"
+            } else {
+                "claude-opus-4.8"
+            }
+            .to_owned();
+            store.record(&record);
+        }
+        drop(store);
+
+        let page = SqliteStore::receipt_page(
+            &path,
+            &ReceiptQuery {
+                agent_id: Some("codex".to_owned()),
+                status: Some("success".to_owned()),
+                ..ReceiptQuery::default()
+            },
+            1,
+            1,
+        )
+        .expect("reads page");
+
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].request_id, "req-0");
 
         std::fs::remove_file(path).ok();
     }
