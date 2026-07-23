@@ -771,6 +771,10 @@ export const applyAgentPlan = (
 export const planAgentDisconnect = (agentId: AgentId, installationPath: string) =>
   invoke<ConfigPlanView>("plan_agent_disconnect", { agentId, installationPath });
 
+/** 强制断开兜底:快照因密钥丢失不可解密、正常恢复被拒时,直接删受管字段 + 清归属。 */
+export const forceForgetAgent = (agentId: AgentId, installationPath: string) =>
+  invoke<void>("force_forget_agent", { agentId, installationPath });
+
 export const listAgentSnapshots = (agentId: AgentId) =>
   invoke<SnapshotView[]>("list_agent_snapshots", { agentId });
 

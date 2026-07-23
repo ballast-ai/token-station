@@ -377,6 +377,21 @@ mod tests {
             assert!(connector.config_path(home).starts_with(home));
             assert!(!connector.create_dir_error().is_empty());
             assert!(!connector.owned_paths().is_empty());
+            // owned_fields 元数据的字段数必须与 owned_paths() 实际归属一一对应:覆盖错位
+            // 会让归属记录/恢复/UI 展示漏字段或多字段(2026-07 opencode 幻影 model、codex
+            // 缺 model 即此类)。字段字符串格式各连接器可不同(如 claude-code 用裸 env 名、
+            // opencode 用点路径),故只校验覆盖数量,不校验字符串本身。
+            assert_eq!(
+                connector.capabilities().owned_fields.len(),
+                connector.owned_paths().len(),
+                "{} 的 owned_fields 与 owned_paths() 覆盖数量不一致",
+                connector.connector_id()
+            );
+            assert!(connector
+                .capabilities()
+                .owned_fields
+                .iter()
+                .all(|field| !field.is_empty()));
             assert!(connector.sensitive_paths().iter().all(|sensitive| connector
                 .owned_paths()
                 .iter()

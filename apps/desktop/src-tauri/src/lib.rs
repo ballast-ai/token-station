@@ -39,9 +39,9 @@ use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, Prov
 use token_station_router_core::UpstreamRef;
 
 use agent_integration::commands::{
-    apply_agent_plan, apply_snapshot_restore, get_agent_drift, list_agent_registry,
-    list_agent_snapshots, plan_agent_connection, plan_agent_disconnect, plan_snapshot_restore,
-    runtime_from_app, scan_agents, AgentCommandState,
+    apply_agent_plan, apply_snapshot_restore, force_forget_agent, get_agent_drift,
+    list_agent_registry, list_agent_snapshots, plan_agent_connection, plan_agent_disconnect,
+    plan_snapshot_restore, runtime_from_app, scan_agents, AgentCommandState,
 };
 use agent_integration::registry::AgentRegistry;
 use agent_integration::types::AdmissionStatus;
@@ -282,6 +282,29 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
     }
     anchor(&mut draft["plugins"]["dir"], config_dir);
     anchor(&mut draft["data"]["dir"], config_dir);
+
+    // 能力迁移:把既有配置里模型的 tool_state / json_schema_state 从 "unknown" 升成
+    // "declared"。早期 add_provider 把新模型写成 unknown,而路由对工具调用 fail-closed
+    // (unknown 一律拒)→ 所有带工具的 Agent(OpenCode 等)一律路由失败。catalog 全是
+    // OpenAI 兼容聊天供应商,按契约支持工具/结构化输出,声明即可;视觉保持原样(因模型
+    // 而异)。只升 "unknown",不覆盖操作员显式标的 "unsupported"/"verified"。
+    if let Some(upstreams) = draft["upstreams"].as_object_mut() {
+        for upstream in upstreams.values_mut() {
+            let Some(models) = upstream["models"].as_array_mut() else {
+                continue;
+            };
+            for model in models.iter_mut() {
+                if model["tool_state"] == json!("unknown") {
+                    model["tool_state"] = json!("declared");
+                    model["tool"] = json!(true);
+                }
+                if model["json_schema_state"] == json!("unknown") {
+                    model["json_schema_state"] = json!("declared");
+                    model["json_schema"] = json!(true);
+                }
+            }
+        }
+    }
     draft
 }
 
@@ -1476,13 +1499,17 @@ fn add_provider(
         .filter(|m| !m.trim().is_empty())
         .map(|m| {
             json!({
+                // OpenAI Chat Completions 契约本就含工具调用与结构化输出,catalog 里全是
+                // OpenAI 兼容聊天供应商,故默认声明(declared)支持——否则路由对 unknown
+                // fail-closed,所有带工具的 Agent(OpenCode 等)一律被拒。视觉因模型而异,
+                // 保守留 unknown;真不支持会被上游打回(运行时降级),这正是标准做法。
                 "model": m,
-                "tool": false,
+                "tool": true,
                 "vision": false,
-                "json_schema": false,
-                "tool_state": "unknown",
+                "json_schema": true,
+                "tool_state": "declared",
                 "vision_state": "unknown",
-                "json_schema_state": "unknown",
+                "json_schema_state": "declared",
                 "context_window": 128000
             })
         })
@@ -1953,13 +1980,14 @@ fn replace_provider_models(
         .map(|model| {
             existing.get(&model).cloned().unwrap_or_else(|| {
                 json!({
+                    // 见 add_provider 的同款注释:OpenAI 兼容聊天默认声明支持工具/结构化输出。
                     "model": model,
-                    "tool": false,
+                    "tool": true,
                     "vision": false,
-                    "json_schema": false,
-                    "tool_state": "unknown",
+                    "json_schema": true,
+                    "tool_state": "declared",
                     "vision_state": "unknown",
-                    "json_schema_state": "unknown",
+                    "json_schema_state": "declared",
                     "context_window": 128000
                 })
             })
@@ -3312,6 +3340,7 @@ pub fn run() {
             plan_agent_connection,
             apply_agent_plan,
             plan_agent_disconnect,
+            force_forget_agent,
             list_agent_snapshots,
             get_agent_drift,
             plan_snapshot_restore,
@@ -3348,6 +3377,27 @@ mod tests {
     use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
     use tauri::Manager;
+
+    #[test]
+    fn prepare_desktop_draft_upgrades_unknown_tool_capability_but_keeps_unsupported() {
+        let draft = json!({
+            "upstreams": {
+                "deepseek": { "models": [
+                    { "model": "a", "tool_state": "unknown", "json_schema_state": "unknown", "vision_state": "unknown" },
+                    { "model": "b", "tool_state": "unsupported", "json_schema_state": "verified", "vision_state": "unknown" },
+                ]}
+            }
+        });
+        let out = prepare_desktop_draft(draft, std::path::Path::new("/tmp"));
+        let models = out["upstreams"]["deepseek"]["models"].as_array().unwrap();
+        // unknown → declared(工具/结构化输出),视觉保持 unknown。
+        assert_eq!(models[0]["tool_state"], json!("declared"));
+        assert_eq!(models[0]["json_schema_state"], json!("declared"));
+        assert_eq!(models[0]["vision_state"], json!("unknown"));
+        // 操作员显式标的 unsupported/verified 不被覆盖。
+        assert_eq!(models[1]["tool_state"], json!("unsupported"));
+        assert_eq!(models[1]["json_schema_state"], json!("verified"));
+    }
 
     fn scratch_home(label: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -4862,9 +4912,10 @@ mod tests {
                 .iter()
                 .find(|provider| provider.name == name)
                 .expect("the added provider is visible");
+            // OpenAI 兼容聊天默认声明支持工具/结构化输出(见 add_provider 注释);视觉保守留 Unknown。
             assert_eq!(
                 provider.model_capabilities[0].tool,
-                CapabilityState::Unknown
+                CapabilityState::Declared
             );
             assert_eq!(
                 provider.model_capabilities[0].vision,
@@ -4872,7 +4923,7 @@ mod tests {
             );
             assert_eq!(
                 provider.model_capabilities[0].json_schema,
-                CapabilityState::Unknown
+                CapabilityState::Declared
             );
         }
         let duplicate = add_provider(

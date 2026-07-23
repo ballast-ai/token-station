@@ -18,7 +18,7 @@ use tauri::{State, WebviewWindow};
 use zeroize::Zeroizing;
 
 use super::compatibility::{evaluate_discovery, CatalogSource, CompatibilityCatalog};
-use super::config_codec::parse_source_bytes;
+use super::config_codec::{apply_patch, parse_source_bytes, render_document, DocumentFormat};
 use super::connectors::{builtin_connectors, find_connector, ConnectInput, Connector};
 use super::discovery::DiscoveryScanner;
 use super::drift::analyze_drift;
@@ -29,7 +29,9 @@ use super::plan::{
     ConfigSource, PreparedChangePlan,
 };
 use super::registry::AgentRegistry;
-use super::snapshot::{FileSnapshotStore, MasterKeyStore, OsKeychainMasterKeyStore, SnapshotStore};
+use super::snapshot::{
+    FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, OsKeychainMasterKeyStore, SnapshotStore,
+};
 use super::transaction::{
     Clock, ConfirmedOperation, FsAtomicConfigWriter, ParseOnlyVerifier, RecoveryStatus,
     RuntimeAdmission, SystemClock, TransactionEngine, TransactionFailure, TransactionOutcome,
@@ -37,7 +39,7 @@ use super::transaction::{
 };
 use super::types::{
     AgentDriftView, AgentUiMetadata, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan,
-    DiscoveryRecord, DriftStatus, PlanIntent, ReasonCode, SnapshotRecord,
+    DiscoveryRecord, DriftStatus, PatchKind, PatchOperation, PlanIntent, ReasonCode, SnapshotRecord,
 };
 use crate::{inbound_adapter_ready, AgentIntegrationPaths, AppStateManaged};
 
@@ -383,9 +385,90 @@ impl Drop for ScanInFlightGuard<'_> {
     }
 }
 
+fn snapshot_master_key_path(paths: &AgentIntegrationPaths) -> PathBuf {
+    // 落在 agent-integration 数据根(snapshots 的父目录)下,与快照同级、私有 0600。
+    paths
+        .snapshot_root
+        .parent()
+        .unwrap_or(paths.snapshot_root.as_path())
+        .join("snapshot-master.key")
+}
+
+/// 一次性把快照主密钥从 OS 钥匙串迁到本地文件(仅当文件尚不存在时)。钥匙串仍可读
+/// → 原样搬过来,已有快照继续可解密;钥匙串已失效 → 生成全新文件密钥(旧快照随之
+/// 无法解密,但那把旧密钥本就已经丢了)。非破坏性:不删除任何快照或归属记录。
+fn migrate_master_key_off_keychain(key_path: &Path) {
+    if key_path.exists() {
+        return;
+    }
+    let store = FileMasterKeyStore::new(key_path.to_path_buf());
+    if let Ok(existing) = OsKeychainMasterKeyStore.load() {
+        if let Some(dir) = key_path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if std::fs::write(key_path, existing.as_ref()).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    } else {
+        let _ = store.load_or_create(true);
+    }
+}
+
+/// 把 `removals`(一组 Remove 操作)应用到 `target` 配置并原子写回,保留原权限。
+/// 文件不存在则直接成功。用于强制断开:只删受管字段,不碰用户其它内容。
+fn force_strip_owned(
+    target: &Path,
+    format: DocumentFormat,
+    label: &str,
+    removals: &[PatchOperation],
+) -> Result<(), AgentCommandError> {
+    let source = read_config_source(target).map_err(AgentCommandError::internal)?;
+    if !source.existed {
+        return Ok(());
+    }
+    let mut document = parse_source_bytes(Some(source.exact_bytes.as_slice()), format, label)
+        .map_err(AgentCommandError::internal)?;
+    apply_patch(&mut document, removals).map_err(AgentCommandError::internal)?;
+    let rendered = render_document(&document, label).map_err(AgentCommandError::internal)?;
+    write_config_atomic(target, rendered.as_bytes(), source.original_permissions)
+        .map_err(AgentCommandError::internal)
+}
+
+/// 原子写回配置文件(同目录临时文件 + rename),尽量恢复原权限。
+fn write_config_atomic(target: &Path, bytes: &[u8], permissions: Option<u32>) -> Result<(), String> {
+    let dir = target.parent().ok_or_else(|| "配置路径缺少父目录".to_string())?;
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "配置路径缺少文件名".to_string())?;
+    let tmp = dir.join(format!(".{file_name}.ts-force"));
+    std::fs::write(&tmp, bytes).map_err(|_| "写入临时配置失败".to_string())?;
+    #[cfg(unix)]
+    if let Some(mode) = permissions {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = permissions;
+    if let Err(error) = super::safe_fs::atomic_replace(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("原子替换配置失败：{error}"));
+    }
+    Ok(())
+}
+
 impl AgentCommandState {
     pub fn new(paths: AgentIntegrationPaths) -> Result<Self, String> {
-        Self::new_with_master_key(paths, Arc::new(OsKeychainMasterKeyStore))
+        // 快照主密钥改存本地私有文件(0600),不再依赖 OS 钥匙串——开发版重签名会让
+        // 钥匙串条目失效,导致恢复/断开彻底锁死(用户反馈的 code=agent_operation_rejected)。
+        // 快照本就加密、且备份的是本来就明文躺在磁盘上的配置,密钥落文件安全性不变。
+        let key_path = snapshot_master_key_path(&paths);
+        migrate_master_key_off_keychain(&key_path);
+        Self::new_with_master_key(paths, Arc::new(FileMasterKeyStore::new(key_path)))
     }
 
     fn new_with_master_key(
@@ -752,6 +835,61 @@ impl AgentCommandState {
         attach_disconnect_companions(&mut prepared, connector, &ownership, &self.snapshots, &key)
             .map_err(AgentCommandError::internal)?;
         self.issue_plan(prepared, &record, session_label, None)
+    }
+
+    /// 强制断开(兜底):不依赖钥匙串/基线快照。按归属记录把 Token Station 注入的
+    /// 受管字段从当前配置里删掉,再清除归属记录、取消固定基线快照。用于快照因密钥
+    /// 丢失而无法解密、正常「恢复原始配置」被拒时自救。无法精确还原被覆盖的原值。
+    fn force_forget(&self, agent_id: &str, installation_path: &str) -> Result<(), AgentCommandError> {
+        validate_short_identifier(agent_id, "agent_id")?;
+        let owned = self
+            .ownership
+            .list_agent_installation(agent_id, installation_path)
+            .map_err(AgentCommandError::internal)?;
+        if owned.is_empty() {
+            return Err(AgentCommandError::boundary(
+                "ownership_missing",
+                "该安装实例没有可清除的接管记录",
+            ));
+        }
+        for ownership in owned {
+            let connector = connector_for(&ownership.connector_id)?;
+            // 主配置:用连接器的 disconnect_patch(与正常断开同一套 Remove)删掉受管字段。
+            force_strip_owned(
+                Path::new(&ownership.target_config_path),
+                connector.format(),
+                connector.label(),
+                &connector.disconnect_patch(),
+            )?;
+            // companion(目前仅 claude-desktop 的 JSON _meta):按其 owned_paths 删。
+            for companion in &ownership.companion_files {
+                let removals: Vec<PatchOperation> = companion
+                    .owned_paths
+                    .iter()
+                    .map(|owned_path| PatchOperation {
+                        operation: PatchKind::Remove,
+                        path: owned_path.clone(),
+                        value: None,
+                    })
+                    .collect();
+                force_strip_owned(
+                    Path::new(&companion.target_config_path),
+                    DocumentFormat::Json,
+                    "companion 配置",
+                    &removals,
+                )?;
+                let _ = self
+                    .snapshots
+                    .set_pinned(&companion.baseline_snapshot_id, false);
+            }
+            let _ = self
+                .snapshots
+                .set_pinned(&ownership.baseline_snapshot_id, false);
+            self.ownership
+                .remove(&ownership.key(), ownership.revision)
+                .map_err(AgentCommandError::internal)?;
+        }
+        Ok(())
     }
 
     fn list_snapshots(&self, agent_id: &str) -> Result<Vec<SnapshotView>, AgentCommandError> {
@@ -1513,6 +1651,17 @@ pub(crate) fn plan_agent_disconnect(
 ) -> Result<ConfigPlanView, AgentCommandError> {
     state.refresh_scan()?;
     state.plan_disconnect(&agent_id, &installation_path, window.label())
+}
+
+/// 强制断开兜底:快照因密钥丢失不可解密、正常恢复被拒时,直接删受管字段 + 清归属。
+#[tauri::command(async)]
+pub(crate) fn force_forget_agent(
+    state: State<'_, AgentCommandState>,
+    agent_id: String,
+    installation_path: String,
+) -> Result<(), AgentCommandError> {
+    state.refresh_scan()?;
+    state.force_forget(&agent_id, &installation_path)
 }
 
 #[tauri::command]
@@ -2450,6 +2599,95 @@ mod tests {
             state.session.lock().unwrap().plans.len(),
             MAX_PENDING_PLANS - 1
         );
+    }
+
+    #[test]
+    fn force_forget_strips_owned_fields_and_clears_ownership_without_keychain() {
+        let state = state("force-forget");
+        let root = scratch("force-forget-target");
+        let target = root.join("settings.json");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&target, br#"{"unowned":"keep"}"#).unwrap();
+        let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+        install_scan(&state, catalog, vec![record(&target, false)]);
+
+        // 建立接管:写入受管字段 + 归属记录 + 快照。
+        let runtime = runtime("vk-force-forget");
+        let connection = state
+            .plan_connection("claude-code", "/opt/claude", Some("2.1.211"), "main", &runtime)
+            .unwrap();
+        let taken = state
+            .take_plan(
+                &connection.plan.operation_id,
+                &connection.confirmation_token,
+                "main",
+                &[PlanIntent::Connect],
+            )
+            .unwrap();
+        let now_ms = state.clock.now_ms();
+        let engine = TransactionEngine::new(
+            &state.snapshots,
+            &state.ownership,
+            state.keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &state.clock,
+        );
+        engine
+            .apply_connection(
+                &taken.prepared,
+                &ConfirmedOperation {
+                    operation_id: taken.prepared.view.operation_id.clone(),
+                    confirmed_at_ms: now_ms,
+                    confirmations: taken
+                        .prepared
+                        .view
+                        .required_confirmations
+                        .iter()
+                        .copied()
+                        .collect(),
+                },
+                &RuntimeAdmission {
+                    compatibility_sequence: 1,
+                    status: CompatibilityStatus::DetectedVerified,
+                },
+                now_ms,
+            )
+            .unwrap();
+
+        let after_connect = String::from_utf8(std::fs::read(&target).unwrap()).unwrap();
+        assert!(after_connect.contains("ANTHROPIC_BASE_URL"), "接管应写入受管字段");
+        assert_eq!(
+            state
+                .ownership
+                .list_agent_installation("claude-code", "/opt/claude")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // 强制断开:force_forget 不触碰钥匙串(方法体内无 self.keys),只按归属删受管字段。
+        state.force_forget("claude-code", "/opt/claude").unwrap();
+
+        let after_forget = String::from_utf8(std::fs::read(&target).unwrap()).unwrap();
+        assert!(!after_forget.contains("ANTHROPIC_BASE_URL"), "受管字段应被删除");
+        assert!(after_forget.contains("keep"), "用户自己的字段必须保留");
+        assert!(
+            state
+                .ownership
+                .list_agent_installation("claude-code", "/opt/claude")
+                .unwrap()
+                .is_empty(),
+            "归属记录应被清除"
+        );
+        assert!(
+            state.force_forget("claude-code", "/opt/claude").is_err(),
+            "已无归属时再次强制断开应报错"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&state.paths.snapshot_root).ok();
+        std::fs::remove_dir_all(&state.paths.ownership_root).ok();
     }
 
     #[test]

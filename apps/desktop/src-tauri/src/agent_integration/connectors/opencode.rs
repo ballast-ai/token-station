@@ -22,7 +22,9 @@ static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
     ],
     config_format: DocumentFormat::Json,
     config_path_template: "${HOME}/.config/opencode/opencode.json",
-    owned_fields: &["provider.tokenstation", "model"],
+    // 只写 provider.tokenstation(模型经该块内的 tokenstation/auto 选择,不写顶层 model);
+    // owned_fields 必须与 owned_paths()/connect_patch() 一致,否则归属与恢复会错位。
+    owned_fields: &["provider.tokenstation"],
     requires_virtual_key: true,
     restart_required: false,
 };
