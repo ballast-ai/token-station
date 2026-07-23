@@ -4,8 +4,9 @@ import { AGGREGATOR_CANDIDATES, PROVIDER_CATALOG } from "./catalog";
 const byId = new Map(PROVIDER_CATALOG.map((preset) => [preset.id, preset]));
 
 describe("provider catalog", () => {
-  it("ships at least fifty verified non-aggregator defaults", () => {
-    expect(PROVIDER_CATALOG.length).toBeGreaterThanOrEqual(50);
+  it("ships a broad set of verified non-aggregator defaults", () => {
+    // 本机自托管只保留 Ollama 一个代表(其余用自定义配置接入),门槛按云端目录规模设。
+    expect(PROVIDER_CATALOG.length).toBeGreaterThanOrEqual(40);
     expect(PROVIDER_CATALOG.every((preset) => preset.serviceClass !== "aggregator")).toBe(true);
     expect(AGGREGATOR_CANDIDATES.length).toBeGreaterThan(0);
     expect(AGGREGATOR_CANDIDATES.every((preset) => preset.serviceClass === "aggregator")).toBe(true);
