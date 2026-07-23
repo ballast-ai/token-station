@@ -8,6 +8,7 @@ import {
   type StateView,
 } from "../api";
 import { CUSTOM_ID, PROVIDER_CATALOG, type ProviderPreset } from "../catalog";
+import { ProviderIcon } from "../brandIcons";
 import ModelPicker, { type CatalogStatus } from "../components/ModelPicker";
 
 interface AddProviderPageProps {
@@ -81,6 +82,8 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
     const selected = PROVIDER_CATALOG.find((item) => item.id === id);
     setName(selected?.id ?? "");
     setUrl(selected?.baseUrl ?? "");
+    // Selecting a local preset such as Local Ollama selects Local model by default. The user can change it.
+    setLocal(selected?.local ?? false);
     setPicked(selected ? [...selected.models] : []);
     setExtraModels([]);
     setDiscoveredModels([]);
@@ -149,12 +152,36 @@ export default function AddProviderPage({ existingNames, onCancel, onAdded }: Ad
         <div className="wizard-step">
           <div className="step-index">01</div>
           <div className="step-body">
-            <label className="field-label" htmlFor="provider-preset">选择供应商</label>
-            <select id="provider-preset" className="select" value={presetId} disabled={disabled} onChange={(event) => selectPreset(event.target.value)}>
-              <option value="">— 选择供应商 —</option>
-              {PROVIDER_CATALOG.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-              <option value={CUSTOM_ID}>自定义…</option>
-            </select>
+            <label className="field-label">选择供应商</label>
+            <div className="preset-grid" role="radiogroup" aria-label="选择供应商">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={presetId === CUSTOM_ID}
+                className={`preset-card ${presetId === CUSTOM_ID ? "active" : ""}`}
+                disabled={disabled}
+                onClick={() => selectPreset(CUSTOM_ID)}
+              >
+                <span className="preset-card-glyph custom">✎</span>
+                <span className="preset-card-label">自定义配置</span>
+              </button>
+              {PROVIDER_CATALOG.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={presetId === item.id}
+                  className={`preset-card ${presetId === item.id ? "active" : ""}`}
+                  disabled={disabled}
+                  onClick={() => selectPreset(item.id)}
+                >
+                  <span className="preset-card-glyph">
+                    <ProviderIcon id={item.id} label={item.label} size={26} />
+                  </span>
+                  <span className="preset-card-label">{item.label}</span>
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 

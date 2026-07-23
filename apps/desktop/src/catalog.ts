@@ -8,6 +8,7 @@ export interface ProviderPreset {
   models: string[]; // Recommended models
   needsKey: boolean;
   note?: string;
+  local?: boolean; // Locally hosted provider such as Ollama or LM Studio; selected presets default to local models.
 }
 
 export const PROVIDER_CATALOG: ProviderPreset[] = [
@@ -191,6 +192,7 @@ export const PROVIDER_CATALOG: ProviderPreset[] = [
     baseUrl: "http://127.0.0.1:11434/v1",
     models: ["llama3.3", "qwen2.5", "deepseek-r1"],
     needsKey: false,
+    local: true,
   },
 ];
 

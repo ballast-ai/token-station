@@ -8,6 +8,7 @@ import {
   setAgentRouteMode,
   setAgentTier,
   type AgentInstallationView,
+  type ConfigPlanView,
   type AgentRouteView,
   type AgentUiMetadataView,
   type AgentView,
@@ -36,6 +37,12 @@ const AGENT_MARKS: Record<string, string> = {
   openclaw: "OC",
   "nous-hermes-agent": "H",
 };
+
+/** Per-Agent key recording that connection changes were shown; localStorage makes it appear only once. */
+const diffShownKey = (agentId: string) => `ts:agent-connect-diff-shown:${agentId}`;
+
+/** Managed fields that best explain where data flows and therefore matter most to users. */
+const KEY_CHANGE_HINT = /url|base|token|key|auth|endpoint|host|proxy/i;
 
 function errorText(error: unknown) {
   if (typeof error === "string") return error;
@@ -70,6 +77,10 @@ export default function AgentRoutePage({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  // Show configuration changes after the first connection, then persist dismissal in localStorage.
+  const [connectDiff, setConnectDiff] = useState<ConfigPlanView | null>(null);
+
+  const dismissConnectDiff = () => setConnectDiff(null);
 
   useEffect(() => {
     const paths = agent?.installations.map((item) => item.discovery.canonical_path) ?? [];
@@ -125,6 +136,14 @@ export default function AgentRoutePage({
       setNotice(connected
         ? "已恢复接入前的 Agent 配置"
         : "Agent 已接入，无需再次确认");
+      // For inbound connection only, show config changes inline if this Agent has never shown them.
+      // Set the marker when shown. It appears only once even if the user leaves without selecting Got it.
+      if (!connected
+        && !localStorage.getItem(diffShownKey(metadata.agent_id))
+        && (plan.changes?.length || plan.human_diff)) {
+        localStorage.setItem(diffShownKey(metadata.agent_id), String(Date.now()));
+        setConnectDiff(plan);
+      }
       await onRescan();
     } catch (caught) {
       setError(errorText(caught));
@@ -202,6 +221,37 @@ export default function AgentRoutePage({
           </button>
         </div>
       </header>
+
+      {connectDiff && (() => {
+        const changes = connectDiff.changes ?? [];
+        const keyChanges = changes.filter((change) => KEY_CHANGE_HINT.test(change.path.segments.join(".")));
+        const shown = keyChanges.length ? keyChanges : changes.slice(0, 3);
+        const rest = changes.length - shown.length;
+        return (
+          <section className="panel connect-diff-card">
+            <div className="connect-diff-head">
+              <div>
+                <span className="eyebrow">首次接入 · 我们动了什么</span>
+                <h2>已接入 {metadata.display_name.replace(" Agent", "")}，改动如实告知</h2>
+              </div>
+              <button className="btn" type="button" onClick={dismissConnectDiff}>知道了</button>
+            </div>
+            <p className="connect-diff-intro">
+              只改了让请求经本地网关必需的<strong>这几个关键字段</strong>，你的原配置已自动备份，断开时一键还原：
+            </p>
+            <ul className="connect-diff-list">
+              {shown.map((change, index) => (
+                <li key={index}>
+                  <code>{change.path.segments.join(".")}</code>
+                  <span className="connect-diff-summary">{change.summary}</span>
+                </li>
+              ))}
+            </ul>
+            {rest > 0 && <p className="connect-diff-rest">另有 {rest} 项辅助开关调整。</p>}
+            <p className="connect-diff-foot">此提示仅在首次接入时出现一次，之后不再打扰。</p>
+          </section>
+        );
+      })()}
 
       {!serveRunning && !connected && <div className="inline-note">请先启动代理，再接入 Agent。路由仍可先行配置。</div>}
       {notice && <div className="banner ok">{notice}</div>}
