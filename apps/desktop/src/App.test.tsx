@@ -547,7 +547,8 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "添加供应商" })).toHaveLength(1);
-    await user.selectOptions(screen.getByLabelText("选择供应商"), "openai");
+    // 供应商选择器现为品牌卡片网格(role=radiogroup),按可见标签点卡片而非下拉选值。
+    await user.click(screen.getByText("OpenAI", { selector: ".preset-card-label" }));
     await user.type(screen.getByPlaceholderText("只保存在系统钥匙串"), "secret-test");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "OpenCode" })).toBeInTheDocument();
