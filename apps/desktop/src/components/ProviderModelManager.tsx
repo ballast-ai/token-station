@@ -8,10 +8,12 @@ import {
   StateView,
   discoverProviderModels,
   editProvider,
+  getState,
   getStats,
   previewProviderEndpoints,
   ProviderEndpointPreview,
   ProviderTestResult,
+  setProviderModelVision,
   testProvider,
   updateProviderModels,
 } from "../api";
@@ -137,6 +139,7 @@ export default function ProviderModelManager({
   const [testResults, setTestResults] = useState<ProviderTestResult[]>([]);
   const [testedAtMs, setTestedAtMs] = useState<number | null>(null);
   const [testing, setTesting] = useState(false);
+  const [capabilitySaving, setCapabilitySaving] = useState<string | null>(null);
   const [usage, setUsage] = useState<string>("正在读取无正文用量…");
   const [editBaseUrl, setEditBaseUrl] = useState(provider.base_url);
   const [editKey, setEditKey] = useState("");
@@ -146,7 +149,7 @@ export default function ProviderModelManager({
     const byModel = new Map((provider.model_capabilities ?? []).map((item) => [item.model, item]));
     return provider.models.map((model) => byModel.get(model) ?? unknownCapabilities(model));
   }, [provider.model_capabilities, provider.models]);
-  const operationDisabled = disabled || refreshing || saving || testing || editing;
+  const operationDisabled = disabled || refreshing || saving || testing || editing || capabilitySaving !== null;
 
   useEffect(() => {
     void previewProviderEndpoints(editBaseUrl).then(setEndpointPreview).catch(() => setEndpointPreview(null));
@@ -192,6 +195,19 @@ export default function ProviderModelManager({
     }
   };
 
+  const toggleVision = async (model: string, state: CapabilityState) => {
+    if (operationDisabled || state === "verified") return;
+    setCapabilitySaving(model);
+    setError("");
+    try {
+      onSaved(await setProviderModelVision(provider.name, model, state !== "declared"));
+    } catch (caught) {
+      setError(String(caught));
+    } finally {
+      setCapabilitySaving(null);
+    }
+  };
+
   const refresh = async () => {
     if (operationDisabled) return;
     setRefreshing(true);
@@ -203,6 +219,9 @@ export default function ProviderModelManager({
       setCatalog(result.catalog ?? []);
       setDiff({ added: result.added ?? [], removed: result.removed ?? [] });
       setStatus(resultStatus(result));
+      if (result.capabilities_updated) {
+        onSaved(await getState());
+      }
     } catch (caught) {
       setStatus({ label: "获取失败", tone: "error", warning: String(caught) });
     } finally {
@@ -302,9 +321,27 @@ export default function ProviderModelManager({
               ["视觉", capability.vision],
               ["JSON", capability.json_schema],
             ] as const).map(([label, state]) => (
-              <span className={`capability-tag ${state}`} key={label}>
-                {label} · {capabilityLabel[state]}
-              </span>
+              label === "视觉" ? (
+                <button
+                  aria-label={state === "verified"
+                    ? `${capability.model} 视觉能力已验证`
+                    : state === "declared"
+                      ? `将 ${capability.model} 标记为不支持视觉`
+                      : `为 ${capability.model} 声明视觉支持`}
+                  aria-pressed={state === "verified" || state === "declared"}
+                  className={`capability-tag capability-tag-button ${state}`}
+                  disabled={operationDisabled || state === "verified"}
+                  key={label}
+                  onClick={() => void toggleVision(capability.model, state)}
+                  type="button"
+                >
+                  {label} · {capabilitySaving === capability.model ? "保存中…" : capabilityLabel[state]}
+                </button>
+              ) : (
+                <span className={`capability-tag ${state}`} key={label}>
+                  {label} · {capabilityLabel[state]}
+                </span>
+              )
             ))}
           </div>
         ))}

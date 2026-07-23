@@ -102,7 +102,16 @@ impl Connector for OpenCodeConnector {
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "token-station",
                 "options": { "baseURL": input.base_url, "apiKey": token },
-                "models": { "auto": { "name": "auto (智能路由)" } }
+                "models": {
+                    "auto": {
+                        "name": "auto (智能路由)",
+                        "attachment": true,
+                        "modalities": {
+                            "input": ["text", "image"],
+                            "output": ["text"]
+                        }
+                    }
+                }
             })),
         }])
     }
@@ -131,6 +140,9 @@ impl Connector for OpenCodeConnector {
         let valid = provider["npm"] == json!("@ai-sdk/openai-compatible")
             && provider["name"] == json!("token-station")
             && provider["models"]["auto"]["name"] == json!("auto (智能路由)")
+            && provider["models"]["auto"]["attachment"] == json!(true)
+            && provider["models"]["auto"]["modalities"]["input"] == json!(["text", "image"])
+            && provider["models"]["auto"]["modalities"]["output"] == json!(["text"])
             && provider["options"]["baseURL"] == json!(input.base_url)
             && provider["options"]["apiKey"] == json!(token);
         if valid {

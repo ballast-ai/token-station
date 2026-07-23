@@ -5,6 +5,7 @@ import type { ProviderView, SettingsView, StateView } from "./api";
 import {
   checkUpgrade,
   discoverProviderModels,
+  getState,
   getPlugins,
   getRouterTable,
   getStats,
@@ -12,6 +13,7 @@ import {
   previewProviderEndpoints,
   previewProviderRemoval,
   setSettings,
+  setProviderModelVision,
   testProvider,
   updateProviderModels,
 } from "./api";
@@ -32,6 +34,7 @@ vi.mock("./api", async (loadOriginal) => {
     ...original,
     checkUpgrade: vi.fn(),
     discoverProviderModels: vi.fn(),
+    getState: vi.fn(),
     getPlugins: vi.fn(),
     getRouterTable: vi.fn(),
     getStats: vi.fn(),
@@ -40,6 +43,7 @@ vi.mock("./api", async (loadOriginal) => {
     previewProviderEndpoints: vi.fn(),
     previewProviderRemoval: vi.fn(),
     setSettings: vi.fn(),
+    setProviderModelVision: vi.fn(),
     testProvider: vi.fn(),
     updateProviderModels: vi.fn(),
   };
@@ -87,6 +91,8 @@ const state: StateView = {
 beforeEach(() => {
   vi.mocked(checkUpgrade).mockReset();
   vi.mocked(discoverProviderModels).mockReset();
+  vi.mocked(getState).mockReset();
+  vi.mocked(getState).mockResolvedValue(state);
   vi.mocked(getPlugins).mockReset();
   vi.mocked(getRouterTable).mockReset();
   vi.mocked(getStats).mockReset();
@@ -94,6 +100,7 @@ beforeEach(() => {
   vi.mocked(previewProviderEndpoints).mockReset();
   vi.mocked(previewProviderRemoval).mockReset();
   vi.mocked(setSettings).mockReset();
+  vi.mocked(setProviderModelVision).mockReset();
   vi.mocked(testProvider).mockReset();
   vi.mocked(updateProviderModels).mockReset();
   vi.mocked(previewProviderEndpoints).mockResolvedValue({
@@ -381,7 +388,7 @@ describe("model selection and provider model management", () => {
     await user.click(screen.getByRole("button", { name: "刷新模型" }));
     const discovered = await screen.findByRole("button", { name: /new/ });
     expect(discovered).toHaveAttribute("aria-pressed", "false");
-    expect(screen.getByRole("button", { name: /old/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "✓old" })).toHaveAttribute("aria-pressed", "true");
     expect(updateProviderModels).not.toHaveBeenCalled();
     expect(onSaved).not.toHaveBeenCalled();
     await user.click(discovered);
@@ -440,6 +447,30 @@ describe("model selection and provider model management", () => {
     expect(screen.getAllByText(/· 未知/)).toHaveLength(3);
   });
 
+  it("allows an unknown model to be declared vision-capable", async () => {
+    const provider: ProviderView = {
+      name: "matrix",
+      provider: "openai-compatible",
+      base_url: "https://api.example/v1",
+      models: ["model-a"],
+      model_capabilities: [
+        { model: "model-a", tool: "unknown", vision: "unknown", json_schema: "unknown" },
+      ],
+      has_auth: true,
+    };
+    vi.mocked(setProviderModelVision).mockResolvedValue(state);
+    const onSaved = vi.fn();
+    const user = userEvent.setup();
+
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={onSaved} />);
+    await user.click(screen.getByRole("button", { name: "为 model-a 声明视觉支持" }));
+
+    await waitFor(() =>
+      expect(setProviderModelVision).toHaveBeenCalledWith("matrix", "model-a", true),
+    );
+    expect(onSaved).toHaveBeenCalledWith(state);
+  });
+
   it("保留已下架模型并展示本次目录差异", async () => {
     const provider: ProviderView = {
       name: "catalog", provider: "openai-compatible", base_url: "https://api.example/v1",
@@ -469,6 +500,43 @@ describe("model selection and provider model management", () => {
     expect(await screen.findByText("下架：old-model（仍保留引用）")).toBeInTheDocument();
     expect(screen.getByText("新增：new-model")).toBeInTheDocument();
     expect(screen.getByText("已下架")).toBeInTheDocument();
+  });
+
+  it("refreshes public state after trusted model capabilities are synchronized", async () => {
+    const provider: ProviderView = {
+      name: "openrouter",
+      provider: "openai-compatible",
+      base_url: "https://openrouter.ai/api/v1",
+      models: ["vision-model"],
+      model_capabilities: [{
+        model: "vision-model", tool: "unknown", vision: "unknown", json_schema: "unknown",
+      }],
+      has_auth: true,
+    };
+    vi.mocked(discoverProviderModels).mockResolvedValue({
+      models: ["vision-model"],
+      source: "live",
+      fetched_at_ms: 42,
+      warning: null,
+      capabilities_updated: true,
+      catalog: [{
+        model: "vision-model",
+        tool: "unknown",
+        vision: "verified",
+        json_schema: "unknown",
+        source: "live",
+        last_seen_ms: 42,
+        catalog_state: "active",
+      }],
+    });
+    const onSaved = vi.fn();
+    const user = userEvent.setup();
+
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={onSaved} />);
+    await user.click(screen.getByRole("button", { name: "刷新模型" }));
+
+    await waitFor(() => expect(getState).toHaveBeenCalled());
+    expect(onSaved).toHaveBeenCalledWith(state);
   });
 
   it("展示 Provider 八层耗时、最近测试时间和绿色健康徽章", async () => {

@@ -68,6 +68,7 @@ export interface ModelDiscoveryView {
   source: "live" | "cache" | "none";
   fetched_at_ms: number | null;
   warning: string | null;
+  capabilities_updated?: boolean;
   revision?: number;
   catalog?: CatalogModelView[];
   added?: string[];
@@ -649,6 +650,9 @@ export const discoverProviderModels = (
 
 export const testProvider = (name: string) =>
   invoke<ProviderTestResult[]>("test_provider", { name });
+
+export const setProviderModelVision = (name: string, model: string, supported: boolean) =>
+  invoke<StateView>("set_provider_model_vision", { name, model, supported });
 
 export const updateProviderModels = (name: string, models: string[]) =>
   invoke<StateView>("update_provider_models", { name, models });

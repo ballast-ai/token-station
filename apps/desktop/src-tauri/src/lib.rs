@@ -1618,19 +1618,30 @@ fn edit_provider(
     Ok(inner.snapshot())
 }
 
-fn resolve_discovery_key(
+#[derive(Debug, PartialEq, Eq)]
+enum DiscoveryCredential {
+    Explicit(Option<String>),
+    Stored { provider: String, slot: String },
+}
+
+fn prepare_discovery_credential(
     inner: &AppInner,
     name: &str,
     base_url: &str,
     api_key: Option<&str>,
-) -> Result<Option<String>, String> {
+) -> Result<DiscoveryCredential, String> {
     inner.ensure_editable()?;
     let explicit = api_key
         .map(str::trim)
         .filter(|key| !key.is_empty())
         .map(str::to_owned);
     if explicit.is_some() {
-        return Ok(explicit);
+        return Ok(DiscoveryCredential::Explicit(explicit));
+    }
+    // OpenRouter's model catalog is public. Avoid an unnecessary Keychain read here:
+    // it can trigger a macOS authorization round-trip even though `/models` needs no key.
+    if base_url == "https://openrouter.ai/api/v1" {
+        return Ok(DiscoveryCredential::Explicit(None));
     }
     if let Some(upstream) = inner.draft["upstreams"].get(name) {
         let configured_base = upstream["base_url"]
@@ -1641,20 +1652,82 @@ fn resolve_discovery_key(
             return Err("使用已保存 Key 刷新时，Base URL 必须与供应商配置一致".to_owned());
         }
         return match upstream["auth"]["slot"].as_str() {
-            Some(slot) => {
-                let config = inner.materialize()?;
-                secrets::SecretStore::from_config(&config)
-                    .resolve(name, slot)
-                    .map(Some)
-            }
-            None => Ok(None),
+            Some(slot) => Ok(DiscoveryCredential::Stored {
+                provider: name.to_owned(),
+                slot: slot.to_owned(),
+            }),
+            None => Ok(DiscoveryCredential::Explicit(None)),
         };
     }
-    Ok(None)
+    Ok(DiscoveryCredential::Explicit(None))
 }
 
 /// Fetch the provider’s current model catalog. Run the network request on a blocking worker so it does not block the Tauri UI.
 /// When using a saved key, require the request URL to match the provider configuration so credentials cannot be forwarded to an arbitrary address.
+fn apply_discovered_model_capabilities(
+    inner: &mut AppInner,
+    name: &str,
+    catalog: &[model_catalog::CatalogModelView],
+) -> Result<bool, String> {
+    let Some(upstream) = inner.draft["upstreams"].get(name) else {
+        return Ok(false);
+    };
+    let previous = upstream
+        .get("models")
+        .filter(|models| models.is_array())
+        .cloned()
+        .ok_or_else(|| format!("供应商 `{name}` 的模型配置无效"))?;
+    let facts: std::collections::BTreeMap<&str, CapabilityState> = catalog
+        .iter()
+        .filter(|model| model.catalog_state == model_catalog::CatalogState::Active)
+        .filter_map(|model| {
+            (model.vision != CapabilityState::Unknown)
+                .then_some((model.model.as_str(), model.vision))
+        })
+        .collect();
+    if facts.is_empty() {
+        return Ok(false);
+    }
+
+    inner.ensure_editable()?;
+    let previous_state = inner.config_state.clone();
+    let models = inner.draft["upstreams"][name]["models"]
+        .as_array_mut()
+        .ok_or_else(|| format!("供应商 `{name}` 的模型配置无效"))?;
+    let mut changed = false;
+    for capability in models {
+        let Some(model) = capability["model"].as_str() else {
+            continue;
+        };
+        let Some(state) = facts.get(model).copied() else {
+            continue;
+        };
+        let (supported, serialized) = match state {
+            CapabilityState::Verified => (true, "verified"),
+            CapabilityState::Unsupported => (false, "unsupported"),
+            CapabilityState::Declared | CapabilityState::Unknown => continue,
+        };
+        if capability["vision"].as_bool() != Some(supported)
+            || capability["vision_state"].as_str() != Some(serialized)
+        {
+            capability["vision"] = json!(supported);
+            capability["vision_state"] = json!(serialized);
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
+
+    let save = inner.observe_draft().and_then(|()| inner.save_draft());
+    if let Err(error) = save {
+        inner.draft["upstreams"][name]["models"] = previous;
+        inner.config_state = previous_state;
+        return Err(format!("保存模型目录能力失败：{error}"));
+    }
+    Ok(true)
+}
+
 #[tauri::command]
 async fn discover_provider_models(
     state: State<'_, AppStateManaged>,
@@ -1671,30 +1744,43 @@ async fn discover_provider_models(
         .map_err(|error| format!("Base URL 不合法：{error}"))?
         .as_str();
 
-    let (data_dir, resolved_key, egress, egress_secrets) = {
+    let (data_dir, credential, egress, egress_secrets) = {
         let inner = state.0.lock().unwrap();
-        let resolved = resolve_discovery_key(&inner, &name, &base_url, api_key.as_deref())?;
+        let credential =
+            prepare_discovery_credential(&inner, &name, &base_url, api_key.as_deref())?;
         let config = inner.materialize()?;
         (
             inner.data_dir(),
-            resolved,
+            credential,
             config.egress.clone(),
             secrets::SecretStore::from_config(&config),
         )
     };
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let task_name = name.clone();
+    let task_base_url = base_url.clone();
+    let mut result = tauri::async_runtime::spawn_blocking(move || {
+        let resolved_key = match credential {
+            DiscoveryCredential::Explicit(key) => key,
+            DiscoveryCredential::Stored { provider, slot } => {
+                Some(egress_secrets.resolve(&provider, &slot)?)
+            }
+        };
         model_catalog::discover_with_cache_egress(
             &data_dir,
-            &name,
-            &base_url,
+            &task_name,
+            &task_base_url,
             resolved_key.as_deref(),
             &egress,
             &egress_secrets,
         )
     })
     .await
-    .map_err(|error| format!("模型目录任务异常结束：{error}"))?
+    .map_err(|error| format!("模型目录任务异常结束：{error}"))??;
+    let mut inner = state.0.lock().unwrap();
+    result.capabilities_updated =
+        apply_discovered_model_capabilities(&mut inner, &name, &result.catalog)?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1880,7 +1966,12 @@ fn replace_provider_models(
         })
         .collect();
 
-    let previous = inner.draft["upstreams"][name]["models"].clone();
+    let previous = inner.draft["upstreams"]
+        .get(name)
+        .and_then(|upstream| upstream.get("models"))
+        .filter(|models| models.is_array())
+        .cloned()
+        .ok_or_else(|| format!("供应商 `{name}` 不存在或模型配置无效"))?;
     let previous_state = inner.config_state.clone();
     inner.draft["upstreams"][name]["models"] = json!(model_objects);
     let save = inner.observe_draft().and_then(|()| inner.save_draft());
@@ -1900,6 +1991,57 @@ fn update_provider_models(
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     replace_provider_models(&mut inner, name.trim(), models)?;
+    Ok(inner.snapshot())
+}
+
+fn replace_provider_model_vision(
+    inner: &mut AppInner,
+    name: &str,
+    model: &str,
+    supported: bool,
+) -> Result<(), String> {
+    inner.ensure_editable()?;
+    let name = name.trim();
+    let model = model.trim();
+    if name.is_empty() || model.is_empty() {
+        return Err("供应商和模型 ID 不能为空".to_owned());
+    }
+
+    let previous = inner.draft["upstreams"]
+        .get(name)
+        .and_then(|upstream| upstream.get("models"))
+        .filter(|models| models.is_array())
+        .cloned()
+        .ok_or_else(|| format!("供应商 `{name}` 不存在或模型配置无效"))?;
+    let previous_state = inner.config_state.clone();
+    let models = inner.draft["upstreams"][name]["models"]
+        .as_array_mut()
+        .ok_or_else(|| format!("供应商 `{name}` 不存在或模型配置无效"))?;
+    let capability = models
+        .iter_mut()
+        .find(|candidate| candidate["model"].as_str() == Some(model))
+        .ok_or_else(|| format!("供应商 `{name}` 未配置模型 `{model}`"))?;
+    capability["vision"] = json!(supported);
+    capability["vision_state"] = json!(if supported { "declared" } else { "unsupported" });
+
+    let save = inner.observe_draft().and_then(|()| inner.save_draft());
+    if let Err(error) = save {
+        inner.draft["upstreams"][name]["models"] = previous;
+        inner.config_state = previous_state;
+        return Err(format!("保存模型视觉能力失败：{error}"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_provider_model_vision(
+    state: State<'_, AppStateManaged>,
+    name: String,
+    model: String,
+    supported: bool,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    replace_provider_model_vision(&mut inner, &name, &model, supported)?;
     Ok(inner.snapshot())
 }
 
@@ -3147,6 +3289,7 @@ pub fn run() {
             edit_provider,
             discover_provider_models,
             test_provider,
+            set_provider_model_vision,
             update_provider_models,
             preview_provider_removal,
             remove_provider,
@@ -3727,6 +3870,107 @@ mod tests {
     }
 
     #[test]
+    fn provider_model_vision_declaration_updates_the_public_state() {
+        let root = scratch_home("model-vision");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{
+                "model": "vision-model",
+                "vision": false,
+                "vision_state": "unknown",
+                "context_window": 128000
+            }]
+        });
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            draft,
+            None,
+        )))));
+
+        let declared = set_provider_model_vision(
+            app.state(),
+            "provider".to_owned(),
+            "vision-model".to_owned(),
+            true,
+        )
+        .expect("a configured model can be declared vision-capable");
+        let model = &declared.providers[0].model_capabilities[0];
+        assert_eq!(model.vision, CapabilityState::Declared);
+
+        let unsupported = set_provider_model_vision(
+            app.state(),
+            "provider".to_owned(),
+            "vision-model".to_owned(),
+            false,
+        )
+        .expect("an operator can explicitly disable vision routing");
+        let model = &unsupported.providers[0].model_capabilities[0];
+        assert_eq!(model.vision, CapabilityState::Unsupported);
+
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("token-station.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved["upstreams"]["provider"]["models"][0]["vision_state"],
+            json!("unsupported")
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn trusted_catalog_vision_facts_update_configured_models() {
+        let root = scratch_home("catalog-vision");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["openrouter"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://openrouter.ai/api/v1",
+            "models": [
+                {"model": "vision-model", "vision": false, "context_window": 128000},
+                {"model": "text-model", "vision": true, "vision_state": "declared", "context_window": 128000}
+            ]
+        });
+        let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+        let catalog = vec![
+            model_catalog::CatalogModelView {
+                model: "vision-model".to_owned(),
+                tool: CapabilityState::Unknown,
+                vision: CapabilityState::Verified,
+                json_schema: CapabilityState::Unknown,
+                source: model_catalog::CatalogSource::Live,
+                last_seen_ms: Some(42),
+                catalog_state: model_catalog::CatalogState::Active,
+            },
+            model_catalog::CatalogModelView {
+                model: "text-model".to_owned(),
+                tool: CapabilityState::Unknown,
+                vision: CapabilityState::Unsupported,
+                json_schema: CapabilityState::Unknown,
+                source: model_catalog::CatalogSource::Live,
+                last_seen_ms: Some(42),
+                catalog_state: model_catalog::CatalogState::Active,
+            },
+        ];
+
+        assert!(
+            apply_discovered_model_capabilities(&mut inner, "openrouter", &catalog)
+                .expect("trusted catalog facts apply")
+        );
+
+        let models = inner.draft["upstreams"]["openrouter"]["models"]
+            .as_array()
+            .unwrap();
+        assert_eq!(models[0]["vision"], json!(true));
+        assert_eq!(models[0]["vision_state"], json!("verified"));
+        assert_eq!(models[1]["vision"], json!(false));
+        assert_eq!(models[1]["vision_state"], json!("unsupported"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn provider_model_updates_preserve_metadata_and_protect_routing_references() {
         let root = scratch_home("model-update");
         let mut draft = template_for_test(&root);
@@ -3948,18 +4192,42 @@ mod tests {
         });
         let inner = AppInner::new(root.join("token-station.json"), draft, None);
 
-        let error = resolve_discovery_key(&inner, "provider", "https://attacker.example/v1", None)
-            .expect_err("a stored credential is bound to its configured URL");
+        let error =
+            prepare_discovery_credential(&inner, "provider", "https://attacker.example/v1", None)
+                .expect_err("a stored credential is bound to its configured URL");
         assert!(error.contains("Base URL 必须与供应商配置一致"), "{error}");
 
-        let one_time = resolve_discovery_key(
+        let one_time = prepare_discovery_credential(
             &inner,
             "new-provider",
             "https://new.example/v1",
             Some("one-time-secret"),
         )
         .expect("an explicit one-time key is accepted");
-        assert_eq!(one_time.as_deref(), Some("one-time-secret"));
+        assert_eq!(
+            one_time,
+            DiscoveryCredential::Explicit(Some("one-time-secret".to_owned()))
+        );
+
+        let stored =
+            prepare_discovery_credential(&inner, "provider", "https://trusted.example/v1", None)
+                .expect("stored credentials are prepared without resolving the keyring");
+        assert_eq!(
+            stored,
+            DiscoveryCredential::Stored {
+                provider: "provider".to_owned(),
+                slot: "provider_api_key".to_owned(),
+            }
+        );
+
+        let openrouter = prepare_discovery_credential(
+            &inner,
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            None,
+        )
+        .expect("OpenRouter's public catalog needs no stored credential");
+        assert_eq!(openrouter, DiscoveryCredential::Explicit(None));
         std::fs::remove_dir_all(root).ok();
     }
 
