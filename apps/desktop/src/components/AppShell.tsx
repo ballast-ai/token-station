@@ -22,14 +22,6 @@ interface AppShellProps {
   children: ReactNode;
 }
 
-const AGENT_MARKS: Record<string, string> = {
-  "claude-code": "C",
-  codex: "X",
-  opencode: "O",
-  openclaw: "OC",
-  "nous-hermes-agent": "H",
-};
-
 function agentTone(agent: AgentView | undefined) {
   if (agent?.status === "CONNECTED") return "connected";
   if (agent?.status === "DETECTED_BLOCKED" || agent?.status === "INSTALLED_BROKEN") return "blocked";
@@ -105,7 +97,7 @@ export default function AppShell({
                 <NavGlyph>
                   <AgentIcon
                     id={metadata.agent_id}
-                    fallback={AGENT_MARKS[metadata.agent_id] ?? metadata.display_name.slice(0, 1)}
+                    fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)}
                     size={22}
                   />
                 </NavGlyph>

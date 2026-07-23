@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::{path, ConnectInput, Connector};
+use super::{path, ConnectInput, Connector, ConnectorCapabilities};
 use crate::agent_integration::config_codec::{semantic_json, ConfigDocument, DocumentFormat};
 use crate::agent_integration::types::{ConfigPath, PatchKind, PatchOperation};
 
@@ -13,8 +13,30 @@ const API_KEY_PATH: &[&str] = &["model", "api_key"];
 const API_MODE_PATH: &[&str] = &["model", "api_mode"];
 
 pub struct HermesConnector;
+pub(super) static CONNECTOR: HermesConnector = HermesConnector;
+static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
+    connector_id: "hermes-v1",
+    agent_id: "nous-hermes-agent",
+    label: "Hermes config.yaml",
+    adapter_id: "agent-openai",
+    base_url_shape: crate::agent_integration::types::BaseUrlShape::OriginV1,
+    platforms: &[
+        crate::agent_integration::types::Platform::Macos,
+        crate::agent_integration::types::Platform::Linux,
+        crate::agent_integration::types::Platform::Windows,
+        crate::agent_integration::types::Platform::Wsl,
+    ],
+    config_format: DocumentFormat::Yaml,
+    config_path_template: "${HOME}/.hermes/config.yaml",
+    owned_fields: &["model.default", "model.provider", "model.base_url", "model.api_key", "model.api_mode"],
+    requires_virtual_key: true,
+    restart_required: false,
+};
 
 impl Connector for HermesConnector {
+    fn capabilities(&self) -> &'static ConnectorCapabilities {
+        &CAPABILITIES
+    }
     fn connector_id(&self) -> &'static str {
         "hermes-v1"
     }

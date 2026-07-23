@@ -30,8 +30,22 @@ pub struct OwnershipRecord {
     pub managed_after_hash: String,
     pub owned_paths: Vec<ConfigPath>,
     pub owned_value_macs: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companion_files: Vec<CompanionOwnership>,
     pub acquired_at_ms: u64,
     pub updated_at_ms: u64,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompanionOwnership {
+    pub target_config_path: String,
+    pub baseline_snapshot_id: String,
+    pub last_transaction_snapshot_id: String,
+    pub before_hash: String,
+    pub managed_after_hash: String,
+    pub owned_paths: Vec<ConfigPath>,
+    pub owned_value_macs: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -244,6 +258,25 @@ fn validate_record(record: &OwnershipRecord) -> Result<(), String> {
     {
         return Err("ownership record 无效".to_string());
     }
+    let mut companion_paths = BTreeSet::new();
+    for companion in &record.companion_files {
+        if companion.target_config_path.is_empty()
+            || companion.target_config_path == record.target_config_path
+            || !companion_paths.insert(&companion.target_config_path)
+            || companion.baseline_snapshot_id.len() != 32
+            || companion.last_transaction_snapshot_id.len() != 32
+            || companion.before_hash.len() != 64
+            || companion.managed_after_hash.len() != 64
+            || companion.owned_paths.is_empty()
+            || companion.owned_paths.len() != companion.owned_value_macs.len()
+            || companion
+                .owned_paths
+                .iter()
+                .any(|path| !companion.owned_value_macs.contains_key(&path.to_string()))
+        {
+            return Err("ownership companion record 无效".to_string());
+        }
+    }
     Ok(())
 }
 
@@ -355,6 +388,7 @@ mod tests {
             managed_after_hash: "b".repeat(64),
             owned_paths,
             owned_value_macs: macs,
+            companion_files: Vec::new(),
             acquired_at_ms: 1,
             updated_at_ms: 1,
         }

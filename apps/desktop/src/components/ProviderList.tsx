@@ -88,7 +88,7 @@ export default function ProviderList({
                   disabled={busy}
                   onClick={() => setManagedProvider((current) => current === provider.name ? null : provider.name)}
                 >
-                  {managedProvider === provider.name ? "收起" : "管理模型"}
+                  {managedProvider === provider.name ? "收起" : "管理详情"}
                 </button>
                 <button className="btn tiny danger" type="button" disabled={busy} onClick={() => void inspectRemoval(provider.name)}>
                   删除

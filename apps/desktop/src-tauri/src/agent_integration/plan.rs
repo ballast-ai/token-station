@@ -4,14 +4,16 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use super::config_codec::{
-    apply_patch, parse_rendered, parse_source_bytes, project_owned_paths, render_document,
-    DocumentFormat,
+    apply_patch, apply_patch_with_reverse, parse_rendered, parse_source_bytes, project_owned_paths,
+    render_document, semantic_json, ConfigDocument, DocumentFormat,
 };
 use super::connectors::{validate_patch_ownership, ConnectInput, Connector};
-use super::ownership::{ownership_matches, OwnershipRecord};
+use super::ownership::{compute_owned_value_macs, ownership_matches, OwnershipRecord};
+use super::snapshot::SnapshotStore;
 use super::types::{
     AllowedAction, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan, ConfigPath,
-    ConfirmationKind, DiscoveryRecord, PatchKind, PatchOperation, PlanIntent, RedactedChange,
+    ConfirmationKind, ConnectorFileProjection, ConnectorProjection, CredentialBinding,
+    CredentialSource, DiscoveryRecord, PatchKind, PatchOperation, PlanIntent, RedactedChange,
     SnapshotRecord,
 };
 
@@ -59,6 +61,18 @@ pub struct PreparedChangePlan {
     pub(crate) format: DocumentFormat,
     pub(crate) label: &'static str,
     pub(crate) ownership: Option<PlanOwnershipBinding>,
+    pub(crate) companions: Vec<PreparedFileProjection>,
+}
+
+pub(crate) struct PreparedFileProjection {
+    pub target_path: String,
+    pub target_existed: bool,
+    pub before_hash: String,
+    pub expected_after_hash: String,
+    pub projected_bytes: Zeroizing<Vec<u8>>,
+    pub format: DocumentFormat,
+    pub label: &'static str,
+    pub owned_paths: Vec<ConfigPath>,
 }
 
 pub(crate) struct PlanOwnershipBinding {
@@ -123,6 +137,13 @@ pub fn build_connection_plan(
     now_ms: u64,
     operation_id: String,
 ) -> Result<PreparedChangePlan, String> {
+    if !connector.supports_platform(discovery.environment) {
+        return Err(format!(
+            "Connector '{}' 不支持当前平台 {:?}",
+            connector.connector_id(),
+            discovery.environment
+        ));
+    }
     validate_binding(
         connector,
         discovery,
@@ -141,15 +162,24 @@ pub fn build_connection_plan(
         connector.label(),
     )?;
     connector.validate_source(&document)?;
+    let baseline_semantic = semantic_json(&document)?;
     let operations = connector.connect_patch(input)?;
     let owned_paths = connector.owned_paths();
     validate_owned_paths(&owned_paths)?;
     validate_patch_ownership(&operations, &owned_paths)?;
-    apply_patch(&mut document, &operations)?;
+    let reverse_operations = apply_patch_with_reverse(&mut document, &operations)?;
     connector.validate_projected(&document, input)?;
     let rendered = render_document(&document, connector.label())?;
     let reparsed = parse_rendered(&rendered, connector.format(), connector.label())?;
     connector.validate_projected(&reparsed, input)?;
+    verify_reverse_projection(
+        &reparsed,
+        &baseline_semantic,
+        &reverse_operations,
+        &owned_paths,
+        connector.format(),
+        connector.label(),
+    )?;
 
     let before_hash = file_revision_hash(target_path, source)?;
     let projected_bytes = rendered.into_bytes();
@@ -160,7 +190,109 @@ pub fn build_connection_plan(
     );
     let expected_after_hash = file_revision_hash(target_path, &projected)?;
     let changes = redact_changes(&operations, &connector.sensitive_paths());
-    let human_diff = changes
+    let reverse_changes = redact_reverse_changes(&reverse_operations, &connector.sensitive_paths());
+    let companion_raw = connector.companion_projections(target_path, input)?;
+    let mut companions = Vec::with_capacity(companion_raw.len());
+    let mut related_config_paths = Vec::with_capacity(companion_raw.len());
+    let mut companion_diff = Vec::new();
+    let mut projection_files = vec![ConnectorFileProjection {
+        target_config_path: strict_path_text(target_path)?.to_string(),
+        format: format_name(connector.format()).to_string(),
+        target_existed: source.existed,
+        before_hash: before_hash.clone(),
+        expected_after_hash: expected_after_hash.clone(),
+        owned_paths: owned_paths.clone(),
+        forward_changes: changes.clone(),
+        reverse_changes,
+        credential_bindings: credential_bindings(&changes, CredentialSource::LocalVirtualKey),
+    }];
+    for companion in companion_raw {
+        validate_target_path(&companion.target_path)?;
+        validate_owned_paths(&companion.owned_paths)?;
+        validate_patch_ownership(&companion.operations, &companion.owned_paths)?;
+        let source = if companion.source_existed {
+            ConfigSource::existing(
+                companion.source_bytes.to_vec(),
+                companion.original_permissions,
+                companion.original_owner.clone(),
+            )
+        } else {
+            ConfigSource::missing()
+        };
+        let mut companion_document = parse_source_bytes(
+            companion
+                .source_existed
+                .then_some(companion.source_bytes.as_slice()),
+            companion.format,
+            companion.label,
+        )?;
+        let companion_baseline_semantic = semantic_json(&companion_document)?;
+        let reverse_operations =
+            apply_patch_with_reverse(&mut companion_document, &companion.operations)?;
+        let declared_projection = parse_rendered(
+            std::str::from_utf8(companion.projected_bytes.as_slice())
+                .map_err(|_| "companion projected bytes 不是 UTF-8".to_string())?,
+            companion.format,
+            companion.label,
+        )?;
+        if semantic_json(&companion_document)? != semantic_json(&declared_projection)? {
+            return Err("companion operations 与 projected bytes 不一致".to_string());
+        }
+        verify_reverse_projection(
+            &declared_projection,
+            &companion_baseline_semantic,
+            &reverse_operations,
+            &companion.owned_paths,
+            companion.format,
+            companion.label,
+        )?;
+        let projected = ConfigSource::existing(
+            companion.projected_bytes.to_vec(),
+            companion.original_permissions.or(Some(0o600)),
+            companion.original_owner.clone(),
+        );
+        let target = strict_path_text(&companion.target_path)?.to_string();
+        let before_hash = file_revision_hash(&companion.target_path, &source)?;
+        let expected_after_hash = file_revision_hash(&companion.target_path, &projected)?;
+        for change in redact_changes(&companion.operations, &companion.sensitive_paths) {
+            companion_diff.push(format!(
+                "{} {} :: {}: {}",
+                patch_symbol(change.operation),
+                target,
+                change.path,
+                change.summary
+            ));
+        }
+        projection_files.push(ConnectorFileProjection {
+            target_config_path: target.clone(),
+            format: format_name(companion.format).to_string(),
+            target_existed: companion.source_existed,
+            before_hash: before_hash.clone(),
+            expected_after_hash: expected_after_hash.clone(),
+            owned_paths: companion.owned_paths.clone(),
+            forward_changes: redact_changes(&companion.operations, &companion.sensitive_paths),
+            reverse_changes: redact_reverse_changes(
+                &reverse_operations,
+                &companion.sensitive_paths,
+            ),
+            credential_bindings: credential_bindings(
+                &redact_changes(&companion.operations, &companion.sensitive_paths),
+                CredentialSource::LocalVirtualKey,
+            ),
+        });
+        related_config_paths.push(target.clone());
+        companions.push(PreparedFileProjection {
+            target_path: target,
+            target_existed: companion.source_existed,
+            before_hash: before_hash.clone(),
+            expected_after_hash: expected_after_hash.clone(),
+            projected_bytes: companion.projected_bytes,
+            format: companion.format,
+            label: companion.label,
+            owned_paths: companion.owned_paths,
+        });
+    }
+    let mut human_diff = changes
         .iter()
         .map(|change| {
             format!(
@@ -172,6 +304,12 @@ pub fn build_connection_plan(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    if !companion_diff.is_empty() {
+        if !human_diff.is_empty() {
+            human_diff.push('\n');
+        }
+        human_diff.push_str(&companion_diff.join("\n"));
+    }
     let required_confirmations = vec![
         ConfirmationKind::Installation,
         ConfirmationKind::TargetConfig,
@@ -189,11 +327,16 @@ pub fn build_connection_plan(
             agent_id: connector.agent_id().to_string(),
             installation_path: discovery.canonical_path.clone(),
             target_config_path: strict_path_text(target_path)?.to_string(),
+            related_config_paths,
             target_existed: source.existed,
             before_hash,
             expected_after_hash,
             owned_paths,
             changes,
+            projection: ConnectorProjection {
+                schema_version: 1,
+                files: projection_files,
+            },
             human_diff,
             connector_id: connector.connector_id().to_string(),
             compatibility_evidence: compatibility.clone(),
@@ -207,6 +350,7 @@ pub fn build_connection_plan(
         format: connector.format(),
         label: connector.label(),
         ownership: None,
+        companions,
     })
 }
 
@@ -246,6 +390,231 @@ pub fn build_disconnect_plan(
         now_ms,
         operation_id,
     )
+}
+
+/// Adds every companion file owned by a multi-file Connector to a disconnect
+/// plan. Each file is independently revision-bound and restored from its own
+/// encrypted baseline; the transaction engine commits or rolls back the set.
+pub fn attach_disconnect_companions(
+    plan: &mut PreparedChangePlan,
+    connector: &dyn Connector,
+    ownership: &OwnershipRecord,
+    snapshots: &dyn SnapshotStore,
+    master_key: &Zeroizing<[u8; 32]>,
+) -> Result<(), String> {
+    if plan.view.intent != PlanIntent::Disconnect || plan.ownership.is_none() {
+        return Err("companion restore 只能附加到已绑定的断开计划".to_string());
+    }
+    for companion in &ownership.companion_files {
+        let target = Path::new(&companion.target_config_path);
+        validate_target_path(target)?;
+        let current = read_config_source(target)?;
+        let mut current_document = parse_source_bytes(
+            current.existed.then_some(current.exact_bytes.as_slice()),
+            connector.format(),
+            connector.label(),
+        )?;
+        let current_macs =
+            compute_owned_value_macs(&current_document, &companion.owned_paths, master_key)?;
+        if current_macs != companion.owned_value_macs {
+            return Err("companion owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
+        }
+        let baseline = snapshots.load(&companion.baseline_snapshot_id)?;
+        if baseline.record.snapshot_id != companion.baseline_snapshot_id
+            || baseline.record.agent_id != ownership.agent_id
+            || baseline.record.target_config_path != companion.target_config_path
+            || baseline.record.connector_id != ownership.connector_id
+        {
+            return Err("companion 基线快照绑定无效".to_string());
+        }
+        let baseline_document = parse_source_bytes(
+            baseline
+                .record
+                .original_existed
+                .then_some(baseline.exact_bytes.as_slice()),
+            connector.format(),
+            connector.label(),
+        )?;
+        let (forward_operations, reverse_operations) = projection_operations(
+            &current_document,
+            &baseline_document,
+            &companion.owned_paths,
+        )?;
+        project_owned_paths(
+            &mut current_document,
+            &baseline_document,
+            &companion.owned_paths,
+        )?;
+        let rendered = render_document(&current_document, connector.label())?;
+        let reparsed = parse_rendered(&rendered, connector.format(), connector.label())?;
+        let original_semantic = semantic_json(&parse_source_bytes(
+            current.existed.then_some(current.exact_bytes.as_slice()),
+            connector.format(),
+            connector.label(),
+        )?)?;
+        verify_reverse_projection(
+            &reparsed,
+            &original_semantic,
+            &reverse_operations,
+            &companion.owned_paths,
+            connector.format(),
+            connector.label(),
+        )?;
+        let projected = ConfigSource::existing(
+            rendered.as_bytes().to_vec(),
+            current.original_permissions.or(Some(0o600)),
+            current.original_owner.clone(),
+        );
+        let before_hash = file_revision_hash(target, &current)?;
+        let expected_after_hash = file_revision_hash(target, &projected)?;
+        plan.view
+            .related_config_paths
+            .push(companion.target_config_path.clone());
+        if !plan.view.human_diff.is_empty() {
+            plan.view.human_diff.push('\n');
+        }
+        plan.view.human_diff.push_str(&format!(
+            "~ {} :: <恢复受管字段>",
+            companion.target_config_path
+        ));
+        let sensitive_paths = connector.sensitive_paths();
+        plan.view.projection.files.push(ConnectorFileProjection {
+            target_config_path: companion.target_config_path.clone(),
+            format: format_name(connector.format()).to_string(),
+            target_existed: current.existed,
+            before_hash: before_hash.clone(),
+            expected_after_hash: expected_after_hash.clone(),
+            owned_paths: companion.owned_paths.clone(),
+            forward_changes: redact_restore_changes(&forward_operations, &sensitive_paths),
+            reverse_changes: redact_reverse_changes(&reverse_operations, &sensitive_paths),
+            credential_bindings: credential_bindings(
+                &redact_restore_changes(&forward_operations, &sensitive_paths),
+                CredentialSource::EncryptedSnapshot,
+            ),
+        });
+        plan.companions.push(PreparedFileProjection {
+            target_path: companion.target_config_path.clone(),
+            target_existed: current.existed,
+            before_hash,
+            expected_after_hash,
+            projected_bytes: Zeroizing::new(rendered.into_bytes()),
+            format: connector.format(),
+            label: connector.label(),
+            owned_paths: companion.owned_paths.clone(),
+        });
+    }
+    Ok(())
+}
+
+pub fn attach_restore_companions(
+    plan: &mut PreparedChangePlan,
+    connector: &dyn Connector,
+    ownership: &OwnershipRecord,
+    primary_source: &SnapshotRecord,
+    snapshots: &dyn SnapshotStore,
+    master_key: &Zeroizing<[u8; 32]>,
+) -> Result<(), String> {
+    if plan.view.intent != PlanIntent::Restore || plan.ownership.is_none() {
+        return Err("companion restore 只能附加到已绑定的快照恢复计划".to_string());
+    }
+    let records = snapshots.list_agent(&ownership.agent_id)?;
+    for companion in &ownership.companion_files {
+        let source_record = records
+            .iter()
+            .find(|record| {
+                record.operation_id == primary_source.operation_id
+                    && record.target_config_path == companion.target_config_path
+                    && record.connector_id == ownership.connector_id
+            })
+            .ok_or_else(|| "目标快照缺少同事务 companion 快照".to_string())?;
+        let source_snapshot = snapshots.load(&source_record.snapshot_id)?;
+        let target = Path::new(&companion.target_config_path);
+        validate_target_path(target)?;
+        let current = read_config_source(target)?;
+        let mut current_document = parse_source_bytes(
+            current.existed.then_some(current.exact_bytes.as_slice()),
+            connector.format(),
+            connector.label(),
+        )?;
+        let current_macs =
+            compute_owned_value_macs(&current_document, &companion.owned_paths, master_key)?;
+        if current_macs != companion.owned_value_macs {
+            return Err("companion owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
+        }
+        let source_document = parse_source_bytes(
+            source_snapshot
+                .record
+                .original_existed
+                .then_some(source_snapshot.exact_bytes.as_slice()),
+            connector.format(),
+            connector.label(),
+        )?;
+        let (forward_operations, reverse_operations) =
+            projection_operations(&current_document, &source_document, &companion.owned_paths)?;
+        project_owned_paths(
+            &mut current_document,
+            &source_document,
+            &companion.owned_paths,
+        )?;
+        let rendered = render_document(&current_document, connector.label())?;
+        let reparsed = parse_rendered(&rendered, connector.format(), connector.label())?;
+        let original_semantic = semantic_json(&parse_source_bytes(
+            current.existed.then_some(current.exact_bytes.as_slice()),
+            connector.format(),
+            connector.label(),
+        )?)?;
+        verify_reverse_projection(
+            &reparsed,
+            &original_semantic,
+            &reverse_operations,
+            &companion.owned_paths,
+            connector.format(),
+            connector.label(),
+        )?;
+        let projected = ConfigSource::existing(
+            rendered.as_bytes().to_vec(),
+            current.original_permissions.or(Some(0o600)),
+            current.original_owner.clone(),
+        );
+        plan.view
+            .related_config_paths
+            .push(companion.target_config_path.clone());
+        if !plan.view.human_diff.is_empty() {
+            plan.view.human_diff.push('\n');
+        }
+        plan.view.human_diff.push_str(&format!(
+            "~ {} :: <恢复受管字段>",
+            companion.target_config_path
+        ));
+        let before_hash = file_revision_hash(target, &current)?;
+        let expected_after_hash = file_revision_hash(target, &projected)?;
+        let sensitive_paths = connector.sensitive_paths();
+        plan.view.projection.files.push(ConnectorFileProjection {
+            target_config_path: companion.target_config_path.clone(),
+            format: format_name(connector.format()).to_string(),
+            target_existed: current.existed,
+            before_hash: before_hash.clone(),
+            expected_after_hash: expected_after_hash.clone(),
+            owned_paths: companion.owned_paths.clone(),
+            forward_changes: redact_restore_changes(&forward_operations, &sensitive_paths),
+            reverse_changes: redact_reverse_changes(&reverse_operations, &sensitive_paths),
+            credential_bindings: credential_bindings(
+                &redact_restore_changes(&forward_operations, &sensitive_paths),
+                CredentialSource::EncryptedSnapshot,
+            ),
+        });
+        plan.companions.push(PreparedFileProjection {
+            target_path: companion.target_config_path.clone(),
+            target_existed: current.existed,
+            before_hash,
+            expected_after_hash,
+            projected_bytes: Zeroizing::new(rendered.into_bytes()),
+            format: connector.format(),
+            label: connector.label(),
+            owned_paths: companion.owned_paths.clone(),
+        });
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -325,6 +694,7 @@ fn build_owned_projection_plan(
     if !ownership_matches(ownership, &current_document, master_key)? {
         return Err("当前 owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
     }
+    let original_semantic = semantic_json(&current_document)?;
     let source_document = parse_source_bytes(
         source_snapshot
             .existed
@@ -332,13 +702,23 @@ fn build_owned_projection_plan(
         connector.format(),
         connector.label(),
     )?;
+    let (forward_operations, reverse_operations) =
+        projection_operations(&current_document, &source_document, &ownership.owned_paths)?;
     project_owned_paths(
         &mut current_document,
         &source_document,
         &ownership.owned_paths,
     )?;
     let rendered = render_document(&current_document, connector.label())?;
-    parse_rendered(&rendered, connector.format(), connector.label())?;
+    let reparsed = parse_rendered(&rendered, connector.format(), connector.label())?;
+    verify_reverse_projection(
+        &reparsed,
+        &original_semantic,
+        &reverse_operations,
+        &ownership.owned_paths,
+        connector.format(),
+        connector.label(),
+    )?;
     let before_hash = file_revision_hash(target_path, current)?;
     let projected_bytes = rendered.into_bytes();
     let projected = ConfigSource::existing(
@@ -348,26 +728,8 @@ fn build_owned_projection_plan(
     );
     let expected_after_hash = file_revision_hash(target_path, &projected)?;
     let sensitive_paths = connector.sensitive_paths();
-    let changes: Vec<_> = ownership
-        .owned_paths
-        .iter()
-        .map(|path| {
-            let sensitive = sensitive_paths.iter().any(|sensitive| {
-                is_path_prefix(path, sensitive) || is_path_prefix(sensitive, path)
-            });
-            RedactedChange {
-                operation: PatchKind::Replace,
-                path: path.clone(),
-                sensitive,
-                summary: if sensitive {
-                    "<恢复受管敏感值，内容已隐藏>"
-                } else {
-                    "<恢复受管值>"
-                }
-                .to_string(),
-            }
-        })
-        .collect();
+    let changes = redact_restore_changes(&forward_operations, &sensitive_paths);
+    let reverse_changes = redact_reverse_changes(&reverse_operations, &sensitive_paths);
     let human_diff = changes
         .iter()
         .map(|change| format!("~ {}: {}", change.path, change.summary))
@@ -382,11 +744,29 @@ fn build_owned_projection_plan(
             agent_id: ownership.agent_id.clone(),
             installation_path: ownership.installation_path.clone(),
             target_config_path: ownership.target_config_path.clone(),
+            related_config_paths: Vec::new(),
             target_existed: current.existed,
-            before_hash,
-            expected_after_hash,
+            before_hash: before_hash.clone(),
+            expected_after_hash: expected_after_hash.clone(),
             owned_paths: ownership.owned_paths.clone(),
             changes,
+            projection: ConnectorProjection {
+                schema_version: 1,
+                files: vec![ConnectorFileProjection {
+                    target_config_path: ownership.target_config_path.clone(),
+                    format: format_name(connector.format()).to_string(),
+                    target_existed: current.existed,
+                    before_hash: before_hash.clone(),
+                    expected_after_hash: expected_after_hash.clone(),
+                    owned_paths: ownership.owned_paths.clone(),
+                    forward_changes: redact_restore_changes(&forward_operations, &sensitive_paths),
+                    reverse_changes,
+                    credential_bindings: credential_bindings(
+                        &redact_restore_changes(&forward_operations, &sensitive_paths),
+                        CredentialSource::EncryptedSnapshot,
+                    ),
+                }],
+            },
             human_diff,
             connector_id: ownership.connector_id.clone(),
             compatibility_evidence: compatibility.clone(),
@@ -407,6 +787,7 @@ fn build_owned_projection_plan(
             record: ownership.clone(),
             disposition,
         }),
+        companions: Vec::new(),
     })
 }
 
@@ -570,6 +951,142 @@ fn redact_changes(
         .collect()
 }
 
+fn redact_reverse_changes(
+    operations: &[PatchOperation],
+    sensitive_paths: &[ConfigPath],
+) -> Vec<RedactedChange> {
+    redact_changes(operations, sensitive_paths)
+        .into_iter()
+        .map(|mut change| {
+            change.summary = if change.sensitive {
+                "<恢复接管前敏感值，内容已隐藏>"
+            } else {
+                "<恢复接管前受管值>"
+            }
+            .to_string();
+            change
+        })
+        .collect()
+}
+
+fn redact_restore_changes(
+    operations: &[PatchOperation],
+    sensitive_paths: &[ConfigPath],
+) -> Vec<RedactedChange> {
+    redact_changes(operations, sensitive_paths)
+        .into_iter()
+        .map(|mut change| {
+            change.summary = if change.sensitive {
+                "<恢复受管敏感值，内容已隐藏>"
+            } else {
+                "<恢复受管值>"
+            }
+            .to_string();
+            change
+        })
+        .collect()
+}
+
+fn credential_bindings(
+    changes: &[RedactedChange],
+    source: CredentialSource,
+) -> Vec<CredentialBinding> {
+    changes
+        .iter()
+        .filter(|change| change.sensitive)
+        .map(|change| CredentialBinding {
+            path: change.path.clone(),
+            source,
+        })
+        .collect()
+}
+
+fn projection_operations(
+    current: &ConfigDocument,
+    target: &ConfigDocument,
+    owned_paths: &[ConfigPath],
+) -> Result<(Vec<PatchOperation>, Vec<PatchOperation>), String> {
+    let current = semantic_json(current)?;
+    let target = semantic_json(target)?;
+    let mut forward = Vec::new();
+    let mut reverse = Vec::new();
+    for path in owned_paths {
+        let before = semantic_value_at(&current, path).cloned();
+        let after = semantic_value_at(&target, path).cloned();
+        if before == after {
+            continue;
+        }
+        forward.push(PatchOperation {
+            operation: if after.is_some() {
+                if before.is_some() {
+                    PatchKind::Replace
+                } else {
+                    PatchKind::Add
+                }
+            } else {
+                PatchKind::Remove
+            },
+            path: path.clone(),
+            value: after,
+        });
+        reverse.push(PatchOperation {
+            operation: if before.is_some() {
+                if semantic_value_at(&target, path).is_some() {
+                    PatchKind::Replace
+                } else {
+                    PatchKind::Add
+                }
+            } else {
+                PatchKind::Remove
+            },
+            path: path.clone(),
+            value: before,
+        });
+    }
+    reverse.reverse();
+    Ok((forward, reverse))
+}
+
+fn verify_reverse_projection(
+    projected: &ConfigDocument,
+    baseline: &serde_json::Value,
+    reverse: &[PatchOperation],
+    owned_paths: &[ConfigPath],
+    format: DocumentFormat,
+    label: &str,
+) -> Result<(), String> {
+    let rendered = render_document(projected, label)?;
+    let mut restored = parse_rendered(&rendered, format, label)?;
+    apply_patch(&mut restored, reverse)?;
+    let restored = semantic_json(&restored)?;
+    if owned_paths
+        .iter()
+        .any(|path| semantic_value_at(&restored, path) != semantic_value_at(baseline, path))
+    {
+        return Err("Connector 反向 patch 无法恢复接管前受管字段".to_string());
+    }
+    Ok(())
+}
+
+fn semantic_value_at<'a>(
+    root: &'a serde_json::Value,
+    path: &ConfigPath,
+) -> Option<&'a serde_json::Value> {
+    path.segments
+        .iter()
+        .try_fold(root, |value, segment| value.as_object()?.get(segment))
+}
+
+fn format_name(format: DocumentFormat) -> &'static str {
+    match format {
+        DocumentFormat::Json => "json",
+        DocumentFormat::Json5 => "json5",
+        DocumentFormat::Toml => "toml",
+        DocumentFormat::Yaml => "yaml",
+        DocumentFormat::Dotenv => "dotenv",
+    }
+}
+
 fn is_path_prefix(prefix: &ConfigPath, path: &ConfigPath) -> bool {
     prefix.segments.len() <= path.segments.len()
         && prefix.segments == path.segments[..prefix.segments.len()]
@@ -630,7 +1147,7 @@ mod tests {
     use super::*;
     use crate::agent_integration::connectors::ClaudeCodeConnector;
     use crate::agent_integration::types::{
-        Diagnostic, DiscoveryEvidence, DiscoverySource, Platform, ReasonCode,
+        BinarySource, Diagnostic, DiscoveryEvidence, DiscoverySource, Platform, ReasonCode,
     };
 
     fn discovery(target: &Path) -> DiscoveryRecord {
@@ -638,6 +1155,10 @@ mod tests {
             agent_id: "claude-code".to_string(),
             executable_path: "/opt/claude".to_string(),
             canonical_path: "/opt/claude".to_string(),
+            binary_source: BinarySource::Path,
+            modified_at_ms: None,
+            binary_sha256: None,
+            upgrade_command: None,
             version_raw: Some("2.1.211".to_string()),
             version_normalized: Some("2.1.211".to_string()),
             environment: Platform::Macos,
@@ -708,6 +1229,18 @@ mod tests {
         assert_eq!(prepared.view.expires_at_ms, 20_000);
         assert_eq!(prepared.view.installation_path, "/opt/claude");
         assert!(prepared.view.changes.iter().any(|change| change.sensitive));
+        assert_eq!(prepared.view.projection.schema_version, 1);
+        assert_eq!(prepared.view.projection.files.len(), 1);
+        assert!(prepared.view.projection.files[0]
+            .reverse_changes
+            .iter()
+            .any(|change| change.sensitive));
+        assert_eq!(
+            prepared.view.projection.files[0].credential_bindings[0].source,
+            CredentialSource::LocalVirtualKey
+        );
+        assert!(serialized.contains("local_virtual_key"));
+        assert!(!serialized.contains("value"));
         assert_ne!(prepared.view.before_hash, prepared.view.expected_after_hash);
     }
 

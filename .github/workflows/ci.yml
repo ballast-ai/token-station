@@ -40,6 +40,7 @@ jobs:
             plugins/official/agent-anthropic
             plugins/official/agent-openai
             plugins/official/agent-openai-responses
+            plugins/official/agent-gemini
             plugins/official/provider-openai-compatible
             crates/plugin-runtime/tests/guests/test-provider
       - run: cargo fmt --check
@@ -93,6 +94,7 @@ jobs:
             plugins/official/agent-anthropic
             plugins/official/agent-openai
             plugins/official/agent-openai-responses
+            plugins/official/agent-gemini
             plugins/official/provider-openai-compatible
       - name: Prepare official plugins for desktop gateway tests
         run: scripts/prepare-desktop-test-plugins.sh
@@ -144,6 +146,7 @@ jobs:
             plugins/official/agent-anthropic
             plugins/official/agent-openai
             plugins/official/agent-openai-responses
+            plugins/official/agent-gemini
             plugins/official/provider-openai-compatible
             crates/plugin-runtime/tests/guests/test-provider
       - run: >-
@@ -182,6 +185,7 @@ jobs:
             plugins/official/agent-anthropic
             plugins/official/agent-openai
             plugins/official/agent-openai-responses
+            plugins/official/agent-gemini
             plugins/official/provider-openai-compatible
       - name: Prepare official plugins for desktop gateway tests
         run: scripts/prepare-desktop-test-plugins.sh

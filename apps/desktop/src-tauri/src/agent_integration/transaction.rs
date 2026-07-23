@@ -7,7 +7,8 @@ use serde::Serialize;
 
 use super::config_codec::{parse_source_bytes, ConfigDocument};
 use super::ownership::{
-    compute_owned_value_macs, ownership_matches, OwnershipKey, OwnershipRecord, OwnershipStore,
+    compute_owned_value_macs, ownership_matches, CompanionOwnership, OwnershipKey, OwnershipRecord,
+    OwnershipStore,
 };
 use super::plan::{
     file_revision_hash, read_config_source, OwnershipDisposition, PreparedChangePlan,
@@ -456,6 +457,32 @@ impl<'a> TransactionEngine<'a> {
                 "before_hash_changed",
             ));
         }
+        let mut companion_currents = Vec::with_capacity(plan.companions.len());
+        for companion in &plan.companions {
+            let target = Path::new(&companion.target_path);
+            let source = read_config_source(target).map_err(|_| {
+                failure(
+                    plan,
+                    TransactionStage::Revision,
+                    "companion_target_read_failed",
+                )
+            })?;
+            let hash = file_revision_hash(target, &source).map_err(|_| {
+                failure(
+                    plan,
+                    TransactionStage::Revision,
+                    "companion_revision_hash_failed",
+                )
+            })?;
+            if hash != companion.before_hash {
+                return Err(failure(
+                    plan,
+                    TransactionStage::Revision,
+                    "companion_before_hash_changed",
+                ));
+            }
+            companion_currents.push(source);
+        }
         if let Some(binding) = &plan.ownership {
             let document = parse_source_bytes(
                 current.existed.then_some(current.exact_bytes.as_slice()),
@@ -485,6 +512,47 @@ impl<'a> TransactionEngine<'a> {
                     "owned_values_changed",
                 ));
             }
+            for (companion, source) in plan.companions.iter().zip(&companion_currents) {
+                let owned = binding
+                    .record
+                    .companion_files
+                    .iter()
+                    .find(|owned| owned.target_config_path == companion.target_path)
+                    .ok_or_else(|| {
+                        failure(
+                            plan,
+                            TransactionStage::Ownership,
+                            "companion_ownership_missing",
+                        )
+                    })?;
+                let document = parse_source_bytes(
+                    source.existed.then_some(source.exact_bytes.as_slice()),
+                    companion.format,
+                    companion.label,
+                )
+                .map_err(|_| {
+                    failure(
+                        plan,
+                        TransactionStage::Ownership,
+                        "companion_ownership_source_parse_failed",
+                    )
+                })?;
+                let observed = compute_owned_value_macs(&document, &owned.owned_paths, &key)
+                    .map_err(|_| {
+                        failure(
+                            plan,
+                            TransactionStage::Ownership,
+                            "companion_ownership_check_failed",
+                        )
+                    })?;
+                if observed != owned.owned_value_macs {
+                    return Err(failure(
+                        plan,
+                        TransactionStage::Ownership,
+                        "companion_owned_values_changed",
+                    ));
+                }
+            }
         }
         self.consume(plan)?;
         let snapshot = self
@@ -501,6 +569,30 @@ impl<'a> TransactionEngine<'a> {
                 pinned: plan.view.intent == PlanIntent::Connect,
             })
             .map_err(|_| failure(plan, TransactionStage::Snapshot, "snapshot_create_failed"))?;
+        let mut companion_snapshots = Vec::with_capacity(plan.companions.len());
+        for (companion, source) in plan.companions.iter().zip(&companion_currents) {
+            let created = self
+                .snapshots
+                .create(SnapshotRequest {
+                    operation_id: &plan.view.operation_id,
+                    agent_id: &plan.view.agent_id,
+                    target_config_path: &companion.target_path,
+                    before_hash: companion.before_hash.clone(),
+                    source,
+                    created_at_ms: now_ms,
+                    connector_id: &plan.view.connector_id,
+                    app_version: env!("CARGO_PKG_VERSION"),
+                    pinned: plan.view.intent == PlanIntent::Connect,
+                })
+                .map_err(|_| {
+                    failure(
+                        plan,
+                        TransactionStage::Snapshot,
+                        "companion_snapshot_create_failed",
+                    )
+                })?;
+            companion_snapshots.push(created);
+        }
         if self.clock.now_ms() > plan.view.expires_at_ms {
             return Err(failure(
                 plan,
@@ -523,9 +615,44 @@ impl<'a> TransactionEngine<'a> {
                 atomic_reason(write_failure.stage),
             );
             if write_failure.target_replaced {
-                self.recover(plan, &snapshot.record.snapshot_id, &mut error);
+                self.recover_files(
+                    plan,
+                    &snapshot.record.snapshot_id,
+                    &companion_snapshots,
+                    0,
+                    true,
+                    &mut error,
+                );
             }
             return Err(error);
+        }
+
+        for (index, (companion, source)) in
+            plan.companions.iter().zip(&companion_currents).enumerate()
+        {
+            if let Err(write_failure) = self.writer.replace(
+                Path::new(&companion.target_path),
+                companion.projected_bytes.as_slice(),
+                source.original_permissions.or(Some(0o600)),
+                source.original_owner.as_deref(),
+                &companion.before_hash,
+                false,
+            ) {
+                let mut error = failure(
+                    plan,
+                    TransactionStage::TargetWrite,
+                    atomic_reason(write_failure.stage),
+                );
+                self.recover_files(
+                    plan,
+                    &snapshot.record.snapshot_id,
+                    &companion_snapshots,
+                    index + usize::from(write_failure.target_replaced),
+                    true,
+                    &mut error,
+                );
+                return Err(error);
+            }
         }
 
         let after_source = match read_config_source(target) {
@@ -536,7 +663,14 @@ impl<'a> TransactionEngine<'a> {
                     TransactionStage::PostWriteRead,
                     "post_write_read_failed",
                 );
-                self.recover(plan, &snapshot.record.snapshot_id, &mut error);
+                self.recover_files(
+                    plan,
+                    &snapshot.record.snapshot_id,
+                    &companion_snapshots,
+                    plan.companions.len(),
+                    true,
+                    &mut error,
+                );
                 return Err(error);
             }
         };
@@ -548,13 +682,27 @@ impl<'a> TransactionEngine<'a> {
             Ok(hash) => hash,
             Err(_) => {
                 let mut error = failure(plan, TransactionStage::PostWriteRead, "after_hash_failed");
-                self.recover(plan, &snapshot.record.snapshot_id, &mut error);
+                self.recover_files(
+                    plan,
+                    &snapshot.record.snapshot_id,
+                    &companion_snapshots,
+                    plan.companions.len(),
+                    true,
+                    &mut error,
+                );
                 return Err(error);
             }
         };
         if observed_after_hash != plan.view.expected_after_hash {
             let mut error = failure(plan, TransactionStage::PostWriteRead, "after_hash_mismatch");
-            self.recover(plan, &snapshot.record.snapshot_id, &mut error);
+            self.recover_files(
+                plan,
+                &snapshot.record.snapshot_id,
+                &companion_snapshots,
+                plan.companions.len(),
+                true,
+                &mut error,
+            );
             return Err(error);
         }
         let document = match parse_source_bytes(
@@ -569,7 +717,14 @@ impl<'a> TransactionEngine<'a> {
                     TransactionStage::PostWriteParse,
                     "post_write_parse_failed",
                 );
-                self.recover(plan, &snapshot.record.snapshot_id, &mut error);
+                self.recover_files(
+                    plan,
+                    &snapshot.record.snapshot_id,
+                    &companion_snapshots,
+                    plan.companions.len(),
+                    true,
+                    &mut error,
+                );
                 return Err(error);
             }
         };
@@ -579,8 +734,105 @@ impl<'a> TransactionEngine<'a> {
                 TransactionStage::PostWriteSelfCheck,
                 "post_write_self_check_failed",
             );
-            self.recover(plan, &snapshot.record.snapshot_id, &mut error);
+            self.recover_files(
+                plan,
+                &snapshot.record.snapshot_id,
+                &companion_snapshots,
+                plan.companions.len(),
+                true,
+                &mut error,
+            );
             return Err(error);
+        }
+        let mut companion_documents = Vec::with_capacity(plan.companions.len());
+        for companion in &plan.companions {
+            let target = Path::new(&companion.target_path);
+            let source = match read_config_source(target) {
+                Ok(source) => source,
+                Err(_) => {
+                    let mut error = failure(
+                        plan,
+                        TransactionStage::PostWriteRead,
+                        "companion_post_write_read_failed",
+                    );
+                    self.recover_files(
+                        plan,
+                        &snapshot.record.snapshot_id,
+                        &companion_snapshots,
+                        plan.companions.len(),
+                        true,
+                        &mut error,
+                    );
+                    return Err(error);
+                }
+            };
+            let mut normalized = source.clone();
+            if !companion.target_existed {
+                normalized.original_owner = None;
+            }
+            let hash = file_revision_hash(target, &normalized).map_err(|_| {
+                failure(
+                    plan,
+                    TransactionStage::PostWriteRead,
+                    "companion_after_hash_failed",
+                )
+            });
+            if hash.as_deref() != Ok(companion.expected_after_hash.as_str()) {
+                let mut error = failure(
+                    plan,
+                    TransactionStage::PostWriteRead,
+                    "companion_after_hash_mismatch",
+                );
+                self.recover_files(
+                    plan,
+                    &snapshot.record.snapshot_id,
+                    &companion_snapshots,
+                    plan.companions.len(),
+                    true,
+                    &mut error,
+                );
+                return Err(error);
+            }
+            let parsed = match parse_source_bytes(
+                Some(source.exact_bytes.as_slice()),
+                companion.format,
+                companion.label,
+            ) {
+                Ok(document) => document,
+                Err(_) => {
+                    let mut error = failure(
+                        plan,
+                        TransactionStage::PostWriteParse,
+                        "companion_post_write_parse_failed",
+                    );
+                    self.recover_files(
+                        plan,
+                        &snapshot.record.snapshot_id,
+                        &companion_snapshots,
+                        plan.companions.len(),
+                        true,
+                        &mut error,
+                    );
+                    return Err(error);
+                }
+            };
+            if self.verifier.verify(target, &parsed).is_err() {
+                let mut error = failure(
+                    plan,
+                    TransactionStage::PostWriteSelfCheck,
+                    "companion_post_write_self_check_failed",
+                );
+                self.recover_files(
+                    plan,
+                    &snapshot.record.snapshot_id,
+                    &companion_snapshots,
+                    plan.companions.len(),
+                    true,
+                    &mut error,
+                );
+                return Err(error);
+            }
+            companion_documents.push(parsed);
         }
         let key = match self.keys.load() {
             Ok(key) => key,
@@ -590,7 +842,14 @@ impl<'a> TransactionEngine<'a> {
                     TransactionStage::OwnershipCommit,
                     "ownership_key_unavailable",
                 );
-                self.recover(plan, &snapshot.record.snapshot_id, &mut error);
+                self.recover_files(
+                    plan,
+                    &snapshot.record.snapshot_id,
+                    &companion_snapshots,
+                    plan.companions.len(),
+                    true,
+                    &mut error,
+                );
                 return Err(error);
             }
         };
@@ -603,10 +862,55 @@ impl<'a> TransactionEngine<'a> {
                         TransactionStage::OwnershipCommit,
                         "ownership_mac_failed",
                     );
-                    self.recover(plan, &snapshot.record.snapshot_id, &mut error);
+                    self.recover_files(
+                        plan,
+                        &snapshot.record.snapshot_id,
+                        &companion_snapshots,
+                        plan.companions.len(),
+                        true,
+                        &mut error,
+                    );
                     return Err(error);
                 }
             };
+        let companion_ownership = plan
+            .companions
+            .iter()
+            .zip(&companion_documents)
+            .zip(&companion_snapshots)
+            .map(|((companion, document), snapshot)| {
+                compute_owned_value_macs(document, &companion.owned_paths, &key).map(|macs| {
+                    CompanionOwnership {
+                        target_config_path: companion.target_path.clone(),
+                        baseline_snapshot_id: snapshot.record.snapshot_id.clone(),
+                        last_transaction_snapshot_id: snapshot.record.snapshot_id.clone(),
+                        before_hash: companion.before_hash.clone(),
+                        managed_after_hash: companion.expected_after_hash.clone(),
+                        owned_paths: companion.owned_paths.clone(),
+                        owned_value_macs: macs,
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let companion_ownership = match companion_ownership {
+            Ok(value) => value,
+            Err(_) => {
+                let mut error = failure(
+                    plan,
+                    TransactionStage::OwnershipCommit,
+                    "companion_ownership_mac_failed",
+                );
+                self.recover_files(
+                    plan,
+                    &snapshot.record.snapshot_id,
+                    &companion_snapshots,
+                    plan.companions.len(),
+                    true,
+                    &mut error,
+                );
+                return Err(error);
+            }
+        };
         let ownership_result = match plan.view.intent {
             PlanIntent::Connect => self.ownership.commit(
                 OwnershipRecord {
@@ -622,6 +926,7 @@ impl<'a> TransactionEngine<'a> {
                     managed_after_hash: plan.view.expected_after_hash.clone(),
                     owned_paths: plan.view.owned_paths.clone(),
                     owned_value_macs,
+                    companion_files: companion_ownership.clone(),
                     acquired_at_ms: now_ms,
                     updated_at_ms: now_ms,
                 },
@@ -653,9 +958,26 @@ impl<'a> TransactionEngine<'a> {
                     updated.last_transaction_snapshot_id = snapshot.record.snapshot_id.clone();
                     updated.managed_after_hash = plan.view.expected_after_hash.clone();
                     updated.owned_value_macs = owned_value_macs;
+                    let mut companion_missing = false;
+                    for companion in &mut updated.companion_files {
+                        if let Some(projected) = companion_ownership.iter().find(|projected| {
+                            projected.target_config_path == companion.target_config_path
+                        }) {
+                            companion.last_transaction_snapshot_id =
+                                projected.last_transaction_snapshot_id.clone();
+                            companion.managed_after_hash = projected.managed_after_hash.clone();
+                            companion.owned_value_macs = projected.owned_value_macs.clone();
+                        } else {
+                            companion_missing = true;
+                        }
+                    }
                     updated.updated_at_ms = now_ms;
-                    self.ownership
-                        .commit(updated, Some(binding.record.revision))
+                    if companion_missing {
+                        Err("companion ownership projection missing".to_string())
+                    } else {
+                        self.ownership
+                            .commit(updated, Some(binding.record.revision))
+                    }
                 }
             }
         };
@@ -667,7 +989,14 @@ impl<'a> TransactionEngine<'a> {
                     TransactionStage::OwnershipCommit,
                     "ownership_commit_failed",
                 );
-                self.recover(plan, &snapshot.record.snapshot_id, &mut error);
+                self.recover_files(
+                    plan,
+                    &snapshot.record.snapshot_id,
+                    &companion_snapshots,
+                    plan.companions.len(),
+                    true,
+                    &mut error,
+                );
                 return Err(error);
             }
         };
@@ -681,6 +1010,22 @@ impl<'a> TransactionEngine<'a> {
                 .baseline_snapshot_id;
             if self.snapshots.set_pinned(baseline_id, false).is_err() {
                 maintenance_warning = Some("断开已成功，但基线快照取消固定失败".to_string());
+            }
+            for companion in &plan
+                .ownership
+                .as_ref()
+                .expect("disconnect binding validated")
+                .record
+                .companion_files
+            {
+                if self
+                    .snapshots
+                    .set_pinned(&companion.baseline_snapshot_id, false)
+                    .is_err()
+                {
+                    maintenance_warning =
+                        Some("断开已成功，但 companion 基线快照取消固定失败".to_string());
+                }
             }
         }
         Ok(TransactionOutcome {
@@ -764,20 +1109,67 @@ impl<'a> TransactionEngine<'a> {
         Ok(())
     }
 
-    fn recover(
+    fn recover_files(
         &self,
         plan: &PreparedChangePlan,
-        snapshot_id: &str,
+        primary_snapshot_id: &str,
+        companion_snapshots: &[super::snapshot::SnapshotCreateResult],
+        written_companions: usize,
+        primary_written: bool,
         error: &mut TransactionFailure,
     ) {
         error.recovery = RecoveryStatus::RepairRequired;
-        let target = Path::new(&plan.view.target_config_path);
-        let snapshot = match self.snapshots.load(snapshot_id) {
-            Ok(snapshot) => snapshot,
-            Err(_) => {
-                error.recovery_reason_code = Some("snapshot_load_failed".to_string());
+        for index in (0..written_companions).rev() {
+            let companion = &plan.companions[index];
+            let snapshot_id = &companion_snapshots[index].record.snapshot_id;
+            if self
+                .restore_projection(
+                    Path::new(&companion.target_path),
+                    snapshot_id,
+                    &companion.expected_after_hash,
+                    &companion.before_hash,
+                    !companion.target_existed,
+                )
+                .is_err()
+            {
+                error.recovery_reason_code =
+                    Some("companion_restore_failed_or_target_changed".to_string());
                 return;
             }
+        }
+        if !primary_written {
+            error.recovery = RecoveryStatus::Restored;
+            error.recovery_reason_code = None;
+            return;
+        }
+        if self
+            .restore_projection(
+                Path::new(&plan.view.target_config_path),
+                primary_snapshot_id,
+                &plan.view.expected_after_hash,
+                &plan.view.before_hash,
+                !plan.view.target_existed,
+            )
+            .is_err()
+        {
+            error.recovery_reason_code = Some("restore_write_failed_or_target_changed".to_string());
+            return;
+        }
+        error.recovery = RecoveryStatus::Restored;
+        error.recovery_reason_code = None;
+    }
+
+    fn restore_projection(
+        &self,
+        target: &Path,
+        snapshot_id: &str,
+        expected_after_hash: &str,
+        expected_before_hash: &str,
+        normalize_new_owner: bool,
+    ) -> Result<(), ()> {
+        let snapshot = match self.snapshots.load(snapshot_id) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return Err(()),
         };
         let result = if snapshot.record.original_existed {
             self.writer.replace(
@@ -785,26 +1177,19 @@ impl<'a> TransactionEngine<'a> {
                 snapshot.exact_bytes.as_slice(),
                 snapshot.record.original_permissions,
                 snapshot.record.original_owner.as_deref(),
-                &plan.view.expected_after_hash,
-                !plan.view.target_existed,
+                expected_after_hash,
+                normalize_new_owner,
             )
         } else {
-            self.writer.remove(
-                target,
-                &plan.view.expected_after_hash,
-                !plan.view.target_existed,
-            )
+            self.writer
+                .remove(target, expected_after_hash, normalize_new_owner)
         };
         if result.is_err() {
-            error.recovery_reason_code = Some("restore_write_failed_or_target_changed".to_string());
-            return;
+            return Err(());
         }
         match read_config_source(target).and_then(|source| file_revision_hash(target, &source)) {
-            Ok(hash) if hash == plan.view.before_hash => {
-                error.recovery = RecoveryStatus::Restored;
-                error.recovery_reason_code = None;
-            }
-            _ => error.recovery_reason_code = Some("restore_verification_failed".to_string()),
+            Ok(hash) if hash == expected_before_hash => Ok(()),
+            _ => Err(()),
         }
     }
 }
@@ -844,11 +1229,13 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    use serde_json::Value;
     use zeroize::Zeroizing;
 
     use super::*;
     use crate::agent_integration::connectors::{
-        ClaudeCodeConnector, ConnectInput, HermesConnector, OpenClawConnector,
+        ClaudeCodeConnector, ClaudeDesktopConnector, ConnectInput, HermesConnector,
+        OpenClawConnector,
     };
     use crate::agent_integration::ownership::FileOwnershipStore;
     use crate::agent_integration::plan::{
@@ -860,8 +1247,8 @@ mod tests {
     };
     use crate::agent_integration::types::SnapshotRecord;
     use crate::agent_integration::types::{
-        AllowedAction, CompatibilityDecision, Diagnostic, DiscoveryEvidence, DiscoveryRecord,
-        DiscoverySource, Platform, ReasonCode,
+        AllowedAction, BinarySource, CompatibilityDecision, Diagnostic, DiscoveryEvidence,
+        DiscoveryRecord, DiscoverySource, Platform, ReasonCode,
     };
 
     struct TestKeys {
@@ -1060,6 +1447,10 @@ mod tests {
             agent_id: "claude-code".to_string(),
             executable_path: "/opt/claude".to_string(),
             canonical_path: "/opt/claude".to_string(),
+            binary_source: BinarySource::Path,
+            modified_at_ms: None,
+            binary_sha256: None,
+            upgrade_command: None,
             version_raw: Some("2.1.211".to_string()),
             version_normalized: Some("2.1.211".to_string()),
             environment: Platform::Macos,
@@ -1091,11 +1482,52 @@ mod tests {
         }
     }
 
+    fn claude_desktop_discovery(target: &Path) -> DiscoveryRecord {
+        let mut record = discovery(target);
+        record.agent_id = "claude-desktop".to_string();
+        record.executable_path = "/Applications/Claude.app/Contents/MacOS/Claude".to_string();
+        record.canonical_path = record.executable_path.clone();
+        record
+    }
+
+    fn claude_desktop_verified() -> CompatibilityDecision {
+        let mut decision = verified();
+        decision.agent_id = "claude-desktop".to_string();
+        decision.installation_path =
+            Some("/Applications/Claude.app/Contents/MacOS/Claude".to_string());
+        decision.connector_id = Some("claude-desktop-3p-v1".to_string());
+        decision
+    }
+
+    fn prepare_claude_desktop(target: &Path, secret: &str) -> PreparedChangePlan {
+        build_connection_plan(
+            &ClaudeDesktopConnector,
+            &claude_desktop_discovery(target),
+            &claude_desktop_verified(),
+            target,
+            &read_config_source(target).unwrap(),
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/agents/claude-desktop",
+                token: Some(secret),
+                adapter_ready: true,
+            },
+            1,
+            None,
+            1_000,
+            "0d".repeat(16),
+        )
+        .unwrap()
+    }
+
     fn openclaw_discovery(target: &Path) -> DiscoveryRecord {
         DiscoveryRecord {
             agent_id: "openclaw".to_string(),
             executable_path: "/opt/openclaw".to_string(),
             canonical_path: "/opt/openclaw".to_string(),
+            binary_source: BinarySource::Path,
+            modified_at_ms: None,
+            binary_sha256: None,
+            upgrade_command: None,
             version_raw: Some("2026.6.11".to_string()),
             version_normalized: Some("2026.6.11".to_string()),
             environment: Platform::Macos,
@@ -1132,6 +1564,10 @@ mod tests {
             agent_id: "nous-hermes-agent".to_string(),
             executable_path: "/opt/hermes".to_string(),
             canonical_path: "/opt/hermes".to_string(),
+            binary_source: BinarySource::Path,
+            modified_at_ms: None,
+            binary_sha256: None,
+            upgrade_command: None,
             version_raw: Some("Hermes Agent v0.18.0 (2026.7.1)".to_string()),
             version_normalized: Some("0.18.0".to_string()),
             environment: Platform::Macos,
@@ -1378,12 +1814,12 @@ mod tests {
         let written = std::fs::read_to_string(&target).unwrap();
         assert!(written.contains(marker));
         assert!(written.contains(secret));
-        let key = OwnershipKey {
+        let ownership_key = OwnershipKey {
             agent_id: "claude-code".to_string(),
             installation_path: "/opt/claude".to_string(),
             target_config_path: target.to_str().unwrap().to_string(),
         };
-        assert_eq!(ownership.load(&key).unwrap().unwrap().revision, 1);
+        assert_eq!(ownership.load(&ownership_key).unwrap().unwrap().revision, 1);
         assert_eq!(outcome.ownership_revision, 1);
         let serialized = serde_json::to_string(&outcome).unwrap();
         assert!(!serialized.contains(secret));
@@ -1396,6 +1832,204 @@ mod tests {
         ));
         assert_eq!(std::fs::read(&legacy_backup).unwrap(), legacy_marker);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn claude_desktop_profile_and_meta_commit_together_and_recover_together() {
+        let root = scratch("claude-desktop-bundle");
+        let target = root.join("7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2.json");
+        let meta = root.join("_meta.json");
+        let original_profile = br#"{"unknownProfile":"keep"}"#;
+        let original_meta = br#"{"unknownMeta":"keep","entries":[{"id":"existing","name":"Existing"}],"appliedId":"existing"}"#;
+        write_initial(&target, original_profile);
+        write_initial(&meta, original_meta);
+        let plan = prepare_claude_desktop(&target, "vk-claude-desktop-secret");
+        assert_eq!(plan.companions.len(), 1);
+        assert_eq!(plan.view.related_config_paths, [meta.to_string_lossy()]);
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+
+        engine
+            .apply_connection(&plan, &confirmation(&plan), &admission(), 1_002)
+            .unwrap();
+
+        let profile: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        let metadata: Value = serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+        assert_eq!(profile["unknownProfile"], "keep");
+        assert_eq!(profile["inferenceProvider"], "gateway");
+        assert_eq!(metadata["unknownMeta"], "keep");
+        assert_eq!(
+            metadata["appliedId"],
+            "7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2"
+        );
+        assert!(metadata["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == "existing"));
+        let ownership_key = OwnershipKey {
+            agent_id: "claude-desktop".to_string(),
+            installation_path: "/Applications/Claude.app/Contents/MacOS/Claude".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let owned = ownership.load(&ownership_key).unwrap().unwrap();
+        assert_eq!(owned.companion_files.len(), 1);
+        let baseline = snapshots.load(&owned.baseline_snapshot_id).unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let current = read_config_source(&target).unwrap();
+        let master_key = keys.load().unwrap();
+        let mut restore = build_snapshot_restore_plan(
+            &ClaudeDesktopConnector,
+            &claude_desktop_discovery(&target),
+            &claude_desktop_verified(),
+            &target,
+            &current,
+            &owned,
+            &baseline.record,
+            &baseline_source,
+            &master_key,
+            1,
+            None,
+            1_003,
+            "0f".repeat(16),
+        )
+        .unwrap();
+        crate::agent_integration::plan::attach_restore_companions(
+            &mut restore,
+            &ClaudeDesktopConnector,
+            &owned,
+            &baseline.record,
+            &snapshots,
+            &master_key,
+        )
+        .unwrap();
+        let restore_confirmation = ConfirmedOperation {
+            operation_id: restore.view.operation_id.clone(),
+            confirmed_at_ms: 1_003,
+            confirmations: restore
+                .view
+                .required_confirmations
+                .iter()
+                .copied()
+                .collect(),
+        };
+        engine
+            .apply_snapshot_restore(&restore, &restore_confirmation, &admission(), 1_004)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&target).unwrap()).unwrap(),
+            serde_json::from_slice::<Value>(original_profile).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&meta).unwrap()).unwrap(),
+            serde_json::from_slice::<Value>(original_meta).unwrap()
+        );
+
+        let owned = ownership.load(&ownership_key).unwrap().unwrap();
+        let baseline = snapshots.load(&owned.baseline_snapshot_id).unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let current = read_config_source(&target).unwrap();
+        let mut disconnect = build_disconnect_plan(
+            &ClaudeDesktopConnector,
+            &claude_desktop_discovery(&target),
+            &claude_desktop_verified(),
+            &target,
+            &current,
+            &owned,
+            &baseline.record,
+            &baseline_source,
+            &master_key,
+            1,
+            None,
+            1_005,
+            "0e".repeat(16),
+        )
+        .unwrap();
+        crate::agent_integration::plan::attach_disconnect_companions(
+            &mut disconnect,
+            &ClaudeDesktopConnector,
+            &owned,
+            &snapshots,
+            &master_key,
+        )
+        .unwrap();
+        let disconnect_confirmation = ConfirmedOperation {
+            operation_id: disconnect.view.operation_id.clone(),
+            confirmed_at_ms: 1_005,
+            confirmations: disconnect
+                .view
+                .required_confirmations
+                .iter()
+                .copied()
+                .collect(),
+        };
+        engine
+            .apply_disconnect(&disconnect, &disconnect_confirmation, &admission(), 1_006)
+            .unwrap();
+        let restored_profile: Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        let restored_meta: Value = serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+        assert_eq!(
+            restored_profile,
+            serde_json::from_slice::<Value>(original_profile).unwrap()
+        );
+        assert_eq!(
+            restored_meta,
+            serde_json::from_slice::<Value>(original_meta).unwrap()
+        );
+        assert!(ownership.load(&ownership_key).unwrap().is_none());
+
+        std::fs::remove_dir_all(root).ok();
+
+        let rollback_root = scratch("claude-desktop-bundle-rollback");
+        let rollback_target = rollback_root.join("7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2.json");
+        let rollback_meta = rollback_root.join("_meta.json");
+        write_initial(&rollback_target, original_profile);
+        write_initial(&rollback_meta, original_meta);
+        let rollback_plan = prepare_claude_desktop(&rollback_target, "vk-claude-desktop-rollback");
+        let rollback_keys = Arc::new(TestKeys::available());
+        let rollback_snapshots =
+            FileSnapshotStore::new(rollback_root.join("snapshots"), rollback_keys.clone());
+        let rollback_ownership = FileOwnershipStore::new(rollback_root.join("ownership"));
+        let rollback_engine = TransactionEngine::new(
+            &rollback_snapshots,
+            &rollback_ownership,
+            rollback_keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &RejectVerifier,
+            &TEST_CLOCK,
+        );
+        let failure = rollback_engine
+            .apply_connection(
+                &rollback_plan,
+                &confirmation(&rollback_plan),
+                &admission(),
+                1_002,
+            )
+            .expect_err("post-write failure rolls both files back");
+        assert_eq!(failure.recovery, RecoveryStatus::Restored);
+        assert_eq!(std::fs::read(&rollback_target).unwrap(), original_profile);
+        assert_eq!(std::fs::read(&rollback_meta).unwrap(), original_meta);
+        std::fs::remove_dir_all(rollback_root).ok();
     }
 
     #[test]

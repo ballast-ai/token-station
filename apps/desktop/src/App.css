@@ -688,12 +688,23 @@ body {
 .provider-endpoint-list { display: grid; gap: 4px; margin-bottom: 9px; padding: 8px; border-radius: 8px; background: var(--surface-2); }
 .provider-endpoint-list code { overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 10px; }
 .provider-test-results { display: grid; gap: 7px; margin-bottom: 10px; }
+.provider-test-results p { margin: 0; color: var(--muted); font-size: 9px; }
 .provider-test-results > div { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
 .provider-test-results strong { margin-right: auto; font-size: 11px; }
 .provider-test-results span { padding: 2px 6px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 9px; }
 .provider-test-results span.pass { color: var(--success); }
 .provider-test-results span.fail { color: var(--danger); }
 .provider-test-results span.skipped, .provider-test-results span.not-run { opacity: 0.72; }
+.provider-health-actions { display: flex; align-items: center; gap: 8px; }
+.provider-health-badge { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 9px; }
+.provider-health-badge i { width: 7px; height: 7px; border-radius: 999px; background: var(--muted); }
+.provider-health-badge small { color: var(--muted); font-size: 8.5px; }
+.provider-health-badge.healthy { color: var(--success); }
+.provider-health-badge.healthy i { background: var(--success); }
+.provider-health-badge.degraded { color: var(--warning); }
+.provider-health-badge.degraded i { background: var(--warning); }
+.provider-health-badge.unavailable { color: var(--danger); }
+.provider-health-badge.unavailable i { background: var(--danger); }
 .catalog-diff { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 9px; font-size: 11px; }
 .catalog-diff span { padding: 5px 8px; border-radius: 7px; background: var(--surface-2); }
 .catalog-diff .added { color: var(--success); }
@@ -1300,6 +1311,44 @@ body {
   flex: 0 0 auto;
   white-space: nowrap;
 }
+
+.projection-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.projection-dialog {
+  width: min(680px, 100%);
+  max-height: min(720px, calc(100vh - 48px));
+  overflow: auto;
+}
+
+.projection-dialog h2 {
+  margin: 8px 0;
+}
+
+.projection-diff {
+  margin: 16px 0;
+  padding: 14px;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.projection-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
 .installation-picker { position: relative; flex: 0 0 auto; }
 .installation-picker-trigger { white-space: nowrap; }
 .installation-picker-trigger span { margin-left: 3px; color: var(--muted); }
@@ -1338,6 +1387,53 @@ body {
   background: var(--signal-soft);
 }
 .installation-check { color: var(--signal); font: 800 12px/1 ui-sans-serif, system-ui, sans-serif; }
+.installation-option-title,
+.installation-option-path,
+.installation-option-facts { display: block; }
+.installation-option-path {
+  max-width: 420px;
+  overflow: hidden;
+  color: var(--muted);
+  font: 500 9.5px/1.4 "SF Mono", Menlo, monospace;
+  text-overflow: ellipsis;
+}
+.installation-option-facts { color: var(--muted); font: 500 9px/1.4 ui-sans-serif, system-ui, sans-serif; }
+.installation-picker-menu { min-width: min(520px, calc(100vw - 36px)); }
+.installation-picker-menu button { align-items: flex-start; flex-direction: column; gap: 3px; }
+.installation-check { position: absolute; right: 12px; }
+.agent-installation-facts { display: grid; gap: 9px; padding: 13px 15px; }
+.agent-installation-facts-head,
+.agent-installation-metadata,
+.agent-upgrade-command { display: flex; align-items: center; gap: 10px; }
+.agent-installation-facts-head { justify-content: space-between; }
+.agent-installation-facts-head strong { display: block; margin-top: 2px; font-size: 12px; }
+.agent-installation-facts-head > span { color: var(--signal); font-size: 10px; font-weight: 700; }
+.agent-installation-path { overflow-wrap: anywhere; color: var(--ink); font-size: 10px; }
+.agent-installation-metadata { flex-wrap: wrap; color: var(--muted); font-size: 9.5px; }
+.agent-installation-metadata span + span::before { margin-right: 10px; content: "·"; }
+.agent-installation-metadata span:last-child { overflow-wrap: anywhere; }
+.agent-upgrade-command { justify-content: space-between; padding-top: 8px; border-top: 1px solid var(--line); }
+.agent-upgrade-command code { overflow-wrap: anywhere; color: var(--signal); font-size: 10px; }
+.agent-drift-panel { display: grid; gap: 10px; padding: 13px 15px; }
+.agent-drift-head,
+.agent-drift-record-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.agent-drift-head strong { display: block; margin-top: 2px; font-size: 12px; }
+.agent-drift-head > span { color: var(--muted); font-size: 9.5px; }
+.agent-drift-empty { color: var(--muted); font-size: 10.5px; }
+.agent-drift-record { display: grid; gap: 9px; padding-top: 10px; border-top: 1px solid var(--line); }
+.agent-drift-record-head code { overflow-wrap: anywhere; color: var(--ink); font-size: 10px; }
+.agent-drift-record-head span { color: var(--warning); font-size: 10px; font-weight: 700; }
+.agent-drift-record.in_sync .agent-drift-record-head span { color: var(--success); }
+.agent-drift-versions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.agent-drift-versions > div { display: grid; gap: 3px; padding: 8px; border-radius: 7px; background: var(--surface-2); }
+.agent-drift-versions span { color: var(--muted); font-size: 9px; }
+.agent-drift-versions code { color: var(--signal); font-size: 10px; }
+.agent-drift-record p { margin: 0; color: var(--muted); font-size: 10px; }
+.agent-drift-changes { display: grid; gap: 5px; }
+.agent-drift-changes > div { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 9px; align-items: center; }
+.agent-drift-changes code { overflow-wrap: anywhere; color: var(--ink); font-size: 10px; }
+.agent-drift-changes span,
+.agent-drift-changes small { color: var(--muted); font-size: 9px; }
 .inline-note {
   padding: 9px 12px;
   border-left: 2px solid var(--warning);
@@ -2322,6 +2418,107 @@ pre.block {
   padding: 12px 0;
   border-bottom: 1px solid var(--line);
 }
+.egress-settings {
+  display: grid;
+  gap: 10px;
+}
+.egress-settings > label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.egress-settings input,
+.egress-settings select {
+  color: var(--ink);
+}
+.egress-route-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(120px, 2fr) auto;
+  gap: 8px;
+  align-items: baseline;
+}
+.egress-route-row code {
+  overflow-wrap: anywhere;
+}
+
+/* 业务应用挂载前的独立自救壳 */
+.recovery-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background:
+    radial-gradient(circle at 15% 10%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 35%),
+    var(--bg);
+}
+.recovery-card {
+  width: min(780px, 100%);
+  display: grid;
+  gap: 18px;
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: 0 18px 60px rgb(0 0 0 / 12%);
+}
+.recovery-card h1,
+.recovery-card h2,
+.recovery-card p {
+  margin: 0;
+}
+.recovery-card h1 { font-size: 25px; }
+.recovery-card h2 { font-size: 15px; }
+.recovery-mark {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--accent);
+  color: white;
+  font-weight: 800;
+  letter-spacing: -.04em;
+}
+.recovery-reason {
+  display: grid;
+  gap: 5px;
+}
+.recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.recovery-export {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  font-size: 13px;
+}
+.recovery-export ul { margin: 0; padding-left: 20px; }
+.recovery-confirm {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.recovery-diagnostics summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.recovery-diagnostics pre {
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  font-size: 11.5px;
+}
 .switch {
   display: flex;
   gap: 10px;
@@ -2341,6 +2538,102 @@ pre.block {
   font-size: 12px;
   color: var(--muted);
   line-height: 1.5;
+}
+
+/* Agent 预算预警 */
+.budget-section {
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.budget-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.budget-title-row h3 {
+  margin: 0 0 3px;
+  font-size: 13.5px;
+}
+.budget-title-row p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.budget-observe-badge {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border-radius: 999px;
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.budget-section .banner {
+  margin: 7px 0;
+}
+.budget-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.budget-actions {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+.pricing-section {
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.price-version {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border-radius: 999px;
+  color: var(--signal);
+  background: var(--signal-soft);
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.price-table {
+  margin: 10px 0 14px;
+}
+.price-actions {
+  display: flex;
+  gap: 5px;
+}
+.price-form {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+}
+.price-model-field {
+  grid-column: span 2;
+}
+.price-save-action {
+  display: flex;
+  align-items: end;
+}
+@media (max-width: 900px) {
+  .budget-form { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+  .price-form { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+}
+@media (max-width: 620px) {
+  .budget-title-row { flex-direction: column; }
+  .budget-form { grid-template-columns: 1fr; }
+  .price-form { grid-template-columns: 1fr; }
+  .price-model-field { grid-column: auto; }
 }
 
 /* 用量卡片 */

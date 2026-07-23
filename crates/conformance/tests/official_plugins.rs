@@ -12,6 +12,7 @@ const AGENT_OPENAI_RESPONSES: &str =
     include_str!("../../../plugins/official/agent-openai-responses/manifest.json");
 const AGENT_ANTHROPIC: &str =
     include_str!("../../../plugins/official/agent-anthropic/manifest.json");
+const AGENT_GEMINI: &str = include_str!("../../../plugins/official/agent-gemini/manifest.json");
 const PROVIDER_OPENAI_COMPATIBLE: &str =
     include_str!("../../../plugins/official/provider-openai-compatible/manifest.json");
 
@@ -25,6 +26,7 @@ fn official_agent_adapter_passes_the_manifest_gate() {
         (AGENT_OPENAI, "openai-chat-completions"),
         (AGENT_OPENAI_RESPONSES, "openai-responses"),
         (AGENT_ANTHROPIC, "anthropic-messages"),
+        (AGENT_GEMINI, "google-gemini-generate-content"),
     ] {
         let manifest = parse(source);
 
@@ -74,6 +76,7 @@ fn manifest_name_matches_the_directory_that_holds_it() {
     assert_eq!(parse(AGENT_OPENAI).name, "agent-openai");
     assert_eq!(parse(AGENT_OPENAI_RESPONSES).name, "agent-openai-responses");
     assert_eq!(parse(AGENT_ANTHROPIC).name, "agent-anthropic");
+    assert_eq!(parse(AGENT_GEMINI).name, "agent-gemini");
     assert_eq!(
         parse(PROVIDER_OPENAI_COMPATIBLE).name,
         "provider-openai-compatible"
@@ -89,6 +92,7 @@ fn official_manifests_round_trip_exactly() {
         AGENT_OPENAI,
         AGENT_OPENAI_RESPONSES,
         AGENT_ANTHROPIC,
+        AGENT_GEMINI,
         PROVIDER_OPENAI_COMPATIBLE,
     ] {
         let expected: serde_json::Value =

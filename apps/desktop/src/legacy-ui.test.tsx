@@ -24,6 +24,8 @@ import RouterTable from "./pages/RouterTable";
 import Settings from "./pages/Settings";
 import Stats from "./pages/Stats";
 
+vi.mock("./components/PricingEditor", () => ({ default: () => null }));
+
 vi.mock("./api", async (loadOriginal) => {
   const original = await loadOriginal<typeof import("./api")>();
   return {
@@ -33,6 +35,7 @@ vi.mock("./api", async (loadOriginal) => {
     getPlugins: vi.fn(),
     getRouterTable: vi.fn(),
     getStats: vi.fn(),
+    getEgress: vi.fn().mockResolvedValue({ mode: "direct", proxy_url: null, no_proxy: [], auth_slot: null, routes: [], fixed_direct_classes: ["update_check"] }),
     editProvider: vi.fn(),
     previewProviderEndpoints: vi.fn(),
     previewProviderRemoval: vi.fn(),
@@ -50,6 +53,11 @@ const settings: SettingsView = {
   plugins_dir: "/plugins",
   agent: "agent-openai",
   version: "0.1.0",
+  egress_mode: "direct",
+  egress_proxy_url: "",
+  egress_no_proxy: [],
+  egress_auth_username: "",
+  egress_auth_slot: "",
 };
 
 const state: StateView = {
@@ -97,6 +105,7 @@ beforeEach(() => {
     total: {
       requests: 0, errors: 0, p50_latency_ms: 0, p95_latency_ms: 0,
       input_tokens: 0, output_tokens: 0, cost_micros: null,
+      priced_requests: 0, unpriced_requests: 0,
     },
     groups: [], by: "upstream", empty: true,
   });
@@ -157,6 +166,8 @@ describe("legacy desktop read-only pages", () => {
         input_tokens: 100,
         output_tokens: 50,
         cost_micros: 1_250_000,
+        priced_requests: 10,
+        unpriced_requests: 0,
       },
       groups: [["openai", {
         requests: 10,
@@ -166,6 +177,8 @@ describe("legacy desktop read-only pages", () => {
         input_tokens: 100,
         output_tokens: 50,
         cost_micros: null,
+        priced_requests: 0,
+        unpriced_requests: 10,
       }]],
       by: "upstream",
       empty: false,
@@ -177,7 +190,7 @@ describe("legacy desktop read-only pages", () => {
     const selectors = screen.getAllByRole("combobox");
     await user.selectOptions(selectors[0], "24h");
     await user.selectOptions(selectors[1], "upstream");
-    await waitFor(() => expect(getStats).toHaveBeenLastCalledWith("24h", "upstream"));
+    await waitFor(() => expect(getStats).toHaveBeenLastCalledWith("24h", "upstream", null, null));
   });
 
   it("shows stats empty and error states", async () => {
@@ -185,6 +198,7 @@ describe("legacy desktop read-only pages", () => {
       total: {
         requests: 0, errors: 0, p50_latency_ms: 0, p95_latency_ms: 0,
         input_tokens: 0, output_tokens: 0, cost_micros: null,
+        priced_requests: 0, unpriced_requests: 0,
       },
       groups: [], by: null, empty: true,
     });
@@ -225,9 +239,34 @@ describe("settings and update actions", () => {
     await user.click(checks[0]);
     expect(screen.getByText(/需重启代理/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(setSettings).toHaveBeenCalledWith(false, true));
+    await waitFor(() => expect(setSettings).toHaveBeenCalledWith(false, true, {
+      egress_mode: "direct",
+      egress_proxy_url: "",
+      egress_no_proxy: [],
+      egress_auth_username: "",
+      egress_auth_slot: "",
+    }));
     expect(onSaved).toHaveBeenCalledWith(state);
     expect(screen.getByText("已保存 · 重启代理后生效")).toBeInTheDocument();
+  });
+
+  it("configures an HTTP egress route with no_proxy and a credential slot", async () => {
+    vi.mocked(setSettings).mockResolvedValue(state);
+    const user = userEvent.setup();
+    render(<Settings settings={settings} serveRunning={false} onSaved={vi.fn()} />);
+    await user.selectOptions(screen.getByLabelText("出口模式"), "http");
+    await user.type(screen.getByLabelText("代理 URL"), "http://proxy.internal:8080");
+    await user.type(screen.getByLabelText("no_proxy"), "localhost, *.corp.internal");
+    await user.type(screen.getByLabelText("代理用户名"), "x");
+    await user.type(screen.getByLabelText("代理认证槽"), "proxy_password");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(setSettings).toHaveBeenCalledWith(true, true, {
+      egress_mode: "http",
+      egress_proxy_url: "http://proxy.internal:8080",
+      egress_no_proxy: ["localhost", "*.corp.internal"],
+      egress_auth_username: "x",
+      egress_auth_slot: "proxy_password",
+    }));
   });
 
   it("shows settings save failures", async () => {
@@ -309,10 +348,12 @@ describe("model selection and provider model management", () => {
       total: {
         requests: 3, errors: 1, p50_latency_ms: 10, p95_latency_ms: 20,
         input_tokens: 120, output_tokens: 30, cost_micros: 1_250_000,
+        priced_requests: 3, unpriced_requests: 0,
       },
       groups: [["openai", {
         requests: 3, errors: 1, p50_latency_ms: 10, p95_latency_ms: 20,
         input_tokens: 120, output_tokens: 30, cost_micros: 1_250_000,
+        priced_requests: 3, unpriced_requests: 0,
       }]],
       by: "upstream", empty: false,
     });
@@ -346,10 +387,12 @@ describe("model selection and provider model management", () => {
       total: {
         requests: 1, errors: 0, p50_latency_ms: 5, p95_latency_ms: 5,
         input_tokens: 2, output_tokens: 3, cost_micros: null,
+        priced_requests: 0, unpriced_requests: 1,
       },
       groups: [["local", {
         requests: 1, errors: 0, p50_latency_ms: 5, p95_latency_ms: 5,
         input_tokens: 2, output_tokens: 3, cost_micros: null,
+        priced_requests: 0, unpriced_requests: 1,
       }]],
       by: "upstream", empty: false,
     });
@@ -409,7 +452,7 @@ describe("model selection and provider model management", () => {
     expect(screen.getByText("已下架")).toBeInTheDocument();
   });
 
-  it("展示 Provider 八层真实测试结果", async () => {
+  it("展示 Provider 八层耗时、最近测试时间和绿色健康徽章", async () => {
     const provider: ProviderView = {
       name: "tested", provider: "openai-compatible", base_url: "https://api.example/v1",
       models: ["model-a"], has_auth: true,
@@ -418,18 +461,65 @@ describe("model selection and provider model management", () => {
       model: "model-a",
       stages: [
         "network", "http", "auth", "model", "generation", "stream", "tool", "json",
-      ].map((layer) => ({
+      ].map((layer, index) => ({
         layer: layer as "network" | "http" | "auth" | "model" | "generation" | "stream" | "tool" | "json",
         status: "pass" as const,
+        duration_ms: index < 5 ? 37 : index + 10,
+        timing_kind: index < 5 ? "cumulative" as const : "stage" as const,
       })),
     }]);
     const user = userEvent.setup();
     render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: "运行分层测试" }));
-    expect(await screen.findByText("流式 · pass")).toBeInTheDocument();
-    expect(screen.getByText("Tool · pass")).toBeInTheDocument();
-    expect(screen.getByText("JSON Schema · pass")).toBeInTheDocument();
+    expect(await screen.findByText("流式 · pass · 15ms")).toBeInTheDocument();
+    expect(screen.getByText("Tool · pass · 16ms")).toBeInTheDocument();
+    expect(screen.getByText("JSON Schema · pass · 17ms")).toBeInTheDocument();
+    expect(screen.getByText("DNS / 网络 · pass · ≤37ms")).toBeInTheDocument();
+    expect(screen.getByLabelText("Provider 健康状态：健康")).toBeInTheDocument();
+    expect(screen.getByText(/最近测试/)).toBeInTheDocument();
     expect(screen.queryByText(/未执行/)).not.toBeInTheDocument();
+  });
+
+  it("基础链路失败为红色，能力层失败为黄色", async () => {
+    const provider: ProviderView = {
+      name: "health", provider: "openai-compatible", base_url: "https://api.example/v1",
+      models: ["model-a"], has_auth: true,
+    };
+    vi.mocked(testProvider)
+      .mockResolvedValueOnce([{
+        model: "model-a",
+        stages: [
+          { layer: "network", status: "pass", duration_ms: 12, timing_kind: "cumulative" },
+          { layer: "http", status: "pass", duration_ms: 12, timing_kind: "cumulative" },
+          { layer: "auth", status: "fail", duration_ms: 12, timing_kind: "cumulative", detail: "401" },
+          { layer: "model", status: "skipped" },
+          { layer: "generation", status: "skipped" },
+          { layer: "stream", status: "skipped" },
+          { layer: "tool", status: "skipped" },
+          { layer: "json", status: "skipped" },
+        ],
+      }])
+      .mockResolvedValueOnce([{
+        model: "model-a",
+        stages: [
+          ...["network", "http", "auth", "model", "generation"].map((layer) => ({
+            layer: layer as "network" | "http" | "auth" | "model" | "generation",
+            status: "pass" as const,
+            duration_ms: 20,
+            timing_kind: "cumulative" as const,
+          })),
+          { layer: "stream", status: "pass", duration_ms: 4, timing_kind: "stage" },
+          { layer: "tool", status: "fail", duration_ms: 5, timing_kind: "stage", detail: "unsupported" },
+          { layer: "json", status: "pass", duration_ms: 6, timing_kind: "stage" },
+        ],
+      }]);
+    const user = userEvent.setup();
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "运行分层测试" }));
+    expect(await screen.findByLabelText("Provider 健康状态：不可用")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "运行分层测试" }));
+    expect(await screen.findByLabelText("Provider 健康状态：能力退化")).toBeInTheDocument();
   });
 });
 

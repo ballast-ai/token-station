@@ -200,6 +200,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> std::io::Result<()
             "/admin/plugins",
             get(admin_plugins).options(admin_preflight),
         )
+        .route("/admin/egress", get(admin_egress).options(admin_preflight))
         .fallback(chat)
         .with_state(state);
 
@@ -276,11 +277,11 @@ fn parse_inbound_path(path: &str) -> Result<ScopedInboundPath<'_>, String> {
     let Some((agent_id, _suffix)) = rest.split_once('/') else {
         return Err("Agent namespace is missing a protocol path".to_owned());
     };
-    if !crate::config::ClientConfig::is_known_agent_id(agent_id) {
+    if !crate::config::ClientConfig::is_valid_agent_id(agent_id) {
         return Err(format!("unknown Agent namespace `{agent_id}`"));
     }
     let canonical_path = &rest[agent_id.len()..];
-    if !canonical_path.starts_with("/v1/")
+    if !(canonical_path.starts_with("/v1/") || canonical_path.starts_with("/v1beta/"))
         || canonical_path.contains("//")
         || canonical_path.contains('%')
     {
@@ -373,15 +374,24 @@ async fn admin_stats(State(state): State<AppState>, uri: Uri, headers: HeaderMap
     // split on `&`/`=` is a full parser here — no percent-decoding to get wrong.
     let mut since = "all".to_owned();
     let mut by = None;
+    let mut agent_id = None;
+    let mut source = None;
     for pair in uri.query().unwrap_or_default().split('&') {
         match pair.split_once('=') {
             Some(("since", value)) if !value.is_empty() => value.clone_into(&mut since),
             Some(("by", value)) if !value.is_empty() => by = Some(value.to_owned()),
+            Some(("agent", value)) if !value.is_empty() => agent_id = Some(value.to_owned()),
+            Some(("source", value)) if !value.is_empty() => source = Some(value.to_owned()),
             _ => {}
         }
     }
     admin_reply(
-        state.admin.stats(&since, by.as_deref()),
+        state.admin.stats(
+            &since,
+            by.as_deref(),
+            agent_id.as_deref(),
+            source.as_deref(),
+        ),
         loopback_origin(&headers),
     )
 }
@@ -408,6 +418,13 @@ async fn admin_plugins(State(state): State<AppState>, headers: HeaderMap) -> Res
         return with_cors(unauthorized("/admin/plugins"), loopback_origin(&headers));
     }
     admin_reply(state.admin.plugins(), loopback_origin(&headers))
+}
+
+async fn admin_egress(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admitted(&state, &headers) {
+        return with_cors(unauthorized("/admin/egress"), loopback_origin(&headers));
+    }
+    admin_reply(Ok(state.gateway.egress_routes()), loopback_origin(&headers))
 }
 
 async fn chat(
@@ -538,6 +555,10 @@ mod tests {
             ("opencode", "/v1/chat/completions"),
             ("openclaw", "/v1/chat/completions"),
             ("nous-hermes-agent", "/v1/chat/completions"),
+            (
+                "gemini-cli",
+                "/v1beta/models/gemini-2.5-pro:generateContent",
+            ),
         ];
         for (agent_id, canonical_path) in cases {
             let path = format!("/agents/{agent_id}{canonical_path}");
@@ -563,10 +584,16 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_unknown_agent_namespaces_fail_closed() {
+    fn future_agent_ids_are_accepted_but_malformed_namespaces_fail_closed() {
+        assert_eq!(
+            parse_inbound_path("/agents/future/v1/responses"),
+            Ok(ScopedInboundPath {
+                agent_id: Some("future"),
+                canonical_path: "/v1/responses",
+            })
+        );
         for path in [
             "/agents/codex",
-            "/agents/future/v1/responses",
             "/agents//v1/responses",
             "/agents/codex//v1/responses",
             "/agents/codex/v2/responses",

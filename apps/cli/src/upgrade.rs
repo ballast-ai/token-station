@@ -163,7 +163,15 @@ pub fn download_and_verify(
 const MAX_DOWNLOAD: u64 = 256 * 1024 * 1024;
 
 fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let response = ureq::get(url)
+    let http = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .proxy(None)
+            .build(),
+    );
+    let response = http
+        .get(url)
         // The GitHub API requires a User-Agent; ours says only what asked.
         .header(
             "user-agent",

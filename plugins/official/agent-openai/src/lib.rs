@@ -152,6 +152,9 @@ impl Guest for OpenAiClient {
             exports::token_station::adapter::agent_adapter::AgentProtocolCapability {
                 protocol: "openai-chat-completions".to_owned(),
                 agent_tools: vec![
+                    "opencode".to_owned(),
+                    "openclaw".to_owned(),
+                    "nous-hermes-agent".to_owned(),
                     "generic-openai-sdk".to_owned(),
                     "cursor".to_owned(),
                     "continue".to_owned(),

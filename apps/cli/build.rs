@@ -25,6 +25,7 @@ fn main() {
         ("AGENT_OPENAI", "agent-openai"),
         ("AGENT_ANTHROPIC", "agent-anthropic"),
         ("AGENT_OPENAI_RESPONSES", "agent-openai-responses"),
+        ("AGENT_GEMINI", "agent-gemini"),
         ("PROVIDER_OPENAI", "provider-openai-compatible"),
     ] {
         for (kind, file) in [("MANIFEST", "manifest.json"), ("WASM", "adapter.wasm")] {

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::{path, ConnectInput, Connector};
+use super::{path, ConnectInput, Connector, ConnectorCapabilities};
 use crate::agent_integration::config_codec::{ConfigDocument, DocumentFormat};
 use crate::agent_integration::types::{ConfigPath, PatchKind, PatchOperation};
 
@@ -16,9 +16,32 @@ const OWNED_ENV_KEYS: &[&str] = &[
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
 ];
 
+pub(super) static CONNECTOR: ClaudeCodeConnector = ClaudeCodeConnector;
+static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
+    connector_id: "claude-code-v1",
+    agent_id: "claude-code",
+    label: "Claude Code settings.json",
+    adapter_id: "agent-anthropic",
+    base_url_shape: crate::agent_integration::types::BaseUrlShape::Origin,
+    platforms: &[
+        crate::agent_integration::types::Platform::Macos,
+        crate::agent_integration::types::Platform::Linux,
+        crate::agent_integration::types::Platform::Windows,
+        crate::agent_integration::types::Platform::Wsl,
+    ],
+    config_format: DocumentFormat::Json,
+    config_path_template: "${HOME}/.claude/settings.json",
+    owned_fields: OWNED_ENV_KEYS,
+    requires_virtual_key: true,
+    restart_required: false,
+};
+
 pub struct ClaudeCodeConnector;
 
 impl Connector for ClaudeCodeConnector {
+    fn capabilities(&self) -> &'static ConnectorCapabilities {
+        &CAPABILITIES
+    }
     fn connector_id(&self) -> &'static str {
         "claude-code-v1"
     }

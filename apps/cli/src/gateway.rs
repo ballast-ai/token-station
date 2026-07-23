@@ -48,7 +48,7 @@ use crate::cancel::CancelToken;
 use crate::request_context::RequestContext;
 use crate::sse::SseFrameDecoder;
 
-use crate::config::ClientConfig;
+use crate::config::{ClientConfig, EgressConfig};
 use crate::secrets::SecretStore;
 
 /// Caps on what crosses the proxy, applied by the host per architecture section 6.
@@ -249,22 +249,64 @@ fn input_contains_non_language_content(value: &Value) -> bool {
 /// Every upstream and probe request goes through this policy, so where a
 /// request (and its credential) can go is a property of the code, not the
 /// ambient environment.
-struct EgressPolicy;
+#[derive(Clone)]
+struct EgressPolicy {
+    policy: EgressConfig,
+}
 
 impl EgressPolicy {
-    fn config(timeout: Duration) -> ureq::config::Config {
-        ureq::Agent::config_builder()
+    fn new(policy: EgressConfig) -> Self {
+        Self { policy }
+    }
+
+    fn config(
+        &self,
+        timeout: Duration,
+        secrets: &SecretStore,
+    ) -> Result<ureq::config::Config, String> {
+        let proxy = self.proxy(secrets)?;
+        Ok(ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
             // The pipeline maps upstream errors itself; a non-2xx is an
             // answer, not a transport failure.
             .http_status_as_error(false)
             .max_redirects(0)
-            .proxy(None)
-            .build()
+            .proxy(proxy)
+            .build())
     }
 
-    fn agent(timeout: Duration) -> ureq::Agent {
-        ureq::Agent::new_with_config(Self::config(timeout))
+    fn proxy(&self, secrets: &SecretStore) -> Result<Option<ureq::Proxy>, String> {
+        let Some((scheme, host, port)) = self.policy.proxy_parts()? else {
+            return Ok(None);
+        };
+        let protocol = match scheme.as_str() {
+            "http" => ureq::ProxyProtocol::Http,
+            "https" => ureq::ProxyProtocol::Https,
+            "socks5" => ureq::ProxyProtocol::Socks5,
+            "socks5h" => ureq::ProxyProtocol::Socks5h,
+            _ => return Err("unsupported egress proxy protocol".to_string()),
+        };
+        let mut builder = ureq::Proxy::builder(protocol).host(&host).port(port);
+        for entry in &self.policy.no_proxy {
+            builder = builder.no_proxy(entry);
+        }
+        if let Some(auth) = &self.policy.auth {
+            let password = secrets.resolve_egress(&auth.credential.slot)?;
+            builder = builder.username(&auth.username).password(&password);
+        }
+        builder
+            .build()
+            .map(Some)
+            .map_err(|_| "invalid egress proxy configuration".to_string())
+    }
+
+    fn agent(&self, timeout: Duration, secrets: &SecretStore) -> Result<ureq::Agent, String> {
+        self.config(timeout, secrets)
+            .map(ureq::Agent::new_with_config)
+    }
+
+    fn bypasses_proxy(&self, target: &str) -> bool {
+        self.policy.bypasses_proxy(target).unwrap_or(true)
     }
 
     fn reject_redirect(status: u16) -> Result<(), ErrorEnvelope> {
@@ -384,15 +426,20 @@ impl ureq::unversioned::transport::Transport for CancelTransport {
     }
 }
 
-fn cancel_aware_agent(timeout: Duration, token: CancelToken) -> ureq::Agent {
-    ureq::Agent::with_parts(
-        EgressPolicy::config(timeout),
+fn cancel_aware_agent(
+    policy: &EgressPolicy,
+    secrets: &SecretStore,
+    timeout: Duration,
+    token: CancelToken,
+) -> Result<ureq::Agent, String> {
+    Ok(ureq::Agent::with_parts(
+        policy.config(timeout, secrets)?,
         CancelConnector {
             inner: ureq::unversioned::transport::DefaultConnector::default(),
             token,
         },
         ureq::unversioned::resolver::DefaultResolver::default(),
-    )
+    ))
 }
 
 /// A [`RequestRecord`] with a stable accounting id stamped on it at arrival.
@@ -579,6 +626,10 @@ pub struct Gateway {
     /// Only custom routes are materialized. Missing/inherit entries use the
     /// home router, so old configurations allocate no duplicate routers.
     agent_routers: BTreeMap<String, Router>,
+    /// Namespaces admitted by loaded adapter capabilities or an explicit
+    /// route. This keeps scoped URLs extensible without letting an arbitrary
+    /// syntactically-valid name inherit the home router.
+    supported_agent_ids: std::collections::BTreeSet<String>,
     upstreams: BTreeMap<String, Upstream>,
     /// Names of upstreams declared `local`. Consulted when building candidates so
     /// the router can honor `local_only` without the data leaving the machine.
@@ -592,6 +643,7 @@ pub struct Gateway {
     /// Versioned per-model prices; the version travels onto each priced record.
     pricing: crate::pricing::PriceTable,
     secrets: SecretStore,
+    egress: EgressPolicy,
     recorder: Arc<dyn Recorder>,
     /// `/v1/models`, rendered once: it changes only with the config.
     models_document: String,
@@ -678,6 +730,7 @@ pub struct FeatureStageResult {
     pub status: StageStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -921,6 +974,15 @@ impl Gateway {
         // first whose match_inbound claims a request serves it.
         let loaded_agents = Self::load_agents(&runtime, &registry, config)?;
 
+        let mut supported_agent_ids = loaded_agents
+            .ready
+            .iter()
+            .flat_map(|agent| agent.plugin.manifest().agent_tools.iter())
+            .filter(|agent_id| ClientConfig::is_valid_agent_id(agent_id))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        supported_agent_ids.extend(config.agent_routes.keys().cloned());
+
         let provider_plugins = load_provider_plugins(&runtime, &registry, config)?;
 
         let mut upstreams = BTreeMap::new();
@@ -1001,6 +1063,7 @@ impl Gateway {
             skipped_agents: loaded_agents.skipped,
             home_router,
             agent_routers,
+            supported_agent_ids,
             upstreams,
             local_upstreams,
             catalog,
@@ -1011,6 +1074,7 @@ impl Gateway {
             admission: Admission::new(config.concurrency),
             pricing: config.pricing.clone(),
             secrets: SecretStore::from_config(config),
+            egress: EgressPolicy::new(config.egress.clone()),
             recorder,
             models_document: json!({ "object": "list", "data": models_document }).to_string(),
         })
@@ -1032,6 +1096,41 @@ impl Gateway {
     #[must_use]
     pub fn skipped_agents(&self) -> &[(String, String)] {
         &self.skipped_agents
+    }
+
+    /// Value-free explanation of the actual running egress resolution for
+    /// each configured upstream and request class.
+    #[must_use]
+    pub fn egress_routes(&self) -> Value {
+        let mut routes = Vec::new();
+        for (upstream_name, upstream) in &self.upstreams {
+            let target = String::from(upstream.config.base_url.clone());
+            let bypassed = self.egress.bypasses_proxy(&target);
+            let route = if self.egress.policy.mode == crate::config::EgressMode::Direct || bypassed
+            {
+                "direct"
+            } else {
+                "proxy"
+            };
+            for request_class in ["provider_request", "model_catalog", "health_probe"] {
+                routes.push(json!({
+                    "request_class": request_class,
+                    "upstream": upstream_name,
+                    "target": target,
+                    "route": route,
+                    "proxy_url": (route == "proxy").then(|| self.egress.policy.proxy_url.clone()).flatten(),
+                    "matched_no_proxy": bypassed && self.egress.policy.mode != crate::config::EgressMode::Direct,
+                }));
+            }
+        }
+        json!({
+            "mode": self.egress.policy.mode,
+            "proxy_url": self.egress.policy.proxy_url,
+            "no_proxy": self.egress.policy.no_proxy,
+            "auth_slot": self.egress.policy.auth.as_ref().map(|auth| auth.credential.slot.clone()),
+            "routes": routes,
+            "fixed_direct_classes": ["update_check"],
+        })
     }
 
     /// `upstream test <name>`: one minimal real completion per declared model.
@@ -1082,7 +1181,7 @@ impl Gateway {
             return Err(format!("upstream `{upstream_name}` declares no models"));
         }
 
-        let http = EgressPolicy::agent(PROBE_TIMEOUT);
+        let http = self.egress.agent(PROBE_TIMEOUT, &self.secrets)?;
 
         Ok(models
             .into_iter()
@@ -1176,7 +1275,7 @@ impl Gateway {
             return Err(format!("upstream `{upstream_name}` declares no models"));
         }
 
-        let http = EgressPolicy::agent(PROBE_TIMEOUT);
+        let http = self.egress.agent(PROBE_TIMEOUT, &self.secrets)?;
 
         Ok(models
             .into_iter()
@@ -1217,20 +1316,17 @@ impl Gateway {
             ));
         }
 
-        let http = EgressPolicy::agent(PROBE_TIMEOUT);
+        let http = self.egress.agent(PROBE_TIMEOUT, &self.secrets)?;
         let stages = vec![
-            Self::feature_stage(
-                FeatureLayer::Stream,
-                self.probe_stream_feature(upstream_name, upstream, only_model, &http),
-            ),
-            Self::feature_stage(
-                FeatureLayer::Tool,
-                self.probe_tool_feature(upstream_name, upstream, only_model, &http),
-            ),
-            Self::feature_stage(
-                FeatureLayer::Json,
-                self.probe_json_feature(upstream_name, upstream, only_model, &http),
-            ),
+            Self::feature_stage(FeatureLayer::Stream, || {
+                self.probe_stream_feature(upstream_name, upstream, only_model, &http)
+            }),
+            Self::feature_stage(FeatureLayer::Tool, || {
+                self.probe_tool_feature(upstream_name, upstream, only_model, &http)
+            }),
+            Self::feature_stage(FeatureLayer::Json, || {
+                self.probe_json_feature(upstream_name, upstream, only_model, &http)
+            }),
         ];
         Ok(FeatureProbe {
             model: only_model.to_owned(),
@@ -1238,17 +1334,25 @@ impl Gateway {
         })
     }
 
-    fn feature_stage(layer: FeatureLayer, result: Result<(), String>) -> FeatureStageResult {
+    fn feature_stage(
+        layer: FeatureLayer,
+        probe: impl FnOnce() -> Result<(), String>,
+    ) -> FeatureStageResult {
+        let started = Instant::now();
+        let result = probe();
+        let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         match result {
             Ok(()) => FeatureStageResult {
                 layer,
                 status: StageStatus::Pass,
                 detail: None,
+                duration_ms,
             },
             Err(detail) => FeatureStageResult {
                 layer,
                 status: StageStatus::Fail,
                 detail: Some(detail),
+                duration_ms,
             },
         }
     }
@@ -1579,7 +1683,7 @@ impl Gateway {
 
         let router = match agent_id {
             None => &self.home_router,
-            Some(agent_id) if crate::config::ClientConfig::is_known_agent_id(agent_id) => self
+            Some(agent_id) if self.supported_agent_ids.contains(agent_id) => self
                 .agent_routers
                 .get(agent_id)
                 .unwrap_or(&self.home_router),
@@ -1655,7 +1759,17 @@ impl Gateway {
         let mut record = begin_record(started_at_ms, protocol, agent_id, running_revision);
 
         if let Some(agent) = selected {
-            match self.chat_inner(ctx, agent, router, headers, body, emit, &mut record) {
+            match self.chat_inner(
+                ctx,
+                agent,
+                router,
+                method,
+                path,
+                headers,
+                body,
+                emit,
+                &mut record,
+            ) {
                 Ok((served, outcome)) => self.settle(&mut record, &served, outcome),
                 Err(refusal) => {
                     // Failed before any upstream served — a whole error response
@@ -1756,6 +1870,8 @@ impl Gateway {
 
     fn normalize_request(
         agent: &LoadedAgent,
+        method: &str,
+        path: &str,
         headers: &[(String, String)],
         body: &[u8],
         record: &mut RequestRecord,
@@ -1812,6 +1928,9 @@ impl Gateway {
         // The envelope an agent adapter is allowed to see: headers already
         // redacted, principal already decided. (Inbound auth itself is C1#4.)
         let header_digest = HeaderDigest::redacting(headers.iter().cloned());
+        let mut extensions = token_station_protocol::Extensions::new();
+        extensions.insert("transport_method".to_owned(), json!(method));
+        extensions.insert("transport_path".to_owned(), json!(path));
         let envelope = AgentRequestEnvelope {
             protocol: agent.protocol.clone(),
             agent_tool: match agent.protocol.as_str() {
@@ -1828,7 +1947,7 @@ impl Gateway {
             },
             hints: Vec::new(),
             body,
-            extensions: token_station_protocol::Extensions::new(),
+            extensions,
         };
 
         let request = match agent.plugin.normalize_inbound(&envelope) {
@@ -1867,12 +1986,14 @@ impl Gateway {
         ctx: &RequestContext,
         agent: &LoadedAgent,
         router: &Router,
+        method: &str,
+        path: &str,
         headers: &[(String, String)],
         body: &[u8],
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
-        let (request, hints) = Self::normalize_request(agent, headers, body, record)?;
+        let (request, hints) = Self::normalize_request(agent, method, path, headers, body, record)?;
         // Privacy boundary: the persisted requested model is a configured name
         // or a hashed `unlisted:` token — never the caller's raw string.
         let configured = self
@@ -2389,7 +2510,9 @@ impl Gateway {
         upstream_name: &str,
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
         let timeout = ctx.remaining().min(attempt_timeout);
-        let http = cancel_aware_agent(timeout, ctx.token());
+        let http = cancel_aware_agent(&self.egress, &self.secrets, timeout, ctx.token()).map_err(
+            |detail| ErrorEnvelope::new(ErrorCode::Auth, 401, format!("egress proxy: {detail}")),
+        )?;
         self.send_raw_with(&http, descriptor, upstream_name)
     }
 
@@ -2922,15 +3045,129 @@ mod attempt_budget_tests {
 #[cfg(test)]
 mod egress_policy_tests {
     use super::EgressPolicy;
+    use crate::config::{EgressConfig, EgressMode};
+    use crate::secrets::SecretStore;
+    use std::io::Read;
     use std::time::Duration;
     use token_station_protocol::ErrorCode;
 
+    fn read_head(stream: &mut std::net::TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 512];
+        while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = stream.read(&mut chunk).unwrap();
+            assert!(count > 0, "proxy peer closed before request head");
+            bytes.extend_from_slice(&chunk[..count]);
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+
     #[test]
     fn redirects_and_environment_proxies_are_disabled_explicitly() {
-        let agent = EgressPolicy::agent(Duration::from_secs(1));
+        let agent = EgressPolicy::new(EgressConfig::default())
+            .agent(Duration::from_secs(1), &SecretStore::default())
+            .unwrap();
 
         assert_eq!(agent.config().max_redirects(), 0);
         assert!(agent.config().proxy().is_none());
+    }
+
+    #[test]
+    fn http_and_socks_policies_are_explicit_and_apply_no_proxy() {
+        for (mode, url) in [
+            (EgressMode::Http, "http://proxy.internal:8080"),
+            (EgressMode::Socks5, "socks5h://proxy.internal:1080"),
+        ] {
+            let policy = EgressPolicy::new(EgressConfig {
+                mode,
+                proxy_url: Some(url.to_string()),
+                no_proxy: vec!["localhost".to_string(), "*.corp.internal".to_string()],
+                auth: None,
+            });
+            let agent = policy
+                .agent(Duration::from_secs(1), &SecretStore::default())
+                .unwrap();
+            let proxy = agent.config().proxy().expect("proxy is explicit");
+            let bypass: ureq::http::Uri = "https://api.corp.internal/v1".parse().unwrap();
+            let proxied: ureq::http::Uri = "https://api.example.com/v1".parse().unwrap();
+            assert!(proxy.is_no_proxy(&bypass));
+            assert!(!proxy.is_no_proxy(&proxied));
+            assert_eq!(agent.config().max_redirects(), 0);
+        }
+    }
+
+    #[test]
+    fn proxy_auth_resolves_from_a_slot_and_never_from_url_userinfo() {
+        let secret_path = std::env::temp_dir().join(format!(
+            "token-station-egress-secret-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&secret_path, "proxy-secret\n").unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(crate::EXAMPLE_CONFIG).unwrap();
+        value["egress"] = serde_json::json!({
+            "mode": "http",
+            "proxy_url": "http://proxy.internal:8080",
+            "auth": {
+                "username": "employee",
+                "credential": { "slot": "proxy_password", "file": secret_path }
+            }
+        });
+        let config: crate::config::ClientConfig = serde_json::from_value(value).unwrap();
+        let secrets = SecretStore::from_config(&config);
+        let proxy = EgressPolicy::new(config.egress.clone())
+            .proxy(&secrets)
+            .unwrap()
+            .unwrap();
+        assert_eq!(proxy.username(), Some("employee"));
+        assert_eq!(proxy.password(), Some("proxy-secret"));
+        assert_eq!(
+            config.egress.proxy_url.as_deref(),
+            Some("http://proxy.internal:8080")
+        );
+        std::fs::remove_file(secret_path).ok();
+    }
+
+    #[test]
+    fn http_proxy_is_used_for_a_real_request_without_resolving_the_target_locally() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let first = read_head(&mut stream);
+            if first.starts_with("CONNECT ") {
+                stream
+                    .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    .unwrap();
+                let tunneled = read_head(&mut stream);
+                assert!(
+                    tunneled.starts_with("GET ") && tunneled.contains("/probe"),
+                    "unexpected tunneled request: {tunneled:?}"
+                );
+            } else {
+                assert!(first.starts_with("GET http://unresolvable.invalid/probe"));
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
+        });
+        let policy = EgressPolicy::new(EgressConfig {
+            mode: EgressMode::Http,
+            proxy_url: Some(format!("http://{address}")),
+            no_proxy: Vec::new(),
+            auth: None,
+        });
+        let response = policy
+            .agent(Duration::from_secs(2), &SecretStore::default())
+            .unwrap()
+            .get("http://unresolvable.invalid/probe")
+            .call()
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        proxy.join().unwrap();
     }
 
     #[test]

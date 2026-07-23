@@ -53,6 +53,8 @@ export interface ProviderTestStage {
   layer: "network" | "http" | "auth" | "model" | "generation" | "stream" | "tool" | "json";
   status: "pass" | "fail" | "skipped";
   detail?: string;
+  duration_ms?: number;
+  timing_kind?: "cumulative" | "stage";
 }
 
 export interface ProviderTestResult {
@@ -208,6 +210,26 @@ export interface SettingsView {
   plugins_dir: string;
   agent: string;
   version: string;
+  egress_mode: "direct" | "http" | "socks5";
+  egress_proxy_url: string;
+  egress_no_proxy: string[];
+  egress_auth_username: string;
+  egress_auth_slot: string;
+}
+
+export interface EgressView {
+  mode: "direct" | "http" | "socks5";
+  proxy_url: string | null;
+  no_proxy: string[];
+  auth_slot: string | null;
+  routes: Array<{
+    request_class: "provider_request" | "model_catalog" | "health_probe";
+    upstream: string;
+    target: string;
+    route: "direct" | "proxy";
+    matched_no_proxy: boolean;
+  }>;
+  fixed_direct_classes: string[];
 }
 
 export interface StateView {
@@ -254,6 +276,19 @@ export interface AgentUiMetadataView {
   display_name: string;
   icon_key: string;
   admission: AgentAdmission;
+  ui_order?: number;
+  nav_mark?: string;
+  connector_capabilities?: Array<{
+    connector_id: string;
+    adapter_id: string;
+    base_url_shape: "origin" | "origin_v1";
+    platforms: Array<"macos" | "linux" | "windows" | "wsl">;
+    config_format: string;
+    config_path_template: string;
+    owned_fields: string[];
+    requires_virtual_key: boolean;
+    restart_required: boolean;
+  }>;
 }
 
 export interface AgentDiagnosticView {
@@ -265,6 +300,10 @@ export interface AgentDiscoveryView {
   agent_id: AgentId;
   executable_path: string;
   canonical_path: string;
+  binary_source: "homebrew" | "npm_global" | "path" | "known_path" | "env_override";
+  modified_at_ms: number | null;
+  binary_sha256: string | null;
+  upgrade_command: string | null;
   version_raw: string | null;
   version_normalized: string | null;
   environment: AgentPlatform;
@@ -309,6 +348,35 @@ export interface AgentView {
   catalog_warning: string | null;
 }
 
+export type DriftStatus =
+  | "unmanaged"
+  | "in_sync"
+  | "unowned_changes"
+  | "managed_changes"
+  | "missing"
+  | "unreadable"
+  | "unparseable";
+
+export interface AgentDriftView {
+  agent_id: AgentId;
+  installation_path: string;
+  target_config_path: string;
+  connector_id: string;
+  status: DriftStatus;
+  baseline_hash: string;
+  managed_hash: string;
+  current_hash: string | null;
+  checked_at_ms: number;
+  changes: Array<{
+    path: { segments: string[] };
+    scope: "managed" | "unowned";
+    kind: "added" | "removed" | "changed";
+    current_matches_managed: boolean | null;
+  }>;
+  truncated: boolean;
+  message: string;
+}
+
 export interface ConfigPlanView {
   schema_version: number;
   operation_id: string;
@@ -316,6 +384,7 @@ export interface ConfigPlanView {
   agent_id: AgentId;
   installation_path: string;
   target_config_path: string;
+  related_config_paths?: string[];
   target_existed: boolean;
   before_hash: string;
   expected_after_hash: string;
@@ -326,6 +395,23 @@ export interface ConfigPlanView {
     sensitive: boolean;
     summary: string;
   }>;
+  projection: {
+    schema_version: number;
+    files: Array<{
+      target_config_path: string;
+      format: string;
+      target_existed: boolean;
+      before_hash: string;
+      expected_after_hash: string;
+      owned_paths: Array<{ segments: string[] }>;
+      forward_changes: ConfigPlanView["changes"];
+      reverse_changes: ConfigPlanView["changes"];
+      credential_bindings: Array<{
+        path: { segments: string[] };
+        source: "local_virtual_key" | "encrypted_snapshot";
+      }>;
+    }>;
+  };
   human_diff: string;
   connector_id: string;
   compatibility_evidence: AgentCompatibilityView;
@@ -369,6 +455,8 @@ export interface AggView {
   input_tokens: number;
   output_tokens: number;
   cost_micros: number | null;
+  priced_requests: number;
+  unpriced_requests: number;
 }
 
 export interface StatsView {
@@ -376,6 +464,39 @@ export interface StatsView {
   groups: [string, AggView][];
   by: string | null;
   empty: boolean;
+}
+
+export type BudgetUsageLevel = "healthy" | "approaching" | "exceeded" | "unknown";
+export type BudgetExpiryLevel = "none" | "active" | "expiring" | "expired";
+
+export interface BudgetStatus {
+  agent_id: AgentId;
+  limit_micros: number;
+  used_micros: number;
+  remaining_micros: number;
+  warning_percent: number;
+  usage_percent: number;
+  unpriced_requests: number;
+  period_start_ms: number | null;
+  period_end_ms: number | null;
+  expiry_warning_days: number;
+  usage_level: BudgetUsageLevel;
+  expiry_level: BudgetExpiryLevel;
+  enforcement: "observe_only";
+  routing_affected: false;
+}
+
+export interface ModelPriceView {
+  input_per_mtok: number;
+  output_per_mtok: number;
+  cache_read_per_mtok: number;
+  cache_write_per_mtok: number;
+  reasoning_per_mtok: number | null;
+}
+
+export interface PriceTableView {
+  version: number;
+  models: Record<string, ModelPriceView>;
 }
 
 export interface BandView {
@@ -416,7 +537,46 @@ export interface UpgradeView {
   newer: boolean;
 }
 
+export interface RecoveryState {
+  mode: "normal" | "safe";
+  reason_code: "metrics_schema_newer" | "metrics_unreadable" | null;
+  message: string | null;
+  found_schema: number | null;
+  supported_schema: number | null;
+  metrics_path: string;
+  backup_dir: string;
+  local_only: boolean;
+}
+
+export interface FrontendDiagnosticInput {
+  kind: "render_error" | "window_error" | "unhandled_rejection" | "runtime_error";
+  message: string;
+  stack: string | null;
+  component_stack: string | null;
+}
+
+export interface FrontendDiagnosticRecord extends FrontendDiagnosticInput {
+  timestamp_ms: number;
+}
+
+export interface DiagnosticPreview {
+  recovery: RecoveryState;
+  frontend_events: FrontendDiagnosticRecord[];
+  export_includes: string[];
+  local_only: boolean;
+  redacted: boolean;
+  auto_upload: boolean;
+}
+
 export const getState = () => invoke<StateView>("get_state");
+export const getRecoveryState = () => invoke<RecoveryState>("get_recovery_state");
+export const getRecoveryDiagnostics = () =>
+  invoke<DiagnosticPreview>("get_recovery_diagnostics");
+export const recordFrontendDiagnostic = (event: FrontendDiagnosticInput) =>
+  invoke<FrontendDiagnosticRecord>("record_frontend_diagnostic", { event });
+export const exportRecoveryBundle = (confirmed: boolean) =>
+  invoke<string>("export_recovery_bundle", { confirmed });
+export const openRecoveryFolder = () => invoke<string>("open_recovery_folder");
 
 export const previewProviderEndpoints = (base_url: string) =>
   invoke<ProviderEndpointPreview>("preview_provider_endpoints", { baseUrl: base_url });
@@ -522,6 +682,47 @@ export const listenServeState = (handler: (serve: ServeView) => void) =>
 export const listAgentRegistry = () =>
   invoke<AgentUiMetadataView[]>("list_agent_registry");
 
+export const getAgentBudgets = () =>
+  invoke<BudgetStatus[]>("get_agent_budgets");
+
+export const setAgentBudget = (
+  agentId: AgentId,
+  limitMicros: number,
+  warningPercent: number,
+  periodStartMs: number | null,
+  periodEndMs: number | null,
+  expiryWarningDays: number,
+) => invoke<BudgetStatus[]>("set_agent_budget", {
+  agentId,
+  limitMicros,
+  warningPercent,
+  periodStartMs,
+  periodEndMs,
+  expiryWarningDays,
+});
+
+export const removeAgentBudget = (agentId: AgentId) =>
+  invoke<BudgetStatus[]>("remove_agent_budget", { agentId });
+
+export const getPriceTable = () => invoke<PriceTableView>("get_price_table");
+
+export const setModelPrice = (
+  model: string,
+  price: ModelPriceView,
+  expectedVersion: number,
+) => invoke<PriceTableView>("set_model_price", {
+  model,
+  inputPerMtok: price.input_per_mtok,
+  outputPerMtok: price.output_per_mtok,
+  cacheReadPerMtok: price.cache_read_per_mtok,
+  cacheWritePerMtok: price.cache_write_per_mtok,
+  reasoningPerMtok: price.reasoning_per_mtok,
+  expectedVersion,
+});
+
+export const removeModelPrice = (model: string, expectedVersion: number) =>
+  invoke<PriceTableView>("remove_model_price", { model, expectedVersion });
+
 export const scanAgents = () => invoke<AgentView[]>("scan_agents");
 
 export const planAgentConnection = (
@@ -548,6 +749,9 @@ export const planAgentDisconnect = (agentId: AgentId, installationPath: string) 
 export const listAgentSnapshots = (agentId: AgentId) =>
   invoke<SnapshotView[]>("list_agent_snapshots", { agentId });
 
+export const getAgentDrift = (agentId: AgentId, installationPath: string) =>
+  invoke<AgentDriftView[]>("get_agent_drift", { agentId, installationPath });
+
 export const planSnapshotRestore = (snapshotId: string) =>
   invoke<ConfigPlanView>("plan_snapshot_restore", { snapshotId });
 
@@ -557,8 +761,19 @@ export const applySnapshotRestore = (operationId: string, confirmationToken: str
     confirmationToken,
   });
 
-export const setSettings = (auth: boolean, metrics: boolean) =>
-  invoke<StateView>("set_settings", { auth, metrics });
+export const setSettings = (
+  auth: boolean,
+  metrics: boolean,
+  egress: Pick<SettingsView, "egress_mode" | "egress_proxy_url" | "egress_no_proxy" | "egress_auth_username" | "egress_auth_slot">,
+) => invoke<StateView>("set_settings", {
+  auth,
+  metrics,
+  egressMode: egress.egress_mode,
+  egressProxyUrl: egress.egress_proxy_url,
+  egressNoProxy: egress.egress_no_proxy,
+  egressAuthUsername: egress.egress_auth_username,
+  egressAuthSlot: egress.egress_auth_slot,
+});
 
 // ---------------------------------------------------------------------------
 // Read-only data plane: prefer local HTTP `/admin/*` so the same frontend can run without the Tauri shell
@@ -604,10 +819,18 @@ async function dataGet<T>(path: string, ipcFallback: () => Promise<T>): Promise<
   );
 }
 
-export const getStats = (since: string, by: string | null) =>
+export const getStats = (
+  since: string,
+  by: string | null,
+  agentId: string | null = null,
+  source: string | null = null,
+) =>
   dataGet<StatsView>(
-    `/admin/stats?since=${since}${by ? `&by=${by}` : ""}`,
-    () => invoke<StatsView>("get_stats", { since, by }),
+    `/admin/stats?since=${encodeURIComponent(since)}`
+      + `${by ? `&by=${encodeURIComponent(by)}` : ""}`
+      + `${agentId ? `&agent=${encodeURIComponent(agentId)}` : ""}`
+      + `${source ? `&source=${encodeURIComponent(source)}` : ""}`,
+    () => invoke<StatsView>("get_stats", { since, by, agentId, source }),
   );
 
 export const getRecentReceipts = (limit = 5) => {
@@ -626,5 +849,8 @@ export const getRouterTable = () =>
 
 export const getPlugins = () =>
   dataGet<PluginsView>("/admin/plugins", () => invoke<PluginsView>("get_plugins"));
+
+export const getEgress = () =>
+  dataGet<EgressView>("/admin/egress", () => invoke<EgressView>("get_egress"));
 
 export const checkUpgrade = () => invoke<UpgradeView>("check_upgrade");

@@ -5,7 +5,7 @@
 //! Target paths, patches, configuration bytes and executable commands are
 //! never accepted from the renderer.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,15 +19,14 @@ use zeroize::Zeroizing;
 
 use super::compatibility::{evaluate_discovery, CatalogSource, CompatibilityCatalog};
 use super::config_codec::parse_source_bytes;
-use super::connectors::{
-    ClaudeCodeConnector, CodexConnector, ConnectInput, Connector, HermesConnector,
-    OpenClawConnector, OpenCodeConnector,
-};
+use super::connectors::{builtin_connectors, find_connector, ConnectInput, Connector};
 use super::discovery::DiscoveryScanner;
+use super::drift::analyze_drift;
 use super::ownership::{FileOwnershipStore, OwnershipStore};
 use super::plan::{
-    build_connection_plan, build_disconnect_plan, build_snapshot_restore_plan,
-    generate_operation_id, read_config_source, ConfigSource, PreparedChangePlan,
+    attach_disconnect_companions, attach_restore_companions, build_connection_plan,
+    build_disconnect_plan, build_snapshot_restore_plan, generate_operation_id, read_config_source,
+    ConfigSource, PreparedChangePlan,
 };
 use super::registry::AgentRegistry;
 use super::snapshot::{FileSnapshotStore, MasterKeyStore, OsKeychainMasterKeyStore, SnapshotStore};
@@ -37,23 +36,14 @@ use super::transaction::{
     TransactionStage,
 };
 use super::types::{
-    AgentUiMetadata, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan, DiscoveryRecord,
-    PlanIntent, ReasonCode, SnapshotRecord,
+    AgentDriftView, AgentUiMetadata, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan,
+    DiscoveryRecord, DriftStatus, PlanIntent, ReasonCode, SnapshotRecord,
 };
-use crate::{
-    anthropic_inbound_ready, openai_inbound_ready, responses_inbound_ready, AgentIntegrationPaths,
-    AppStateManaged,
-};
+use crate::{inbound_adapter_ready, AgentIntegrationPaths, AppStateManaged};
 
 const MAX_PENDING_PLANS: usize = 64;
 const MAX_SESSION_LABEL_BYTES: usize = 128;
 const CONFIRMATION_TOKEN_BYTES: usize = 32;
-
-static CLAUDE_CONNECTOR: ClaudeCodeConnector = ClaudeCodeConnector;
-static CODEX_CONNECTOR: CodexConnector = CodexConnector;
-static OPENCODE_CONNECTOR: OpenCodeConnector = OpenCodeConnector;
-static OPENCLAW_CONNECTOR: OpenClawConnector = OpenClawConnector;
-static HERMES_CONNECTOR: HermesConnector = HermesConnector;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -289,18 +279,44 @@ struct CommandSession {
 
 pub struct AgentProxyRuntime {
     instance_id: String,
-    claude_origin: String,
-    codex_base: String,
-    opencode_base: String,
-    openclaw_base: String,
-    hermes_base: String,
+    connector_base_urls: BTreeMap<String, String>,
+    connector_adapter_ready: BTreeMap<String, bool>,
     virtual_key: Zeroizing<String>,
-    anthropic_ready: bool,
-    responses_ready: bool,
-    openai_ready: bool,
 }
 
 impl AgentProxyRuntime {
+    fn new(
+        instance_id: String,
+        gateway_origin: &str,
+        virtual_key: String,
+        adapter_readiness: BTreeMap<String, bool>,
+    ) -> Self {
+        let mut connector_base_urls = BTreeMap::new();
+        let mut connector_adapter_ready = BTreeMap::new();
+        for connector in builtin_connectors() {
+            let capability = connector.capabilities();
+            let suffix = match capability.base_url_shape {
+                super::types::BaseUrlShape::Origin => "",
+                super::types::BaseUrlShape::OriginV1 => "/v1",
+            };
+            connector_base_urls.insert(
+                capability.connector_id.to_string(),
+                format!("{gateway_origin}/agents/{}{suffix}", capability.agent_id),
+            );
+            let ready = adapter_readiness
+                .get(capability.adapter_id)
+                .copied()
+                .unwrap_or(false);
+            connector_adapter_ready.insert(capability.connector_id.to_string(), ready);
+        }
+        Self {
+            instance_id,
+            connector_base_urls,
+            connector_adapter_ready,
+            virtual_key: Zeroizing::new(virtual_key),
+        }
+    }
+
     pub(crate) fn instance_id(&self) -> &str {
         &self.instance_id
     }
@@ -309,52 +325,37 @@ impl AgentProxyRuntime {
         let mut hash = Sha256::new();
         hash.update(b"token-station-agent-proxy-binding-v1\0");
         hash_field(&mut hash, self.instance_id.as_bytes());
-        hash_field(&mut hash, self.claude_origin.as_bytes());
-        hash_field(&mut hash, self.codex_base.as_bytes());
-        hash_field(&mut hash, self.opencode_base.as_bytes());
-        hash_field(&mut hash, self.openclaw_base.as_bytes());
-        hash_field(&mut hash, self.hermes_base.as_bytes());
+        for (connector_id, base_url) in &self.connector_base_urls {
+            hash_field(&mut hash, connector_id.as_bytes());
+            hash_field(&mut hash, base_url.as_bytes());
+        }
         hash_field(&mut hash, self.virtual_key.as_bytes());
-        hash.update([
-            u8::from(self.anthropic_ready),
-            u8::from(self.responses_ready),
-            u8::from(self.openai_ready),
-        ]);
+        for (connector_id, ready) in &self.connector_adapter_ready {
+            hash_field(&mut hash, connector_id.as_bytes());
+            hash.update([u8::from(*ready)]);
+        }
         hash.finalize().into()
     }
 
     fn input_for<'a>(&'a self, connector_id: &str) -> Result<ConnectInput<'a>, AgentCommandError> {
-        match connector_id {
-            "claude-code-v1" => Ok(ConnectInput {
-                base_url: &self.claude_origin,
-                token: Some(self.virtual_key.as_str()),
-                adapter_ready: self.anthropic_ready,
-            }),
-            "codex-v1" => Ok(ConnectInput {
-                base_url: &self.codex_base,
-                token: None,
-                adapter_ready: self.responses_ready,
-            }),
-            "opencode-v1" => Ok(ConnectInput {
-                base_url: &self.opencode_base,
-                token: Some(self.virtual_key.as_str()),
-                adapter_ready: self.openai_ready,
-            }),
-            "openclaw-v1" => Ok(ConnectInput {
-                base_url: &self.openclaw_base,
-                token: Some(self.virtual_key.as_str()),
-                adapter_ready: self.openai_ready,
-            }),
-            "hermes-v1" => Ok(ConnectInput {
-                base_url: &self.hermes_base,
-                token: Some(self.virtual_key.as_str()),
-                adapter_ready: self.openai_ready,
-            }),
-            _ => Err(AgentCommandError::boundary(
-                "unsupported_connector",
-                "兼容目录引用了未实现的 Connector",
-            )),
-        }
+        let connector = find_connector(connector_id).ok_or_else(|| {
+            AgentCommandError::boundary("unsupported_connector", "兼容目录引用了未实现的 Connector")
+        })?;
+        let base_url = self.connector_base_urls.get(connector_id).ok_or_else(|| {
+            AgentCommandError::boundary("unsupported_connector", "Connector 缺少运行时 URL 投影")
+        })?;
+        Ok(ConnectInput {
+            base_url,
+            token: connector
+                .capabilities()
+                .requires_virtual_key
+                .then_some(self.virtual_key.as_str()),
+            adapter_ready: self
+                .connector_adapter_ready
+                .get(connector_id)
+                .copied()
+                .unwrap_or(false),
+        })
     }
 }
 
@@ -497,10 +498,12 @@ impl AgentCommandState {
         snapshot: &ScanSnapshot,
         runtime: Option<&AgentProxyRuntime>,
     ) -> Result<Vec<AgentView>, AgentCommandError> {
+        let metadata = self.registry.ui_metadata();
         self.registry
             .descriptors()
             .iter()
-            .map(|descriptor| {
+            .zip(metadata)
+            .map(|(descriptor, metadata)| {
                 let installations: Result<Vec<_>, AgentCommandError> = snapshot
                     .records
                     .iter()
@@ -536,7 +539,7 @@ impl AgentCommandState {
                         |_| CompatibilityStatus::Connected,
                     );
                 Ok(AgentView {
-                    metadata: AgentUiMetadata::from(descriptor),
+                    metadata,
                     installations,
                     status,
                     catalog_sequence: snapshot.catalog.sequence,
@@ -648,6 +651,16 @@ impl AgentCommandState {
             }
         }
         let connector = connector_for(connector_id)?;
+        if !connector.supports_platform(record.environment) {
+            return Err(AgentCommandError::boundary(
+                "unsupported_platform",
+                format!(
+                    "{} 不支持当前 {:?} 平台；未修改任何配置",
+                    connector.label(),
+                    record.environment
+                ),
+            ));
+        }
         let target = server_target(&record)?;
         let source = read_config_source(target).map_err(AgentCommandError::internal)?;
         let input = runtime.input_for(connector_id)?;
@@ -702,7 +715,7 @@ impl AgentCommandState {
         let target = Path::new(&ownership.target_config_path);
         let current = read_config_source(target).map_err(AgentCommandError::internal)?;
         let key = self.keys.load().map_err(AgentCommandError::internal)?;
-        let prepared = build_disconnect_plan(
+        let mut prepared = build_disconnect_plan(
             connector,
             &record,
             &decision,
@@ -718,6 +731,8 @@ impl AgentCommandState {
             generate_operation_id().map_err(AgentCommandError::internal)?,
         )
         .map_err(AgentCommandError::internal)?;
+        attach_disconnect_companions(&mut prepared, connector, &ownership, &self.snapshots, &key)
+            .map_err(AgentCommandError::internal)?;
         self.issue_plan(prepared, &record, session_label, None)
     }
 
@@ -765,6 +780,137 @@ impl AgentCommandState {
         );
         views.sort_by_key(|view| std::cmp::Reverse(view.created_at_ms));
         Ok(views)
+    }
+
+    fn drift(
+        &self,
+        agent_id: &str,
+        installation_path: &str,
+    ) -> Result<Vec<AgentDriftView>, AgentCommandError> {
+        let (_record, _, _, _) = self.selected(agent_id, installation_path)?;
+        let ownership = self
+            .ownership
+            .list_agent_installation(agent_id, installation_path)
+            .map_err(AgentCommandError::internal)?;
+        let checked_at_ms = self.clock.now_ms();
+        ownership
+            .into_iter()
+            .map(|owned| {
+                let failure = |status: DriftStatus, current_hash: Option<String>, message: &str| {
+                    AgentDriftView {
+                        agent_id: owned.agent_id.clone(),
+                        installation_path: owned.installation_path.clone(),
+                        target_config_path: owned.target_config_path.clone(),
+                        connector_id: owned.connector_id.clone(),
+                        status,
+                        baseline_hash: owned.before_hash.clone(),
+                        managed_hash: owned.managed_after_hash.clone(),
+                        current_hash,
+                        checked_at_ms,
+                        changes: Vec::new(),
+                        truncated: false,
+                        message: message.to_string(),
+                    }
+                };
+                let connector = match connector_for(&owned.connector_id) {
+                    Ok(connector) => connector,
+                    Err(_) => {
+                        return Ok(failure(
+                            DriftStatus::Unreadable,
+                            None,
+                            "归属记录引用的 Connector 不可用",
+                        ));
+                    }
+                };
+                let baseline = match self.snapshots.load(&owned.baseline_snapshot_id) {
+                    Ok(snapshot) => snapshot,
+                    Err(_) => {
+                        return Ok(failure(
+                            DriftStatus::Unreadable,
+                            None,
+                            "接管前加密快照不可读",
+                        ));
+                    }
+                };
+                let baseline_bytes = baseline
+                    .record
+                    .original_existed
+                    .then_some(baseline.exact_bytes.as_slice());
+                let baseline_document =
+                    match parse_source_bytes(baseline_bytes, connector.format(), connector.label())
+                    {
+                        Ok(document) => document,
+                        Err(_) => {
+                            return Ok(failure(
+                                DriftStatus::Unreadable,
+                                None,
+                                "接管前加密快照无法结构化解析",
+                            ));
+                        }
+                    };
+                let target = Path::new(&owned.target_config_path);
+                let current = match read_config_source(target) {
+                    Ok(source) => source,
+                    Err(_) => {
+                        return Ok(failure(
+                            DriftStatus::Unreadable,
+                            None,
+                            "当前 Agent 配置不可读",
+                        ));
+                    }
+                };
+                if !current.existed {
+                    return Ok(failure(
+                        DriftStatus::Missing,
+                        None,
+                        "当前 Agent 配置文件已不存在",
+                    ));
+                }
+                let current_hash = match super::plan::file_revision_hash(target, &current) {
+                    Ok(hash) => hash,
+                    Err(_) => {
+                        return Ok(failure(
+                            DriftStatus::Unreadable,
+                            None,
+                            "无法计算当前 Agent 配置指纹",
+                        ));
+                    }
+                };
+                let current_document = match parse_source_bytes(
+                    Some(current.exact_bytes.as_slice()),
+                    connector.format(),
+                    connector.label(),
+                ) {
+                    Ok(document) => document,
+                    Err(_) => {
+                        return Ok(failure(
+                            DriftStatus::Unparseable,
+                            Some(current_hash),
+                            "当前 Agent 配置已无法结构化解析",
+                        ));
+                    }
+                };
+                let key = match self.keys.load() {
+                    Ok(key) => key,
+                    Err(_) => {
+                        return Ok(failure(
+                            DriftStatus::Unreadable,
+                            Some(current_hash),
+                            "配置对账主密钥不可用",
+                        ));
+                    }
+                };
+                analyze_drift(
+                    &owned,
+                    &baseline_document,
+                    &current_document,
+                    &current_hash,
+                    &key,
+                    checked_at_ms,
+                )
+                .map_err(AgentCommandError::internal)
+            })
+            .collect::<Result<Vec<_>, _>>()
     }
 
     fn plan_restore(
@@ -831,7 +977,7 @@ impl AgentCommandState {
         let current = read_config_source(target).map_err(AgentCommandError::internal)?;
         let source = decrypted_source(&snapshot.record, snapshot.exact_bytes);
         let key = self.keys.load().map_err(AgentCommandError::internal)?;
-        let prepared = build_snapshot_restore_plan(
+        let mut prepared = build_snapshot_restore_plan(
             connector,
             &record,
             &decision,
@@ -845,6 +991,15 @@ impl AgentCommandState {
             catalog_expiry,
             self.clock.now_ms(),
             generate_operation_id().map_err(AgentCommandError::internal)?,
+        )
+        .map_err(AgentCommandError::internal)?;
+        attach_restore_companions(
+            &mut prepared,
+            connector,
+            &ownership,
+            &snapshot.record,
+            &self.snapshots,
+            &key,
         )
         .map_err(AgentCommandError::internal)?;
         self.issue_plan(prepared, &record, session_label, None)
@@ -1074,17 +1229,12 @@ impl AgentCommandState {
 }
 
 fn connector_for(connector_id: &str) -> Result<&'static dyn Connector, AgentCommandError> {
-    match connector_id {
-        "claude-code-v1" => Ok(&CLAUDE_CONNECTOR),
-        "codex-v1" => Ok(&CODEX_CONNECTOR),
-        "opencode-v1" => Ok(&OPENCODE_CONNECTOR),
-        "openclaw-v1" => Ok(&OPENCLAW_CONNECTOR),
-        "hermes-v1" => Ok(&HERMES_CONNECTOR),
-        _ => Err(AgentCommandError::boundary(
+    find_connector(connector_id).ok_or_else(|| {
+        AgentCommandError::boundary(
             "unsupported_connector",
             "Connector 不在本机构建的准入列表中",
-        )),
-    }
+        )
+    })
 }
 
 fn server_target(record: &DiscoveryRecord) -> Result<&Path, AgentCommandError> {
@@ -1257,24 +1407,26 @@ pub(crate) fn runtime_from_app(
         }
     };
     let plugins = serde_json::to_value(plugins).unwrap_or_default();
-    Ok(AgentProxyRuntime {
-        instance_id: serve.instance_id.ok_or_else(|| {
+    let adapter_readiness = builtin_connectors()
+        .iter()
+        .map(|connector| connector.capabilities().adapter_id)
+        .map(|adapter_id| {
+            (
+                adapter_id.to_string(),
+                inbound_adapter_ready(&plugins, adapter_id),
+            )
+        })
+        .collect();
+    Ok(AgentProxyRuntime::new(
+        serve.instance_id.ok_or_else(|| {
             AgentCommandError::boundary("proxy_not_running", "代理运行实例身份不可用")
         })?,
-        claude_origin: format!("{origin}/agents/claude-code"),
-        codex_base: format!("{origin}/agents/codex/v1"),
-        opencode_base: format!("{origin}/agents/opencode/v1"),
-        openclaw_base: format!("{origin}/agents/openclaw/v1"),
-        hermes_base: format!("{origin}/agents/nous-hermes-agent/v1"),
-        virtual_key: Zeroizing::new(
-            serve
-                .virtual_key
-                .unwrap_or_else(|| "token-station-no-auth".to_string()),
-        ),
-        anthropic_ready: anthropic_inbound_ready(&plugins),
-        responses_ready: responses_inbound_ready(&plugins),
-        openai_ready: openai_inbound_ready(&plugins),
-    })
+        &origin,
+        serve
+            .virtual_key
+            .unwrap_or_else(|| "token-station-no-auth".to_string()),
+        adapter_readiness,
+    ))
 }
 
 #[tauri::command]
@@ -1353,6 +1505,15 @@ pub(crate) fn list_agent_snapshots(
     state.list_snapshots(&agent_id)
 }
 
+#[tauri::command]
+pub(crate) fn get_agent_drift(
+    state: State<'_, AgentCommandState>,
+    agent_id: String,
+    installation_path: String,
+) -> Result<Vec<AgentDriftView>, AgentCommandError> {
+    state.drift(&agent_id, &installation_path)
+}
+
 #[tauri::command(async)]
 pub(crate) fn plan_snapshot_restore(
     state: State<'_, AgentCommandState>,
@@ -1387,7 +1548,8 @@ mod tests {
     use crate::agent_integration::connectors::ConnectInput;
     use crate::agent_integration::plan::build_connection_plan;
     use crate::agent_integration::types::{
-        AllowedAction, ConfirmationKind, Diagnostic, DiscoveryEvidence, DiscoverySource, Platform,
+        AllowedAction, BinarySource, ConfirmationKind, Diagnostic, DiscoveryEvidence,
+        DiscoverySource, DriftScope, DriftStatus, Platform,
     };
 
     struct MemoryMasterKey;
@@ -1429,6 +1591,10 @@ mod tests {
             agent_id: "claude-code".to_string(),
             executable_path: "/opt/claude".to_string(),
             canonical_path: "/opt/claude".to_string(),
+            binary_source: BinarySource::Path,
+            modified_at_ms: None,
+            binary_sha256: None,
+            upgrade_command: None,
             version_raw: Some("2.1.211".to_string()),
             version_normalized: Some("2.1.211".to_string()),
             environment: Platform::Macos,
@@ -1463,7 +1629,7 @@ mod tests {
     fn prepared(target: &Path, secret: &str, now_ms: u64) -> PreparedChangePlan {
         let source = read_config_source(target).unwrap();
         build_connection_plan(
-            &CLAUDE_CONNECTOR,
+            connector_for("claude-code-v1").unwrap(),
             &record(target, false),
             &decision(),
             target,
@@ -1482,18 +1648,16 @@ mod tests {
     }
 
     fn runtime(token: &str) -> AgentProxyRuntime {
-        AgentProxyRuntime {
-            instance_id: "fixture-runtime".to_string(),
-            claude_origin: "http://127.0.0.1:8787/agents/claude-code".to_string(),
-            codex_base: "http://127.0.0.1:8787/agents/codex/v1".to_string(),
-            opencode_base: "http://127.0.0.1:8787/agents/opencode/v1".to_string(),
-            openclaw_base: "http://127.0.0.1:8787/agents/openclaw/v1".to_string(),
-            hermes_base: "http://127.0.0.1:8787/agents/nous-hermes-agent/v1".to_string(),
-            virtual_key: Zeroizing::new(token.to_string()),
-            anthropic_ready: true,
-            responses_ready: true,
-            openai_ready: true,
-        }
+        let adapter_readiness = builtin_connectors()
+            .iter()
+            .map(|connector| (connector.capabilities().adapter_id.to_string(), true))
+            .collect();
+        AgentProxyRuntime::new(
+            "fixture-runtime".to_string(),
+            "http://127.0.0.1:8787",
+            token.to_string(),
+            adapter_readiness,
+        )
     }
 
     fn install_scan(
@@ -1609,7 +1773,7 @@ mod tests {
     fn commands_installation_path_is_only_an_exact_scan_lookup_key() {
         let state = state("lookup");
         let registry_metadata = state.registry_metadata();
-        assert_eq!(registry_metadata.len(), 5);
+        assert_eq!(registry_metadata.len(), 7);
         assert_eq!(registry_metadata[0].agent_id, "claude-code");
         let target = scratch("lookup-target").join("settings.json");
         let registry = AgentRegistry::builtin().unwrap();
@@ -1643,7 +1807,7 @@ mod tests {
             records: Vec::new(),
         };
         let views = state.views(&empty, None).unwrap();
-        assert_eq!(views.len(), 5);
+        assert_eq!(views.len(), 7);
         assert!(views.iter().all(|view| {
             view.status == CompatibilityStatus::NotDetected && view.installations.is_empty()
         }));
@@ -1840,6 +2004,37 @@ mod tests {
     }
 
     #[test]
+    fn claude_desktop_linux_returns_typed_unsupported_before_any_write() {
+        let state = state("claude-desktop-linux");
+        let target = scratch("claude-desktop-linux-target")
+            .join("configLibrary/7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2.json");
+        let mut installation = record(&target, false);
+        installation.agent_id = "claude-desktop".to_string();
+        installation.executable_path = "/opt/Claude".to_string();
+        installation.canonical_path = "/opt/Claude".to_string();
+        installation.environment = Platform::Linux;
+        let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+        install_scan(&state, catalog, vec![installation]);
+
+        let error = state
+            .plan_connection(
+                "claude-desktop",
+                "/opt/Claude",
+                Some("2.1.211"),
+                "main",
+                &runtime("vk-must-not-be-written"),
+            )
+            .err()
+            .expect("Claude Desktop has no supported Linux 3P profile path");
+
+        assert_eq!(error.code, "unsupported_platform");
+        assert!(!target.exists());
+        assert!(!target.with_file_name("_meta.json").exists());
+        assert!(!state.paths.snapshot_root.exists());
+        assert!(!state.paths.ownership_root.exists());
+    }
+
+    #[test]
     fn commands_snapshot_view_exposes_metadata_without_crypto_or_owner_fields() {
         let view = SnapshotView::from(SnapshotRecord {
             schema_version: 1,
@@ -1901,7 +2096,12 @@ mod tests {
         let fingerprint = runtime_view.fingerprint();
         for (connector_id, expected_base) in [
             ("claude-code-v1", "http://127.0.0.1:8787/agents/claude-code"),
+            (
+                "claude-desktop-3p-v1",
+                "http://127.0.0.1:8787/agents/claude-desktop",
+            ),
             ("codex-v1", "http://127.0.0.1:8787/agents/codex/v1"),
+            ("gemini-cli-v1", "http://127.0.0.1:8787/agents/gemini-cli"),
             ("opencode-v1", "http://127.0.0.1:8787/agents/opencode/v1"),
             ("openclaw-v1", "http://127.0.0.1:8787/agents/openclaw/v1"),
             (
@@ -1913,6 +2113,10 @@ mod tests {
             let input = runtime_view.input_for(connector_id).unwrap();
             assert_eq!(input.base_url, expected_base);
             assert_eq!(connector.connector_id(), connector_id);
+            if connector_id == "opencode-v1" {
+                assert_eq!(input.token, Some("vk-runtime-matrix"));
+                assert!(connector.connect_patch(&input).is_ok());
+            }
         }
         assert!(runtime_view.input_for("future-v1").is_err());
         assert!(connector_for("future-v1").is_err());
@@ -2063,7 +2267,7 @@ mod tests {
         assert_eq!(error.code, "read_only_preflight_failed");
 
         let scanned = state.scan().unwrap();
-        assert_eq!(scanned.len(), 5);
+        assert_eq!(scanned.len(), 7);
         assert!(state.session.lock().unwrap().scan.is_some());
     }
 
@@ -2215,6 +2419,51 @@ mod tests {
             .unwrap()
             .replace("127.0.0.1:8787", "127.0.0.1:9999");
         std::fs::write(&target, tampered).unwrap();
+        let drift_bytes = std::fs::read(&target).unwrap();
+        let drift_modified = std::fs::metadata(&target).unwrap().modified().unwrap();
+        let ownership_index = state.paths.ownership_root.join("ownership-index.json");
+        let snapshot_index = state.paths.snapshot_root.join("index.json");
+        let ownership_index_bytes = std::fs::read(&ownership_index).unwrap();
+        let snapshot_index_bytes = std::fs::read(&snapshot_index).unwrap();
+        let drift = state
+            .drift("claude-code", "/opt/claude")
+            .expect("drift query is read-only and uses the exact scan binding");
+        assert_eq!(drift.len(), 1);
+        assert_eq!(drift[0].status, DriftStatus::ManagedChanges);
+        assert!(drift[0].changes.iter().any(|change| {
+            change.path.segments == ["env", "ANTHROPIC_BASE_URL"]
+                && change.scope == DriftScope::Managed
+        }));
+        assert_eq!(std::fs::read(&target).unwrap(), drift_bytes);
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().modified().unwrap(),
+            drift_modified
+        );
+        assert_eq!(
+            std::fs::read(&ownership_index).unwrap(),
+            ownership_index_bytes
+        );
+        assert_eq!(
+            std::fs::read(&snapshot_index).unwrap(),
+            snapshot_index_bytes
+        );
+
+        std::fs::write(&target, b"{").unwrap();
+        let unparseable = state.drift("claude-code", "/opt/claude").unwrap();
+        assert_eq!(unparseable[0].status, DriftStatus::Unparseable);
+        assert!(unparseable[0].current_hash.is_some());
+        std::fs::remove_file(&target).unwrap();
+        let missing = state.drift("claude-code", "/opt/claude").unwrap();
+        assert_eq!(missing[0].status, DriftStatus::Missing);
+        assert!(missing[0].current_hash.is_none());
+        assert_eq!(
+            std::fs::read(&ownership_index).unwrap(),
+            ownership_index_bytes
+        );
+        assert_eq!(
+            std::fs::read(&snapshot_index).unwrap(),
+            snapshot_index_bytes
+        );
         assert!(
             !state.any_connected_to(&runtime).unwrap(),
             "ownership alone must not report a tampered Agent config as connected"

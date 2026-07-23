@@ -30,8 +30,6 @@ import SettingsHub from "./pages/SettingsHub";
 import Stats from "./pages/Stats";
 import "./App.css";
 
-const AGENT_ORDER = ["claude-code", "codex", "opencode", "openclaw", "nous-hermes-agent"];
-
 function errorText(error: unknown): string {
   if (typeof error === "string") return error;
   if (error && typeof error === "object") {
@@ -79,10 +77,14 @@ export default function App() {
   const pendingServeRef = useRef<ServeView | null>(null);
 
   const orderedRegistry = useMemo(
-    () => AGENT_ORDER.flatMap((id) => {
-      const metadata = registry.find((item) => item.agent_id === id && item.admission === "supported");
-      return metadata ? [metadata] : [];
-    }),
+    () => registry
+      .map((metadata, index) => ({ metadata, index }))
+      .filter(({ metadata }) => metadata.admission === "supported")
+      .sort((left, right) =>
+        (left.metadata.ui_order ?? Number.MAX_SAFE_INTEGER)
+          - (right.metadata.ui_order ?? Number.MAX_SAFE_INTEGER)
+        || left.index - right.index)
+      .map(({ metadata }) => metadata),
     [registry],
   );
 
@@ -292,7 +294,7 @@ export default function App() {
       )}
 
       {agentId && !metadata && (
-        <section className="panel"><div className="panel-head"><h2>未知 Agent</h2><p className="sub">该 Agent 不在当前受支持的五个客户端中。</p></div></section>
+        <section className="panel"><div className="panel-head"><h2>未知 Agent</h2><p className="sub">该 Agent 不在当前 Registry 的受支持列表中。</p></div></section>
       )}
 
       {view === "usage" && <Stats />}

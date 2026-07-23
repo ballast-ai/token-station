@@ -17,6 +17,7 @@ pub enum ConfigDocument {
     Json5(Json5Document),
     Toml(Box<Document>),
     Yaml(LosslessYamlDocument),
+    Dotenv(LosslessDotenvDocument),
 }
 
 pub struct Json5Document {
@@ -28,12 +29,17 @@ pub struct LosslessYamlDocument {
     rendered: String,
 }
 
+pub struct LosslessDotenvDocument {
+    rendered: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DocumentFormat {
     Json,
     Json5,
     Toml,
     Yaml,
+    Dotenv,
 }
 
 pub fn parse_source_bytes(
@@ -48,6 +54,9 @@ pub fn parse_source_bytes(
             DocumentFormat::Toml => ConfigDocument::Toml(Box::new(Document::new())),
             DocumentFormat::Yaml => ConfigDocument::Yaml(LosslessYamlDocument {
                 rendered: "{}\n".to_string(),
+            }),
+            DocumentFormat::Dotenv => ConfigDocument::Dotenv(LosslessDotenvDocument {
+                rendered: String::new(),
             }),
         }),
         Some(bytes) => {
@@ -68,9 +77,39 @@ pub fn apply_patch(
             ConfigDocument::Json5(document) => apply_json5_operation(document, operation)?,
             ConfigDocument::Toml(value) => apply_toml_operation(value, operation)?,
             ConfigDocument::Yaml(document) => apply_yaml_operation(document, operation)?,
+            ConfigDocument::Dotenv(document) => apply_dotenv_operation(document, operation)?,
         }
     }
     Ok(())
+}
+
+/// Apply a structured projection and return the inverse operations in the
+/// order required to undo it. Values remain in the non-serializable
+/// `PatchOperation` type, so credentials cannot cross the IPC boundary.
+pub fn apply_patch_with_reverse(
+    document: &mut ConfigDocument,
+    operations: &[PatchOperation],
+) -> Result<Vec<PatchOperation>, String> {
+    let mut reverse = Vec::with_capacity(operations.len());
+    for operation in operations {
+        let before = semantic_json(document)?;
+        let previous = json_value_at(&before, &operation.path).cloned();
+        apply_patch(document, std::slice::from_ref(operation))?;
+        if operation.operation == PatchKind::Test {
+            continue;
+        }
+        reverse.push(PatchOperation {
+            operation: if previous.is_some() {
+                PatchKind::Replace
+            } else {
+                PatchKind::Remove
+            },
+            path: operation.path.clone(),
+            value: previous,
+        });
+    }
+    reverse.reverse();
+    Ok(reverse)
 }
 
 /// Copy only declared owned subtrees from a baseline document into the
@@ -127,6 +166,9 @@ pub fn project_owned_paths(
                 apply_yaml_operation(current, &operation)?;
             }
             Ok(())
+        }
+        (ConfigDocument::Dotenv(current), ConfigDocument::Dotenv(baseline)) => {
+            project_dotenv_paths(current, baseline, owned_paths)
         }
         _ => Err("当前配置与基线快照格式不一致".to_string()),
     }
@@ -978,6 +1020,7 @@ pub fn render_document(document: &ConfigDocument, label: &str) -> Result<String,
         )),
         ConfigDocument::Toml(document) => Ok(document.to_string()),
         ConfigDocument::Yaml(document) => Ok(document.rendered.clone()),
+        ConfigDocument::Dotenv(document) => Ok(document.rendered.clone()),
     }
 }
 
@@ -994,6 +1037,7 @@ pub fn semantic_json(document: &ConfigDocument) -> Result<Value, String> {
         ConfigDocument::Yaml(document) => {
             strict_yaml_semantic(&document.rendered, "YAML semantic projection")
         }
+        ConfigDocument::Dotenv(document) => dotenv_semantic(&document.rendered),
     }
 }
 
@@ -1054,7 +1098,258 @@ pub fn parse_rendered(
                 rendered: rendered.to_string(),
             }))
         }
+        DocumentFormat::Dotenv => {
+            dotenv_semantic(rendered)
+                .map_err(|error| format!("写入前复验 {label} dotenv 失败：{error}"))?;
+            Ok(ConfigDocument::Dotenv(LosslessDotenvDocument {
+                rendered: rendered.to_string(),
+            }))
+        }
     }
+}
+
+#[derive(Clone)]
+struct DotenvEntry {
+    key: String,
+    value: String,
+    start: usize,
+    end: usize,
+    raw: String,
+}
+
+fn dotenv_entries(rendered: &str) -> Result<Vec<DotenvEntry>, String> {
+    let mut entries = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut offset = 0;
+    for line in rendered.split_inclusive('\n') {
+        let end = offset + line.len();
+        let without_newline = line.trim_end_matches(['\r', '\n']);
+        if let Some((key, value)) = parse_dotenv_assignment(without_newline)? {
+            if !seen.insert(key.clone()) {
+                return Err(format!("包含重复键 '{key}'"));
+            }
+            entries.push(DotenvEntry {
+                key,
+                value,
+                start: offset,
+                end,
+                raw: line.to_string(),
+            });
+        }
+        offset = end;
+    }
+    if offset < rendered.len() {
+        let line = &rendered[offset..];
+        if let Some((key, value)) = parse_dotenv_assignment(line)? {
+            if !seen.insert(key.clone()) {
+                return Err(format!("包含重复键 '{key}'"));
+            }
+            entries.push(DotenvEntry {
+                key,
+                value,
+                start: offset,
+                end: rendered.len(),
+                raw: line.to_string(),
+            });
+        }
+    }
+    Ok(entries)
+}
+
+fn parse_dotenv_assignment(line: &str) -> Result<Option<(String, String)>, String> {
+    let mut rest = line.trim_start_matches([' ', '\t']);
+    if rest.is_empty() || rest.starts_with('#') {
+        return Ok(None);
+    }
+    if let Some(after_export) = rest.strip_prefix("export") {
+        if after_export.starts_with([' ', '\t']) {
+            rest = after_export.trim_start_matches([' ', '\t']);
+        }
+    }
+    let key_end = rest
+        .bytes()
+        .position(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_'))
+        .unwrap_or(rest.len());
+    let key = &rest[..key_end];
+    if key.is_empty() || !key.as_bytes()[0].is_ascii_alphabetic() && key.as_bytes()[0] != b'_' {
+        return Err("包含无效键名".to_string());
+    }
+    rest = rest[key_end..].trim_start_matches([' ', '\t']);
+    let Some(value_source) = rest.strip_prefix('=') else {
+        return Err(format!("键 '{key}' 缺少 '='"));
+    };
+    let value = parse_dotenv_value(value_source.trim_start_matches([' ', '\t']))?;
+    Ok(Some((key.to_string(), value)))
+}
+
+fn parse_dotenv_value(source: &str) -> Result<String, String> {
+    if let Some(rest) = source.strip_prefix('\'') {
+        let close = rest
+            .find('\'')
+            .ok_or_else(|| "单引号值未闭合".to_string())?;
+        validate_dotenv_trailing(&rest[close + 1..])?;
+        return Ok(rest[..close].to_string());
+    }
+    if let Some(rest) = source.strip_prefix('"') {
+        let mut value = String::new();
+        let mut escaped = false;
+        for (index, character) in rest.char_indices() {
+            if escaped {
+                value.push(match character {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    other => other,
+                });
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                validate_dotenv_trailing(&rest[index + character.len_utf8()..])?;
+                return Ok(value);
+            } else {
+                value.push(character);
+            }
+        }
+        return Err("双引号值未闭合".to_string());
+    }
+    let comment = source
+        .char_indices()
+        .find(|(index, character)| {
+            *character == '#'
+                && (*index == 0
+                    || source[..*index]
+                        .chars()
+                        .next_back()
+                        .is_some_and(char::is_whitespace))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(source.len());
+    Ok(source[..comment].trim_end().to_string())
+}
+
+fn validate_dotenv_trailing(trailing: &str) -> Result<(), String> {
+    let trailing = trailing.trim_start_matches([' ', '\t']);
+    if trailing.is_empty() || trailing.starts_with('#') {
+        Ok(())
+    } else {
+        Err("引号值后包含无效内容".to_string())
+    }
+}
+
+fn dotenv_semantic(rendered: &str) -> Result<Value, String> {
+    let mut object = serde_json::Map::new();
+    for entry in dotenv_entries(rendered)? {
+        object.insert(entry.key, Value::String(entry.value));
+    }
+    Ok(Value::Object(object))
+}
+
+fn dotenv_path_key(path: &ConfigPath) -> Result<&str, String> {
+    let [key] = path.segments.as_slice() else {
+        return Err(format!("dotenv 配置路径 '{path}' 必须只有一个键"));
+    };
+    if key.is_empty()
+        || key.len() > 128
+        || !key.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_'
+                || byte.is_ascii_alphanumeric() && (index > 0 || byte.is_ascii_alphabetic())
+        })
+    {
+        return Err(format!("dotenv 配置路径 '{path}' 不合法"));
+    }
+    Ok(key)
+}
+
+fn quoted_dotenv_value(value: &str) -> Result<String, String> {
+    if value.contains(['\n', '\r', '\0']) {
+        return Err("dotenv 写入值不能包含换行或 NUL".to_string());
+    }
+    Ok(format!(
+        "\"{}\"",
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
+}
+
+fn replace_dotenv_raw(
+    rendered: &mut String,
+    key: &str,
+    replacement: Option<&str>,
+) -> Result<(), String> {
+    let entry = dotenv_entries(rendered)?
+        .into_iter()
+        .find(|entry| entry.key == key);
+    match (entry, replacement) {
+        (Some(entry), Some(replacement)) => {
+            rendered.replace_range(entry.start..entry.end, replacement)
+        }
+        (Some(entry), None) => rendered.replace_range(entry.start..entry.end, ""),
+        (None, Some(replacement)) => {
+            if !rendered.is_empty() && !rendered.ends_with('\n') {
+                rendered.push('\n');
+            }
+            rendered.push_str(replacement);
+        }
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+fn apply_dotenv_operation(
+    document: &mut LosslessDotenvDocument,
+    operation: &PatchOperation,
+) -> Result<(), String> {
+    let key = dotenv_path_key(&operation.path)?;
+    match operation.operation {
+        PatchKind::Add | PatchKind::Replace => {
+            let value = operation
+                .value
+                .as_ref()
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("dotenv 配置路径 '{}' 只允许字符串", operation.path))?;
+            let newline = if document.rendered.contains("\r\n") {
+                "\r\n"
+            } else {
+                "\n"
+            };
+            let replacement = format!("{key}={}{}", quoted_dotenv_value(value)?, newline);
+            replace_dotenv_raw(&mut document.rendered, key, Some(&replacement))
+        }
+        PatchKind::Remove => replace_dotenv_raw(&mut document.rendered, key, None),
+        PatchKind::Test => {
+            let expected = operation
+                .value
+                .as_ref()
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("dotenv test 路径 '{}' 只允许字符串", operation.path))?;
+            let actual = dotenv_entries(&document.rendered)?
+                .into_iter()
+                .find(|entry| entry.key == key)
+                .map(|entry| entry.value);
+            if actual.as_deref() == Some(expected) {
+                Ok(())
+            } else {
+                Err(format!("dotenv test 路径 '{}' 不匹配", operation.path))
+            }
+        }
+    }
+}
+
+fn project_dotenv_paths(
+    current: &mut LosslessDotenvDocument,
+    baseline: &LosslessDotenvDocument,
+    owned_paths: &[ConfigPath],
+) -> Result<(), String> {
+    let baseline_entries = dotenv_entries(&baseline.rendered)?;
+    for path in owned_paths {
+        let key = dotenv_path_key(path)?;
+        let raw = baseline_entries
+            .iter()
+            .find(|entry| entry.key == key)
+            .map(|entry| entry.raw.as_str());
+        replace_dotenv_raw(&mut current.rendered, key, raw)?;
+    }
+    Ok(())
 }
 
 fn validate_json5_value(value: &JSONValue) -> Result<(), String> {
@@ -1116,6 +1411,49 @@ mod tests {
             },
             value: None,
         }
+    }
+
+    #[test]
+    fn reverse_patch_restores_owned_values_without_reverting_unowned_edits() {
+        let mut document = ConfigDocument::Json(json!({
+            "provider": { "base_url": "https://before.test", "api_key": "before-key" },
+            "theme": "dark"
+        }));
+        let forward = vec![
+            operation(
+                PatchKind::Replace,
+                &["provider", "base_url"],
+                Some(json!("http://127.0.0.1:8787/v1")),
+            ),
+            operation(
+                PatchKind::Replace,
+                &["provider", "api_key"],
+                Some(json!("local-virtual-key")),
+            ),
+        ];
+
+        let reverse = apply_patch_with_reverse(&mut document, &forward).unwrap();
+        apply_patch(
+            &mut document,
+            &[operation(
+                PatchKind::Replace,
+                &["theme"],
+                Some(json!("light")),
+            )],
+        )
+        .unwrap();
+        apply_patch(&mut document, &reverse).unwrap();
+
+        assert_eq!(
+            semantic_json(&document).unwrap(),
+            json!({
+                "provider": { "base_url": "https://before.test", "api_key": "before-key" },
+                "theme": "light"
+            })
+        );
+        assert_eq!(reverse.len(), 2);
+        assert_eq!(reverse[0].path.segments, ["provider", "api_key"]);
+        assert_eq!(reverse[1].path.segments, ["provider", "base_url"]);
     }
 
     #[test]
@@ -1492,5 +1830,64 @@ command = "must-not-replace-current"
         assert!(rendered.contains("model = \"original-model\" # original model comment"));
         assert!(rendered.contains("# original provider comment"));
         assert!(rendered.contains("custom = \"original\""));
+    }
+
+    #[test]
+    fn dotenv_round_trip_changes_only_owned_keys_and_restores_them() {
+        let source = "# keep heading\nUNKNOWN = keep-me # keep inline\nexport GOOGLE_GEMINI_BASE_URL='https://old.example/v1'\nGEMINI_API_KEY=old-key\nTAIL=keep-tail\n";
+        let mut connected = parse_rendered(source, DocumentFormat::Dotenv, "Gemini .env").unwrap();
+        let baseline = parse_rendered(source, DocumentFormat::Dotenv, "Gemini .env").unwrap();
+        let owned = [
+            ConfigPath {
+                segments: vec!["GOOGLE_GEMINI_BASE_URL".to_string()],
+            },
+            ConfigPath {
+                segments: vec!["GEMINI_API_KEY".to_string()],
+            },
+        ];
+        apply_patch(
+            &mut connected,
+            &[
+                PatchOperation {
+                    operation: PatchKind::Replace,
+                    path: owned[0].clone(),
+                    value: Some(json!("http://127.0.0.1:8787/agents/gemini-cli/v1")),
+                },
+                PatchOperation {
+                    operation: PatchKind::Replace,
+                    path: owned[1].clone(),
+                    value: Some(json!("vk-local-only")),
+                },
+            ],
+        )
+        .unwrap();
+        let rendered = render_document(&connected, "Gemini .env").unwrap();
+        assert!(rendered.starts_with("# keep heading\n"), "{rendered}");
+        assert!(
+            rendered.contains("UNKNOWN = keep-me # keep inline"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("TAIL=keep-tail"), "{rendered}");
+        let semantic = semantic_json(&connected).unwrap();
+        assert_eq!(
+            semantic["GOOGLE_GEMINI_BASE_URL"],
+            "http://127.0.0.1:8787/agents/gemini-cli/v1"
+        );
+        assert_eq!(semantic["GEMINI_API_KEY"], "vk-local-only");
+
+        project_owned_paths(&mut connected, &baseline, &owned).unwrap();
+        let restored = render_document(&connected, "Gemini .env").unwrap();
+        assert_eq!(restored, source);
+    }
+
+    #[test]
+    fn dotenv_rejects_duplicate_owned_keys_without_echoing_values() {
+        let marker = "vk-sensitive-marker-must-not-leak";
+        let source = format!("GEMINI_API_KEY={marker}\nGEMINI_API_KEY=second\n");
+        let error = parse_rendered(&source, DocumentFormat::Dotenv, "Gemini .env")
+            .err()
+            .expect("duplicate dotenv keys fail closed");
+        assert!(error.contains("重复键"), "{error}");
+        assert!(!error.contains(marker), "{error}");
     }
 }

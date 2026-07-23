@@ -1,15 +1,14 @@
-mod claude_code;
-mod codex;
-mod hermes;
-mod openclaw;
-mod opencode;
-
 use std::path::{Path, PathBuf};
 
+use zeroize::Zeroizing;
+
 use super::config_codec::{ConfigDocument, DocumentFormat};
-use super::types::{ConfigPath, PatchOperation};
+use super::types::{BaseUrlShape, ConfigPath, PatchOperation, Platform};
+
+include!(concat!(env!("OUT_DIR"), "/builtin_connectors.rs"));
 
 pub use claude_code::ClaudeCodeConnector;
+pub use claude_desktop::ClaudeDesktopConnector;
 pub use codex::CodexConnector;
 pub use hermes::HermesConnector;
 pub use openclaw::OpenClawConnector;
@@ -21,11 +20,54 @@ pub struct ConnectInput<'a> {
     pub adapter_ready: bool,
 }
 
-pub trait Connector {
-    fn connector_id(&self) -> &'static str;
-    fn agent_id(&self) -> &'static str;
-    fn label(&self) -> &'static str;
-    fn format(&self) -> DocumentFormat;
+/// A second configuration file that must commit with a Connector's primary
+/// target. Bytes stay server-side and are zeroized because they may contain a
+/// local virtual key.
+pub struct CompanionProjection {
+    pub target_path: PathBuf,
+    pub source_existed: bool,
+    pub source_bytes: Zeroizing<Vec<u8>>,
+    pub original_permissions: Option<u32>,
+    pub original_owner: Option<String>,
+    pub projected_bytes: Zeroizing<Vec<u8>>,
+    pub format: DocumentFormat,
+    pub label: &'static str,
+    pub owned_paths: Vec<ConfigPath>,
+    pub sensitive_paths: Vec<ConfigPath>,
+    pub operations: Vec<PatchOperation>,
+}
+
+pub struct ConnectorCapabilities {
+    pub connector_id: &'static str,
+    pub agent_id: &'static str,
+    pub label: &'static str,
+    pub adapter_id: &'static str,
+    pub base_url_shape: BaseUrlShape,
+    pub platforms: &'static [Platform],
+    pub config_format: DocumentFormat,
+    pub config_path_template: &'static str,
+    pub owned_fields: &'static [&'static str],
+    pub requires_virtual_key: bool,
+    pub restart_required: bool,
+}
+
+pub trait Connector: Sync {
+    fn capabilities(&self) -> &'static ConnectorCapabilities;
+    fn connector_id(&self) -> &'static str {
+        self.capabilities().connector_id
+    }
+    fn agent_id(&self) -> &'static str {
+        self.capabilities().agent_id
+    }
+    fn label(&self) -> &'static str {
+        self.capabilities().label
+    }
+    fn format(&self) -> DocumentFormat {
+        self.capabilities().config_format
+    }
+    fn supports_platform(&self, platform: Platform) -> bool {
+        self.capabilities().platforms.contains(&platform)
+    }
     fn config_path(&self, home: &Path) -> PathBuf;
     fn create_dir_error(&self) -> &'static str;
     fn owned_paths(&self) -> Vec<ConfigPath>;
@@ -35,6 +77,13 @@ pub trait Connector {
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String>;
     fn validate_source(&self, document: &ConfigDocument) -> Result<(), String>;
     fn connect_patch(&self, input: &ConnectInput<'_>) -> Result<Vec<PatchOperation>, String>;
+    fn companion_projections(
+        &self,
+        _primary_target: &Path,
+        _input: &ConnectInput<'_>,
+    ) -> Result<Vec<CompanionProjection>, String> {
+        Ok(Vec::new())
+    }
     fn disconnect_patch(&self) -> Vec<PatchOperation>;
     fn validate_projected(
         &self,
@@ -42,6 +91,17 @@ pub trait Connector {
         input: &ConnectInput<'_>,
     ) -> Result<(), String>;
     fn success_message(&self, input: &ConnectInput<'_>) -> String;
+}
+
+pub fn builtin_connectors() -> &'static [&'static dyn Connector] {
+    BUILTIN_CONNECTORS
+}
+
+pub fn find_connector(connector_id: &str) -> Option<&'static dyn Connector> {
+    BUILTIN_CONNECTORS
+        .iter()
+        .copied()
+        .find(|connector| connector.connector_id() == connector_id)
 }
 
 pub(super) fn validate_patch_ownership(
@@ -95,10 +155,76 @@ mod tests {
     #[test]
     fn connector_identities_match_the_builtin_registry_capabilities() {
         assert_eq!(ClaudeCodeConnector.connector_id(), "claude-code-v1");
+        assert_eq!(
+            ClaudeDesktopConnector.connector_id(),
+            "claude-desktop-3p-v1"
+        );
         assert_eq!(CodexConnector.connector_id(), "codex-v1");
         assert_eq!(HermesConnector.connector_id(), "hermes-v1");
         assert_eq!(OpenCodeConnector.connector_id(), "opencode-v1");
         assert_eq!(OpenClawConnector.connector_id(), "openclaw-v1");
+    }
+
+    #[test]
+    fn connector_modules_are_build_registered_without_a_command_match() {
+        let ids: Vec<_> = builtin_connectors()
+            .iter()
+            .map(|connector| connector.capabilities().connector_id)
+            .collect();
+
+        assert_eq!(
+            ids,
+            [
+                "claude-code-v1",
+                "claude-desktop-3p-v1",
+                "codex-v1",
+                "gemini-cli-v1",
+                "hermes-v1",
+                "openclaw-v1",
+                "opencode-v1",
+            ]
+        );
+        for id in ids {
+            assert_eq!(find_connector(id).unwrap().connector_id(), id);
+        }
+        assert!(find_connector("future-v1").is_none());
+    }
+
+    #[test]
+    fn gemini_connector_preserves_unknown_dotenv_and_never_reports_the_virtual_key() {
+        let connector = find_connector("gemini-cli-v1").unwrap();
+        let source = b"# user comment\nUNKNOWN=keep-me\n";
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/gemini-cli",
+            token: Some("vk-gemini-sensitive"),
+            adapter_ready: true,
+        };
+        let baseline =
+            parse_source_bytes(Some(source), connector.format(), connector.label()).unwrap();
+        let mut document =
+            parse_source_bytes(Some(source), connector.format(), connector.label()).unwrap();
+        connector.validate_source(&document).unwrap();
+        let patch = connector.connect_patch(&input).unwrap();
+        validate_patch_ownership(&patch, &connector.owned_paths()).unwrap();
+        apply_patch(&mut document, &patch).unwrap();
+        connector.validate_projected(&document, &input).unwrap();
+        let rendered = render_document(&document, connector.label()).unwrap();
+        assert!(rendered.contains("# user comment"), "{rendered}");
+        assert!(rendered.contains("UNKNOWN=keep-me"), "{rendered}");
+        assert!(!connector
+            .success_message(&input)
+            .contains("vk-gemini-sensitive"));
+
+        crate::agent_integration::config_codec::project_owned_paths(
+            &mut document,
+            &baseline,
+            &connector.owned_paths(),
+        )
+        .unwrap();
+        assert_eq!(
+            render_document(&document, connector.label()).unwrap(),
+            String::from_utf8_lossy(source)
+        );
     }
 
     #[test]
@@ -160,6 +286,7 @@ mod tests {
                 DocumentFormat::Json5 => b"{invalid-json5".as_slice(),
                 DocumentFormat::Toml => b"invalid = [".as_slice(),
                 DocumentFormat::Yaml => b"model:\n  broken: [\n".as_slice(),
+                DocumentFormat::Dotenv => b"BROKEN".as_slice(),
             };
             let malformed =
                 parse_source_bytes(Some(malformed_bytes), connector.format(), connector.label())
@@ -223,7 +350,7 @@ mod tests {
             assert!(connector.validate_preconditions(&good).is_ok());
             if matches!(
                 connector.connector_id(),
-                "claude-code-v1" | "hermes-v1" | "openclaw-v1"
+                "claude-code-v1" | "hermes-v1" | "openclaw-v1" | "opencode-v1"
             ) {
                 assert!(connector.validate_preconditions(&missing_token).is_err());
             } else {

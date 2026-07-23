@@ -204,10 +204,17 @@ struct StatsArgs {
     /// Group by one dimension instead of totals only.
     #[arg(long, value_enum)]
     by: Option<GroupByArg>,
+    /// Keep only receipts from this Agent namespace.
+    #[arg(long)]
+    agent: Option<String>,
+    /// Keep only receipts from this inbound protocol source.
+    #[arg(long)]
+    source: Option<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
 enum GroupByArg {
+    Agent,
     Upstream,
     Model,
     Pool,
@@ -217,6 +224,7 @@ enum GroupByArg {
 impl From<GroupByArg> for stats::GroupBy {
     fn from(by: GroupByArg) -> Self {
         match by {
+            GroupByArg::Agent => Self::Agent,
             GroupByArg::Upstream => Self::Upstream,
             GroupByArg::Model => Self::Model,
             GroupByArg::Pool => Self::Pool,
@@ -318,7 +326,16 @@ fn run(cli: Cli) -> Result<(), String> {
             let window = stats::parse_since(&args.since)?;
             let cutoff = window.map(|window| now_ms().saturating_sub(window));
             let group_by = args.by.map(stats::GroupBy::from);
-            let report = stats::collect(&config.data.dir.join("metrics.sqlite"), cutoff, group_by)?;
+            let report = stats::collect_filtered(
+                &config.data.dir.join("metrics.sqlite"),
+                cutoff,
+                None,
+                group_by,
+                stats::StatsFilter {
+                    agent_id: args.agent.as_deref(),
+                    source: args.source.as_deref(),
+                },
+            )?;
             print!("{}", stats::render(&report, group_by));
             Ok(())
         }

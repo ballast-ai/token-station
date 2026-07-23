@@ -13,6 +13,7 @@ pub mod agent_integration;
 mod config_state;
 mod model_catalog;
 mod provider_tombstones;
+mod recovery;
 mod serve_lifecycle;
 
 use std::path::PathBuf;
@@ -22,21 +23,29 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
-use token_station_cli::config::{ClientConfig, PluginsConfig, KNOWN_AGENT_IDS};
+use token_station_cli::budget::{AgentBudget, BudgetStatus};
+use token_station_cli::config::{ClientConfig, PluginsConfig};
 use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, StageStatus};
 use token_station_cli::plugins::{PluginRegistry, Receipts};
+use token_station_cli::pricing::{ModelPrice, PriceTable};
 use token_station_cli::{secrets, stats, store::SqliteStore, upgrade};
 use token_station_metrics::ReceiptView;
 use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, ProviderEndpoint};
 use token_station_router_core::UpstreamRef;
 
 use agent_integration::commands::{
-    apply_agent_plan, apply_snapshot_restore, list_agent_registry, list_agent_snapshots,
-    plan_agent_connection, plan_agent_disconnect, plan_snapshot_restore, runtime_from_app,
-    scan_agents, AgentCommandState,
+    apply_agent_plan, apply_snapshot_restore, get_agent_drift, list_agent_registry,
+    list_agent_snapshots, plan_agent_connection, plan_agent_disconnect, plan_snapshot_restore,
+    runtime_from_app, scan_agents, AgentCommandState,
 };
+use agent_integration::registry::AgentRegistry;
+use agent_integration::types::AdmissionStatus;
 use config_state::ConfigState;
 use model_catalog::ModelDiscoveryView;
+use recovery::{
+    DiagnosticPreview, FrontendDiagnosticInput, FrontendDiagnosticRecord, RecoveryMode,
+    RecoveryState,
+};
 use serve_lifecycle::{prepare_server, PreparedServer, RunningServer, StartFailure};
 
 /// Pool names for the three tier slots shown as the panel's high, middle, and low rows.
@@ -44,39 +53,23 @@ const TIER_HIGH: &str = "tier_high";
 const TIER_MID: &str = "tier_mid";
 const TIER_LOW: &str = "tier_low";
 
-/// Stable id for each tier’s “keyword override” rule. Keywords added to a tier enter the corresponding rule’s
-/// `keywords_any`—a match selects this tier and overrides complexity tiers (highest priority in router-core layer 1).
-/// The id is stable because audit and decision records also use it as the `matched routing rule ID`.
-const KW_RULE_HIGH: &str = "kw-high";
-const KW_RULE_MID: &str = "kw-mid";
-const KW_RULE_LOW: &str = "kw-low";
-
-/// Map UI slots to pool names and keyword-rule IDs. Rule order is priority from
-/// high to mid to low, so phrases matching multiple tiers move upward safely.
-fn tier_pool_and_rule(slot: &str) -> Result<(&'static str, &'static str), String> {
-    match slot {
-        "high" => Ok((TIER_HIGH, KW_RULE_HIGH)),
-        "mid" => Ok((TIER_MID, KW_RULE_MID)),
-        "low" => Ok((TIER_LOW, KW_RULE_LOW)),
-        other => Err(format!("未知档位 `{other}`(应为 high/mid/low)")),
-    }
-}
-
-/// Three tiers from high to low as UI slot, pool name, and keyword-rule ID; preserve this order in router.rules.
-const TIER_ORDER: [(&str, &str, &str); 3] = [
-    ("high", TIER_HIGH, KW_RULE_HIGH),
-    ("mid", TIER_MID, KW_RULE_MID),
-    ("low", TIER_LOW, KW_RULE_LOW),
-];
-
 /// Tier thresholds mapping heuristic scores to tiers. Bands descend strictly by
 /// at_least, with a final zero fallback. Evaluation will calibrate these defaults later.
 const CUT_HIGH: u32 = 55;
 const CUT_MID: u32 = 22;
 
-/// The three inbound protocols promised by the desktop app. Their order is also the `match_inbound` priority; their paths
-/// are mutually exclusive, so putting the general Chat Completions first does not consume Messages or Responses.
-const DESKTOP_AGENTS: [&str; 3] = ["agent-openai", "agent-anthropic", "agent-openai-responses"];
+/// Derive required desktop inbound adapters from Connector capability declarations. Deduplicate repeated adapters while preserving
+/// Stable order of the build-time Connector registry. Adding a Connector no longer requires changing this location.
+fn desktop_agents() -> Vec<&'static str> {
+    let mut agents = Vec::new();
+    for connector in agent_integration::connectors::builtin_connectors() {
+        let adapter = connector.capabilities().adapter_id;
+        if !agents.contains(&adapter) {
+            agents.push(adapter);
+        }
+    }
+    agents
+}
 
 const SERVE_STATE_CHANGED_EVENT: &str = "serve-state-changed";
 
@@ -196,7 +189,7 @@ fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value 
         "data": { "dir": data_dir, "metrics": true },
         "plugins": {
             "dir": plugins_dir,
-            "agents": DESKTOP_AGENTS,
+            "agents": desktop_agents(),
             "providers": { "openai-compatible": "provider-openai-compatible" }
         },
         "upstreams": {},
@@ -226,7 +219,7 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
         if let Some(plugins) = draft["plugins"].as_object_mut() {
             plugins.remove("agent");
         }
-        draft["plugins"]["agents"] = json!(DESKTOP_AGENTS);
+        draft["plugins"]["agents"] = json!(desktop_agents());
     }
 
     fn anchor(path: &mut Value, config_dir: &std::path::Path) {
@@ -355,6 +348,10 @@ struct ProviderTestStage {
     status: StageStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timing_kind: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -415,9 +412,6 @@ struct StateView {
     deleted_providers: Vec<String>,
     provider_recovery_error: Option<String>,
     tiers: std::collections::BTreeMap<String, TierView>,
-    /// User keyword set for each tier (high/mid/low). A match forces that tier; this is the requested
-    /// A direct control for user routing; stored in `router.rules` as `keywords_any`.
-    keywords: std::collections::BTreeMap<String, Vec<String>>,
     agent_routes: std::collections::BTreeMap<String, AgentRouteView>,
     profiles: Vec<String>,
     /// Local-only routing uses providers marked local and keeps requests on the machine.
@@ -430,11 +424,11 @@ struct StateView {
     config_dirty: bool,
     /// Whether the draft materializes as a valid config and can be saved or started.
     config_error: Option<String>,
-    /// Settings page read model: switches and read-only environment information.
+    /// Settings read model: switches, egress policy, and read-only environment information.
     settings: SettingsView,
 }
 
-/// Settings page view: two writable switches (server.auth / data.metrics) and read-only environment information.
+/// Settings view for proxy switches, egress policy, and read-only environment information.
 #[derive(Serialize)]
 struct SettingsView {
     listen: String,
@@ -444,6 +438,11 @@ struct SettingsView {
     plugins_dir: String,
     agent: String,
     version: String,
+    egress_mode: String,
+    egress_proxy_url: String,
+    egress_no_proxy: Vec<String>,
+    egress_auth_username: String,
+    egress_auth_slot: String,
 }
 
 // ---- Subpage view types for full-capability subpages (#5) ------------------
@@ -458,6 +457,8 @@ struct AggView {
     input_tokens: u64,
     output_tokens: u64,
     cost_micros: Option<i64>,
+    priced_requests: u64,
+    unpriced_requests: u64,
 }
 
 impl AggView {
@@ -470,6 +471,8 @@ impl AggView {
             input_tokens: 0,
             output_tokens: 0,
             cost_micros: None,
+            priced_requests: 0,
+            unpriced_requests: 0,
         }
     }
     fn from(a: &stats::Aggregate) -> Self {
@@ -481,6 +484,8 @@ impl AggView {
             input_tokens: a.input_tokens,
             output_tokens: a.output_tokens,
             cost_micros: a.cost_micros,
+            priced_requests: a.priced_requests,
+            unpriced_requests: a.unpriced_requests,
         }
     }
 }
@@ -683,127 +688,6 @@ impl AppInner {
         tiers
     }
 
-    /// Whether a pool is configured (exists and is non-empty). Keyword rules may reference only existing pools; otherwise, saving
-    /// validation then fails with `UnknownPool`.
-    fn pool_present(&self, pool: &str) -> bool {
-        self.draft["router"]["pools"][pool]
-            .as_array()
-            .is_some_and(|members| !members.is_empty())
-    }
-
-    /// Read the current keywords_any list for a keyword-rule ID.
-    fn rule_keywords(&self, rule_id: &str) -> Vec<String> {
-        self.draft["router"]["rules"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|rule| rule["id"].as_str() == Some(rule_id))
-            .and_then(|rule| rule["when"]["keywords_any"].as_array())
-            .map(|words| {
-                words
-                    .iter()
-                    .filter_map(|w| w.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Keyword libraries for high, mid, and low tiers, exposed to the frontend.
-    fn home_keywords(&self) -> std::collections::BTreeMap<String, Vec<String>> {
-        TIER_ORDER
-            .iter()
-            .map(|(slot, _pool, rule_id)| ((*slot).to_string(), self.rule_keywords(rule_id)))
-            .collect()
-    }
-
-    /// Current mapping from tier slots to keyword lists, used as the pre-write snapshot.
-    fn keyword_map(&self) -> std::collections::BTreeMap<String, Vec<String>> {
-        self.home_keywords()
-    }
-
-    /// Rewrite `router.rules` from the given three-tier keyword mapping. Rule order is priority (high → mid → low),
-    /// Emit rules only for tiers that have both keywords and a configured pool. Preserve non-keyword rules written by the operator
-    /// Preserve them unchanged afterward. Do not emit rules for empty keyword sets or unconfigured tiers, to avoid references to missing pools.
-    fn apply_keyword_map(&mut self, map: &std::collections::BTreeMap<String, Vec<String>>) {
-        let mut rules: Vec<Value> = Vec::new();
-        for (slot, pool, rule_id) in TIER_ORDER {
-            let words = map.get(slot).cloned().unwrap_or_default();
-            if words.is_empty() || !self.pool_present(pool) {
-                continue;
-            }
-            rules.push(json!({
-                "id": rule_id,
-                "when": { "keywords_any": words },
-                "route_to": pool,
-            }));
-        }
-        // Preserve existing rules not managed by this module and append them afterward.
-        let managed = [KW_RULE_HIGH, KW_RULE_MID, KW_RULE_LOW];
-        if let Some(existing) = self.draft["router"]["rules"].as_array() {
-            for rule in existing {
-                let is_managed = rule["id"].as_str().is_some_and(|id| managed.contains(&id));
-                if !is_managed {
-                    rules.push(rule.clone());
-                }
-            }
-        }
-        self.draft["router"]["rules"] = Value::Array(rules);
-    }
-
-    /// Normalize keywords by trimming whitespace. Deduplicate case-insensitively
-    /// to match core keywords_any behavior while preserving original case for display.
-    fn add_tier_keyword(&mut self, slot: &str, keyword: &str) -> Result<(), String> {
-        let (pool, _rule_id) = tier_pool_and_rule(slot)?;
-        if !self.pool_present(pool) {
-            return Err("请先为该档配置供应商和模型,再添加关键词".to_string());
-        }
-        let word = keyword.trim();
-        if word.is_empty() {
-            return Err("关键词不能为空".to_string());
-        }
-        if word.chars().count() > 64 {
-            return Err("单个关键词过长(最多 64 字)".to_string());
-        }
-        let mut map = self.keyword_map();
-        let list = map.entry(slot.to_string()).or_default();
-        if list
-            .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(word))
-        {
-            return Err(format!("关键词「{word}」已在该档"));
-        }
-        if list.len() >= 100 {
-            return Err("单档关键词过多(最多 100 个)".to_string());
-        }
-        list.push(word.to_string());
-        self.apply_keyword_map(&map);
-        Ok(())
-    }
-
-    fn remove_tier_keyword(&mut self, slot: &str, keyword: &str) -> Result<(), String> {
-        tier_pool_and_rule(slot)?;
-        let mut map = self.keyword_map();
-        if let Some(list) = map.get_mut(slot) {
-            list.retain(|existing| !existing.eq_ignore_ascii_case(keyword.trim()));
-        }
-        self.apply_keyword_map(&map);
-        Ok(())
-    }
-
-    /// Remove a pool's keyword rule when clearing it so route_to cannot reference an empty pool.
-    fn drop_keyword_rule_for_pool(&mut self, pool: &str) {
-        let Some(rule_id) = TIER_ORDER
-            .iter()
-            .find(|(_, p, _)| *p == pool)
-            .map(|(_, _, id)| *id)
-        else {
-            return;
-        };
-        if let Some(rules) = self.draft["router"]["rules"].as_array_mut() {
-            rules.retain(|rule| rule["id"].as_str() != Some(rule_id));
-        }
-    }
-
     fn agent_route_mode(&self, agent_id: &str) -> &str {
         self.draft["agent_routes"][agent_id]["mode"]
             .as_str()
@@ -845,17 +729,17 @@ impl AppInner {
     }
 
     fn agent_routes_view(&self) -> std::collections::BTreeMap<String, AgentRouteView> {
-        KNOWN_AGENT_IDS
-            .iter()
+        supported_agent_ids()
+            .into_iter()
             .map(|agent_id| {
-                let mode = self.agent_route_mode(agent_id).to_string();
+                let mode = self.agent_route_mode(&agent_id).to_string();
                 let tiers = ["high", "mid", "low"]
                     .into_iter()
-                    .map(|slot| (slot.to_string(), self.agent_tier(agent_id, slot)))
+                    .map(|slot| (slot.to_string(), self.agent_tier(&agent_id, slot)))
                     .collect();
                 let config_error = if mode == "custom" || mode == "profile" {
                     ["high", "mid", "low"].into_iter().find_map(|slot| {
-                        let tier = self.agent_tier(agent_id, slot);
+                        let tier = self.agent_tier(&agent_id, slot);
                         (tier.upstream.is_none() || tier.model.is_none())
                             .then(|| format!("{slot} 档尚未配置供应商和模型"))
                     })
@@ -863,12 +747,12 @@ impl AppInner {
                     None
                 };
                 (
-                    (*agent_id).to_string(),
+                    agent_id.clone(),
                     AgentRouteView {
                         mode,
                         tiers,
                         config_error,
-                        profile: self.agent_profile(agent_id),
+                        profile: self.agent_profile(&agent_id),
                     },
                 )
             })
@@ -1044,7 +928,6 @@ impl AppInner {
             deleted_providers,
             provider_recovery_error,
             tiers: self.home_tiers(),
-            keywords: self.home_keywords(),
             agent_routes: self.agent_routes_view(),
             profiles: self.profile_names(),
             local_only: self.draft["router"]["local_only"]
@@ -1075,6 +958,29 @@ impl AppInner {
             plugins_dir: d["plugins"]["dir"].as_str().unwrap_or_default().to_string(),
             agent: agents_display(&d["plugins"]),
             version: upgrade::CURRENT_VERSION.to_string(),
+            egress_mode: d["egress"]["mode"].as_str().unwrap_or("direct").to_string(),
+            egress_proxy_url: d["egress"]["proxy_url"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            egress_no_proxy: d["egress"]["no_proxy"]
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            egress_auth_username: d["egress"]["auth"]["username"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            egress_auth_slot: d["egress"]["auth"]["credential"]["slot"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
         }
     }
 
@@ -1123,8 +1029,6 @@ impl AppInner {
                 if let Some(pools) = self.draft["router"]["pools"].as_object_mut() {
                     pools.remove(pool);
                 }
-                // Remove the keyword rule with the pool so it cannot target an empty pool and break saving.
-                self.drop_keyword_rule_for_pool(pool);
             }
             _ => return Err("档位必须同时提供供应商和模型，或同时清空".to_string()),
         }
@@ -1256,10 +1160,9 @@ impl AppInner {
     }
 
     fn delete_profile_value(&mut self, name: &str) -> Result<(), String> {
-        let mounted: Vec<_> = KNOWN_AGENT_IDS
-            .iter()
+        let mounted: Vec<_> = supported_agent_ids()
+            .into_iter()
             .filter(|agent_id| self.agent_profile(agent_id).as_deref() == Some(name))
-            .copied()
             .collect();
         if !mounted.is_empty() {
             return Err(format!("策略组 `{name}` 仍被挂载：{}", mounted.join(", ")));
@@ -1284,10 +1187,21 @@ fn pool_key(slot: &str) -> Result<&'static str, String> {
 }
 
 fn ensure_known_agent_id(agent_id: &str) -> Result<(), String> {
-    KNOWN_AGENT_IDS
-        .contains(&agent_id)
+    supported_agent_ids()
+        .iter()
+        .any(|candidate| candidate == agent_id)
         .then_some(())
         .ok_or_else(|| format!("未知 Agent `{agent_id}`"))
+}
+
+fn supported_agent_ids() -> Vec<String> {
+    AgentRegistry::builtin()
+        .expect("built-in Agent Registry must be valid")
+        .descriptors()
+        .iter()
+        .filter(|descriptor| descriptor.admission == AdmissionStatus::Supported)
+        .map(|descriptor| descriptor.agent_id.clone())
+        .collect()
 }
 
 // ---- Tauri commands ---------------------------------------------------------------
@@ -1565,14 +1479,27 @@ async fn discover_provider_models(
         .map_err(|error| format!("Base URL 不合法：{error}"))?
         .as_str();
 
-    let (data_dir, resolved_key) = {
+    let (data_dir, resolved_key, egress, egress_secrets) = {
         let inner = state.0.lock().unwrap();
         let resolved = resolve_discovery_key(&inner, &name, &base_url, api_key.as_deref())?;
-        (inner.data_dir(), resolved)
+        let config = inner.materialize()?;
+        (
+            inner.data_dir(),
+            resolved,
+            config.egress.clone(),
+            secrets::SecretStore::from_config(&config),
+        )
     };
 
     tauri::async_runtime::spawn_blocking(move || {
-        model_catalog::discover_with_cache(&data_dir, &name, &base_url, resolved_key.as_deref())
+        model_catalog::discover_with_cache_egress(
+            &data_dir,
+            &name,
+            &base_url,
+            resolved_key.as_deref(),
+            &egress,
+            &egress_secrets,
+        )
     })
     .await
     .map_err(|error| format!("模型目录任务异常结束：{error}"))?
@@ -1616,6 +1543,10 @@ async fn test_provider(
                         .to_owned(),
                         status: stage.status,
                         detail: stage.detail,
+                        duration_ms: (stage.status != StageStatus::Skipped)
+                            .then_some(probe.latency_ms)
+                            .flatten(),
+                        timing_kind: (stage.status != StageStatus::Skipped).then_some("cumulative"),
                     })
                     .collect();
                 if generation_passed {
@@ -1630,6 +1561,8 @@ async fn test_provider(
                                 .to_owned(),
                                 status: stage.status,
                                 detail: stage.detail,
+                                duration_ms: Some(stage.duration_ms),
+                                timing_kind: Some("stage"),
                             }
                         })),
                         Err(error) => stages.extend(["stream", "tool", "json"].map(|layer| {
@@ -1637,6 +1570,8 @@ async fn test_provider(
                                 layer: layer.to_owned(),
                                 status: StageStatus::Fail,
                                 detail: Some(error.clone()),
+                                duration_ms: None,
+                                timing_kind: None,
                             }
                         })),
                     }
@@ -1645,6 +1580,8 @@ async fn test_provider(
                         layer: layer.to_owned(),
                         status: StageStatus::Skipped,
                         detail: Some("基础生成测试未通过".to_owned()),
+                        duration_ms: None,
+                        timing_kind: None,
                     }));
                 }
                 ProviderTestResult {
@@ -1704,9 +1641,9 @@ fn replace_provider_models(
     }
 
     let mut agent_blocked = Vec::new();
-    for agent_id in KNOWN_AGENT_IDS {
+    for agent_id in supported_agent_ids() {
         for slot in ["high", "mid", "low"] {
-            let target = &inner.draft["agent_routes"][agent_id]["custom_route"][slot];
+            let target = &inner.draft["agent_routes"][&agent_id]["custom_route"][slot];
             let refers_to_provider = target["upstream"].as_str() == Some(name);
             let retained = target["model"]
                 .as_str()
@@ -1792,9 +1729,9 @@ fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {
             }
         }
     }
-    for agent_id in KNOWN_AGENT_IDS {
+    for agent_id in supported_agent_ids() {
         for slot in ["high", "mid", "low"] {
-            if inner.draft["agent_routes"][agent_id]["custom_route"][slot]["upstream"].as_str()
+            if inner.draft["agent_routes"][&agent_id]["custom_route"][slot]["upstream"].as_str()
                 == Some(name)
             {
                 references.push(format!("Agent/{agent_id}/{slot}"));
@@ -1897,32 +1834,6 @@ fn set_tier(
     Ok(inner.snapshot())
 }
 
-/// Add a keyword to a high, mid, or low tier; matches force that tier at router-core layer 1.
-#[tauri::command]
-fn add_keyword(
-    state: State<'_, AppStateManaged>,
-    slot: String,
-    keyword: String,
-) -> Result<StateView, String> {
-    let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    inner.add_tier_keyword(&slot, &keyword)?;
-    Ok(inner.snapshot())
-}
-
-/// Remove a keyword from a tier.
-#[tauri::command]
-fn remove_keyword(
-    state: State<'_, AppStateManaged>,
-    slot: String,
-    keyword: String,
-) -> Result<StateView, String> {
-    let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    inner.remove_tier_keyword(&slot, &keyword)?;
-    Ok(inner.snapshot())
-}
-
 #[tauri::command]
 fn set_agent_route_mode(
     state: State<'_, AppStateManaged>,
@@ -2012,8 +1923,8 @@ fn save_agent_routes(state: State<'_, AppStateManaged>) -> Result<StateView, Str
 fn apply_home_route_to_all_agents(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
-    for agent_id in KNOWN_AGENT_IDS {
-        inner.set_agent_route_mode_value(agent_id, "inherit");
+    for agent_id in supported_agent_ids() {
+        inner.set_agent_route_mode_value(&agent_id, "inherit");
     }
     inner.observe_draft()?;
     inner.save_draft()?;
@@ -2394,24 +2305,12 @@ fn serve_stop(app: AppHandle, state: State<'_, AppStateManaged>) -> StateView {
 /// Determine whether the `plugins` configuration includes an inbound adapter that supports Anthropic. Inspect the `agents` list
 /// and the two adapter names in the deprecated single `agent` string. Do not inspect providers to avoid false positives. agent-anthropic
 /// Once it enters the configuration, the CC safety gate unlocks automatically.
-fn inbound_adapter_ready(plugins: &Value, expected: &str) -> bool {
+pub(crate) fn inbound_adapter_ready(plugins: &Value, expected: &str) -> bool {
     let hits = |value: &Value| value.as_str() == Some(expected);
     let in_list = plugins["agents"]
         .as_array()
         .is_some_and(|arr| arr.iter().any(hits));
     in_list || hits(&plugins["agent"])
-}
-
-fn anthropic_inbound_ready(plugins: &Value) -> bool {
-    inbound_adapter_ready(plugins, "agent-anthropic")
-}
-
-fn responses_inbound_ready(plugins: &Value) -> bool {
-    inbound_adapter_ready(plugins, "agent-openai-responses")
-}
-
-fn openai_inbound_ready(plugins: &Value) -> bool {
-    inbound_adapter_ready(plugins, "agent-openai")
 }
 
 /// Display inbound adapters from the comma-joined agents list, falling back to the single agent value.
@@ -2432,15 +2331,40 @@ fn agents_display(plugins: &Value) -> String {
 /// Settings page: toggle server.auth and data.metrics. If the draft can materialize, write it to disk, matching config set behavior;
 /// Otherwise, change only the draft until a complete save. Note: these changes do not affect a running serve; restart the proxy.
 #[tauri::command]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Tauri maps this stable command boundary to named frontend arguments"
+)]
 fn set_settings(
     state: State<'_, AppStateManaged>,
     auth: bool,
     metrics: bool,
+    egress_mode: String,
+    egress_proxy_url: String,
+    egress_no_proxy: Vec<String>,
+    egress_auth_username: String,
+    egress_auth_slot: String,
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
     inner.draft["server"]["auth"] = json!(auth);
     inner.draft["data"]["metrics"] = json!(metrics);
+    inner.draft["egress"] = if egress_mode == "direct" {
+        json!({ "mode": "direct" })
+    } else {
+        let mut egress = json!({
+            "mode": egress_mode,
+            "proxy_url": egress_proxy_url,
+            "no_proxy": egress_no_proxy,
+        });
+        if !egress_auth_username.is_empty() || !egress_auth_slot.is_empty() {
+            egress["auth"] = json!({
+                "username": egress_auth_username,
+                "credential": { "slot": egress_auth_slot, "keyring": true }
+            });
+        }
+        egress
+    };
     inner.observe_draft()?;
     if inner.materialize().is_ok() {
         inner.save_draft()?;
@@ -2448,13 +2372,232 @@ fn set_settings(
     Ok(inner.snapshot())
 }
 
-/// Usage page: read-only aggregate metrics database. `since` = all / <N>h / <N>d; `by` = upstream/model/pool/status
+#[tauri::command]
+fn get_egress(state: State<'_, AppStateManaged>) -> Result<Value, String> {
+    let inner = state.0.lock().unwrap();
+    let config = inner.materialize()?;
+    let mut routes = Vec::new();
+    for (upstream, entry) in &config.upstreams {
+        let target = String::from(entry.base_url.clone());
+        let bypassed = config.egress.bypasses_proxy(&target)?;
+        let route =
+            if config.egress.mode == token_station_cli::config::EgressMode::Direct || bypassed {
+                "direct"
+            } else {
+                "proxy"
+            };
+        for request_class in ["provider_request", "model_catalog", "health_probe"] {
+            routes.push(json!({
+                "request_class": request_class,
+                "upstream": upstream,
+                "target": target,
+                "route": route,
+                "matched_no_proxy": bypassed && config.egress.mode != token_station_cli::config::EgressMode::Direct,
+            }));
+        }
+    }
+    Ok(json!({
+        "mode": config.egress.mode,
+        "proxy_url": config.egress.proxy_url,
+        "no_proxy": config.egress.no_proxy,
+        "auth_slot": config.egress.auth.map(|auth| auth.credential.slot),
+        "routes": routes,
+        "fixed_direct_classes": ["update_check"],
+    }))
+}
+
+fn budget_statuses(inner: &AppInner) -> Result<Vec<BudgetStatus>, String> {
+    let budgets: std::collections::BTreeMap<String, AgentBudget> = inner
+        .draft
+        .get("agent_budgets")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("Agent 预算配置不合法：{error}"))?
+        .unwrap_or_default();
+    let db = inner.data_dir().join("metrics.sqlite");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    budgets
+        .iter()
+        .map(|(agent_id, budget)| {
+            let aggregate = if db.exists() {
+                stats::collect_range(
+                    &db,
+                    budget.period_start_ms,
+                    budget.period_end_ms,
+                    Some(stats::GroupBy::Agent),
+                )?
+                .groups
+                .into_iter()
+                .find(|(candidate, _)| candidate == agent_id)
+                .map(|(_, aggregate)| aggregate)
+                .unwrap_or_default()
+            } else {
+                stats::Aggregate::default()
+            };
+            let used_micros = aggregate
+                .cost_micros
+                .and_then(|value| u64::try_from(value).ok())
+                .unwrap_or(0);
+            Ok(BudgetStatus::evaluate(
+                agent_id,
+                budget,
+                used_micros,
+                aggregate.unpriced_requests,
+                now_ms,
+            ))
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn get_agent_budgets(state: State<'_, AppStateManaged>) -> Result<Vec<BudgetStatus>, String> {
+    budget_statuses(&state.0.lock().unwrap())
+}
+
+#[tauri::command]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Tauri maps this stable command boundary to named form fields"
+)]
+fn set_agent_budget(
+    state: State<'_, AppStateManaged>,
+    agent_id: String,
+    limit_micros: u64,
+    warning_percent: u8,
+    period_start_ms: Option<u64>,
+    period_end_ms: Option<u64>,
+    expiry_warning_days: u16,
+) -> Result<Vec<BudgetStatus>, String> {
+    ensure_known_agent_id(&agent_id)?;
+    let budget = AgentBudget {
+        limit_micros,
+        warning_percent,
+        period_start_ms,
+        period_end_ms,
+        expiry_warning_days,
+    };
+    budget.validate()?;
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    if !inner.draft["agent_budgets"].is_object() {
+        inner.draft["agent_budgets"] = json!({});
+    }
+    inner.draft["agent_budgets"][&agent_id] =
+        serde_json::to_value(budget).map_err(|error| error.to_string())?;
+    inner.observe_draft()?;
+    inner.save_draft()?;
+    budget_statuses(&inner)
+}
+
+#[tauri::command]
+fn remove_agent_budget(
+    state: State<'_, AppStateManaged>,
+    agent_id: String,
+) -> Result<Vec<BudgetStatus>, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let budgets = inner.draft["agent_budgets"]
+        .as_object_mut()
+        .ok_or_else(|| format!("Agent `{agent_id}` 尚未配置预算"))?;
+    if budgets.remove(&agent_id).is_none() {
+        return Err(format!("Agent `{agent_id}` 尚未配置预算"));
+    }
+    inner.observe_draft()?;
+    inner.save_draft()?;
+    budget_statuses(&inner)
+}
+
+fn draft_price_table(inner: &AppInner) -> Result<PriceTable, String> {
+    inner
+        .draft
+        .get("pricing")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("定价表配置不合法：{error}"))
+        .map(Option::unwrap_or_default)
+}
+
+#[tauri::command]
+fn get_price_table(state: State<'_, AppStateManaged>) -> Result<PriceTable, String> {
+    draft_price_table(&state.0.lock().unwrap())
+}
+
+#[tauri::command]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Tauri maps the five price classes and expected version to named form fields"
+)]
+fn set_model_price(
+    state: State<'_, AppStateManaged>,
+    model: String,
+    input_per_mtok: u64,
+    output_per_mtok: u64,
+    cache_read_per_mtok: u64,
+    cache_write_per_mtok: u64,
+    reasoning_per_mtok: Option<u64>,
+    expected_version: u32,
+) -> Result<PriceTable, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let current = draft_price_table(&inner)?;
+    if current.version != expected_version {
+        return Err(format!(
+            "定价表版本冲突：当前为 v{}，页面基于 v{expected_version}；请刷新后重试",
+            current.version
+        ));
+    }
+    let next = current.next_with_model(
+        &model,
+        ModelPrice {
+            input_per_mtok,
+            output_per_mtok,
+            cache_read_per_mtok,
+            cache_write_per_mtok,
+            reasoning_per_mtok,
+        },
+    )?;
+    inner.draft["pricing"] = serde_json::to_value(&next).map_err(|error| error.to_string())?;
+    inner.observe_draft()?;
+    inner.save_draft()?;
+    Ok(next)
+}
+
+#[tauri::command]
+fn remove_model_price(
+    state: State<'_, AppStateManaged>,
+    model: String,
+    expected_version: u32,
+) -> Result<PriceTable, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let current = draft_price_table(&inner)?;
+    if current.version != expected_version {
+        return Err(format!(
+            "定价表版本冲突：当前为 v{}，页面基于 v{expected_version}；请刷新后重试",
+            current.version
+        ));
+    }
+    let next = current.next_without_model(&model)?;
+    inner.draft["pricing"] = serde_json::to_value(&next).map_err(|error| error.to_string())?;
+    inner.observe_draft()?;
+    inner.save_draft()?;
+    Ok(next)
+}
+
+/// Usage page: read-only aggregate metrics database. `since` = all / <N>h / <N>d; `by` = agent/upstream/model/pool/status
 /// or empty. Return `empty=true` when the metrics database does not exist; do not report an error.
 #[tauri::command]
 fn get_stats(
     state: State<'_, AppStateManaged>,
     since: String,
     by: Option<String>,
+    agent_id: Option<String>,
+    source: Option<String>,
 ) -> Result<StatsView, String> {
     let db = {
         let inner = state.0.lock().unwrap();
@@ -2471,13 +2614,23 @@ fn get_stats(
     let cutoff = stats::parse_since(&since)?;
     let group = match by.as_deref() {
         None | Some("") => None,
+        Some("agent") => Some(stats::GroupBy::Agent),
         Some("upstream") => Some(stats::GroupBy::Upstream),
         Some("model") => Some(stats::GroupBy::Model),
         Some("pool") => Some(stats::GroupBy::Pool),
         Some("status") => Some(stats::GroupBy::Status),
         Some(other) => return Err(format!("未知分组 `{other}`")),
     };
-    let report = stats::collect(&db, cutoff, group)?;
+    let report = stats::collect_filtered(
+        &db,
+        cutoff,
+        None,
+        group,
+        stats::StatsFilter {
+            agent_id: agent_id.as_deref(),
+            source: source.as_deref(),
+        },
+    )?;
     Ok(StatsView {
         total: AggView::from(&report.total),
         groups: report
@@ -2597,6 +2750,45 @@ fn check_upgrade() -> Result<UpgradeView, String> {
     })
 }
 
+/// Minimal recovery control plane. These commands depend only on application
+/// paths and the filesystem; they never require the business metrics DB to
+/// open successfully.
+#[tauri::command]
+fn get_recovery_state(paths: State<'_, DesktopPaths>) -> RecoveryState {
+    recovery::inspect_recovery_state(&paths.data_dir)
+}
+
+#[tauri::command]
+fn get_recovery_diagnostics(paths: State<'_, DesktopPaths>) -> Result<DiagnosticPreview, String> {
+    recovery::diagnostic_preview(&paths.config_file, &paths.data_dir)
+}
+
+#[tauri::command]
+fn record_frontend_diagnostic(
+    paths: State<'_, DesktopPaths>,
+    event: FrontendDiagnosticInput,
+) -> Result<FrontendDiagnosticRecord, String> {
+    recovery::append_frontend_event(&recovery::diagnostic_log_path(&paths.data_dir), event)
+}
+
+#[tauri::command]
+fn export_recovery_bundle(
+    paths: State<'_, DesktopPaths>,
+    confirmed: bool,
+) -> Result<String, String> {
+    recovery::export_bundle(&paths.config_file, &paths.data_dir, confirmed)
+        .map(|path| path.display().to_string())
+}
+
+#[tauri::command]
+fn open_recovery_folder(paths: State<'_, DesktopPaths>) -> Result<String, String> {
+    std::fs::create_dir_all(&paths.data_dir)
+        .map_err(|error| format!("{}: {error}", paths.data_dir.display()))?;
+    tauri_plugin_opener::open_path(&paths.data_dir, None::<&str>)
+        .map_err(|error| format!("打开自救目录失败：{error}"))?;
+    Ok(paths.data_dir.display().to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2614,6 +2806,16 @@ pub fn run() {
                     desktop_paths.plugins_dir.display()
                 ))
             })?;
+
+            // The recovery control plane is available before any business
+            // state. In safe mode we intentionally do not manage AppState or
+            // Agent command state, so normal read/write IPC cannot be invoked
+            // behind the recovery shell.
+            app.manage(desktop_paths.clone());
+            if recovery::inspect_recovery_state(&desktop_paths.data_dir).mode == RecoveryMode::Safe
+            {
+                return Ok(());
+            }
 
             // Validate existing configuration and apply defaults through the CLI before reuse. Put damaged configuration into read-only
             // Protection prevents silent overwrite with an empty template. Upgrade the legacy single OpenAI inbound config only in memory.
@@ -2654,8 +2856,6 @@ pub fn run() {
             remove_provider,
             restore_provider,
             set_tier,
-            add_keyword,
-            remove_keyword,
             set_agent_route_mode,
             set_agent_tier,
             save_home_route_as_profile,
@@ -2672,14 +2872,27 @@ pub fn run() {
             apply_agent_plan,
             plan_agent_disconnect,
             list_agent_snapshots,
+            get_agent_drift,
             plan_snapshot_restore,
             apply_snapshot_restore,
             set_settings,
+            get_egress,
             get_stats,
+            get_agent_budgets,
+            set_agent_budget,
+            remove_agent_budget,
+            get_price_table,
+            set_model_price,
+            remove_model_price,
             get_recent_receipts,
             get_router_table,
             get_plugins,
             check_upgrade,
+            get_recovery_state,
+            get_recovery_diagnostics,
+            record_frontend_diagnostic,
+            export_recovery_bundle,
+            open_recovery_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -2902,10 +3115,7 @@ mod tests {
         let root = PathBuf::from("/tmp/token-station-desktop-test");
         let draft = template_for_test(&root);
 
-        assert_eq!(
-            draft["plugins"]["agents"],
-            json!(["agent-openai", "agent-anthropic", "agent-openai-responses"])
-        );
+        assert_eq!(draft["plugins"]["agents"], json!(desktop_agents()));
     }
 
     #[test]
@@ -2948,6 +3158,7 @@ mod tests {
             "agent-openai",
             "agent-anthropic",
             "agent-openai-responses",
+            "agent-gemini",
             "provider-openai-compatible",
         ] {
             let package = registry
@@ -3152,7 +3363,7 @@ mod tests {
         let saved = draft.clone();
         let prepared = prepare_desktop_draft(draft, &root);
 
-        assert_eq!(prepared["plugins"]["agents"], json!(DESKTOP_AGENTS));
+        assert_eq!(prepared["plugins"]["agents"], json!(desktop_agents()));
         assert!(prepared["plugins"].get("agent").is_none());
         assert_eq!(prepared["plugins"]["dir"], json!(root.join("plugins-dist")));
         assert_eq!(
@@ -3177,7 +3388,7 @@ mod tests {
 
         let prepared = prepare_desktop_draft(draft, &root);
 
-        assert_eq!(prepared["plugins"]["agents"], json!(DESKTOP_AGENTS));
+        assert_eq!(prepared["plugins"]["agents"], json!(desktop_agents()));
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -3190,16 +3401,16 @@ mod tests {
                 "agent-openai-compatible"
             ]
         });
-        assert!(!anthropic_inbound_ready(&plugins));
-        assert!(!responses_inbound_ready(&plugins));
-        assert!(!openai_inbound_ready(&plugins));
+        assert!(!inbound_adapter_ready(&plugins, "agent-anthropic"));
+        assert!(!inbound_adapter_ready(&plugins, "agent-openai-responses"));
+        assert!(!inbound_adapter_ready(&plugins, "agent-openai"));
 
         let plugins = json!({
             "agents": ["agent-anthropic", "agent-openai-responses", "agent-openai"]
         });
-        assert!(anthropic_inbound_ready(&plugins));
-        assert!(responses_inbound_ready(&plugins));
-        assert!(openai_inbound_ready(&plugins));
+        assert!(inbound_adapter_ready(&plugins, "agent-anthropic"));
+        assert!(inbound_adapter_ready(&plugins, "agent-openai-responses"));
+        assert!(inbound_adapter_ready(&plugins, "agent-openai"));
     }
 
     #[test]
@@ -3326,103 +3537,6 @@ mod tests {
                 .len(),
             2
         );
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn tier_keywords_write_valid_rules_dedupe_and_require_a_configured_pool() {
-        let root = scratch_home("tier-keywords");
-        let mut inner = AppInner::new(
-            root.join("token-station.json"),
-            template_for_test(&root),
-            None,
-        );
-        inner.draft["upstreams"]["provider"] = json!({
-            "provider": "openai-compatible",
-            "base_url": "https://example.com/v1",
-            "models": [{"model": "m"}]
-        });
-
-        // Unconfigured tiers cannot accept keywords because the rule would target an empty pool.
-        let error = inner
-            .add_tier_keyword("low", "提交git")
-            .expect_err("adding to an unconfigured tier is refused");
-        assert!(error.contains("先"), "{error}");
-
-        inner
-            .set_tier_value(TIER_LOW, Some("provider".into()), Some("m".into()))
-            .unwrap();
-
-        inner.add_tier_keyword("low", "提交git").unwrap();
-        // Deduplicate case-insensitively.
-        let dup = inner
-            .add_tier_keyword("low", "提交GIT")
-            .expect_err("case-insensitive duplicate is refused");
-        assert!(dup.contains("已在"), "{dup}");
-
-        // The keyword enters the low-tier rule targeting tier_low, and the full config validates.
-        let keywords = inner.home_keywords();
-        assert_eq!(keywords["low"], vec!["提交git".to_string()]);
-        let config = inner
-            .materialize()
-            .expect("keyword rule keeps config valid");
-        let rule = config
-            .router
-            .rules
-            .iter()
-            .find(|rule| rule.id == KW_RULE_LOW)
-            .expect("low keyword rule exists");
-        assert_eq!(rule.route_to, TIER_LOW);
-        assert_eq!(rule.matcher.keywords_any, vec!["提交git".to_string()]);
-
-        // Remove case-insensitively and delete the rule when its list empties instead of leaving empty keywords_any.
-        inner.remove_tier_keyword("low", "提交GIT").unwrap();
-        assert!(inner.home_keywords()["low"].is_empty());
-        assert!(inner.materialize().unwrap().router.rules.is_empty());
-
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn clearing_a_tier_drops_its_keyword_rule_so_the_config_stays_valid() {
-        let root = scratch_home("tier-keywords-clear");
-        let mut inner = AppInner::new(
-            root.join("token-station.json"),
-            template_for_test(&root),
-            None,
-        );
-        inner.draft["upstreams"]["provider"] = json!({
-            "provider": "openai-compatible",
-            "base_url": "https://example.com/v1",
-            "models": [{"model": "m"}]
-        });
-        // Keep another fallback tier so clearing the only tier does not empty pools.
-        inner
-            .set_tier_value(TIER_HIGH, Some("provider".into()), Some("m".into()))
-            .unwrap();
-        inner
-            .set_tier_value(TIER_LOW, Some("provider".into()), Some("m".into()))
-            .unwrap();
-        inner.add_tier_keyword("low", "翻译").unwrap();
-        assert!(inner
-            .materialize()
-            .unwrap()
-            .router
-            .rules
-            .iter()
-            .any(|rule| rule.id == KW_RULE_LOW));
-
-        // Clearing the low tier must also remove its keyword rule or route_to would target an empty pool.
-        inner.set_tier_value(TIER_LOW, None, None).unwrap();
-        let config = inner
-            .materialize()
-            .expect("clearing a tier leaves a valid config, not a dangling rule");
-        assert!(config
-            .router
-            .rules
-            .iter()
-            .all(|rule| rule.id != KW_RULE_LOW));
-
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -3876,6 +3990,12 @@ mod tests {
         inner.draft["server"]["auth"] = json!(false);
         inner.draft["data"]["metrics"] = json!(true);
         inner.draft["data"]["dir"] = json!(root.join("data"));
+        inner.draft["pricing"] = json!({
+            "version": 1,
+            "models": {
+                "small": { "input_per_mtok": 1_000_000, "output_per_mtok": 2_000_000 }
+            }
+        });
         let metrics_path = root.join("data/metrics.sqlite");
         inner.draft["upstreams"]["fixture"] = json!({
             "provider": "openai-compatible",
@@ -3905,6 +4025,8 @@ mod tests {
         assert!(chat_through_proxy(&listen).contains("revision-a"));
         let first_receipts = wait_for_receipts(&metrics_path, 1);
         assert_eq!(first_receipts[0].running_revision, Some(revision_a));
+        assert_eq!(first_receipts[0].cost_micros, Some(3));
+        assert_eq!(first_receipts[0].price_version, Some(1));
         fixture_a.join().unwrap();
 
         save_home_route_as_profile(app.state(), "shared".to_string()).unwrap();
@@ -3912,6 +4034,19 @@ mod tests {
             mount_agent_profile(app.state(), "codex".to_string(), "shared".to_string()).unwrap();
         assert!(mounted.config_dirty);
         assert_eq!(mounted.serve.running_revision, Some(revision_a));
+
+        let price_v2 = set_model_price(
+            app.state(),
+            "small".to_string(),
+            2_000_000,
+            4_000_000,
+            0,
+            0,
+            None,
+            1,
+        )
+        .unwrap();
+        assert_eq!(price_v2.version, 2);
 
         edit_provider(app.state(), "fixture".to_owned(), upstream_b, None).unwrap();
         update_provider_models(
@@ -3940,6 +4075,10 @@ mod tests {
         let second_revision = second.serve.running_revision.unwrap();
         let second_receipts = wait_for_receipts(&metrics_path, 2);
         assert_eq!(second_receipts[0].running_revision, Some(second_revision));
+        assert_eq!(second_receipts[0].cost_micros, Some(6));
+        assert_eq!(second_receipts[0].price_version, Some(2));
+        assert_eq!(second_receipts[1].cost_micros, Some(3));
+        assert_eq!(second_receipts[1].price_version, Some(1));
         let ipc_receipts = get_recent_receipts(app.state(), 5).expect("receipt IPC reads");
         assert_eq!(
             ipc_receipts, second_receipts,
@@ -4167,7 +4306,17 @@ mod tests {
             ],
         )
         .unwrap();
-        let configured = set_settings(app.state(), false, false).unwrap();
+        let configured = set_settings(
+            app.state(),
+            false,
+            false,
+            "direct".to_string(),
+            String::new(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+        )
+        .unwrap();
         assert!(!configured.settings.auth);
         assert!(!configured.settings.metrics);
 
@@ -4179,7 +4328,7 @@ mod tests {
             .any(|dialect| dialect == "openai-compatible"));
         assert!(plugins.listing.contains("provider-openai-compatible"));
 
-        let empty_stats = get_stats(app.state(), "all".to_string(), None).unwrap();
+        let empty_stats = get_stats(app.state(), "all".to_string(), None, None, None).unwrap();
         assert!(empty_stats.empty);
         assert_eq!(empty_stats.total.requests, 0);
 
@@ -4296,6 +4445,136 @@ mod tests {
             .expect("empty routing config is rejected")
             .contains("至少配置一档"));
 
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn agent_budget_commands_persist_display_only_thresholds_and_report_zero_without_a_store() {
+        let root = scratch_home("agent-budget-commands");
+        let inner = AppInner::new(
+            root.join("token-station.json"),
+            gateway_template_for_test(&root),
+            None,
+        );
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+        let statuses = set_agent_budget(
+            app.state(),
+            "codex".to_string(),
+            1_000_000,
+            80,
+            Some(1_000),
+            Some(2_000),
+            7,
+        )
+        .unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].agent_id, "codex");
+        assert_eq!(statuses[0].used_micros, 0);
+        assert!(!statuses[0].routing_affected);
+        let saved = ClientConfig::load(&root.join("token-station.json")).unwrap();
+        assert_eq!(saved.agent_budgets["codex"].limit_micros, 1_000_000);
+
+        assert!(set_agent_budget(
+            app.state(),
+            "unknown-agent".to_string(),
+            1,
+            80,
+            None,
+            None,
+            7,
+        )
+        .is_err());
+        assert!(remove_agent_budget(app.state(), "codex".to_string())
+            .unwrap()
+            .is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn model_price_edits_append_versions_and_never_revalue_historical_receipts() {
+        use token_station_metrics::{CostKind, Recorder, RequestRecord};
+
+        let root = scratch_home("model-price-editor");
+        let draft = gateway_template_for_test(&root);
+        let data_dir = PathBuf::from(draft["data"]["dir"].as_str().unwrap());
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let store = SqliteStore::open(&data_dir.join("metrics.sqlite")).unwrap();
+        let mut historical = RequestRecord::begin(1, "openai-responses");
+        historical.request_id = "historical-v7".to_string();
+        historical.requested_model = "model-a".to_string();
+        historical.status = 200;
+        historical.cost_kind = CostKind::Estimated;
+        historical.cost_micros = Some(111);
+        historical.price_version = Some(7);
+        store.record(&historical);
+        drop(store);
+
+        let inner = AppInner::new(root.join("token-station.json"), draft, None);
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+        assert_eq!(get_price_table(app.state()).unwrap().version, 0);
+        let v1 = set_model_price(
+            app.state(),
+            "model-a".to_string(),
+            1_000_000,
+            2_000_000,
+            300_000,
+            4_000_000,
+            Some(5_000_000),
+            0,
+        )
+        .unwrap();
+        assert_eq!(v1.version, 1);
+        assert_eq!(v1.models["model-a"].reasoning_per_mtok, Some(5_000_000));
+        assert!(
+            set_model_price(app.state(), "model-a".to_string(), 9, 9, 9, 9, None, 0,)
+                .unwrap_err()
+                .contains("版本冲突")
+        );
+
+        let v2 = set_model_price(
+            app.state(),
+            "model-a".to_string(),
+            2_000_000,
+            3_000_000,
+            300_000,
+            4_000_000,
+            None,
+            1,
+        )
+        .unwrap();
+        assert_eq!(v2.version, 2);
+        let v3 = remove_model_price(app.state(), "model-a".to_string(), 2).unwrap();
+        assert_eq!(v3.version, 3);
+        assert!(v3.models.is_empty());
+
+        let saved = ClientConfig::load(&root.join("token-station.json")).unwrap();
+        assert_eq!(saved.pricing.version, 3);
+        assert!(saved.pricing.models.is_empty());
+        let receipts = SqliteStore::recent_receipts(&data_dir.join("metrics.sqlite"), 5).unwrap();
+        assert_eq!(receipts[0].cost_micros, Some(111));
+        assert_eq!(receipts[0].price_version, Some(7));
+        let source_filtered = get_stats(
+            app.state(),
+            "all".to_string(),
+            None,
+            None,
+            Some("openai-responses".to_string()),
+        )
+        .unwrap();
+        assert_eq!(source_filtered.total.requests, 1);
+        let agent_filtered = get_stats(
+            app.state(),
+            "all".to_string(),
+            None,
+            Some("codex".to_string()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(agent_filtered.total.requests, 0);
         std::fs::remove_dir_all(root).ok();
     }
 

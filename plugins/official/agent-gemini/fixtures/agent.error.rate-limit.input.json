@@ -1,0 +1,4 @@
+{
+  "context": {"protocol": "google-gemini-generate-content"},
+  "error": {"code": "rate_limit", "http_status": 429, "message": "slow down"}
+}
