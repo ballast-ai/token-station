@@ -76,6 +76,8 @@ function StationApp() {
   const scanGenerationRef = useRef(0);
   const pendingServeRef = useRef<ServeView | null>(null);
   const viewHistoryRef = useRef<AppView[]>([]);
+  const prevPhaseRef = useRef<string | null>(null);
+  const runtimeReadyRef = useRef<boolean | null>(null);
 
   const orderedRegistry = useMemo(
     () => registry
@@ -174,6 +176,41 @@ function StationApp() {
     if (state) setAdminEndpoint(state.serve);
   }, [state]);
 
+  // Runtime state drives the Save and apply banner, not a one-time success message. Apply is asynchronous.
+  // Setting Applying immediately when serveStart returns breaks alignment with the real lifecycle. See UX feedback.
+  // When runtime state changes from starting (=Applying) to running, this version is active. Replace it with
+  // Automatically hide the brief Applied notice.
+  useEffect(() => {
+    const phase = state?.serve.phase;
+    const previous = prevPhaseRef.current;
+    prevPhaseRef.current = phase ?? null;
+    if (previous === "starting" && phase === "running" && state) {
+      setMessage(`配置已应用 · revision ${state.saved_revision}`);
+      const timer = window.setTimeout(
+        () => setMessage((current) => (current.startsWith("配置已应用") ? "" : current)),
+        2600,
+      );
+      return () => window.clearTimeout(timer);
+    }
+    return undefined;
+  }, [state?.serve.phase]);
+
+  // Rescan when runtime state changes from not ready to ready. The first app scan can occur before the gateway starts,
+  // That scan_agents call got runtime=None, so all installations had connected=false. Managed
+  // can incorrectly show Repair required. The 500 ms top-bar poll corrects itself, but scan results do not refresh. When runtime state
+  // Scan once when ready to align cards with actual runtime state. rescanAgents has deduplication and queue protection.
+  useEffect(() => {
+    if (!state) return;
+    const ready = state.serve.app_runtime === "running" && Boolean(state.serve.listener_reachable);
+    const wasReady = runtimeReadyRef.current;
+    runtimeReadyRef.current = ready;
+    // The first observation (null) is not a transition to ready. If already ready, the initial load() scan includes runtime.
+    // Scan only on an actual not-ready (false) to ready (true) transition. This fixes the startup race.
+    if (wasReady === false && ready) {
+      void rescanAgents();
+    }
+  }, [state?.serve.app_runtime, state?.serve.listener_reachable, rescanAgents]);
+
   const showState = (next: StateView, nextMessage?: string) => {
     setState(next);
     setError("");
@@ -257,7 +294,8 @@ function StationApp() {
       onRescan={() => void rescanAgents()}
       onToggleServe={() => void toggleServe()}
     >
-      {message && <div className="banner ok global-banner">{message}</div>}
+      {state.serve.phase === "starting" && !error && <div className="banner ok global-banner">正在应用配置…</div>}
+      {message && state.serve.phase !== "starting" && <div className="banner ok global-banner">{message}</div>}
       {error && <div className="banner err global-banner">{error}</div>}
       {state.serve.phase === "error" && state.serve.error && <div className="banner err global-banner">{state.serve.error}</div>}
 
@@ -273,6 +311,7 @@ function StationApp() {
           agents={agents}
           serveRunning={runtimeHealthy}
           busy={busy}
+          applying={state.serve.phase === "starting"}
           configError={state.config_error}
           keywords={state.keywords}
           saveStatus={saveStatus}
@@ -282,7 +321,7 @@ function StationApp() {
           onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
           onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
           onRemoveKeyword={(slot, keyword) => void run(() => removeKeyword(slot, keyword))}
-          onSave={() => void run(serveStart, "正在保存并应用配置")}
+          onSave={() => void run(serveStart)}
           onApplyAll={() => void run(applyHomeRouteToAllAgents, runtimeHealthy ? "全部 Agent 已恢复跟随主页 · 尚待应用" : "全部 Agent 已恢复跟随主页")}
           onOpenAgent={(id) => navigate(`agent:${id}`)}
           onRemoveProvider={(name) => void run(() => removeProvider(name), "供应商已删除")}
@@ -293,6 +332,9 @@ function StationApp() {
 
       {metadata && route && (
         <AgentRoutePage
+          // Key by agent_id and remount when the Agent changes. Per-Agent transient state, such as first-connection cards
+          // notices and selected installations do not leak to another Agent page.
+          key={metadata.agent_id}
           metadata={metadata}
           agent={agent}
           route={route}

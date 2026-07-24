@@ -97,7 +97,6 @@ export default function AgentRoutePage({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
-  const [pendingPlan, setPendingPlan] = useState<ConfigPlanView | null>(null);
   // Show configuration changes after the first connection, then persist dismissal in localStorage.
   const [connectDiff, setConnectDiff] = useState<ConfigPlanView | null>(null);
   const dismissConnectDiff = () => setConnectDiff(null);
@@ -136,6 +135,8 @@ export default function AgentRoutePage({
     }
   };
 
+  // Connect and restore: apply immediately after planning. Do not wait for separate confirmation because it only adds delay. After connection,
+  // The post-connection diff card still appears once for transparency.
   const applyConnection = async () => {
     if (!installation || !canOperate || busy) return;
     setBusy(true);
@@ -151,29 +152,14 @@ export default function AgentRoutePage({
             ? { expectedVersion: installation.discovery.version_normalized as string }
             : undefined,
         );
-      setPendingPlan(plan);
-    } catch (caught) {
-      setError(errorText(caught));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const confirmProjection = async () => {
-    if (!pendingPlan || busy) return;
-    setBusy(true);
-    setError("");
-    setNotice("");
-    try {
-      await applyAgentPlan(pendingPlan.operation_id, pendingPlan.confirmation_token);
-      const restored = pendingPlan.intent !== "connect";
+      await applyAgentPlan(plan.operation_id, plan.confirmation_token);
+      const restored = plan.intent !== "connect";
       if (!restored
         && !localStorage.getItem(diffShownKey(metadata.agent_id))
-        && (pendingPlan.changes?.length || pendingPlan.human_diff)) {
+        && (plan.changes?.length || plan.human_diff)) {
         localStorage.setItem(diffShownKey(metadata.agent_id), String(Date.now()));
-        setConnectDiff(pendingPlan);
+        setConnectDiff(plan);
       }
-      setPendingPlan(null);
       setNotice(restored ? "已恢复接入前的 Agent 配置" : "Agent 已接入");
       await onRescan();
     } catch (caught) {
@@ -185,11 +171,6 @@ export default function AgentRoutePage({
 
   const forceForget = async () => {
     if (!installation || busy) return;
-    if (!window.confirm(
-      "强制断开会移除 Token Station 注入的字段并清除接管记录,但无法精确还原被覆盖的原配置值。仅在正常「恢复原始配置」因密钥/快照不可用而失败时使用。确定继续?",
-    )) {
-      return;
-    }
     setBusy(true);
     setError("");
     setNotice("");
@@ -288,38 +269,6 @@ export default function AgentRoutePage({
           )}
         </div>
       </header>
-
-      {pendingPlan && (() => {
-        const changes = pendingPlan.changes ?? [];
-        return (
-          <section className="projection-inline" aria-label="配置改动确认">
-            <div className="projection-inline-head">
-              <span className="eyebrow">
-                即将写入 · {pendingPlan.intent === "connect" ? "接入" : "恢复"}
-                <code>{pendingPlan.target_config_path}</code>
-              </span>
-              <div className="projection-inline-actions">
-                <button className="btn tiny" type="button" disabled={busy} onClick={() => setPendingPlan(null)}>取消</button>
-                <button className="btn tiny primary" type="button" disabled={busy} onClick={() => void confirmProjection()}>
-                  {busy ? "应用中…" : "确认写入"}
-                </button>
-              </div>
-            </div>
-            {changes.length ? (
-              <ul className="projection-inline-list">
-                {changes.map((change, index) => (
-                  <li key={index}>
-                    <code>{change.path.segments.join(".")}</code>
-                    <span>{change.summary}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="projection-inline-empty">没有字段变化，确认后仅更新时间戳。</p>
-            )}
-          </section>
-        );
-      })()}
 
       {connectDiff && (() => {
         const changes = connectDiff.changes ?? [];

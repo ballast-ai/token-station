@@ -23,8 +23,17 @@ use crate::lexicon;
 /// carry any of it forward.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestFeatures {
-    /// See [`estimate_tokens`] for what "estimated" is worth.
+    /// See [`estimate_tokens`] for what "estimated" is worth. This counts the
+    /// WHOLE request (incl. the system prompt); it is what context-window
+    /// fitting needs — not what difficulty scoring should use.
     pub estimated_input_tokens: u32,
+    /// Estimated tokens of the CONVERSATION only (non-system messages). Agents
+    /// (OpenCode/Claude Code) ship a fixed multi-thousand-token system prompt
+    /// every turn; counting it as difficulty pins every request to the top tier.
+    /// Difficulty scoring uses this so a trivial greeting stays trivial regardless
+    /// of the agent's scaffolding.
+    #[serde(default)]
+    pub conversation_tokens: u32,
     pub message_count: u32,
     pub tool_count: u32,
     pub has_images: bool,
@@ -68,22 +77,30 @@ impl RequestFeatures {
     #[must_use]
     pub fn extract(request: &ChatRequest, hints: &[AgentHint]) -> Self {
         let mut estimated_input_tokens: u32 = 0;
+        let mut conversation_tokens: u32 = 0;
         let mut code_fences: u32 = 0;
         let mut has_images = false;
 
         for message in &request.messages {
+            // The system prompt is fixed Agent scaffolding. Include it only in estimated_input_tokens for context
+            // context-window fitting), not conversation_tokens used for difficulty scoring.
+            let is_conversation = message.role != Role::System;
+            let mut add = |tokens: u32| {
+                estimated_input_tokens = estimated_input_tokens.saturating_add(tokens);
+                if is_conversation {
+                    conversation_tokens = conversation_tokens.saturating_add(tokens);
+                }
+            };
             match message.content.as_ref() {
                 Some(Content::Text(text)) => {
-                    estimated_input_tokens =
-                        estimated_input_tokens.saturating_add(estimate_tokens(text));
+                    add(estimate_tokens(text));
                     code_fences = code_fences.saturating_add(count_fences(text));
                 }
                 Some(Content::Parts(parts)) => {
                     for part in parts {
                         match part {
                             ContentPart::Text { text } => {
-                                estimated_input_tokens =
-                                    estimated_input_tokens.saturating_add(estimate_tokens(text));
+                                add(estimate_tokens(text));
                                 code_fences = code_fences.saturating_add(count_fences(text));
                             }
                             ContentPart::ImageUrl { .. } => has_images = true,
@@ -93,8 +110,7 @@ impl RequestFeatures {
                 None => {}
             }
             for call in &message.tool_calls {
-                estimated_input_tokens =
-                    estimated_input_tokens.saturating_add(estimate_tokens(&call.arguments));
+                add(estimate_tokens(&call.arguments));
             }
         }
 
@@ -103,6 +119,7 @@ impl RequestFeatures {
 
         Self {
             estimated_input_tokens,
+            conversation_tokens,
             message_count: truncate(request.messages.len()),
             tool_count: truncate(request.tools.len()),
             has_images,

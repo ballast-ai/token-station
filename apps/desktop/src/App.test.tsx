@@ -277,6 +277,47 @@ describe("desktop station navigation", () => {
     );
   });
 
+  it("rescans once the runtime becomes ready after a not-ready first load", async () => {
+    // The gateway can be unavailable when the app opens. The initial load scan has a not-ready runtime state. Managed Agents
+    // This can incorrectly show Repair required. When runtime becomes ready, scan again to align the card with real state.
+    const notReady = stateFixture({
+      serve: serveFixture({
+        phase: "starting",
+        app_runtime: "stopped",
+        listener_reachable: false,
+        running_revision: 1,
+        instance_id: "runtime-a",
+      }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return notReady;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "get_runtime_state") {
+        return serveFixture({
+          phase: "running",
+          app_runtime: "running",
+          listener_reachable: true,
+          running_revision: 1,
+          instance_id: "runtime-a",
+        });
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    // The first scan comes from load() while runtime is not ready.
+    await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1));
+    // The 500 ms poll marks runtime ready, and the transition triggers a rescan.
+    await waitFor(
+      () => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2),
+      { timeout: 1_500 },
+    );
+    // Runtime remains ready afterward, so no additional rescan occurs.
+    await waitFor(() => expect(screen.getByTestId("agent-runtime-connection")).toBeInTheDocument());
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2);
+  });
+
   it("shows exactly five fixed Agents, no Gemini, and scans only on load or explicit rescan", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -356,8 +397,6 @@ describe("desktop station navigation", () => {
     await waitFor(() => expect(scans).toBe(2));
     await user.click(navigation().getByRole("button", { name: "Claude Code" }));
     await user.click(screen.getByRole("button", { name: "一键接入" }));
-    await user.click(within(await screen.findByRole("region", { name: "配置改动确认" }))
-      .getByRole("button", { name: "确认写入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
       "apply_agent_plan",
       { operationId: "op-overlap", confirmationToken: "token-overlap" },
@@ -580,7 +619,7 @@ describe("desktop station navigation", () => {
     expect(screen.getByText("供应商已添加")).toBeInTheDocument();
   });
 
-  it("previews the redacted Connector projection before applying it", async () => {
+  it("applies the Connector plan directly on 一键接入", async () => {
     const user = userEvent.setup();
     const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
     let scans = 0;
@@ -608,24 +647,18 @@ describe("desktop station navigation", () => {
     await user.click(navigation().getByRole("button", { name: "Claude Code" }));
     expect(screen.queryByRole("button", { name: /选择安装/ })).toBeNull();
     await user.click(await screen.findByRole("button", { name: "一键接入" }));
-    expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
       installationPath: "/opt/claude",
       expectedVersion: "9.9.9",
-    });
-    const preview = await screen.findByRole("region", { name: "配置改动确认" });
-    expect(preview).toHaveTextContent("env.ANTHROPIC_BASE_URL");
-    expect(preview).toHaveTextContent("敏感值已隐藏");
-    expect(preview).not.toHaveTextContent("local-virtual-key");
-    expect(invokeMock).not.toHaveBeenCalledWith("apply_agent_plan", expect.anything());
-    await user.click(within(preview).getByRole("button", { name: "确认写入" }));
+    }));
+    // There is no separate write-confirmation step; apply immediately after planning.
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", { operationId: "op-1", confirmationToken: "token-1" }));
-    expect(screen.queryByRole("region", { name: "配置改动确认" })).toBeNull();
     expect(await screen.findByText("Agent 已接入")).toBeInTheDocument();
     expect(scans).toBe(2);
   });
 
-  it("shows one admitted state and only applies after projection confirmation", async () => {
+  it("applies directly for an admitted state", async () => {
     const user = userEvent.setup();
     const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
     const admitted = defaultAdmittedClaude();
@@ -649,17 +682,14 @@ describe("desktop station navigation", () => {
       installationPath: "/opt/claude",
       expectedVersion: "2.1.210",
     }));
-    expect(invokeMock).not.toHaveBeenCalledWith("apply_agent_plan", expect.anything());
-    await user.click(within(await screen.findByRole("region", { name: "配置改动确认" }))
-      .getByRole("button", { name: "确认写入" }));
+    // Apply immediately after planning without a confirmation step.
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
       operationId: "op-admitted",
       confirmationToken: "token-admitted",
     }));
-    expect(screen.queryByRole("region", { name: "配置改动确认" })).toBeNull();
   });
 
-  it("previews and confirms one-click restoration to the encrypted baseline", async () => {
+  it("restores the encrypted baseline directly on 恢复原始配置", async () => {
     const user = userEvent.setup();
     const connected = structuredClone(scannedClaude);
     connected.installations[0].managed = true;
@@ -691,13 +721,11 @@ describe("desktop station navigation", () => {
     await user.click(within(await screen.findByLabelText("主导航"))
       .getByRole("button", { name: "Claude Code" }));
     await user.click(await screen.findByRole("button", { name: "恢复 Agent 原始配置" }));
-    expect(invokeMock).toHaveBeenCalledWith("plan_agent_disconnect", {
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_disconnect", {
       agentId: "claude-code",
       installationPath: "/opt/claude",
-    });
-    const preview = await screen.findByRole("region", { name: "配置改动确认" });
-    expect(preview).toHaveTextContent("恢复受管敏感值，内容已隐藏");
-    await user.click(within(preview).getByRole("button", { name: "确认写入" }));
+    }));
+    // Apply immediately after planning without a confirmation step.
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
       operationId: "op-restore",
       confirmationToken: "token-restore",

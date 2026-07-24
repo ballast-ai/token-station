@@ -188,9 +188,11 @@ fn a_hint_beats_the_heuristic_that_would_have_said_otherwise() {
 
 #[test]
 fn the_heuristic_scores_a_request_nothing_else_claimed() {
-    // 12,000 ASCII characters ≈ 3,000 estimated tokens → 30 points, plus one
-    // tool at 20 → 50, over the threshold of 40.
-    let mut request = ask(&"x".repeat(12_000));
+    // 20,000 ASCII characters ≈ 5,000 estimated tokens → 50 points, over the
+    // threshold of 40. The advertised tool is fixed per-agent scaffolding and no
+    // longer contributes to the score, so the escalation is driven purely by the
+    // conversation content.
+    let mut request = ask(&"x".repeat(20_000));
     request.tools = vec![tool()];
 
     let decision = router()
@@ -205,6 +207,33 @@ fn the_heuristic_scores_a_request_nothing_else_claimed() {
         }
     );
     assert_eq!(decision.pool, "sota");
+}
+
+#[test]
+fn a_trivial_turn_stays_cheap_under_a_heavy_agent_harness() {
+    // The regression that motivated scoring on conversation content only: an
+    // agent (e.g. OpenCode) wraps a one-word user turn in a multi-thousand-token
+    // system prompt and a dozen advertised tools. Neither the system prompt nor
+    // the tool count is the user's request; a simple greeting must still land in `cheap`.
+    let mut request = ChatRequest::new(
+        "auto",
+        vec![
+            Message::text(Role::System, &"You are a coding agent. ".repeat(400)),
+            Message::text(Role::User, "你好"),
+        ],
+    );
+    request.tools = (0..12).map(|_| tool()).collect();
+
+    let decision = router()
+        .route(&request, &[], &candidates())
+        .expect("routable");
+
+    assert_eq!(decision.pool, "cheap", "a greeting is not a hard request");
+    assert!(
+        matches!(decision.decided_by, DecidedBy::Heuristic { score, .. } if score < 40),
+        "the score must reflect the two-character turn, not the harness: {:?}",
+        decision.decided_by
+    );
 }
 
 #[test]

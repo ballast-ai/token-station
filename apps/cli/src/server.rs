@@ -217,15 +217,49 @@ pub async fn serve(state: AppState, listener: TcpListener) -> std::io::Result<()
 
 /// The inbound gate. Loopback keeps the network out; this keeps out every
 /// other process on the machine that can open a socket to 127.0.0.1.
-fn admitted(state: &AppState, headers: &HeaderMap) -> bool {
-    let Some(expected) = &state.virtual_key else {
-        return true; // The operator switched auth off.
-    };
-    headers
+/// Clients place the virtual key differently, so extract every supported candidate from the request:
+/// - OpenAI/Anthropic:`Authorization: Bearer <key>`
+/// - Native Gemini (Gemini CLI): `x-goog-api-key: <key>` header or `?key=<key>` query parameter
+///
+/// Bearer-only authentication would ignore Gemini keys and report them missing. Kept pure for testing.
+fn presented_virtual_keys<'a>(headers: &'a HeaderMap, query: Option<&'a str>) -> Vec<&'a str> {
+    let mut keys = Vec::new();
+    if let Some(bearer) = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|presented| virtual_key::matches(presented, expected))
+    {
+        keys.push(bearer);
+    }
+    if let Some(goog) = headers
+        .get("x-goog-api-key")
+        .and_then(|value| value.to_str().ok())
+    {
+        keys.push(goog);
+    }
+    for presented in query
+        .into_iter()
+        .flat_map(|query| query.split('&'))
+        .filter_map(|pair| pair.strip_prefix("key="))
+    {
+        keys.push(presented);
+    }
+    keys
+}
+
+/// The inbound gate. Loopback keeps the network out; this keeps out every
+/// other process on the machine that can open a socket to 127.0.0.1.
+fn key_admitted(state: &AppState, headers: &HeaderMap, query: Option<&str>) -> bool {
+    let Some(expected) = &state.virtual_key else {
+        return true; // The operator switched auth off.
+    };
+    presented_virtual_keys(headers, query)
+        .into_iter()
+        .any(|presented| virtual_key::matches(presented, expected))
+}
+
+fn admitted(state: &AppState, headers: &HeaderMap) -> bool {
+    key_admitted(state, headers, None)
 }
 
 fn unauthorized(path: &str) -> Response {
@@ -445,7 +479,7 @@ async fn chat(
         Ok(scoped) => scoped,
         Err(detail) => return invalid_namespace(&detail),
     };
-    if !admitted(&state, &headers) {
+    if !key_admitted(&state, &headers, uri.query()) {
         return unauthorized(scoped.canonical_path);
     }
     if method == Method::GET && scoped.canonical_path == "/v1/models" {
@@ -535,7 +569,40 @@ async fn chat(
 
 #[cfg(test)]
 mod tests {
-    use super::{ScopedInboundPath, ServerControl, parse_inbound_path};
+    use super::{ScopedInboundPath, ServerControl, parse_inbound_path, presented_virtual_keys};
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn presented_virtual_keys_reads_bearer_goog_header_and_query() {
+        // Bearer(OpenAI/Anthropic)。
+        let mut bearer = HeaderMap::new();
+        bearer.insert("authorization", "Bearer vk-abc".parse().unwrap());
+        assert_eq!(presented_virtual_keys(&bearer, None), vec!["vk-abc"]);
+
+        // Native Gemini x-goog-api-key header.
+        let mut goog = HeaderMap::new();
+        goog.insert("x-goog-api-key", "vk-gem".parse().unwrap());
+        assert_eq!(presented_virtual_keys(&goog, None), vec!["vk-gem"]);
+
+        // Native Gemini fallback: a ?key= query parameter among other parameters.
+        assert_eq!(
+            presented_virtual_keys(&HeaderMap::new(), Some("alt=1&key=vk-q&x=2")),
+            vec!["vk-q"]
+        );
+
+        // Collect all three when present; any matching candidate grants access.
+        let mut all = HeaderMap::new();
+        all.insert("authorization", "Bearer vk-b".parse().unwrap());
+        all.insert("x-goog-api-key", "vk-g".parse().unwrap());
+        assert_eq!(
+            presented_virtual_keys(&all, Some("key=vk-q")),
+            vec!["vk-b", "vk-g", "vk-q"]
+        );
+
+        // Return an empty list when no key is present.
+        assert!(presented_virtual_keys(&HeaderMap::new(), None).is_empty());
+        assert!(presented_virtual_keys(&HeaderMap::new(), Some("model=x")).is_empty());
+    }
 
     #[test]
     fn accept_stop_and_request_drain_are_separate_lifecycle_steps() {

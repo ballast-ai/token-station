@@ -3,7 +3,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use command_group::CommandGroup;
@@ -685,14 +685,72 @@ fn valid_npm_package_name(name: &str) -> bool {
     }
 }
 
+/// Binary hash cache entry. Reuse SHA-256 while path, mtime, and size remain unchanged.
+struct CachedBinaryHash {
+    modified_at_ms: Option<u64>,
+    size: u64,
+    sha256: String,
+}
+
+/// Process-wide binary hash cache keyed by canonical path. Each `DiscoveryScanner` is new for every scan, so store the cache
+/// Persists globally across scans. Almost every Agent button starts a full scan first, and Agent binaries can be
+/// hundreds of MB (claude 225 MB, opencode 138 MB). Without caching, every click reads them from start to finish for SHA-256
+/// each time; in debug builds this can take several seconds. The cache lets unchanged binaries use stat without rehashing.
+static BINARY_HASH_CACHE: LazyLock<Mutex<BTreeMap<PathBuf, CachedBinaryHash>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
 fn binary_facts(path: &Path) -> (Option<u64>, Option<String>) {
-    let modified_at_ms = std::fs::metadata(path)
-        .ok()
+    let metadata = std::fs::metadata(path).ok();
+    let modified_at_ms = metadata
+        .as_ref()
         .and_then(|metadata| metadata.modified().ok())
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
         .and_then(|duration| duration.as_millis().try_into().ok());
-    let binary_sha256 = hash_file(path).ok();
+    let size = metadata.as_ref().map(std::fs::Metadata::len);
+    let binary_sha256 = cached_binary_sha256(path, modified_at_ms, size);
     (modified_at_ms, binary_sha256)
+}
+
+/// Reuse the global cache when path, mtime, and size match; otherwise hash the file and update the cache.
+fn cached_binary_sha256(
+    path: &Path,
+    modified_at_ms: Option<u64>,
+    size: Option<u64>,
+) -> Option<String> {
+    match BINARY_HASH_CACHE.lock() {
+        Ok(mut cache) => lookup_or_hash(&mut cache, path, modified_at_ms, size, hash_file),
+        // Do not crash on a poisoned lock; fall back to hashing the file.
+        Err(_) => hash_file(path).ok(),
+    }
+}
+
+/// Pure cache-decision logic with an injected hash function for testing. Reuse the cache when mtime and size match;
+/// Otherwise, call `hasher` to recalculate and update the cache. Do not cache when size is unavailable because the file is absent or unreadable.
+fn lookup_or_hash(
+    cache: &mut BTreeMap<PathBuf, CachedBinaryHash>,
+    path: &Path,
+    modified_at_ms: Option<u64>,
+    size: Option<u64>,
+    hasher: impl Fn(&Path) -> std::io::Result<String>,
+) -> Option<String> {
+    let Some(size) = size else {
+        return hasher(path).ok();
+    };
+    if let Some(entry) = cache.get(path) {
+        if entry.size == size && entry.modified_at_ms == modified_at_ms {
+            return Some(entry.sha256.clone());
+        }
+    }
+    let sha256 = hasher(path).ok()?;
+    cache.insert(
+        path.to_path_buf(),
+        CachedBinaryHash {
+            modified_at_ms,
+            size,
+            sha256: sha256.clone(),
+        },
+    );
+    Some(sha256)
 }
 
 fn hash_file(path: &Path) -> std::io::Result<String> {
@@ -1274,6 +1332,36 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
+
+    #[test]
+    fn lookup_or_hash_reuses_cache_until_mtime_or_size_changes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let hasher = |_: &Path| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, std::io::Error>("sha".to_string())
+        };
+        let mut cache = BTreeMap::new();
+        let path = Path::new("/bin/agent");
+
+        // First lookup misses and hashes once.
+        let first = lookup_or_hash(&mut cache, path, Some(100), Some(500), &hasher).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Unchanged mtime and size reuse the cache without hashing.
+        let second = lookup_or_hash(&mut cache, path, Some(100), Some(500), &hasher).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(first, second);
+        // Recalculate when mtime changes.
+        lookup_or_hash(&mut cache, path, Some(200), Some(500), &hasher).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // Recalculate when size changes.
+        lookup_or_hash(&mut cache, path, Some(200), Some(600), &hasher).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        // An unreadable size disables caching, so every call hashes.
+        lookup_or_hash(&mut cache, path, Some(200), None, &hasher).unwrap();
+        lookup_or_hash(&mut cache, path, Some(200), None, &hasher).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+    }
 
     struct FixedProbe;
 

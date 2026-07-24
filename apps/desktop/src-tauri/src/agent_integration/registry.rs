@@ -802,10 +802,15 @@ mod tests {
             openclaw.version_probe.runtime,
             Some(ProbeRuntime::EnvShebang { .. })
         ));
+        // gemini-cli (descriptors()[3]) is also an `env node` script and needs Node runtime version detection.
+        assert!(matches!(
+            registry.descriptors()[3].version_probe.runtime,
+            Some(ProbeRuntime::EnvShebang { .. })
+        ));
         assert!(registry
             .descriptors()
             .iter()
-            .filter(|descriptor| descriptor.agent_id != "openclaw")
+            .filter(|descriptor| !matches!(descriptor.agent_id.as_str(), "openclaw" | "gemini-cli"))
             .all(|descriptor| descriptor.version_probe.runtime.is_none()));
         assert!(registry
             .descriptors()

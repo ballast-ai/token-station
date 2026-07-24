@@ -271,6 +271,20 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
         draft["plugins"]["agents"] = json!(desktop_agents());
     }
 
+    // Ensure agents includes inbound adapters for all builtin connectors. In old configurations, agents was a fixed snapshot
+    // A snapshot. New adapters such as agent-gemini are not added automatically. The gateway does not load them, so the related Agent
+    // Connection fails if the gateway did not load agent-xxx. Add missing entries here while preserving order and other user entries.
+    if !draft["plugins"]["agents"].is_array() {
+        draft["plugins"]["agents"] = json!([]);
+    }
+    if let Some(agents) = draft["plugins"]["agents"].as_array_mut() {
+        for adapter in desktop_agents() {
+            if !agents.iter().any(|value| value.as_str() == Some(adapter)) {
+                agents.push(json!(adapter));
+            }
+        }
+    }
+
     fn anchor(path: &mut Value, config_dir: &std::path::Path) {
         let Some(raw) = path.as_str() else {
             return;
@@ -3377,6 +3391,30 @@ mod tests {
     use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
     use tauri::Manager;
+
+    #[test]
+    fn prepare_desktop_draft_backfills_missing_builtin_agent_adapters() {
+        // Legacy agents snapshots omit the later agent-gemini adapter.
+        let draft = json!({
+            "plugins": { "agents": ["agent-openai", "agent-anthropic", "agent-openai-responses"] }
+        });
+        let out = prepare_desktop_draft(draft, std::path::Path::new("/tmp"));
+        let agents: Vec<String> = out["plugins"]["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect();
+        // Include every desktop_agents() built-in adapter, including agent-gemini, while preserving existing entries.
+        assert!(agents.contains(&"agent-openai".to_string()));
+        assert!(
+            agents.contains(&"agent-gemini".to_string()),
+            "agent-gemini 应被补齐,实际 ={agents:?}"
+        );
+        for adapter in desktop_agents() {
+            assert!(agents.iter().any(|a| a == adapter), "缺 {adapter}:{agents:?}");
+        }
+    }
 
     #[test]
     fn prepare_desktop_draft_upgrades_unknown_tool_capability_but_keeps_unsupported() {

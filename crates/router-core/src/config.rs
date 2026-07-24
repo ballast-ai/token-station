@@ -272,11 +272,16 @@ impl Heuristic {
     #[must_use]
     pub fn score(&self, features: &RequestFeatures) -> u32 {
         let weights = &self.weights;
+        // Score difficulty from conversation content without the system prompt. Fixed Agent scaffolding can contain thousands of system tokens
+        // prompt), or every request receives a high-tier score. See the conversation_tokens comment.
         let mut score = features
-            .estimated_input_tokens
+            .conversation_tokens
             .saturating_div(weights.tokens_per_point.max(1));
 
-        score = score.saturating_add(features.tool_count.saturating_mul(weights.per_tool));
+        // Note: advertised tool_count(request.tools.len()) is fixed for each agent.
+        // OpenCode sends the full tool set with every request, independent of difficulty. Do not include it in difficulty scoring. Previously, tool_count
+        // `×per_tool` was a main cause of a basic greeting entering the high tier. tool_count still controls capability admission. Requests with tools
+        // Route requests to models that support tool calls. See route.rs. Keep per_tool weights but exclude them from scoring.
         score = score.saturating_add(
             features
                 .code_block_count
@@ -651,16 +656,16 @@ mod tests {
         assert!(heuristic.bands.is_empty());
 
         let features = RequestFeatures {
-            estimated_input_tokens: 2_000, // 20
-            tool_count: 1,                 // 20
-            code_block_count: 1,           // 8
-            message_count: 3,              // 6
+            conversation_tokens: 2_000, // 20 from conversation tokens, excluding the system prompt
+            tool_count: 1,              // Excluded from difficulty; used only for capability gating
+            code_block_count: 1,        // 8
+            message_count: 3,           // 6 from two extra turns times 3
             // Ported counts present but every ported weight defaulted to 0.
             reasoning_marker_count: 9,
             simple_indicator_count: 9,
             ..RequestFeatures::default()
         };
-        assert_eq!(heuristic.score(&features), 54);
+        assert_eq!(heuristic.score(&features), 34); // 20 + 8 + 6; tool_count no longer scores
         assert_eq!(heuristic.select(54), ("sota", 40));
         assert_eq!(heuristic.select(39), ("cheap", 40));
     }
@@ -989,8 +994,9 @@ mod tests {
             bands: Vec::new(),
         };
         let features = RequestFeatures {
-            estimated_input_tokens: 1_000,
-            tool_count: 2,
+            // tokens_per_point=1 makes the base u32::MAX; json_schema then exercises saturating_add.
+            conversation_tokens: u32::MAX,
+            requires_json_schema: true,
             ..RequestFeatures::default()
         };
 

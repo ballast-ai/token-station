@@ -144,7 +144,17 @@
         "argv": ["--version"],
         "timeout_ms": 2000,
         "max_output_bytes": 65536,
-        "output_matcher": "SEMVER_ANYWHERE"
+        "output_matcher": "SEMVER_ANYWHERE",
+        "runtime": {
+          "kind": "env_shebang",
+          "interpreter_candidates": ["node"],
+          "resolution_sources": ["observed_entry_sibling", "known_install_locations"],
+          "known_install_locations": {
+            "macos": ["${HOME}/.local/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"],
+            "linux": ["${HOME}/.local/bin/node", "/usr/local/bin/node", "/usr/bin/node"],
+            "wsl": ["${HOME}/.local/bin/node", "/usr/local/bin/node", "/usr/bin/node"]
+          }
+        }
       },
       "config_locations": [
         {
