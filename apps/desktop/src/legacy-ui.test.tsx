@@ -5,6 +5,7 @@ import type { ProviderView, SettingsView, StateView } from "./api";
 import {
   checkUpgrade,
   discoverProviderModels,
+  getEgress,
   getState,
   getPlugins,
   getRouterTable,
@@ -91,6 +92,15 @@ const state: StateView = {
 beforeEach(() => {
   vi.mocked(checkUpgrade).mockReset();
   vi.mocked(discoverProviderModels).mockReset();
+  vi.mocked(getEgress).mockReset();
+  vi.mocked(getEgress).mockResolvedValue({
+    mode: "direct",
+    proxy_url: null,
+    no_proxy: [],
+    auth_slot: null,
+    routes: [],
+    fixed_direct_classes: ["update_check"],
+  });
   vi.mocked(getState).mockReset();
   vi.mocked(getState).mockResolvedValue(state);
   vi.mocked(getPlugins).mockReset();
@@ -252,6 +262,40 @@ describe("legacy desktop read-only pages", () => {
 });
 
 describe("settings and update actions", () => {
+  it("renders resolved egress routes in a dedicated full-width list", async () => {
+    vi.mocked(getEgress).mockResolvedValue({
+      mode: "direct",
+      proxy_url: null,
+      no_proxy: [],
+      auth_slot: null,
+      routes: [
+        {
+          request_class: "provider_request",
+          upstream: "deepseek",
+          target: "https://api.deepseek.com",
+          route: "direct",
+          matched_no_proxy: false,
+        },
+        {
+          request_class: "model_catalog",
+          upstream: "openrouter",
+          target: "https://openrouter.ai/api/v1/models",
+          route: "direct",
+          matched_no_proxy: false,
+        },
+      ],
+      fixed_direct_classes: ["update_check"],
+    });
+
+    render(<Settings settings={settings} serveRunning={false} onSaved={vi.fn()} />);
+
+    const routes = await screen.findByLabelText("实际出口解析");
+    expect(routes).toHaveClass("egress-route-list");
+    expect(routes).not.toHaveClass("kv-grid");
+    expect(within(routes).getByText("provider_request · deepseek")).toBeInTheDocument();
+    expect(within(routes).getByText("model_catalog · openrouter")).toBeInTheDocument();
+  });
+
   it("saves changed settings and explains the running-server restart", async () => {
     vi.mocked(setSettings).mockResolvedValue(state);
     const onSaved = vi.fn();

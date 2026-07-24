@@ -414,11 +414,6 @@ pub fn attach_disconnect_companions(
             connector.format(),
             connector.label(),
         )?;
-        let current_macs =
-            compute_owned_value_macs(&current_document, &companion.owned_paths, master_key)?;
-        if current_macs != companion.owned_value_macs {
-            return Err("companion owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
-        }
         let baseline = snapshots.load(&companion.baseline_snapshot_id)?;
         if baseline.record.snapshot_id != companion.baseline_snapshot_id
             || baseline.record.agent_id != ownership.agent_id
@@ -435,6 +430,13 @@ pub fn attach_disconnect_companions(
             connector.format(),
             connector.label(),
         )?;
+        let current_macs =
+            compute_owned_value_macs(&current_document, &companion.owned_paths, master_key)?;
+        let baseline_macs =
+            compute_owned_value_macs(&baseline_document, &companion.owned_paths, master_key)?;
+        if current_macs != companion.owned_value_macs && current_macs != baseline_macs {
+            return Err("companion owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
+        }
         let (forward_operations, reverse_operations) = projection_operations(
             &current_document,
             &baseline_document,
@@ -536,11 +538,6 @@ pub fn attach_restore_companions(
             connector.format(),
             connector.label(),
         )?;
-        let current_macs =
-            compute_owned_value_macs(&current_document, &companion.owned_paths, master_key)?;
-        if current_macs != companion.owned_value_macs {
-            return Err("companion owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
-        }
         let source_document = parse_source_bytes(
             source_snapshot
                 .record
@@ -549,6 +546,13 @@ pub fn attach_restore_companions(
             connector.format(),
             connector.label(),
         )?;
+        let current_macs =
+            compute_owned_value_macs(&current_document, &companion.owned_paths, master_key)?;
+        let source_macs =
+            compute_owned_value_macs(&source_document, &companion.owned_paths, master_key)?;
+        if current_macs != companion.owned_value_macs && current_macs != source_macs {
+            return Err("companion owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
+        }
         let (forward_operations, reverse_operations) =
             projection_operations(&current_document, &source_document, &companion.owned_paths)?;
         project_owned_paths(
@@ -691,10 +695,6 @@ fn build_owned_projection_plan(
         connector.format(),
         connector.label(),
     )?;
-    if !ownership_matches(ownership, &current_document, master_key)? {
-        return Err("当前 owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
-    }
-    let original_semantic = semantic_json(&current_document)?;
     let source_document = parse_source_bytes(
         source_snapshot
             .existed
@@ -702,6 +702,14 @@ fn build_owned_projection_plan(
         connector.format(),
         connector.label(),
     )?;
+    let matches_record = ownership_matches(ownership, &current_document, master_key)?;
+    let matches_source =
+        compute_owned_value_macs(&current_document, &ownership.owned_paths, master_key)?
+            == compute_owned_value_macs(&source_document, &ownership.owned_paths, master_key)?;
+    if !matches_record && !matches_source {
+        return Err("当前 owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
+    }
+    let original_semantic = semantic_json(&current_document)?;
     let (forward_operations, reverse_operations) =
         projection_operations(&current_document, &source_document, &ownership.owned_paths)?;
     project_owned_paths(

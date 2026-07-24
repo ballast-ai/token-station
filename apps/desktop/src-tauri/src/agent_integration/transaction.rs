@@ -503,9 +503,36 @@ impl<'a> TransactionEngine<'a> {
                     "ownership_key_unavailable",
                 )
             })?;
-            if !ownership_matches(&binding.record, &document, &key)
-                .map_err(|_| failure(plan, TransactionStage::Ownership, "ownership_check_failed"))?
-            {
+            let matches_record =
+                ownership_matches(&binding.record, &document, &key).map_err(|_| {
+                    failure(plan, TransactionStage::Ownership, "ownership_check_failed")
+                })?;
+            let projected_document = parse_source_bytes(
+                Some(plan.projected_bytes.as_slice()),
+                plan.format,
+                plan.label,
+            )
+            .map_err(|_| {
+                failure(
+                    plan,
+                    TransactionStage::Ownership,
+                    "ownership_projection_parse_failed",
+                )
+            })?;
+            let matches_projection =
+                compute_owned_value_macs(&document, &binding.record.owned_paths, &key)
+                    .and_then(|observed| {
+                        compute_owned_value_macs(
+                            &projected_document,
+                            &binding.record.owned_paths,
+                            &key,
+                        )
+                        .map(|projected| observed == projected)
+                    })
+                    .map_err(|_| {
+                        failure(plan, TransactionStage::Ownership, "ownership_check_failed")
+                    })?;
+            if !matches_record && !matches_projection {
                 return Err(failure(
                     plan,
                     TransactionStage::Ownership,
@@ -545,7 +572,28 @@ impl<'a> TransactionEngine<'a> {
                             "companion_ownership_check_failed",
                         )
                     })?;
-                if observed != owned.owned_value_macs {
+                let projected_document = parse_source_bytes(
+                    Some(companion.projected_bytes.as_slice()),
+                    companion.format,
+                    companion.label,
+                )
+                .map_err(|_| {
+                    failure(
+                        plan,
+                        TransactionStage::Ownership,
+                        "companion_ownership_projection_parse_failed",
+                    )
+                })?;
+                let projected =
+                    compute_owned_value_macs(&projected_document, &owned.owned_paths, &key)
+                        .map_err(|_| {
+                            failure(
+                                plan,
+                                TransactionStage::Ownership,
+                                "companion_ownership_check_failed",
+                            )
+                        })?;
+                if observed != owned.owned_value_macs && observed != projected {
                     return Err(failure(
                         plan,
                         TransactionStage::Ownership,
@@ -2108,6 +2156,83 @@ mod tests {
             .list("claude-code", target.to_str().unwrap())
             .unwrap();
         assert!(records.iter().all(|record| !record.pinned));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn transaction_disconnect_accepts_owned_paths_already_at_baseline() {
+        let root = scratch("disconnect-already-restored");
+        let target = root.join("settings.json");
+        write_initial(&target, br#"{"unowned":"keep"}"#);
+        let connect = prepare(&target, "vk-disconnect-already-restored");
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership_store = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership_store,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        engine
+            .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
+            .unwrap();
+
+        let ownership_key = OwnershipKey {
+            agent_id: "claude-code".to_string(),
+            installation_path: "/opt/claude".to_string(),
+            target_config_path: target.to_str().unwrap().to_string(),
+        };
+        let ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let baseline = snapshots.load(&ownership.baseline_snapshot_id).unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+
+        // An external tool removed Token Station managed fields but kept the ownership record.
+        // This matches the baseline state on managed paths. Permit an idempotent disconnect and clear ownership.
+        std::fs::write(
+            &target,
+            br#"{"unowned":"keep","later_user_field":{"enabled":true}}"#,
+        )
+        .unwrap();
+        let current = read_config_source(&target).unwrap();
+        let disconnect = build_disconnect_plan(
+            &ClaudeCodeConnector,
+            &discovery(&target),
+            &verified(),
+            &target,
+            &current,
+            &ownership,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            2_000,
+            "ef".repeat(16),
+        )
+        .expect("owned paths already matching the baseline should be recoverable");
+
+        let outcome = engine
+            .apply_disconnect(
+                &disconnect,
+                &confirmation_at(&disconnect, 2_001),
+                &admission(),
+                2_002,
+            )
+            .unwrap();
+        assert_eq!(outcome.ownership_revision, 0);
+        let restored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(restored["unowned"], "keep");
+        assert_eq!(restored["later_user_field"]["enabled"], true);
+        assert!(ownership_store.load(&ownership_key).unwrap().is_none());
         std::fs::remove_dir_all(root).ok();
     }
 
