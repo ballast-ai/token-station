@@ -731,6 +731,10 @@ describe("desktop station navigation", () => {
       confirmationToken: "token-restore",
     }));
     expect(await screen.findByText("已恢复接入前的 Agent 配置")).toBeInTheDocument();
+
+    await user.click(navigation().getByRole("button", { name: "OpenCode" }));
+    expect(await screen.findByRole("heading", { name: "OpenCode", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByText("已恢复接入前的 Agent 配置")).not.toBeInTheDocument();
   });
 
   it("selects an exact installation and plans against its path", async () => {
