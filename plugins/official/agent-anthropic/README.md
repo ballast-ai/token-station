@@ -11,6 +11,9 @@ network, file-system, or credential access.
 - Source: `src/lib.rs`
 - Target: `wasm32-wasip2`
 - Acceptance: five `agent-protocol-v1` conformance families in `fixtures/`
-- Current limit: Canonical IR does not represent `thinking` or
-  `redacted_thinking`. The adapter rejects these content blocks and does not
-  discard them silently.
+- The `anthropic_thinking` request extension stores the `thinking` request
+  configuration. The `anthropic_thinking_blocks` message extension stores
+  original `thinking` and `redacted_thinking` blocks from assistant
+  history, including their original array positions. These fields do not
+  change the core Canonical IR schema. Providers that do not recognize them
+  do not serialize them to the upstream.
