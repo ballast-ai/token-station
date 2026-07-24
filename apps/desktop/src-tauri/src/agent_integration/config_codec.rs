@@ -94,9 +94,17 @@ pub fn apply_patch_with_reverse(
     for operation in operations {
         let before = semantic_json(document)?;
         let previous = json_value_at(&before, &operation.path).cloned();
+        let created_parent = created_nested_parent(&before, operation);
         apply_patch(document, std::slice::from_ref(operation))?;
         if operation.operation == PatchKind::Test {
             continue;
+        }
+        if let Some(path) = created_parent {
+            reverse.push(PatchOperation {
+                operation: PatchKind::Remove,
+                path,
+                value: None,
+            });
         }
         reverse.push(PatchOperation {
             operation: if previous.is_some() {
@@ -110,6 +118,21 @@ pub fn apply_patch_with_reverse(
     }
     reverse.reverse();
     Ok(reverse)
+}
+
+/// Returns the deepest parent that an add/replace operation will create.
+/// Reversing each leaf independently otherwise leaves an empty nested table
+/// behind, which differs from a baseline where the owned subtree was absent.
+fn created_nested_parent(before: &Value, operation: &PatchOperation) -> Option<ConfigPath> {
+    if !matches!(operation.operation, PatchKind::Add | PatchKind::Replace)
+        || operation.path.segments.len() < 2
+    {
+        return None;
+    }
+    let path = ConfigPath {
+        segments: operation.path.segments[..operation.path.segments.len() - 1].to_vec(),
+    };
+    json_value_at(before, &path).is_none().then_some(path)
 }
 
 /// Copy only declared owned subtrees from a baseline document into the
@@ -514,7 +537,7 @@ fn apply_toml_operation(document: &mut Document, operation: &PatchOperation) -> 
                     .and_then(Item::as_table_like_mut)
                     .ok_or_else(|| format!("配置路径 '{}' 的父级不是 TOML 表", operation.path))?;
             }
-            let item = json_scalar_to_toml(
+            let item = json_to_toml_item(
                 operation
                     .value
                     .as_ref()
@@ -983,7 +1006,7 @@ fn strict_yaml_semantic(rendered: &str, label: &str) -> Result<Value, String> {
     Ok(value.0)
 }
 
-fn json_scalar_to_toml(value: &Value, path: &ConfigPath) -> Result<Item, String> {
+fn json_to_toml_item(value: &Value, path: &ConfigPath) -> Result<Item, String> {
     match value {
         Value::String(value) => Ok(toml_value(value.clone())),
         Value::Bool(value) => Ok(toml_value(*value)),
@@ -991,7 +1014,16 @@ fn json_scalar_to_toml(value: &Value, path: &ConfigPath) -> Result<Item, String>
             .as_i64()
             .map(toml_value)
             .ok_or_else(|| format!("配置路径 '{path}' 不是受支持的 TOML 整数")),
-        _ => Err(format!("配置路径 '{path}' 只允许 TOML 标量")),
+        Value::Object(values) => {
+            let mut table = Table::new();
+            for (key, value) in values {
+                let mut child_path = path.clone();
+                child_path.segments.push(key.clone());
+                table.insert(key, json_to_toml_item(value, &child_path)?);
+            }
+            Ok(Item::Table(table))
+        }
+        _ => Err(format!("配置路径 '{path}' 只允许 TOML 标量或表")),
     }
 }
 
@@ -1471,6 +1503,37 @@ mod tests {
     }
 
     #[test]
+    fn toml_patch_can_restore_a_provider_table_from_a_structured_reverse_value() {
+        let mut document = ConfigDocument::Toml(Box::new(Document::new()));
+        apply_patch(
+            &mut document,
+            &[operation(
+                PatchKind::Add,
+                &["model_providers", "tokenstation"],
+                Some(json!({
+                    "base_url": "http://127.0.0.1:8787/v1",
+                    "wire_api": "responses",
+                    "requires_openai_auth": false
+                })),
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(
+            semantic_json(&document).unwrap(),
+            json!({
+                "model_providers": {
+                    "tokenstation": {
+                        "base_url": "http://127.0.0.1:8787/v1",
+                        "wire_api": "responses",
+                        "requires_openai_auth": false
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
     fn config_parse_errors_never_echo_the_source_line() {
         let marker = "sk-sensitive-marker-must-not-leak";
         let json = format!("{{\"apiKey\":\"{marker}\",}}");
@@ -1580,7 +1643,7 @@ mod tests {
             )
             .unwrap();
         }
-        for value in [json!(1.5), json!([1]), json!({"a": 1})] {
+        for value in [json!(1.5), json!([1])] {
             assert!(apply_patch(
                 &mut toml,
                 &[operation(PatchKind::Replace, &["bad"], Some(value))]
