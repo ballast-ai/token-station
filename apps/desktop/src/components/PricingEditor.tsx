@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import {
   ModelPriceView,
+  ModelPriceSuggestionView,
   PriceTableView,
   getPriceTable,
   removeModelPrice,
   setModelPrice,
+  suggestModelPrice,
 } from "../api";
 
 function displayRate(rate: number | null): string {
@@ -34,10 +36,43 @@ export default function PricingEditor() {
   const [reasoning, setReasoning] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [priceTouched, setPriceTouched] = useState(false);
+  const [suggestion, setSuggestion] = useState<ModelPriceSuggestionView | null>(null);
 
   useEffect(() => {
     getPriceTable().then(setTable).catch((value) => setError(String(value)));
   }, []);
+
+  useEffect(() => {
+    const requestedModel = model.trim();
+    setSuggestion(null);
+    if (!table
+        || requestedModel.length === 0
+        || requestedModel.length > 256
+        || table.models[requestedModel]
+        || priceTouched) {
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      suggestModelPrice(null, requestedModel)
+        .then((value) => {
+          if (cancelled || !value) return;
+          setInput(displayRate(value.input_per_mtok));
+          setOutput(displayRate(value.output_per_mtok));
+          setCacheRead(displayRate(value.cache_read_per_mtok));
+          setCacheWrite(displayRate(value.cache_write_per_mtok));
+          setReasoning(displayRate(value.reasoning_per_mtok));
+          setSuggestion(value);
+        })
+        // Suggestions are optional. Manual entry remains available offline.
+        .catch(() => undefined);
+    }, 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [model, priceTouched, table]);
 
   const edit = (name: string, price: ModelPriceView) => {
     setModel(name);
@@ -48,6 +83,8 @@ export default function PricingEditor() {
     setReasoning(displayRate(price.reasoning_per_mtok));
     setError("");
     setNotice("");
+    setPriceTouched(true);
+    setSuggestion(null);
   };
 
   const save = async () => {
@@ -88,6 +125,8 @@ export default function PricingEditor() {
         setCacheRead("0");
         setCacheWrite("0");
         setReasoning("");
+        setPriceTouched(false);
+        setSuggestion(null);
       }
       setNotice(`已生成 price v${next.version}；历史回执保持原成本`);
     } catch (value) {
@@ -137,7 +176,22 @@ export default function PricingEditor() {
       <div className="price-form">
         <label className="field-label price-model-field">
           模型 ID
-          <input aria-label="模型 ID" className="input" value={model} onChange={(event) => setModel(event.target.value)} />
+          <input
+            aria-label="模型 ID"
+            className="input"
+            value={model}
+            onChange={(event) => {
+              if (suggestion) {
+                setInput("0");
+                setOutput("0");
+                setCacheRead("0");
+                setCacheWrite("0");
+                setReasoning("");
+              }
+              setSuggestion(null);
+              setModel(event.target.value);
+            }}
+          />
         </label>
         {[
           ["输入价格", input, setInput],
@@ -155,7 +209,11 @@ export default function PricingEditor() {
               min="0"
               step="0.000001"
               value={value as string}
-              onChange={(event) => (setter as (value: string) => void)(event.target.value)}
+              onChange={(event) => {
+                setPriceTouched(true);
+                setSuggestion(null);
+                (setter as (value: string) => void)(event.target.value);
+              }}
             />
           </label>
         ))}
@@ -163,6 +221,12 @@ export default function PricingEditor() {
           <button className="btn primary" disabled={!table} onClick={save}>保存新版本</button>
         </div>
       </div>
+      {suggestion && (
+        <div className="banner">
+          已按 {suggestion.source} 的 {suggestion.provider_name} / {suggestion.display_name}
+          公开美元标价预填；尚未保存，请核对后生成新版本。
+        </div>
+      )}
       {error && <div className="banner err">{error}</div>}
       {notice && <div className="banner ok">{notice}</div>}
     </div>

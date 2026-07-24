@@ -1,7 +1,12 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getPriceTable, removeModelPrice, setModelPrice } from "../api";
+import {
+  getPriceTable,
+  removeModelPrice,
+  setModelPrice,
+  suggestModelPrice,
+} from "../api";
 import PricingEditor from "./PricingEditor";
 
 vi.mock("../api", async (loadOriginal) => {
@@ -11,6 +16,7 @@ vi.mock("../api", async (loadOriginal) => {
     getPriceTable: vi.fn(),
     removeModelPrice: vi.fn(),
     setModelPrice: vi.fn(),
+    suggestModelPrice: vi.fn(),
   };
 });
 
@@ -40,6 +46,7 @@ beforeEach(() => {
     },
   });
   vi.mocked(removeModelPrice).mockReset().mockResolvedValue({ version: 9, models: {} });
+  vi.mocked(suggestModelPrice).mockReset().mockResolvedValue(null);
 });
 
 describe("versioned pricing editor", () => {
@@ -96,5 +103,64 @@ describe("versioned pricing editor", () => {
     await user.click(await screen.findByRole("button", { name: "删除 free" }));
     await waitFor(() => expect(removeModelPrice).toHaveBeenCalledWith("free", 1));
     expect(await screen.findByText("price v9")).toBeInTheDocument();
+  });
+
+  it("prefills a public catalog suggestion but never saves before confirmation", async () => {
+    vi.mocked(getPriceTable).mockResolvedValueOnce({ version: 0, models: {} });
+    vi.mocked(suggestModelPrice).mockResolvedValue({
+      model_id: "gpt-5",
+      display_name: "GPT-5",
+      provider_id: "openai",
+      provider_name: "OpenAI",
+      source: "models.dev",
+      catalog_source: "live",
+      fetched_at_ms: 1_753_334_400_000,
+      input_per_mtok: 1_250_000,
+      output_per_mtok: 10_000_000,
+      cache_read_per_mtok: 125_000,
+      cache_write_per_mtok: 0,
+      reasoning_per_mtok: null,
+    });
+    const user = userEvent.setup();
+    render(<PricingEditor />);
+    await screen.findByText("price v0");
+
+    await user.type(screen.getByRole("textbox", { name: "模型 ID" }), "gpt-5");
+
+    expect(await screen.findByText(/models\.dev.*OpenAI.*GPT-5/)).toBeInTheDocument();
+    expect(screen.getByRole("spinbutton", { name: "输入价格" })).toHaveValue(1.25);
+    expect(screen.getByRole("spinbutton", { name: "输出价格" })).toHaveValue(10);
+    expect(setModelPrice).not.toHaveBeenCalled();
+
+    await user.clear(screen.getByRole("textbox", { name: "模型 ID" }));
+    expect(screen.getByRole("spinbutton", { name: "输入价格" })).toHaveValue(0);
+    expect(screen.getByRole("spinbutton", { name: "输出价格" })).toHaveValue(0);
+    await user.type(screen.getByRole("textbox", { name: "模型 ID" }), "gpt-5");
+    await screen.findByText(/models\.dev.*OpenAI.*GPT-5/);
+
+    await user.click(screen.getByRole("button", { name: "保存新版本" }));
+    await waitFor(() => expect(setModelPrice).toHaveBeenCalledWith("gpt-5", {
+      input_per_mtok: 1_250_000,
+      output_per_mtok: 10_000_000,
+      cache_read_per_mtok: 125_000,
+      cache_write_per_mtok: 0,
+      reasoning_per_mtok: null,
+    }, 0));
+  });
+
+  it("does not overwrite a price the user has started entering", async () => {
+    vi.mocked(getPriceTable).mockResolvedValueOnce({ version: 0, models: {} });
+    const user = userEvent.setup();
+    render(<PricingEditor />);
+    await screen.findByText("price v0");
+
+    await user.type(screen.getByRole("textbox", { name: "模型 ID" }), "gpt-5");
+    const input = screen.getByRole("spinbutton", { name: "输入价格" });
+    await user.clear(input);
+    await user.type(input, "9");
+
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(suggestModelPrice).not.toHaveBeenCalled();
+    expect(input).toHaveValue(9);
   });
 });

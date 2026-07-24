@@ -1925,12 +1925,17 @@ mod tests {
 
         let profile: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
         let metadata: Value = serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
-        let normal: Value = serde_json::from_slice(&std::fs::read(&normal_config).unwrap()).unwrap();
-        let threep: Value = serde_json::from_slice(&std::fs::read(&threep_config).unwrap()).unwrap();
+        let normal: Value =
+            serde_json::from_slice(&std::fs::read(&normal_config).unwrap()).unwrap();
+        let threep: Value =
+            serde_json::from_slice(&std::fs::read(&threep_config).unwrap()).unwrap();
         assert_eq!(profile["unknownProfile"], "keep");
         assert_eq!(profile["inferenceProvider"], "gateway");
         assert_eq!(profile["disableDeploymentModeChooser"], true);
-        assert_eq!(profile["coworkEgressAllowedHosts"], serde_json::json!(["*"]));
+        assert_eq!(
+            profile["coworkEgressAllowedHosts"],
+            serde_json::json!(["*"])
+        );
         assert_eq!(metadata["unknownMeta"], "keep");
         assert_eq!(normal["unknownNormal"], "keep");
         assert_eq!(normal["deploymentMode"], "3p");

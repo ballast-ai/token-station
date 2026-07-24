@@ -12,6 +12,7 @@
 pub mod agent_integration;
 mod config_state;
 mod model_catalog;
+mod pricing_catalog;
 mod provider_tombstones;
 mod recovery;
 mod serve_lifecycle;
@@ -47,6 +48,7 @@ use agent_integration::registry::AgentRegistry;
 use agent_integration::types::AdmissionStatus;
 use config_state::ConfigState;
 use model_catalog::ModelDiscoveryView;
+use pricing_catalog::ModelPriceSuggestionView;
 use recovery::{
     DiagnosticPreview, FrontendDiagnosticInput, FrontendDiagnosticRecord, RecoveryMode,
     RecoveryState,
@@ -2930,6 +2932,41 @@ fn get_price_table(state: State<'_, AppStateManaged>) -> Result<PriceTable, Stri
 }
 
 #[tauri::command]
+async fn suggest_model_price(
+    state: State<'_, AppStateManaged>,
+    provider_id: Option<String>,
+    model_id: String,
+) -> Result<Option<ModelPriceSuggestionView>, String> {
+    let model_id = model_id.trim().to_owned();
+    if model_id.is_empty() || model_id.len() > 256 {
+        return Err("模型 ID 必须是 1–256 个字符".to_owned());
+    }
+    let provider_id = provider_id
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let (data_dir, egress, egress_secrets) = {
+        let inner = state.0.lock().unwrap();
+        let config = inner.materialize()?;
+        (
+            inner.data_dir(),
+            config.egress.clone(),
+            secrets::SecretStore::from_config(&config),
+        )
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        pricing_catalog::suggest_with_cache_egress(
+            &data_dir,
+            provider_id.as_deref(),
+            &model_id,
+            &egress,
+            &egress_secrets,
+        )
+    })
+    .await
+    .map_err(|error| format!("公开价格目录任务异常结束：{error}"))?
+}
+
+#[tauri::command]
 #[allow(
     clippy::too_many_arguments,
     reason = "Tauri maps the five price classes and expected version to named form fields"
@@ -3366,6 +3403,7 @@ pub fn run() {
             set_agent_budget,
             remove_agent_budget,
             get_price_table,
+            suggest_model_price,
             set_model_price,
             remove_model_price,
             get_recent_receipts,

@@ -42,6 +42,7 @@ import {
   setAgentRouteMode,
   setAgentBudget,
   setModelPrice,
+  suggestModelPrice,
   setAgentTier,
   setTier,
   testProvider,
@@ -222,6 +223,14 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
     expect(invokeMock).toHaveBeenLastCalledWith("remove_model_price", {
       model: "gpt-5",
       expectedVersion: 8,
+    });
+  });
+
+  it("requests a read-only public price suggestion without saving it", async () => {
+    await suggestModelPrice(null, "gpt-5");
+    expect(invokeMock).toHaveBeenLastCalledWith("suggest_model_price", {
+      providerId: null,
+      modelId: "gpt-5",
     });
   });
 

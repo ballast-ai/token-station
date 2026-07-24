@@ -521,6 +521,16 @@ export interface PriceTableView {
   models: Record<string, ModelPriceView>;
 }
 
+export interface ModelPriceSuggestionView extends ModelPriceView {
+  model_id: string;
+  display_name: string;
+  provider_id: string;
+  provider_name: string;
+  source: "models.dev";
+  catalog_source: "live" | "cache" | "stale_cache";
+  fetched_at_ms: number;
+}
+
 export interface BandView {
   at_least: number;
   pool: string;
@@ -730,6 +740,12 @@ export const removeAgentBudget = (agentId: AgentId) =>
   invoke<BudgetStatus[]>("remove_agent_budget", { agentId });
 
 export const getPriceTable = () => invoke<PriceTableView>("get_price_table");
+
+export const suggestModelPrice = (providerId: string | null, modelId: string) =>
+  invoke<ModelPriceSuggestionView | null>("suggest_model_price", {
+    providerId,
+    modelId,
+  });
 
 export const setModelPrice = (
   model: string,
