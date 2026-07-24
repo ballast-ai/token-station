@@ -3,12 +3,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
-use super::{
-    path, CompanionProjection, ConnectInput, Connector, ConnectorCapabilities,
-};
+use super::{path, CompanionProjection, ConnectInput, Connector, ConnectorCapabilities};
 use crate::agent_integration::config_codec::{
-    apply_patch, parse_source_bytes, render_document, semantic_json, ConfigDocument,
-    DocumentFormat,
+    apply_patch, parse_source_bytes, render_document, semantic_json, ConfigDocument, DocumentFormat,
 };
 use crate::agent_integration::plan::read_config_source;
 use crate::agent_integration::types::{
@@ -136,9 +133,9 @@ impl Connector for ClaudeDesktopConnector {
             DISABLE_DEPLOYMENT_MODE_CHOOSER,
             COWORK_EGRESS_ALLOWED_HOSTS,
         ]
-            .iter()
-            .map(|key| path(&[key]))
-            .collect()
+        .iter()
+        .map(|key| path(&[key]))
+        .collect()
     }
 
     fn sensitive_paths(&self) -> Vec<ConfigPath> {
@@ -294,8 +291,11 @@ mod tests {
             "token-station-claude-desktop-connector-{}-{unique}",
             std::process::id()
         ));
-        let profile = root.join("Claude-3p/configLibrary").join(format!("{PROFILE_ID}.json"));
-        fs::create_dir_all(profile.parent().expect("profile has parent")).expect("profile dir builds");
+        let profile = root
+            .join("Claude-3p/configLibrary")
+            .join(format!("{PROFILE_ID}.json"));
+        fs::create_dir_all(profile.parent().expect("profile has parent"))
+            .expect("profile dir builds");
         fs::create_dir_all(root.join("Claude")).expect("Claude dir builds");
         fs::write(root.join("Claude/config.json"), r#"{"keep":"normal"}"#)
             .expect("normal config writes");
@@ -314,7 +314,10 @@ mod tests {
             .expect("projections build");
 
         assert_eq!(projections.len(), 3);
-        for target in [root.join("Claude/config.json"), root.join("Claude-3p/config.json")] {
+        for target in [
+            root.join("Claude/config.json"),
+            root.join("Claude-3p/config.json"),
+        ] {
             let projection = projections
                 .iter()
                 .find(|projection| projection.target_path == target)
@@ -325,7 +328,10 @@ mod tests {
                 projection.label,
             )
             .expect("projected config parses");
-            assert_eq!(semantic_json(&document).expect("semantic config")[DEPLOYMENT_MODE], "3p");
+            assert_eq!(
+                semantic_json(&document).expect("semantic config")[DEPLOYMENT_MODE],
+                "3p"
+            );
         }
 
         fs::remove_dir_all(root).expect("temporary files clean up");
