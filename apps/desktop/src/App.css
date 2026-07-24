@@ -2560,13 +2560,25 @@ pre.block {
 .egress-settings select {
   color: var(--ink);
 }
+.egress-route-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 8px 0;
+}
 .egress-route-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(120px, 2fr) auto;
+  grid-template-columns: minmax(0, 2fr) minmax(80px, 1fr) auto;
   gap: 8px;
   align-items: baseline;
+  min-width: 0;
+}
+.egress-route-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .egress-route-row code {
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
