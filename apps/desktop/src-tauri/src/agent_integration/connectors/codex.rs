@@ -25,7 +25,7 @@ static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
     // connect_patch also rewrites model to auto and includes it in owned_paths(),
     // so declare it here or ownership metadata, restoration, and display will omit it.
     owned_fields: &["model", "model_provider", "model_providers.tokenstation"],
-    requires_virtual_key: false,
+    requires_virtual_key: true,
     restart_required: false,
 };
 
@@ -65,9 +65,20 @@ impl Connector for CodexConnector {
         ]
     }
 
+    fn sensitive_paths(&self) -> Vec<ConfigPath> {
+        vec![path(&[
+            "model_providers",
+            "tokenstation",
+            "experimental_bearer_token",
+        ])]
+    }
+
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String> {
         if input.adapter_ready {
-            Ok(())
+            input
+                .token
+                .map(|_| ())
+                .ok_or_else(|| "Codex 接入缺少本地虚拟 Key".to_string())
         } else {
             Err(
                 "暂不能接入 Codex：网关未加载 agent-openai-responses，/v1/responses \
@@ -90,6 +101,9 @@ impl Connector for CodexConnector {
     }
 
     fn connect_patch(&self, input: &ConnectInput<'_>) -> Result<Vec<PatchOperation>, String> {
+        let token = input
+            .token
+            .ok_or_else(|| "Codex 接入缺少本地虚拟 Key".to_string())?;
         let mut operations = vec![
             replace(&["model"], json!("auto")),
             replace(&["model_provider"], json!("tokenstation")),
@@ -99,7 +113,7 @@ impl Connector for CodexConnector {
             ),
         ];
         operations.extend(
-            provider_fields()
+            provider_fields(token)
                 .into_iter()
                 .map(|(field, value)| replace(&["model_providers", "tokenstation", field], value)),
         );
@@ -139,7 +153,10 @@ impl Connector for CodexConnector {
         if !valid {
             return Err("Codex 写入前复验失败".to_string());
         }
-        for (field, expected) in provider_fields() {
+        let token = input
+            .token
+            .ok_or_else(|| "Codex 写入前复验缺少本地虚拟 Key".to_string())?;
+        for (field, expected) in provider_fields(token) {
             if !item_matches_json(provider.get(field), &expected) {
                 return Err(format!("Codex 写入前复验字段 {field} 失败"));
             }
@@ -149,9 +166,7 @@ impl Connector for CodexConnector {
 
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
         format!(
-            "Codex 已通过 Responses API 指向 {}(~/.codex/config.toml,已备份)。\
-             Codex 的 key 走环境变量,请在启动 Codex 的终端执行一次:\
-             export TOKENSTATION_KEY=<面板上的虚拟 Key>",
+            "Codex 已通过 Responses API 指向 {}(~/.codex/config.toml,已备份)。",
             input.base_url
         )
     }
@@ -165,11 +180,11 @@ fn replace(segments: &[&str], value: serde_json::Value) -> PatchOperation {
     }
 }
 
-fn provider_fields() -> Vec<(&'static str, serde_json::Value)> {
+fn provider_fields(token: &str) -> Vec<(&'static str, serde_json::Value)> {
     vec![
         ("name", json!("token-station")),
         ("wire_api", json!("responses")),
-        ("env_key", json!("TOKENSTATION_KEY")),
+        ("experimental_bearer_token", json!(token)),
         ("requires_openai_auth", json!(false)),
         ("request_max_retries", json!(0)),
         ("stream_max_retries", json!(0)),
@@ -195,5 +210,34 @@ mod tests {
     fn projected_field_matcher_rejects_unsupported_json_shapes() {
         assert!(!item_matches_json(None, &json!(null)));
         assert!(!item_matches_json(None, &json!(["unexpected"])));
+    }
+
+    #[test]
+    fn codex_connection_embeds_the_sensitive_local_virtual_key_for_gui_clients() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/v1",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+        };
+
+        let operations = CodexConnector.connect_patch(&input).unwrap();
+        assert!(operations.iter().any(|operation| {
+            operation.path
+                == path(&[
+                    "model_providers",
+                    "tokenstation",
+                    "experimental_bearer_token",
+                ])
+                && operation.value == Some(json!("local-virtual-key"))
+        }));
+        assert!(!operations.iter().any(|operation| {
+            operation.path == path(&["model_providers", "tokenstation", "env_key"])
+        }));
+        assert!(CodexConnector.sensitive_paths().contains(&path(&[
+            "model_providers",
+            "tokenstation",
+            "experimental_bearer_token",
+        ])));
+        assert!(CodexConnector.capabilities().requires_virtual_key);
     }
 }

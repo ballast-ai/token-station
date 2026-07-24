@@ -398,10 +398,7 @@ mod tests {
                 .any(|owned| { sensitive.segments.starts_with(&owned.segments) })));
             assert!(connector.validate_preconditions(&not_ready).is_err());
             assert!(connector.validate_preconditions(&good).is_ok());
-            if matches!(
-                connector.connector_id(),
-                "claude-code-v1" | "hermes-v1" | "openclaw-v1" | "opencode-v1"
-            ) {
+            if connector.capabilities().requires_virtual_key {
                 assert!(connector.validate_preconditions(&missing_token).is_err());
             } else {
                 assert!(connector.validate_preconditions(&missing_token).is_ok());
@@ -426,7 +423,7 @@ mod tests {
             let success = connector.success_message(&good);
             assert!(!success.contains("fixture-virtual-key"));
 
-            if connector.connector_id() != "codex-v1" {
+            if connector.capabilities().requires_virtual_key {
                 assert!(connector.connect_patch(&missing_token).is_err());
             }
         }
@@ -445,7 +442,7 @@ unknown = "preserved"
 "#;
         let input = ConnectInput {
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
-            token: None,
+            token: Some("fixture-codex-virtual-key"),
             adapter_ready: true,
         };
         let baseline = parse_source_bytes(Some(source), DocumentFormat::Toml, "Codex").unwrap();

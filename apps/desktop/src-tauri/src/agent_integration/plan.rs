@@ -1145,7 +1145,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::agent_integration::connectors::ClaudeCodeConnector;
+    use crate::agent_integration::connectors::{ClaudeCodeConnector, CodexConnector};
     use crate::agent_integration::types::{
         BinarySource, Diagnostic, DiscoveryEvidence, DiscoverySource, Platform, ReasonCode,
     };
@@ -1242,6 +1242,45 @@ mod tests {
         assert!(serialized.contains("local_virtual_key"));
         assert!(!serialized.contains("value"));
         assert_ne!(prepared.view.before_hash, prepared.view.expected_after_hash);
+    }
+
+    #[test]
+    fn codex_first_connection_without_tokenstation_provider_builds_reversible_plan() {
+        let target = Path::new("/tmp/token-station-plan/config.toml");
+        let mut codex_discovery = discovery(target);
+        codex_discovery.agent_id = "codex".to_string();
+        let mut codex_compatibility = verified();
+        codex_compatibility.agent_id = "codex".to_string();
+        codex_compatibility.connector_id = Some("codex-v1".to_string());
+        let source = ConfigSource::existing(
+            b"model = \"gpt-5\"\napproval_policy = \"on-request\"\n".to_vec(),
+            Some(0o600),
+            None,
+        );
+
+        let prepared = build_connection_plan(
+            &CodexConnector,
+            &codex_discovery,
+            &codex_compatibility,
+            target,
+            &source,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/v1",
+                token: Some("fixture-codex-virtual-key"),
+                adapter_ready: true,
+            },
+            1,
+            None,
+            10,
+            "06".repeat(16),
+        )
+        .expect("a first Codex connection must be reversible");
+
+        assert!(prepared.view.projection.files[0]
+            .reverse_changes
+            .iter()
+            .any(|change| change.operation == PatchKind::Remove
+                && change.path.segments == ["model_providers", "tokenstation"]));
     }
 
     #[test]
