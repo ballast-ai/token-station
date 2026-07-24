@@ -277,6 +277,47 @@ describe("desktop station navigation", () => {
     );
   });
 
+  it("rescans once the runtime becomes ready after a not-ready first load", async () => {
+    // 开 app 时网关还没起来:首扫(load)带的是「未就绪」运行态,已接管的 Agent
+    // 会误显「需修复」。运行态一就绪(轮询翻正)就必须补扫一次,让卡片对齐真实态。
+    const notReady = stateFixture({
+      serve: serveFixture({
+        phase: "starting",
+        app_runtime: "stopped",
+        listener_reachable: false,
+        running_revision: 1,
+        instance_id: "runtime-a",
+      }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return notReady;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "get_runtime_state") {
+        return serveFixture({
+          phase: "running",
+          app_runtime: "running",
+          listener_reachable: true,
+          running_revision: 1,
+          instance_id: "runtime-a",
+        });
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    // 首扫来自 load()(此刻运行态未就绪)。
+    await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1));
+    // 500ms 轮询把运行态翻成就绪 → 未就绪→就绪跃迁触发补扫。
+    await waitFor(
+      () => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2),
+      { timeout: 1_500 },
+    );
+    // 之后持续就绪,不再重复补扫。
+    await waitFor(() => expect(screen.getByTestId("agent-runtime-connection")).toBeInTheDocument());
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2);
+  });
+
   it("shows exactly five fixed Agents, no Gemini, and scans only on load or explicit rescan", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -356,8 +397,6 @@ describe("desktop station navigation", () => {
     await waitFor(() => expect(scans).toBe(2));
     await user.click(navigation().getByRole("button", { name: "Claude Code" }));
     await user.click(screen.getByRole("button", { name: "一键接入" }));
-    await user.click(within(await screen.findByRole("region", { name: "配置改动确认" }))
-      .getByRole("button", { name: "确认写入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
       "apply_agent_plan",
       { operationId: "op-overlap", confirmationToken: "token-overlap" },
@@ -580,7 +619,7 @@ describe("desktop station navigation", () => {
     expect(screen.getByText("供应商已添加")).toBeInTheDocument();
   });
 
-  it("previews the redacted Connector projection before applying it", async () => {
+  it("applies the Connector plan directly on 一键接入", async () => {
     const user = userEvent.setup();
     const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
     let scans = 0;
@@ -608,24 +647,18 @@ describe("desktop station navigation", () => {
     await user.click(navigation().getByRole("button", { name: "Claude Code" }));
     expect(screen.queryByRole("button", { name: /选择安装/ })).toBeNull();
     await user.click(await screen.findByRole("button", { name: "一键接入" }));
-    expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
       installationPath: "/opt/claude",
       expectedVersion: "9.9.9",
-    });
-    const preview = await screen.findByRole("region", { name: "配置改动确认" });
-    expect(preview).toHaveTextContent("env.ANTHROPIC_BASE_URL");
-    expect(preview).toHaveTextContent("敏感值已隐藏");
-    expect(preview).not.toHaveTextContent("local-virtual-key");
-    expect(invokeMock).not.toHaveBeenCalledWith("apply_agent_plan", expect.anything());
-    await user.click(within(preview).getByRole("button", { name: "确认写入" }));
+    }));
+    // 不再有「确认写入」步骤:计划后直接应用。
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", { operationId: "op-1", confirmationToken: "token-1" }));
-    expect(screen.queryByRole("region", { name: "配置改动确认" })).toBeNull();
     expect(await screen.findByText("Agent 已接入")).toBeInTheDocument();
     expect(scans).toBe(2);
   });
 
-  it("shows one admitted state and only applies after projection confirmation", async () => {
+  it("applies directly for an admitted state", async () => {
     const user = userEvent.setup();
     const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
     const admitted = defaultAdmittedClaude();
@@ -649,17 +682,14 @@ describe("desktop station navigation", () => {
       installationPath: "/opt/claude",
       expectedVersion: "2.1.210",
     }));
-    expect(invokeMock).not.toHaveBeenCalledWith("apply_agent_plan", expect.anything());
-    await user.click(within(await screen.findByRole("region", { name: "配置改动确认" }))
-      .getByRole("button", { name: "确认写入" }));
+    // 计划后直接应用,无确认步骤。
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
       operationId: "op-admitted",
       confirmationToken: "token-admitted",
     }));
-    expect(screen.queryByRole("region", { name: "配置改动确认" })).toBeNull();
   });
 
-  it("previews and confirms one-click restoration to the encrypted baseline", async () => {
+  it("restores the encrypted baseline directly on 恢复原始配置", async () => {
     const user = userEvent.setup();
     const connected = structuredClone(scannedClaude);
     connected.installations[0].managed = true;
@@ -691,13 +721,11 @@ describe("desktop station navigation", () => {
     await user.click(within(await screen.findByLabelText("主导航"))
       .getByRole("button", { name: "Claude Code" }));
     await user.click(await screen.findByRole("button", { name: "恢复 Agent 原始配置" }));
-    expect(invokeMock).toHaveBeenCalledWith("plan_agent_disconnect", {
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_disconnect", {
       agentId: "claude-code",
       installationPath: "/opt/claude",
-    });
-    const preview = await screen.findByRole("region", { name: "配置改动确认" });
-    expect(preview).toHaveTextContent("恢复受管敏感值，内容已隐藏");
-    await user.click(within(preview).getByRole("button", { name: "确认写入" }));
+    }));
+    // 计划后直接应用,无确认步骤。
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
       operationId: "op-restore",
       confirmationToken: "token-restore",

@@ -271,6 +271,20 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
         draft["plugins"]["agents"] = json!(desktop_agents());
     }
 
+    // 确保所有内置连接器的入站适配器都在 agents 列表里:老配置的 agents 是当时写死的
+    // 快照,新增适配器(如 agent-gemini)不会自动进去,网关就不加载它 → 对应 Agent
+    // 接入被「网关未加载 agent-xxx」拒。这里补齐缺的,保留既有顺序与用户其它项。
+    if !draft["plugins"]["agents"].is_array() {
+        draft["plugins"]["agents"] = json!([]);
+    }
+    if let Some(agents) = draft["plugins"]["agents"].as_array_mut() {
+        for adapter in desktop_agents() {
+            if !agents.iter().any(|value| value.as_str() == Some(adapter)) {
+                agents.push(json!(adapter));
+            }
+        }
+    }
+
     fn anchor(path: &mut Value, config_dir: &std::path::Path) {
         let Some(raw) = path.as_str() else {
             return;
@@ -3377,6 +3391,30 @@ mod tests {
     use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
     use tauri::Manager;
+
+    #[test]
+    fn prepare_desktop_draft_backfills_missing_builtin_agent_adapters() {
+        // 老配置的 agents 快照缺了后加的 agent-gemini。
+        let draft = json!({
+            "plugins": { "agents": ["agent-openai", "agent-anthropic", "agent-openai-responses"] }
+        });
+        let out = prepare_desktop_draft(draft, std::path::Path::new("/tmp"));
+        let agents: Vec<String> = out["plugins"]["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect();
+        // desktop_agents() 里的每个内置适配器都必须在(含 agent-gemini),原有项保留。
+        assert!(agents.contains(&"agent-openai".to_string()));
+        assert!(
+            agents.contains(&"agent-gemini".to_string()),
+            "agent-gemini 应被补齐,实际 ={agents:?}"
+        );
+        for adapter in desktop_agents() {
+            assert!(agents.iter().any(|a| a == adapter), "缺 {adapter}:{agents:?}");
+        }
+    }
 
     #[test]
     fn prepare_desktop_draft_upgrades_unknown_tool_capability_but_keeps_unsupported() {

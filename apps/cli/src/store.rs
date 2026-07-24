@@ -201,6 +201,15 @@ const MIGRATIONS: &[Migration] = &[
             );
         ",
     },
+    Migration {
+        // v4 -> v5: difficulty tokens that exclude the system prompt, split out
+        // from the whole-request est_input_tokens so scoring reflects the user's
+        // turn, not the agent's harness. Legacy rows default to 0 (no split
+        // recorded); their est_input_tokens still stands as the whole-request
+        // figure.
+        to: 5,
+        sql: "ALTER TABLE decisions ADD COLUMN conversation_tokens INTEGER NOT NULL DEFAULT 0;",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -272,6 +281,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     heuristic_threshold INTEGER,
     fallbacks INTEGER NOT NULL,
     est_input_tokens INTEGER NOT NULL,
+    conversation_tokens INTEGER NOT NULL DEFAULT 0,
     message_count INTEGER NOT NULL,
     tool_count INTEGER NOT NULL,
     has_images INTEGER NOT NULL,
@@ -834,7 +844,7 @@ fn insert_decision(
         "INSERT INTO decisions (
             request_id, upstream, model, pool, decision_kind, rule_id, hint_kind,
             hint_value, heuristic_score, heuristic_threshold, fallbacks,
-            est_input_tokens, message_count, tool_count, has_images,
+            est_input_tokens, conversation_tokens, message_count, tool_count, has_images,
             requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
             reasoning_marker_count, technical_term_count, simple_indicator_count,
             code_keyword_count, math_term_count, creative_term_count, multi_step_signal,
@@ -842,7 +852,7 @@ fn insert_decision(
          ) VALUES (
             :request_id, :upstream, :model, :pool, :decision_kind, :rule_id, :hint_kind,
             :hint_value, :heuristic_score, :heuristic_threshold, :fallbacks,
-            :est_input_tokens, :message_count, :tool_count, :has_images,
+            :est_input_tokens, :conversation_tokens, :message_count, :tool_count, :has_images,
             :requires_json_schema, :code_block_count, :requested_max_output_tokens, :hint_count,
             :reasoning_marker_count, :technical_term_count, :simple_indicator_count,
             :code_keyword_count, :math_term_count, :creative_term_count, :multi_step_signal,
@@ -861,6 +871,7 @@ fn insert_decision(
             ":heuristic_threshold": columns.threshold,
             ":fallbacks": decision.fallbacks,
             ":est_input_tokens": features.estimated_input_tokens,
+            ":conversation_tokens": features.conversation_tokens,
             ":message_count": features.message_count,
             ":tool_count": features.tool_count,
             ":has_images": features.has_images,
@@ -1169,7 +1180,7 @@ fn read_decision(
         .query_row(
             "SELECT upstream, model, pool, decision_kind, rule_id, hint_kind, hint_value,
                     heuristic_score, heuristic_threshold, fallbacks,
-                    est_input_tokens, message_count, tool_count, has_images,
+                    est_input_tokens, conversation_tokens, message_count, tool_count, has_images,
                     requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
                     reasoning_marker_count, technical_term_count, simple_indicator_count,
                     code_keyword_count, math_term_count, creative_term_count, multi_step_signal,
@@ -1195,22 +1206,23 @@ fn read_decision(
                     fallbacks: row.get(9)?,
                     features: RequestFeatures {
                         estimated_input_tokens: row.get(10)?,
-                        message_count: row.get(11)?,
-                        tool_count: row.get(12)?,
-                        has_images: row.get(13)?,
-                        requires_json_schema: row.get(14)?,
-                        code_block_count: row.get(15)?,
-                        requested_max_output_tokens: row.get(16)?,
-                        hint_count: row.get(17)?,
-                        reasoning_marker_count: row.get(18)?,
-                        technical_term_count: row.get(19)?,
-                        simple_indicator_count: row.get(20)?,
-                        code_keyword_count: row.get(21)?,
-                        math_term_count: row.get(22)?,
-                        creative_term_count: row.get(23)?,
-                        multi_step_signal: row.get(24)?,
-                        question_count: row.get(25)?,
-                        system_format_hint: row.get(26)?,
+                        conversation_tokens: row.get(11)?,
+                        message_count: row.get(12)?,
+                        tool_count: row.get(13)?,
+                        has_images: row.get(14)?,
+                        requires_json_schema: row.get(15)?,
+                        code_block_count: row.get(16)?,
+                        requested_max_output_tokens: row.get(17)?,
+                        hint_count: row.get(18)?,
+                        reasoning_marker_count: row.get(19)?,
+                        technical_term_count: row.get(20)?,
+                        simple_indicator_count: row.get(21)?,
+                        code_keyword_count: row.get(22)?,
+                        math_term_count: row.get(23)?,
+                        creative_term_count: row.get(24)?,
+                        multi_step_signal: row.get(25)?,
+                        question_count: row.get(26)?,
+                        system_format_hint: row.get(27)?,
                     },
                 })
             },
@@ -1342,6 +1354,7 @@ mod tests {
     fn receipt(request_id: &str, started_at_ms: u64) -> RequestRecord {
         let features = RequestFeatures {
             estimated_input_tokens: 42,
+            conversation_tokens: 30,
             tool_count: 1,
             technical_term_count: 3,
             ..RequestFeatures::default()

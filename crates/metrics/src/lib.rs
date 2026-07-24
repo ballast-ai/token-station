@@ -43,7 +43,9 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 /// - v2: adds `request_id` (the stable accounting id).
 /// - v3: adds `price_version` (the price table a cost was computed under).
 /// - v4: adds the normalized, content-free request receipt tables.
-pub const SCHEMA_VERSION: u32 = 4;
+/// - v5: adds `conversation_tokens` (difficulty tokens excluding the system
+///   prompt) alongside the whole-request `est_input_tokens`.
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Where the recorded cost came from. The local price table may only produce
 /// [`Self::Estimated`]; [`Self::Actual`] is reserved for future bill

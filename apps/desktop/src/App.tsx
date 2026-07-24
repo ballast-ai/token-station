@@ -76,6 +76,8 @@ function StationApp() {
   const scanGenerationRef = useRef(0);
   const pendingServeRef = useRef<ServeView | null>(null);
   const viewHistoryRef = useRef<AppView[]>([]);
+  const prevPhaseRef = useRef<string | null>(null);
+  const runtimeReadyRef = useRef<boolean | null>(null);
 
   const orderedRegistry = useMemo(
     () => registry
@@ -174,6 +176,41 @@ function StationApp() {
     if (state) setAdminEndpoint(state.serve);
   }, [state]);
 
+  // 「保存并应用」的横幅由运行态驱动,而非一次性成功消息:apply 是异步的,
+  // serveStart 一返回就贴死「正在应用」会和真实生命周期脱节(见 UX 反馈)。
+  // 当运行态从 starting(=Applying)落到 running,说明这一版真正生效了,替换成
+  // 短暂的「已应用」提示后自动消失。
+  useEffect(() => {
+    const phase = state?.serve.phase;
+    const previous = prevPhaseRef.current;
+    prevPhaseRef.current = phase ?? null;
+    if (previous === "starting" && phase === "running" && state) {
+      setMessage(`配置已应用 · revision ${state.saved_revision}`);
+      const timer = window.setTimeout(
+        () => setMessage((current) => (current.startsWith("配置已应用") ? "" : current)),
+        2600,
+      );
+      return () => window.clearTimeout(timer);
+    }
+    return undefined;
+  }, [state?.serve.phase]);
+
+  // 运行态从「未就绪」变「就绪」时自动重扫一次。开 app 的首扫可能早于网关起来,
+  // 那次 scan_agents 拿到 runtime=None → 所有安装 connected=false → 已接管的
+  // Agent 误显「需修复」。顶栏 500ms 轮询会自纠,但扫描结果不会跟着刷。运行态一
+  // 就绪就补一次扫,让卡片与真实运行态对齐(rescanAgents 内部有去重/排队保护)。
+  useEffect(() => {
+    if (!state) return;
+    const ready = state.serve.app_runtime === "running" && Boolean(state.serve.listener_reachable);
+    const wasReady = runtimeReadyRef.current;
+    runtimeReadyRef.current = ready;
+    // 首次观测(null)不算「变就绪」——那一刻若已就绪,load() 的首扫已带上 runtime;
+    // 只在真正的 未就绪(false)→就绪(true) 跃迁时补扫,才是启动竞态的修复点。
+    if (wasReady === false && ready) {
+      void rescanAgents();
+    }
+  }, [state?.serve.app_runtime, state?.serve.listener_reachable, rescanAgents]);
+
   const showState = (next: StateView, nextMessage?: string) => {
     setState(next);
     setError("");
@@ -257,7 +294,8 @@ function StationApp() {
       onRescan={() => void rescanAgents()}
       onToggleServe={() => void toggleServe()}
     >
-      {message && <div className="banner ok global-banner">{message}</div>}
+      {state.serve.phase === "starting" && !error && <div className="banner ok global-banner">正在应用配置…</div>}
+      {message && state.serve.phase !== "starting" && <div className="banner ok global-banner">{message}</div>}
       {error && <div className="banner err global-banner">{error}</div>}
       {state.serve.phase === "error" && state.serve.error && <div className="banner err global-banner">{state.serve.error}</div>}
 
@@ -273,6 +311,7 @@ function StationApp() {
           agents={agents}
           serveRunning={runtimeHealthy}
           busy={busy}
+          applying={state.serve.phase === "starting"}
           configError={state.config_error}
           keywords={state.keywords}
           saveStatus={saveStatus}
@@ -282,7 +321,7 @@ function StationApp() {
           onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
           onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
           onRemoveKeyword={(slot, keyword) => void run(() => removeKeyword(slot, keyword))}
-          onSave={() => void run(serveStart, "正在保存并应用配置")}
+          onSave={() => void run(serveStart)}
           onApplyAll={() => void run(applyHomeRouteToAllAgents, runtimeHealthy ? "全部 Agent 已恢复跟随主页 · 尚待应用" : "全部 Agent 已恢复跟随主页")}
           onOpenAgent={(id) => navigate(`agent:${id}`)}
           onRemoveProvider={(name) => void run(() => removeProvider(name), "供应商已删除")}
@@ -293,6 +332,9 @@ function StationApp() {
 
       {metadata && route && (
         <AgentRoutePage
+          // 按 agent_id 挂 key:切 Agent 时重挂载,per-agent 的瞬时状态(首次接入卡片/
+          // 提示/已选安装等)不会泄漏到别的 Agent 页面。
+          key={metadata.agent_id}
           metadata={metadata}
           agent={agent}
           route={route}

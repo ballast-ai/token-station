@@ -3,7 +3,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use command_group::CommandGroup;
@@ -685,14 +685,72 @@ fn valid_npm_package_name(name: &str) -> bool {
     }
 }
 
+/// 二进制哈希缓存条目:同一路径只要 mtime + size 没变,SHA-256 就不必重算。
+struct CachedBinaryHash {
+    modified_at_ms: Option<u64>,
+    size: u64,
+    sha256: String,
+}
+
+/// 进程级二进制哈希缓存(键=规范路径)。`DiscoveryScanner` 每次扫描都新建,故缓存放
+/// 全局、跨扫描存活。几乎每个 Agent 按钮都会先触发一次全量扫描,而 Agent 二进制可达
+/// 数百 MB(claude 225MB、opencode 138MB);没缓存时每次点击都要把它们从头 SHA-256
+/// 一遍,debug 构建下每次卡数秒。缓存让未变的二进制只 stat、不重哈希。
+static BINARY_HASH_CACHE: LazyLock<Mutex<BTreeMap<PathBuf, CachedBinaryHash>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
 fn binary_facts(path: &Path) -> (Option<u64>, Option<String>) {
-    let modified_at_ms = std::fs::metadata(path)
-        .ok()
+    let metadata = std::fs::metadata(path).ok();
+    let modified_at_ms = metadata
+        .as_ref()
         .and_then(|metadata| metadata.modified().ok())
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
         .and_then(|duration| duration.as_millis().try_into().ok());
-    let binary_sha256 = hash_file(path).ok();
+    let size = metadata.as_ref().map(std::fs::Metadata::len);
+    let binary_sha256 = cached_binary_sha256(path, modified_at_ms, size);
     (modified_at_ms, binary_sha256)
+}
+
+/// 查全局缓存,命中(路径 + mtime + size 一致)就复用,否则读盘算 SHA-256 并写回。
+fn cached_binary_sha256(
+    path: &Path,
+    modified_at_ms: Option<u64>,
+    size: Option<u64>,
+) -> Option<String> {
+    match BINARY_HASH_CACHE.lock() {
+        Ok(mut cache) => lookup_or_hash(&mut cache, path, modified_at_ms, size, hash_file),
+        // 锁中毒也别崩,退化成老实哈希。
+        Err(_) => hash_file(path).ok(),
+    }
+}
+
+/// 缓存判断的纯逻辑(哈希函数注入,便于测试):mtime + size 一致则复用缓存,
+/// 否则调用 `hasher` 重算并更新缓存。拿不到 size(文件不存在/不可读)则不缓存。
+fn lookup_or_hash(
+    cache: &mut BTreeMap<PathBuf, CachedBinaryHash>,
+    path: &Path,
+    modified_at_ms: Option<u64>,
+    size: Option<u64>,
+    hasher: impl Fn(&Path) -> std::io::Result<String>,
+) -> Option<String> {
+    let Some(size) = size else {
+        return hasher(path).ok();
+    };
+    if let Some(entry) = cache.get(path) {
+        if entry.size == size && entry.modified_at_ms == modified_at_ms {
+            return Some(entry.sha256.clone());
+        }
+    }
+    let sha256 = hasher(path).ok()?;
+    cache.insert(
+        path.to_path_buf(),
+        CachedBinaryHash {
+            modified_at_ms,
+            size,
+            sha256: sha256.clone(),
+        },
+    );
+    Some(sha256)
 }
 
 fn hash_file(path: &Path) -> std::io::Result<String> {
@@ -1274,6 +1332,36 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
+
+    #[test]
+    fn lookup_or_hash_reuses_cache_until_mtime_or_size_changes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let hasher = |_: &Path| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, std::io::Error>("sha".to_string())
+        };
+        let mut cache = BTreeMap::new();
+        let path = Path::new("/bin/agent");
+
+        // 首次:未命中 → 哈希一次。
+        let first = lookup_or_hash(&mut cache, path, Some(100), Some(500), &hasher).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // mtime + size 不变 → 复用,不再哈希。
+        let second = lookup_or_hash(&mut cache, path, Some(100), Some(500), &hasher).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(first, second);
+        // mtime 变 → 重算。
+        lookup_or_hash(&mut cache, path, Some(200), Some(500), &hasher).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // size 变 → 重算。
+        lookup_or_hash(&mut cache, path, Some(200), Some(600), &hasher).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        // 拿不到 size(文件不可读)→ 不缓存,每次都哈希。
+        lookup_or_hash(&mut cache, path, Some(200), None, &hasher).unwrap();
+        lookup_or_hash(&mut cache, path, Some(200), None, &hasher).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+    }
 
     struct FixedProbe;
 

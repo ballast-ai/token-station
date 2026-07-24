@@ -272,11 +272,16 @@ impl Heuristic {
     #[must_use]
     pub fn score(&self, features: &RequestFeatures) -> u32 {
         let weights = &self.weights;
+        // 难度按对话内容打分,不含系统 prompt:agent 的固定脚手架(几千 token 系统
+        // prompt)否则会把每条请求都顶到高档(见 conversation_tokens 注释)。
         let mut score = features
-            .estimated_input_tokens
+            .conversation_tokens
             .saturating_div(weights.tokens_per_point.max(1));
 
-        score = score.saturating_add(features.tool_count.saturating_mul(weights.per_tool));
+        // 注意:advertised tool_count(request.tools.len())是每个 agent 的固定值——
+        // OpenCode 每条都带全套工具,与任务难度无关,故不计入难度打分(以前 tool_count
+        // ×per_tool 是"你好"被顶到高档的主因之一)。tool_count 仍用于能力门禁:带工具的
+        // 请求必须路由到支持工具调用的模型(见 route.rs)。per_tool 权重保留但不再参与打分。
         score = score.saturating_add(
             features
                 .code_block_count
@@ -651,16 +656,16 @@ mod tests {
         assert!(heuristic.bands.is_empty());
 
         let features = RequestFeatures {
-            estimated_input_tokens: 2_000, // 20
-            tool_count: 1,                 // 20
-            code_block_count: 1,           // 8
-            message_count: 3,              // 6
+            conversation_tokens: 2_000, // 20(难度按对话 token,不含系统 prompt)
+            tool_count: 1,              // 不再计入难度分(仅供能力门禁)
+            code_block_count: 1,        // 8
+            message_count: 3,           // 6(2 个 extra turn × 3)
             // Ported counts present but every ported weight defaulted to 0.
             reasoning_marker_count: 9,
             simple_indicator_count: 9,
             ..RequestFeatures::default()
         };
-        assert_eq!(heuristic.score(&features), 54);
+        assert_eq!(heuristic.score(&features), 34); // 20 + 8 + 6(tool_count 不再计分)
         assert_eq!(heuristic.select(54), ("sota", 40));
         assert_eq!(heuristic.select(39), ("cheap", 40));
     }
@@ -989,8 +994,9 @@ mod tests {
             bands: Vec::new(),
         };
         let features = RequestFeatures {
-            estimated_input_tokens: 1_000,
-            tool_count: 2,
+            // tokens_per_point=1 → base = u32::MAX,再叠加 json_schema 触发 saturating_add。
+            conversation_tokens: u32::MAX,
+            requires_json_schema: true,
             ..RequestFeatures::default()
         };
 

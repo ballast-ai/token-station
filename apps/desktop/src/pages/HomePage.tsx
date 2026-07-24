@@ -27,6 +27,7 @@ interface HomePageProps {
   agents: AgentView[];
   serveRunning: boolean;
   busy: boolean;
+  applying: boolean;
   configError: string | null;
   saveStatus: string;
   localOnly: boolean;
@@ -63,6 +64,7 @@ export default function HomePage({
   agents,
   serveRunning,
   busy,
+  applying,
   configError,
   saveStatus,
   localOnly,
@@ -195,8 +197,10 @@ export default function HomePage({
         </div>
 
         <footer className="panel-foot route-actions">
-          <button className="btn primary" type="button" disabled={busy} onClick={onSave}>保存并应用</button>
-          <button className="btn" type="button" disabled={busy} onClick={onApplyAll}>应用到全部 Agent</button>
+          <button className="btn primary" type="button" disabled={busy || applying} onClick={onSave}>
+            {applying ? "应用中…" : "保存并应用"}
+          </button>
+          <button className="btn" type="button" disabled={busy || applying} onClick={onApplyAll}>应用到全部 Agent</button>
           <span className="foot-hint" data-testid="config-save-status">{saveStatus}</span>
           {providers.length === 0 && <span className="foot-hint">请先添加供应商，再配置三档。</span>}
           {providers.length > 0 && configError && <span className="foot-hint">还有档位未完成，保存时会进行完整校验。</span>}
