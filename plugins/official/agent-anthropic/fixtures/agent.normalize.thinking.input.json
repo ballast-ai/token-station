@@ -1,0 +1,41 @@
+{
+  "protocol": "anthropic-messages",
+  "agent_tool": "claude-desktop",
+  "headers": {
+    "names": ["authorization", "anthropic-version", "content-type"],
+    "values": {
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json"
+    }
+  },
+  "principal": {"subject": "local"},
+  "body": {
+    "model": "routed-model",
+    "max_tokens": 1024,
+    "thinking": {"type": "enabled", "budget_tokens": 512},
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "Check the tool result before replying.",
+            "signature": "opaque-signature"
+          },
+          {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "lookup",
+            "input": {"query": "Token Station"}
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {"type": "tool_result", "tool_use_id": "toolu_1", "content": "found"}
+        ]
+      }
+    ]
+  }
+}

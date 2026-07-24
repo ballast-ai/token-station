@@ -1971,7 +1971,7 @@ fn an_anthropic_message_round_trips_through_the_same_provider_pipeline() {
             "model": "auto",
             "max_tokens": 128,
             "system": "You are concise.",
-            "thinking": {"type": "disabled"},
+            "thinking": {"type": "enabled", "budget_tokens": 128},
             "tool_choice": {"type": "auto"},
             "messages": [{"role": "user", "content": "what is six times seven"}]
         }),
@@ -1994,6 +1994,7 @@ fn an_anthropic_message_round_trips_through_the_same_provider_pipeline() {
     assert_eq!(seen[0].body["model"], json!("gpt-5.5"));
     assert_eq!(seen[0].body["messages"][0]["role"], json!("system"));
     assert_eq!(seen[0].body["messages"][1]["role"], json!("user"));
+    assert!(seen[0].body.get("anthropic_thinking").is_none());
 
     settle();
     let row = last_row(&proxy.data_dir);

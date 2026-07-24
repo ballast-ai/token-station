@@ -20,6 +20,56 @@ const PROVIDER: &str = "inferenceProvider";
 const BASE_URL: &str = "inferenceGatewayBaseUrl";
 const API_KEY: &str = "inferenceGatewayApiKey";
 const AUTH_SCHEME: &str = "inferenceGatewayAuthScheme";
+const DEPLOYMENT_MODE: &str = "deploymentMode";
+const DISABLE_DEPLOYMENT_MODE_CHOOSER: &str = "disableDeploymentModeChooser";
+const COWORK_EGRESS_ALLOWED_HOSTS: &str = "coworkEgressAllowedHosts";
+
+fn json_companion_projection(
+    target_path: PathBuf,
+    label: &'static str,
+    operations: Vec<PatchOperation>,
+) -> Result<CompanionProjection, String> {
+    let source = read_config_source(&target_path)?;
+    let mut document = parse_source_bytes(
+        source.existed.then_some(source.exact_bytes.as_slice()),
+        DocumentFormat::Json,
+        label,
+    )?;
+    if !semantic_json(&document)?.is_object() {
+        return Err(format!("{label} 必须是 JSON 对象"));
+    }
+    apply_patch(&mut document, &operations)?;
+    let rendered = render_document(&document, label)?;
+    let owned_paths = operations
+        .iter()
+        .map(|operation| operation.path.clone())
+        .collect();
+    Ok(CompanionProjection {
+        target_path,
+        source_existed: source.existed,
+        source_bytes: Zeroizing::new(source.exact_bytes.to_vec()),
+        original_permissions: source.original_permissions,
+        original_owner: source.original_owner,
+        projected_bytes: Zeroizing::new(rendered.into_bytes()),
+        format: DocumentFormat::Json,
+        label,
+        owned_paths,
+        sensitive_paths: Vec::new(),
+        operations,
+    })
+}
+
+fn deployment_mode_paths(primary_target: &Path) -> Result<[PathBuf; 2], String> {
+    let app_support = primary_target
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| "Claude Desktop profile 路径缺少 Application Support 父目录".to_string())?;
+    Ok([
+        app_support.join("Claude/config.json"),
+        app_support.join("Claude-3p/config.json"),
+    ])
+}
 
 pub struct ClaudeDesktopConnector;
 pub(super) static CONNECTOR: ClaudeDesktopConnector = ClaudeDesktopConnector;
@@ -32,7 +82,14 @@ static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
     platforms: &[Platform::Macos, Platform::Windows],
     config_format: DocumentFormat::Json,
     config_path_template: "${CLAUDE_3P_CONFIG_LIBRARY}/7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2.json",
-    owned_fields: &[PROVIDER, BASE_URL, API_KEY, AUTH_SCHEME],
+    owned_fields: &[
+        PROVIDER,
+        BASE_URL,
+        API_KEY,
+        AUTH_SCHEME,
+        DISABLE_DEPLOYMENT_MODE_CHOOSER,
+        COWORK_EGRESS_ALLOWED_HOSTS,
+    ],
     requires_virtual_key: true,
     restart_required: true,
 };
@@ -71,7 +128,14 @@ impl Connector for ClaudeDesktopConnector {
     }
 
     fn owned_paths(&self) -> Vec<ConfigPath> {
-        [PROVIDER, BASE_URL, API_KEY, AUTH_SCHEME]
+        [
+            PROVIDER,
+            BASE_URL,
+            API_KEY,
+            AUTH_SCHEME,
+            DISABLE_DEPLOYMENT_MODE_CHOOSER,
+            COWORK_EGRESS_ALLOWED_HOSTS,
+        ]
             .iter()
             .map(|key| path(&[key]))
             .collect()
@@ -114,6 +178,8 @@ impl Connector for ClaudeDesktopConnector {
             replace(path(&[BASE_URL]), json!(input.base_url)),
             replace(path(&[API_KEY]), json!(token)),
             replace(path(&[AUTH_SCHEME]), json!("bearer")),
+            replace(path(&[DISABLE_DEPLOYMENT_MODE_CHOOSER]), json!(true)),
+            replace(path(&[COWORK_EGRESS_ALLOWED_HOSTS]), json!(["*"])),
         ])
     }
 
@@ -146,7 +212,7 @@ impl Connector for ClaudeDesktopConnector {
         ];
         apply_patch(&mut document, &operations)?;
         let rendered = render_document(&document, "Claude Desktop 3P profile metadata")?;
-        Ok(vec![CompanionProjection {
+        let mut projections = vec![CompanionProjection {
             target_path: meta_path,
             source_existed: source.existed,
             source_bytes: Zeroizing::new(source.exact_bytes.to_vec()),
@@ -158,7 +224,15 @@ impl Connector for ClaudeDesktopConnector {
             owned_paths: vec![path(&["appliedId"]), path(&["entries"])],
             sensitive_paths: Vec::new(),
             operations,
-        }])
+        }];
+        for deployment_path in deployment_mode_paths(primary_target)? {
+            projections.push(json_companion_projection(
+                deployment_path,
+                "Claude Desktop deployment mode",
+                vec![replace(path(&[DEPLOYMENT_MODE]), json!("3p"))],
+            )?);
+        }
+        Ok(projections)
     }
 
     fn disconnect_patch(&self) -> Vec<PatchOperation> {
@@ -186,6 +260,8 @@ impl Connector for ClaudeDesktopConnector {
             && semantic.get(BASE_URL) == Some(&json!(input.base_url))
             && semantic.get(API_KEY) == Some(&json!(token))
             && semantic.get(AUTH_SCHEME) == Some(&json!("bearer"))
+            && semantic.get(DISABLE_DEPLOYMENT_MODE_CHOOSER) == Some(&json!(true))
+            && semantic.get(COWORK_EGRESS_ALLOWED_HOSTS) == Some(&json!(["*"]))
         {
             Ok(())
         } else {
@@ -198,5 +274,60 @@ impl Connector for ClaudeDesktopConnector {
             "Claude Desktop 的 Token Station 3P profile 已指向 {}；需要重启 Claude Desktop。",
             input.base_url
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn claude_desktop_connection_enables_3p_mode_in_both_runtime_configs() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "token-station-claude-desktop-connector-{}-{unique}",
+            std::process::id()
+        ));
+        let profile = root.join("Claude-3p/configLibrary").join(format!("{PROFILE_ID}.json"));
+        fs::create_dir_all(profile.parent().expect("profile has parent")).expect("profile dir builds");
+        fs::create_dir_all(root.join("Claude")).expect("Claude dir builds");
+        fs::write(root.join("Claude/config.json"), r#"{"keep":"normal"}"#)
+            .expect("normal config writes");
+        fs::write(root.join("Claude-3p/config.json"), r#"{"keep":"threep"}"#)
+            .expect("3P config writes");
+
+        let projections = CONNECTOR
+            .companion_projections(
+                &profile,
+                &ConnectInput {
+                    base_url: "http://127.0.0.1:8787/agents/claude-desktop",
+                    token: Some("vk-test"),
+                    adapter_ready: true,
+                },
+            )
+            .expect("projections build");
+
+        assert_eq!(projections.len(), 3);
+        for target in [root.join("Claude/config.json"), root.join("Claude-3p/config.json")] {
+            let projection = projections
+                .iter()
+                .find(|projection| projection.target_path == target)
+                .expect("deployment config projection exists");
+            let document = parse_source_bytes(
+                Some(projection.projected_bytes.as_slice()),
+                DocumentFormat::Json,
+                projection.label,
+            )
+            .expect("projected config parses");
+            assert_eq!(semantic_json(&document).expect("semantic config")[DEPLOYMENT_MODE], "3p");
+        }
+
+        fs::remove_dir_all(root).expect("temporary files clean up");
     }
 }

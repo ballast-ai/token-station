@@ -1883,17 +1883,30 @@ mod tests {
     }
 
     #[test]
-    fn claude_desktop_profile_and_meta_commit_together_and_recover_together() {
+    fn claude_desktop_profile_metadata_and_deployment_modes_commit_and_recover_together() {
         let root = scratch("claude-desktop-bundle");
-        let target = root.join("7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2.json");
-        let meta = root.join("_meta.json");
+        let target = root.join("Claude-3p/configLibrary/7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2.json");
+        let meta = root.join("Claude-3p/configLibrary/_meta.json");
+        let normal_config = root.join("Claude/config.json");
+        let threep_config = root.join("Claude-3p/config.json");
         let original_profile = br#"{"unknownProfile":"keep"}"#;
         let original_meta = br#"{"unknownMeta":"keep","entries":[{"id":"existing","name":"Existing"}],"appliedId":"existing"}"#;
+        let original_normal_config = br#"{"unknownNormal":"keep"}"#;
+        let original_threep_config = br#"{"unknownThreep":"keep"}"#;
         write_initial(&target, original_profile);
         write_initial(&meta, original_meta);
+        write_initial(&normal_config, original_normal_config);
+        write_initial(&threep_config, original_threep_config);
         let plan = prepare_claude_desktop(&target, "vk-claude-desktop-secret");
-        assert_eq!(plan.companions.len(), 1);
-        assert_eq!(plan.view.related_config_paths, [meta.to_string_lossy()]);
+        assert_eq!(plan.companions.len(), 3);
+        assert_eq!(
+            plan.view.related_config_paths,
+            [
+                meta.to_string_lossy(),
+                normal_config.to_string_lossy(),
+                threep_config.to_string_lossy(),
+            ]
+        );
         let keys = Arc::new(TestKeys::available());
         let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
         let ownership = FileOwnershipStore::new(root.join("ownership"));
@@ -1912,9 +1925,17 @@ mod tests {
 
         let profile: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
         let metadata: Value = serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+        let normal: Value = serde_json::from_slice(&std::fs::read(&normal_config).unwrap()).unwrap();
+        let threep: Value = serde_json::from_slice(&std::fs::read(&threep_config).unwrap()).unwrap();
         assert_eq!(profile["unknownProfile"], "keep");
         assert_eq!(profile["inferenceProvider"], "gateway");
+        assert_eq!(profile["disableDeploymentModeChooser"], true);
+        assert_eq!(profile["coworkEgressAllowedHosts"], serde_json::json!(["*"]));
         assert_eq!(metadata["unknownMeta"], "keep");
+        assert_eq!(normal["unknownNormal"], "keep");
+        assert_eq!(normal["deploymentMode"], "3p");
+        assert_eq!(threep["unknownThreep"], "keep");
+        assert_eq!(threep["deploymentMode"], "3p");
         assert_eq!(
             metadata["appliedId"],
             "7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2"
@@ -1930,7 +1951,7 @@ mod tests {
             target_config_path: target.to_string_lossy().into_owned(),
         };
         let owned = ownership.load(&ownership_key).unwrap().unwrap();
-        assert_eq!(owned.companion_files.len(), 1);
+        assert_eq!(owned.companion_files.len(), 3);
         let baseline = snapshots.load(&owned.baseline_snapshot_id).unwrap();
         let baseline_source = ConfigSource {
             existed: baseline.record.original_existed,
@@ -1986,6 +2007,14 @@ mod tests {
             serde_json::from_slice::<Value>(&std::fs::read(&meta).unwrap()).unwrap(),
             serde_json::from_slice::<Value>(original_meta).unwrap()
         );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&normal_config).unwrap()).unwrap(),
+            serde_json::from_slice::<Value>(original_normal_config).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&threep_config).unwrap()).unwrap(),
+            serde_json::from_slice::<Value>(original_threep_config).unwrap()
+        );
 
         let owned = ownership.load(&ownership_key).unwrap().unwrap();
         let baseline = snapshots.load(&owned.baseline_snapshot_id).unwrap();
@@ -2036,6 +2065,10 @@ mod tests {
         let restored_profile: Value =
             serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
         let restored_meta: Value = serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+        let restored_normal: Value =
+            serde_json::from_slice(&std::fs::read(&normal_config).unwrap()).unwrap();
+        let restored_threep: Value =
+            serde_json::from_slice(&std::fs::read(&threep_config).unwrap()).unwrap();
         assert_eq!(
             restored_profile,
             serde_json::from_slice::<Value>(original_profile).unwrap()
@@ -2043,6 +2076,14 @@ mod tests {
         assert_eq!(
             restored_meta,
             serde_json::from_slice::<Value>(original_meta).unwrap()
+        );
+        assert_eq!(
+            restored_normal,
+            serde_json::from_slice::<Value>(original_normal_config).unwrap()
+        );
+        assert_eq!(
+            restored_threep,
+            serde_json::from_slice::<Value>(original_threep_config).unwrap()
         );
         assert!(ownership.load(&ownership_key).unwrap().is_none());
 

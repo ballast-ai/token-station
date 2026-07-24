@@ -37,6 +37,12 @@ const KNOWN_REQUEST_FIELDS: &[&str] = &[
     "tool_choice",
 ];
 
+// These are intentionally adapter-local extensions rather than new Canonical
+// IR fields. Thinking configuration and signatures are Anthropic-specific and
+// must remain opaque unless a downstream provider explicitly supports them.
+const ANTHROPIC_THINKING_EXTENSION: &str = "anthropic_thinking";
+const ANTHROPIC_THINKING_BLOCKS_EXTENSION: &str = "anthropic_thinking_blocks";
+
 fn fail(envelope: &ErrorEnvelope) -> String {
     serde_json::to_string(envelope).unwrap_or_else(|_| {
         r#"{"code":"internal","http_status":500,"message":"unserializable error"}"#.to_owned()
@@ -63,10 +69,7 @@ fn validate_thinking(body: &Value) -> Result<(), String> {
     match body.get("thinking") {
         None | Some(Value::Null) => Ok(()),
         Some(Value::Object(config)) => match config.get("type").and_then(Value::as_str) {
-            Some("disabled") => Ok(()),
-            Some(_) => Err(capability(
-                "Anthropic thinking requires an approved Canonical IR extension",
-            )),
+            Some(_) => Ok(()),
             None => Err(invalid("thinking declares no string type")),
         },
         Some(_) => Err(invalid("thinking must be an object")),
@@ -300,10 +303,15 @@ fn parse_user_blocks(blocks: &[Value]) -> Result<Vec<Message>, String> {
 fn parse_assistant_blocks(blocks: &[Value]) -> Result<Message, String> {
     let mut parts = Vec::new();
     let mut tool_calls = Vec::new();
+    let mut thinking_blocks = Vec::new();
 
-    for block in blocks {
+    for (index, block) in blocks.iter().enumerate() {
         match block.get("type").and_then(Value::as_str) {
             Some("tool_use") => tool_calls.push(tool_call(block)?),
+            Some("thinking" | "redacted_thinking") => thinking_blocks.push(json!({
+                "index": index,
+                "block": block,
+            })),
             Some("tool_result") => {
                 return Err(invalid(
                     "assistant messages cannot contain tool_result blocks",
@@ -316,13 +324,21 @@ fn parse_assistant_blocks(blocks: &[Value]) -> Result<Message, String> {
         }
     }
 
+    let mut extensions = Extensions::new();
+    if !thinking_blocks.is_empty() {
+        extensions.insert(
+            ANTHROPIC_THINKING_BLOCKS_EXTENSION.to_owned(),
+            Value::Array(thinking_blocks),
+        );
+    }
+
     Ok(Message {
         role: Role::Assistant,
         content: content_from_parts(parts),
         tool_calls,
         tool_call_id: None,
         name: None,
-        extensions: Extensions::new(),
+        extensions,
     })
 }
 
@@ -395,12 +411,17 @@ fn parse_tools(body: &Value) -> Result<Vec<ToolDef>, String> {
 }
 
 fn request_extensions(body: &Value) -> Extensions {
-    body.as_object()
+    let mut extensions: Extensions = body
+        .as_object()
         .into_iter()
         .flatten()
         .filter(|(key, _)| !KNOWN_REQUEST_FIELDS.contains(&key.as_str()))
         .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
+        .collect();
+    if let Some(thinking) = body.get("thinking").filter(|value| !value.is_null()) {
+        extensions.insert(ANTHROPIC_THINKING_EXTENSION.to_owned(), thinking.clone());
+    }
+    extensions
 }
 
 fn finish_reason_to_anthropic(reason: Option<FinishReason>) -> Value {
