@@ -540,6 +540,7 @@ mod tests {
             cache_read_tokens: 400,
             cache_write_tokens: 120,
             reasoning_tokens: 80,
+            ..token_station_protocol::Usage::default()
         });
         store.record(&value);
 

@@ -38,7 +38,8 @@ fn finish_reason(raw: Option<&str>) -> Option<FinishReason> {
         "length" => Some(FinishReason::Length),
         "tool_calls" => Some(FinishReason::ToolCalls),
         "content_filter" => Some(FinishReason::ContentFilter),
-        _ => None,
+        // 0.3.0: unknown reasons survive verbatim instead of vanishing.
+        other => Some(FinishReason::Other(other.to_owned())),
     }
 }
 
@@ -61,6 +62,8 @@ impl PendingFinish {
         self.seen = false;
         Some(StreamEvent::Done {
             finish_reason: self.reason.take(),
+            // openai chat wire has no stop-sequence report slot.
+            stop_sequence: None,
         })
     }
 }
@@ -83,6 +86,7 @@ fn usage_of(raw: &Value) -> Usage {
         reasoning_tokens: raw["completion_tokens_details"]["reasoning_tokens"]
             .as_u64()
             .unwrap_or(0),
+        ..Usage::default()
     }
 }
 
@@ -237,6 +241,8 @@ impl ProviderAdapter for OpenAiCompatible {
 
             choices.push(Choice {
                 index: index_of(&choice["index"]),
+                // openai chat wire has no stop-sequence report slot.
+                stop_sequence: None,
                 message: Message {
                     role: Role::Assistant,
                     content: message["content"]

@@ -247,12 +247,16 @@ fn string_array(value: Option<&Value>, field: &str) -> Result<Vec<String>, Strin
     }
 }
 
-fn finish_reason(reason: Option<FinishReason>) -> Option<&'static str> {
+fn finish_reason(reason: Option<FinishReason>) -> Option<String> {
     match reason {
-        Some(FinishReason::Stop) => Some("STOP"),
-        Some(FinishReason::Length) => Some("MAX_TOKENS"),
-        Some(FinishReason::ToolCalls) => Some("STOP"),
-        Some(FinishReason::ContentFilter) => Some("SAFETY"),
+        Some(FinishReason::Stop) => Some("STOP".to_owned()),
+        Some(FinishReason::Length) => Some("MAX_TOKENS".to_owned()),
+        Some(FinishReason::ToolCalls) => Some("STOP".to_owned()),
+        Some(FinishReason::ContentFilter) => Some("SAFETY".to_owned()),
+        // Gemini reports a fired stop sequence as a plain STOP.
+        Some(FinishReason::StopSequence) => Some("STOP".to_owned()),
+        // 0.3.0: unknown reasons survive verbatim instead of vanishing.
+        Some(FinishReason::Other(other)) => Some(other),
         None => None,
     }
 }
@@ -269,6 +273,24 @@ fn response_parts(message: &Message) -> Result<Vec<Value>, String> {
                     ContentPart::ImageUrl { .. } => {
                         return Err(capability("Gemini response cannot render image output"))
                     }
+                    // 0.3.0: reasoning renders as a Gemini thought part; the
+                    // signature rides its `thoughtSignature` slot.
+                    ContentPart::Thinking {
+                        thinking,
+                        signature,
+                    } => {
+                        let mut part = json!({"text": thinking, "thought": true});
+                        if let Some(signature) = signature {
+                            part["thoughtSignature"] = json!(signature);
+                        }
+                        parts.push(part);
+                    }
+                    // Opaque encrypted reasoning has no Gemini wire slot;
+                    // there is nothing renderable inside it.
+                    ContentPart::RedactedThinking { .. } => {}
+                    // 0.3.0: unmodeled parts survive verbatim instead of
+                    // silently dropping content.
+                    ContentPart::Unknown(value) => parts.push(value.clone()),
                 }
             }
         }
@@ -376,6 +398,8 @@ impl Guest for GeminiClient {
             messages: parse_messages(&envelope.body)?,
             tools: parse_tools(&envelope.body)?,
             response_format: None,
+            // Gemini's toolConfig modes have no Canonical IR mapping yet.
+            tool_choice: None,
             sampling: Sampling {
                 temperature: generation.get("temperature").and_then(Value::as_f64),
                 top_p: generation.get("topP").and_then(Value::as_f64),
@@ -400,7 +424,7 @@ impl Guest for GeminiClient {
                 Ok(json!({
                     "index": choice.index,
                     "content": {"role": "model", "parts": response_parts(&choice.message)?},
-                    "finishReason": finish_reason(choice.finish_reason),
+                    "finishReason": finish_reason(choice.finish_reason.clone()),
                 }))
             })
             .collect::<Result<Vec<Value>, String>>()?;
@@ -426,6 +450,17 @@ impl Guest for GeminiClient {
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         let data = match event {
+            // 0.3.0: reasoning deltas stream as Gemini thought parts; a
+            // signature fragment has no streaming wire slot and renders
+            // nothing.
+            StreamEvent::ThinkingDelta {
+                index,
+                thinking_delta,
+            } => sse(&json!({
+                "candidates": [{"index": index, "content": {"role": "model", "parts": [{"text": thinking_delta, "thought": true}]}}],
+                "modelVersion": model,
+            }))?,
+            StreamEvent::ThinkingSignatureDelta { .. } => String::new(),
             StreamEvent::Delta { index, content } => sse(&json!({
                 "candidates": [{"index": index, "content": {"role": "model", "parts": [{"text": content}]}}],
                 "modelVersion": model,
@@ -462,6 +497,8 @@ impl Guest for GeminiClient {
             }))?,
             StreamEvent::Done {
                 finish_reason: reason,
+                // Gemini candidates carry no stop-sequence report slot.
+                stop_sequence: _,
             } => {
                 let calls = STREAM_CALLS.with(|streams| streams.borrow_mut().remove(&id));
                 let mut parts = Vec::new();

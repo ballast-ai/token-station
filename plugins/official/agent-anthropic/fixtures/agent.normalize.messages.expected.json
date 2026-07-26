@@ -4,16 +4,24 @@
     {
       "role": "system",
       "content": [
-        {"type": "text", "text": "You are a coding assistant."}
+        {
+          "type": "text",
+          "text": "You are a coding assistant."
+        }
       ]
     },
     {
       "role": "user",
       "content": [
-        {"type": "text", "text": "Weather in Beijing?"},
+        {
+          "type": "text",
+          "text": "Weather in Beijing?"
+        },
         {
           "type": "image_url",
-          "image_url": {"url": "data:image/png;base64,aGVsbG8="}
+          "image_url": {
+            "url": "data:image/png;base64,aGVsbG8="
+          }
         }
       ]
     },
@@ -24,7 +32,10 @@
     {
       "role": "assistant",
       "content": [
-        {"type": "text", "text": "I'll check."}
+        {
+          "type": "text",
+          "text": "I'll check."
+        }
       ],
       "tool_calls": [
         {
@@ -43,7 +54,10 @@
     {
       "role": "user",
       "content": [
-        {"type": "text", "text": "Thanks"}
+        {
+          "type": "text",
+          "text": "Thanks"
+        }
       ]
     }
   ],
@@ -54,10 +68,16 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "city": {"type": "string"},
-          "unit": {"type": "string"}
+          "city": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          }
         },
-        "required": ["city"]
+        "required": [
+          "city"
+        ]
       }
     }
   ],
@@ -65,9 +85,16 @@
     "temperature": 0.2,
     "top_p": 0.9,
     "max_output_tokens": 1024,
-    "stop": ["END"]
+    "stop": [
+      "END"
+    ]
   },
   "stream": true,
-  "future_field": {"kept": true},
-  "metadata": {"user_id": "local-user"}
+  "future_field": {
+    "kept": true
+  },
+  "metadata": {
+    "user_id": "local-user"
+  },
+  "tool_choice": "auto"
 }

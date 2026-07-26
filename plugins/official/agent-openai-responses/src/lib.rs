@@ -14,7 +14,7 @@ use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
     ErrorEnvelope, Extensions, FinishReason, HintKind, ImageUrl, Message, Role, Sampling,
-    StreamEvent, ToolCall, ToolDef, Usage,
+    StreamEvent, ToolCall, ToolChoice, ToolDef, Usage,
 };
 
 struct ResponsesClient;
@@ -416,6 +416,18 @@ fn text_parts(content: Option<&Content>) -> Result<Vec<Value>, String> {
                 ContentPart::ImageUrl { .. } => Err(capability(
                     "Responses assistant image output is not represented by the Canonical IR",
                 )),
+                // 0.3.0: reasoning renders as a Responses reasoning text part;
+                // its signature has no Responses wire slot.
+                ContentPart::Thinking { thinking, .. } => Ok(json!({
+                    "type": "reasoning_text",
+                    "text": thinking
+                })),
+                ContentPart::RedactedThinking { .. } => Err(capability(
+                    "Responses output cannot render encrypted reasoning blocks",
+                )),
+                // 0.3.0: unmodeled parts survive verbatim instead of silently
+                // dropping content.
+                ContentPart::Unknown(value) => Ok(value.clone()),
             })
             .collect(),
     }
@@ -764,6 +776,11 @@ impl Guest for ResponsesClient {
             messages,
             tools: tools_of(body.get("tools").unwrap_or(&Value::Null))?,
             response_format: None,
+            // `validate_request` already refused everything but `auto`.
+            tool_choice: body
+                .get("tool_choice")
+                .filter(|value| !value.is_null())
+                .map(|_| ToolChoice::Auto),
             sampling,
             stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
             extensions: request_extensions(body),
@@ -788,7 +805,7 @@ impl Guest for ResponsesClient {
         let finish_reason = response
             .choices
             .iter()
-            .find_map(|choice| choice.finish_reason);
+            .find_map(|choice| choice.finish_reason.clone());
         let output = response_output(&response, &response_id)?;
         to_output(&response_object(
             &response_id,
@@ -849,6 +866,11 @@ impl Guest for ResponsesClient {
                 String::new()
             };
             match event {
+                // 0.3.0 thinking events have no Responses rendering yet: the
+                // reasoning-summary SSE family is stateful and unimplemented,
+                // so reasoning deltas render nothing rather than a malformed
+                // frame.
+                StreamEvent::ThinkingDelta { .. } | StreamEvent::ThinkingSignatureDelta { .. } => {}
                 StreamEvent::Delta { index, content } => {
                     let item_id = format!("msg_{}_{}", state.response_id, index);
                     if !state.text.contains_key(&index) {
@@ -961,7 +983,11 @@ impl Guest for ResponsesClient {
                 StreamEvent::Usage { usage } => {
                     state.usage = usage;
                 }
-                StreamEvent::Done { finish_reason } => {
+                StreamEvent::Done {
+                    finish_reason,
+                    // Responses SSE has no stop-sequence slot to render into.
+                    stop_sequence: _,
+                } => {
                     let state = states.remove(stream_id).expect("state inserted");
                     rendered.push_str(&stream_done(state, finish_reason)?);
                 }

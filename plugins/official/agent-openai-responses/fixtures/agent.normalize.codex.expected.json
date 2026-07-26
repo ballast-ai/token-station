@@ -1,11 +1,17 @@
 {
   "model": "auto",
   "messages": [
-    {"role": "system", "content": "Be concise."},
+    {
+      "role": "system",
+      "content": "Be concise."
+    },
     {
       "role": "user",
       "content": [
-        {"type": "text", "text": "Read the marker."},
+        {
+          "type": "text",
+          "text": "Read the marker."
+        },
         {
           "type": "image_url",
           "image_url": {
@@ -18,7 +24,10 @@
     {
       "role": "assistant",
       "content": [
-        {"type": "text", "text": "Reading the marker."}
+        {
+          "type": "text",
+          "text": "Reading the marker."
+        }
       ],
       "tool_calls": [
         {
@@ -40,8 +49,14 @@
       "description": "Read one marker",
       "parameters": {
         "type": "object",
-        "properties": {"path": {"type": "string"}},
-        "required": ["path"]
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
       }
     }
   ],
@@ -50,5 +65,6 @@
     "top_p": 0.9,
     "max_output_tokens": 256
   },
-  "stream": true
+  "stream": true,
+  "tool_choice": "auto"
 }

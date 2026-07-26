@@ -18,7 +18,7 @@ use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
     ErrorEnvelope, Extensions, FinishReason, HintKind, ImageUrl, Message, Role, Sampling,
-    StreamEvent, ToolCall, ToolDef, Usage,
+    StreamEvent, ToolCall, ToolChoice, ToolDef, Usage,
 };
 
 struct AnthropicClient;
@@ -409,6 +409,9 @@ fn finish_reason_to_anthropic(reason: Option<FinishReason>) -> Value {
         Some(FinishReason::Length) => json!("max_tokens"),
         Some(FinishReason::ToolCalls) => json!("tool_use"),
         Some(FinishReason::ContentFilter) => json!("refusal"),
+        Some(FinishReason::StopSequence) => json!("stop_sequence"),
+        // 0.3.0: unknown reasons survive verbatim instead of vanishing.
+        Some(FinishReason::Other(other)) => json!(other),
         None => Value::Null,
     }
 }
@@ -428,6 +431,22 @@ fn response_blocks(message: &Message) -> Result<Vec<Value>, String> {
                             "Anthropic assistant responses cannot contain image blocks",
                         ));
                     }
+                    ContentPart::Thinking {
+                        thinking,
+                        signature,
+                    } => {
+                        blocks.push(json!({
+                            "type": "thinking",
+                            "thinking": thinking,
+                            "signature": signature,
+                        }));
+                    }
+                    ContentPart::RedactedThinking { data } => {
+                        blocks.push(json!({"type": "redacted_thinking", "data": data}));
+                    }
+                    // 0.3.0: unmodeled parts survive verbatim instead of
+                    // silently dropping content.
+                    ContentPart::Unknown(value) => blocks.push(value.clone()),
                 }
             }
         }
@@ -491,6 +510,7 @@ struct StreamState {
     started: bool,
     next_block_index: u32,
     text_blocks: BTreeMap<u32, u32>,
+    thinking_blocks: BTreeMap<u32, u32>,
     tool_blocks: BTreeMap<u32, ToolBlock>,
     open_blocks: BTreeSet<u32>,
 }
@@ -507,6 +527,7 @@ impl StreamState {
             started: false,
             next_block_index: 0,
             text_blocks: BTreeMap::new(),
+            thinking_blocks: BTreeMap::new(),
             tool_blocks: BTreeMap::new(),
             open_blocks: BTreeSet::new(),
         }
@@ -522,6 +543,25 @@ impl StreamState {
         self.next_block_index += 1;
         self.open_blocks.insert(index);
         Ok(index)
+    }
+
+    /// The anthropic content-block index for choice `index`'s thinking
+    /// block, opening it on first use.
+    fn thinking_block(&mut self, index: u32, rendered: &mut String) -> Result<u32, String> {
+        if let Some(block_index) = self.thinking_blocks.get(&index) {
+            return Ok(*block_index);
+        }
+        let block_index = self.allocate_block()?;
+        self.thinking_blocks.insert(index, block_index);
+        rendered.push_str(&sse(
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": block_index,
+                "content_block": {"type": "thinking", "thinking": ""}
+            }),
+        )?);
+        Ok(block_index)
     }
 
     fn ensure_started(&mut self, rendered: &mut String) -> Result<(), String> {
@@ -679,6 +719,11 @@ impl Guest for AnthropicClient {
             messages: parse_messages(body)?,
             tools: parse_tools(body)?,
             response_format: None,
+            // `validate_tool_choice` already refused everything but `auto`.
+            tool_choice: body
+                .get("tool_choice")
+                .filter(|value| !value.is_null())
+                .map(|_| ToolChoice::Auto),
             sampling: Sampling {
                 temperature: body.get("temperature").and_then(Value::as_f64),
                 top_p: body.get("top_p").and_then(Value::as_f64),
@@ -737,7 +782,7 @@ impl Guest for AnthropicClient {
             "role": "assistant",
             "content": response_blocks(&choice.message)?,
             "model": response.model,
-            "stop_reason": finish_reason_to_anthropic(choice.finish_reason),
+            "stop_reason": finish_reason_to_anthropic(choice.finish_reason.clone()),
             "stop_sequence": null,
             "usage": Value::Object(usage),
         }))
@@ -812,6 +857,45 @@ impl Guest for AnthropicClient {
                             "type": "content_block_delta",
                             "index": block_index,
                             "delta": {"type": "text_delta", "text": content}
+                        }),
+                    )?);
+                    Ok(rendered)
+                }
+                // 0.3.0: reasoning streams as native Anthropic thinking
+                // blocks, one per choice index, closed at `Done` with the
+                // other open blocks.
+                StreamEvent::ThinkingDelta {
+                    index,
+                    thinking_delta,
+                } => {
+                    let state = states.get_mut(stream_id).expect("state inserted above");
+                    let mut rendered = String::new();
+                    state.ensure_started(&mut rendered)?;
+                    let block_index = state.thinking_block(index, &mut rendered)?;
+                    rendered.push_str(&sse(
+                        "content_block_delta",
+                        json!({
+                            "type": "content_block_delta",
+                            "index": block_index,
+                            "delta": {"type": "thinking_delta", "thinking": thinking_delta}
+                        }),
+                    )?);
+                    Ok(rendered)
+                }
+                StreamEvent::ThinkingSignatureDelta {
+                    index,
+                    signature_delta,
+                } => {
+                    let state = states.get_mut(stream_id).expect("state inserted above");
+                    let mut rendered = String::new();
+                    state.ensure_started(&mut rendered)?;
+                    let block_index = state.thinking_block(index, &mut rendered)?;
+                    rendered.push_str(&sse(
+                        "content_block_delta",
+                        json!({
+                            "type": "content_block_delta",
+                            "index": block_index,
+                            "delta": {"type": "signature_delta", "signature": signature_delta}
                         }),
                     )?);
                     Ok(rendered)
@@ -899,7 +983,10 @@ impl Guest for AnthropicClient {
                     )?);
                     Ok(rendered)
                 }
-                StreamEvent::Done { finish_reason } => {
+                StreamEvent::Done {
+                    finish_reason,
+                    stop_sequence,
+                } => {
                     let mut state = states.remove(stream_id).expect("state inserted above");
                     let mut rendered = String::new();
                     state.ensure_started(&mut rendered)?;
@@ -915,7 +1002,7 @@ impl Guest for AnthropicClient {
                             "type": "message_delta",
                             "delta": {
                                 "stop_reason": finish_reason_to_anthropic(finish_reason),
-                                "stop_sequence": null
+                                "stop_sequence": stop_sequence
                             },
                             "usage": stream_usage(state.usage)
                         }),

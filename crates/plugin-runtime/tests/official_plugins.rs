@@ -326,6 +326,7 @@ fn anthropic_stream_state_is_isolated_and_cleaned_by_stream_id() {
         .render_stream_event(
             &StreamEvent::Done {
                 finish_reason: Some(FinishReason::Stop),
+                stop_sequence: None,
             },
             &context("stream-a", "msg-a"),
         )
@@ -408,6 +409,7 @@ fn responses_stream_state_is_isolated_and_cleaned_by_stream_id() {
         .render_stream_event(
             &StreamEvent::Done {
                 finish_reason: Some(FinishReason::Stop),
+                stop_sequence: None,
             },
             &context("stream-a", "resp-a"),
         )
@@ -516,6 +518,7 @@ fn responses_stream_assigns_global_output_indices_by_first_appearance() {
             .render_stream_event(
                 &StreamEvent::Done {
                     finish_reason: Some(FinishReason::ToolCalls),
+                    stop_sequence: None,
                 },
                 &context("text-first"),
             )
@@ -584,6 +587,7 @@ fn responses_stream_keeps_tool_first_output_order() {
             .render_stream_event(
                 &StreamEvent::Done {
                     finish_reason: Some(FinishReason::ToolCalls),
+                    stop_sequence: None,
                 },
                 &context,
             )

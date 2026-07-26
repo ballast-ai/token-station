@@ -596,6 +596,7 @@ impl SqliteStore {
                             cache_read_tokens: narrow(row.get::<_, i64>(4)?),
                             cache_write_tokens: narrow(row.get::<_, i64>(5)?),
                             reasoning_tokens: narrow(row.get::<_, i64>(6)?),
+                            ..Usage::default()
                         },
                     ))
                 })
@@ -1134,6 +1135,7 @@ fn receipt_seed(row: &Row<'_>) -> Result<ReceiptSeed, rusqlite::Error> {
         cache_read_tokens: cache_read_tokens.unwrap_or(0),
         cache_write_tokens: cache_write_tokens.unwrap_or(0),
         reasoning_tokens: reasoning_tokens.unwrap_or(0),
+        ..Usage::default()
     });
     let cost_kind = cost_kind(34, &row.get::<_, String>(34)?)?;
     let (cost_micros, price_version) = match cost_kind {

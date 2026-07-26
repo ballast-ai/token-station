@@ -10,6 +10,7 @@
     }
   },
   {
-    "type": "done"
+    "type": "done",
+    "finish_reason": "insufficient_system_resource"
   }
 ]
