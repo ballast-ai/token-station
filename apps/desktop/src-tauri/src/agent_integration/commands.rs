@@ -39,7 +39,8 @@ use super::transaction::{
 };
 use super::types::{
     AgentDriftView, AgentUiMetadata, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan,
-    DiscoveryRecord, DriftStatus, PatchKind, PatchOperation, PlanIntent, ReasonCode, SnapshotRecord,
+    DiscoveryRecord, DriftStatus, PatchKind, PatchOperation, PlanIntent, ReasonCode,
+    SnapshotRecord,
 };
 use crate::{inbound_adapter_ready, AgentIntegrationPaths, AppStateManaged};
 
@@ -439,8 +440,14 @@ fn force_strip_owned(
 }
 
 /// Atomically rewrite a config through a sibling temporary file and rename, preserving permissions when possible.
-fn write_config_atomic(target: &Path, bytes: &[u8], permissions: Option<u32>) -> Result<(), String> {
-    let dir = target.parent().ok_or_else(|| "配置路径缺少父目录".to_string())?;
+fn write_config_atomic(
+    target: &Path,
+    bytes: &[u8],
+    permissions: Option<u32>,
+) -> Result<(), String> {
+    let dir = target
+        .parent()
+        .ok_or_else(|| "配置路径缺少父目录".to_string())?;
     let file_name = target
         .file_name()
         .and_then(|name| name.to_str())
@@ -840,7 +847,11 @@ impl AgentCommandState {
     /// Force disconnect (fallback): does not depend on the keychain or baseline snapshot. Use ownership records to remove fields injected by Token Station
     /// Remove managed fields from the current configuration, clear ownership records, and unpin the baseline snapshot. Use this when a snapshot key
     /// is lost and snapshots cannot be decrypted, or normal “restore original configuration” is rejected. It cannot recover overwritten original values exactly.
-    fn force_forget(&self, agent_id: &str, installation_path: &str) -> Result<(), AgentCommandError> {
+    fn force_forget(
+        &self,
+        agent_id: &str,
+        installation_path: &str,
+    ) -> Result<(), AgentCommandError> {
         validate_short_identifier(agent_id, "agent_id")?;
         let owned = self
             .ownership
@@ -2614,7 +2625,13 @@ mod tests {
         // Establish management by writing managed fields, ownership records, and a snapshot.
         let runtime = runtime("vk-force-forget");
         let connection = state
-            .plan_connection("claude-code", "/opt/claude", Some("2.1.211"), "main", &runtime)
+            .plan_connection(
+                "claude-code",
+                "/opt/claude",
+                Some("2.1.211"),
+                "main",
+                &runtime,
+            )
             .unwrap();
         let taken = state
             .take_plan(
@@ -2656,7 +2673,10 @@ mod tests {
             .unwrap();
 
         let after_connect = String::from_utf8(std::fs::read(&target).unwrap()).unwrap();
-        assert!(after_connect.contains("ANTHROPIC_BASE_URL"), "接管应写入受管字段");
+        assert!(
+            after_connect.contains("ANTHROPIC_BASE_URL"),
+            "接管应写入受管字段"
+        );
         assert_eq!(
             state
                 .ownership
@@ -2670,7 +2690,10 @@ mod tests {
         state.force_forget("claude-code", "/opt/claude").unwrap();
 
         let after_forget = String::from_utf8(std::fs::read(&target).unwrap()).unwrap();
-        assert!(!after_forget.contains("ANTHROPIC_BASE_URL"), "受管字段应被删除");
+        assert!(
+            !after_forget.contains("ANTHROPIC_BASE_URL"),
+            "受管字段应被删除"
+        );
         assert!(after_forget.contains("keep"), "用户自己的字段必须保留");
         assert!(
             state

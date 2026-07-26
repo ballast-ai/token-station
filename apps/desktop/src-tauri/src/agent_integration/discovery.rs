@@ -1345,21 +1345,21 @@ mod tests {
         let path = Path::new("/bin/agent");
 
         // First lookup misses and hashes once.
-        let first = lookup_or_hash(&mut cache, path, Some(100), Some(500), &hasher).unwrap();
+        let first = lookup_or_hash(&mut cache, path, Some(100), Some(500), hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         // Unchanged mtime and size reuse the cache without hashing.
-        let second = lookup_or_hash(&mut cache, path, Some(100), Some(500), &hasher).unwrap();
+        let second = lookup_or_hash(&mut cache, path, Some(100), Some(500), hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(first, second);
         // Recalculate when mtime changes.
-        lookup_or_hash(&mut cache, path, Some(200), Some(500), &hasher).unwrap();
+        lookup_or_hash(&mut cache, path, Some(200), Some(500), hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         // Recalculate when size changes.
-        lookup_or_hash(&mut cache, path, Some(200), Some(600), &hasher).unwrap();
+        lookup_or_hash(&mut cache, path, Some(200), Some(600), hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         // An unreadable size disables caching, so every call hashes.
-        lookup_or_hash(&mut cache, path, Some(200), None, &hasher).unwrap();
-        lookup_or_hash(&mut cache, path, Some(200), None, &hasher).unwrap();
+        lookup_or_hash(&mut cache, path, Some(200), None, hasher).unwrap();
+        lookup_or_hash(&mut cache, path, Some(200), None, hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 5);
     }
 
