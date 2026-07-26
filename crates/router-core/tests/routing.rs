@@ -218,7 +218,7 @@ fn a_trivial_turn_stays_cheap_under_a_heavy_agent_harness() {
     let mut request = ChatRequest::new(
         "auto",
         vec![
-            Message::text(Role::System, &"You are a coding agent. ".repeat(400)),
+            Message::text(Role::System, "You are a coding agent. ".repeat(400)),
             Message::text(Role::User, "你好"),
         ],
     );

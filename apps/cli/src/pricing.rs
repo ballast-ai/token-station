@@ -303,6 +303,7 @@ mod tests {
             cache_read_tokens: 60,
             cache_write_tokens: 20,
             reasoning_tokens: 15,
+            ..Usage::default()
         };
 
         assert_eq!(price.cost_micros(&value), 91);

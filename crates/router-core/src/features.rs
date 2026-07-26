@@ -104,6 +104,12 @@ impl RequestFeatures {
                                 code_fences = code_fences.saturating_add(count_fences(text));
                             }
                             ContentPart::ImageUrl { .. } => has_images = true,
+                            // 0.3.0: reasoning traces and unmodeled parts are
+                            // not caller-visible prompt content — they join
+                            // neither the token estimate nor `has_images`.
+                            ContentPart::Thinking { .. }
+                            | ContentPart::RedactedThinking { .. }
+                            | ContentPart::Unknown(_) => {}
                         }
                     }
                 }

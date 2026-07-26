@@ -216,7 +216,12 @@ fn message_texts(request: &ChatRequest) -> impl Iterator<Item = &str> {
                 Content::Text(text) => Box::new(std::iter::once(text.as_str())),
                 Content::Parts(parts) => Box::new(parts.iter().filter_map(|part| match part {
                     ContentPart::Text { text } => Some(text.as_str()),
-                    ContentPart::ImageUrl { .. } => None,
+                    // 0.3.0: reasoning/unmodeled parts stay out of context
+                    // summaries — same rationale as feature extraction.
+                    ContentPart::ImageUrl { .. }
+                    | ContentPart::Thinking { .. }
+                    | ContentPart::RedactedThinking { .. }
+                    | ContentPart::Unknown(_) => None,
                 })),
             }
         })
