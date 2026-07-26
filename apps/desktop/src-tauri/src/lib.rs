@@ -3412,7 +3412,10 @@ mod tests {
             "agent-gemini 应被补齐,实际 ={agents:?}"
         );
         for adapter in desktop_agents() {
-            assert!(agents.iter().any(|a| a == adapter), "缺 {adapter}:{agents:?}");
+            assert!(
+                agents.iter().any(|a| a == adapter),
+                "缺 {adapter}:{agents:?}"
+            );
         }
     }
 

@@ -39,7 +39,8 @@ use super::transaction::{
 };
 use super::types::{
     AgentDriftView, AgentUiMetadata, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan,
-    DiscoveryRecord, DriftStatus, PatchKind, PatchOperation, PlanIntent, ReasonCode, SnapshotRecord,
+    DiscoveryRecord, DriftStatus, PatchKind, PatchOperation, PlanIntent, ReasonCode,
+    SnapshotRecord,
 };
 use crate::{inbound_adapter_ready, AgentIntegrationPaths, AppStateManaged};
 
@@ -439,8 +440,14 @@ fn force_strip_owned(
 }
 
 /// 原子写回配置文件(同目录临时文件 + rename),尽量恢复原权限。
-fn write_config_atomic(target: &Path, bytes: &[u8], permissions: Option<u32>) -> Result<(), String> {
-    let dir = target.parent().ok_or_else(|| "配置路径缺少父目录".to_string())?;
+fn write_config_atomic(
+    target: &Path,
+    bytes: &[u8],
+    permissions: Option<u32>,
+) -> Result<(), String> {
+    let dir = target
+        .parent()
+        .ok_or_else(|| "配置路径缺少父目录".to_string())?;
     let file_name = target
         .file_name()
         .and_then(|name| name.to_str())
@@ -840,7 +847,11 @@ impl AgentCommandState {
     /// 强制断开(兜底):不依赖钥匙串/基线快照。按归属记录把 Token Station 注入的
     /// 受管字段从当前配置里删掉,再清除归属记录、取消固定基线快照。用于快照因密钥
     /// 丢失而无法解密、正常「恢复原始配置」被拒时自救。无法精确还原被覆盖的原值。
-    fn force_forget(&self, agent_id: &str, installation_path: &str) -> Result<(), AgentCommandError> {
+    fn force_forget(
+        &self,
+        agent_id: &str,
+        installation_path: &str,
+    ) -> Result<(), AgentCommandError> {
         validate_short_identifier(agent_id, "agent_id")?;
         let owned = self
             .ownership
@@ -2614,7 +2625,13 @@ mod tests {
         // 建立接管:写入受管字段 + 归属记录 + 快照。
         let runtime = runtime("vk-force-forget");
         let connection = state
-            .plan_connection("claude-code", "/opt/claude", Some("2.1.211"), "main", &runtime)
+            .plan_connection(
+                "claude-code",
+                "/opt/claude",
+                Some("2.1.211"),
+                "main",
+                &runtime,
+            )
             .unwrap();
         let taken = state
             .take_plan(
@@ -2656,7 +2673,10 @@ mod tests {
             .unwrap();
 
         let after_connect = String::from_utf8(std::fs::read(&target).unwrap()).unwrap();
-        assert!(after_connect.contains("ANTHROPIC_BASE_URL"), "接管应写入受管字段");
+        assert!(
+            after_connect.contains("ANTHROPIC_BASE_URL"),
+            "接管应写入受管字段"
+        );
         assert_eq!(
             state
                 .ownership
@@ -2670,7 +2690,10 @@ mod tests {
         state.force_forget("claude-code", "/opt/claude").unwrap();
 
         let after_forget = String::from_utf8(std::fs::read(&target).unwrap()).unwrap();
-        assert!(!after_forget.contains("ANTHROPIC_BASE_URL"), "受管字段应被删除");
+        assert!(
+            !after_forget.contains("ANTHROPIC_BASE_URL"),
+            "受管字段应被删除"
+        );
         assert!(after_forget.contains("keep"), "用户自己的字段必须保留");
         assert!(
             state

@@ -1345,21 +1345,21 @@ mod tests {
         let path = Path::new("/bin/agent");
 
         // 首次:未命中 → 哈希一次。
-        let first = lookup_or_hash(&mut cache, path, Some(100), Some(500), &hasher).unwrap();
+        let first = lookup_or_hash(&mut cache, path, Some(100), Some(500), hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         // mtime + size 不变 → 复用,不再哈希。
-        let second = lookup_or_hash(&mut cache, path, Some(100), Some(500), &hasher).unwrap();
+        let second = lookup_or_hash(&mut cache, path, Some(100), Some(500), hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(first, second);
         // mtime 变 → 重算。
-        lookup_or_hash(&mut cache, path, Some(200), Some(500), &hasher).unwrap();
+        lookup_or_hash(&mut cache, path, Some(200), Some(500), hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         // size 变 → 重算。
-        lookup_or_hash(&mut cache, path, Some(200), Some(600), &hasher).unwrap();
+        lookup_or_hash(&mut cache, path, Some(200), Some(600), hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         // 拿不到 size(文件不可读)→ 不缓存,每次都哈希。
-        lookup_or_hash(&mut cache, path, Some(200), None, &hasher).unwrap();
-        lookup_or_hash(&mut cache, path, Some(200), None, &hasher).unwrap();
+        lookup_or_hash(&mut cache, path, Some(200), None, hasher).unwrap();
+        lookup_or_hash(&mut cache, path, Some(200), None, hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 5);
     }
 
