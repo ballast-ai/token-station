@@ -46,7 +46,6 @@ interface AddProviderPageProps {
 }
 
 const offerLabel = (kind: FreeOfferKind) => kind === "recurring" ? "长期免费" : "试用额度";
-const regionLabel = (region: FreeProviderRegion) => region === "china" ? "中国可用" : "全球平台";
 const regularRegion = (preset: ProviderPreset): "china" | "global" =>
   preset.region === "中国" ? "china" : "global";
 
@@ -402,17 +401,6 @@ export default function AddProviderPage({
                       </span>
                       <span className="provider-catalog-card-title">
                         <strong>{item.label}</strong>
-                        <code>{item.id}</code>
-                      </span>
-                      <span className="provider-card-model-count">
-                        {custom ? "手动配置" : `${item.models.length} 模型`}
-                      </span>
-                      <span className="provider-catalog-card-note">
-                        {item.note ?? `${item.region}开放平台 · ${item.subscription}`}
-                      </span>
-                      <span className="provider-catalog-card-tags">
-                        <i className="regular">{custom ? "高级设置" : item.region}</i>
-                        {!custom && <i>{item.subscription}</i>}
                       </span>
                     </button>
                   </article>
@@ -435,16 +423,11 @@ export default function AddProviderPage({
                     </span>
                     <span className="provider-catalog-card-title">
                       <strong>{item.label}</strong>
-                      <code>{item.upstream_name}</code>
                     </span>
-                    <span className="provider-card-model-count">{item.models.length} 模型</span>
-                    <span className="provider-catalog-card-note">{item.free_note}</span>
-                    <span className="provider-catalog-card-tags">
+                    <span className="provider-catalog-card-badge">
                       <i className={item.offer_kind === "recurring" ? "free" : "trial"}>
                         {offerLabel(item.offer_kind)}
                       </i>
-                      <i>{regionLabel(item.region)}</i>
-                      {item.tags.slice(2, 3).map((tag) => <i key={tag}>{tag}</i>)}
                     </span>
                   </button>
                 </article>
