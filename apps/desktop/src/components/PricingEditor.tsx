@@ -36,7 +36,10 @@ export default function PricingEditor() {
   const [reasoning, setReasoning] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [priceTouched, setPriceTouched] = useState(false);
+  // A dirty price belongs to one model only. Reusing it after the model ID
+  // changes can silently save one model's price under another model.
+  const [touchedModel, setTouchedModel] = useState<string | null>(null);
+  const [lookupRequestedFor, setLookupRequestedFor] = useState<string | null>(null);
   const [suggestion, setSuggestion] = useState<ModelPriceSuggestionView | null>(null);
 
   useEffect(() => {
@@ -50,7 +53,8 @@ export default function PricingEditor() {
         || requestedModel.length === 0
         || requestedModel.length > 256
         || table.models[requestedModel]
-        || priceTouched) {
+        || lookupRequestedFor !== requestedModel
+        || touchedModel === requestedModel) {
       return;
     }
     let cancelled = false;
@@ -72,7 +76,7 @@ export default function PricingEditor() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [model, priceTouched, table]);
+  }, [lookupRequestedFor, model, table, touchedModel]);
 
   const edit = (name: string, price: ModelPriceView) => {
     setModel(name);
@@ -83,7 +87,7 @@ export default function PricingEditor() {
     setReasoning(displayRate(price.reasoning_per_mtok));
     setError("");
     setNotice("");
-    setPriceTouched(true);
+    setTouchedModel(name);
     setSuggestion(null);
   };
 
@@ -125,7 +129,8 @@ export default function PricingEditor() {
         setCacheRead("0");
         setCacheWrite("0");
         setReasoning("");
-        setPriceTouched(false);
+        setTouchedModel(null);
+        setLookupRequestedFor(null);
         setSuggestion(null);
       }
       setNotice(`已生成 price v${next.version}；历史回执保持原成本`);
@@ -181,14 +186,16 @@ export default function PricingEditor() {
             className="input"
             value={model}
             onChange={(event) => {
-              if (suggestion) {
-                setInput("0");
-                setOutput("0");
-                setCacheRead("0");
-                setCacheWrite("0");
-                setReasoning("");
-              }
+              // Changing the identity invalidates both an automatic suggestion
+              // and any manually entered amount for the previous model.
+              setInput("0");
+              setOutput("0");
+              setCacheRead("0");
+              setCacheWrite("0");
+              setReasoning("");
               setSuggestion(null);
+              setTouchedModel(null);
+              setLookupRequestedFor(null);
               setModel(event.target.value);
             }}
           />
@@ -210,7 +217,7 @@ export default function PricingEditor() {
               step="0.000001"
               value={value as string}
               onChange={(event) => {
-                setPriceTouched(true);
+                setTouchedModel(model.trim());
                 setSuggestion(null);
                 (setter as (value: string) => void)(event.target.value);
               }}
@@ -218,6 +225,13 @@ export default function PricingEditor() {
           </label>
         ))}
         <div className="price-save-action">
+          <button
+            className="btn"
+            disabled={!table || model.trim().length === 0 || table.models[model.trim()] != null}
+            onClick={() => setLookupRequestedFor(model.trim())}
+          >
+            查询公开价格
+          </button>
           <button className="btn primary" disabled={!table} onClick={save}>保存新版本</button>
         </div>
       </div>

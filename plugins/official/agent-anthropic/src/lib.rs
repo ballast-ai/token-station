@@ -69,7 +69,13 @@ fn validate_thinking(body: &Value) -> Result<(), String> {
     match body.get("thinking") {
         None | Some(Value::Null) => Ok(()),
         Some(Value::Object(config)) => match config.get("type").and_then(Value::as_str) {
-            Some(_) => Ok(()),
+            // There is no provider-side consumer for this adapter-local
+            // extension yet. Accepting enabled/adaptive thinking would claim
+            // a capability while silently dropping its semantics upstream.
+            Some("disabled") => Ok(()),
+            Some(kind) => Err(capability(format!(
+                "Anthropic thinking type {kind} is not supported by the configured provider"
+            ))),
             None => Err(invalid("thinking declares no string type")),
         },
         Some(_) => Err(invalid("thinking must be an object")),

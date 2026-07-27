@@ -126,6 +126,8 @@ describe("versioned pricing editor", () => {
     await screen.findByText("price v0");
 
     await user.type(screen.getByRole("textbox", { name: "模型 ID" }), "gpt-5");
+    expect(suggestModelPrice).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "查询公开价格" }));
 
     expect(await screen.findByText(/models\.dev.*OpenAI.*GPT-5/)).toBeInTheDocument();
     expect(screen.getByRole("spinbutton", { name: "输入价格" })).toHaveValue(1.25);
@@ -136,6 +138,7 @@ describe("versioned pricing editor", () => {
     expect(screen.getByRole("spinbutton", { name: "输入价格" })).toHaveValue(0);
     expect(screen.getByRole("spinbutton", { name: "输出价格" })).toHaveValue(0);
     await user.type(screen.getByRole("textbox", { name: "模型 ID" }), "gpt-5");
+    await user.click(screen.getByRole("button", { name: "查询公开价格" }));
     await screen.findByText(/models\.dev.*OpenAI.*GPT-5/);
 
     await user.click(screen.getByRole("button", { name: "保存新版本" }));
@@ -159,8 +162,28 @@ describe("versioned pricing editor", () => {
     await user.clear(input);
     await user.type(input, "9");
 
+    await user.click(screen.getByRole("button", { name: "查询公开价格" }));
     await new Promise((resolve) => setTimeout(resolve, 450));
     expect(suggestModelPrice).not.toHaveBeenCalled();
     expect(input).toHaveValue(9);
+  });
+
+  it("clears a prior model's manual price before saving a different model", async () => {
+    vi.mocked(getPriceTable).mockResolvedValueOnce({ version: 0, models: {} });
+    const user = userEvent.setup();
+    render(<PricingEditor />);
+    await screen.findByText("price v0");
+    const model = screen.getByRole("textbox", { name: "模型 ID" });
+    await user.type(model, "old-model");
+    const input = screen.getByRole("spinbutton", { name: "输入价格" });
+    await user.clear(input);
+    await user.type(input, "9");
+    await user.clear(model);
+    await user.type(model, "new-model");
+    expect(input).toHaveValue(0);
+    await user.click(screen.getByRole("button", { name: "保存新版本" }));
+    await waitFor(() => expect(setModelPrice).toHaveBeenCalledWith("new-model", expect.objectContaining({
+      input_per_mtok: 0,
+    }), 0));
   });
 });
