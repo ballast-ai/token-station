@@ -610,13 +610,70 @@ describe("desktop station navigation", () => {
     await user.click(navigation().getByRole("button", { name: "OpenCode" }));
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "添加供应商" })).toHaveLength(1);
-    // The provider selector is now a brand-card grid with role=radiogroup. Select a visible card label.
-    await user.click(screen.getByText("OpenAI", { selector: ".preset-card-label" }));
+    expect(screen.queryByRole("button", { name: "添加供应商" })).toBeNull();
+    // The provider picker is a brand-card catalog; click by visible label instead of selecting an option.
+    await user.click(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" }));
+    expect(screen.getByRole("button", { name: "添加供应商" })).toBeInTheDocument();
     await user.type(screen.getByPlaceholderText("只保存在系统钥匙串"), "secret-test");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "OpenCode" })).toBeInTheDocument();
     expect(screen.getByText("供应商已添加")).toBeInTheDocument();
+  });
+
+  it("uses one provider catalog for regular and free APIs and restores the selected mode", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "list_free_provider_presets") {
+        return [{
+          id: "nvidia",
+          upstream_name: "nvidia_free",
+          label: "NVIDIA API Catalog",
+          short_label: "NV",
+          base_url: "https://integrate.api.nvidia.com/v1",
+          offer_kind: "recurring",
+          region: "global",
+          tags: ["长期免费", "全球平台", "开发用途"],
+          free_note: "build.nvidia.com 托管 API",
+          key_instruction: "打开模型页面并点击 Get API Key。",
+          application_url: "https://build.nvidia.com/",
+          docs_url: "https://docs.example.com/nvidia",
+          verified_at: "2026-07-27",
+          overage_policy: "rate_limited",
+          models: [{
+            id: "openai/gpt-oss-120b",
+            label: "GPT-OSS 120B",
+            tool: "declared",
+            vision: "unknown",
+            json_schema: "declared",
+            context_window: 131072,
+          }],
+        }];
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "添加供应商" }));
+    expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /常规 API/ })).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("button", { name: /免费 API/ }));
+    expect(screen.getByRole("button", { name: /免费 API/ })).toHaveAttribute("aria-pressed", "true");
+    expect(await screen.findByText("NVIDIA API Catalog")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /NVIDIA API Catalog/ }));
+    expect(await screen.findByRole("heading", { name: "NVIDIA API Catalog" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /免费 API/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("NVIDIA API Catalog")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /常规 API/ }));
+    expect(screen.getByRole("button", { name: /常规 API/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" })).toBeInTheDocument();
   });
 
   it("applies the Connector plan directly on 一键接入", async () => {

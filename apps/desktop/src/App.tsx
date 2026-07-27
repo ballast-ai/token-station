@@ -5,6 +5,7 @@ import {
   getRuntimeState,
   getState,
   listAgentRegistry,
+  listFreeProviderPresets,
   listenServeState,
   removeKeyword,
   removeProvider,
@@ -18,14 +19,20 @@ import {
   type AgentRouteView,
   type AgentUiMetadataView,
   type AgentView,
+  type FreeProviderPresetView,
   type ServeView,
   type StateView,
   type TierSlot,
 } from "./api";
 import AppShell, { type AppView } from "./components/AppShell";
 import { LanguageBoundary } from "./components/LanguageProvider";
-import AddProviderPage from "./pages/AddProviderPage";
+import AddProviderPage, {
+  type FreeCatalogFilters,
+  type ProviderCatalogMode,
+  type RegularCatalogFilters,
+} from "./pages/AddProviderPage";
 import AgentRoutePage from "./pages/AgentRoutePage";
+import FreeProviderConfigPage from "./pages/FreeProviderConfigPage";
 import HomePage from "./pages/HomePage";
 import SettingsHub from "./pages/SettingsHub";
 import Stats from "./pages/Stats";
@@ -70,6 +77,19 @@ function StationApp() {
   const [serveBusy, setServeBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [freePresets, setFreePresets] = useState<FreeProviderPresetView[]>([]);
+  const [freeCatalogLoading, setFreeCatalogLoading] = useState(false);
+  const [freeCatalogError, setFreeCatalogError] = useState("");
+  const [freeCatalogFilters, setFreeCatalogFilters] = useState<FreeCatalogFilters>({
+    query: "",
+    offer: "all",
+    region: "all",
+  });
+  const [providerCatalogMode, setProviderCatalogMode] = useState<ProviderCatalogMode>("regular");
+  const [regularCatalogFilters, setRegularCatalogFilters] = useState<RegularCatalogFilters>({
+    query: "",
+    region: "all",
+  });
   const busyRef = useRef(false);
   const scanRef = useRef(false);
   const scanQueuedRef = useRef(false);
@@ -265,6 +285,18 @@ function StationApp() {
     setError("");
   };
 
+  const loadFreeCatalog = async () => {
+    setFreeCatalogLoading(true);
+    setFreeCatalogError("");
+    try {
+      setFreePresets(await listFreeProviderPresets());
+    } catch (caught) {
+      setFreeCatalogError(errorText(caught));
+    } finally {
+      setFreeCatalogLoading(false);
+    }
+  };
+
   if (!state) {
     return (
       <div className="loading-screen">
@@ -363,12 +395,43 @@ function StationApp() {
         <AddProviderPage
           existingNames={state.providers.map((provider) => provider.name)}
           onCancel={navigateBack}
+          catalogMode={providerCatalogMode}
+          onCatalogModeChange={setProviderCatalogMode}
+          regularFilters={regularCatalogFilters}
+          onRegularFiltersChange={setRegularCatalogFilters}
+          freePresets={freePresets}
+          freeLoading={freeCatalogLoading}
+          freeError={freeCatalogError}
+          freeFilters={freeCatalogFilters}
+          onFreeFiltersChange={setFreeCatalogFilters}
+          onLoadFree={() => void loadFreeCatalog()}
+          onSelectFree={(preset) => setView(`free-provider:${preset.id}`)}
           onAdded={(next, message) => {
             showState(next, message);
             setView(viewHistoryRef.current.pop() ?? "home");
           }}
         />
       )}
+      {view.startsWith("free-provider:") && (() => {
+        const presetId = view.slice("free-provider:".length);
+        const preset = freePresets.find((item) => item.id === presetId);
+        return preset ? (
+          <FreeProviderConfigPage
+            key={preset.id}
+            preset={preset}
+            onBack={() => setView("add-provider")}
+            onAdded={(next, nextMessage) => {
+              showState(next, nextMessage);
+              setView("home");
+            }}
+          />
+        ) : (
+          <section className="panel free-catalog-state">
+            <strong>免费供应商不存在或目录已更新</strong>
+            <button className="btn" type="button" onClick={() => setView("add-provider")}>返回目录</button>
+          </section>
+        );
+      })()}
     </AppShell>
   );
 }

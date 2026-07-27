@@ -11,6 +11,7 @@
 
 pub mod agent_integration;
 mod config_state;
+mod free_provider_catalog;
 mod model_catalog;
 mod pricing_catalog;
 mod provider_tombstones;
@@ -406,6 +407,7 @@ struct ProviderView {
     has_auth: bool,
     /// This upstream runs on the local machine; `local_only` routing keeps to it.
     local: bool,
+    access_tier: String,
 }
 
 #[derive(Serialize)]
@@ -767,6 +769,11 @@ impl AppInner {
                     catalog,
                     has_auth: up.get("auth").map(|a| !a.is_null()).unwrap_or(false),
                     local: up.get("local").and_then(Value::as_bool).unwrap_or(false),
+                    access_tier: up
+                        .get("access_tier")
+                        .and_then(Value::as_str)
+                        .unwrap_or("paid")
+                        .to_owned(),
                 }
             })
             .collect()
@@ -1478,6 +1485,151 @@ fn preview_provider_endpoints(base_url: String) -> Result<ProviderEndpointPrevie
         responses: endpoint.resolve(ProviderApi::Responses),
         messages: endpoint.resolve(ProviderApi::Messages),
     })
+}
+
+#[tauri::command]
+fn list_free_provider_presets() -> Vec<free_provider_catalog::FreeProviderPreset> {
+    free_provider_catalog::presets().to_vec()
+}
+
+#[tauri::command]
+async fn add_free_provider(
+    state: State<'_, AppStateManaged>,
+    preset_id: String,
+    selected_models: Vec<String>,
+    api_key: String,
+    guard_confirmed: bool,
+) -> Result<StateView, String> {
+    let preset = free_provider_catalog::find(preset_id.trim())
+        .ok_or_else(|| format!("未知免费供应商 `{}`", preset_id.trim()))?;
+    let api_key = api_key.trim().to_owned();
+    if api_key.is_empty() {
+        return Err("请填写 API Key".to_owned());
+    }
+    if preset.overage_policy == free_provider_catalog::OveragePolicy::UserMustEnableGuard
+        && !guard_confirmed
+    {
+        return Err("请先确认已在供应商控制台启用免费额度保护".to_owned());
+    }
+
+    let allowed: std::collections::BTreeMap<&str, &free_provider_catalog::FreeModelPreset> = preset
+        .models
+        .iter()
+        .map(|model| (model.id, model))
+        .collect();
+    let mut selected = Vec::new();
+    for raw in selected_models {
+        let model = raw.trim();
+        if model.is_empty() || selected.iter().any(|existing: &String| existing == model) {
+            continue;
+        }
+        if !allowed.contains_key(model) {
+            return Err(format!("模型 `{model}` 不在该供应商的免费目录中"));
+        }
+        selected.push(model.to_owned());
+    }
+    if selected.is_empty() {
+        return Err("请至少选择一个免费模型".to_owned());
+    }
+
+    let (egress, egress_secrets) = {
+        let inner = state.0.lock().unwrap();
+        inner.ensure_editable()?;
+        if inner.draft["upstreams"].get(preset.upstream_name).is_some() {
+            return Err(format!(
+                "免费供应商 `{}` 已存在，请先在主页管理该实例",
+                preset.upstream_name
+            ));
+        }
+        if provider_tombstones::contains(&inner.data_dir(), preset.upstream_name)? {
+            return Err(format!(
+                "Provider 回收站中已有 `{}`，请先恢复或彻底处理该实例",
+                preset.upstream_name
+            ));
+        }
+        let config = inner.materialize()?;
+        (
+            config.egress.clone(),
+            secrets::SecretStore::from_config(&config),
+        )
+    };
+
+    let validate_preset = *preset;
+    let validate_model = selected[0].clone();
+    let validate_key = api_key.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        free_provider_catalog::validate_chat_completion(
+            &validate_preset,
+            &validate_model,
+            &validate_key,
+            &egress,
+            &egress_secrets,
+        )
+    })
+    .await
+    .map_err(|error| format!("免费模型验证任务异常结束：{error}"))??;
+
+    let model_objs: Vec<Value> = selected
+        .iter()
+        .filter_map(|id| allowed.get(id.as_str()).copied())
+        .map(|model| {
+            let capability_bool = |state: CapabilityState| {
+                matches!(state, CapabilityState::Verified | CapabilityState::Declared)
+            };
+            json!({
+                "model": model.id,
+                "tool": capability_bool(model.tool),
+                "vision": capability_bool(model.vision),
+                "json_schema": capability_bool(model.json_schema),
+                "tool_state": model.tool,
+                "vision_state": model.vision,
+                "json_schema_state": model.json_schema,
+                "context_window": model.context_window,
+            })
+        })
+        .collect();
+
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    if inner.draft["upstreams"].get(preset.upstream_name).is_some() {
+        return Err(format!("免费供应商 `{}` 已存在", preset.upstream_name));
+    }
+    let data_dir = inner.data_dir();
+    if provider_tombstones::contains(&data_dir, preset.upstream_name)? {
+        return Err(format!(
+            "Provider 回收站中已有 `{}`，请先恢复或彻底处理该实例",
+            preset.upstream_name
+        ));
+    }
+    model_catalog::remove_provider(&data_dir, preset.upstream_name)?;
+    inner.draft["upstreams"][preset.upstream_name] = json!({
+        "provider": "openai-compatible",
+        "base_url": preset.base_url,
+        "access_tier": "free",
+        "auth": { "slot": "provider_api_key", "keyring": true },
+        "models": model_objs,
+    });
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["upstreams"]
+            .as_object_mut()
+            .expect("upstreams is an object")
+            .remove(preset.upstream_name);
+        return Err(error);
+    }
+    if let Err(key_error) = secrets::keyring_set(preset.upstream_name, "provider_api_key", &api_key)
+    {
+        inner.draft["upstreams"]
+            .as_object_mut()
+            .expect("upstreams is an object")
+            .remove(preset.upstream_name);
+        return match inner.observe_draft() {
+            Ok(()) => Err(key_error),
+            Err(rollback_error) => Err(format!(
+                "{key_error}；同时回滚免费 Provider 草稿失败：{rollback_error}"
+            )),
+        };
+    }
+    Ok(inner.snapshot())
 }
 
 /// Add an OpenAI-compatible upstream provider, storing its key in the system keychain when present.
@@ -3363,6 +3515,8 @@ pub fn run() {
             get_state,
             get_runtime_state,
             preview_provider_endpoints,
+            list_free_provider_presets,
+            add_free_provider,
             add_provider,
             set_local_routing,
             edit_provider,
@@ -3429,6 +3583,72 @@ mod tests {
     use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
     use tauri::Manager;
+
+    #[test]
+    fn free_provider_catalog_exposes_only_reviewed_free_models() {
+        let presets = list_free_provider_presets();
+        assert_eq!(presets.len(), 13);
+        let nvidia = presets
+            .iter()
+            .find(|preset| preset.id == "nvidia")
+            .expect("NVIDIA is included in the reviewed free catalog");
+        assert_eq!(nvidia.upstream_name, "nvidia_free");
+        assert_eq!(nvidia.base_url, "https://integrate.api.nvidia.com/v1");
+        assert!(!nvidia.models.is_empty());
+        assert!(presets
+            .iter()
+            .all(|preset| preset.upstream_name.ends_with("_free")));
+    }
+
+    #[test]
+    fn free_provider_command_rejects_forged_models_before_network_or_keychain() {
+        let root = scratch_home("free-provider-forged-model");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        )))));
+
+        let error = match tauri::async_runtime::block_on(add_free_provider(
+            app.state(),
+            "nvidia".to_owned(),
+            vec!["paid/model".to_owned()],
+            "not-a-real-key".to_owned(),
+            true,
+        )) {
+            Err(error) => error,
+            Ok(_) => panic!("a model outside the backend allowlist is rejected"),
+        };
+        assert!(error.contains("免费目录"), "{error}");
+        assert!(get_state(app.state()).providers.is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn guarded_trial_provider_requires_explicit_quota_protection_confirmation() {
+        let root = scratch_home("free-provider-guard");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        )))));
+
+        let error = match tauri::async_runtime::block_on(add_free_provider(
+            app.state(),
+            "alibaba_model_studio".to_owned(),
+            vec!["qwen-turbo".to_owned()],
+            "not-a-real-key".to_owned(),
+            false,
+        )) {
+            Err(error) => error,
+            Ok(_) => panic!("trial providers cannot continue without the free-quota guard"),
+        };
+        assert!(error.contains("免费额度保护"), "{error}");
+        assert!(get_state(app.state()).providers.is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn prepare_desktop_draft_backfills_missing_builtin_agent_adapters() {
