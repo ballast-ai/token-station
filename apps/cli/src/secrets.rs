@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::config::{AuthConfig, ClientConfig};
+use crate::config::{AuthConfig, ClientConfig, EgressConfig};
 
 /// The keychain service every entry lives under; the user is
 /// `<upstream>/<slot>`.
@@ -41,6 +41,17 @@ pub fn keyring_set(upstream: &str, slot: &str, value: &str) -> Result<(), String
     keyring_entry(upstream, slot)?
         .set_password(value)
         .map_err(|error| format!("keychain write for `{upstream}/{slot}`: {error}"))
+}
+
+/// Reads a credential from the OS keychain for a recoverable key rotation.
+///
+/// # Errors
+///
+/// The platform keychain's own message; it never contains the credential.
+pub fn keyring_get(upstream: &str, slot: &str) -> Result<String, String> {
+    keyring_entry(upstream, slot)?
+        .get_password()
+        .map_err(|error| format!("keychain read for `{upstream}/{slot}`: {error}"))
 }
 
 /// Deletes a credential from the OS keychain (`key remove`).
@@ -89,6 +100,28 @@ impl SecretStore {
             }
         }
         if let Some(auth) = &config.egress.auth {
+            let credential = &auth.credential;
+            let source = if credential.keyring {
+                Source::Keyring
+            } else {
+                match (&credential.env, &credential.file) {
+                    (Some(name), _) => Source::Env(name.clone()),
+                    (_, Some(path)) => Source::File(path.clone()),
+                    (None, None) => return Self { sources },
+                }
+            };
+            sources.insert(
+                (EGRESS_SECRET_OWNER.to_string(), credential.slot.clone()),
+                source,
+            );
+        }
+        Self { sources }
+    }
+
+    #[must_use]
+    pub fn from_egress_config(egress: &EgressConfig) -> Self {
+        let mut sources = BTreeMap::new();
+        if let Some(auth) = &egress.auth {
             let credential = &auth.credential;
             let source = if credential.keyring {
                 Source::Keyring

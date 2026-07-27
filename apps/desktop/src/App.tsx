@@ -75,6 +75,7 @@ function StationApp() {
   const [scanBusy, setScanBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [serveBusy, setServeBusy] = useState(false);
+  const [freeProviderBusy, setFreeProviderBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [freePresets, setFreePresets] = useState<FreeProviderPresetView[]>([]);
@@ -269,6 +270,7 @@ function StationApp() {
   };
 
   const navigate = (next: AppView) => {
+    if (freeProviderBusy) return;
     if (next === view) return;
     if (next === "usage" || next === "settings" || next === "add-provider") {
       viewHistoryRef.current.push(view);
@@ -321,7 +323,7 @@ function StationApp() {
       registry={orderedRegistry}
       agents={agents}
       scanBusy={scanBusy}
-      commandBusy={serveBusy || busy}
+      commandBusy={serveBusy || busy || freeProviderBusy}
       onNavigate={navigate}
       onRescan={() => void rescanAgents()}
       onToggleServe={() => void toggleServe()}
@@ -420,6 +422,7 @@ function StationApp() {
             key={preset.id}
             preset={preset}
             onBack={() => setView("add-provider")}
+            onBusyChange={setFreeProviderBusy}
             onAdded={(next, nextMessage) => {
               showState(next, nextMessage);
               setView("home");

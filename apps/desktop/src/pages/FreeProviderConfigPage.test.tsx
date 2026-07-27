@@ -54,7 +54,7 @@ beforeEach(() => {
 
 it("shows the one-line key instruction and opens the official application page externally", async () => {
   const user = userEvent.setup();
-  render(<FreeProviderConfigPage preset={preset} onBack={vi.fn()} onAdded={vi.fn()} />);
+  render(<FreeProviderConfigPage preset={preset} onBack={vi.fn()} onAdded={vi.fn()} onBusyChange={vi.fn()} />);
 
   expect(screen.getByText(preset.key_instruction)).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: /申请免费 API Key/ }));
@@ -64,8 +64,9 @@ it("shows the one-line key instruction and opens the official application page e
 it("selects all reviewed models by default and submits only the current selection", async () => {
   const user = userEvent.setup();
   const onAdded = vi.fn();
+  const onBusyChange = vi.fn();
   invokeMock.mockResolvedValue({ providers: [] } as unknown as StateView);
-  render(<FreeProviderConfigPage preset={preset} onBack={vi.fn()} onAdded={onAdded} />);
+  render(<FreeProviderConfigPage preset={preset} onBack={vi.fn()} onAdded={onAdded} onBusyChange={onBusyChange} />);
 
   expect(screen.getByRole("checkbox", { name: /GPT-OSS 120B/ })).toBeChecked();
   expect(screen.getByRole("checkbox", { name: /GPT-OSS 20B/ })).toBeChecked();
@@ -80,4 +81,6 @@ it("selects all reviewed models by default and submits only the current selectio
     guardConfirmed: false,
   });
   expect(onAdded).toHaveBeenCalledOnce();
+  expect(onBusyChange).toHaveBeenNthCalledWith(1, true);
+  expect(onBusyChange).toHaveBeenLastCalledWith(false);
 });

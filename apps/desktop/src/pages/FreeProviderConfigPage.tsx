@@ -13,6 +13,7 @@ interface FreeProviderConfigPageProps {
   preset: FreeProviderPresetView;
   onBack: () => void;
   onAdded: (state: StateView, message: string) => void;
+  onBusyChange: (busy: boolean) => void;
 }
 
 const capabilityLabel = (state: CapabilityState) => {
@@ -29,6 +30,7 @@ export default function FreeProviderConfigPage({
   preset,
   onBack,
   onAdded,
+  onBusyChange,
 }: FreeProviderConfigPageProps) {
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
@@ -63,6 +65,7 @@ export default function FreeProviderConfigPage({
       return;
     }
     setSaving(true);
+    onBusyChange(true);
     setError("");
     try {
       const state = await addFreeProvider(
@@ -72,11 +75,12 @@ export default function FreeProviderConfigPage({
         guardConfirmed,
       );
       setApiKey("");
-      onAdded(state, `免费供应商「${preset.label}」已添加`);
+      onAdded(state, `免费供应商「${preset.label}」已验证 · 待保存应用`);
     } catch (caught) {
       setError(String(caught));
     } finally {
       setSaving(false);
+      onBusyChange(false);
     }
   };
 
