@@ -1,5 +1,6 @@
 use std::path::{Component, Path};
 
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -185,7 +186,7 @@ pub fn build_connection_plan(
     let projected_bytes = rendered.into_bytes();
     let projected = ConfigSource::existing(
         projected_bytes.clone(),
-        source.original_permissions.or(Some(0o600)),
+        Some(0o600),
         source.original_owner.clone(),
     );
     let expected_after_hash = file_revision_hash(target_path, &projected)?;
@@ -248,7 +249,7 @@ pub fn build_connection_plan(
         )?;
         let projected = ConfigSource::existing(
             companion.projected_bytes.to_vec(),
-            companion.original_permissions.or(Some(0o600)),
+            Some(0o600),
             companion.original_owner.clone(),
         );
         let target = strict_path_text(&companion.target_path)?.to_string();
@@ -462,11 +463,17 @@ pub fn attach_disconnect_companions(
             connector.format(),
             connector.label(),
         )?;
-        let projected = ConfigSource::existing(
-            rendered.as_bytes().to_vec(),
-            current.original_permissions.or(Some(0o600)),
-            current.original_owner.clone(),
-        );
+        let projected = if !baseline.record.original_existed
+            && semantic_json(&current_document)? == json!({})
+        {
+            ConfigSource::missing()
+        } else {
+            ConfigSource::existing(
+                rendered.as_bytes().to_vec(),
+                Some(0o600),
+                current.original_owner.clone(),
+            )
+        };
         let before_hash = file_revision_hash(target, &current)?;
         let expected_after_hash = file_revision_hash(target, &projected)?;
         plan.view
@@ -575,11 +582,17 @@ pub fn attach_restore_companions(
             connector.format(),
             connector.label(),
         )?;
-        let projected = ConfigSource::existing(
-            rendered.as_bytes().to_vec(),
-            current.original_permissions.or(Some(0o600)),
-            current.original_owner.clone(),
-        );
+        let projected = if !source_snapshot.record.original_existed
+            && semantic_json(&current_document)? == json!({})
+        {
+            ConfigSource::missing()
+        } else {
+            ConfigSource::existing(
+                rendered.as_bytes().to_vec(),
+                Some(0o600),
+                current.original_owner.clone(),
+            )
+        };
         plan.view
             .related_config_paths
             .push(companion.target_config_path.clone());
@@ -728,12 +741,20 @@ fn build_owned_projection_plan(
         connector.label(),
     )?;
     let before_hash = file_revision_hash(target_path, current)?;
+    let remove_after_projection =
+        !source_snapshot.existed && semantic_json(&current_document)? == json!({});
     let projected_bytes = rendered.into_bytes();
-    let projected = ConfigSource::existing(
-        projected_bytes.clone(),
-        current.original_permissions.or(Some(0o600)),
-        current.original_owner.clone(),
-    );
+    let projected = if remove_after_projection {
+        // A configuration which did not exist before connection must return
+        // to absence, not an empty JSON/TOML file.
+        ConfigSource::missing()
+    } else {
+        ConfigSource::existing(
+            projected_bytes.clone(),
+            Some(0o600),
+            current.original_owner.clone(),
+        )
+    };
     let expected_after_hash = file_revision_hash(target_path, &projected)?;
     let sensitive_paths = connector.sensitive_paths();
     let changes = redact_restore_changes(&forward_operations, &sensitive_paths);

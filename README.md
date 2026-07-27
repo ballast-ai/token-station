@@ -22,7 +22,10 @@ Model routing usually means a cloud gateway reading your traffic. token-station
 takes the opposite bet: **routing is a local decision**. The router, the rules,
 the metrics, and your keys all live on your machine. The proxy's outbound
 connections are exactly the upstreams you configured — plus one anonymous
-version check, only when you run `upgrade`, never in the background.
+version check, only when you run `upgrade`, never in the background. The
+Desktop price editor can also query the public models.dev catalog only after
+you explicitly press its “查询公开价格” button; that request carries no provider
+credentials or prompt data.
 
 - **Content cannot reach disk.** The request log and metrics store are built
   from a record type whose fields are numbers, closed enums, or names from

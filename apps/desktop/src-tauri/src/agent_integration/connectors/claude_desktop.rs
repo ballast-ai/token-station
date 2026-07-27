@@ -20,6 +20,7 @@ const AUTH_SCHEME: &str = "inferenceGatewayAuthScheme";
 const DEPLOYMENT_MODE: &str = "deploymentMode";
 const DISABLE_DEPLOYMENT_MODE_CHOOSER: &str = "disableDeploymentModeChooser";
 const COWORK_EGRESS_ALLOWED_HOSTS: &str = "coworkEgressAllowedHosts";
+const LOOPBACK_EGRESS_HOSTS: &[&str] = &["127.0.0.1", "::1", "localhost"];
 
 fn json_companion_projection(
     target_path: PathBuf,
@@ -176,7 +177,10 @@ impl Connector for ClaudeDesktopConnector {
             replace(path(&[API_KEY]), json!(token)),
             replace(path(&[AUTH_SCHEME]), json!("bearer")),
             replace(path(&[DISABLE_DEPLOYMENT_MODE_CHOOSER]), json!(true)),
-            replace(path(&[COWORK_EGRESS_ALLOWED_HOSTS]), json!(["*"])),
+            // Claude's Cowork egress must remain restricted to the local
+            // Token Station gateway; a wildcard turns this connector into an
+            // arbitrary network-access grant.
+            replace(path(&[COWORK_EGRESS_ALLOWED_HOSTS]), json!(LOOPBACK_EGRESS_HOSTS)),
         ])
     }
 
@@ -258,7 +262,7 @@ impl Connector for ClaudeDesktopConnector {
             && semantic.get(API_KEY) == Some(&json!(token))
             && semantic.get(AUTH_SCHEME) == Some(&json!("bearer"))
             && semantic.get(DISABLE_DEPLOYMENT_MODE_CHOOSER) == Some(&json!(true))
-            && semantic.get(COWORK_EGRESS_ALLOWED_HOSTS) == Some(&json!(["*"]))
+            && semantic.get(COWORK_EGRESS_ALLOWED_HOSTS) == Some(&json!(LOOPBACK_EGRESS_HOSTS))
         {
             Ok(())
         } else {

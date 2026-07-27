@@ -83,15 +83,17 @@ pub(crate) fn suggest_with_cache_egress(
         }
     }
 
-    match fetch_catalog(egress, secrets) {
-        Ok(body) => {
-            let fetched_at_ms = now_ms();
-            let suggestion = suggest_from_json(&body, provider_id, model_id, fetched_at_ms)?
-                .map(|value| with_catalog_source(value, "live"));
-            // A cache write failure must not discard a valid live suggestion.
-            let _ = write_cache(data_dir, body.as_bytes());
-            Ok(suggestion)
-        }
+    let live = fetch_catalog(egress, secrets).and_then(|body| {
+        let fetched_at_ms = now_ms();
+        let suggestion = suggest_from_json(&body, provider_id, model_id, fetched_at_ms)?
+            .map(|value| with_catalog_source(value, "live"));
+        // Never replace a known-good cache with an invalid catalog. Parsing and
+        // price validation above are part of a successful refresh.
+        let _ = write_cache(data_dir, body.as_bytes());
+        Ok(suggestion)
+    });
+    match live {
+        Ok(suggestion) => Ok(suggestion),
         Err(live_error) => {
             let Some(cached) = cache else {
                 return Err(live_error);

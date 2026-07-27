@@ -117,6 +117,14 @@ impl Connector for CodexConnector {
                 .into_iter()
                 .map(|(field, value)| replace(&["model_providers", "tokenstation", field], value)),
         );
+        // Older connectors wrote env_key. Codex prefers it over the embedded
+        // bearer token, so leaving it behind makes a GUI connection depend on
+        // an environment variable it never receives.
+        operations.push(PatchOperation {
+            operation: PatchKind::Remove,
+            path: path(&["model_providers", "tokenstation", "env_key"]),
+            value: None,
+        });
         Ok(operations)
     }
 
@@ -160,6 +168,9 @@ impl Connector for CodexConnector {
             if !item_matches_json(provider.get(field), &expected) {
                 return Err(format!("Codex 写入前复验字段 {field} 失败"));
             }
+        }
+        if provider.get("env_key").is_some() {
+            return Err("Codex 写入前复验遗留 env_key".to_string());
         }
         Ok(())
     }
@@ -230,8 +241,9 @@ mod tests {
                 ])
                 && operation.value == Some(json!("local-virtual-key"))
         }));
-        assert!(!operations.iter().any(|operation| {
-            operation.path == path(&["model_providers", "tokenstation", "env_key"])
+        assert!(operations.iter().any(|operation| {
+            operation.operation == PatchKind::Remove
+                && operation.path == path(&["model_providers", "tokenstation", "env_key"])
         }));
         assert!(CodexConnector.sensitive_paths().contains(&path(&[
             "model_providers",

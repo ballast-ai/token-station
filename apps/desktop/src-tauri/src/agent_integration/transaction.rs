@@ -11,7 +11,7 @@ use super::ownership::{
     OwnershipStore,
 };
 use super::plan::{
-    file_revision_hash, read_config_source, OwnershipDisposition, PreparedChangePlan,
+    file_revision_hash, read_config_source, ConfigSource, OwnershipDisposition, PreparedChangePlan,
 };
 use super::safe_fs::{atomic_replace, sync_parent};
 use super::snapshot::{MasterKeyStore, SnapshotRequest, SnapshotStore};
@@ -196,6 +196,11 @@ impl AtomicConfigWriter for FsAtomicConfigWriter {
                 stage: AtomicWriteStage::Permission,
                 target_replaced: false,
             })?;
+            #[cfg(windows)]
+            apply_windows_owner_dacl(&temporary).map_err(|_| AtomicWriteFailure {
+                stage: AtomicWriteStage::Permission,
+                target_replaced: false,
+            })?;
             file.sync_all().map_err(|_| AtomicWriteFailure {
                 stage: AtomicWriteStage::TempFsync,
                 target_replaced: false,
@@ -268,6 +273,56 @@ fn apply_metadata(
     file.set_permissions(std::fs::Permissions::from_mode(mode))
         .map_err(|_| ())?;
     Ok(())
+}
+
+/// New Agent configuration files can contain a virtual key. A protected DACL
+/// grants full access only to the file owner and rejects inherited broad ACLs.
+/// Administrators can still take ownership; that is outside the same-user
+/// protection boundary, just as on Unix root can read a 0600 file.
+#[cfg(windows)]
+fn apply_windows_owner_dacl(path: &Path) -> Result<(), ()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    // OW is the current file owner. P disables inheritance, so a permissive
+    // parent directory cannot reintroduce another local reader after rename.
+    let sddl: Vec<u16> = "D:P(A;;FA;;;OW)".encode_utf16().chain(Some(0)).collect();
+    let mut descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: both UTF-16 inputs are NUL terminated and descriptor is released
+    // with LocalFree exactly once on every path after successful allocation.
+    let created = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    if created == 0 || descriptor.is_null() {
+        return Err(());
+    }
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: path and descriptor remain valid for the synchronous Win32 call.
+    let applied = unsafe {
+        SetFileSecurityW(
+            path.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor,
+        )
+    };
+    // SAFETY: descriptor was allocated by ConvertStringSecurityDescriptor…
+    unsafe { LocalFree(descriptor.cast()) };
+    if applied == 0 {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(not(unix))]
@@ -633,6 +688,11 @@ impl<'a> TransactionEngine<'a> {
                     pinned: plan.view.intent == PlanIntent::Connect,
                 })
                 .map_err(|_| {
+                    self.unpin_failed_connection_snapshots(
+                        plan,
+                        &snapshot.record.snapshot_id,
+                        &companion_snapshots,
+                    );
                     failure(
                         plan,
                         TransactionStage::Snapshot,
@@ -642,6 +702,11 @@ impl<'a> TransactionEngine<'a> {
             companion_snapshots.push(created);
         }
         if self.clock.now_ms() > plan.view.expires_at_ms {
+            self.unpin_failed_connection_snapshots(
+                plan,
+                &snapshot.record.snapshot_id,
+                &companion_snapshots,
+            );
             return Err(failure(
                 plan,
                 TransactionStage::Confirmation,
@@ -649,14 +714,23 @@ impl<'a> TransactionEngine<'a> {
             ));
         }
 
-        if let Err(write_failure) = self.writer.replace(
-            target,
-            plan.projected_bytes.as_slice(),
-            current.original_permissions.or(Some(0o600)),
-            current.original_owner.as_deref(),
-            &plan.view.before_hash,
-            false,
-        ) {
+        let remove_primary = file_revision_hash(target, &ConfigSource::missing())
+            .is_ok_and(|missing_hash| missing_hash == plan.view.expected_after_hash);
+        let primary_write = if remove_primary {
+            self.writer.remove(target, &plan.view.before_hash, false)
+        } else {
+            self.writer.replace(
+                target,
+                plan.projected_bytes.as_slice(),
+                // Every managed Agent file can contain a local virtual key. Do
+                // not preserve a caller-created group/world-readable mode.
+                Some(0o600),
+                current.original_owner.as_deref(),
+                &plan.view.before_hash,
+                false,
+            )
+        };
+        if let Err(write_failure) = primary_write {
             let mut error = failure(
                 plan,
                 TransactionStage::TargetWrite,
@@ -678,14 +752,22 @@ impl<'a> TransactionEngine<'a> {
         for (index, (companion, source)) in
             plan.companions.iter().zip(&companion_currents).enumerate()
         {
-            if let Err(write_failure) = self.writer.replace(
-                Path::new(&companion.target_path),
-                companion.projected_bytes.as_slice(),
-                source.original_permissions.or(Some(0o600)),
-                source.original_owner.as_deref(),
-                &companion.before_hash,
-                false,
-            ) {
+            let target = Path::new(&companion.target_path);
+            let remove_companion = file_revision_hash(target, &ConfigSource::missing())
+                .is_ok_and(|missing_hash| missing_hash == companion.expected_after_hash);
+            let companion_write = if remove_companion {
+                self.writer.remove(target, &companion.before_hash, false)
+            } else {
+                self.writer.replace(
+                    target,
+                    companion.projected_bytes.as_slice(),
+                    Some(0o600),
+                    source.original_owner.as_deref(),
+                    &companion.before_hash,
+                    false,
+                )
+            };
+            if let Err(write_failure) = companion_write {
                 let mut error = failure(
                     plan,
                     TransactionStage::TargetWrite,
@@ -754,7 +836,9 @@ impl<'a> TransactionEngine<'a> {
             return Err(error);
         }
         let document = match parse_source_bytes(
-            Some(after_source.exact_bytes.as_slice()),
+            after_source
+                .existed
+                .then_some(after_source.exact_bytes.as_slice()),
             plan.format,
             plan.label,
         ) {
@@ -842,7 +926,7 @@ impl<'a> TransactionEngine<'a> {
                 return Err(error);
             }
             let parsed = match parse_source_bytes(
-                Some(source.exact_bytes.as_slice()),
+                source.existed.then_some(source.exact_bytes.as_slice()),
                 companion.format,
                 companion.label,
             ) {
@@ -1166,7 +1250,9 @@ impl<'a> TransactionEngine<'a> {
         primary_written: bool,
         error: &mut TransactionFailure,
     ) {
+        self.unpin_failed_connection_snapshots(plan, primary_snapshot_id, companion_snapshots);
         error.recovery = RecoveryStatus::RepairRequired;
+        let mut recovery_failed = false;
         for index in (0..written_companions).rev() {
             let companion = &plan.companions[index];
             let snapshot_id = &companion_snapshots[index].record.snapshot_id;
@@ -1182,12 +1268,14 @@ impl<'a> TransactionEngine<'a> {
             {
                 error.recovery_reason_code =
                     Some("companion_restore_failed_or_target_changed".to_string());
-                return;
+                recovery_failed = true;
             }
         }
         if !primary_written {
-            error.recovery = RecoveryStatus::Restored;
-            error.recovery_reason_code = None;
+            if !recovery_failed {
+                error.recovery = RecoveryStatus::Restored;
+                error.recovery_reason_code = None;
+            }
             return;
         }
         if self
@@ -1203,8 +1291,27 @@ impl<'a> TransactionEngine<'a> {
             error.recovery_reason_code = Some("restore_write_failed_or_target_changed".to_string());
             return;
         }
-        error.recovery = RecoveryStatus::Restored;
-        error.recovery_reason_code = None;
+        if !recovery_failed {
+            error.recovery = RecoveryStatus::Restored;
+            error.recovery_reason_code = None;
+        }
+    }
+
+    fn unpin_failed_connection_snapshots(
+        &self,
+        plan: &PreparedChangePlan,
+        primary_snapshot_id: &str,
+        companion_snapshots: &[super::snapshot::SnapshotCreateResult],
+    ) {
+        if plan.view.intent != PlanIntent::Connect {
+            return;
+        }
+        let _ = self.snapshots.set_pinned(primary_snapshot_id, false);
+        for snapshot in companion_snapshots {
+            let _ = self
+                .snapshots
+                .set_pinned(&snapshot.record.snapshot_id, false);
+        }
     }
 
     fn restore_projection(
@@ -1934,7 +2041,7 @@ mod tests {
         assert_eq!(profile["disableDeploymentModeChooser"], true);
         assert_eq!(
             profile["coworkEgressAllowedHosts"],
-            serde_json::json!(["*"])
+            serde_json::json!(["127.0.0.1", "::1", "localhost"])
         );
         assert_eq!(metadata["unknownMeta"], "keep");
         assert_eq!(normal["unknownNormal"], "keep");
@@ -2605,6 +2712,9 @@ mod tests {
         for stage in [
             AtomicWriteStage::TempCreate,
             AtomicWriteStage::TempFsync,
+            // Windows owner-only DACL application fails before the atomic
+            // rename.  It must therefore preserve the original config.
+            AtomicWriteStage::Permission,
             AtomicWriteStage::Replace,
         ] {
             let root2 = scratch("writer-failure");

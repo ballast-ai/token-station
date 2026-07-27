@@ -228,6 +228,13 @@ jobs:
       - run: >-
           cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
           snapshot_validation_rejects_malformed_index_envelope_and_hex
+      # Windows ACL application happens before the atomic rename.  This
+      # regression test injects its Permission failure at that boundary and
+      # proves the pre-existing agent config remains intact.
+      - if: runner.os == 'Windows'
+        run: >-
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+          transaction_snapshot_and_pre_replace_failures_leave_target_untouched
 
   desktop-security:
     runs-on: ubuntu-latest
