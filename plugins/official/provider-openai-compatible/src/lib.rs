@@ -244,6 +244,23 @@ fn body_of(request: &ChatRequest) -> Value {
     Value::Object(body)
 }
 
+/// Whether `reasoning_effort` may be sent for the chosen model. An undeclared
+/// (empty) parameter set is optimistic — the field is rendered. A model that
+/// enumerates its parameters and omits `reasoning_effort` opts out, and the
+/// field is dropped rather than risking an upstream rejection.
+fn reasoning_effort_allowed(request: &ChatRequest, config: &ProviderConfig) -> bool {
+    config
+        .models
+        .iter()
+        .find(|capability| capability.model == request.model)
+        .map_or(true, |capability| {
+            capability.supported_parameters.is_empty()
+                || capability
+                    .supported_parameters
+                    .contains("reasoning_effort")
+        })
+}
+
 fn usage_of(raw: &Value) -> Usage {
     Usage {
         input_tokens: raw["prompt_tokens"].as_u64().unwrap_or(0),
@@ -390,7 +407,19 @@ impl Guest for OpenAiCompatible {
         );
         descriptor.headers =
             SafeHeaders::try_new([("content-type", "application/json")]).map_err(internal)?;
-        descriptor.body = Some(body_of(&request));
+        let mut body = body_of(&request);
+        // `reasoning_effort` arrives through the extensions passthrough. Render
+        // it unless the chosen model explicitly enumerates its parameters and
+        // omits it — an empty (undeclared) set is treated optimistically, matching
+        // how the sampling params above render unconditionally.
+        if let Some(effort) = request.extensions.get("reasoning_effort").and_then(Value::as_str) {
+            if reasoning_effort_allowed(&request, &config) {
+                if let Value::Object(map) = &mut body {
+                    map.insert("reasoning_effort".to_owned(), json!(effort));
+                }
+            }
+        }
+        descriptor.body = Some(body);
         // The host holds the value; this names the slot and the dialect.
         descriptor.auth = config.auth.clone().map(Auth::bearer);
         to_output(&descriptor)

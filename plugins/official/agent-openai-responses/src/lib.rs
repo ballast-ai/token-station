@@ -135,13 +135,19 @@ fn validate_semantic_options(body: &Value) -> Result<(), String> {
         Some(_) => return Err(invalid("parallel_tool_calls must be a boolean")),
     }
 
+    // `reasoning.effort` maps onto the OpenAI-compatible `reasoning_effort`
+    // request parameter (see `normalize_inbound` → Canonical IR extensions →
+    // provider render). It rides through as a string; the provider validates
+    // and, per its own docs, remaps unsupported levels. Other reasoning keys
+    // (e.g. `summary`) have no chat-completions equivalent and are dropped.
     match body.get("reasoning") {
         None | Some(Value::Null) => {}
-        Some(Value::Object(reasoning)) if reasoning.values().all(Value::is_null) => {}
-        Some(Value::Object(_)) => {
-            return Err(capability(
-                "Responses reasoning options require an approved Canonical IR/provider mapping",
-            ));
+        Some(Value::Object(reasoning)) => {
+            if let Some(effort) = reasoning.get("effort").filter(|value| !value.is_null()) {
+                if !effort.is_string() {
+                    return Err(invalid("reasoning.effort must be a string"));
+                }
+            }
         }
         Some(_) => return Err(invalid("reasoning must be an object")),
     }
@@ -776,6 +782,15 @@ impl Guest for ResponsesClient {
         // it verbatim (OpenAI-compatible providers accept it alongside tools).
         if let Some(parallel) = body.get("parallel_tool_calls").and_then(Value::as_bool) {
             extensions.insert("parallel_tool_calls".to_owned(), json!(parallel));
+        }
+        // `reasoning.effort` → `reasoning_effort`, carried through extensions and
+        // rendered by the provider when the model does not declare it out.
+        if let Some(effort) = body
+            .get("reasoning")
+            .and_then(|reasoning| reasoning.get("effort"))
+            .and_then(Value::as_str)
+        {
+            extensions.insert("reasoning_effort".to_owned(), json!(effort));
         }
         to_output(&ChatRequest {
             model,

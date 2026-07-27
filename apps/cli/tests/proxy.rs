@@ -1649,7 +1649,6 @@ fn responses_semantic_options_fail_before_the_upstream_when_the_ir_cannot_preser
     for unsupported in [
         json!({"previous_response_id": "resp_previous"}),
         json!({"tool_choice": "required"}),
-        json!({"reasoning": {"effort": "high"}}),
     ] {
         let mut request = json!({"model": "auto", "input": "hi"});
         request
@@ -1725,6 +1724,51 @@ fn responses_parallel_tool_calls_false_is_preserved_to_the_upstream() {
     assert_eq!(
         seen[0].body["tools"][0]["function"]["name"],
         json!("read_marker")
+    );
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn responses_reasoning_effort_maps_to_the_upstream_parameter() {
+    // Codex sends `reasoning: { effort: "high" }`. The effort maps onto the
+    // OpenAI-compatible `reasoning_effort` parameter and is rendered to the
+    // upstream (the demo model declares no parameter set, so it is optimistic);
+    // `summary` has no chat equivalent and is dropped without refusing.
+    let upstream_answer = json!({
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "M4_OK"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("responses-reasoning-effort", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-openai-responses");
+    let token = proxy.virtual_key.clone();
+
+    let (status, _content_type, body) = send_responses(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "input": "Read the marker.",
+            "stream": false,
+            "reasoning": {"effort": "high", "summary": "auto"}
+        }),
+        &token,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1, "the request reaches the upstream");
+    assert_eq!(
+        seen[0].body["reasoning_effort"],
+        json!("high"),
+        "reasoning.effort maps to reasoning_effort: {}",
+        seen[0].body
     );
     std::fs::remove_file(key).ok();
 }
