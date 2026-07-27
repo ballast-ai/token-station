@@ -207,6 +207,16 @@ describe("AddProviderPage", () => {
     expect(screen.queryByText(/OpenRouter/)).toBeNull();
   });
 
+  it("keeps regular provider choices compact with only icon and name", () => {
+    renderPage();
+
+    const grid = screen.getByRole("list", { name: "常规供应商列表" });
+    expect(within(grid).getByText("OpenAI", { selector: "strong" })).toBeInTheDocument();
+    expect(within(grid).queryByText("openai", { selector: "code" })).toBeNull();
+    expect(within(grid).queryByText("7 模型")).toBeNull();
+    expect(within(grid).queryByText("全球开放平台 · 按量 API")).toBeNull();
+  });
+
   it("frames an existing provider as a safe update", async () => {
     const user = userEvent.setup();
     renderPage({ existingNames: ["deepseek"] });
@@ -226,6 +236,18 @@ describe("AddProviderPage", () => {
     const grid = screen.getByRole("list", { name: "免费供应商列表" });
     expect(within(grid).getByText("NVIDIA API Catalog")).toBeInTheDocument();
     expect(within(grid).queryByText("Cohere")).toBeNull();
+  });
+
+  it("keeps free provider choices compact while preserving the fee type", () => {
+    render(<FreeCatalogHarness />);
+
+    const grid = screen.getByRole("list", { name: "免费供应商列表" });
+    expect(within(grid).getByText("NVIDIA API Catalog", { selector: "strong" })).toBeInTheDocument();
+    expect(within(grid).getAllByText("长期免费").length).toBeGreaterThan(0);
+    expect(within(grid).queryByText("nvidia_free", { selector: "code" })).toBeNull();
+    expect(within(grid).queryByText("3 模型")).toBeNull();
+    expect(within(grid).queryByText("build.nvidia.com 托管 API")).toBeNull();
+    expect(within(grid).queryByText("全球平台")).toBeNull();
   });
 
   it("combines free offer and region filters and can clear an empty result", async () => {
