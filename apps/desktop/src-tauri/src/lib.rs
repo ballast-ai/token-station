@@ -764,7 +764,9 @@ impl AppInner {
         }
         for upstream in self.pending_provider_keys.keys() {
             if let Err(error) = provider_tombstones::discard(&self.data_dir(), upstream) {
-                eprintln!("configuration saved but free Provider tombstone cleanup failed: {error}");
+                eprintln!(
+                    "configuration saved but free Provider tombstone cleanup failed: {error}"
+                );
             }
         }
         self.pending_provider_keys.clear();
@@ -1567,11 +1569,7 @@ fn is_free_provider_value(provider: &Value) -> bool {
     provider["access_tier"].as_str() == Some("free")
 }
 
-fn restore_provider_key(
-    upstream: &str,
-    slot: &str,
-    previous: Option<&str>,
-) -> Result<(), String> {
+fn restore_provider_key(upstream: &str, slot: &str, previous: Option<&str>) -> Result<(), String> {
     match previous {
         Some(value) => secrets::keyring_set(upstream, slot, value),
         None => secrets::keyring_remove(upstream, slot),
@@ -1633,7 +1631,10 @@ async fn add_free_provider(
             ));
         }
         let tombstone = provider_tombstones::get(&inner.data_dir(), preset.upstream_name)?;
-        if tombstone.as_ref().is_some_and(|provider| !is_free_provider_value(provider)) {
+        if tombstone
+            .as_ref()
+            .is_some_and(|provider| !is_free_provider_value(provider))
+        {
             return Err(format!(
                 "Provider 回收站中已有同名普通供应商 `{}`，请先恢复或彻底处理该实例",
                 preset.upstream_name
@@ -1641,10 +1642,7 @@ async fn add_free_provider(
         }
         let egress: EgressConfig = serde_json::from_value(inner.draft["egress"].clone())
             .map_err(|error| format!("出站配置不合法：{error}"))?;
-        if inner
-            .pending_free_providers
-            .contains(preset.upstream_name)
-        {
+        if inner.pending_free_providers.contains(preset.upstream_name) {
             return Err(format!(
                 "免费供应商 `{}` 正在验证，请等待当前请求完成",
                 preset.upstream_name
@@ -1738,10 +1736,9 @@ async fn add_free_provider(
         inner.config_state = previous_config_state;
         return Err(error);
     }
-    inner.pending_provider_keys.insert(
-        preset.upstream_name.to_owned(),
-        Zeroizing::new(api_key),
-    );
+    inner
+        .pending_provider_keys
+        .insert(preset.upstream_name.to_owned(), Zeroizing::new(api_key));
     Ok(inner.snapshot())
 }
 
@@ -3726,10 +3723,13 @@ mod tests {
         assert!(presets
             .iter()
             .all(|preset| preset.upstream_name.ends_with("_free")));
-        assert!(presets.iter().flat_map(|preset| preset.models).all(|model| {
-            model.tool == CapabilityState::Unknown
-                && model.json_schema == CapabilityState::Unknown
-        }));
+        assert!(presets
+            .iter()
+            .flat_map(|preset| preset.models)
+            .all(|model| {
+                model.tool == CapabilityState::Unknown
+                    && model.json_schema == CapabilityState::Unknown
+            }));
         assert!(["gemini", "hugging_face"].iter().all(|id| {
             presets
                 .iter()
@@ -3835,7 +3835,10 @@ mod tests {
             Some("renderer-supplied-key"),
         )
         .expect_err("generic discovery cannot use a free identity");
-        assert!(discovery_error.contains("内置目录管理"), "{discovery_error}");
+        assert!(
+            discovery_error.contains("内置目录管理"),
+            "{discovery_error}"
+        );
         let models_error =
             replace_provider_models(&mut inner, "nvidia_free", vec!["paid/model".to_owned()])
                 .expect_err("generic model replacement cannot change a free allowlist");

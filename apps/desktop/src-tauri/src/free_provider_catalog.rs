@@ -457,9 +457,7 @@ pub(crate) fn validate_stored_provider(name: &str, provider: &Value) -> Result<(
             .iter()
             .find(|candidate| candidate.id == model_id)
             .ok_or_else(|| {
-                format!(
-                    "模型 `{model_id}` 已不在免费供应商 `{name}` 的当前目录中，请重新验证"
-                )
+                format!("模型 `{model_id}` 已不在免费供应商 `{name}` 的当前目录中，请重新验证")
             })?;
         let expected = [
             ("tool_state", model.tool),
@@ -476,7 +474,10 @@ pub(crate) fn validate_stored_provider(name: &str, provider: &Value) -> Result<(
         let expected_flags = [
             (
                 "tool",
-                matches!(model.tool, CapabilityState::Verified | CapabilityState::Declared),
+                matches!(
+                    model.tool,
+                    CapabilityState::Verified | CapabilityState::Declared
+                ),
             ),
             (
                 "vision",
@@ -545,11 +546,8 @@ pub(crate) fn validate_chat_completion(
     provider
         .authorize(&descriptor)
         .map_err(|error| format!("免费供应商出站请求被拒绝：{error}"))?;
-    let http = token_station_cli::gateway::build_egress_agent(
-        egress,
-        Duration::from_secs(12),
-        secrets,
-    )?;
+    let http =
+        token_station_cli::gateway::build_egress_agent(egress, Duration::from_secs(12), secrets)?;
     let body = json!({
         "model": model,
         "messages": [{"role": "user", "content": "Reply OK"}],
