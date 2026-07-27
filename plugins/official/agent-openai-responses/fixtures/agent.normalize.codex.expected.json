@@ -66,5 +66,6 @@
     "max_output_tokens": 256
   },
   "stream": true,
-  "tool_choice": "auto"
+  "tool_choice": "auto",
+  "parallel_tool_calls": true
 }
