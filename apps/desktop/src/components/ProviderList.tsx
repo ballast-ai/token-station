@@ -71,7 +71,10 @@ export default function ProviderList({
             <div className="provider-card-head">
               <div className="provider-monogram" aria-hidden="true">{provider.name.slice(0, 2).toUpperCase()}</div>
               <div className="provider-main">
-                <div className="provider-name">{provider.name}</div>
+                <div className="provider-name">
+                  {provider.name}
+                  {provider.access_tier === "free" && <span className="provider-access-badge">免费</span>}
+                </div>
                 <div className="provider-url">{provider.base_url}</div>
                 <div className="provider-models">
                   {provider.models.slice(0, 4).map((model) => <span className="chip" key={model}>{model}</span>)}
@@ -96,12 +99,18 @@ export default function ProviderList({
               </div>
             </div>
             {managedProvider === provider.name && (
-              <ProviderModelManager
-                provider={provider}
-                serveRunning={serveRunning}
-                disabled={busy}
-                onSaved={(next) => onStateChange(next, `${provider.name} 的模型已保存`)}
-              />
+              provider.access_tier === "free" ? (
+                <div className="free-provider-managed-note">
+                  免费实例的端点与模型集合受免费目录保护。需要更换 Key 或模型时，请删除后从免费目录重新验证添加。
+                </div>
+              ) : (
+                <ProviderModelManager
+                  provider={provider}
+                  serveRunning={serveRunning}
+                  disabled={busy}
+                  onSaved={(next) => onStateChange(next, `${provider.name} 的模型已保存`)}
+                />
+              )
             )}
             {removal?.name === provider.name && (
               <div className="provider-removal-preview" role="dialog" aria-label="删除影响预览">

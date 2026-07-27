@@ -8,6 +8,7 @@ export type AppView =
   | "usage"
   | "settings"
   | "add-provider"
+  | `free-provider:${string}`
   | `agent:${string}`;
 
 interface AppShellProps {
@@ -165,7 +166,7 @@ export default function AppShell({
             >
               <span aria-hidden="true">⚙</span>
             </button>
-            {view !== "add-provider" && (
+            {view !== "add-provider" && !view.startsWith("free-provider") && (
               <button className="btn primary add-provider-action" type="button" onClick={() => onNavigate("add-provider")}>
                 <span aria-hidden="true">＋</span> {t("nav.addProvider")}
               </button>
