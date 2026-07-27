@@ -1971,7 +1971,7 @@ fn an_anthropic_message_round_trips_through_the_same_provider_pipeline() {
             "model": "auto",
             "max_tokens": 128,
             "system": "You are concise.",
-            "thinking": {"type": "enabled", "budget_tokens": 128},
+            "thinking": {"type": "disabled"},
             "tool_choice": {"type": "auto"},
             "messages": [{"role": "user", "content": "what is six times seven"}]
         }),
@@ -2000,6 +2000,37 @@ fn an_anthropic_message_round_trips_through_the_same_provider_pipeline() {
     let row = last_row(&proxy.data_dir);
     assert_eq!(row["protocol"], "Text(\"anthropic-messages\")");
     assert_eq!(row["status"], "Integer(200)");
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn anthropic_enabled_thinking_is_refused_before_upstream() {
+    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
+    let key = key_file("anthropic-enabled-thinking", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, content_type, body) = send_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 128,
+            "thinking": {"type": "enabled", "budget_tokens": 128},
+            "messages": [{"role": "user", "content": "think before answering"}]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(content_type.as_deref(), Some("application/json"));
+    let body: Value = serde_json::from_str(&body).expect("Anthropic error is JSON");
+    assert_eq!(body["error"]["type"], json!("invalid_request_error"));
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("thinking type enabled"))
+    );
+    assert_eq!(mock.hits(), 0, "enabled thinking is refused before routing");
 
     std::fs::remove_file(key).ok();
 }
