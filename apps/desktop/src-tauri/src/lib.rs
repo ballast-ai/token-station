@@ -18,6 +18,7 @@ mod provider_tombstones;
 mod recovery;
 mod serve_lifecycle;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,9 +26,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
+use zeroize::Zeroizing;
 
 use token_station_cli::budget::{AgentBudget, BudgetStatus};
-use token_station_cli::config::{ClientConfig, PluginsConfig};
+use token_station_cli::config::{ClientConfig, EgressConfig, PluginsConfig};
 use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, StageStatus};
 use token_station_cli::plugins::{PluginRegistry, Receipts};
 use token_station_cli::pricing::{ModelPrice, PriceTable};
@@ -167,9 +169,25 @@ struct AppInner {
     config_state: ConfigState,
     /// Authoritative proxy-service lifecycle state.
     server: ServerLifecycle,
+    /// Free-provider verification sends real upstream requests; an in-memory single-flight set limits duplication and abuse.
+    pending_free_providers: BTreeSet<String>,
+    /// Verified but unsaved provider keys. Clear them on exit to avoid orphaned keys without config references.
+    pending_provider_keys: BTreeMap<String, Zeroizing<String>>,
 }
 
 pub struct AppStateManaged(Mutex<AppInner>);
+
+struct FreeProviderValidationGuard<'a> {
+    inner: &'a Mutex<AppInner>,
+    upstream: String,
+}
+
+impl Drop for FreeProviderValidationGuard<'_> {
+    fn drop(&mut self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.pending_free_providers.remove(&self.upstream);
+    }
+}
 
 /// Writable runtime locations resolved from Tauri's per-application roots.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -307,6 +325,9 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
     // can differ). Upgrade only `unknown`. Do not override operator-set `unsupported` or `verified` states.
     if let Some(upstreams) = draft["upstreams"].as_object_mut() {
         for upstream in upstreams.values_mut() {
+            if upstream["access_tier"].as_str() == Some("free") {
+                continue;
+            }
             let Some(models) = upstream["models"].as_array_mut() else {
                 continue;
             };
@@ -688,6 +709,8 @@ impl AppInner {
             load_error,
             config_state,
             server: ServerLifecycle::stopped(),
+            pending_free_providers: BTreeSet::new(),
+            pending_provider_keys: BTreeMap::new(),
         }
     }
 
@@ -705,14 +728,46 @@ impl AppInner {
         let config = self.materialize()?;
         let draft = self.draft.clone();
         let revision = self.config_state.prepare_save(&draft)?;
-        config
-            .save(&self.config_path)
-            .map_err(|error| format!("写配置失败: {error}"))?;
+        let mut applied_keys: Vec<(String, Option<String>)> = Vec::new();
+        for (upstream, value) in &self.pending_provider_keys {
+            let previous = secrets::keyring_get(upstream, "provider_api_key").ok();
+            if let Err(error) = secrets::keyring_set(upstream, "provider_api_key", value) {
+                for (applied, old_value) in applied_keys.iter().rev() {
+                    restore_provider_key(applied, "provider_api_key", old_value.as_deref()).ok();
+                }
+                return Err(error);
+            }
+            applied_keys.push((upstream.clone(), previous));
+        }
+        if let Err(error) = config.save(&self.config_path) {
+            let mut rollback_errors = Vec::new();
+            for (upstream, previous) in applied_keys.iter().rev() {
+                if let Err(rollback_error) =
+                    restore_provider_key(upstream, "provider_api_key", previous.as_deref())
+                {
+                    rollback_errors.push(rollback_error);
+                }
+            }
+            let mut message = format!("写配置失败: {error}");
+            if !rollback_errors.is_empty() {
+                message.push_str(&format!(
+                    "；同时恢复 Provider 凭据失败：{}",
+                    rollback_errors.join("；")
+                ));
+            }
+            return Err(message);
+        }
         if let Err(error) = self.config_state.finish_save(&draft) {
             // Configuration was committed atomically. The pending journal is promoted at the next start,
             // Do not report a final state-write failure as a configuration-save failure.
             eprintln!("configuration saved but revision finalization failed: {error}");
         }
+        for upstream in self.pending_provider_keys.keys() {
+            if let Err(error) = provider_tombstones::discard(&self.data_dir(), upstream) {
+                eprintln!("configuration saved but free Provider tombstone cleanup failed: {error}");
+            }
+        }
+        self.pending_provider_keys.clear();
         Ok(revision)
     }
 
@@ -1042,6 +1097,13 @@ impl AppInner {
 
     /// Materialize and validate the draft as ClientConfig, returning a human-readable error on failure.
     fn materialize(&self) -> Result<ClientConfig, String> {
+        if let Some(upstreams) = self.draft["upstreams"].as_object() {
+            for (name, provider) in upstreams {
+                if provider["access_tier"].as_str() == Some("free") {
+                    free_provider_catalog::validate_stored_provider(name, provider)?;
+                }
+            }
+        }
         serde_json::from_value::<ClientConfig>(self.draft.clone())
             .map_err(|e| format!("配置结构不合法: {e}"))
     }
@@ -1487,6 +1549,35 @@ fn preview_provider_endpoints(base_url: String) -> Result<ProviderEndpointPrevie
     })
 }
 
+fn ensure_generic_provider_mutation_allowed(inner: &AppInner, name: &str) -> Result<(), String> {
+    if inner.draft["upstreams"]
+        .get(name)
+        .and_then(|upstream| upstream.get("access_tier"))
+        .and_then(Value::as_str)
+        == Some("free")
+    {
+        return Err(format!(
+            "免费供应商 `{name}` 由内置目录管理，不能通过通用 Provider 接口修改"
+        ));
+    }
+    Ok(())
+}
+
+fn is_free_provider_value(provider: &Value) -> bool {
+    provider["access_tier"].as_str() == Some("free")
+}
+
+fn restore_provider_key(
+    upstream: &str,
+    slot: &str,
+    previous: Option<&str>,
+) -> Result<(), String> {
+    match previous {
+        Some(value) => secrets::keyring_set(upstream, slot, value),
+        None => secrets::keyring_remove(upstream, slot),
+    }
+}
+
 #[tauri::command]
 fn list_free_provider_presets() -> Vec<free_provider_catalog::FreeProviderPreset> {
     free_provider_catalog::presets().to_vec()
@@ -1532,8 +1623,8 @@ async fn add_free_provider(
         return Err("请至少选择一个免费模型".to_owned());
     }
 
-    let (egress, egress_secrets) = {
-        let inner = state.0.lock().unwrap();
+    let (egress, egress_secrets, expected_revision, expected_tombstone) = {
+        let mut inner = state.0.lock().unwrap();
         inner.ensure_editable()?;
         if inner.draft["upstreams"].get(preset.upstream_name).is_some() {
             return Err(format!(
@@ -1541,30 +1632,58 @@ async fn add_free_provider(
                 preset.upstream_name
             ));
         }
-        if provider_tombstones::contains(&inner.data_dir(), preset.upstream_name)? {
+        let tombstone = provider_tombstones::get(&inner.data_dir(), preset.upstream_name)?;
+        if tombstone.as_ref().is_some_and(|provider| !is_free_provider_value(provider)) {
             return Err(format!(
-                "Provider 回收站中已有 `{}`，请先恢复或彻底处理该实例",
+                "Provider 回收站中已有同名普通供应商 `{}`，请先恢复或彻底处理该实例",
                 preset.upstream_name
             ));
         }
-        let config = inner.materialize()?;
+        let egress: EgressConfig = serde_json::from_value(inner.draft["egress"].clone())
+            .map_err(|error| format!("出站配置不合法：{error}"))?;
+        if inner
+            .pending_free_providers
+            .contains(preset.upstream_name)
+        {
+            return Err(format!(
+                "免费供应商 `{}` 正在验证，请等待当前请求完成",
+                preset.upstream_name
+            ));
+        }
+        const MAX_CONCURRENT_FREE_VALIDATIONS: usize = 2;
+        if inner.pending_free_providers.len() >= MAX_CONCURRENT_FREE_VALIDATIONS {
+            return Err("免费供应商验证任务已达并发上限，请稍后重试".to_owned());
+        }
+        inner
+            .pending_free_providers
+            .insert(preset.upstream_name.to_owned());
         (
-            config.egress.clone(),
-            secrets::SecretStore::from_config(&config),
+            egress.clone(),
+            secrets::SecretStore::from_egress_config(&egress),
+            inner.config_state.draft_revision(),
+            tombstone,
         )
+    };
+    let _validation_guard = FreeProviderValidationGuard {
+        inner: &state.0,
+        upstream: preset.upstream_name.to_owned(),
     };
 
     let validate_preset = *preset;
-    let validate_model = selected[0].clone();
+    let validate_models = selected.clone();
     let validate_key = api_key.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        free_provider_catalog::validate_chat_completion(
-            &validate_preset,
-            &validate_model,
-            &validate_key,
-            &egress,
-            &egress_secrets,
-        )
+        for model in validate_models {
+            free_provider_catalog::validate_chat_completion(
+                &validate_preset,
+                &model,
+                &validate_key,
+                &egress,
+                &egress_secrets,
+            )
+            .map_err(|error| format!("模型 `{model}` 验证失败：{error}"))?;
+        }
+        Ok::<(), String>(())
     })
     .await
     .map_err(|error| format!("免费模型验证任务异常结束：{error}"))??;
@@ -1591,17 +1710,22 @@ async fn add_free_provider(
 
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    if inner.config_state.draft_revision() != expected_revision {
+        return Err("验证期间配置已变化，请按当前出站设置重新验证".to_owned());
+    }
     if inner.draft["upstreams"].get(preset.upstream_name).is_some() {
         return Err(format!("免费供应商 `{}` 已存在", preset.upstream_name));
     }
     let data_dir = inner.data_dir();
-    if provider_tombstones::contains(&data_dir, preset.upstream_name)? {
+    let current_tombstone = provider_tombstones::get(&data_dir, preset.upstream_name)?;
+    if current_tombstone != expected_tombstone {
         return Err(format!(
-            "Provider 回收站中已有 `{}`，请先恢复或彻底处理该实例",
+            "验证期间 Provider `{}` 的回收状态已变化，请重试",
             preset.upstream_name
         ));
     }
-    model_catalog::remove_provider(&data_dir, preset.upstream_name)?;
+    let previous_draft = inner.draft.clone();
+    let previous_config_state = inner.config_state.clone();
     inner.draft["upstreams"][preset.upstream_name] = json!({
         "provider": "openai-compatible",
         "base_url": preset.base_url,
@@ -1610,25 +1734,14 @@ async fn add_free_provider(
         "models": model_objs,
     });
     if let Err(error) = inner.observe_draft() {
-        inner.draft["upstreams"]
-            .as_object_mut()
-            .expect("upstreams is an object")
-            .remove(preset.upstream_name);
+        inner.draft = previous_draft;
+        inner.config_state = previous_config_state;
         return Err(error);
     }
-    if let Err(key_error) = secrets::keyring_set(preset.upstream_name, "provider_api_key", &api_key)
-    {
-        inner.draft["upstreams"]
-            .as_object_mut()
-            .expect("upstreams is an object")
-            .remove(preset.upstream_name);
-        return match inner.observe_draft() {
-            Ok(()) => Err(key_error),
-            Err(rollback_error) => Err(format!(
-                "{key_error}；同时回滚免费 Provider 草稿失败：{rollback_error}"
-            )),
-        };
-    }
+    inner.pending_provider_keys.insert(
+        preset.upstream_name.to_owned(),
+        Zeroizing::new(api_key),
+    );
     Ok(inner.snapshot())
 }
 
@@ -1773,6 +1886,7 @@ fn edit_provider(
         .as_str();
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    ensure_generic_provider_mutation_allowed(&inner, &name)?;
     let previous = inner.draft["upstreams"]
         .get(&name)
         .cloned()
@@ -1826,6 +1940,7 @@ fn prepare_discovery_credential(
     api_key: Option<&str>,
 ) -> Result<DiscoveryCredential, String> {
     inner.ensure_editable()?;
+    ensure_generic_provider_mutation_allowed(inner, name)?;
     let explicit = api_key
         .map(str::trim)
         .filter(|key| !key.is_empty())
@@ -2076,6 +2191,7 @@ fn replace_provider_models(
     models: Vec<String>,
 ) -> Result<(), String> {
     inner.ensure_editable()?;
+    ensure_generic_provider_mutation_allowed(inner, name)?;
     let mut normalized: Vec<String> = models
         .into_iter()
         .map(|model| model.trim().to_owned())
@@ -2202,6 +2318,7 @@ fn replace_provider_model_vision(
     if name.is_empty() || model.is_empty() {
         return Err("供应商和模型 ID 不能为空".to_owned());
     }
+    ensure_generic_provider_mutation_allowed(inner, name)?;
 
     let previous = inner.draft["upstreams"]
         .get(name)
@@ -2309,6 +2426,7 @@ fn remove_provider(state: State<'_, AppStateManaged>, name: String) -> Result<St
     let data_dir = inner.data_dir();
     model_catalog::remove_provider(&data_dir, name)?;
     provider_tombstones::archive(&data_dir, name, &provider)?;
+    let pending_key = inner.pending_provider_keys.remove(name);
     inner.draft["upstreams"]
         .as_object_mut()
         .expect("upstreams is an object")
@@ -2316,6 +2434,9 @@ fn remove_provider(state: State<'_, AppStateManaged>, name: String) -> Result<St
     inner.rebuild_routing();
     if let Err(error) = inner.observe_draft() {
         inner.draft["upstreams"][name] = provider;
+        if let Some(key) = pending_key {
+            inner.pending_provider_keys.insert(name.to_owned(), key);
+        }
         provider_tombstones::discard(&data_dir, name).ok();
         return Err(error);
     }
@@ -2331,6 +2452,13 @@ fn restore_provider(state: State<'_, AppStateManaged>, name: String) -> Result<S
         return Err(format!("同名供应商 `{name}` 已存在，不能覆盖恢复"));
     }
     let data_dir = inner.data_dir();
+    let archived = provider_tombstones::get(&data_dir, name)?
+        .ok_or_else(|| format!("Provider 回收站中没有 `{name}`"))?;
+    if is_free_provider_value(&archived) {
+        return Err(format!(
+            "免费供应商 `{name}` 必须从免费目录重新验证，不能恢复旧目录快照"
+        ));
+    }
     model_catalog::remove_provider(&data_dir, name)?;
     let provider = provider_tombstones::take(&data_dir, name)?
         .ok_or_else(|| format!("Provider 回收站中没有 `{name}`"))?;
@@ -3598,6 +3726,19 @@ mod tests {
         assert!(presets
             .iter()
             .all(|preset| preset.upstream_name.ends_with("_free")));
+        assert!(presets.iter().flat_map(|preset| preset.models).all(|model| {
+            model.tool == CapabilityState::Unknown
+                && model.json_schema == CapabilityState::Unknown
+        }));
+        assert!(["gemini", "hugging_face"].iter().all(|id| {
+            presets
+                .iter()
+                .find(|preset| preset.id == *id)
+                .is_some_and(|preset| {
+                    preset.overage_policy
+                        == free_provider_catalog::OveragePolicy::UserMustEnableGuard
+                })
+        }));
     }
 
     #[test]
@@ -3651,6 +3792,95 @@ mod tests {
     }
 
     #[test]
+    fn catalog_managed_free_providers_reject_every_generic_mutator() {
+        let root = scratch_home("free-provider-generic-mutation");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["nvidia_free"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://integrate.api.nvidia.com/v1",
+            "access_tier": "free",
+            "auth": { "slot": "provider_api_key", "keyring": true },
+            "models": [{
+                "model": "openai/gpt-oss-120b",
+                "tool_state": "unknown",
+                "vision_state": "unknown",
+                "json_schema_state": "unknown",
+                "context_window": 131072
+            }]
+        });
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            draft,
+            None,
+        )))));
+
+        let edit_error = match edit_provider(
+            app.state(),
+            "nvidia_free".to_owned(),
+            "https://attacker.invalid/v1".to_owned(),
+            None,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a generic edit cannot retarget a free credential"),
+        };
+        assert!(edit_error.contains("内置目录管理"), "{edit_error}");
+
+        let state = app.state::<AppStateManaged>();
+        let mut inner = state.0.lock().unwrap();
+        let discovery_error = prepare_discovery_credential(
+            &inner,
+            "nvidia_free",
+            "https://integrate.api.nvidia.com/v1",
+            Some("renderer-supplied-key"),
+        )
+        .expect_err("generic discovery cannot use a free identity");
+        assert!(discovery_error.contains("内置目录管理"), "{discovery_error}");
+        let models_error =
+            replace_provider_models(&mut inner, "nvidia_free", vec!["paid/model".to_owned()])
+                .expect_err("generic model replacement cannot change a free allowlist");
+        assert!(models_error.contains("内置目录管理"), "{models_error}");
+        let vision_error =
+            replace_provider_model_vision(&mut inner, "nvidia_free", "openai/gpt-oss-120b", true)
+                .expect_err("generic capability edits cannot change a free allowlist");
+        assert!(vision_error.contains("内置目录管理"), "{vision_error}");
+        drop(inner);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn archived_free_provider_requires_catalog_revalidation_instead_of_restore() {
+        let root = scratch_home("free-provider-restore");
+        let draft = template_for_test(&root);
+        let data_dir = root.join("token-station-data");
+        provider_tombstones::archive(
+            &data_dir,
+            "nvidia_free",
+            &json!({
+                "provider": "openai-compatible",
+                "base_url": "https://integrate.api.nvidia.com/v1",
+                "access_tier": "free"
+            }),
+        )
+        .unwrap();
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            draft,
+            None,
+        )))));
+
+        let error = match restore_provider(app.state(), "nvidia_free".to_owned()) {
+            Err(error) => error,
+            Ok(_) => panic!("free provider tombstones cannot bypass catalog revalidation"),
+        };
+        assert!(error.contains("免费目录重新验证"), "{error}");
+        assert!(provider_tombstones::contains(&data_dir, "nvidia_free").unwrap());
+        assert!(get_state(app.state()).deleted_providers.is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn prepare_desktop_draft_backfills_missing_builtin_agent_adapters() {
         // Legacy agents snapshots omit the later agent-gemini adapter.
         let draft = json!({
@@ -3675,6 +3905,35 @@ mod tests {
                 "缺 {adapter}:{agents:?}"
             );
         }
+    }
+
+    #[test]
+    fn prepare_desktop_draft_keeps_free_capabilities_fail_closed() {
+        let root = scratch_home("free-capability-migration");
+        let draft = json!({
+            "plugins": {"agents": desktop_agents(), "dir": root.join("plugins")},
+            "data": {"dir": root.join("data")},
+            "upstreams": {
+                "nvidia_free": {
+                    "access_tier": "free",
+                    "models": [{
+                        "model": "openai/gpt-oss-120b",
+                        "tool": false,
+                        "json_schema": false,
+                        "tool_state": "unknown",
+                        "json_schema_state": "unknown"
+                    }]
+                }
+            }
+        });
+
+        let migrated = prepare_desktop_draft(draft, &root);
+        let model = &migrated["upstreams"]["nvidia_free"]["models"][0];
+        assert_eq!(model["tool_state"], "unknown");
+        assert_eq!(model["json_schema_state"], "unknown");
+        assert_eq!(model["tool"], false);
+        assert_eq!(model["json_schema"], false);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

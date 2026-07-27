@@ -19,7 +19,7 @@
 //! Log content. The one line it prints per request is the routing decision,
 //! which is content-free by `router-core`'s construction.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fmt::Write as _;
 use std::io::{self, Read};
@@ -309,6 +309,24 @@ impl EgressPolicy {
         }
         Ok(())
     }
+}
+
+/// Builds the same fail-closed HTTP client used by the production gateway.
+///
+/// This is exposed for control-plane probes that must honor the configured
+/// proxy, ignore ambient proxy variables, and refuse redirects exactly like
+/// normal provider traffic.
+///
+/// # Errors
+///
+/// Returns an error when the configured proxy or its credential cannot be
+/// resolved safely.
+pub fn build_egress_agent(
+    policy: &EgressConfig,
+    timeout: Duration,
+    secrets: &SecretStore,
+) -> Result<ureq::Agent, String> {
+    EgressPolicy::new(policy.clone()).agent(timeout, secrets)
 }
 
 /// A request-scoped connector that turns a blocking socket read into short,
@@ -602,6 +620,14 @@ fn restore_configured_capability_evidence(
     reported
 }
 
+fn retain_free_fallbacks(decision: &mut Decision, free_upstreams: &BTreeSet<String>) {
+    if free_upstreams.contains(decision.chosen.upstream.as_str()) {
+        decision
+            .fallbacks
+            .retain(|target| free_upstreams.contains(target.upstream.as_str()));
+    }
+}
+
 /// The assembled data plane.
 pub struct Gateway {
     /// Inbound adapters in match-priority order. Each request is dispatched to
@@ -623,7 +649,11 @@ pub struct Gateway {
     upstreams: BTreeMap<String, Upstream>,
     /// Names of upstreams declared `local`. Consulted when building candidates so
     /// the router can honor `local_only` without the data leaving the machine.
-    local_upstreams: std::collections::BTreeSet<String>,
+    local_upstreams: BTreeSet<String>,
+    /// Free identities may fail over only to other free identities. Keeping
+    /// this policy in the gateway preserves the router-core redline while
+    /// preventing a quota failure from silently becoming a paid attempt.
+    free_upstreams: BTreeSet<String>,
     /// What each upstream serves; health is applied per request from the
     /// tracker, because it changes and this does not.
     catalog: Vec<(UpstreamModel, token_station_protocol::ModelCapability)>,
@@ -937,6 +967,22 @@ impl Gateway {
         ))
     }
 
+    fn upstream_boundary_sets(config: &ClientConfig) -> (BTreeSet<String>, BTreeSet<String>) {
+        let local = config
+            .upstreams
+            .iter()
+            .filter(|(_, entry)| entry.local)
+            .map(|(name, _)| name.clone())
+            .collect();
+        let free = config
+            .upstreams
+            .iter()
+            .filter(|(_, entry)| entry.access_tier == crate::config::AccessTier::Free)
+            .map(|(name, _)| name.clone())
+            .collect();
+        (local, free)
+    }
+
     /// Loads plugins, probes capabilities, validates the routing table, and
     /// renders the model catalog.
     ///
@@ -1031,12 +1077,7 @@ impl Gateway {
             );
         }
 
-        let local_upstreams: std::collections::BTreeSet<String> = config
-            .upstreams
-            .iter()
-            .filter(|(_, entry)| entry.local)
-            .map(|(name, _)| name.clone())
-            .collect();
+        let (local_upstreams, free_upstreams) = Self::upstream_boundary_sets(config);
 
         let home_router = Router::new(config.router.clone()).map_err(|error| error.to_string())?;
         let mut agent_routers = BTreeMap::new();
@@ -1056,6 +1097,7 @@ impl Gateway {
             supported_agent_ids,
             upstreams,
             local_upstreams,
+            free_upstreams,
             catalog,
             health: std::sync::Mutex::new(HealthTracker::new(HealthPolicy {
                 eject_after: config.health.eject_after,
@@ -1994,7 +2036,7 @@ impl Gateway {
         record.stream = request.stream;
 
         let candidates = self.candidates(std::time::Instant::now());
-        let decision = router
+        let mut decision = router
             .route(&request, &hints, &candidates)
             .map_err(|no_route| {
                 let code = no_route.error_code();
@@ -2005,6 +2047,7 @@ impl Gateway {
                 };
                 ErrorEnvelope::new(code, status, no_route.to_string())
             })?;
+        retain_free_fallbacks(&mut decision, &self.free_upstreams);
         eprintln!(
             "route {} -> {} ({:?}), {} fallback(s)",
             request.model,
@@ -3308,6 +3351,53 @@ mod requested_model_privacy_tests {
             canonical_requested_model("mystery-model-a", false),
             canonical_requested_model("mystery-model-b", false),
         );
+    }
+}
+
+#[cfg(test)]
+mod free_fallback_tests {
+    use std::collections::BTreeSet;
+
+    use super::retain_free_fallbacks;
+    use token_station_router_core::{
+        DecidedBy, Decision, RequestFeatures, UpstreamModel, UpstreamRef,
+    };
+
+    fn target(upstream: &str) -> UpstreamModel {
+        UpstreamModel::new(UpstreamRef::new(upstream).unwrap(), "shared-model")
+    }
+
+    #[test]
+    fn a_free_choice_can_fall_back_only_to_another_free_identity() {
+        let mut decision = Decision {
+            chosen: target("nvidia_free"),
+            decided_by: DecidedBy::Default,
+            fallbacks: vec![target("nvidia_paid"), target("groq_free")],
+            features: RequestFeatures::default(),
+            pool: "main".to_owned(),
+        };
+        let free = BTreeSet::from(["groq_free".to_owned(), "nvidia_free".to_owned()]);
+
+        retain_free_fallbacks(&mut decision, &free);
+
+        assert_eq!(decision.fallbacks, [target("groq_free")]);
+    }
+
+    #[test]
+    fn a_paid_choice_keeps_its_configured_recovery_order() {
+        let mut decision = Decision {
+            chosen: target("nvidia_paid"),
+            decided_by: DecidedBy::Default,
+            fallbacks: vec![target("nvidia_free"), target("groq_paid")],
+            features: RequestFeatures::default(),
+            pool: "main".to_owned(),
+        };
+        let expected = decision.fallbacks.clone();
+        let free = BTreeSet::from(["nvidia_free".to_owned()]);
+
+        retain_free_fallbacks(&mut decision, &free);
+
+        assert_eq!(decision.fallbacks, expected);
     }
 }
 

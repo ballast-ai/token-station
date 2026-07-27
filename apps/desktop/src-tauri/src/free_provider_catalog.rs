@@ -5,8 +5,10 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use token_station_cli::config::EgressConfig;
 use token_station_cli::secrets::SecretStore;
-use token_station_protocol::CapabilityState;
-use token_station_protocol::{ProviderApi, ProviderEndpoint};
+use token_station_protocol::{
+    Auth, CapabilityState, HttpMethod, HttpRequestDescriptor, ProviderApi, ProviderConfig,
+    ProviderEndpoint, SecretRef,
+};
 
 pub(crate) const CURATED_AT: &str = "2026-07-27";
 
@@ -220,7 +222,7 @@ const PRESETS: &[FreeProviderPreset] = &[
         "在 Google AI Studio 创建 Gemini API Key。",
         "https://aistudio.google.com/app/apikey",
         "https://ai.google.dev/gemini-api/docs/openai",
-        OveragePolicy::HardStop,
+        OveragePolicy::UserMustEnableGuard,
         GEMINI_MODELS,
     ),
     preset(
@@ -332,7 +334,7 @@ const PRESETS: &[FreeProviderPreset] = &[
         "在 Hugging Face Access Tokens 页面创建只读 Token。",
         "https://huggingface.co/settings/tokens/new",
         "https://huggingface.co/docs/inference-providers/pricing",
-        OveragePolicy::HardStop,
+        OveragePolicy::UserMustEnableGuard,
         HUGGING_FACE_MODELS,
     ),
     preset(
@@ -357,9 +359,9 @@ const fn model(id: &'static str, label: &'static str, context_window: u32) -> Fr
     FreeModelPreset {
         id,
         label,
-        tool: DECLARED,
+        tool: UNKNOWN,
         vision: UNKNOWN,
-        json_schema: DECLARED,
+        json_schema: UNKNOWN,
         context_window,
     }
 }
@@ -372,9 +374,9 @@ const fn vision_model(
     FreeModelPreset {
         id,
         label,
-        tool: DECLARED,
+        tool: UNKNOWN,
         vision: DECLARED,
-        json_schema: DECLARED,
+        json_schema: UNKNOWN,
         context_window,
     }
 }
@@ -423,6 +425,105 @@ pub(crate) fn find(id: &str) -> Option<&'static FreeProviderPreset> {
     PRESETS.iter().find(|preset| preset.id == id)
 }
 
+pub(crate) fn validate_stored_provider(name: &str, provider: &Value) -> Result<(), String> {
+    let preset = PRESETS
+        .iter()
+        .find(|preset| preset.upstream_name == name)
+        .ok_or_else(|| format!("免费供应商 `{name}` 已不在当前内置目录中，请删除后重新选择"))?;
+    if provider["provider"].as_str() != Some("openai-compatible")
+        || provider["base_url"].as_str() != Some(preset.base_url)
+        || provider["access_tier"].as_str() != Some("free")
+        || provider["auth"]["slot"].as_str() != Some("provider_api_key")
+        || provider["auth"]["keyring"].as_bool() != Some(true)
+    {
+        return Err(format!(
+            "免费供应商 `{name}` 与当前内置目录身份不一致，请删除后重新验证"
+        ));
+    }
+    let models = provider["models"]
+        .as_array()
+        .filter(|models| !models.is_empty())
+        .ok_or_else(|| format!("免费供应商 `{name}` 没有可用模型"))?;
+    let mut seen = std::collections::BTreeSet::new();
+    for stored in models {
+        let model_id = stored["model"]
+            .as_str()
+            .ok_or_else(|| format!("免费供应商 `{name}` 包含无效模型条目"))?;
+        if !seen.insert(model_id) {
+            return Err(format!("免费供应商 `{name}` 重复声明模型 `{model_id}`"));
+        }
+        let model = preset
+            .models
+            .iter()
+            .find(|candidate| candidate.id == model_id)
+            .ok_or_else(|| {
+                format!(
+                    "模型 `{model_id}` 已不在免费供应商 `{name}` 的当前目录中，请重新验证"
+                )
+            })?;
+        let expected = [
+            ("tool_state", model.tool),
+            ("vision_state", model.vision),
+            ("json_schema_state", model.json_schema),
+        ];
+        for (field, capability) in expected {
+            if stored[field] != serde_json::to_value(capability).expect("capability serializes") {
+                return Err(format!(
+                    "免费模型 `{model_id}` 的能力 `{field}` 与当前目录不一致，请重新验证"
+                ));
+            }
+        }
+        let expected_flags = [
+            (
+                "tool",
+                matches!(model.tool, CapabilityState::Verified | CapabilityState::Declared),
+            ),
+            (
+                "vision",
+                matches!(
+                    model.vision,
+                    CapabilityState::Verified | CapabilityState::Declared
+                ),
+            ),
+            (
+                "json_schema",
+                matches!(
+                    model.json_schema,
+                    CapabilityState::Verified | CapabilityState::Declared
+                ),
+            ),
+        ];
+        for (field, expected) in expected_flags {
+            if stored[field].as_bool() != Some(expected) {
+                return Err(format!(
+                    "免费模型 `{model_id}` 的能力标记 `{field}` 与当前目录不一致，请重新验证"
+                ));
+            }
+        }
+        if stored["context_window"].as_u64() != Some(u64::from(model.context_window)) {
+            return Err(format!(
+                "免费模型 `{model_id}` 的上下文窗口与当前目录不一致，请重新验证"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn has_nonempty_message(document: &Value) -> bool {
+    document
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| {
+            choices.iter().any(|choice| {
+                choice
+                    .get("message")
+                    .and_then(|message| message.get("content"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|content| !content.trim().is_empty())
+            })
+        })
+}
+
 pub(crate) fn validate_chat_completion(
     preset: &FreeProviderPreset,
     model: &str,
@@ -433,44 +534,32 @@ pub(crate) fn validate_chat_completion(
     let endpoint = ProviderEndpoint::try_new(preset.base_url)
         .map_err(|error| format!("免费供应商端点配置无效：{error}"))?;
     let url = endpoint.resolve(ProviderApi::ChatCompletions);
-    let proxy = if let Some((scheme, host, port)) = egress.proxy_parts()? {
-        let protocol = match scheme.as_str() {
-            "http" => ureq::ProxyProtocol::Http,
-            "https" => ureq::ProxyProtocol::Https,
-            "socks5" => ureq::ProxyProtocol::Socks5,
-            "socks5h" => ureq::ProxyProtocol::Socks5h,
-            _ => return Err("不支持的出站代理协议".to_owned()),
-        };
-        let mut builder = ureq::Proxy::builder(protocol).host(&host).port(port);
-        for entry in &egress.no_proxy {
-            builder = builder.no_proxy(entry);
-        }
-        if let Some(auth) = &egress.auth {
-            let password = secrets.resolve_egress(&auth.credential.slot)?;
-            builder = builder.username(&auth.username).password(&password);
-        }
-        Some(builder.build().map_err(|_| "出站代理配置无效".to_owned())?)
-    } else {
-        None
-    };
-    let http = ureq::Agent::new_with_config(
-        ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(12)))
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .proxy(proxy)
-            .build(),
+    let slot = SecretRef::new("provider_api_key");
+    let mut provider = ProviderConfig::new("openai-compatible", endpoint);
+    provider.auth = Some(slot.clone());
+    let mut descriptor = HttpRequestDescriptor::new(HttpMethod::Post, &url);
+    descriptor.auth = Some(
+        Auth::header("authorization", slot)
+            .map_err(|error| format!("免费供应商鉴权头配置无效：{error}"))?,
     );
+    provider
+        .authorize(&descriptor)
+        .map_err(|error| format!("免费供应商出站请求被拒绝：{error}"))?;
+    let http = token_station_cli::gateway::build_egress_agent(
+        egress,
+        Duration::from_secs(12),
+        secrets,
+    )?;
     let body = json!({
         "model": model,
         "messages": [{"role": "user", "content": "Reply OK"}],
-        "max_tokens": 2,
+        "max_tokens": 8,
         "temperature": 0,
         "stream": false
     })
     .to_string();
     let response = http
-        .post(&url)
+        .post(&descriptor.url)
         .header("accept", "application/json")
         .header("content-type", "application/json")
         .header("authorization", &format!("Bearer {}", api_key.trim()))
@@ -504,12 +593,52 @@ pub(crate) fn validate_chat_completion(
         .map_err(|error| format!("读取免费模型验证响应失败：{error}"))?;
     let document: Value = serde_json::from_slice(&bytes)
         .map_err(|_| "供应商返回的验证响应不是有效 JSON".to_owned())?;
-    let valid = document
-        .get("choices")
-        .and_then(Value::as_array)
-        .is_some_and(|choices| !choices.is_empty());
-    if !valid {
-        return Err("供应商未返回 OpenAI-compatible 的生成结果".to_owned());
+    if !has_nonempty_message(&document) {
+        return Err("供应商未返回 OpenAI-compatible 的非空消息".to_owned());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_nonempty_message, validate_stored_provider};
+    use serde_json::json;
+
+    #[test]
+    fn rejects_structurally_empty_chat_responses() {
+        assert!(!has_nonempty_message(&json!({"choices": [null]})));
+        assert!(!has_nonempty_message(
+            &json!({"choices": [{"message": {"content": "  "}}]})
+        ));
+        assert!(has_nonempty_message(
+            &json!({"choices": [{"message": {"content": "OK"}}]})
+        ));
+    }
+
+    #[test]
+    fn stored_free_provider_must_match_the_current_catalog() {
+        let valid = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.groq.com/openai/v1",
+            "access_tier": "free",
+            "auth": {"slot": "provider_api_key", "keyring": true},
+            "models": [{
+                "model": "openai/gpt-oss-120b",
+                "tool": false,
+                "vision": false,
+                "json_schema": false,
+                "tool_state": "unknown",
+                "vision_state": "unknown",
+                "json_schema_state": "unknown",
+                "context_window": 131072
+            }]
+        });
+        validate_stored_provider("groq_free", &valid).unwrap();
+
+        let mut stale = valid;
+        stale["models"][0]["model"] = json!("paid-model");
+        assert!(validate_stored_provider("groq_free", &stale)
+            .unwrap_err()
+            .contains("当前目录"));
+    }
 }
