@@ -400,7 +400,7 @@ export default function AddProviderPage({
                         {custom ? "✎" : <ProviderIcon id={item.id} label={item.label} size={30} />}
                       </span>
                       <span className="provider-catalog-card-title">
-                        <strong>{item.label}</strong>
+                        <strong title={item.label}>{item.label}</strong>
                       </span>
                     </button>
                   </article>
@@ -422,7 +422,7 @@ export default function AddProviderPage({
                       <ProviderIcon id={item.id} label={item.label} size={30} />
                     </span>
                     <span className="provider-catalog-card-title">
-                      <strong>{item.label}</strong>
+                      <strong title={item.label}>{item.label}</strong>
                     </span>
                     <span className="provider-catalog-card-badge">
                       <i className={item.offer_kind === "recurring" ? "free" : "trial"}>

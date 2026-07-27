@@ -242,7 +242,10 @@ describe("AddProviderPage", () => {
     render(<FreeCatalogHarness />);
 
     const grid = screen.getByRole("list", { name: "免费供应商列表" });
-    expect(within(grid).getByText("NVIDIA API Catalog", { selector: "strong" })).toBeInTheDocument();
+    expect(within(grid).getByText("NVIDIA API Catalog", { selector: "strong" })).toHaveAttribute(
+      "title",
+      "NVIDIA API Catalog",
+    );
     expect(within(grid).getAllByText("长期免费").length).toBeGreaterThan(0);
     expect(within(grid).queryByText("nvidia_free", { selector: "code" })).toBeNull();
     expect(within(grid).queryByText("3 模型")).toBeNull();

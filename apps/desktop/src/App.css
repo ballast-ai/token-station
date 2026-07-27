@@ -4239,6 +4239,10 @@ pre.block {
   text-align: left;
   cursor: pointer;
 }
+.provider-catalog-card.free > button {
+  gap: 9px;
+  padding-right: 10px;
+}
 .provider-catalog-logo {
   width: 34px;
   height: 34px;
@@ -4261,18 +4265,22 @@ pre.block {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.provider-catalog-card-badge {
+  justify-self: end;
+}
 .provider-catalog-card-badge i {
-  min-height: 21px;
+  min-height: 18px;
   display: inline-flex;
   align-items: center;
-  padding: 0 7px;
+  padding: 0 5px;
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--muted);
   background: var(--surface-2);
-  font-size: 8.5px;
+  font-size: 7.5px;
   font-style: normal;
   font-weight: 600;
+  letter-spacing: .01em;
   white-space: nowrap;
 }
 .provider-catalog-card-badge i.free {
