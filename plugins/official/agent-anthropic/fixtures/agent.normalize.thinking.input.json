@@ -12,7 +12,7 @@
   "body": {
     "model": "routed-model",
     "max_tokens": 1024,
-    "thinking": {"type": "enabled", "budget_tokens": 512},
+    "thinking": {"type": "disabled"},
     "messages": [
       {
         "role": "assistant",
