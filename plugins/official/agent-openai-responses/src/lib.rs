@@ -126,13 +126,12 @@ fn validate_semantic_options(body: &Value) -> Result<(), String> {
         Some(_) => return Err(invalid("tool_choice must be a string or object")),
     }
 
+    // Both settings are preserved: the boolean rides through to the provider
+    // request verbatim (see `normalize_inbound` → Canonical IR extensions), so
+    // `parallel_tool_calls=false` is honored rather than refused. Only a
+    // non-boolean is a malformed request.
     match body.get("parallel_tool_calls") {
-        None | Some(Value::Null | Value::Bool(true)) => {}
-        Some(Value::Bool(false)) => {
-            return Err(capability(
-                "Responses parallel_tool_calls=false cannot be preserved by Canonical IR",
-            ));
-        }
+        None | Some(Value::Null | Value::Bool(_)) => {}
         Some(_) => return Err(invalid("parallel_tool_calls must be a boolean")),
     }
 
@@ -771,6 +770,13 @@ impl Guest for ResponsesClient {
                 .transpose()?,
             stop: Vec::new(),
         };
+        let mut extensions = request_extensions(body);
+        // `parallel_tool_calls` has no first-class Canonical IR field; it rides
+        // the extensions passthrough so the outbound provider request preserves
+        // it verbatim (OpenAI-compatible providers accept it alongside tools).
+        if let Some(parallel) = body.get("parallel_tool_calls").and_then(Value::as_bool) {
+            extensions.insert("parallel_tool_calls".to_owned(), json!(parallel));
+        }
         to_output(&ChatRequest {
             model,
             messages,
@@ -783,7 +789,7 @@ impl Guest for ResponsesClient {
                 .map(|_| ToolChoice::Auto),
             sampling,
             stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
-            extensions: request_extensions(body),
+            extensions,
         })
     }
 

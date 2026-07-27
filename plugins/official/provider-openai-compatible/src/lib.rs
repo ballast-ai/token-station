@@ -220,6 +220,16 @@ fn body_of(request: &ChatRequest) -> Value {
             })
             .collect();
         body.insert("tools".to_owned(), Value::Array(tools));
+        // `parallel_tool_calls` has no first-class Canonical IR field; it
+        // arrives through the extensions passthrough. The OpenAI wire only
+        // accepts it alongside `tools`, so it is rendered inside this branch.
+        if let Some(parallel) = request
+            .extensions
+            .get("parallel_tool_calls")
+            .and_then(Value::as_bool)
+        {
+            body.insert("parallel_tool_calls".to_owned(), json!(parallel));
+        }
     }
     if let Some(format) = &request.response_format {
         let format = match format {
