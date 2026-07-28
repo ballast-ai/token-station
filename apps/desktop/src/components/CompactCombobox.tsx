@@ -91,13 +91,11 @@ export default function CompactCombobox({
       const viewportPadding = 12;
       const gap = 6;
       const spaceBelow = window.innerHeight - rect.bottom - viewportPadding - gap;
-      const spaceAbove = rect.top - viewportPadding - gap;
-      const placeAbove = spaceBelow < 220 && spaceAbove > spaceBelow;
-      const maxHeight = Math.max(120, Math.min(360, placeAbove ? spaceAbove : spaceBelow));
+      const maxHeight = Math.max(120, Math.min(360, spaceBelow));
       setPopoverStyle({
         left: Math.max(viewportPadding, rect.left),
-        top: placeAbove ? "auto" : rect.bottom + gap,
-        bottom: placeAbove ? Math.max(viewportPadding, window.innerHeight - rect.top + gap) : "auto",
+        top: rect.bottom + gap,
+        bottom: "auto",
         width: rect.width,
         maxHeight,
       });
