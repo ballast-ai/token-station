@@ -158,6 +158,8 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
   const requestGeneration = useRef(0);
   const dashboardInFlight = useRef(false);
   const dashboardQueued = useRef(false);
+  const activeDashboardKey = useRef("");
+  const dashboardMounted = useRef(true);
   const latestDashboardLoader = useRef<(background?: boolean) => Promise<void>>(async () => undefined);
 
   const [agents, setAgents] = useState<AgentUiMetadataView[]>([]);
@@ -181,6 +183,15 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
   }, []);
 
   useEffect(() => {
+    dashboardMounted.current = true;
+    return () => {
+      dashboardMounted.current = false;
+      dashboardQueued.current = false;
+      requestGeneration.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
     Promise.all([listAgentRegistry(), getAgentBudgets()])
       .then(([registry, statuses]) => {
         const supported = registry.filter((agent) => agent.admission === "supported");
@@ -194,24 +205,40 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
   }, [loadForm]);
 
   const loadDashboard = useCallback(async (background = false) => {
-    const generation = ++requestGeneration.current;
+    const requestKey = JSON.stringify([
+      since,
+      activeGroup,
+      agentFilter,
+      upstreamFilter,
+      modelFilter,
+    ]);
     if (dashboardInFlight.current) {
       dashboardQueued.current = true;
+      if (requestKey !== activeDashboardKey.current) requestGeneration.current += 1;
       return;
     }
+    const generation = ++requestGeneration.current;
     dashboardInFlight.current = true;
+    activeDashboardKey.current = requestKey;
     if (background || data) setRefreshing(true);
     else setLoading(true);
     setErr("");
     const trendBy = since === "24h" ? "hour" : "day";
     try {
-      const [nextData, nextTrend, upstreamData, modelData] = await Promise.all([
+      const settled = await Promise.allSettled([
         getStats(since, activeGroup, agentFilter || null, null, upstreamFilter || null, modelFilter || null),
         getStats(since, trendBy, agentFilter || null, null, upstreamFilter || null, modelFilter || null),
         getStats(since, "upstream", agentFilter || null, null, null, null),
         getStats(since, "model", agentFilter || null, null, upstreamFilter || null, null),
       ]);
-      if (generation !== requestGeneration.current) return;
+      const failure = settled.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (failure) throw failure.reason;
+      const [nextData, nextTrend, upstreamData, modelData] = settled.map(
+        (result) => (result as PromiseFulfilledResult<StatsView>).value,
+      );
+      if (!dashboardMounted.current || generation !== requestGeneration.current) return;
       const nextUpstreams = upstreamData.groups.map(([name]) => name).filter((name) => name !== "(unrouted)");
       const nextModels = modelData.groups.map(([name]) => name).filter((name) => name !== "(unrouted)");
       setData(nextData);
@@ -226,16 +253,18 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
       }
       setReceiptRefreshKey((value) => value + 1);
     } catch (error) {
-      if (generation === requestGeneration.current) setErr(String(error));
+      if (dashboardMounted.current && generation === requestGeneration.current) setErr(String(error));
     } finally {
-      if (generation === requestGeneration.current) {
+      if (dashboardMounted.current && generation === requestGeneration.current) {
         setLoading(false);
         setRefreshing(false);
       }
       dashboardInFlight.current = false;
-      if (dashboardQueued.current) {
+      if (dashboardMounted.current && dashboardQueued.current) {
         dashboardQueued.current = false;
-        queueMicrotask(() => void latestDashboardLoader.current(true));
+        queueMicrotask(() => {
+          if (dashboardMounted.current) void latestDashboardLoader.current(true);
+        });
       }
     }
   }, [activeGroup, agentFilter, data, modelFilter, since, upstreamFilter]);
