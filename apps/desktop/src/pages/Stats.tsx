@@ -12,6 +12,7 @@ import {
 } from "../api";
 import PricingEditor from "../components/PricingEditor";
 import PageBackButton from "../components/PageBackButton";
+import CompactCombobox from "../components/CompactCombobox";
 import UsageRequestLog from "../components/UsageRequestLog";
 import UsageTrendChart, { type UsageTrendRange } from "../components/UsageTrendChart";
 
@@ -314,51 +315,63 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
       </header>
 
       <div className="usage-toolbar" aria-label="用量筛选">
-        <label>
+        <div className="usage-filter-field">
           <span>Agent</span>
-          <select
-            aria-label="Agent 过滤"
+          <CompactCombobox
+            ariaLabel="Agent 过滤"
             value={agentFilter}
-            onChange={(event) => {
-              setAgentFilter(event.target.value);
+            options={[
+              { value: "", label: "全部 Agent" },
+              ...agents.map((agent) => ({ value: agent.agent_id, label: agent.display_name })),
+            ]}
+            onChange={(value) => {
+              setAgentFilter(value);
               setUpstreamFilter("");
               setModelFilter("");
             }}
-          >
-            <option value="">全部 Agent</option>
-            {agents.map((agent) => <option key={agent.agent_id} value={agent.agent_id}>{agent.display_name}</option>)}
-          </select>
-        </label>
-        <label>
+          />
+        </div>
+        <div className="usage-filter-field">
           <span>供应商</span>
-          <select
-            aria-label="供应商过滤"
+          <CompactCombobox
+            ariaLabel="供应商过滤"
             value={upstreamFilter}
-            onChange={(event) => {
-              setUpstreamFilter(event.target.value);
+            options={[
+              { value: "", label: "全部供应商" },
+              ...visibleUpstreams.map((upstream) => ({ value: upstream, label: upstream })),
+            ]}
+            onChange={(value) => {
+              setUpstreamFilter(value);
               setModelFilter("");
             }}
-          >
-            <option value="">全部供应商</option>
-            {visibleUpstreams.map((upstream) => <option key={upstream} value={upstream}>{upstream}</option>)}
-          </select>
-        </label>
-        <label>
+          />
+        </div>
+        <div className="usage-filter-field">
           <span>模型</span>
-          <select aria-label="模型过滤" value={modelFilter} onChange={(event) => setModelFilter(event.target.value)}>
-            <option value="">全部模型</option>
-            {visibleModels.map((model) => <option key={model} value={model}>{model}</option>)}
-          </select>
-        </label>
+          <CompactCombobox
+            ariaLabel="模型过滤"
+            value={modelFilter}
+            options={[
+              { value: "", label: "全部模型" },
+              ...visibleModels.map((model) => ({ value: model, label: model })),
+            ]}
+            onChange={setModelFilter}
+          />
+        </div>
         <div className="usage-toolbar-spacer" />
-        <label className="usage-refresh-select">
+        <div className="usage-filter-field usage-refresh-select">
           <span>自动刷新</span>
-          <select aria-label="自动刷新" value={refreshInterval} onChange={(event) => setRefreshInterval(Number(event.target.value))}>
-            <option value={0}>关闭</option>
-            <option value={30_000}>30 秒</option>
-            <option value={60_000}>60 秒</option>
-          </select>
-        </label>
+          <CompactCombobox
+            ariaLabel="自动刷新"
+            value={String(refreshInterval)}
+            options={[
+              { value: "0", label: "关闭" },
+              { value: "30000", label: "30 秒" },
+              { value: "60000", label: "60 秒" },
+            ]}
+            onChange={(value) => setRefreshInterval(Number(value))}
+          />
+        </div>
         <button
           className={`usage-refresh-button ${refreshing ? "busy" : ""}`}
           type="button"
@@ -369,12 +382,15 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
         >
           <span aria-hidden="true">↻</span>
         </button>
-        <label className="usage-range-select">
+        <div className="usage-filter-field usage-range-select">
           <span>时间范围</span>
-          <select aria-label="时间范围" value={since} onChange={(event) => setSince(event.target.value)}>
-            {SINCE.map((range) => <option key={range.value} value={range.value}>{range.label}</option>)}
-          </select>
-        </label>
+          <CompactCombobox
+            ariaLabel="时间范围"
+            value={since}
+            options={SINCE}
+            onChange={setSince}
+          />
+        </div>
       </div>
 
       {err && <div className="banner err usage-error">{err}</div>}

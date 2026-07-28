@@ -339,10 +339,7 @@ function StationApp() {
           deletedProviders={state.deleted_providers ?? []}
           providerRecoveryError={state.provider_recovery_error ?? null}
           tiers={state.tiers}
-          agentRoutes={state.agent_routes ?? {}}
           profiles={state.profiles ?? []}
-          registry={orderedRegistry}
-          agents={agents}
           serveRunning={runtimeHealthy}
           busy={busy}
           applying={state.serve.phase === "starting"}
@@ -353,11 +350,15 @@ function StationApp() {
           allowCloudFallback={state.allow_cloud_fallback}
           onSetLocalRouting={(localOnly, allowCloudFallback) => void run(() => setLocalRouting(localOnly, allowCloudFallback))}
           onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
+          onSyncTiers={() => void run(async () => {
+            const { upstream, model } = state.tiers.high;
+            await setTier("mid", upstream, model);
+            return setTier("low", upstream, model);
+          }, "上档配置已同步到三档")}
           onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
           onRemoveKeyword={(slot, keyword) => void run(() => removeKeyword(slot, keyword))}
           onSave={() => void run(serveStart)}
           onApplyAll={() => void run(applyHomeRouteToAllAgents, runtimeHealthy ? "全部 Agent 已恢复跟随主页 · 尚待应用" : "全部 Agent 已恢复跟随主页")}
-          onOpenAgent={(id) => navigate(`agent:${id}`)}
           onRemoveProvider={(name) => void run(() => removeProvider(name), "供应商已删除")}
           onRestoreProvider={(name) => void run(() => restoreProvider(name), "供应商已从回收站恢复")}
           onStateChange={showState}

@@ -43,10 +43,10 @@ describe("TierRouteEditor", () => {
     expect(screen.getByText("上档")).toBeInTheDocument();
     expect(screen.getByText("中档")).toBeInTheDocument();
     expect(screen.getByText("下档")).toBeInTheDocument();
-    expect(screen.getByText("最强模型 · 难任务升到这里")).toBeInTheDocument();
-    expect(screen.getByText("便宜快模型 · 简单任务兜底")).toBeInTheDocument();
-    expect(screen.getByLabelText("上档供应商")).toHaveValue("deepseek");
-    expect(screen.getByLabelText("上档模型")).toHaveValue("deepseek-v4-pro");
+    expect(screen.getByText("复杂推理与代码")).toBeInTheDocument();
+    expect(screen.getByText("简单快速任务")).toBeInTheDocument();
+    expect(screen.getByLabelText("上档供应商")).toHaveTextContent("deepseek");
+    expect(screen.getByLabelText("上档模型")).toHaveTextContent("deepseek-v4-pro");
     expect(screen.getByLabelText("下档模型")).toBeDisabled();
   });
 
@@ -57,7 +57,22 @@ describe("TierRouteEditor", () => {
       <TierRouteEditor tiers={tiers} providers={providers} onTierChange={onTierChange} />,
     );
 
-    await user.selectOptions(screen.getByLabelText("上档供应商"), "openai");
+    await user.click(screen.getByLabelText("上档供应商"));
+    await user.click(screen.getByRole("option", { name: "openai" }));
+
+    expect(onTierChange).toHaveBeenCalledWith("high", "openai", "gpt-5.5");
+  });
+
+  it("supports keyboard navigation in the provider menu", async () => {
+    const onTierChange = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <TierRouteEditor tiers={tiers} providers={providers} onTierChange={onTierChange} />,
+    );
+
+    const trigger = screen.getByLabelText("上档供应商");
+    await user.click(trigger);
+    await user.keyboard("{ArrowDown}{Enter}");
 
     expect(onTierChange).toHaveBeenCalledWith("high", "openai", "gpt-5.5");
   });
@@ -69,7 +84,8 @@ describe("TierRouteEditor", () => {
       <TierRouteEditor tiers={tiers} providers={providers} onTierChange={onTierChange} />,
     );
 
-    await user.selectOptions(screen.getByLabelText("中档供应商"), "empty");
+    await user.click(screen.getByLabelText("中档供应商"));
+    await user.click(screen.getByRole("option", { name: "empty" }));
 
     expect(onTierChange).toHaveBeenCalledWith("mid", "empty", null);
   });
@@ -81,8 +97,10 @@ describe("TierRouteEditor", () => {
       <TierRouteEditor tiers={tiers} providers={providers} onTierChange={onTierChange} />,
     );
 
-    await user.selectOptions(screen.getByLabelText("上档供应商"), "");
-    await user.selectOptions(screen.getByLabelText("中档模型"), "");
+    await user.click(screen.getByLabelText("上档供应商"));
+    await user.click(screen.getByRole("option", { name: "未选择" }));
+    await user.click(screen.getByLabelText("中档模型"));
+    await user.click(screen.getByRole("option", { name: "未选择" }));
 
     expect(onTierChange).toHaveBeenNthCalledWith(1, "high", null, null);
     expect(onTierChange).toHaveBeenNthCalledWith(2, "mid", "openai", null);
@@ -105,5 +123,21 @@ describe("TierRouteEditor", () => {
     for (const control of screen.getAllByRole("combobox")) {
       expect(control).toBeDisabled();
     }
+  });
+
+  it("syncs the configured high tier from the compact table", async () => {
+    const user = userEvent.setup();
+    const onSyncTiers = vi.fn();
+    render(
+      <TierRouteEditor
+        tiers={tiers}
+        providers={providers}
+        onTierChange={vi.fn()}
+        onSyncTiers={onSyncTiers}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "同步三档" }));
+    expect(onSyncTiers).toHaveBeenCalledOnce();
   });
 });

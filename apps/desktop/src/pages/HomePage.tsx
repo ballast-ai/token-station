@@ -2,9 +2,6 @@ import { useState } from "react";
 import {
   deleteProfile,
   saveHomeRouteAsProfile,
-  type AgentRouteView,
-  type AgentUiMetadataView,
-  type AgentView,
   type ProviderView,
   type StateView,
   type TierSlot,
@@ -21,10 +18,7 @@ interface HomePageProps {
   providerRecoveryError: string | null;
   tiers: Record<TierSlot, TierView>;
   keywords: Record<TierSlot, string[]>;
-  agentRoutes: Record<string, AgentRouteView>;
   profiles: string[];
-  registry: AgentUiMetadataView[];
-  agents: AgentView[];
   serveRunning: boolean;
   busy: boolean;
   applying: boolean;
@@ -34,11 +28,11 @@ interface HomePageProps {
   allowCloudFallback: boolean;
   onSetLocalRouting: (localOnly: boolean, allowCloudFallback: boolean) => void;
   onTierChange: (slot: TierSlot, upstream: string | null, model: string | null) => void;
+  onSyncTiers: () => void;
   onAddKeyword: (slot: TierSlot, keyword: string) => void;
   onRemoveKeyword: (slot: TierSlot, keyword: string) => void;
   onSave: () => void;
   onApplyAll: () => void;
-  onOpenAgent: (agentId: string) => void;
   onRemoveProvider: (name: string) => void;
   onRestoreProvider: (name: string) => void;
   onStateChange: (state: StateView, message: string) => void;
@@ -58,10 +52,7 @@ export default function HomePage({
   providerRecoveryError,
   tiers,
   keywords,
-  agentRoutes,
   profiles,
-  registry,
-  agents,
   serveRunning,
   busy,
   applying,
@@ -71,11 +62,11 @@ export default function HomePage({
   allowCloudFallback,
   onSetLocalRouting,
   onTierChange,
+  onSyncTiers,
   onAddKeyword,
   onRemoveKeyword,
   onSave,
   onApplyAll,
-  onOpenAgent,
   onRemoveProvider,
   onRestoreProvider,
   onStateChange,
@@ -89,7 +80,7 @@ export default function HomePage({
   const [profileName, setProfileName] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileError, setProfileError] = useState("");
-  const scanned = new Map(agents.map((agent) => [agent.metadata.agent_id, agent]));
+  const [profileOpen, setProfileOpen] = useState(false);
 
   const saveProfile = async () => {
     const name = profileName.trim();
@@ -99,6 +90,7 @@ export default function HomePage({
     try {
       const next = await saveHomeRouteAsProfile(name);
       setProfileName("");
+      setProfileOpen(false);
       onStateChange(next, `策略组「${name}」已加入草稿，请保存并应用`);
     } catch (caught) {
       setProfileError(errorText(caught));
@@ -124,36 +116,29 @@ export default function HomePage({
     <div className="page-stack home-page">
       <header className="page-title-row">
         <div>
-          <span className="eyebrow">DEFAULT ROUTE</span>
           <h1>主页路由</h1>
           <p>这套三档配置是所有 Agent 的默认值。独立路由只覆盖对应 Agent。</p>
         </div>
       </header>
 
-      <section className="agent-overview" aria-label="Agent 路由摘要">
-        {registry.map((metadata) => {
-          const agent = scanned.get(metadata.agent_id);
-          const route = agentRoutes[metadata.agent_id];
-          const connected = agent?.status === "CONNECTED";
-          return (
-            <button key={metadata.agent_id} type="button" onClick={() => onOpenAgent(metadata.agent_id)}>
-              <span className={`overview-signal ${connected ? "connected" : agent?.installations.length ? "detected" : ""}`} />
-              <strong>{metadata.display_name.replace(" Agent", "")}</strong>
-              <small>{connected ? "已接入" : agent?.installations.length ? "已发现" : "未发现"}</small>
-              <em>{route?.mode === "custom" ? "独立路由" : route?.mode === "profile" ? `策略组 · ${route.profile}` : "跟随主页"}</em>
-            </button>
-          );
-        })}
-      </section>
-
       <section className="panel route-panel">
         <div className="panel-head split-heading">
           <div>
-            <span className="eyebrow">SMART ROUTING · 3 TIERS</span>
-            <h2>智能路由 · 三档</h2>
-            <p className="sub">请求按复杂度自动落档；你只选择每档的供应商和模型。</p>
+            <h2>智能路由</h2>
+            <p className="sub">根据任务复杂度选择不同模型。</p>
           </div>
-          <span className="default-route-chip">全局默认</span>
+          <div className="route-heading-actions">
+            {profiles.length > 0 && <span className="count-badge">{profiles.length} 个策略</span>}
+            <button
+              className="btn quiet"
+              type="button"
+              aria-expanded={profileOpen}
+              disabled={busy || profileBusy}
+              onClick={() => setProfileOpen((current) => !current)}
+            >
+              {profileOpen ? "收起" : "存为策略"}
+            </button>
+          </div>
         </div>
 
         <TierRouteEditor
@@ -161,13 +146,10 @@ export default function HomePage({
           providers={providers}
           disabled={busy}
           onTierChange={onTierChange}
+          onSyncTiers={onSyncTiers}
         />
 
-        <div className="profile-manager">
-          <div>
-            <strong>可复用策略组</strong>
-            <span>把当前主页三档另存后，可供多个 Agent 共同挂载。</span>
-          </div>
+        {profileOpen && <div className="profile-manager compact-profile-manager">
           <div className="profile-create-row">
             <input
               className="input"
@@ -181,7 +163,8 @@ export default function HomePage({
                 if (event.key === "Enter") void saveProfile();
               }}
             />
-            <button className="btn" type="button" disabled={busy || profileBusy || !profileName.trim()} onClick={() => void saveProfile()}>另存为策略组</button>
+            <button className="btn primary" type="button" disabled={busy || profileBusy || !profileName.trim()} onClick={() => void saveProfile()}>保存策略</button>
+            <button className="btn quiet" type="button" disabled={profileBusy} onClick={() => setProfileOpen(false)}>取消</button>
           </div>
           {profiles.length > 0 && (
             <div className="profile-list" aria-label="已有策略组">
@@ -194,16 +177,20 @@ export default function HomePage({
             </div>
           )}
           {profileError && <span className="foot-hint error-text">{profileError}</span>}
-        </div>
+        </div>}
 
         <footer className="panel-foot route-actions">
-          <button className="btn primary" type="button" disabled={busy || applying} onClick={onSave}>
-            {applying ? "应用中…" : "保存并应用"}
-          </button>
-          <button className="btn" type="button" disabled={busy || applying} onClick={onApplyAll}>应用到全部 Agent</button>
-          <span className="foot-hint" data-testid="config-save-status">{saveStatus}</span>
-          {providers.length === 0 && <span className="foot-hint">请先添加供应商，再配置三档。</span>}
-          {providers.length > 0 && configError && <span className="foot-hint">还有档位未完成，保存时会进行完整校验。</span>}
+          <div className="route-status-copy">
+            <span className="foot-hint" data-testid="config-save-status">{saveStatus}</span>
+            {providers.length === 0 && <span className="foot-hint">请先添加供应商，再配置三档。</span>}
+            {providers.length > 0 && configError && <span className="foot-hint">还有档位未完成，保存时会进行完整校验。</span>}
+          </div>
+          <div className="route-action-buttons">
+            <button className="btn" type="button" disabled={busy || applying} onClick={onApplyAll}>应用到全部 Agent</button>
+            <button className="btn primary" type="button" disabled={busy || applying} onClick={onSave}>
+              {applying ? "应用中…" : "保存并应用"}
+            </button>
+          </div>
         </footer>
       </section>
 
