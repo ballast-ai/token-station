@@ -96,7 +96,8 @@ export default function CompactCombobox({
       const maxHeight = Math.max(120, Math.min(360, placeAbove ? spaceAbove : spaceBelow));
       setPopoverStyle({
         left: Math.max(viewportPadding, rect.left),
-        top: placeAbove ? Math.max(viewportPadding, rect.top - maxHeight - gap) : rect.bottom + gap,
+        top: placeAbove ? "auto" : rect.bottom + gap,
+        bottom: placeAbove ? Math.max(viewportPadding, window.innerHeight - rect.top + gap) : "auto",
         width: rect.width,
         maxHeight,
       });
