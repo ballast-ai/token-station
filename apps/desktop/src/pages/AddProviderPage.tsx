@@ -14,6 +14,8 @@ import { CUSTOM_ID, PROVIDER_CATALOG, type ProviderPreset } from "../catalog";
 import { ProviderIcon } from "../brandIcons";
 import ModelPicker, { type CatalogStatus } from "../components/ModelPicker";
 import PageBackButton from "../components/PageBackButton";
+import { useLocalizedCopy } from "../components/LanguageProvider";
+import { englishProviderName } from "../providerCopy";
 
 export type ProviderCatalogMode = "regular" | "free";
 
@@ -45,7 +47,6 @@ interface AddProviderPageProps {
   onSelectFree: (preset: FreeProviderPresetView) => void;
 }
 
-const offerLabel = (kind: FreeOfferKind) => kind === "recurring" ? "长期免费" : "试用额度";
 const regularRegion = (preset: ProviderPreset): "china" | "global" =>
   preset.region === "中国" ? "china" : "global";
 
@@ -86,6 +87,14 @@ export default function AddProviderPage({
   onLoadFree,
   onSelectFree,
 }: AddProviderPageProps) {
+  const { copy } = useLocalizedCopy();
+  const offerLabel = (kind: FreeOfferKind) => (
+    kind === "recurring" ? copy("Always free", "长期免费") : copy("Trial credit", "试用额度")
+  );
+  const providerName = (id: string, label: string) => copy(
+    englishProviderName(id, label),
+    label,
+  );
   const [presetId, setPresetId] = useState("");
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
@@ -116,18 +125,21 @@ export default function AddProviderPage({
     const query = regularFilters.query.trim().toLocaleLowerCase();
     const custom: ProviderPreset = {
       id: CUSTOM_ID,
-      label: "自定义配置",
+      label: copy("Custom configuration", "自定义配置"),
       baseUrl: "",
       models: [],
       needsKey: true,
       protocol: "openai_chat_completions",
-      region: "自定义",
-      subscription: "手动配置",
+      region: copy("Custom", "自定义"),
+      subscription: copy("Manual configuration", "手动配置"),
       serviceClass: "self_hosted",
       officialDocs: "",
       modelDocs: "",
       verifiedAt: "2026-07-22",
-      note: "手动填写 OpenAI-compatible 地址与模型。",
+      note: copy(
+        "Enter an OpenAI-compatible endpoint and models manually.",
+        "手动填写 OpenAI-compatible 地址与模型。",
+      ),
     };
     return [custom, ...PROVIDER_CATALOG].filter((item) => {
       if (
@@ -138,7 +150,7 @@ export default function AddProviderPage({
       if (!query) return true;
       return searchableRegular(item).includes(query);
     });
-  }, [regularFilters]);
+  }, [copy, regularFilters]);
 
   const visibleFree = useMemo(() => {
     const query = freeFilters.query.trim().toLocaleLowerCase();
@@ -174,14 +186,34 @@ export default function AddProviderPage({
   }, [url]);
 
   const catalogStatus: CatalogStatus = discovering
-    ? { label: "正在获取…", tone: "loading" }
+    ? { label: copy("Loading…", "正在获取…"), tone: "loading" }
     : discovery?.source === "live"
-      ? { label: `已同步 ${discovery.models.length} 个`, tone: "live", warning: discovery.warning }
+      ? {
+          label: copy(
+            `${discovery.models.length} models synced`,
+            `已同步 ${discovery.models.length} 个`,
+          ),
+          tone: "live",
+          warning: discovery.warning,
+        }
       : discovery?.source === "cache"
-        ? { label: `使用缓存 · ${discovery.models.length} 个`, tone: "cache", warning: discovery.warning }
+        ? {
+            label: copy(
+              `Cached · ${discovery.models.length} models`,
+              `使用缓存 · ${discovery.models.length} 个`,
+            ),
+            tone: "cache",
+            warning: discovery.warning,
+          }
         : discovery
-          ? { label: "获取失败", tone: "error", warning: discovery.warning }
-          : { label: `内置建议 · ${catalogModels.length} 个`, tone: "idle" };
+          ? { label: copy("Failed to load", "获取失败"), tone: "error", warning: discovery.warning }
+          : {
+              label: copy(
+                `Built-in suggestions · ${catalogModels.length}`,
+                `内置建议 · ${catalogModels.length} 个`,
+              ),
+              tone: "idle",
+            };
 
   const selectPreset = (id: string) => {
     setPresetId(id);
@@ -215,11 +247,27 @@ export default function AddProviderPage({
 
   const refreshModels = async () => {
     if (!name.trim() || !url.trim()) {
-      setDiscovery({ models: [], source: "none", fetched_at_ms: null, warning: "请先填写供应商名称和 Base URL" });
+      setDiscovery({
+        models: [],
+        source: "none",
+        fetched_at_ms: null,
+        warning: copy(
+          "Enter a provider name and base URL first.",
+          "请先填写供应商名称和 Base URL。",
+        ),
+      });
       return;
     }
     if (needsKey && !key.trim()) {
-      setDiscovery({ models: [], source: "none", fetched_at_ms: null, warning: "填写 API Key 后才能读取该供应商的模型目录" });
+      setDiscovery({
+        models: [],
+        source: "none",
+        fetched_at_ms: null,
+        warning: copy(
+          "Enter an API key to load this provider's model catalog.",
+          "填写 API Key 后才能读取该供应商的模型目录。",
+        ),
+      });
       return;
     }
     setDiscovering(true);
@@ -236,15 +284,32 @@ export default function AddProviderPage({
   };
 
   const submit = async () => {
-    if (!presetId) return setError("请先选择供应商");
-    if (!name.trim() || !url.trim()) return setError("供应商名称和 Base URL 不能为空");
-    if (!endpointPreview || endpointError) return setError(endpointError || "Base URL 尚未解析完成");
-    if (picked.length === 0) return setError("请至少选择一个模型");
+    if (!presetId) return setError(copy("Select a provider first.", "请先选择供应商。"));
+    if (!name.trim() || !url.trim()) {
+      return setError(copy(
+        "Provider name and base URL are required.",
+        "供应商名称和 Base URL 不能为空。",
+      ));
+    }
+    if (!endpointPreview || endpointError) {
+      return setError(endpointError || copy(
+        "The base URL is still being resolved.",
+        "Base URL 尚未解析完成。",
+      ));
+    }
+    if (picked.length === 0) {
+      return setError(copy("Select at least one model.", "请至少选择一个模型。"));
+    }
     setSaving(true);
     setError("");
     try {
       const next = await addProvider(name.trim(), url.trim(), picked, needsKey ? key : null, local);
-      onAdded(next, isExisting ? `供应商「${name.trim()}」已更新` : "供应商已添加");
+      onAdded(
+        next,
+        isExisting
+          ? copy(`Provider "${name.trim()}" updated`, `供应商“${name.trim()}”已更新`)
+          : copy("Provider added", "供应商已添加"),
+      );
     } catch (caught) {
       setError(String(caught));
     } finally {
@@ -264,24 +329,30 @@ export default function AddProviderPage({
           <div>
             <PageBackButton onClick={onCancel} />
             <span className="eyebrow">NEW UPSTREAM</span>
-            <h1>添加供应商</h1>
-            <p>从同一个目录选择常规 API 或免费 API，配置入口和返回逻辑保持一致。</p>
+            <h1>{copy("Add provider", "添加供应商")}</h1>
+            <p>{copy(
+              "Choose a standard or free API from one catalog.",
+              "从同一个目录选择常规 API 或免费 API，配置入口和返回逻辑保持一致。",
+            )}</p>
           </div>
           <span className="provider-catalog-total">
-            {catalogMode === "regular" ? PROVIDER_CATALOG.length + 1 : freePresets.length} 家可选供应商
+            {copy(
+              `${catalogMode === "regular" ? PROVIDER_CATALOG.length + 1 : freePresets.length} providers`,
+              `${catalogMode === "regular" ? PROVIDER_CATALOG.length + 1 : freePresets.length} 家可选供应商`,
+            )}
           </span>
         </header>
 
         <section className="panel unified-provider-catalog">
           <div className="provider-catalog-toolbar">
-            <div className="provider-mode-switch" aria-label="API 类型">
+            <div className="provider-mode-switch" aria-label={copy("API type", "API 类型")}>
               <button
                 className={catalogMode === "regular" ? "active regular" : ""}
                 type="button"
                 aria-pressed={catalogMode === "regular"}
                 onClick={() => switchCatalogMode("regular")}
               >
-                常规 API <small>{PROVIDER_CATALOG.length + 1}</small>
+                {copy("Standard API", "常规 API")} <small>{PROVIDER_CATALOG.length + 1}</small>
               </button>
               <button
                 className={catalogMode === "free" ? "active free" : ""}
@@ -290,15 +361,17 @@ export default function AddProviderPage({
                 onClick={() => switchCatalogMode("free")}
               >
                 <span className="free-entry-signal" aria-hidden="true"><i /><i /><i /></span>
-                免费 API <small>{freePresets.length || "—"}</small>
+                {copy("Free API", "免费 API")} <small>{freePresets.length || "—"}</small>
               </button>
             </div>
             <label className="provider-catalog-search">
               <span aria-hidden="true">⌕</span>
               <input
                 type="search"
-                aria-label={catalogMode === "regular" ? "搜索常规供应商" : "搜索免费供应商"}
-                placeholder="搜索供应商、模型或标签…"
+                aria-label={catalogMode === "regular"
+                  ? copy("Search standard providers", "搜索常规供应商")
+                  : copy("Search free providers", "搜索免费供应商")}
+                placeholder={copy("Search providers, models, or tags…", "搜索供应商、模型或标签…")}
                 value={catalogMode === "regular" ? regularFilters.query : freeFilters.query}
                 onChange={(event) => {
                   if (catalogMode === "regular") {
@@ -313,11 +386,11 @@ export default function AddProviderPage({
 
           <div className="provider-catalog-filters">
             {catalogMode === "regular" ? (
-              <div className="free-filter-row" aria-label="常规供应商地区筛选">
+              <div className="free-filter-row" aria-label={copy("Standard provider region", "常规供应商地区筛选")}>
                 {([
-                  ["all", "全部"],
-                  ["china", "中国可用"],
-                  ["global", "全球平台"],
+                  ["all", copy("All", "全部")],
+                  ["china", copy("Available in China", "中国可用")],
+                  ["global", copy("Global", "全球平台")],
                 ] as const).map(([value, label]) => (
                   <button
                     key={value}
@@ -332,11 +405,11 @@ export default function AddProviderPage({
               </div>
             ) : (
               <>
-                <div className="free-filter-row" aria-label="免费类型筛选">
+                <div className="free-filter-row" aria-label={copy("Free offer type", "免费类型筛选")}>
                   {([
-                    ["all", "全部"],
-                    ["recurring", "长期免费"],
-                    ["trial", "试用额度"],
+                    ["all", copy("All", "全部")],
+                    ["recurring", copy("Always free", "长期免费")],
+                    ["trial", copy("Trial credit", "试用额度")],
                   ] as const).map(([value, label]) => (
                     <button
                       key={value}
@@ -349,11 +422,11 @@ export default function AddProviderPage({
                     </button>
                   ))}
                 </div>
-                <div className="free-filter-row" aria-label="免费供应商地区筛选">
+                <div className="free-filter-row" aria-label={copy("Free provider region", "免费供应商地区筛选")}>
                   {([
-                    ["all", "全部地区"],
-                    ["china", "中国可用"],
-                    ["global", "全球平台"],
+                    ["all", copy("All regions", "全部地区")],
+                    ["china", copy("Available in China", "中国可用")],
+                    ["global", copy("Global", "全球平台")],
                   ] as const).map(([value, label]) => (
                     <button
                       key={value}
@@ -372,35 +445,42 @@ export default function AddProviderPage({
 
           {catalogMode === "free" && (
             <div className="provider-free-boundary">
-              <strong>费用边界</strong>
-              只保存已核验免费模型；额度耗尽时停止，不回退到付费实例。
-              <small>最后核验 · {freePresets[0]?.verified_at ?? "—"}</small>
+              <strong>{copy("Cost boundary", "费用边界")}</strong>
+              {copy(
+                "Only verified free models are saved. Requests stop when quota is exhausted and never fall back to paid instances.",
+                "只保存已核验免费模型；额度耗尽时停止，不回退到付费实例。",
+              )}
+              <small>{copy("Last verified", "最后核验")} · {freePresets[0]?.verified_at ?? "—"}</small>
             </div>
           )}
 
           {catalogMode === "free" && freeLoading && (
-            <div className="provider-catalog-status">正在读取免费供应商目录…</div>
+            <div className="provider-catalog-status">{copy(
+              "Loading free provider catalog…",
+              "正在读取免费供应商目录…",
+            )}</div>
           )}
           {catalogMode === "free" && freeError && (
             <div className="provider-catalog-status error">
-              <strong>免费供应商目录加载失败</strong>
+              <strong>{copy("Failed to load free provider catalog", "免费供应商目录加载失败")}</strong>
               <span>{freeError}</span>
-              <button className="btn" type="button" onClick={onLoadFree}>重试</button>
+              <button className="btn" type="button" onClick={onLoadFree}>{copy("Retry", "重试")}</button>
             </div>
           )}
 
           {catalogMode === "regular" && visibleRegular.length > 0 && (
-            <div className="provider-catalog-grid" role="list" aria-label="常规供应商列表">
+            <div className="provider-catalog-grid" role="list" aria-label={copy("Standard providers", "常规供应商列表")}>
               {visibleRegular.map((item) => {
                 const custom = item.id === CUSTOM_ID;
+                const displayName = providerName(item.id, item.label);
                 return (
                   <article className="provider-catalog-card regular" role="listitem" key={item.id}>
                     <button type="button" onClick={() => selectPreset(item.id)}>
                       <span className={`provider-catalog-logo ${custom ? "custom" : ""}`}>
-                        {custom ? "✎" : <ProviderIcon id={item.id} label={item.label} size={30} />}
+                        {custom ? "✎" : <ProviderIcon id={item.id} label={displayName} size={30} />}
                       </span>
                       <span className="provider-catalog-card-title">
-                        <strong title={item.label}>{item.label}</strong>
+                        <strong title={displayName}>{displayName}</strong>
                       </span>
                     </button>
                   </article>
@@ -410,7 +490,7 @@ export default function AddProviderPage({
           )}
 
           {catalogMode === "free" && !freeLoading && !freeError && visibleFree.length > 0 && (
-            <div className="provider-catalog-grid" role="list" aria-label="免费供应商列表">
+            <div className="provider-catalog-grid" role="list" aria-label={copy("Free providers", "免费供应商列表")}>
               {visibleFree.map((item) => (
                 <article
                   className={`provider-catalog-card free offer-${item.offer_kind}`}
@@ -419,10 +499,12 @@ export default function AddProviderPage({
                 >
                   <button type="button" onClick={() => onSelectFree(item)}>
                     <span className="provider-catalog-logo">
-                      <ProviderIcon id={item.id} label={item.label} size={30} />
+                      <ProviderIcon id={item.id} label={providerName(item.id, item.label)} size={30} />
                     </span>
                     <span className="provider-catalog-card-title">
-                      <strong title={item.label}>{item.label}</strong>
+                      <strong title={providerName(item.id, item.label)}>
+                        {providerName(item.id, item.label)}
+                      </strong>
                     </span>
                     <span className="provider-catalog-card-badge">
                       <i className={item.offer_kind === "recurring" ? "free" : "trial"}>
@@ -445,8 +527,11 @@ export default function AddProviderPage({
             )
           ) && (
             <div className="provider-catalog-empty">
-              <strong>没有匹配的供应商</strong>
-              <p>当前搜索词或筛选组合没有结果。</p>
+              <strong>{copy("No matching providers", "没有匹配的供应商")}</strong>
+              <p>{copy(
+                "No providers match the current search and filters.",
+                "当前搜索词或筛选组合没有结果。",
+              )}</p>
               {!filtersEmpty && (
                 <button
                   className="btn"
@@ -459,7 +544,7 @@ export default function AddProviderPage({
                     }
                   }}
                 >
-                  清除筛选
+                  {copy("Clear filters", "清除筛选")}
                 </button>
               )}
             </div>
@@ -475,30 +560,41 @@ export default function AddProviderPage({
         <div>
           <PageBackButton onClick={leaveRegularConfig} disabled={disabled} />
           <span className="eyebrow">STANDARD UPSTREAM</span>
-          <h1>{preset?.label ?? "自定义配置"}</h1>
-          <p>填写凭据并选择模型；保存后创建独立的常规 API 实例。</p>
+          <h1>{preset?.label ?? copy("Custom configuration", "自定义配置")}</h1>
+          <p>{copy(
+            "Enter credentials and choose models to create a standard API instance.",
+            "填写凭据并选择模型；保存后创建独立的常规 API 实例。",
+          )}</p>
         </div>
       </header>
 
       {error && <div className="banner err">{error}</div>}
       {isExisting && !error && (
         <div className="banner info">
-          供应商「{name.trim()}」已经存在。继续保存会更新它的 Base URL、API Key 和模型，不会重复创建。
+          {copy(
+            `Provider "${name.trim()}" already exists. Saving updates its base URL, API key, and models instead of creating a duplicate.`,
+            `供应商“${name.trim()}”已经存在。继续保存会更新它的 Base URL、API Key 和模型，不会重复创建。`,
+          )}
         </div>
       )}
 
       <section className="panel provider-wizard">
         {preset && (
           <div className="preset-note">
-            <span>{preset.note ?? `${preset.region} · ${preset.subscription}`}</span>
-            <a href={preset.officialDocs} target="_blank" rel="noreferrer">官方接入文档</a>
+            <span>{copy(
+              "Review the provider documentation before saving credentials and models.",
+              preset.note ?? `${preset.region} · ${preset.subscription}`,
+            )}</span>
+            <a href={preset.officialDocs} target="_blank" rel="noreferrer">
+              {copy("Provider documentation", "官方接入文档")}
+            </a>
           </div>
         )}
         <div className="wizard-step">
           <div className="step-index">01</div>
           <div className="step-body form-grid">
             <label className="field-label">
-              名称
+              {copy("Name", "名称")}
               <input className="input" value={name} disabled={disabled || !isCustom} onChange={(event) => setName(event.target.value)} />
             </label>
             <label className="field-label">
@@ -515,15 +611,30 @@ export default function AddProviderPage({
                   <span><strong>Messages</strong><code>{endpointPreview.messages}</code></span>
                 </>
               ) : (
-                <span>填写 Base URL 后显示最终请求地址</span>
+                <span>{copy(
+                  "Enter a base URL to preview the final request endpoints.",
+                  "填写 Base URL 后显示最终请求地址。",
+                )}</span>
               )}
             </div>
             {needsKey ? (
               <label className="field-label form-span">
                 API Key
-                <input className="input mono" type="password" autoComplete="off" placeholder="只保存在系统钥匙串" value={key} disabled={disabled} onChange={(event) => setKey(event.target.value)} />
+                <input
+                  className="input mono"
+                  type="password"
+                  autoComplete="off"
+                  placeholder={copy("Stored only in the system keychain", "只保存在系统钥匙串")}
+                  value={key}
+                  disabled={disabled}
+                  onChange={(event) => setKey(event.target.value)}
+                />
               </label>
-            ) : <div className="local-provider-note form-span">本地供应商，无需 API Key。</div>}
+            ) : (
+              <div className="local-provider-note form-span">
+                {copy("Local provider. No API key required.", "本地供应商，无需 API Key。")}
+              </div>
+            )}
             <label className="field-label form-span checkbox-label">
               <input
                 type="checkbox"
@@ -531,7 +642,10 @@ export default function AddProviderPage({
                 disabled={disabled}
                 onChange={(event) => setLocal(event.target.checked)}
               />
-              <span>这是本机运行的本地模型(Ollama / LM Studio 等)——可被「只走本地」路由锁定，请求不出本机</span>
+              <span>{copy(
+                "This model runs locally (for example, Ollama or LM Studio) and can be selected by Local only routing.",
+                "这是本机运行的本地模型（Ollama / LM Studio 等），可被“只走本地”路由锁定，请求不出本机。",
+              )}</span>
             </label>
           </div>
         </div>
@@ -539,7 +653,7 @@ export default function AddProviderPage({
         <div className="wizard-step">
           <div className="step-index">02</div>
           <div className="step-body">
-            <label className="field-label">选择模型</label>
+            <label className="field-label">{copy("Select models", "选择模型")}</label>
             <ModelPicker
               models={allModels}
               selected={picked}
@@ -557,9 +671,15 @@ export default function AddProviderPage({
         </div>
 
         <footer className="wizard-actions">
-          <button className="btn" type="button" disabled={disabled} onClick={leaveRegularConfig}>返回目录</button>
+          <button className="btn" type="button" disabled={disabled} onClick={leaveRegularConfig}>
+            {copy("Back to catalog", "返回目录")}
+          </button>
           <button className="btn primary" type="button" disabled={disabled || !endpointPreview || Boolean(endpointError)} onClick={() => void submit()}>
-            {saving ? "正在保存…" : isExisting ? "更新供应商" : "添加供应商"}
+            {saving
+              ? copy("Saving…", "正在保存…")
+              : isExisting
+                ? copy("Update provider", "更新供应商")
+                : copy("Add provider", "添加供应商")}
           </button>
         </footer>
       </section>

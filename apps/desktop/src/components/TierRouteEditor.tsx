@@ -1,11 +1,6 @@
 import type { ProviderView, TierSlot, TierView } from "../api";
 import CompactCombobox, { type CompactComboboxOption } from "./CompactCombobox";
-
-const TIER_META: { slot: TierSlot; label: string; hint: string }[] = [
-  { slot: "high", label: "上档", hint: "复杂推理与代码" },
-  { slot: "mid", label: "中档", hint: "日常开发任务" },
-  { slot: "low", label: "下档", hint: "简单快速任务" },
-];
+import { useLocalizedCopy } from "./LanguageProvider";
 
 export interface TierRouteEditorProps {
   tiers: Record<TierSlot, TierView>;
@@ -27,38 +22,44 @@ export default function TierRouteEditor({
   onTierChange,
 }: TierRouteEditorProps) {
   const controlsDisabled = disabled || readOnly;
+  const { copy } = useLocalizedCopy();
+  const tierMeta: { slot: TierSlot; label: string; hint: string }[] = [
+    { slot: "high", label: copy("High", "上档"), hint: copy("Complex reasoning and code", "复杂推理与代码") },
+    { slot: "mid", label: copy("Medium", "中档"), hint: copy("Everyday development", "日常开发任务") },
+    { slot: "low", label: copy("Low", "下档"), hint: copy("Simple, fast tasks", "简单快速任务") },
+  ];
 
   return (
     <div className="tier-grid">
       <div className="tier-table-head">
-        <div className="tier-col-head">档位</div>
-        <div className="tier-col-head">供应商</div>
-        <div className="tier-col-head">模型</div>
+        <div className="tier-col-head">{copy("Tier", "档位")}</div>
+        <div className="tier-col-head">{copy("Provider", "供应商")}</div>
+        <div className="tier-col-head">{copy("Model", "模型")}</div>
       </div>
 
-      {TIER_META.map(({ slot, label, hint }) => {
+      {tierMeta.map(({ slot, label, hint }) => {
         const tier = tiers[slot];
         const provider = providers.find((candidate) => candidate.name === tier.upstream);
         const selectedProviderOption: CompactComboboxOption[] = tier.upstream
           ? [{
               value: tier.upstream,
               label: tier.upstream,
-              hint: provider?.access_tier === "free" ? "免费" : undefined,
+              hint: provider?.access_tier === "free" ? copy("Free", "免费") : undefined,
             }]
           : [];
         const providerOptions: CompactComboboxOption[] = [
           ...selectedProviderOption,
-          { value: "", label: "未选择" },
+          { value: "", label: copy("Not selected", "未选择") },
           ...providers
             .filter((candidate) => candidate.name !== tier.upstream)
             .map((candidate) => ({
               value: candidate.name,
               label: candidate.name,
-              hint: candidate.access_tier === "free" ? "免费" : undefined,
+              hint: candidate.access_tier === "free" ? copy("Free", "免费") : undefined,
             })),
         ];
         const modelOptions: CompactComboboxOption[] = [
-          { value: "", label: "未选择" },
+          { value: "", label: copy("Not selected", "未选择") },
           ...(provider?.models ?? []).map((model) => ({ value: model, label: model })),
         ];
 
@@ -72,7 +73,7 @@ export default function TierRouteEditor({
               </div>
             </div>
             <CompactCombobox
-              ariaLabel={`${label}供应商`}
+              ariaLabel={copy(`${label} provider`, `${label}供应商`)}
               disabled={controlsDisabled}
               value={tier.upstream ?? ""}
               options={providerOptions}
@@ -87,7 +88,7 @@ export default function TierRouteEditor({
               }}
             />
             <CompactCombobox
-              ariaLabel={`${label}模型`}
+              ariaLabel={copy(`${label} model`, `${label}模型`)}
               value={tier.model ?? ""}
               disabled={controlsDisabled || !tier.upstream}
               options={modelOptions}

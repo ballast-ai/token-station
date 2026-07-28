@@ -127,10 +127,8 @@ const LANGUAGE_OPTIONS: Array<{
   mark: string;
   hint: TranslationKey;
 }> = [
-  { value: "zh-CN", label: "简体中文", mark: "简", hint: "language.zhCNHint" },
-  { value: "zh-TW", label: "繁體中文", mark: "繁", hint: "language.zhTWHint" },
   { value: "en", label: "English", mark: "EN", hint: "language.enHint" },
-  { value: "ja", label: "日本語", mark: "日", hint: "language.jaHint" },
+  { value: "zh-CN", label: "简体中文", mark: "简", hint: "language.zhCNHint" },
 ];
 
 function LanguagePanel() {

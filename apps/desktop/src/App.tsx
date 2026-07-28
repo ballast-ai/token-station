@@ -27,7 +27,11 @@ import {
   type TierSlot,
 } from "./api";
 import AppShell, { type AppView } from "./components/AppShell";
-import { LanguageBoundary } from "./components/LanguageProvider";
+import {
+  LanguageBoundary,
+  useLanguage,
+  type Language,
+} from "./components/LanguageProvider";
 import AddProviderPage, {
   type FreeCatalogFilters,
   type ProviderCatalogMode,
@@ -57,19 +61,23 @@ function emptyAgentRoute(state: StateView): AgentRouteView {
   return { mode: "inherit", tiers: state.tiers, config_error: null, profile: null };
 }
 
-export function configSaveStatus(state: StateView): string {
-  if (state.config_dirty) return "有未保存更改";
+export function configSaveStatus(state: StateView, language: Language = "en"): string {
+  const chinese = language === "zh-CN";
+  if (state.config_dirty) return chinese ? "有未保存更改" : "Unsaved changes";
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
   if (runtimeHealthy && state.serve.running_revision !== state.saved_revision) {
-    return "已保存尚未应用";
+    return chinese ? "已保存尚未应用" : "Saved, not applied";
   }
   if (runtimeHealthy && state.serve.running_revision === state.saved_revision) {
-    return `运行中 revision ${state.saved_revision}`;
+    return chinese
+      ? `运行中 revision ${state.saved_revision}`
+      : `Running revision ${state.saved_revision}`;
   }
-  return "无改动";
+  return chinese ? "无改动" : "No changes";
 }
 
 function StationApp() {
+  const { language, copy } = useLanguage();
   const [state, setState] = useState<StateView | null>(null);
   const [view, setView] = useState<AppView>("home");
   const [registry, setRegistry] = useState<AgentUiMetadataView[]>([]);
@@ -172,7 +180,10 @@ function StationApp() {
       }
     }).catch((caught) => {
       if (!disposed) {
-        setError(`代理状态监听失败：${errorText(caught)}`);
+        setError(copy(
+          `Failed to listen for proxy status: ${errorText(caught)}`,
+          `代理状态监听失败：${errorText(caught)}`,
+        ));
         void load();
       }
     });
@@ -208,9 +219,16 @@ function StationApp() {
     const previous = prevPhaseRef.current;
     prevPhaseRef.current = phase ?? null;
     if (previous === "starting" && phase === "running" && state) {
-      setMessage(`配置已应用 · revision ${state.saved_revision}`);
+      setMessage(copy(
+        `Configuration applied · revision ${state.saved_revision}`,
+        `配置已应用 · revision ${state.saved_revision}`,
+      ));
       const timer = window.setTimeout(
-        () => setMessage((current) => (current.startsWith("配置已应用") ? "" : current)),
+        () => setMessage((current) => (
+          current.startsWith("Configuration applied") || current.startsWith("配置已应用")
+            ? ""
+            : current
+        )),
         2600,
       );
       return () => window.clearTimeout(timer);
@@ -307,8 +325,17 @@ function StationApp() {
     return (
       <div className="loading-screen">
         <span className="loading-mark" aria-hidden="true"><i /><i /><i /></span>
-        <strong>{error ? "无法加载 Token Station" : "正在进入 Token Station"}</strong>
-        {error && <><p>{error}</p><button className="btn" type="button" onClick={() => window.location.reload()}>重试</button></>}
+        <strong>{error
+          ? copy("Unable to load Token Station", "无法加载 Token Station")
+          : copy("Opening Token Station", "正在进入 Token Station")}</strong>
+        {error && (
+          <>
+            <p>{error}</p>
+            <button className="btn" type="button" onClick={() => window.location.reload()}>
+              {copy("Retry", "重试")}
+            </button>
+          </>
+        )}
       </div>
     );
   }
@@ -318,7 +345,7 @@ function StationApp() {
   const agent = agentId ? agents.find((item) => item.metadata.agent_id === agentId) : undefined;
   const route = agentId ? (state.agent_routes?.[agentId] ?? emptyAgentRoute(state)) : undefined;
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
-  const saveStatus = configSaveStatus(state);
+  const saveStatus = configSaveStatus(state, language);
 
   return (
     <AppShell
@@ -332,7 +359,11 @@ function StationApp() {
       onRescan={() => void rescanAgents()}
       onToggleServe={() => void toggleServe()}
     >
-      {state.serve.phase === "starting" && !error && <div className="banner ok global-banner">正在应用配置…</div>}
+      {state.serve.phase === "starting" && !error && (
+        <div className="banner ok global-banner">
+          {copy("Applying configuration…", "正在应用配置…")}
+        </div>
+      )}
       {message && state.serve.phase !== "starting" && <div className="banner ok global-banner">{message}</div>}
       {error && <div className="banner err global-banner">{error}</div>}
       {state.serve.phase === "error" && state.serve.error && <div className="banner err global-banner">{state.serve.error}</div>}
@@ -356,18 +387,38 @@ function StationApp() {
           onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
           onSaveProfile={(name) => run(
             () => saveHomeRouteAsProfile(name),
-            `策略组「${name}」已加入草稿，请保存并应用`,
+            copy(
+              `Profile "${name}" added to the draft. Save and apply to activate it.`,
+              `策略组“${name}”已加入草稿，请保存并应用。`,
+            ),
           )}
           onDeleteProfile={(name) => run(
             () => deleteProfile(name),
-            `策略组「${name}」已从草稿删除，请保存并应用`,
+            copy(
+              `Profile "${name}" removed from the draft. Save and apply to activate the change.`,
+              `策略组“${name}”已从草稿删除，请保存并应用。`,
+            ),
           )}
           onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
           onRemoveKeyword={(slot, keyword) => void run(() => removeKeyword(slot, keyword))}
           onSave={() => void run(serveStart)}
-          onApplyAll={() => void run(applyHomeRouteToAllAgents, runtimeHealthy ? "全部 Agent 已恢复跟随主页 · 尚待应用" : "全部 Agent 已恢复跟随主页")}
-          onRemoveProvider={(name) => void run(() => removeProvider(name), "供应商已删除")}
-          onRestoreProvider={(name) => void run(() => restoreProvider(name), "供应商已从回收站恢复")}
+          onApplyAll={() => void run(
+            applyHomeRouteToAllAgents,
+            runtimeHealthy
+              ? copy(
+                  "All Agents now follow Home · pending apply",
+                  "全部 Agent 已恢复跟随主页 · 尚待应用",
+                )
+              : copy("All Agents now follow Home", "全部 Agent 已恢复跟随主页"),
+          )}
+          onRemoveProvider={(name) => void run(
+            () => removeProvider(name),
+            copy("Provider deleted", "供应商已删除"),
+          )}
+          onRestoreProvider={(name) => void run(
+            () => restoreProvider(name),
+            copy("Provider restored from the recycle bin", "供应商已从回收站恢复"),
+          )}
           onStateChange={showState}
         />
       )}
@@ -389,7 +440,15 @@ function StationApp() {
       )}
 
       {agentId && !metadata && (
-        <section className="panel"><div className="panel-head"><h2>未知 Agent</h2><p className="sub">该 Agent 不在当前 Registry 的受支持列表中。</p></div></section>
+        <section className="panel">
+          <div className="panel-head">
+            <h2>{copy("Unknown Agent", "未知 Agent")}</h2>
+            <p className="sub">{copy(
+              "This Agent is not in the current Registry support list.",
+              "该 Agent 不在当前 Registry 的受支持列表中。",
+            )}</p>
+          </div>
+        </section>
       )}
 
       {view === "usage" && <Stats onBack={navigateBack} />}
@@ -438,8 +497,13 @@ function StationApp() {
           />
         ) : (
           <section className="panel free-catalog-state">
-            <strong>免费供应商不存在或目录已更新</strong>
-            <button className="btn" type="button" onClick={() => setView("add-provider")}>返回目录</button>
+            <strong>{copy(
+              "This free provider is no longer available or the catalog has changed.",
+              "免费供应商不存在或目录已更新。",
+            )}</strong>
+            <button className="btn" type="button" onClick={() => setView("add-provider")}>
+              {copy("Back to catalog", "返回目录")}
+            </button>
           </section>
         );
       })()}

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useLocalizedCopy } from "./LanguageProvider";
 
 export type CatalogTone = "idle" | "loading" | "live" | "cache" | "error";
 
@@ -29,6 +30,7 @@ export default function ModelPicker({
   refreshing,
   disabled = false,
 }: ModelPickerProps) {
+  const { copy } = useLocalizedCopy();
   const [query, setQuery] = useState("");
   const [customModel, setCustomModel] = useState("");
   const selectedSet = useMemo(() => new Set(selected), [selected]);
@@ -62,7 +64,7 @@ export default function ModelPicker({
           onClick={onRefresh}
           disabled={disabled || refreshing}
         >
-          {refreshing ? "同步中…" : "刷新模型"}
+          {refreshing ? copy("Refreshing…", "同步中…") : copy("Refresh models", "刷新模型")}
         </button>
       </div>
 
@@ -75,8 +77,8 @@ export default function ModelPicker({
             className="model-search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder={`搜索 ${models.length} 个模型`}
-            aria-label="搜索模型"
+            placeholder={copy(`Search ${models.length} models`, `搜索 ${models.length} 个模型`)}
+            aria-label={copy("Search models", "搜索模型")}
             disabled={disabled}
           />
         </div>
@@ -96,7 +98,9 @@ export default function ModelPicker({
             {model}
           </button>
         ))}
-        {visible.length === 0 && <div className="model-empty">没有匹配的模型</div>}
+        {visible.length === 0 && (
+          <div className="model-empty">{copy("No matching models", "没有匹配的模型")}</div>
+        )}
       </div>
 
       <div className="custom-model-row">
@@ -110,8 +114,8 @@ export default function ModelPicker({
               addCustom();
             }
           }}
-          placeholder="手动输入模型 ID"
-          aria-label="手动输入模型 ID"
+          placeholder={copy("Enter a model ID", "手动输入模型 ID")}
+          aria-label={copy("Enter a model ID", "手动输入模型 ID")}
           disabled={disabled}
         />
         <button
@@ -120,10 +124,13 @@ export default function ModelPicker({
           onClick={addCustom}
           disabled={disabled || !customModel.trim()}
         >
-          加入列表
+          {copy("Add to list", "加入列表")}
         </button>
       </div>
-      <div className="catalog-note">目录不消耗推理 Token；请选择支持 Chat Completions 的模型。</div>
+      <div className="catalog-note">{copy(
+        "Catalog requests do not consume inference tokens. Select models that support Chat Completions.",
+        "目录不消耗推理 Token；请选择支持 Chat Completions 的模型。",
+      )}</div>
     </div>
   );
 }

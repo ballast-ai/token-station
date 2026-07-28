@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentInstallationView } from "../api";
+import { useLocalizedCopy } from "./LanguageProvider";
 
 interface InstallationPickerProps {
   agentName: string;
@@ -11,30 +12,13 @@ interface InstallationPickerProps {
 
 function executableName(path: string) {
   const segments = path.split(/[\\/]/).filter(Boolean);
-  return segments[segments.length - 1] ?? "安装";
+  return segments[segments.length - 1] ?? "Installation";
 }
 
 function normalizedVersion(installation: AgentInstallationView) {
   const version = installation.discovery.version_normalized;
   if (!version) return null;
   return version.startsWith("v") ? version : `v${version}`;
-}
-
-const sourceLabels: Record<AgentInstallationView["discovery"]["binary_source"], string> = {
-  homebrew: "Homebrew",
-  npm_global: "npm 全局",
-  path: "PATH",
-  known_path: "已知目录",
-  env_override: "环境变量",
-};
-
-function modifiedLabel(modifiedAtMs: number | null) {
-  if (modifiedAtMs == null) return "修改时间未知";
-  return `修改于 ${new Date(modifiedAtMs).toLocaleString()}`;
-}
-
-function hashLabel(hash: string | null) {
-  return hash ? `SHA-256 ${hash.slice(0, 12)}` : "SHA-256 不可读";
 }
 
 export function installationLabels(installations: AgentInstallationView[]) {
@@ -66,9 +50,28 @@ export default function InstallationPicker({
   disabled = false,
   onSelect,
 }: InstallationPickerProps) {
+  const { language, copy } = useLocalizedCopy();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const options = useMemo(() => installationLabels(installations), [installations]);
+  const sourceLabels: Record<AgentInstallationView["discovery"]["binary_source"], string> = {
+    homebrew: "Homebrew",
+    npm_global: copy("npm global", "npm 全局"),
+    path: "PATH",
+    known_path: copy("Known location", "已知目录"),
+    env_override: copy("Environment override", "环境变量"),
+  };
+  const modifiedLabel = (modifiedAtMs: number | null) => (
+    modifiedAtMs == null
+      ? copy("Modified time unknown", "修改时间未知")
+      : copy(
+          `Modified ${new Date(modifiedAtMs).toLocaleString(language)}`,
+          `修改于 ${new Date(modifiedAtMs).toLocaleString(language)}`,
+        )
+  );
+  const hashLabel = (hash: string | null) => (
+    hash ? `SHA-256 ${hash.slice(0, 12)}` : copy("SHA-256 unavailable", "SHA-256 不可读")
+  );
 
   useEffect(() => setOpen(false), [agentName]);
 
@@ -100,10 +103,14 @@ export default function InstallationPicker({
         disabled={disabled}
         onClick={() => setOpen((current) => !current)}
       >
-        选择安装 <span aria-hidden="true">⌄</span>
+        {copy("Select installation", "选择安装")} <span aria-hidden="true">⌄</span>
       </button>
       {open && (
-        <div className="installation-picker-menu" role="listbox" aria-label={`${agentName} 安装列表`}>
+        <div
+          className="installation-picker-menu"
+          role="listbox"
+          aria-label={copy(`${agentName} installations`, `${agentName} 安装列表`)}
+        >
           {options.map((option, index) => {
             const selected = option.path === selectedPath;
             const discovery = installations[index].discovery;
@@ -124,7 +131,7 @@ export default function InstallationPicker({
                 <code className="installation-option-path">{discovery.canonical_path}</code>
                 <span className="installation-option-facts">
                   {sourceLabels[discovery.binary_source]}
-                  {discovery.is_path_default ? " · 当前生效" : ""}
+                  {discovery.is_path_default ? ` · ${copy("Active", "当前生效")}` : ""}
                   {` · ${modifiedLabel(discovery.modified_at_ms)} · ${hashLabel(discovery.binary_sha256)}`}
                 </span>
                 {selected && <span className="installation-check" aria-hidden="true">✓</span>}

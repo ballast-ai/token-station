@@ -15,13 +15,13 @@ describe("humanizeErrorCode", () => {
     ["provider_protocol_error", "协议", "适配器"],
     ["internal", "本地代理", "请求 ID"],
   ])("maps %s to a layer and an actionable suggestion", (code, layer, suggestion) => {
-    const value = humanizeErrorCode(code);
+    const value = humanizeErrorCode(code, "zh-CN");
     expect(value?.layer).toContain(layer);
     expect(value?.suggestion).toContain(suggestion);
   });
 
   it("keeps an unknown structured code diagnosable", () => {
-    const value = humanizeErrorCode("teapot");
+    const value = humanizeErrorCode("teapot", "zh-CN");
     expect(value?.layer).toBe("未知");
     expect(value?.message).toContain("teapot");
     expect(value?.suggestion).toContain("请求 ID");
