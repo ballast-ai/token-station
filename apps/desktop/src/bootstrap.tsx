@@ -2,8 +2,10 @@ import React, { useEffect, useState } from "react";
 import App from "./App";
 import { getRecoveryState, type RecoveryState } from "./api";
 import RecoveryShell from "./components/RecoveryShell";
+import { useLocalizedCopy } from "./components/LanguageProvider";
 
 export function AppBootstrap() {
+  const { copy } = useLocalizedCopy();
   const [recovery, setRecovery] = useState<RecoveryState | null>(null);
   const [error, setError] = useState<Error | null>(null);
 
@@ -22,7 +24,10 @@ export function AppBootstrap() {
     return (
       <div className="loading-screen">
         <span className="loading-mark" aria-hidden="true"><i /><i /><i /></span>
-        <strong>正在检查本地数据兼容性</strong>
+        <strong>{copy(
+          "Checking local data compatibility",
+          "正在检查本地数据兼容性",
+        )}</strong>
       </div>
     );
   }

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { previewProviderRemoval } from "../api";
 import type { ProviderRemovalPreview, ProviderView, StateView } from "../api";
 import ProviderModelManager from "./ProviderModelManager";
+import { useLocalizedCopy } from "./LanguageProvider";
 
 interface ProviderListProps {
   providers: ProviderView[];
@@ -24,6 +25,7 @@ export default function ProviderList({
   onRestore,
   onStateChange,
 }: ProviderListProps) {
+  const { copy } = useLocalizedCopy();
   const [managedProvider, setManagedProvider] = useState<string | null>(null);
   const [removal, setRemoval] = useState<ProviderRemovalPreview | null>(null);
   const [removalError, setRemovalError] = useState("");
@@ -42,28 +44,36 @@ export default function ProviderList({
       <div className="panel-head split-heading">
         <div>
           <span className="eyebrow">UPSTREAMS</span>
-          <h2>供应商</h2>
-          <p className="sub">统一维护供应商和可用模型，主页与五个 Agent 共用这一份目录。</p>
+          <h2>{copy("Providers", "供应商")}</h2>
+          <p className="sub">{copy(
+            "Manage providers and available models in one catalog shared by Home and every Agent.",
+            "统一维护供应商和可用模型，主页与所有 Agent 共用这一份目录。",
+          )}</p>
         </div>
-        <span className="count-badge">{providers.length} 个</span>
+        <span className="count-badge">
+          {copy(`${providers.length} total`, `${providers.length} 个`)}
+        </span>
       </div>
 
       <div className="provider-list">
         {recoveryError && <div className="manager-error">{recoveryError}</div>}
         {deletedProviders.length > 0 && (
-          <div className="provider-recovery" aria-label="Provider 回收站">
-            <strong>可恢复的 Provider</strong>
+          <div className="provider-recovery" aria-label={copy("Provider recycle bin", "Provider 回收站")}>
+            <strong>{copy("Recoverable providers", "可恢复的 Provider")}</strong>
             {deletedProviders.map((name) => (
               <button className="btn tiny" type="button" disabled={busy} key={name} onClick={() => onRestore(name)}>
-                恢复 {name}
+                {copy(`Restore ${name}`, `恢复 ${name}`)}
               </button>
             ))}
           </div>
         )}
         {providers.length === 0 && (
           <div className="empty-state">
-            <strong>还没有供应商</strong>
-            <span>点击右上角“添加供应商”开始配置。</span>
+            <strong>{copy("No providers yet", "还没有供应商")}</strong>
+            <span>{copy(
+              "Select Add provider in the top-right corner to get started.",
+              "点击右上角“添加供应商”开始配置。",
+            )}</span>
           </div>
         )}
         {providers.map((provider) => (
@@ -71,7 +81,12 @@ export default function ProviderList({
             <div className="provider-card-head">
               <div className="provider-monogram" aria-hidden="true">{provider.name.slice(0, 2).toUpperCase()}</div>
               <div className="provider-main">
-                <div className="provider-name">{provider.name}</div>
+                <div className="provider-name">
+                  {provider.name}
+                  {provider.access_tier === "free" && (
+                    <span className="provider-access-badge">{copy("Free", "免费")}</span>
+                  )}
+                </div>
                 <div className="provider-url">{provider.base_url}</div>
                 <div className="provider-models">
                   {provider.models.slice(0, 4).map((model) => <span className="chip" key={model}>{model}</span>)}
@@ -80,7 +95,7 @@ export default function ProviderList({
               </div>
               <div className="provider-side">
                 <span className={`auth ${provider.has_auth ? "yes" : "no"}`}>
-                  {provider.has_auth ? "Key 已就绪" : "无鉴权"}
+                  {provider.has_auth ? copy("Key ready", "Key 已就绪") : copy("No authentication", "无鉴权")}
                 </span>
                 <button
                   className="btn tiny"
@@ -88,41 +103,70 @@ export default function ProviderList({
                   disabled={busy}
                   onClick={() => setManagedProvider((current) => current === provider.name ? null : provider.name)}
                 >
-                  {managedProvider === provider.name ? "收起" : "管理详情"}
+                  {managedProvider === provider.name
+                    ? copy("Close", "收起")
+                    : copy("Manage", "管理详情")}
                 </button>
                 <button className="btn tiny danger" type="button" disabled={busy} onClick={() => void inspectRemoval(provider.name)}>
-                  删除
+                  {copy("Delete", "删除")}
                 </button>
               </div>
             </div>
             {managedProvider === provider.name && (
-              <ProviderModelManager
-                provider={provider}
-                serveRunning={serveRunning}
-                disabled={busy}
-                onSaved={(next) => onStateChange(next, `${provider.name} 的模型已保存`)}
-              />
+              provider.access_tier === "free" ? (
+                <div className="free-provider-managed-note">
+                  {copy(
+                    "Free provider endpoints and model sets are protected by the catalog. To change the key or models, delete this provider and add it again through the free catalog.",
+                    "免费实例的端点与模型集合受免费目录保护。需要更换 Key 或模型时，请删除后从免费目录重新验证添加。",
+                  )}
+                </div>
+              ) : (
+                <ProviderModelManager
+                  provider={provider}
+                  serveRunning={serveRunning}
+                  disabled={busy}
+                  onSaved={(next) => onStateChange(
+                    next,
+                    copy(
+                      `Models for ${provider.name} saved`,
+                      `${provider.name} 的模型已保存`,
+                    ),
+                  )}
+                />
+              )
             )}
             {removal?.name === provider.name && (
-              <div className="provider-removal-preview" role="dialog" aria-label="删除影响预览">
-                <strong>删除影响</strong>
+              <div
+                className="provider-removal-preview"
+                role="dialog"
+                aria-label={copy("Deletion impact preview", "删除影响预览")}
+              >
+                <strong>{copy("Deletion impact", "删除影响")}</strong>
                 {removal.references.length > 0 ? (
                   <>
-                    <p>以下路由仍在引用，必须先调整：</p>
+                    <p>{copy(
+                      "The following routes still reference this provider and must be updated first:",
+                      "以下路由仍在引用，必须先调整：",
+                    )}</p>
                     <ul>{removal.references.map((reference) => <li key={reference}>{reference}</li>)}</ul>
                   </>
                 ) : (
-                  <p>没有路由引用。删除后会进入本地回收站，可恢复。</p>
+                  <p>{copy(
+                    "No routes reference this provider. Deleted providers move to the local recycle bin and can be restored.",
+                    "没有路由引用。删除后会进入本地回收站，可恢复。",
+                  )}</p>
                 )}
                 <div>
-                  <button className="btn tiny" type="button" onClick={() => setRemoval(null)}>取消</button>
+                  <button className="btn tiny" type="button" onClick={() => setRemoval(null)}>
+                    {copy("Cancel", "取消")}
+                  </button>
                   <button
                     className="btn tiny danger"
                     type="button"
                     disabled={busy || !removal.can_remove}
                     onClick={() => onRemove(provider.name)}
                   >
-                    确认移入回收站
+                    {copy("Move to recycle bin", "确认移入回收站")}
                   </button>
                 </div>
               </div>

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { AggView } from "../api";
+import { useLocalizedCopy } from "./LanguageProvider";
 
 export type UsageTrendRange = "24h" | "7d" | "30d" | "all";
 
@@ -26,13 +27,12 @@ const HEIGHT = 300;
 const PLOT = { left: 58, right: 64, top: 18, bottom: 42 };
 const TOKEN_SERIES: {
   key: TokenSeriesKey;
-  label: string;
   className: string;
 }[] = [
-  { key: "input_tokens", label: "输入", className: "input" },
-  { key: "output_tokens", label: "输出", className: "output" },
-  { key: "cache_write_tokens", label: "缓存写入", className: "cache-write" },
-  { key: "cache_read_tokens", label: "缓存命中", className: "cache-read" },
+  { key: "input_tokens", className: "input" },
+  { key: "output_tokens", className: "output" },
+  { key: "cache_write_tokens", className: "cache-write" },
+  { key: "cache_read_tokens", className: "cache-read" },
 ];
 const EMPTY_AGGREGATE: AggView = {
   requests: 0,
@@ -49,8 +49,8 @@ const EMPTY_AGGREGATE: AggView = {
   unpriced_requests: 0,
 };
 
-function compact(value: number): string {
-  return new Intl.NumberFormat("zh-CN", {
+function compact(value: number, locale: string): string {
+  return new Intl.NumberFormat(locale, {
     notation: "compact",
     maximumFractionDigits: 1,
   }).format(value);
@@ -70,19 +70,19 @@ function shiftBucket(ms: number, unit: "hour" | "day", amount: number): number {
   return date.getTime();
 }
 
-function detailedLabel(timestamp: number, unit: "hour" | "day"): string {
+function detailedLabel(timestamp: number, unit: "hour" | "day", locale: string): string {
   const date = new Date(timestamp);
-  return date.toLocaleString("zh-CN", unit === "hour"
+  return date.toLocaleString(locale, unit === "hour"
     ? { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }
     : { year: "numeric", month: "2-digit", day: "2-digit" });
 }
 
-function axisLabel(timestamp: number, unit: "hour" | "day", edge: boolean): string {
+function axisLabel(timestamp: number, unit: "hour" | "day", edge: boolean, locale: string): string {
   const date = new Date(timestamp);
   if (unit === "day") {
-    return date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+    return date.toLocaleDateString(locale, { month: "numeric", day: "numeric" });
   }
-  const time = date.toLocaleTimeString("zh-CN", {
+  const time = date.toLocaleTimeString(locale, {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
@@ -214,6 +214,7 @@ export default function UsageTrendChart({
   range,
   nowMs = Date.now(),
 }: UsageTrendChartProps) {
+  const { language, copy } = useLocalizedCopy();
   const { buckets, unit } = useMemo(
     () => normalizeBuckets(groups, range, nowMs),
     [groups, range, nowMs],
@@ -229,6 +230,12 @@ export default function UsageTrendChart({
   );
   const tokenSeries = TOKEN_SERIES.map((series) => ({
     ...series,
+    label: {
+      input_tokens: copy("Input", "输入"),
+      output_tokens: copy("Output", "输出"),
+      cache_write_tokens: copy("Cache write", "缓存写入"),
+      cache_read_tokens: copy("Cache hit", "缓存命中"),
+    }[series.key],
     values: buckets.map(({ aggregate }) => aggregate[series.key]),
   }));
   const rawTokenMaximum = Math.max(
@@ -251,16 +258,25 @@ export default function UsageTrendChart({
   const activeCount = buckets.filter(({ aggregate }) => isActive(aggregate)).length;
   const activeIndex = buckets.findIndex((bucket) => bucket.key === activeKey);
   const active = activeIndex >= 0 ? buckets[activeIndex] : null;
-  const unitName = unit === "hour" ? "小时" : "天";
-  const summary = `用量趋势，${buckets.length} 个${unitName}槽，活跃 ${activeCount} 个；左轴为 Token，右轴为成本`;
+  const unitName = unit === "hour" ? copy("hours", "小时") : copy("days", "天");
+  const summary = copy(
+    `Usage trend with ${buckets.length} ${unitName} and ${activeCount} active periods. Tokens use the left axis and cost uses the right axis.`,
+    `用量趋势，共 ${buckets.length} 个${unitName}槽，活跃 ${activeCount} 个；左轴为 Token，右轴为成本。`,
+  );
   const ticks = tickIndexes(buckets.length);
 
   if (activeCount === 0) {
     return (
       <div className="usage-chart-empty">
         <span aria-hidden="true">⌁</span>
-        <strong>当前范围没有可绘制的用量数据</strong>
-        <small>完成一次模型请求后，输入、输出、缓存与成本趋势会出现在这里。</small>
+        <strong>{copy(
+          "No usage data to chart in this range",
+          "当前范围没有可绘制的用量数据",
+        )}</strong>
+        <small>{copy(
+          "Input, output, cache, and cost trends appear after the first model request.",
+          "完成一次模型请求后，输入、输出、缓存与成本趋势会出现在这里。",
+        )}</small>
       </div>
     );
   }
@@ -268,9 +284,13 @@ export default function UsageTrendChart({
   return (
     <div className="usage-trend-chart">
       <div className="usage-chart-meta">
-        <span>活跃 <strong>{activeCount}</strong> / {buckets.length} {unitName}</span>
-        <span>Token 峰值 <strong>{compact(rawTokenMaximum)}</strong> / {unitName}</span>
-        <span>成本峰值 <strong>{hasPricedCost ? costLabel(rawCostMaximum) : "未定价"}</strong>{hasPricedCost ? ` / ${unitName}` : ""}</span>
+        <span>{copy("Active", "活跃")} <strong>{activeCount}</strong> / {buckets.length} {unitName}</span>
+        <span>{copy("Peak tokens", "Token 峰值")} <strong>{compact(rawTokenMaximum, language)}</strong> / {unitName}</span>
+        <span>
+          {copy("Peak cost", "成本峰值")}{" "}
+          <strong>{hasPricedCost ? costLabel(rawCostMaximum) : copy("Unpriced", "未定价")}</strong>
+          {hasPricedCost ? ` / ${unitName}` : ""}
+        </span>
       </div>
 
       <div className="usage-chart-stage">
@@ -283,7 +303,7 @@ export default function UsageTrendChart({
           onMouseLeave={() => setActiveKey(null)}
         >
           <defs>
-            {TOKEN_SERIES.map((series) => (
+            {tokenSeries.map((series) => (
               <linearGradient
                 key={series.key}
                 id={`usage-gradient-${series.className}`}
@@ -312,7 +332,7 @@ export default function UsageTrendChart({
                   className="usage-chart-grid"
                 />
                 <text x={PLOT.left - 10} y={y + 3} textAnchor="end" className="usage-chart-axis">
-                  {compact(tokenValue)}
+                  {compact(tokenValue, language)}
                 </text>
                 <text x={WIDTH - PLOT.right + 10} y={y + 3} textAnchor="start" className="usage-chart-axis">
                   {hasPricedCost ? costLabel(costValue) : ratio === 1 ? "$0" : "—"}
@@ -382,7 +402,10 @@ export default function UsageTrendChart({
             const hitLeft = index === 0 ? PLOT.left : (previousX + x) / 2;
             const hitRight = index === buckets.length - 1 ? WIDTH - PLOT.right : (x + nextX) / 2;
             const currentCost = costValues[index];
-            const label = `${detailedLabel(bucket.timestamp, unit)}：输入 ${aggregate.input_tokens.toLocaleString()}，输出 ${aggregate.output_tokens.toLocaleString()}，缓存写入 ${aggregate.cache_write_tokens.toLocaleString()}，缓存命中 ${aggregate.cache_read_tokens.toLocaleString()}，成本 ${currentCost == null ? "未知" : costLabel(currentCost)}`;
+            const label = copy(
+              `${detailedLabel(bucket.timestamp, unit, language)}: input ${aggregate.input_tokens.toLocaleString(language)}, output ${aggregate.output_tokens.toLocaleString(language)}, cache write ${aggregate.cache_write_tokens.toLocaleString(language)}, cache hit ${aggregate.cache_read_tokens.toLocaleString(language)}, cost ${currentCost == null ? "unknown" : costLabel(currentCost)}`,
+              `${detailedLabel(bucket.timestamp, unit, language)}：输入 ${aggregate.input_tokens.toLocaleString(language)}，输出 ${aggregate.output_tokens.toLocaleString(language)}，缓存写入 ${aggregate.cache_write_tokens.toLocaleString(language)}，缓存命中 ${aggregate.cache_read_tokens.toLocaleString(language)}，成本 ${currentCost == null ? "未知" : costLabel(currentCost)}`,
+            );
             return (
               <g
                 key={bucket.key}
@@ -420,7 +443,12 @@ export default function UsageTrendChart({
               textAnchor={index === 0 ? "start" : index === buckets.length - 1 ? "end" : "middle"}
               className="usage-chart-axis usage-chart-x-axis"
             >
-              {axisLabel(buckets[index].timestamp, unit, index === 0 || index === buckets.length - 1)}
+              {axisLabel(
+                buckets[index].timestamp,
+                unit,
+                index === 0 || index === buckets.length - 1,
+                language,
+              )}
             </text>
           ))}
         </svg>
@@ -431,17 +459,22 @@ export default function UsageTrendChart({
             style={{ left: `${(xForIndex(activeIndex) / WIDTH) * 100}%` }}
             role="status"
           >
-            <strong>{detailedLabel(active.timestamp, unit)}</strong>
-            {TOKEN_SERIES.map((series) => (
+            <strong>{detailedLabel(active.timestamp, unit, language)}</strong>
+            {tokenSeries.map((series) => (
               <span className={series.className} key={series.key}>
                 <i />{series.label}<em>{active.aggregate[series.key].toLocaleString()}</em>
               </span>
             ))}
             <span className="cost">
-              <i />成本
-              <em>{costValues[activeIndex] == null ? "未知" : costLabel(costValues[activeIndex] ?? 0)}</em>
+              <i />{copy("Cost", "成本")}
+              <em>{costValues[activeIndex] == null
+                ? copy("Unknown", "未知")
+                : costLabel(costValues[activeIndex] ?? 0)}</em>
             </span>
-            <small>{active.aggregate.requests.toLocaleString()} 次请求 · 缓存指标属于输入子集</small>
+            <small>{copy(
+              `${active.aggregate.requests.toLocaleString(language)} requests · Cache metrics are a subset of input`,
+              `${active.aggregate.requests.toLocaleString(language)} 次请求 · 缓存指标属于输入子集`,
+            )}</small>
           </div>
         )}
       </div>

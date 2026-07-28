@@ -1,10 +1,6 @@
 import type { ProviderView, TierSlot, TierView } from "../api";
-
-const TIER_META: { slot: TierSlot; label: string; hint: string }[] = [
-  { slot: "high", label: "上档", hint: "最强模型 · 难任务升到这里" },
-  { slot: "mid", label: "中档", hint: "中等复杂度" },
-  { slot: "low", label: "下档", hint: "便宜快模型 · 简单任务兜底" },
-];
+import CompactCombobox, { type CompactComboboxOption } from "./CompactCombobox";
+import { useLocalizedCopy } from "./LanguageProvider";
 
 export interface TierRouteEditorProps {
   tiers: Record<TierSlot, TierView>;
@@ -26,31 +22,62 @@ export default function TierRouteEditor({
   onTierChange,
 }: TierRouteEditorProps) {
   const controlsDisabled = disabled || readOnly;
+  const { copy } = useLocalizedCopy();
+  const tierMeta: { slot: TierSlot; label: string; hint: string }[] = [
+    { slot: "high", label: copy("High", "上档"), hint: copy("Complex reasoning and code", "复杂推理与代码") },
+    { slot: "mid", label: copy("Medium", "中档"), hint: copy("Everyday development", "日常开发任务") },
+    { slot: "low", label: copy("Low", "下档"), hint: copy("Simple, fast tasks", "简单快速任务") },
+  ];
 
   return (
     <div className="tier-grid">
-      <div className="tier-col-head" />
-      <div className="tier-col-head">供应商</div>
-      <div className="tier-col-head">模型</div>
+      <div className="tier-table-head">
+        <div className="tier-col-head">{copy("Tier", "档位")}</div>
+        <div className="tier-col-head">{copy("Provider", "供应商")}</div>
+        <div className="tier-col-head">{copy("Model", "模型")}</div>
+      </div>
 
-      {TIER_META.map(({ slot, label, hint }) => {
+      {tierMeta.map(({ slot, label, hint }) => {
         const tier = tiers[slot];
         const provider = providers.find((candidate) => candidate.name === tier.upstream);
+        const selectedProviderOption: CompactComboboxOption[] = tier.upstream
+          ? [{
+              value: tier.upstream,
+              label: tier.upstream,
+              hint: provider?.access_tier === "free" ? copy("Free", "免费") : undefined,
+            }]
+          : [];
+        const providerOptions: CompactComboboxOption[] = [
+          ...selectedProviderOption,
+          { value: "", label: copy("Not selected", "未选择") },
+          ...providers
+            .filter((candidate) => candidate.name !== tier.upstream)
+            .map((candidate) => ({
+              value: candidate.name,
+              label: candidate.name,
+              hint: candidate.access_tier === "free" ? copy("Free", "免费") : undefined,
+            })),
+        ];
+        const modelOptions: CompactComboboxOption[] = [
+          { value: "", label: copy("Not selected", "未选择") },
+          ...(provider?.models ?? []).map((model) => ({ value: model, label: model })),
+        ];
 
         return (
-          <div className="tier-row" key={slot}>
-            <div className={`tier-badge ${slot}`}>
-              <div className="tier-label">{label}</div>
-              <div className="tier-hint">{hint}</div>
+          <div className={`tier-row tier-row-${slot}`} key={slot}>
+            <div className="tier-identity">
+              <span className={`tier-node ${slot}`} aria-hidden="true" />
+              <div className="tier-copy">
+                <strong>{label}</strong>
+                <span>{hint}</span>
+              </div>
             </div>
-            <select
-              className="select"
-              aria-label={`${label}供应商`}
-              aria-readonly={readOnly}
+            <CompactCombobox
+              ariaLabel={copy(`${label} provider`, `${label}供应商`)}
               disabled={controlsDisabled}
               value={tier.upstream ?? ""}
-              onChange={(event) => {
-                const upstream = event.target.value;
+              options={providerOptions}
+              onChange={(upstream) => {
                 if (!upstream) {
                   void onTierChange(slot, null, null);
                   return;
@@ -59,32 +86,16 @@ export default function TierRouteEditor({
                 const nextProvider = providers.find((candidate) => candidate.name === upstream);
                 void onTierChange(slot, upstream, nextProvider?.models[0] ?? null);
               }}
-            >
-              <option value="">— 未选 —</option>
-              {providers.map((candidate) => (
-                <option key={candidate.name} value={candidate.name}>
-                  {candidate.name}
-                </option>
-              ))}
-            </select>
-            <select
-              className="select"
-              aria-label={`${label}模型`}
-              aria-readonly={readOnly}
+            />
+            <CompactCombobox
+              ariaLabel={copy(`${label} model`, `${label}模型`)}
               value={tier.model ?? ""}
               disabled={controlsDisabled || !tier.upstream}
-              onChange={(event) => {
-                const model = event.target.value;
+              options={modelOptions}
+              onChange={(model) => {
                 void onTierChange(slot, tier.upstream, model || null);
               }}
-            >
-              <option value="">— 模型 —</option>
-              {provider?.models.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
+            />
           </div>
         );
       })}

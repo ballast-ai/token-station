@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use token_station_protocol::{CapabilityState, ModelCapability, ProviderEndpoint};
 use token_station_router_core::{Router, UpstreamModel, UpstreamRef};
 
-use crate::config::{AuthConfig, ClientConfig, UpstreamConfig};
+use crate::config::{AccessTier, AuthConfig, ClientConfig, UpstreamConfig};
 
 /// Everything `upstream add` collects from the command line, still as text:
 /// parsing and refusal both live in [`upstream_add`], so the tests bite the
@@ -106,6 +106,7 @@ pub fn upstream_add(config: &mut ClientConfig, spec: &AddUpstream) -> Result<Str
             base_url,
             auth,
             local: spec.local,
+            access_tier: AccessTier::default(),
             models,
         },
     );

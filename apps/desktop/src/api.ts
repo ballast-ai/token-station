@@ -17,9 +17,41 @@ export interface ProviderView {
   has_auth: boolean;
   /** 本机运行的供应商(如本地 Ollama);「只走本地」路由据此把流量锁在本机。 */
   local?: boolean;
+  access_tier?: "free" | "paid";
 }
 
 export type CapabilityState = "verified" | "declared" | "unsupported" | "unknown";
+
+export type FreeOfferKind = "recurring" | "trial";
+export type FreeProviderRegion = "china" | "global";
+export type FreeOveragePolicy = "hard_stop" | "rate_limited" | "user_must_enable_guard";
+
+export interface FreeModelPresetView {
+  id: string;
+  label: string;
+  tool: CapabilityState;
+  vision: CapabilityState;
+  json_schema: CapabilityState;
+  context_window: number;
+}
+
+export interface FreeProviderPresetView {
+  id: string;
+  upstream_name: string;
+  label: string;
+  short_label: string;
+  base_url: string;
+  offer_kind: FreeOfferKind;
+  region: FreeProviderRegion;
+  tags: string[];
+  free_note: string;
+  key_instruction: string;
+  application_url: string;
+  docs_url: string;
+  verified_at: string;
+  overage_policy: FreeOveragePolicy;
+  models: FreeModelPresetView[];
+}
 
 export interface ModelCapabilityView {
   model: string;
@@ -626,6 +658,22 @@ export const addProvider = (
     models,
     apiKey: api_key,
     local,
+  });
+
+export const listFreeProviderPresets = () =>
+  invoke<FreeProviderPresetView[]>("list_free_provider_presets");
+
+export const addFreeProvider = (
+  presetId: string,
+  selectedModels: string[],
+  apiKey: string,
+  guardConfirmed: boolean,
+) =>
+  invoke<StateView>("add_free_provider", {
+    presetId,
+    selectedModels,
+    apiKey,
+    guardConfirmed,
   });
 
 /** 设置「只走本地」及其云兜底许可(写进 home router,Agent inherit 自动跟随)。 */

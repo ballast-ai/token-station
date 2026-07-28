@@ -106,7 +106,7 @@ function SettingsContent({
           })}
         </div>
         {egressView && (
-          <div className="egress-route-list" aria-label="实际出口解析">
+          <div className="egress-route-list" aria-label={t("general.resolvedRoutes")}>
             {egressView.routes.map((route) => (
               <div key={`${route.request_class}-${route.upstream}`} className="egress-route-row">
                 <span>{route.request_class} · {route.upstream}</span>
