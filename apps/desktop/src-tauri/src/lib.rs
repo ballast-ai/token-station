@@ -4670,6 +4670,34 @@ mod tests {
     }
 
     #[test]
+    fn a_desktop_legacy_zero_concurrency_config_loads_writable_without_rewriting_source() {
+        let root = scratch_home("legacy-zero-concurrency");
+        let path = root.join("token-station.json");
+        let mut legacy = template_for_test(&root);
+        legacy["server"]["auth"] = json!(false);
+        legacy["concurrency"] = json!({
+            "global": 0,
+            "per_agent": 0,
+            "per_provider": 0
+        });
+        let original = serde_json::to_vec(&legacy).expect("legacy fixture serializes");
+        std::fs::write(&path, &original).expect("legacy fixture writes");
+
+        let (draft, error) = load_draft(&path, &root);
+
+        assert_eq!(error, None);
+        assert_eq!(draft["concurrency"]["global"], json!(64));
+        assert_eq!(draft["concurrency"]["per_agent"], json!(16));
+        assert_eq!(draft["concurrency"]["per_provider"], json!(16));
+        assert_eq!(draft["server"]["auth"], json!(false));
+        assert_eq!(
+            std::fs::read(&path).expect("legacy source remains readable"),
+            original
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn provider_model_vision_declaration_updates_the_public_state() {
         let root = scratch_home("model-vision");
         let mut draft = template_for_test(&root);
