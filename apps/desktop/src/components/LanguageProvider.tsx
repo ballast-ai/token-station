@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 
-export type Language = "zh-CN" | "zh-TW" | "en" | "ja";
+export type Language = "zh-CN" | "en";
 
 export const LANGUAGE_STORAGE_KEY = "token-station-language";
 
@@ -52,7 +52,7 @@ const messages = {
     "settings.aboutHint": "版本与更新",
     "language.eyebrow": "LANGUAGE",
     "language.title": "界面语言",
-    "language.description": "切换后立即应用到导航和设置界面，无需重启。",
+    "language.description": "切换后立即应用到整个界面，无需重启。",
     "language.groupLabel": "界面语言",
     "language.zhCNHint": "简体中文界面",
     "language.zhTWHint": "繁體中文介面",
@@ -98,6 +98,7 @@ const messages = {
     "general.authSlotLabel": "代理认证槽",
     "general.credentialCommand": "写入凭据：token-station-cli key set egress-proxy {slot}",
     "general.routeSummary": "Provider 请求、模型目录与健康探测：{route}；更新检查固定直连。每次 3xx 仍拒绝跟随，跨主机不会转发原 Authorization。",
+    "general.resolvedRoutes": "实际出口解析",
     "general.pendingProxy": "待填写代理",
     "general.matchedNoProxy": "命中 no_proxy",
     "general.metrics": "本地指标",
@@ -314,7 +315,7 @@ const messages = {
     "settings.aboutHint": "Version and updates",
     "language.eyebrow": "LANGUAGE",
     "language.title": "Interface language",
-    "language.description": "Changes apply to navigation and Settings immediately. No restart required.",
+    "language.description": "Changes apply to the entire interface immediately. No restart required.",
     "language.groupLabel": "Interface language",
     "language.zhCNHint": "Simplified Chinese interface",
     "language.zhTWHint": "Traditional Chinese interface",
@@ -360,6 +361,7 @@ const messages = {
     "general.authSlotLabel": "Proxy credential slot",
     "general.credentialCommand": "Store credential: token-station-cli key set egress-proxy {slot}",
     "general.routeSummary": "Provider requests, model catalogs, and health probes: {route}. Update checks always connect directly. 3xx redirects remain blocked and the original Authorization header is never forwarded across hosts.",
+    "general.resolvedRoutes": "Resolved egress routes",
     "general.pendingProxy": "proxy URL required",
     "general.matchedNoProxy": "matched no_proxy",
     "general.metrics": "Local metrics",
@@ -547,19 +549,20 @@ type LanguageContextValue = {
   language: Language;
   setLanguage: (language: Language) => void;
   t: (key: TranslationKey, replacements?: Replacements) => string;
+  copy: (english: string, simplifiedChinese: string) => string;
 };
 
 const LanguageContext = createContext<LanguageContextValue | null>(null);
 
 function isLanguage(value: string | null): value is Language {
-  return value === "zh-CN" || value === "zh-TW" || value === "en" || value === "ja";
+  return value === "zh-CN" || value === "en";
 }
 
 function storedLanguage(): Language {
-  if (typeof window === "undefined") return "zh-CN";
+  if (typeof window === "undefined") return "en";
   const value = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
   if (value === "zh") return "zh-CN";
-  return isLanguage(value) ? value : "zh-CN";
+  return isLanguage(value) ? value : "en";
 }
 
 function format(message: string, replacements?: Replacements): string {
@@ -584,6 +587,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
       language,
       setLanguage,
       t: (key, replacements) => format(messages[language][key], replacements),
+      copy: (english, simplifiedChinese) => language === "zh-CN" ? simplifiedChinese : english,
     }),
     [language],
   );
@@ -600,4 +604,13 @@ export function useLanguage(): LanguageContextValue {
   const value = useContext(LanguageContext);
   if (!value) throw new Error("useLanguage must be used within LanguageProvider");
   return value;
+}
+
+export function useLocalizedCopy(): Pick<LanguageContextValue, "language" | "copy"> {
+  const value = useContext(LanguageContext);
+  const language = storedLanguage();
+  return value ?? {
+    language,
+    copy: (english, simplifiedChinese) => language === "zh-CN" ? simplifiedChinese : english,
+  };
 }

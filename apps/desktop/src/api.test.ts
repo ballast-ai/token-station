@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   addProvider,
+  addFreeProvider,
   setLocalRouting,
   applyHomeRouteToAllAgents,
   applyAgentPlan,
@@ -22,6 +23,7 @@ import {
   getState,
   getStats,
   listAgentRegistry,
+  listFreeProviderPresets,
   listAgentSnapshots,
   listenServeState,
   planAgentConnection,
@@ -244,6 +246,8 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
     ["get state", () => getState(), "get_state", undefined],
     ["get runtime facts", () => getRuntimeState(), "get_runtime_state", undefined],
     ["add provider", () => addProvider("p", "https://p/v1", ["m"], "k"), "add_provider", { name: "p", baseUrl: "https://p/v1", models: ["m"], apiKey: "k", local: false }],
+    ["list free provider presets", () => listFreeProviderPresets(), "list_free_provider_presets", undefined],
+    ["validate and add free provider", () => addFreeProvider("nvidia", ["openai/gpt-oss-120b"], "nvapi", true), "add_free_provider", { presetId: "nvidia", selectedModels: ["openai/gpt-oss-120b"], apiKey: "nvapi", guardConfirmed: true }],
     ["add local provider", () => addProvider("ollama", "http://127.0.0.1:11434/v1", ["m"], null, true), "add_provider", { name: "ollama", baseUrl: "http://127.0.0.1:11434/v1", models: ["m"], apiKey: null, local: true }],
     ["set local routing on", () => setLocalRouting(true, false), "set_local_routing", { localOnly: true, allowCloudFallback: false }],
     ["set local routing off", () => setLocalRouting(false, false), "set_local_routing", { localOnly: false, allowCloudFallback: false }],

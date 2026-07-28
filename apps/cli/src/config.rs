@@ -408,6 +408,21 @@ impl PluginsConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessTier {
+    Free,
+    #[default]
+    Paid,
+}
+
+impl AccessTier {
+    #[must_use]
+    pub fn is_paid(&self) -> bool {
+        *self == Self::Paid
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpstreamConfig {
@@ -429,6 +444,10 @@ pub struct UpstreamConfig {
     /// upstream is unchanged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub local: bool,
+    /// Commercial identity of this Provider instance. Free and paid instances
+    /// use different upstream names and keyring slots; routing order is unchanged.
+    #[serde(default, skip_serializing_if = "AccessTier::is_paid")]
+    pub access_tier: AccessTier,
     /// What this upstream serves. The provider adapter may refine it; with no
     /// network of its own it cannot replace it.
     pub models: Vec<ModelCapability>,
@@ -733,7 +752,7 @@ impl ConfigSource for FileRouterSource {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientConfig, EgressConfig, EgressMode};
+    use super::{AccessTier, ClientConfig, EgressConfig, EgressMode};
     use std::fs;
     use std::path::PathBuf;
 
@@ -748,6 +767,31 @@ mod tests {
 
     fn example() -> serde_json::Value {
         serde_json::from_str(crate::EXAMPLE_CONFIG).expect("the shipped example parses")
+    }
+
+    #[test]
+    fn upstream_access_tier_defaults_to_paid_and_round_trips_free() {
+        let legacy = example();
+        let legacy_config: ClientConfig =
+            serde_json::from_value(legacy).expect("legacy upstreams stay compatible");
+        assert_eq!(
+            legacy_config.upstreams["openai_personal"].access_tier,
+            AccessTier::Paid
+        );
+
+        let mut free = example();
+        free["upstreams"]["openai_personal"]["access_tier"] = serde_json::json!("free");
+        let free_config: ClientConfig =
+            serde_json::from_value(free).expect("free access tier is accepted");
+        assert_eq!(
+            free_config.upstreams["openai_personal"].access_tier,
+            AccessTier::Free
+        );
+        let serialized = serde_json::to_value(free_config).expect("free config serializes");
+        assert_eq!(
+            serialized["upstreams"]["openai_personal"]["access_tier"],
+            "free"
+        );
     }
 
     #[test]

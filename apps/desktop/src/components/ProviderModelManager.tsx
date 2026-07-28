@@ -18,6 +18,7 @@ import {
   updateProviderModels,
 } from "../api";
 import ModelPicker, { CatalogStatus } from "./ModelPicker";
+import { useLocalizedCopy } from "./LanguageProvider";
 
 interface ProviderModelManagerProps {
   provider: ProviderView;
@@ -28,13 +29,6 @@ interface ProviderModelManagerProps {
 
 const mergeModels = (...groups: string[][]) => [...new Set(groups.flat())];
 
-const capabilityLabel: Record<CapabilityState, string> = {
-  verified: "已验证",
-  declared: "已声明",
-  unsupported: "不支持",
-  unknown: "未知",
-};
-
 const unknownCapabilities = (model: string): ModelCapabilityView => ({
   model,
   tool: "unknown",
@@ -42,37 +36,7 @@ const unknownCapabilities = (model: string): ModelCapabilityView => ({
   json_schema: "unknown",
 });
 
-const catalogStateLabel = {
-  active: "在售",
-  stale: "缓存待确认",
-  removed: "已下架",
-} as const;
-
-const catalogSourceLabel = {
-  live: "实时目录",
-  cache: "本地缓存",
-  configured: "手工配置",
-} as const;
-
-const probeLayerLabel = {
-  network: "DNS / 网络",
-  http: "HTTP",
-  auth: "鉴权",
-  model: "模型",
-  generation: "生成",
-  stream: "流式",
-  tool: "Tool",
-  json: "JSON Schema",
-} as const;
-
 type ProviderHealth = "untested" | "healthy" | "degraded" | "unavailable";
-
-const healthLabel: Record<ProviderHealth, string> = {
-  untested: "未测试",
-  healthy: "健康",
-  degraded: "能力退化",
-  unavailable: "不可用",
-};
 
 const baseLayers = new Set(["network", "http", "auth", "model", "generation"]);
 
@@ -88,34 +52,46 @@ function providerHealth(results: ProviderTestResult[]): ProviderHealth {
     : "healthy";
 }
 
-function stageTiming(stage: ProviderTestResult["stages"][number]) {
-  if (stage.status === "skipped") return "未执行";
-  if (stage.duration_ms == null) return "未计时";
+function stageTiming(
+  stage: ProviderTestResult["stages"][number],
+  copy: (english: string, simplifiedChinese: string) => string,
+) {
+  if (stage.status === "skipped") return copy("Not run", "未执行");
+  if (stage.duration_ms == null) return copy("Not timed", "未计时");
   return `${stage.timing_kind === "cumulative" ? "≤" : ""}${stage.duration_ms}ms`;
 }
 
-function costLabel(costMicros: number | null): string {
+function costLabel(
+  costMicros: number | null,
+  copy: (english: string, simplifiedChinese: string) => string,
+): string {
   return costMicros != null && costMicros > 0
-    ? `估算成本 ${(costMicros / 1_000_000).toFixed(4)}`
-    : "成本未知";
+    ? copy(
+      `Estimated cost ${(costMicros / 1_000_000).toFixed(4)}`,
+      `估算成本 ${(costMicros / 1_000_000).toFixed(4)}`,
+    )
+    : copy("Cost unknown", "成本未知");
 }
 
-const resultStatus = (result: ModelDiscoveryView): CatalogStatus => {
+const resultStatus = (
+  result: ModelDiscoveryView,
+  copy: (english: string, simplifiedChinese: string) => string,
+): CatalogStatus => {
   if (result.source === "live") {
     return {
-      label: `已同步 ${result.models.length} 个`,
+      label: copy(`Synced ${result.models.length}`, `已同步 ${result.models.length} 个`),
       tone: "live",
       warning: result.warning,
     };
   }
   if (result.source === "cache") {
     return {
-      label: `使用缓存 · ${result.models.length} 个`,
+      label: copy(`Using cache · ${result.models.length}`, `使用缓存 · ${result.models.length} 个`),
       tone: "cache",
       warning: result.warning,
     };
   }
-  return { label: "获取失败", tone: "error", warning: result.warning };
+  return { label: copy("Fetch failed", "获取失败"), tone: "error", warning: result.warning };
 };
 
 export default function ProviderModelManager({
@@ -124,10 +100,11 @@ export default function ProviderModelManager({
   disabled = false,
   onSaved,
 }: ProviderModelManagerProps) {
+  const { copy, language } = useLocalizedCopy();
   const [models, setModels] = useState(provider.models);
   const [selected, setSelected] = useState(provider.models);
   const [status, setStatus] = useState<CatalogStatus>({
-    label: `已配置 ${provider.models.length} 个`,
+    label: copy(`Configured ${provider.models.length}`, `已配置 ${provider.models.length} 个`),
     tone: "idle",
   });
   const [refreshing, setRefreshing] = useState(false);
@@ -140,7 +117,10 @@ export default function ProviderModelManager({
   const [testedAtMs, setTestedAtMs] = useState<number | null>(null);
   const [testing, setTesting] = useState(false);
   const [capabilitySaving, setCapabilitySaving] = useState<string | null>(null);
-  const [usage, setUsage] = useState<string>("正在读取无正文用量…");
+  const [usage, setUsage] = useState<string>(copy(
+    "Reading metadata-only usage…",
+    "正在读取无正文用量…",
+  ));
   const [editBaseUrl, setEditBaseUrl] = useState(provider.base_url);
   const [editKey, setEditKey] = useState("");
   const [editing, setEditing] = useState(false);
@@ -160,6 +140,38 @@ export default function ProviderModelManager({
     }));
   }, [catalog, capabilities]);
   const operationDisabled = disabled || refreshing || saving || testing || editing || capabilitySaving !== null;
+  const capabilityLabel: Record<CapabilityState, string> = {
+    verified: copy("Verified", "已验证"),
+    declared: copy("Declared", "已声明"),
+    unsupported: copy("Unsupported", "不支持"),
+    unknown: copy("Unknown", "未知"),
+  };
+  const catalogStateLabel = {
+    active: copy("Active", "在售"),
+    stale: copy("Cached, pending confirmation", "缓存待确认"),
+    removed: copy("Removed", "已下架"),
+  } as const;
+  const catalogSourceLabel = {
+    live: copy("Live catalog", "实时目录"),
+    cache: copy("Local cache", "本地缓存"),
+    configured: copy("Manual", "手工配置"),
+  } as const;
+  const probeLayerLabel = {
+    network: copy("DNS / Network", "DNS / 网络"),
+    http: "HTTP",
+    auth: copy("Authentication", "鉴权"),
+    model: copy("Model", "模型"),
+    generation: copy("Generation", "生成"),
+    stream: copy("Streaming", "流式"),
+    tool: "Tool",
+    json: "JSON Schema",
+  } as const;
+  const healthLabel: Record<ProviderHealth, string> = {
+    untested: copy("Untested", "未测试"),
+    healthy: copy("Healthy", "健康"),
+    degraded: copy("Degraded capabilities", "能力退化"),
+    unavailable: copy("Unavailable", "不可用"),
+  };
 
   useEffect(() => {
     void previewProviderEndpoints(editBaseUrl).then(setEndpointPreview).catch(() => setEndpointPreview(null));
@@ -170,11 +182,14 @@ export default function ProviderModelManager({
       .then((view) => {
         const aggregate = view.groups.find(([name]) => name === provider.name)?.[1];
         setUsage(aggregate
-          ? `${aggregate.requests} 次请求 · ${aggregate.errors} 次错误 · P95 ${aggregate.p95_latency_ms}ms · ${aggregate.input_tokens + aggregate.output_tokens} tokens · ${costLabel(aggregate.cost_micros)}`
-          : "暂无请求记录");
+          ? copy(
+            `${aggregate.requests} requests · ${aggregate.errors} errors · P95 ${aggregate.p95_latency_ms}ms · ${aggregate.input_tokens + aggregate.output_tokens} tokens · ${costLabel(aggregate.cost_micros, copy)}`,
+            `${aggregate.requests} 次请求 · ${aggregate.errors} 次错误 · P95 ${aggregate.p95_latency_ms}ms · ${aggregate.input_tokens + aggregate.output_tokens} tokens · ${costLabel(aggregate.cost_micros, copy)}`,
+          )
+          : copy("No request records", "暂无请求记录"));
       })
-      .catch(() => setUsage("用量暂不可读"));
-  }, [provider.name]);
+      .catch(() => setUsage(copy("Usage is temporarily unavailable", "用量暂不可读")));
+  }, [copy, provider.name]);
 
   const saveProviderDetails = async () => {
     if (operationDisabled || !endpointPreview) return;
@@ -222,18 +237,18 @@ export default function ProviderModelManager({
     if (operationDisabled) return;
     setRefreshing(true);
     setError("");
-    setStatus({ label: "正在获取…", tone: "loading" });
+    setStatus({ label: copy("Fetching…", "正在获取…"), tone: "loading" });
     try {
       const result = await discoverProviderModels(provider.name, provider.base_url, null);
       setModels((current) => mergeModels(current, result.models));
       setCatalog(result.catalog ?? []);
       setDiff({ added: result.added ?? [], removed: result.removed ?? [] });
-      setStatus(resultStatus(result));
+      setStatus(resultStatus(result, copy));
       if (result.capabilities_updated) {
         onSaved(await getState());
       }
     } catch (caught) {
-      setStatus({ label: "获取失败", tone: "error", warning: String(caught) });
+      setStatus({ label: copy("Fetch failed", "获取失败"), tone: "error", warning: String(caught) });
     } finally {
       setRefreshing(false);
     }
@@ -246,7 +261,7 @@ export default function ProviderModelManager({
     try {
       const next = await updateProviderModels(provider.name, selected);
       onSaved(next);
-      setStatus({ label: `已保存 ${selected.length} 个`, tone: "live" });
+      setStatus({ label: copy(`Saved ${selected.length}`, `已保存 ${selected.length} 个`), tone: "live" });
     } catch (caught) {
       setError(String(caught));
     } finally {
@@ -258,46 +273,54 @@ export default function ProviderModelManager({
     <div className="provider-model-manager">
       <div className="provider-detail-summary">
         <div>
-          <strong>Provider 详情</strong>
+          <strong>{copy("Provider details", "Provider 详情")}</strong>
           <span>{usage}</span>
         </div>
         <div className="provider-health-actions">
           <div
             className={`provider-health-badge ${providerHealth(testResults)}`}
-            aria-label={`Provider 健康状态：${healthLabel[providerHealth(testResults)]}`}
+            aria-label={copy(
+              `Provider health: ${healthLabel[providerHealth(testResults)]}`,
+              `Provider 健康状态：${healthLabel[providerHealth(testResults)]}`,
+            )}
           >
             <i aria-hidden="true" />
             <span>{healthLabel[providerHealth(testResults)]}</span>
-            {testedAtMs != null && <small>最近测试 {new Date(testedAtMs).toLocaleString()}</small>}
+            {testedAtMs != null && (
+              <small>{copy("Last tested", "最近测试")} {new Date(testedAtMs).toLocaleString(language === "zh-CN" ? "zh-CN" : "en-US")}</small>
+            )}
           </div>
           <button className="btn tiny" type="button" disabled={operationDisabled} onClick={() => void runProviderTest()}>
-            {testing ? "测试中…" : "运行分层测试"}
+            {testing ? copy("Testing…", "测试中…") : copy("Run layered test", "运行分层测试")}
           </button>
         </div>
       </div>
       <div className="provider-edit-fields">
-        <input className="input mono" aria-label="编辑 Base URL" value={editBaseUrl} disabled={operationDisabled} onChange={(event) => setEditBaseUrl(event.target.value)} />
-        <input className="input mono" aria-label="更新 API Key" type="password" value={editKey} disabled={operationDisabled} placeholder="留空则保留现有 Key" onChange={(event) => setEditKey(event.target.value)} />
+        <input className="input mono" aria-label={copy("Edit base URL", "编辑 Base URL")} value={editBaseUrl} disabled={operationDisabled} onChange={(event) => setEditBaseUrl(event.target.value)} />
+        <input className="input mono" aria-label={copy("Update API key", "更新 API Key")} type="password" value={editKey} disabled={operationDisabled} placeholder={copy("Leave blank to keep the current key", "留空则保留现有 Key")} onChange={(event) => setEditKey(event.target.value)} />
         <button className="btn tiny" type="button" disabled={operationDisabled || !endpointPreview} onClick={() => void saveProviderDetails()}>
-          {editing ? "保存中…" : "保存基本信息"}
+          {editing ? copy("Saving…", "保存中…") : copy("Save details", "保存基本信息")}
         </button>
       </div>
       {endpointPreview && (
-        <div className="provider-endpoint-list" aria-label="Provider 最终 URL">
+        <div className="provider-endpoint-list" aria-label={copy("Final provider URLs", "Provider 最终 URL")}>
           <code>{endpointPreview.chat}</code>
           <code>{endpointPreview.responses}</code>
           <code>{endpointPreview.messages}</code>
         </div>
       )}
       {testResults.length > 0 && (
-        <div className="provider-test-results" aria-label="Provider 分层测试结果">
-          <p>基础五层显示同一次真实生成探测的累计耗时（≤）；能力层显示各自真实请求耗时。</p>
+        <div className="provider-test-results" aria-label={copy("Provider layered test results", "Provider 分层测试结果")}>
+          <p>{copy(
+            "The five base layers show cumulative timing (≤) for one live generation probe; capability layers show their own request timing.",
+            "基础五层显示同一次真实生成探测的累计耗时（≤）；能力层显示各自真实请求耗时。",
+          )}</p>
           {testResults.map((result) => (
             <div key={result.model}>
               <strong>{result.model}</strong>
               {result.stages.map((stage) => (
                 <span className={stage.status} key={stage.layer} title={stage.detail}>
-                  {probeLayerLabel[stage.layer]} · {stage.status} · {stageTiming(stage)}
+                  {probeLayerLabel[stage.layer]} · {stage.status} · {stageTiming(stage, copy)}
                 </span>
               ))}
             </div>
@@ -305,13 +328,23 @@ export default function ProviderModelManager({
         </div>
       )}
       {diff && (diff.added.length > 0 || diff.removed.length > 0) && (
-        <div className="catalog-diff" aria-label="模型目录变化">
-          {diff.added.length > 0 && <span className="added">新增：{diff.added.join("、")}</span>}
-          {diff.removed.length > 0 && <span className="removed">下架：{diff.removed.join("、")}（仍保留引用）</span>}
+        <div className="catalog-diff" aria-label={copy("Model catalog changes", "模型目录变化")}>
+          {diff.added.length > 0 && (
+            <span className="added">{copy(
+              `Added: ${diff.added.join(", ")}`,
+              `新增：${diff.added.join("、")}`,
+            )}</span>
+          )}
+          {diff.removed.length > 0 && (
+            <span className="removed">{copy(
+              `Removed: ${diff.removed.join(", ")} (references retained)`,
+              `下架：${diff.removed.join("、")}（仍保留引用）`,
+            )}</span>
+          )}
         </div>
       )}
       {modelRows.length > 0 && (
-        <div className="model-ledger" aria-label="模型目录与能力">
+        <div className="model-ledger" aria-label={copy("Model catalog and capabilities", "模型目录与能力")}>
           {modelRows.map((row) => (
             <div className={`model-ledger-row ${row.catalog?.catalog_state ?? ""}`} key={row.model}>
               <code>{row.model}</code>
@@ -322,17 +355,17 @@ export default function ProviderModelManager({
                   </span>
                 )}
                 {([
-                  ["工具", row.cap.tool],
-                  ["视觉", row.cap.vision],
+                  [copy("Tools", "工具"), row.cap.tool],
+                  [copy("Vision", "视觉"), row.cap.vision],
                   ["JSON", row.cap.json_schema],
                 ] as const).map(([label, state]) => (
-                  label === "视觉" ? (
+                  label === copy("Vision", "视觉") ? (
                     <button
                       aria-label={state === "verified"
-                        ? `${row.model} 视觉能力已验证`
+                        ? copy(`${row.model} vision capability verified`, `${row.model} 视觉能力已验证`)
                         : state === "declared"
-                          ? `将 ${row.model} 标记为不支持视觉`
-                          : `为 ${row.model} 声明视觉支持`}
+                          ? copy(`Mark ${row.model} as not supporting vision`, `将 ${row.model} 标记为不支持视觉`)
+                          : copy(`Declare vision support for ${row.model}`, `为 ${row.model} 声明视觉支持`)}
                       aria-pressed={state === "verified" || state === "declared"}
                       className={`capability-tag capability-tag-button ${state}`}
                       disabled={operationDisabled || state === "verified"}
@@ -340,7 +373,7 @@ export default function ProviderModelManager({
                       onClick={() => void toggleVision(row.model, state)}
                       type="button"
                     >
-                      {label} · {capabilitySaving === row.model ? "保存中…" : capabilityLabel[state]}
+                      {label} · {capabilitySaving === row.model ? copy("Saving…", "保存中…") : capabilityLabel[state]}
                     </button>
                   ) : (
                     <span className={`capability-tag ${state}`} key={label}>
@@ -373,7 +406,9 @@ export default function ProviderModelManager({
       {error && <div className="manager-error">{error}</div>}
       <div className="manager-actions">
         <span className="manager-hint">
-          {serveRunning ? "代理运行中 · 保存后重启代理生效" : "保存后写入当前供应商配置"}
+          {serveRunning
+            ? copy("Proxy running · Restart after saving to apply", "代理运行中 · 保存后重启代理生效")
+            : copy("Save to write the current provider configuration", "保存后写入当前供应商配置")}
         </span>
         <button
           className="btn primary"
@@ -381,7 +416,7 @@ export default function ProviderModelManager({
           disabled={operationDisabled || selected.length === 0}
           onClick={save}
         >
-          {saving ? "保存中…" : "保存模型"}
+          {saving ? copy("Saving…", "保存中…") : copy("Save models", "保存模型")}
         </button>
       </div>
     </div>

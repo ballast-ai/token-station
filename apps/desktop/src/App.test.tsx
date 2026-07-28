@@ -176,7 +176,7 @@ function navigation() {
 }
 
 beforeEach(() => {
-  window.localStorage.removeItem(LANGUAGE_STORAGE_KEY);
+  window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "zh-CN");
   listenMock.mockReset();
   listenMock.mockResolvedValue(vi.fn());
   const initial = stateFixture();
@@ -205,16 +205,16 @@ it("renders a supported virtual Agent entirely from registry metadata", async ()
 
 describe("desktop station navigation", () => {
   it("maps the four revision relationships to stable save copy", () => {
-    expect(configSaveStatus(stateFixture())).toBe("无改动");
-    expect(configSaveStatus(stateFixture({ config_dirty: true, draft_revision: 2, saved_revision: 1 }))).toBe("有未保存更改");
+    expect(configSaveStatus(stateFixture(), "zh-CN")).toBe("无改动");
+    expect(configSaveStatus(stateFixture({ config_dirty: true, draft_revision: 2, saved_revision: 1 }), "zh-CN")).toBe("有未保存更改");
     expect(configSaveStatus(stateFixture({
       saved_revision: 2,
       serve: serveFixture({ app_runtime: "running", listener_reachable: true, running_revision: 1 }),
-    }))).toBe("已保存尚未应用");
+    }), "zh-CN")).toBe("已保存尚未应用");
     expect(configSaveStatus(stateFixture({
       saved_revision: 2,
       serve: serveFixture({ app_runtime: "running", listener_reachable: true, running_revision: 2 }),
-    }))).toBe("运行中 revision 2");
+    }), "zh-CN")).toBe("运行中 revision 2");
   });
 
   it("shows the revision save state and makes 保存并应用 start a real apply", async () => {
@@ -456,21 +456,47 @@ describe("desktop station navigation", () => {
     expect(await screen.findByRole("heading", { name: "主页路由" })).toBeInTheDocument();
   });
 
-  it("switches and persists the interface language from Settings", async () => {
+  it("renders the primary desktop surface in English by default", async () => {
     const user = userEvent.setup();
+    window.localStorage.removeItem(LANGUAGE_STORAGE_KEY);
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "设置" }));
-    await user.click(screen.getByRole("button", { name: /语言/ }));
-    expect(screen.getByRole("heading", { name: "界面语言" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Home routing" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Smart routing" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save and apply" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Providers" })).toBeInTheDocument();
+    expect(screen.queryByText("主页路由")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("radio", { name: /English/ }));
+    await user.click(screen.getByRole("button", { name: "Usage" }));
+    expect(await screen.findByRole("heading", { name: "Usage" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Home" }));
+    await user.click(screen.getByRole("button", { name: "Add provider" }));
+    expect(await screen.findByRole("heading", { name: "Add provider" })).toBeInTheDocument();
+    expect(screen.getByText("MiniMax (China)")).toBeInTheDocument();
+    expect(screen.queryByText("MiniMax（中国）")).not.toBeInTheDocument();
+  });
 
-    expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+  it("switches the whole interface to Simplified Chinese and persists the choice", async () => {
+    const user = userEvent.setup();
+    window.localStorage.removeItem(LANGUAGE_STORAGE_KEY);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: /Language/ }));
+    expect(screen.getByRole("heading", { name: "Interface language" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /English/ })).toHaveAttribute("aria-checked", "true");
-    expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("en");
-    expect(document.documentElement).toHaveAttribute("lang", "en");
+
+    await user.click(screen.getByRole("radio", { name: /简体中文/ }));
+
+    expect(screen.getByRole("heading", { name: "设置", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /简体中文/ })).toHaveAttribute("aria-checked", "true");
+    await user.click(screen.getByRole("button", { name: /返回/ }));
+    expect(await screen.findByRole("heading", { name: "主页路由" })).toBeInTheDocument();
+    expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("zh-CN");
+    expect(document.documentElement).toHaveAttribute("lang", "zh-CN");
   });
 
   it("moves virtual key to Settings, masks it, and starts or stops the proxy from the top bar", async () => {
@@ -536,7 +562,8 @@ describe("desktop station navigation", () => {
     await screen.findByRole("heading", { name: "主页路由" });
     await user.click(navigation().getByRole("button", { name: "Codex" }));
     await user.click(screen.getByRole("radio", { name: "独立路由" }));
-    await user.selectOptions(screen.getByLabelText("上档供应商"), "deepseek");
+    await user.click(screen.getByLabelText("上档供应商"));
+    await user.click(screen.getByRole("option", { name: "deepseek" }));
     expect(invokeMock).toHaveBeenCalledWith("set_agent_tier", {
       agentId: "codex",
       slot: "high",
@@ -578,16 +605,47 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
+    await user.click(await screen.findByRole("button", { name: "存为策略" }));
     await user.type(await screen.findByLabelText("策略组名称"), "日常开发");
-    await user.click(screen.getByRole("button", { name: "另存为策略组" }));
+    await user.click(screen.getByRole("button", { name: "保存策略" }));
     expect(invokeMock).toHaveBeenCalledWith("save_home_route_as_profile", { name: "日常开发" });
-    expect(await screen.findByText("策略组「日常开发」已加入草稿，请保存并应用")).toBeInTheDocument();
+    expect(await screen.findByText("策略组“日常开发”已加入草稿，请保存并应用。")).toBeInTheDocument();
 
     await user.click(navigation().getByRole("button", { name: "Codex" }));
     await user.click(screen.getByRole("radio", { name: "挂载策略组" }));
     expect(invokeMock).toHaveBeenCalledWith("mount_agent_profile", { agentId: "codex", profile: "日常开发" });
     expect(await screen.findByText("已挂载策略组「日常开发」· 尚待保存并应用")).toBeInTheDocument();
     expect(screen.getByLabelText("当前策略组")).toHaveValue("日常开发");
+  });
+
+  it("serializes profile mutations with the rest of the home route commands", async () => {
+    const user = userEvent.setup();
+    let finishSave: ((value: ReturnType<typeof stateFixture>) => void) | undefined;
+    const current = stateFixture();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return current;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "save_home_route_as_profile") {
+        return new Promise((resolve) => {
+          finishSave = resolve;
+        });
+      }
+      if (command === "serve_start") return current;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "存为策略" }));
+    await user.type(screen.getByLabelText("策略组名称"), "并发保护");
+    await user.click(screen.getByRole("button", { name: "保存策略" }));
+
+    expect(screen.getByRole("button", { name: "保存并应用" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "保存并应用" }));
+    expect(invokeMock).not.toHaveBeenCalledWith("serve_start");
+
+    finishSave?.({ ...current, profiles: ["并发保护"] });
+    expect(await screen.findByText("策略组“并发保护”已加入草稿，请保存并应用。")).toBeInTheDocument();
   });
 
   it("opens Add Provider as a separate page and returns to the source page after saving", async () => {
@@ -610,13 +668,70 @@ describe("desktop station navigation", () => {
     await user.click(navigation().getByRole("button", { name: "OpenCode" }));
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "添加供应商" })).toHaveLength(1);
-    // The provider selector is now a brand-card grid with role=radiogroup. Select a visible card label.
-    await user.click(screen.getByText("OpenAI", { selector: ".preset-card-label" }));
+    expect(screen.queryByRole("button", { name: "添加供应商" })).toBeNull();
+    // The provider picker is a brand-card catalog; click by visible label instead of selecting an option.
+    await user.click(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" }));
+    expect(screen.getByRole("button", { name: "添加供应商" })).toBeInTheDocument();
     await user.type(screen.getByPlaceholderText("只保存在系统钥匙串"), "secret-test");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "OpenCode" })).toBeInTheDocument();
     expect(screen.getByText("供应商已添加")).toBeInTheDocument();
+  });
+
+  it("uses one provider catalog for regular and free APIs and restores the selected mode", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "list_free_provider_presets") {
+        return [{
+          id: "nvidia",
+          upstream_name: "nvidia_free",
+          label: "NVIDIA API Catalog",
+          short_label: "NV",
+          base_url: "https://integrate.api.nvidia.com/v1",
+          offer_kind: "recurring",
+          region: "global",
+          tags: ["长期免费", "全球平台", "开发用途"],
+          free_note: "build.nvidia.com 托管 API",
+          key_instruction: "打开模型页面并点击 Get API Key。",
+          application_url: "https://build.nvidia.com/",
+          docs_url: "https://docs.example.com/nvidia",
+          verified_at: "2026-07-27",
+          overage_policy: "rate_limited",
+          models: [{
+            id: "openai/gpt-oss-120b",
+            label: "GPT-OSS 120B",
+            tool: "declared",
+            vision: "unknown",
+            json_schema: "declared",
+            context_window: 131072,
+          }],
+        }];
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "添加供应商" }));
+    expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /常规 API/ })).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("button", { name: /免费 API/ }));
+    expect(screen.getByRole("button", { name: /免费 API/ })).toHaveAttribute("aria-pressed", "true");
+    expect(await screen.findByText("NVIDIA API Catalog")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /NVIDIA API Catalog/ }));
+    expect(await screen.findByRole("heading", { name: "NVIDIA API Catalog" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /免费 API/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("NVIDIA API Catalog")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /常规 API/ }));
+    expect(screen.getByRole("button", { name: /常规 API/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" })).toBeInTheDocument();
   });
 
   it("applies the Connector plan directly on 一键接入", async () => {

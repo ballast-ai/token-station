@@ -211,8 +211,10 @@ describe("legacy desktop read-only pages", () => {
     render(<Stats />);
     expect(await screen.findByText("1.2500")).toBeInTheDocument();
     expect(screen.getAllByText("openai").length).toBeGreaterThan(0);
-    await user.selectOptions(screen.getByRole("combobox", { name: "时间范围" }), "7d");
-    await user.selectOptions(screen.getByRole("combobox", { name: "供应商过滤" }), "openai");
+    await user.click(screen.getByRole("combobox", { name: "时间范围" }));
+    await user.click(within(screen.getByRole("listbox")).getByRole("option", { name: "近 7 天" }));
+    await user.click(screen.getByRole("combobox", { name: "供应商过滤" }));
+    await user.click(within(screen.getByRole("listbox")).getByRole("option", { name: "openai" }));
     await user.click(screen.getByRole("tab", { name: "供应商" }));
     await waitFor(() => expect(getStats).toHaveBeenCalledWith(
       "7d",
@@ -541,8 +543,16 @@ describe("model selection and provider model management", () => {
     const user = userEvent.setup();
     render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: "刷新模型" }));
-    expect(await screen.findByText("下架：old-model（仍保留引用）")).toBeInTheDocument();
-    expect(screen.getByText("新增：new-model")).toBeInTheDocument();
+    expect(await screen.findByText((_, element) =>
+      Boolean(
+        element?.classList.contains("removed")
+        && element.textContent?.includes("old-model")
+        && element.textContent.includes("仍保留引用"),
+      ),
+    )).toBeInTheDocument();
+    expect(screen.getByText((_, element) =>
+      Boolean(element?.classList.contains("added") && element.textContent?.includes("new-model")),
+    )).toBeInTheDocument();
     expect(screen.getByText(/已下架/)).toBeInTheDocument();
   });
 
