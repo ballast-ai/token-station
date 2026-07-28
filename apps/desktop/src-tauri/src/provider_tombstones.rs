@@ -59,6 +59,13 @@ pub(crate) fn contains(data_dir: &Path, name: &str) -> Result<bool, String> {
     Ok(load(data_dir)?.providers.contains_key(name))
 }
 
+pub(crate) fn get(data_dir: &Path, name: &str) -> Result<Option<Value>, String> {
+    Ok(load(data_dir)?
+        .providers
+        .get(name)
+        .map(|tombstone| tombstone.provider.clone()))
+}
+
 pub(crate) fn take(data_dir: &Path, name: &str) -> Result<Option<Value>, String> {
     let mut file = load(data_dir)?;
     let Some(tombstone) = file.providers.remove(name) else {
@@ -77,7 +84,13 @@ pub(crate) fn discard(data_dir: &Path, name: &str) -> Result<(), String> {
 }
 
 pub(crate) fn list(data_dir: &Path) -> Result<Vec<String>, String> {
-    Ok(load(data_dir)?.providers.into_keys().collect())
+    Ok(load(data_dir)?
+        .providers
+        .into_iter()
+        .filter_map(|(name, tombstone)| {
+            (tombstone.provider["access_tier"].as_str() != Some("free")).then_some(name)
+        })
+        .collect())
 }
 
 fn path(data_dir: &Path) -> PathBuf {
@@ -136,7 +149,7 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{archive, contains, discard, list, path, take};
+    use super::{archive, contains, discard, get, list, path, take};
     use serde_json::json;
 
     #[test]
@@ -154,6 +167,7 @@ mod tests {
 
         archive(&root, "example", &provider).unwrap();
         assert!(contains(&root, "example").unwrap());
+        assert_eq!(get(&root, "example").unwrap(), Some(provider.clone()));
         let replacement = json!({"provider": "another-account"});
         assert!(archive(&root, "example", &replacement)
             .unwrap_err()
@@ -164,6 +178,32 @@ mod tests {
         archive(&root, "example", &provider).unwrap();
         discard(&root, "example").unwrap();
         assert_eq!(take(&root, "example").unwrap(), None);
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn free_providers_are_hidden_from_generic_restore_list() {
+        let root = std::env::temp_dir().join(format!(
+            "token-station-provider-tombstone-free-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&root).ok();
+        archive(
+            &root,
+            "free",
+            &json!({"provider": "openai-compatible", "access_tier": "free"}),
+        )
+        .unwrap();
+        archive(
+            &root,
+            "paid",
+            &json!({"provider": "openai-compatible", "access_tier": "paid"}),
+        )
+        .unwrap();
+
+        assert_eq!(list(&root).unwrap(), ["paid"]);
+        assert!(get(&root, "free").unwrap().is_some());
 
         std::fs::remove_dir_all(root).ok();
     }

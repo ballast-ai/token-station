@@ -63,7 +63,7 @@ export default function TierRouteEditor({
               <option value="">— 未选 —</option>
               {providers.map((candidate) => (
                 <option key={candidate.name} value={candidate.name}>
-                  {candidate.name}
+                  {candidate.name}{candidate.access_tier === "free" ? " · 免费" : ""}
                 </option>
               ))}
             </select>

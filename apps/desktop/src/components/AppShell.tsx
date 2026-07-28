@@ -8,6 +8,7 @@ export type AppView =
   | "usage"
   | "settings"
   | "add-provider"
+  | `free-provider:${string}`
   | `agent:${string}`;
 
 interface AppShellProps {
@@ -66,7 +67,7 @@ export default function AppShell({
   return (
     <div className="station-shell">
       <aside className="station-rail" aria-label={t("nav.main")}>
-        <button className="station-brand" type="button" onClick={() => onNavigate("home")} aria-label={t("nav.homeLabel")}>
+        <button className="station-brand" type="button" disabled={commandBusy} onClick={() => onNavigate("home")} aria-label={t("nav.homeLabel")}>
           <span className="brand-signal" aria-hidden="true"><i /><i /><i /></span>
           <span className="brand-word">Token<br />Station</span>
         </button>
@@ -75,6 +76,7 @@ export default function AppShell({
           <button
             className={`rail-item ${view === "home" ? "active" : ""}`}
             type="button"
+            disabled={commandBusy}
             onClick={() => onNavigate("home")}
             aria-current={view === "home" ? "page" : undefined}
           >
@@ -92,6 +94,7 @@ export default function AppShell({
                 key={metadata.agent_id}
                 className={`rail-item agent-link ${selected ? "active" : ""}`}
                 type="button"
+                disabled={commandBusy}
                 onClick={() => onNavigate(`agent:${metadata.agent_id}`)}
                 aria-current={selected ? "page" : undefined}
                 title={`${metadata.display_name} · ${agentTone(agent)}`}
@@ -110,7 +113,7 @@ export default function AppShell({
           })}
         </nav>
 
-        <button className="rail-rescan" type="button" disabled={scanBusy} onClick={onRescan}>
+        <button className="rail-rescan" type="button" disabled={scanBusy || commandBusy} onClick={onRescan}>
           <span aria-hidden="true">↻</span>
           <span>{scanBusy ? t("nav.scanning") : t("nav.rescan")}</span>
         </button>
@@ -147,6 +150,7 @@ export default function AppShell({
             <button
               className={`icon-action ${view === "usage" ? "active" : ""}`}
               type="button"
+              disabled={commandBusy}
               onClick={() => onNavigate("usage")}
               aria-label={t("nav.usage")}
               title={t("nav.usage")}
@@ -159,14 +163,15 @@ export default function AppShell({
             <button
               className={`icon-action ${view === "settings" ? "active" : ""}`}
               type="button"
+              disabled={commandBusy}
               onClick={() => onNavigate("settings")}
               aria-label={t("nav.settings")}
               title={t("nav.settings")}
             >
               <span aria-hidden="true">⚙</span>
             </button>
-            {view !== "add-provider" && (
-              <button className="btn primary add-provider-action" type="button" onClick={() => onNavigate("add-provider")}>
+            {view !== "add-provider" && !view.startsWith("free-provider") && (
+              <button className="btn primary add-provider-action" type="button" disabled={commandBusy} onClick={() => onNavigate("add-provider")}>
                 <span aria-hidden="true">＋</span> {t("nav.addProvider")}
               </button>
             )}
