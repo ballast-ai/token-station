@@ -88,7 +88,7 @@ describe("CompactCombobox", () => {
     expect(screen.getByLabelText("搜索模型")).toBeInTheDocument();
   });
 
-  it("anchors an upward menu to the trigger instead of its maximum height", async () => {
+  it("always opens below the trigger even when space is tighter below", async () => {
     const user = userEvent.setup();
     const originalInnerHeight = window.innerHeight;
     const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
@@ -110,8 +110,8 @@ describe("CompactCombobox", () => {
     await user.click(screen.getByRole("combobox", { name: "供应商" }));
 
     expect(screen.getByRole("listbox").parentElement).toHaveStyle({
-      bottom: "86px",
-      top: "auto",
+      bottom: "auto",
+      top: "566px",
     });
     rectSpy.mockRestore();
     Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
