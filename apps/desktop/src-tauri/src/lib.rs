@@ -2489,27 +2489,6 @@ fn set_tier(
     Ok(inner.snapshot())
 }
 
-/// Copy the effective high-tier route to the middle and low tiers in one operation. Commit only one draft revision while holding the lock,
-/// Therefore, callers never observe a partially updated three-tier state.
-#[tauri::command]
-fn sync_tiers_from_high(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
-    let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    let (upstream, model) = inner.pool_member(TIER_HIGH);
-    let (upstream, model) = match (upstream, model) {
-        (Some(upstream), Some(model)) => (upstream, model),
-        _ => return Err("请先完整配置上档供应商和模型".to_string()),
-    };
-    inner.validate_route_target(&upstream, &model)?;
-
-    let member = json!([{ "upstream": upstream, "model": model }]);
-    inner.draft["router"]["pools"][TIER_MID] = member.clone();
-    inner.draft["router"]["pools"][TIER_LOW] = member;
-    inner.rebuild_routing();
-    inner.observe_draft()?;
-    Ok(inner.snapshot())
-}
-
 /// Add a keyword to a high, mid, or low tier; matches force that tier at router-core layer 1.
 #[tauri::command]
 fn add_keyword(
@@ -3674,7 +3653,6 @@ pub fn run() {
             remove_provider,
             restore_provider,
             set_tier,
-            sync_tiers_from_high,
             add_keyword,
             remove_keyword,
             set_agent_route_mode,
@@ -5950,51 +5928,6 @@ mod tests {
             assert!(inner.draft["router"].get("allow_cloud_fallback").is_none());
         }
 
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn sync_tiers_from_high_updates_mid_and_low_in_one_command() {
-        let root = scratch_home("sync-tiers-from-high");
-        let inner = AppInner::new(
-            root.join("token-station.json"),
-            template_for_test(&root),
-            None,
-        );
-        let app = tauri::test::mock_app();
-        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
-
-        add_provider(
-            app.state(),
-            "provider".to_owned(),
-            "https://provider.example/v1".to_owned(),
-            vec!["large".to_owned(), "small".to_owned()],
-            None,
-            false,
-        )
-        .unwrap();
-        set_tier(
-            app.state(),
-            "high".to_owned(),
-            Some("provider".to_owned()),
-            Some("large".to_owned()),
-        )
-        .unwrap();
-        set_tier(
-            app.state(),
-            "mid".to_owned(),
-            Some("provider".to_owned()),
-            Some("small".to_owned()),
-        )
-        .unwrap();
-
-        let synced = sync_tiers_from_high(app.state()).unwrap();
-
-        for slot in ["high", "mid", "low"] {
-            let tier = synced.tiers.get(slot).unwrap();
-            assert_eq!(tier.upstream.as_deref(), Some("provider"));
-            assert_eq!(tier.model.as_deref(), Some("large"));
-        }
         std::fs::remove_dir_all(root).ok();
     }
 

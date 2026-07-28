@@ -18,7 +18,6 @@ import {
   setAdminEndpoint,
   setLocalRouting,
   setTier,
-  syncTiersFromHigh,
   type AgentRouteView,
   type AgentUiMetadataView,
   type AgentView,
@@ -355,7 +354,6 @@ function StationApp() {
           allowCloudFallback={state.allow_cloud_fallback}
           onSetLocalRouting={(localOnly, allowCloudFallback) => void run(() => setLocalRouting(localOnly, allowCloudFallback))}
           onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
-          onSyncTiers={() => void run(syncTiersFromHigh, "上档配置已同步到三档")}
           onSaveProfile={(name) => run(
             () => saveHomeRouteAsProfile(name),
             `策略组「${name}」已加入草稿，请保存并应用`,

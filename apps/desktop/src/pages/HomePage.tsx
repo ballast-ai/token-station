@@ -26,7 +26,6 @@ interface HomePageProps {
   allowCloudFallback: boolean;
   onSetLocalRouting: (localOnly: boolean, allowCloudFallback: boolean) => void;
   onTierChange: (slot: TierSlot, upstream: string | null, model: string | null) => void;
-  onSyncTiers: () => void;
   onSaveProfile: (name: string) => Promise<boolean>;
   onDeleteProfile: (name: string) => Promise<boolean>;
   onAddKeyword: (slot: TierSlot, keyword: string) => void;
@@ -54,7 +53,6 @@ export default function HomePage({
   allowCloudFallback,
   onSetLocalRouting,
   onTierChange,
-  onSyncTiers,
   onSaveProfile,
   onDeleteProfile,
   onAddKeyword,
@@ -132,7 +130,6 @@ export default function HomePage({
           providers={providers}
           disabled={busy}
           onTierChange={onTierChange}
-          onSyncTiers={onSyncTiers}
         />
 
         {profileOpen && <div className="profile-manager compact-profile-manager">

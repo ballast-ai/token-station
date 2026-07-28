@@ -721,9 +721,6 @@ export const setTier = (
   model: string | null,
 ) => invoke<StateView>("set_tier", { slot, upstream, model });
 
-export const syncTiersFromHigh = () =>
-  invoke<StateView>("sync_tiers_from_high");
-
 /** Add a keyword to a tier; matching it forces that tier. */
 export const addKeyword = (slot: TierSlot, keyword: string) =>
   invoke<StateView>("add_keyword", { slot, keyword });

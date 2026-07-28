@@ -48,6 +48,7 @@ describe("TierRouteEditor", () => {
     expect(screen.getByLabelText("上档供应商")).toHaveTextContent("deepseek");
     expect(screen.getByLabelText("上档模型")).toHaveTextContent("deepseek-v4-pro");
     expect(screen.getByLabelText("下档模型")).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "同步三档" })).not.toBeInTheDocument();
   });
 
   it("selects the provider's first model when the provider changes", async () => {
@@ -72,9 +73,33 @@ describe("TierRouteEditor", () => {
 
     const trigger = screen.getByLabelText("上档供应商");
     await user.click(trigger);
-    await user.keyboard("{ArrowDown}{Enter}");
+    await user.keyboard("{ArrowDown}{ArrowDown}{Enter}");
 
     expect(onTierChange).toHaveBeenCalledWith("high", "openai", "gpt-5.5");
+  });
+
+  it("places the selected provider first for each tier", async () => {
+    const user = userEvent.setup();
+    render(
+      <TierRouteEditor tiers={tiers} providers={providers} onTierChange={vi.fn()} />,
+    );
+
+    await user.click(screen.getByLabelText("上档供应商"));
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "deepseek",
+      "未选择",
+      "openai",
+      "empty",
+    ]);
+
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByLabelText("中档供应商"));
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "openai",
+      "未选择",
+      "deepseek",
+      "empty",
+    ]);
   });
 
   it("uses an empty model when the selected provider has no models", async () => {
@@ -123,21 +148,5 @@ describe("TierRouteEditor", () => {
     for (const control of screen.getAllByRole("combobox")) {
       expect(control).toBeDisabled();
     }
-  });
-
-  it("syncs the configured high tier from the compact table", async () => {
-    const user = userEvent.setup();
-    const onSyncTiers = vi.fn();
-    render(
-      <TierRouteEditor
-        tiers={tiers}
-        providers={providers}
-        onTierChange={vi.fn()}
-        onSyncTiers={onSyncTiers}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "同步三档" }));
-    expect(onSyncTiers).toHaveBeenCalledOnce();
   });
 });
