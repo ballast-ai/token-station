@@ -104,6 +104,8 @@ export default function AppShell({
             disabled={commandBusy}
             onClick={() => onNavigate("home")}
             aria-current={view === "home" ? "page" : undefined}
+            aria-label={t("nav.home")}
+            title={t("nav.home")}
           >
             <NavGlyph><HomeIcon /></NavGlyph>
             <span>{t("nav.home")}</span>
@@ -138,7 +140,14 @@ export default function AppShell({
           })}
         </nav>
 
-        <button className="rail-rescan" type="button" disabled={scanBusy || commandBusy} onClick={onRescan}>
+        <button
+          className="rail-rescan"
+          type="button"
+          disabled={scanBusy || commandBusy}
+          aria-label={scanBusy ? t("nav.scanning") : t("nav.rescan")}
+          title={scanBusy ? t("nav.scanning") : t("nav.rescan")}
+          onClick={onRescan}
+        >
           <span className="rail-rescan-icon" aria-hidden="true"><RefreshIcon /></span>
           <span>{scanBusy ? t("nav.scanning") : t("nav.rescan")}</span>
         </button>

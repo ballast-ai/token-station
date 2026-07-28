@@ -721,6 +721,9 @@ export const setTier = (
   model: string | null,
 ) => invoke<StateView>("set_tier", { slot, upstream, model });
 
+export const syncTiersFromHigh = () =>
+  invoke<StateView>("sync_tiers_from_high");
+
 /** 往某档(弱/中/强)关键词库加一个词;命中即强制走该档。 */
 export const addKeyword = (slot: TierSlot, keyword: string) =>
   invoke<StateView>("add_keyword", { slot, keyword });

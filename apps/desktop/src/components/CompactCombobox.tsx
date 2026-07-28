@@ -1,4 +1,12 @@
-import { useEffect, useId, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 
 export interface CompactComboboxOption {
   value: string;
@@ -15,6 +23,10 @@ interface CompactComboboxProps {
   onChange: (value: string) => void;
 }
 
+const COMBOBOX_OPEN_EVENT = "token-station:combobox-open";
+const SEARCH_THRESHOLD = 10;
+const INITIAL_OPTION_LIMIT = 100;
+
 export default function CompactCombobox({
   ariaLabel,
   value,
@@ -25,36 +37,123 @@ export default function CompactCombobox({
 }: CompactComboboxProps) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [query, setQuery] = useState("");
+  const [popoverStyle, setPopoverStyle] = useState<CSSProperties>();
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const listboxId = useId();
+  const instanceId = useId();
   const selected = options.find((option) => option.value === value);
+  const searchable = options.length > SEARCH_THRESHOLD;
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const defaultOptions = useMemo(() => {
+    if (!searchable || options.length <= INITIAL_OPTION_LIMIT) return options;
+    const initial = options.slice(0, INITIAL_OPTION_LIMIT);
+    return selected && !initial.some((option) => option.value === selected.value)
+      ? [selected, ...initial]
+      : initial;
+  }, [options, searchable, selected]);
+  const visibleOptions = useMemo(() => {
+    if (normalizedQuery) {
+      return options.filter((option) =>
+        `${option.label} ${option.hint ?? ""}`.toLocaleLowerCase().includes(normalizedQuery));
+    }
+    return defaultOptions;
+  }, [defaultOptions, normalizedQuery, options]);
 
   useEffect(() => {
     if (!open) return undefined;
     const closeOnOutsideClick = (event: PointerEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
     };
+    const closeOtherCombobox = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== instanceId) setOpen(false);
+    };
     document.addEventListener("pointerdown", closeOnOutsideClick);
-    const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
-    setActiveIndex(selectedIndex);
-    window.requestAnimationFrame(() => optionRefs.current[selectedIndex]?.focus());
-    return () => document.removeEventListener("pointerdown", closeOnOutsideClick);
-  }, [open, options, value]);
+    document.addEventListener(COMBOBOX_OPEN_EVENT, closeOtherCombobox);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener(COMBOBOX_OPEN_EVENT, closeOtherCombobox);
+    };
+  }, [instanceId, open]);
 
-  const close = () => {
+  useEffect(() => {
+    if (disabled && open) setOpen(false);
+  }, [disabled, open]);
+
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    const positionPopover = () => {
+      const rect = triggerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const viewportPadding = 12;
+      const gap = 6;
+      const spaceBelow = window.innerHeight - rect.bottom - viewportPadding - gap;
+      const spaceAbove = rect.top - viewportPadding - gap;
+      const placeAbove = spaceBelow < 220 && spaceAbove > spaceBelow;
+      const maxHeight = Math.max(120, Math.min(360, placeAbove ? spaceAbove : spaceBelow));
+      setPopoverStyle({
+        left: Math.max(viewportPadding, rect.left),
+        top: placeAbove ? Math.max(viewportPadding, rect.top - maxHeight - gap) : rect.bottom + gap,
+        width: rect.width,
+        maxHeight,
+      });
+    };
+    positionPopover();
+    window.addEventListener("resize", positionPopover);
+    window.addEventListener("scroll", positionPopover, true);
+    return () => {
+      window.removeEventListener("resize", positionPopover);
+      window.removeEventListener("scroll", positionPopover, true);
+    };
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (open) optionRefs.current[activeIndex]?.focus();
+    // Only the closed → open transition owns initial focus. Arrow-key focus
+    // is synchronous and must never be overwritten by a later render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const close = (restoreFocus = false) => {
     setOpen(false);
+    setQuery("");
+    if (restoreFocus) triggerRef.current?.focus();
+  };
+
+  const openMenu = (direction: "selected" | "first" | "last" = "selected") => {
+    if (disabled || options.length === 0) return;
+    const selectedIndex = Math.max(0, defaultOptions.findIndex((option) => option.value === value));
+    const nextIndex = direction === "first"
+      ? 0
+      : direction === "last"
+        ? defaultOptions.length - 1
+        : selectedIndex;
+    setQuery("");
+    setActiveIndex(nextIndex);
+    setOpen(true);
+    document.dispatchEvent(new CustomEvent(COMBOBOX_OPEN_EVENT, { detail: instanceId }));
   };
 
   const focusOption = (index: number) => {
-    const nextIndex = (index + options.length) % options.length;
+    if (visibleOptions.length === 0) return;
+    const nextIndex = (index + visibleOptions.length) % visibleOptions.length;
     setActiveIndex(nextIndex);
     optionRefs.current[nextIndex]?.focus();
   };
 
   return (
-    <div className="compact-combobox" ref={rootRef}>
+    <div
+      className="compact-combobox"
+      ref={rootRef}
+      onBlurCapture={(event) => {
+        if (open && !event.currentTarget.contains(event.relatedTarget as Node | null)) close();
+      }}
+    >
       <button
+        ref={triggerRef}
         className="compact-combobox-trigger"
         type="button"
         role="combobox"
@@ -63,14 +162,18 @@ export default function CompactCombobox({
         aria-controls={listboxId}
         aria-haspopup="listbox"
         disabled={disabled}
-        onClick={() => setOpen((current) => !current)}
+        title={selected?.label}
+        onClick={() => {
+          if (open) close();
+          else openMenu();
+        }}
         onKeyDown={(event) => {
           if (event.key === "ArrowDown") {
             event.preventDefault();
             if (open) {
               focusOption(activeIndex + 1);
             } else {
-              setOpen(true);
+              openMenu("first");
             }
           }
           if (event.key === "ArrowUp") {
@@ -78,10 +181,10 @@ export default function CompactCombobox({
             if (open) {
               focusOption(activeIndex - 1);
             } else {
-              setOpen(true);
+              openMenu("last");
             }
           }
-          if (event.key === "Escape") close();
+          if (event.key === "Escape") close(true);
         }}
       >
         <span className={selected ? "" : "placeholder-copy"}>
@@ -93,21 +196,48 @@ export default function CompactCombobox({
       </button>
 
       {open && (
-        <div className="compact-combobox-popover">
+        <div className="compact-combobox-popover" style={popoverStyle}>
+          {searchable && (
+            <label className="compact-combobox-search">
+              <span aria-hidden="true">⌕</span>
+              <input
+                ref={searchRef}
+                type="search"
+                value={query}
+                aria-label={`搜索${ariaLabel}`}
+                placeholder="搜索"
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setActiveIndex(0);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    focusOption(0);
+                  } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    close(true);
+                  }
+                }}
+              />
+            </label>
+          )}
           <div className="compact-combobox-options" id={listboxId} role="listbox">
-            {options.map((option, index) => (
+            {visibleOptions.map((option, index) => (
               <button
                 key={option.value || "__empty__"}
                 className={`compact-combobox-option ${option.value === value ? "selected" : ""}`}
                 type="button"
                 role="option"
                 aria-selected={option.value === value}
+                tabIndex={index === activeIndex ? 0 : -1}
+                title={option.label}
                 ref={(element) => {
                   optionRefs.current[index] = element;
                 }}
                 onClick={() => {
-                  onChange(option.value);
-                  close();
+                  if (option.value !== value) onChange(option.value);
+                  close(true);
                 }}
                 onFocus={() => setActiveIndex(index)}
                 onKeyDown={(event) => {
@@ -122,10 +252,19 @@ export default function CompactCombobox({
                     focusOption(0);
                   } else if (event.key === "End") {
                     event.preventDefault();
-                    focusOption(options.length - 1);
+                    focusOption(visibleOptions.length - 1);
                   } else if (event.key === "Escape") {
                     event.preventDefault();
-                    close();
+                    close(true);
+                  } else if (
+                    searchable
+                    && event.key.length === 1
+                    && !event.altKey
+                    && !event.ctrlKey
+                    && !event.metaKey
+                  ) {
+                    setQuery(event.key);
+                    window.requestAnimationFrame(() => searchRef.current?.focus());
                   }
                 }}
               >
@@ -140,6 +279,12 @@ export default function CompactCombobox({
                 )}
               </button>
             ))}
+            {visibleOptions.length === 0 && (
+              <div className="compact-combobox-empty">没有匹配项</div>
+            )}
+            {!normalizedQuery && options.length > INITIAL_OPTION_LIMIT && (
+              <div className="compact-combobox-limit">输入名称可搜索其余选项</div>
+            )}
           </div>
         </div>
       )}

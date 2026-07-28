@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addKeyword,
   applyHomeRouteToAllAgents,
+  deleteProfile,
   getRuntimeState,
   getState,
   listAgentRegistry,
@@ -11,11 +12,13 @@ import {
   removeProvider,
   restoreProvider,
   scanAgents,
+  saveHomeRouteAsProfile,
   serveStart,
   serveStop,
   setAdminEndpoint,
   setLocalRouting,
   setTier,
+  syncTiersFromHigh,
   type AgentRouteView,
   type AgentUiMetadataView,
   type AgentView,
@@ -238,16 +241,18 @@ function StationApp() {
     if (nextMessage) setMessage(nextMessage);
   };
 
-  const run = async (action: () => Promise<StateView>, ok?: string) => {
-    if (busyRef.current) return;
+  const run = async (action: () => Promise<StateView>, ok?: string): Promise<boolean> => {
+    if (busyRef.current) return false;
     busyRef.current = true;
     setBusy(true);
     setError("");
     setMessage("");
     try {
       showState(await action(), ok);
+      return true;
     } catch (caught) {
       setError(errorText(caught));
+      return false;
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -350,11 +355,15 @@ function StationApp() {
           allowCloudFallback={state.allow_cloud_fallback}
           onSetLocalRouting={(localOnly, allowCloudFallback) => void run(() => setLocalRouting(localOnly, allowCloudFallback))}
           onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
-          onSyncTiers={() => void run(async () => {
-            const { upstream, model } = state.tiers.high;
-            await setTier("mid", upstream, model);
-            return setTier("low", upstream, model);
-          }, "上档配置已同步到三档")}
+          onSyncTiers={() => void run(syncTiersFromHigh, "上档配置已同步到三档")}
+          onSaveProfile={(name) => run(
+            () => saveHomeRouteAsProfile(name),
+            `策略组「${name}」已加入草稿，请保存并应用`,
+          )}
+          onDeleteProfile={(name) => run(
+            () => deleteProfile(name),
+            `策略组「${name}」已从草稿删除，请保存并应用`,
+          )}
           onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
           onRemoveKeyword={(slot, keyword) => void run(() => removeKeyword(slot, keyword))}
           onSave={() => void run(serveStart)}

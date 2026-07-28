@@ -1,7 +1,5 @@
 import { useState } from "react";
 import {
-  deleteProfile,
-  saveHomeRouteAsProfile,
   type ProviderView,
   type StateView,
   type TierSlot,
@@ -29,6 +27,8 @@ interface HomePageProps {
   onSetLocalRouting: (localOnly: boolean, allowCloudFallback: boolean) => void;
   onTierChange: (slot: TierSlot, upstream: string | null, model: string | null) => void;
   onSyncTiers: () => void;
+  onSaveProfile: (name: string) => Promise<boolean>;
+  onDeleteProfile: (name: string) => Promise<boolean>;
   onAddKeyword: (slot: TierSlot, keyword: string) => void;
   onRemoveKeyword: (slot: TierSlot, keyword: string) => void;
   onSave: () => void;
@@ -36,14 +36,6 @@ interface HomePageProps {
   onRemoveProvider: (name: string) => void;
   onRestoreProvider: (name: string) => void;
   onStateChange: (state: StateView, message: string) => void;
-}
-
-function errorText(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object" && "message" in error) {
-    return String((error as { message: unknown }).message);
-  }
-  return String(error);
 }
 
 export default function HomePage({
@@ -63,6 +55,8 @@ export default function HomePage({
   onSetLocalRouting,
   onTierChange,
   onSyncTiers,
+  onSaveProfile,
+  onDeleteProfile,
   onAddKeyword,
   onRemoveKeyword,
   onSave,
@@ -79,21 +73,17 @@ export default function HomePage({
   const hasLocalProvider = providers.some((provider) => provider.local);
   const [profileName, setProfileName] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
-  const [profileError, setProfileError] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
 
   const saveProfile = async () => {
     const name = profileName.trim();
     if (!name || profileBusy) return;
     setProfileBusy(true);
-    setProfileError("");
     try {
-      const next = await saveHomeRouteAsProfile(name);
-      setProfileName("");
-      setProfileOpen(false);
-      onStateChange(next, `策略组「${name}」已加入草稿，请保存并应用`);
-    } catch (caught) {
-      setProfileError(errorText(caught));
+      if (await onSaveProfile(name)) {
+        setProfileName("");
+        setProfileOpen(false);
+      }
     } finally {
       setProfileBusy(false);
     }
@@ -102,12 +92,8 @@ export default function HomePage({
   const removeProfile = async (name: string) => {
     if (profileBusy) return;
     setProfileBusy(true);
-    setProfileError("");
     try {
-      const next = await deleteProfile(name);
-      onStateChange(next, `策略组「${name}」已从草稿删除，请保存并应用`);
-    } catch (caught) {
-      setProfileError(errorText(caught));
+      await onDeleteProfile(name);
     } finally {
       setProfileBusy(false);
     }
@@ -176,7 +162,6 @@ export default function HomePage({
               ))}
             </div>
           )}
-          {profileError && <span className="foot-hint error-text">{profileError}</span>}
         </div>}
 
         <footer className="panel-foot route-actions">
