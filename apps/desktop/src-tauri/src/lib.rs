@@ -217,7 +217,33 @@ impl DesktopPaths {
             self.plugins_dir.as_path(),
             self.agent_data_root.as_path(),
         ] {
-            std::fs::create_dir_all(path)?;
+            crate::agent_integration::safe_fs::ensure_private_dir(path)?;
+        }
+        let config_root = self
+            .config_file
+            .parent()
+            .expect("desktop config file always has a parent");
+        for path in [
+            self.config_file.clone(),
+            config_root.join("token-station.state.json"),
+            self.data_dir.join("virtual-key"),
+            self.data_dir.join("plugin-receipts.json"),
+            self.data_dir.join("model-catalog-cache.json"),
+            self.data_dir.join("provider-tombstones.json"),
+            self.data_dir.join("metrics.sqlite"),
+            self.data_dir.join("metrics.sqlite-wal"),
+            self.data_dir.join("metrics.sqlite-shm"),
+            self.data_dir.join("requests.log"),
+            self.data_dir.join("requests.log.1"),
+            self.data_dir.join("requests.log.2"),
+            self.data_dir.join("requests.log.3"),
+            self.data_dir.join("diagnostics/frontend.jsonl"),
+        ] {
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => crate::agent_integration::safe_fs::harden_private_file(&path)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
         Ok(())
     }
@@ -4012,6 +4038,9 @@ mod tests {
                     }
                 };
                 stream
+                    .set_nonblocking(false)
+                    .expect("accepted model catalog socket is blocking");
+                stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .expect("model catalog fixture read is bounded");
                 stream
@@ -4183,11 +4212,63 @@ mod tests {
         assert_eq!(paths.plugins_dir, data_root.join("plugins"));
         assert_eq!(paths.agent_data_root, data_root.join("agent-integration"));
 
+        std::fs::create_dir_all(&config_root).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::write(&paths.config_file, b"{}").unwrap();
+        let legacy_cache = paths.data_dir.join("model-catalog-cache.json");
+        std::fs::write(&legacy_cache, b"{}").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&config_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&paths.data_dir, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            std::fs::set_permissions(&paths.config_file, std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+            std::fs::set_permissions(&legacy_cache, std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+        }
         paths.create_writable_dirs().unwrap();
         assert!(config_root.is_dir());
         assert!(paths.data_dir.is_dir());
         assert!(paths.plugins_dir.is_dir());
         assert!(paths.agent_data_root.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&config_root)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&paths.data_dir)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&paths.config_file)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(&legacy_cache)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
 
         let draft = template(&paths.data_dir, &paths.plugins_dir);
         assert_eq!(draft["data"]["dir"], json!(paths.data_dir));
@@ -5657,10 +5738,9 @@ mod tests {
         );
 
         let catalog_path = root.join("data").join("model-catalog-cache.json");
-        std::fs::create_dir_all(root.join("data")).unwrap();
-        std::fs::write(
+        crate::agent_integration::safe_fs::write_atomic_private(
             &catalog_path,
-            serde_json::to_vec_pretty(&json!({
+            &serde_json::to_vec_pretty(&json!({
                 "version": 2,
                 "providers": {
                     "local": {

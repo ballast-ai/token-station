@@ -5,6 +5,7 @@
 //! stdout; operational chatter and errors go to stderr, so `stats | column`
 //! composes.
 
+use std::io::{BufRead, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -23,7 +24,7 @@ use token_station_metrics::Recorder;
 #[command(
     name = "token-station-cli",
     version,
-    about = "A loopback LLM proxy: local routing, BYOK, content never leaves your machine"
+    about = "A loopback LLM proxy with local routing, BYOK, and content-free metrics"
 )]
 struct Cli {
     /// The configuration file every command reads (and the editing ones
@@ -478,10 +479,7 @@ fn key(command: &KeyCommand) -> Result<(), String> {
         // and shell history.
         KeyCommand::Set { upstream, slot } => {
             eprintln!("paste the key for {upstream}/{slot}, then press Enter:");
-            let mut line = String::new();
-            std::io::stdin()
-                .read_line(&mut line)
-                .map_err(|error| format!("stdin: {error}"))?;
+            let line = read_secret_from_stdin()?;
             let value = line.trim();
             if value.is_empty() {
                 return Err("no key on stdin; nothing stored".to_owned());
@@ -495,6 +493,52 @@ fn key(command: &KeyCommand) -> Result<(), String> {
             eprintln!("removed {upstream}/{slot} from the OS keychain");
             Ok(())
         }
+    }
+}
+
+fn read_secret_from_stdin() -> Result<String, String> {
+    let stdin = std::io::stdin();
+    if !stdin.is_terminal() {
+        let mut line = String::new();
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .map_err(|error| format!("stdin: {error}"))?;
+        return Ok(line);
+    }
+
+    #[cfg(unix)]
+    {
+        struct EchoGuard;
+        impl Drop for EchoGuard {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("stty").arg("echo").status();
+                eprintln!();
+            }
+        }
+
+        let disabled = std::process::Command::new("stty")
+            .arg("-echo")
+            .status()
+            .map_err(|_| "cannot disable terminal echo; pipe the key through stdin".to_owned())?;
+        if !disabled.success() {
+            return Err("cannot disable terminal echo; pipe the key through stdin".to_owned());
+        }
+        let _guard = EchoGuard;
+        let mut line = String::new();
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .map_err(|error| format!("stdin: {error}"))?;
+        Ok(line)
+    }
+
+    #[cfg(not(unix))]
+    {
+        Err(
+            "interactive secret input is unavailable without echo; pipe the key through stdin"
+                .to_owned(),
+        )
     }
 }
 
@@ -590,9 +634,10 @@ fn serve(config_path: &Path) -> Result<(), String> {
     let key = if config.server.auth {
         let (key, created) = virtual_key::load_or_create(&config.data.dir)?;
         if created {
-            // Printed exactly once, at creation. Later startups say where it
-            // lives instead, because startup output tends to end up in logs.
-            eprintln!("local virtual key (created now, shown once): {key}");
+            eprintln!(
+                "auth on; created an owner-only virtual key at {}",
+                config.data.dir.join("virtual-key").display()
+            );
         } else {
             eprintln!(
                 "auth on; virtual key at {}",

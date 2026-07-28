@@ -20,6 +20,7 @@
 //! proves the publisher, the rebuild proves the source.
 
 use std::fmt::Write as _;
+use std::io::Read;
 use std::path::Path;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -29,6 +30,11 @@ use sha2::{Digest, Sha256};
 /// The manifest shape's version. A verifier that meets a number it does not
 /// know must refuse, not guess.
 pub const FORMAT_VERSION: u32 = 1;
+
+const MAX_PLUGIN_FILES: usize = 10_000;
+const MAX_PLUGIN_DEPTH: usize = 16;
+const MAX_PLUGIN_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PLUGIN_PACKAGE_BYTES: u64 = 128 * 1024 * 1024;
 
 /// One release: what was published, hashed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,9 +123,20 @@ impl ReleaseManifest {
 ///
 /// The file could not be read.
 pub fn sha256_file(path: &Path) -> Result<String, String> {
-    let bytes =
-        std::fs::read(path).map_err(|error| format!("read `{}`: {error}", path.display()))?;
-    Ok(hex(&Sha256::digest(&bytes)))
+    let mut file =
+        std::fs::File::open(path).map_err(|error| format!("read `{}`: {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("read `{}`: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex(&hasher.finalize()))
 }
 
 /// A fresh Ed25519 signing key from the OS entropy source.
@@ -190,30 +207,114 @@ pub fn verify_bytes(key: &VerifyingKey, bytes: &[u8], signature_hex: &str) -> Re
 ///
 /// An unreadable package directory or file.
 pub fn plugin_package_digest(package_dir: &Path) -> Result<String, String> {
-    let mut names = Vec::new();
-    let entries = std::fs::read_dir(package_dir)
+    let root_metadata = std::fs::symlink_metadata(package_dir)
         .map_err(|error| format!("package `{}`: {error}", package_dir.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("package entry: {error}"))?;
-        let name = entry.file_name();
-        let name = name
-            .to_str()
-            .ok_or_else(|| "package file name is not UTF-8".to_owned())?;
-        if name == PLUGIN_SIGNATURE_FILE {
-            continue;
-        }
-        names.push(name.to_owned());
+    if !root_metadata.file_type().is_dir() {
+        return Err(format!(
+            "package `{}` is not a directory",
+            package_dir.display()
+        ));
     }
-    names.sort();
-    if names.is_empty() {
+
+    let mut files = Vec::new();
+    collect_plugin_files(package_dir, package_dir, 0, &mut files)?;
+    files.sort();
+    if files.is_empty() {
         return Err(format!("package `{}` is empty", package_dir.display()));
     }
 
+    let mut total_bytes = 0_u64;
     let mut digest = String::new();
-    for name in names {
-        let _ = writeln!(digest, "{name}\n{}", sha256_file(&package_dir.join(&name))?);
+    for relative in files {
+        let path = package_dir.join(&relative);
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("package entry `{}`: {error}", path.display()))?;
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "package entry `{}` is not a regular file",
+                path.display()
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.nlink() != 1 {
+                return Err(format!(
+                    "package entry `{}` has multiple hard links",
+                    path.display()
+                ));
+            }
+        }
+        if metadata.len() > MAX_PLUGIN_FILE_BYTES {
+            return Err(format!(
+                "package entry `{}` exceeds the {} byte file limit",
+                path.display(),
+                MAX_PLUGIN_FILE_BYTES
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(metadata.len());
+        if total_bytes > MAX_PLUGIN_PACKAGE_BYTES {
+            return Err(format!(
+                "package exceeds the {MAX_PLUGIN_PACKAGE_BYTES} byte total limit"
+            ));
+        }
+        let relative = relative
+            .to_str()
+            .ok_or_else(|| "package file name is not UTF-8".to_owned())?
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let _ = writeln!(digest, "{relative}\n{}", sha256_file(&path)?);
     }
     Ok(digest)
+}
+
+fn collect_plugin_files(
+    root: &Path,
+    directory: &Path,
+    depth: usize,
+    files: &mut Vec<std::path::PathBuf>,
+) -> Result<(), String> {
+    if depth > MAX_PLUGIN_DEPTH {
+        return Err(format!(
+            "package directory depth exceeds the {MAX_PLUGIN_DEPTH} level limit"
+        ));
+    }
+    let entries = std::fs::read_dir(directory)
+        .map_err(|error| format!("package directory `{}`: {error}", directory.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("package entry: {error}"))?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| format!("package entry `{}` escaped its root", path.display()))?;
+        if relative == Path::new(PLUGIN_SIGNATURE_FILE) {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("package entry `{}`: {error}", path.display()))?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            return Err(format!(
+                "package entry `{}` is a symbolic link; symbolic links are forbidden",
+                path.display()
+            ));
+        }
+        if file_type.is_dir() {
+            collect_plugin_files(root, &path, depth + 1, files)?;
+        } else if file_type.is_file() {
+            files.push(relative.to_path_buf());
+            if files.len() > MAX_PLUGIN_FILES {
+                return Err(format!(
+                    "package contains more than {MAX_PLUGIN_FILES} files"
+                ));
+            }
+        } else {
+            return Err(format!(
+                "package entry `{}` is not a regular file or directory",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The signature file inside a plugin package.
@@ -406,5 +507,39 @@ mod tests {
         let after = plugin_package_digest(&dir).expect("digests");
 
         assert_eq!(before, after, "signing must not invalidate itself");
+    }
+
+    #[test]
+    fn package_digest_recursively_binds_fixture_paths_and_bytes() {
+        let dir = scratch_dir("recursive-digest");
+        std::fs::create_dir_all(dir.join("fixtures/nested")).expect("fixture tree");
+        std::fs::write(dir.join("manifest.json"), b"{}").expect("manifest");
+        std::fs::write(dir.join("adapter.wasm"), b"wasm").expect("wasm");
+        std::fs::write(dir.join("fixtures/nested/case.json"), b"{\"version\":1}").expect("fixture");
+
+        let before = plugin_package_digest(&dir).expect("a real plugin tree digests");
+        std::fs::write(dir.join("fixtures/nested/case.json"), b"{\"version\":2}")
+            .expect("fixture changes");
+        let after = plugin_package_digest(&dir).expect("changed tree digests");
+
+        assert_ne!(
+            before, after,
+            "a receipt or signature must bind every recursive fixture byte"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_digest_rejects_symlinks_instead_of_following_them() {
+        use std::os::unix::fs::symlink;
+
+        let dir = scratch_dir("special-entry");
+        std::fs::create_dir_all(dir.join("fixtures")).expect("fixture tree");
+        std::fs::write(dir.join("outside.json"), b"outside").expect("target");
+        symlink("../outside.json", dir.join("fixtures/case.json")).expect("symlink");
+
+        let error =
+            plugin_package_digest(&dir).expect_err("package symlinks are not trusted bytes");
+        assert!(error.contains("symbolic links are forbidden"), "{error}");
     }
 }

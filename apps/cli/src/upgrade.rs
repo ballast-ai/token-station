@@ -11,11 +11,12 @@
 //! distribution channel is a courier, not an authority — swapping the
 //! endpoint for a self-hosted one later changes one constant here.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use token_station_release::{ReleaseManifest, parse_public_key, sha256_file, verify_bytes};
+use sha2::{Digest, Sha256};
+use token_station_release::{ReleaseManifest, parse_public_key, verify_bytes};
 
 /// The official release public key, lowercase hex, stamped in by the release
 /// pipeline. Empty in a source build: version *checking* still works, and
@@ -54,7 +55,7 @@ pub struct Asset {
 /// Transport failure, a non-200, or a body that is not a release.
 pub fn check(endpoint: &str) -> Result<Release, String> {
     let url = format!("{endpoint}/releases/latest");
-    let body = http_get_string(&url)?;
+    let body = http_get_string(&url, MAX_METADATA_DOWNLOAD)?;
     serde_json::from_str(&body).map_err(|error| format!("release listing: {error}"))
 }
 
@@ -133,8 +134,14 @@ pub fn download_and_verify(
     let artifact_name = format!("token-station-cli-{version}-{triple}.tar.gz");
 
     // Manifest and signature are small; verify them before the big download.
-    let manifest_bytes = http_get_bytes(&asset("manifest.json")?.browser_download_url)?;
-    let signature = http_get_string(&asset("manifest.json.sig")?.browser_download_url)?;
+    let manifest_bytes = http_get_bytes(
+        &asset("manifest.json")?.browser_download_url,
+        MAX_METADATA_DOWNLOAD,
+    )?;
+    let signature = http_get_string(
+        &asset("manifest.json.sig")?.browser_download_url,
+        MAX_SIGNATURE_DOWNLOAD,
+    )?;
     verify_bytes(&key, &manifest_bytes, &signature)
         .map_err(|error| format!("release manifest does not verify: {error}"))?;
     let manifest = ReleaseManifest::parse(&manifest_bytes)?;
@@ -142,27 +149,28 @@ pub fn download_and_verify(
         .sha256_of(&artifact_name)
         .ok_or_else(|| format!("the signed manifest does not list `{artifact_name}`"))?;
 
-    let artifact = http_get_bytes(&asset(&artifact_name)?.browser_download_url)?;
     let path = target_dir.join(&artifact_name);
-    std::fs::write(&path, &artifact)
-        .map_err(|error| format!("write `{}`: {error}", path.display()))?;
-
-    let actual = sha256_file(&path)?;
-    if actual != expected {
-        std::fs::remove_file(&path).ok();
+    if path.exists() {
         return Err(format!(
-            "`{artifact_name}` does not match the signed manifest (expected {expected}, got \
-             {actual}); the download was discarded"
+            "`{}` already exists; refusing to overwrite it",
+            path.display()
         ));
     }
+    download_verified_artifact(
+        &asset(&artifact_name)?.browser_download_url,
+        &path,
+        expected,
+    )?;
     Ok(path)
 }
 
 /// Downloads are capped: a release artifact is megabytes, and an endpoint
 /// that answers with more is answering something else.
 const MAX_DOWNLOAD: u64 = 256 * 1024 * 1024;
+const MAX_METADATA_DOWNLOAD: u64 = 1024 * 1024;
+const MAX_SIGNATURE_DOWNLOAD: u64 = 64 * 1024;
 
-fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
+fn http_response(url: &str) -> Result<ureq::http::Response<ureq::Body>, String> {
     let http = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .http_status_as_error(false)
@@ -183,19 +191,120 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
     if status != 200 {
         return Err(format!("GET {url}: HTTP {status}"));
     }
+    Ok(response)
+}
+
+fn http_get_bytes(url: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let response = http_response(url)?;
     let mut bytes = Vec::new();
     response
         .into_body()
         .into_with_config()
-        .limit(MAX_DOWNLOAD)
+        .limit(limit + 1)
         .reader()
         .read_to_end(&mut bytes)
         .map_err(|error| format!("GET {url}: {error}"))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+        return Err(format!(
+            "GET {url}: response exceeds the {limit} byte limit"
+        ));
+    }
     Ok(bytes)
 }
 
-fn http_get_string(url: &str) -> Result<String, String> {
-    String::from_utf8(http_get_bytes(url)?).map_err(|_| format!("GET {url}: not UTF-8"))
+fn http_get_string(url: &str, limit: u64) -> Result<String, String> {
+    String::from_utf8(http_get_bytes(url, limit)?).map_err(|_| format!("GET {url}: not UTF-8"))
+}
+
+fn download_verified_artifact(url: &str, path: &Path, expected: &str) -> Result<(), String> {
+    std::fs::create_dir_all(
+        path.parent()
+            .ok_or_else(|| format!("download target `{}` has no parent", path.display()))?,
+    )
+    .map_err(|error| format!("create download directory: {error}"))?;
+    let temporary = temporary_download_path(path)?;
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| format!("write `{}`: {error}", temporary.display()))?;
+        let mut reader = http_response(url)?
+            .into_body()
+            .into_with_config()
+            .limit(MAX_DOWNLOAD + 1)
+            .reader();
+        let mut hasher = Sha256::new();
+        let mut total = 0_u64;
+        let mut buffer = vec![0_u8; 64 * 1024];
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .map_err(|error| format!("GET {url}: {error}"))?;
+            if read == 0 {
+                break;
+            }
+            total = total
+                .checked_add(read as u64)
+                .ok_or_else(|| "download size overflow".to_owned())?;
+            if total > MAX_DOWNLOAD {
+                return Err(format!(
+                    "GET {url}: artifact exceeds the {MAX_DOWNLOAD} byte limit"
+                ));
+            }
+            hasher.update(&buffer[..read]);
+            file.write_all(&buffer[..read])
+                .map_err(|error| format!("write `{}`: {error}", temporary.display()))?;
+        }
+        file.flush()
+            .and_then(|()| file.sync_all())
+            .map_err(|error| format!("sync `{}`: {error}", temporary.display()))?;
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != expected {
+            return Err(format!(
+                "`{}` does not match the signed manifest (expected {expected}, got {actual}); the download was discarded",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+        }
+        std::fs::hard_link(&temporary, path).map_err(|error| {
+            format!(
+                "publish verified artifact `{}` without overwrite: {error}",
+                path.display()
+            )
+        })?;
+        std::fs::remove_file(&temporary)
+            .map_err(|error| format!("remove `{}`: {error}", temporary.display()))
+    })();
+    if result.is_err() {
+        std::fs::remove_file(&temporary).ok();
+    }
+    result
+}
+
+fn temporary_download_path(path: &Path) -> Result<PathBuf, String> {
+    let name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| format!("invalid download target `{}`", path.display()))?;
+    for _ in 0..16 {
+        let mut random = [0_u8; 12];
+        getrandom::fill(&mut random).map_err(|error| format!("randomness: {error}"))?;
+        let suffix = random.iter().fold(String::new(), |mut output, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(output, "{byte:02x}");
+            output
+        });
+        let temporary = path.with_file_name(format!(".{name}.{suffix}.partial"));
+        if !temporary.exists() {
+            return Ok(temporary);
+        }
+    }
+    Err("could not allocate a unique download staging file".to_owned())
 }
 
 #[cfg(test)]

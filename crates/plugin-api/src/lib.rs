@@ -26,7 +26,7 @@ mod manifest;
 
 pub use manifest::{
     AdapterKind, AdapterManifest, AdapterMetadata, AdapterPermissions, Capability, ConformanceSpec,
-    ManifestError,
+    ManifestError, validate_package_relative_path, validate_plugin_name,
 };
 
 /// The adapter ABI, as WIT source.
