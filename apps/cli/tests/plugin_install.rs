@@ -67,6 +67,22 @@ fn config(tag: &str) -> ClientConfig {
     serde_json::from_value(config).expect("test config parses")
 }
 
+fn cloned_source(tag: &str) -> PathBuf {
+    let source = source_package();
+    let dir = std::env::temp_dir().join(format!("ts-install-clone-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("fixtures")).expect("clone fixture dir");
+    for file in ["manifest.json", "adapter.wasm"] {
+        std::fs::copy(source.join(file), dir.join(file)).expect("package file clones");
+    }
+    for entry in std::fs::read_dir(source.join("fixtures")).expect("fixtures exist") {
+        let entry = entry.expect("fixture readable");
+        std::fs::copy(entry.path(), dir.join("fixtures").join(entry.file_name()))
+            .expect("fixture clones");
+    }
+    dir
+}
+
 #[test]
 fn install_admits_serve_follows_and_tampering_revokes() {
     let config = config("roundtrip");
@@ -86,7 +102,7 @@ fn install_admits_serve_follows_and_tampering_revokes() {
         registry
             .package("provider-openai-compatible")
             .expect("catalogued")
-            .verified
+            .conformance_passed
     );
 
     // A second install of the same package is refused, not overwritten.
@@ -163,4 +179,94 @@ fn remove_deletes_the_package_unless_an_upstream_depends_on_it() {
     assert!(summary.contains("removed"), "{summary}");
     let registry = PluginRegistry::for_config(&config).expect("registry builds");
     assert!(registry.package("provider-openai-compatible").is_none());
+}
+
+#[test]
+fn remove_rejects_relative_and_absolute_paths_before_touching_the_filesystem() {
+    let config = config("remove-escape");
+    let scratch = config.plugins.dir.parent().expect("plugins has a parent");
+    let victim = scratch.join("victim");
+    std::fs::create_dir_all(&victim).expect("victim dir");
+    std::fs::write(
+        victim.join("manifest.json"),
+        b"not a plugin, only a deletion canary",
+    )
+    .expect("victim marker");
+
+    for malicious_name in ["../victim", victim.to_str().expect("utf-8 temp path")] {
+        let error = plugins::remove(&config, malicious_name)
+            .expect_err("a plugin name is never a relative or absolute path");
+        assert!(
+            error.contains("plugin name"),
+            "refusal should identify the invalid public input: {error}"
+        );
+        assert!(
+            victim.join("manifest.json").exists(),
+            "invalid input must not delete outside the plugin root"
+        );
+    }
+
+    std::fs::remove_dir_all(scratch).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn install_rejects_a_fixture_symlink_without_copying_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let config = config("fixture-symlink");
+    let source = cloned_source("fixture-symlink");
+    let outside = source
+        .parent()
+        .expect("source parent")
+        .join(format!("ts-install-secret-{}.txt", std::process::id()));
+    std::fs::write(&outside, b"must never be copied").expect("outside canary");
+    symlink(&outside, source.join("fixtures/leak.txt")).expect("fixture symlink");
+
+    let error = plugins::install(&config, &source)
+        .expect_err("an installable package may not contain symbolic links");
+    assert!(error.contains("symbolic link"), "{error}");
+    assert!(
+        !config
+            .plugins
+            .dir
+            .join("provider-openai-compatible")
+            .exists(),
+        "a refused package must not leave a discoverable directory"
+    );
+
+    std::fs::remove_dir_all(source).ok();
+    std::fs::remove_file(outside).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn remove_rejects_a_plugin_directory_symlink_without_touching_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let config = config("remove-symlink");
+    let scratch = config.plugins.dir.parent().expect("plugins has a parent");
+    let victim = scratch.join("victim-plugin");
+    std::fs::create_dir_all(&victim).expect("victim dir");
+    std::fs::copy(
+        source_package().join("manifest.json"),
+        victim.join("manifest.json"),
+    )
+    .expect("valid victim manifest");
+    symlink(
+        &victim,
+        config.plugins.dir.join("provider-openai-compatible"),
+    )
+    .expect("plugin directory symlink");
+
+    let error = plugins::remove(&config, "provider-openai-compatible")
+        .expect_err("removal may never follow an installed-directory symlink");
+    assert!(error.contains("symbolic link"), "{error}");
+    assert!(
+        victim.join("manifest.json").exists(),
+        "the symlink target must remain untouched"
+    );
+
+    std::fs::remove_file(config.plugins.dir.join("provider-openai-compatible")).ok();
+    std::fs::remove_dir_all(scratch).ok();
 }

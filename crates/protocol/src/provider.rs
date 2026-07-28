@@ -36,6 +36,9 @@ impl ProviderEndpoint {
         if rest.contains('?') || rest.contains('#') {
             return Err(EndpointError::CarriesQueryOrFragment);
         }
+        if path_is_ambiguous(rest) {
+            return Err(EndpointError::AmbiguousPath);
+        }
 
         let path = normalize_api_root(rest.trim_end_matches('/'));
         Ok(Self { origin, path })
@@ -55,11 +58,9 @@ impl ProviderEndpoint {
     /// `http://api.example`. Anything this method cannot parse as an origin —
     /// including a `user:pass@` authority — is refused rather than guessed at.
     ///
-    /// The *path* prefix is a narrower check on top, and it does not resolve
-    /// dot-segments: `/v1/../admin` passes. That is deliberate rather than
-    /// overlooked. Dot-segments cannot change an origin, so the credential still
-    /// only ever reaches the configured upstream, which is the property being
-    /// defended.
+    /// Ambiguous spellings (dot segments, encoded separators, backslashes and
+    /// repeated separators) fail closed so authorization and the HTTP client
+    /// cannot interpret the same descriptor as two different targets.
     #[must_use]
     pub fn permits(&self, url: &str) -> bool {
         let Ok((origin, rest)) = split_origin(url) else {
@@ -72,6 +73,9 @@ impl ProviderEndpoint {
         let path = rest
             .split_once(['?', '#'])
             .map_or(rest, |(before, _)| before);
+        if path_is_ambiguous(path) {
+            return false;
+        }
 
         path == self.path
             || path
@@ -82,6 +86,32 @@ impl ProviderEndpoint {
     #[must_use]
     pub fn as_str(&self) -> String {
         format!("{}{}", self.origin, self.path)
+    }
+
+    /// Whether the configured endpoint's host is a loopback identity. Product
+    /// `local_only` policy must derive this from the endpoint, never from an
+    /// operator-controlled label alone.
+    #[must_use]
+    pub fn is_loopback(&self) -> bool {
+        let authority = self
+            .origin
+            .strip_prefix("https://")
+            .or_else(|| self.origin.strip_prefix("http://"))
+            .unwrap_or_default();
+        let host = if let Some(bracketed) = authority.strip_prefix('[') {
+            bracketed.split_once(']').map_or("", |(host, _)| host)
+        } else {
+            authority
+                .rsplit_once(':')
+                .filter(|(_, port)| {
+                    !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                .map_or(authority, |(host, _)| host)
+        };
+        host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
     }
 
     /// Resolves one canonical Provider API target from the normalized root.
@@ -124,6 +154,57 @@ fn normalize_api_root(path: &str) -> String {
         .unwrap_or(path)
         .trim_end_matches('/')
         .to_owned()
+}
+
+fn path_is_ambiguous(path: &str) -> bool {
+    if path.contains('\\')
+        || path.contains("//")
+        || path
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b' ')
+    {
+        return true;
+    }
+    path.split('/').any(|segment| {
+        if matches!(segment, "." | "..") {
+            return true;
+        }
+        let bytes = segment.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] != b'%' {
+                decoded.push(bytes[index]);
+                index += 1;
+                continue;
+            }
+            if index + 2 >= bytes.len() {
+                return true;
+            }
+            let Some(high) = hex_nibble(bytes[index + 1]) else {
+                return true;
+            };
+            let Some(low) = hex_nibble(bytes[index + 2]) else {
+                return true;
+            };
+            let byte = high << 4 | low;
+            if matches!(byte, b'/' | b'\\') || byte.is_ascii_control() {
+                return true;
+            }
+            decoded.push(byte);
+            index += 3;
+        }
+        decoded == b"." || decoded == b".."
+    })
+}
+
+const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 impl fmt::Display for ProviderEndpoint {
@@ -177,6 +258,7 @@ pub enum EndpointError {
     MissingHost,
     CarriesUserinfo,
     CarriesQueryOrFragment,
+    AmbiguousPath,
 }
 
 impl fmt::Display for EndpointError {
@@ -189,6 +271,9 @@ impl fmt::Display for EndpointError {
             ),
             Self::CarriesQueryOrFragment => f.write_str(
                 "a provider endpoint must not carry a query or fragment; that is where an API key gets pasted",
+            ),
+            Self::AmbiguousPath => f.write_str(
+                "a provider endpoint path must not contain dot segments, encoded separators, backslashes or repeated separators",
             ),
         }
     }
@@ -379,6 +464,14 @@ mod tests {
     }
 
     #[test]
+    fn loopback_identity_is_derived_from_the_endpoint_not_an_operator_label() {
+        assert!(endpoint("http://127.0.0.1:11434/v1").is_loopback());
+        assert!(endpoint("http://[::1]:11434/v1").is_loopback());
+        assert!(endpoint("http://localhost:11434/v1").is_loopback());
+        assert!(!endpoint("https://api.example.com/v1").is_loopback());
+    }
+
+    #[test]
     fn origin_root_and_complete_endpoint_resolve_to_one_path() {
         for raw in [
             "https://api.example.com",
@@ -437,6 +530,24 @@ mod tests {
             "a prefix that stops mid-segment is a different path"
         );
         assert!(!base.permits("https://api.openai.com/"));
+    }
+
+    #[test]
+    fn permits_refuses_ambiguous_path_spellings_before_credentials_are_resolved() {
+        let base = endpoint("https://api.openai.com/v1");
+
+        for url in [
+            "https://api.openai.com/v1/../admin",
+            "https://api.openai.com/v1/%2e%2e/admin",
+            "https://api.openai.com/v1/%2Fadmin",
+            "https://api.openai.com/v1\\..\\admin",
+            "https://api.openai.com/v1//chat/completions",
+        ] {
+            assert!(
+                !base.permits(url),
+                "ambiguous target must fail closed: {url}"
+            );
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The local virtual key: what stands between the loopback port and every
 //! other process on this machine.
 //!
-//! Generated on first start, printed exactly once, and
+//! Generated automatically on first start, never printed by the server, and
 //! required on every endpoint by default. Loopback is a boundary
 //! against the network, not against local software — any browser tab that can
 //! issue `fetch("http://127.0.0.1:8787/...")` is on this side of it, and what
@@ -19,9 +19,9 @@ const KEY_BYTES: usize = 24;
 
 /// Loads the virtual key, creating it on first start.
 ///
-/// Returns the key and whether this call created it — the caller prints it
-/// only then. On later starts the key is deliberately not printed: it is
-/// already wherever the operator put it, and startup output ends up in logs.
+/// Returns the key and whether this call created it. The caller uses the key
+/// in memory and reports only the owner-only file path; startup output ends up
+/// in logs and must never carry credential material.
 ///
 /// # Errors
 ///

@@ -39,13 +39,19 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use token_station_plugin_api::{AdapterKind, AdapterManifest};
-use token_station_release::sha256_file;
+use token_station_plugin_api::{AdapterKind, AdapterManifest, validate_plugin_name};
+use token_station_release::{plugin_package_digest, sha256_file};
 
 use crate::config::{ClientConfig, PluginsConfig};
+
+const MAX_PACKAGE_FILES: usize = 10_000;
+const MAX_PACKAGE_DEPTH: usize = 16;
+const MAX_PACKAGE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PACKAGE_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
 
 /// The builtin tier's raw material. With the feature off the slice is empty
 /// and everything below degrades to pure directory discovery.
@@ -112,27 +118,23 @@ pub struct DiscoveredPackage {
     pub manifest: AdapterManifest,
     pub source: PackageSource,
     /// Builtin, or carries a conformance receipt matching its current
-    /// `adapter.wasm`. Unverified packages are catalogued but bind no
+    /// package digest. Packages without conformance are catalogued but bind no
     /// dialects unless the operator vouches (see the module docs).
-    pub verified: bool,
+    pub conformance_passed: bool,
+    /// Publisher identity is a separate claim from local protocol conformance.
+    pub publisher_signature_verified: bool,
 }
 
 /// What `plugin install` records after a package passes its conformance suite:
-/// the hashes the approval applies to. Approval follows bytes, not names — and
-/// not just the `adapter.wasm` bytes. The `manifest.json` is bound too, so a
-/// package that quietly widens its `permissions` (network, filesystem, a new
-/// secret) or changes any other declared behavior invalidates the receipt even
-/// when the WASM is byte-for-byte identical.
-///
-/// A receipt with an empty `manifest_sha256` is a legacy receipt from before
-/// this binding existed; it no longer verifies, and the package must be
-/// re-installed to earn a full-package approval.
+/// the canonical recursive package digest the approval applies to. Approval
+/// follows every installed byte, not a name or only the component.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Receipt {
-    pub sha256: String,
     #[serde(default)]
-    pub manifest_sha256: String,
+    pub package_digest: String,
     pub suite: String,
+    #[serde(default)]
+    pub publisher_signature_verified: bool,
 }
 
 /// The conformance receipts, one per installed package, stored under the
@@ -162,14 +164,9 @@ impl Receipts {
         Ok(Self { path, entries })
     }
 
-    fn matches(&self, package: &str, sha256: &str, manifest_sha256: &str) -> bool {
-        self.entries.get(package).is_some_and(|receipt| {
-            // Both the WASM and the manifest must match, and a legacy receipt
-            // with no bound manifest hash never verifies — the full package is
-            // what was approved, not the bytes alone.
-            !receipt.manifest_sha256.is_empty()
-                && receipt.sha256 == sha256
-                && receipt.manifest_sha256 == manifest_sha256
+    fn matching(&self, package: &str, package_digest: &str) -> Option<&Receipt> {
+        self.entries.get(package).filter(|receipt| {
+            !receipt.package_digest.is_empty() && receipt.package_digest == package_digest
         })
     }
 
@@ -188,7 +185,8 @@ impl Receipts {
         let mut rendered = serde_json::to_string_pretty(&self.entries)
             .map_err(|error| format!("receipts: {error}"))?;
         rendered.push('\n');
-        fs::write(&self.path, rendered).map_err(|error| format!("{}: {error}", self.path.display()))
+        crate::private_fs::write_atomic_private(&self.path, rendered.as_bytes())
+            .map_err(|error| format!("{}: {error}", self.path.display()))
     }
 }
 
@@ -343,10 +341,14 @@ impl PluginRegistry {
                 PackageSource::Builtin { .. } => manifest.name.clone(),
                 PackageSource::Dir(dir) => package_dir_name(dir),
             };
-            let trust = if package.verified {
-                "verified"
+            let trust = if package.conformance_passed {
+                if package.publisher_signature_verified {
+                    "conformance-passed; publisher-signature-verified"
+                } else {
+                    "conformance-passed; publisher-signature-unverified"
+                }
             } else {
-                "unverified"
+                "conformance-unverified; publisher-signature-unverified"
             };
             let _ = writeln!(
                 out,
@@ -385,7 +387,8 @@ fn builtin_packages() -> Result<Vec<DiscoveredPackage>, String> {
                 manifest_source: package.manifest_source,
                 wasm: package.wasm,
             },
-            verified: true,
+            conformance_passed: true,
+            publisher_signature_verified: true,
         });
     }
     Ok(packages)
@@ -404,7 +407,7 @@ fn bind_declared_dialects(
         if package.manifest.kind != AdapterKind::Provider {
             continue;
         }
-        if !package.verified && !allow_unsigned {
+        if !package.conformance_passed && !allow_unsigned {
             if let PackageSource::Dir(dir) = &package.source {
                 shadowed.push(format!(
                     "package `{}` has no conformance receipt; its dialects [{}] are not served \
@@ -536,21 +539,19 @@ fn scan(dir: &Path, receipts: &Receipts) -> Result<Vec<DiscoveredPackage>, Strin
         manifest
             .validate()
             .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
-        // Approval follows bytes: a receipt for a different (or absent)
-        // adapter.wasm or manifest.json vouches for nothing.
-        let verified = match (
-            sha256_file(&package_dir.join("adapter.wasm")),
-            sha256_file(&manifest_path),
-        ) {
-            (Ok(wasm), Ok(manifest_hash)) => {
-                receipts.matches(&package_dir_name(&package_dir), &wasm, &manifest_hash)
-            }
-            _ => false,
-        };
+        // Approval follows the complete recursive package bytes. Legacy
+        // receipts without a package digest fail closed and require reinstall.
+        let matching_receipt = plugin_package_digest(&package_dir).ok().and_then(|digest| {
+            receipts
+                .matching(&package_dir_name(&package_dir), &digest)
+                .cloned()
+        });
         packages.push(DiscoveredPackage {
             manifest,
             source: PackageSource::Dir(package_dir),
-            verified,
+            conformance_passed: matching_receipt.is_some(),
+            publisher_signature_verified: matching_receipt
+                .is_some_and(|receipt| receipt.publisher_signature_verified),
         });
     }
     Ok(packages)
@@ -582,7 +583,11 @@ pub fn install(config: &ClientConfig, source: &Path) -> Result<String, String> {
         .map_err(|error| format!("{}: {error}", manifest_path.display()))?;
 
     let name = manifest.name.clone();
-    let dest = config.plugins.dir.join(&name);
+    fs::create_dir_all(&config.plugins.dir)
+        .map_err(|error| format!("{}: {error}", config.plugins.dir.display()))?;
+    let plugin_root = fs::canonicalize(&config.plugins.dir)
+        .map_err(|error| format!("{}: {error}", config.plugins.dir.display()))?;
+    let dest = plugin_root.join(&name);
     if dest.exists() {
         return Err(format!(
             "{} already exists; `plugin remove {name}` first",
@@ -610,32 +615,50 @@ pub fn install(config: &ClientConfig, source: &Path) -> Result<String, String> {
         }
     }
 
-    let report = run_conformance(source, &manifest)?;
+    let mut staging = StagingGuard::create(&plugin_root)?;
+    copy_package(
+        source,
+        staging.path(),
+        &manifest.conformance.fixtures,
+        &mut CopyBudget::default(),
+    )?;
+    let staged_manifest_path = staging.path().join("manifest.json");
+    let staged_source = fs::read_to_string(&staged_manifest_path)
+        .map_err(|error| format!("{}: {error}", staged_manifest_path.display()))?;
+    let staged_manifest: AdapterManifest = serde_json::from_str(&staged_source)
+        .map_err(|error| format!("{}: {error}", staged_manifest_path.display()))?;
+    token_station_conformance::accepts_manifest(&staged_manifest)
+        .map_err(|error| format!("{}: {error}", staged_manifest_path.display()))?;
+    if staged_manifest != manifest {
+        return Err(
+            "plugin source changed while it was being staged; retry from stable bytes".into(),
+        );
+    }
+
+    let package_digest = plugin_package_digest(staging.path())?;
+    let report = run_conformance(staging.path(), &staged_manifest)?;
     if !report.is_passing() {
         return Err(format!("conformance refused the package:\n{report}"));
     }
 
-    if let Err(error) = copy_package(source, &dest, &manifest.conformance.fixtures) {
-        // A half-copied package must not sit where discovery scans.
-        let _ = fs::remove_dir_all(&dest);
-        return Err(error);
-    }
-    let sha256 = sha256_file(&dest.join("adapter.wasm"))
-        .map_err(|error| format!("{}: {error}", dest.join("adapter.wasm").display()))?;
-    let manifest_sha256 = sha256_file(&dest.join("manifest.json"))
-        .map_err(|error| format!("{}: {error}", dest.join("manifest.json").display()))?;
+    fs::rename(staging.path(), &dest)
+        .map_err(|error| format!("publish staged plugin to `{}`: {error}", dest.display()))?;
+    staging.disarm();
     receipts.record(
         name.clone(),
         Receipt {
-            sha256,
-            manifest_sha256,
+            package_digest,
             suite: report.suite().to_owned(),
+            publisher_signature_verified: false,
         },
     );
-    receipts.save()?;
+    if let Err(error) = receipts.save() {
+        let _ = fs::remove_dir_all(&dest);
+        return Err(error);
+    }
 
     Ok(format!(
-        "installed `{name}` {} into {} — {} passed, receipt recorded",
+        "installed `{name}` {} into {} — {} conformance passed; publisher signature unverified",
         manifest.version,
         dest.display(),
         report.suite(),
@@ -649,19 +672,53 @@ pub fn install(config: &ClientConfig, source: &Path) -> Result<String, String> {
 ///
 /// No such package, an upstream still depends on it, or the filesystem.
 pub fn remove(config: &ClientConfig, name: &str) -> Result<String, String> {
-    let dir = config.plugins.dir.join(name);
-    if !dir.join("manifest.json").is_file() {
+    validate_plugin_name(name).map_err(|error| format!("plugin name refused: {error}"))?;
+    let plugin_root = fs::canonicalize(&config.plugins.dir)
+        .map_err(|error| format!("{}: {error}", config.plugins.dir.display()))?;
+    let logical_dir = config.plugins.dir.join(name);
+    let metadata = fs::symlink_metadata(&logical_dir)
+        .map_err(|error| format!("{}: {error}", logical_dir.display()))?;
+    if metadata.file_type().is_symlink() {
         return Err(format!(
-            "no installed package at {}; `plugin list` shows what exists",
+            "installed package path `{}` is a symbolic link; refusing removal",
+            logical_dir.display()
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "installed package path `{}` is not a directory",
+            logical_dir.display()
+        ));
+    }
+    let dir = fs::canonicalize(&logical_dir)
+        .map_err(|error| format!("{}: {error}", logical_dir.display()))?;
+    if dir.parent() != Some(plugin_root.as_path()) {
+        return Err(format!(
+            "installed package `{}` does not resolve directly under the configured plugin root",
+            logical_dir.display()
+        ));
+    }
+    let manifest_metadata = fs::symlink_metadata(dir.join("manifest.json"))
+        .map_err(|error| format!("{}: {error}", dir.join("manifest.json").display()))?;
+    if manifest_metadata.file_type().is_symlink() || !manifest_metadata.is_file() {
+        return Err(format!(
+            "no real installed package manifest at {}; `plugin list` shows what exists",
             dir.display()
         ));
     }
 
     let registry = PluginRegistry::for_config(config)?;
     for (upstream, entry) in &config.upstreams {
-        let serves_through_this = registry
-            .provider_binding(&entry.provider)
-            .is_some_and(|binding| matches!(&binding.source, PackageSource::Dir(d) if *d == dir));
+        let serves_through_this =
+            registry
+                .provider_binding(&entry.provider)
+                .is_some_and(|binding| {
+                    matches!(
+                        &binding.source,
+                        PackageSource::Dir(candidate)
+                            if fs::canonicalize(candidate).is_ok_and(|resolved| resolved == dir)
+                    )
+                });
         if serves_through_this {
             return Err(format!(
                 "upstream `{upstream}` still speaks `{}` through `{name}`; \
@@ -698,11 +755,20 @@ pub fn info(config: &ClientConfig, name: &str) -> Result<String, String> {
     let _ = writeln!(out, "source: {}", package.source.describe());
     let _ = writeln!(
         out,
-        "trust: {}",
-        if package.verified {
-            "verified"
+        "conformance: {}",
+        if package.conformance_passed {
+            "passed"
         } else {
             "unverified — `plugin install` it to run conformance"
+        }
+    );
+    let _ = writeln!(
+        out,
+        "publisher signature: {}",
+        if package.publisher_signature_verified {
+            "verified"
+        } else {
+            "unverified"
         }
     );
     match manifest.kind {
@@ -766,31 +832,278 @@ pub(crate) fn run_conformance(
     }
 }
 
-/// Copies what the runtime and future re-verification need: the manifest,
-/// the component, and the fixtures the suite ran on.
-fn copy_package(source: &Path, dest: &Path, fixtures_rel: &str) -> Result<(), String> {
-    fs::create_dir_all(dest).map_err(|error| format!("{}: {error}", dest.display()))?;
-    for file in ["manifest.json", "adapter.wasm"] {
-        fs::copy(source.join(file), dest.join(file))
-            .map_err(|error| format!("{}: {error}", source.join(file).display()))?;
-    }
-    copy_dir(&source.join(fixtures_rel), &dest.join(fixtures_rel))
+#[derive(Default)]
+struct CopyBudget {
+    files: usize,
+    bytes: u64,
 }
 
-fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
-    fs::create_dir_all(to).map_err(|error| format!("{}: {error}", to.display()))?;
-    let entries = fs::read_dir(from).map_err(|error| format!("{}: {error}", from.display()))?;
+/// Owns a private, same-filesystem staging directory until publication.
+struct StagingGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StagingGuard {
+    fn create(plugin_root: &Path) -> Result<Self, String> {
+        for _ in 0..16 {
+            let mut random = [0_u8; 16];
+            getrandom::fill(&mut random)
+                .map_err(|error| format!("generate plugin staging name: {error}"))?;
+            let suffix = random
+                .iter()
+                .fold(String::with_capacity(32), |mut output, byte| {
+                    let _ = write!(output, "{byte:02x}");
+                    output
+                });
+            let path = plugin_root.join(format!(".install-{suffix}.tmp"));
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
+                Ok(()) => return Ok(Self { path, armed: true }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(format!("{}: {error}", path.display())),
+            }
+        }
+        Err("could not allocate a unique plugin staging directory".to_owned())
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagingGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+/// Copies exactly the package bytes that will be verified and published.
+/// Every source entry is inspected without following links; every regular
+/// file is opened no-follow and streamed into a private create-new target.
+fn copy_package(
+    source: &Path,
+    dest: &Path,
+    fixtures_rel: &str,
+    budget: &mut CopyBudget,
+) -> Result<(), String> {
+    let source_metadata =
+        fs::symlink_metadata(source).map_err(|error| format!("{}: {error}", source.display()))?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        return Err(format!(
+            "plugin source `{}` must be a real directory, not a link or special file",
+            source.display()
+        ));
+    }
+
+    for file in ["manifest.json", "adapter.wasm"] {
+        copy_regular_file(&source.join(file), &dest.join(file), budget)?;
+    }
+    copy_dir(
+        &source.join(fixtures_rel),
+        &dest.join(fixtures_rel),
+        1,
+        budget,
+    )?;
+
+    let signature = source.join("signature.sig");
+    match fs::symlink_metadata(&signature) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(format!(
+                "optional signature `{}` must be a real regular file",
+                signature.display()
+            ));
+        }
+        Ok(_) => copy_regular_file(&signature, &dest.join("signature.sig"), budget)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("{}: {error}", signature.display())),
+    }
+    Ok(())
+}
+
+fn copy_dir(from: &Path, to: &Path, depth: usize, budget: &mut CopyBudget) -> Result<(), String> {
+    if depth > MAX_PACKAGE_DEPTH {
+        return Err(format!(
+            "plugin package exceeds the maximum directory depth of {MAX_PACKAGE_DEPTH}"
+        ));
+    }
+    let metadata =
+        fs::symlink_metadata(from).map_err(|error| format!("{}: {error}", from.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "plugin package directory `{}` must be a real directory; symbolic links are forbidden",
+            from.display()
+        ));
+    }
+
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(to)
+        .map_err(|error| format!("{}: {error}", to.display()))?;
+
+    let mut entries = fs::read_dir(from)
+        .map_err(|error| format!("{}: {error}", from.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("{}: {error}", from.display()))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
-        let entry = entry.map_err(|error| format!("{}: {error}", from.display()))?;
+        let source = entry.path();
         let target = to.join(entry.file_name());
-        if entry.path().is_dir() {
-            copy_dir(&entry.path(), &target)?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("{}: {error}", source.display()))?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "plugin package entry `{}` is a symbolic link; symbolic links are forbidden",
+                source.display()
+            ));
+        }
+        if file_type.is_dir() {
+            copy_dir(&source, &target, depth + 1, budget)?;
+        } else if file_type.is_file() {
+            copy_regular_file(&source, &target, budget)?;
         } else {
-            fs::copy(entry.path(), &target)
-                .map_err(|error| format!("{}: {error}", entry.path().display()))?;
+            return Err(format!(
+                "plugin package entry `{}` is not a regular file or directory",
+                source.display()
+            ));
         }
     }
     Ok(())
+}
+
+fn copy_regular_file(from: &Path, to: &Path, budget: &mut CopyBudget) -> Result<(), String> {
+    let before =
+        fs::symlink_metadata(from).map_err(|error| format!("{}: {error}", from.display()))?;
+    if before.file_type().is_symlink() || !before.is_file() {
+        return Err(format!(
+            "plugin package entry `{}` must be a real regular file; symbolic links are forbidden",
+            from.display()
+        ));
+    }
+    if before.len() > MAX_PACKAGE_FILE_BYTES {
+        return Err(format!(
+            "plugin package file `{}` exceeds the {} byte limit",
+            from.display(),
+            MAX_PACKAGE_FILE_BYTES
+        ));
+    }
+    if budget.files >= MAX_PACKAGE_FILES {
+        return Err(format!(
+            "plugin package exceeds the maximum of {MAX_PACKAGE_FILES} files"
+        ));
+    }
+
+    let mut source_options = fs::OpenOptions::new();
+    source_options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        source_options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        source_options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut source = source_options
+        .open(from)
+        .map_err(|error| format!("open plugin package file `{}`: {error}", from.display()))?;
+    let opened = source
+        .metadata()
+        .map_err(|error| format!("{}: {error}", from.display()))?;
+    if !opened.is_file() {
+        return Err(format!(
+            "plugin package entry `{}` changed type while being staged",
+            from.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.dev() != before.dev() || opened.ino() != before.ino() {
+            return Err(format!(
+                "plugin package entry `{}` changed while being staged",
+                from.display()
+            ));
+        }
+        if opened.nlink() != 1 {
+            return Err(format!(
+                "plugin package entry `{}` has multiple hard links; hard links are forbidden",
+                from.display()
+            ));
+        }
+    }
+
+    let mut target = create_private_file(to)?;
+
+    budget.files += 1;
+    let mut file_bytes = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = source
+            .read(&mut buffer)
+            .map_err(|error| format!("{}: {error}", from.display()))?;
+        if read == 0 {
+            break;
+        }
+        file_bytes = file_bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| "plugin package size overflow".to_owned())?;
+        if file_bytes > MAX_PACKAGE_FILE_BYTES {
+            return Err(format!(
+                "plugin package file `{}` grew beyond the {} byte limit",
+                from.display(),
+                MAX_PACKAGE_FILE_BYTES
+            ));
+        }
+        budget.bytes = budget
+            .bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| "plugin package size overflow".to_owned())?;
+        if budget.bytes > MAX_PACKAGE_TOTAL_BYTES {
+            return Err(format!(
+                "plugin package exceeds the {MAX_PACKAGE_TOTAL_BYTES} byte total limit"
+            ));
+        }
+        target
+            .write_all(&buffer[..read])
+            .map_err(|error| format!("{}: {error}", to.display()))?;
+    }
+    target
+        .flush()
+        .and_then(|()| target.sync_all())
+        .map_err(|error| format!("{}: {error}", to.display()))
+}
+
+fn create_private_file(path: &Path) -> Result<fs::File, String> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
 
 #[cfg(test)]
@@ -1024,11 +1337,10 @@ mod tests {
     }
 
     #[test]
-    fn a_receipt_matching_the_wasm_binds_and_a_stale_one_does_not() {
+    fn a_receipt_matching_the_package_binds_and_a_stale_one_does_not() {
         let dir = scratch("receipts");
         write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
         let wasm = dir.join("provider-x/adapter.wasm");
-        let manifest = dir.join("provider-x/manifest.json");
         fs::write(&wasm, b"component bytes").expect("temp dir is writable");
 
         let data = dir.join("data");
@@ -1036,9 +1348,12 @@ mod tests {
         receipts.record(
             "provider-x".to_owned(),
             super::Receipt {
-                sha256: super::sha256_file(&wasm).expect("the file just got written"),
-                manifest_sha256: super::sha256_file(&manifest).expect("the manifest exists"),
+                package_digest: token_station_release::plugin_package_digest(
+                    &dir.join("provider-x"),
+                )
+                .expect("package exists"),
                 suite: "provider-protocol-v1".to_owned(),
+                publisher_signature_verified: false,
             },
         );
         receipts.save().expect("data dir is writable");
@@ -1048,7 +1363,12 @@ mod tests {
         let reloaded = super::Receipts::load(&data).expect("round-trips");
         let registry = PluginRegistry::discover(&config, &reloaded).expect("a receipt vouches");
         assert!(registry.provider_binding("x").is_some());
-        assert!(registry.package("provider-x").expect("catalogued").verified);
+        assert!(
+            registry
+                .package("provider-x")
+                .expect("catalogued")
+                .conformance_passed
+        );
 
         // The wasm changes; the approval must not follow the name.
         fs::write(&wasm, b"different bytes").expect("temp dir is writable");
@@ -1066,7 +1386,6 @@ mod tests {
         let dir = scratch("receipts-manifest");
         write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
         let wasm = dir.join("provider-x/adapter.wasm");
-        let manifest = dir.join("provider-x/manifest.json");
         fs::write(&wasm, b"component bytes").expect("temp dir is writable");
 
         let data = dir.join("data");
@@ -1074,9 +1393,12 @@ mod tests {
         receipts.record(
             "provider-x".to_owned(),
             super::Receipt {
-                sha256: super::sha256_file(&wasm).expect("wasm exists"),
-                manifest_sha256: super::sha256_file(&manifest).expect("manifest exists"),
+                package_digest: token_station_release::plugin_package_digest(
+                    &dir.join("provider-x"),
+                )
+                .expect("package exists"),
                 suite: "provider-protocol-v1".to_owned(),
+                publisher_signature_verified: false,
             },
         );
         receipts.save().expect("data dir is writable");
@@ -1095,14 +1417,17 @@ mod tests {
         let registry = PluginRegistry::discover(&config, &reloaded)
             .expect("a mismatched manifest is a note, not an error");
         assert!(
-            !registry.package("provider-x").expect("catalogued").verified,
+            !registry
+                .package("provider-x")
+                .expect("catalogued")
+                .conformance_passed,
             "the receipt binds the whole package, not just the WASM"
         );
         fs::remove_dir_all(dir).ok();
     }
 
     #[test]
-    fn a_legacy_receipt_without_a_manifest_hash_no_longer_verifies() {
+    fn a_legacy_receipt_without_a_package_digest_no_longer_verifies() {
         let dir = scratch("receipts-legacy");
         write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
         let wasm = dir.join("provider-x/adapter.wasm");
@@ -1110,13 +1435,13 @@ mod tests {
 
         let data = dir.join("data");
         let mut receipts = super::Receipts::load(&data).expect("missing file is empty");
-        // A receipt from before the manifest binding existed: no manifest hash.
+        // A receipt from before recursive package binding: no package digest.
         receipts.record(
             "provider-x".to_owned(),
             super::Receipt {
-                sha256: super::sha256_file(&wasm).expect("wasm exists"),
-                manifest_sha256: String::new(),
+                package_digest: String::new(),
                 suite: "provider-protocol-v1".to_owned(),
+                publisher_signature_verified: false,
             },
         );
         receipts.save().expect("data dir is writable");
@@ -1126,7 +1451,10 @@ mod tests {
         let reloaded = super::Receipts::load(&data).expect("round-trips");
         let registry = PluginRegistry::discover(&config, &reloaded).expect("a note, not an error");
         assert!(
-            !registry.package("provider-x").expect("catalogued").verified,
+            !registry
+                .package("provider-x")
+                .expect("catalogued")
+                .conformance_passed,
             "a partial (WASM-only) approval must be re-earned as a full-package one"
         );
         fs::remove_dir_all(dir).ok();

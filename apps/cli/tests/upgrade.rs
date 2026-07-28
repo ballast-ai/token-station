@@ -168,6 +168,26 @@ fn a_swapped_artifact_is_discarded_with_the_hashes_named() {
 }
 
 #[test]
+fn a_failed_download_never_overwrites_or_deletes_an_existing_artifact() {
+    let scene = scene("preserve-existing", |routes| {
+        for (path, body) in routes.iter_mut() {
+            if path.ends_with(".tar.gz") {
+                *body = b"tampered replacement".to_vec();
+            }
+        }
+    });
+    let existing = scene.download_dir.join(&scene.artifact_name);
+    std::fs::write(&existing, b"previously verified").expect("existing artifact");
+
+    upgrade::download_and_verify(&scene.release, &scene.download_dir, &scene.pubkey_hex)
+        .expect_err("an existing target may not be replaced by a failed download");
+    assert_eq!(
+        std::fs::read(existing).expect("existing artifact survives"),
+        b"previously verified"
+    );
+}
+
+#[test]
 fn a_manifest_signed_by_someone_else_is_refused_before_any_artifact_downloads() {
     // The scene's manifest is signed by the scene's key; verifying against a
     // *different* key is the compromised-channel case.

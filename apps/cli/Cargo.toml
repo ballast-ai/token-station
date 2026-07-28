@@ -14,6 +14,7 @@ getrandom = "0.4.3"
 rusqlite = { version = "0.40.1", features = ["backup", "bundled"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 token-station-conformance = { path = "../../crates/conformance" }
 token-station-metrics = { path = "../../crates/metrics" }
 token-station-plugin-api = { path = "../../crates/plugin-api" }
@@ -35,6 +36,9 @@ keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 # The builtin plugin tier (architecture section 12.1): the release pipeline embeds the
