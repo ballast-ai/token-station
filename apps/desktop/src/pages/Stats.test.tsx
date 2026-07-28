@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -59,6 +59,7 @@ const aggregate = {
 };
 
 beforeEach(() => {
+  vi.useRealTimers();
   vi.mocked(getStats).mockReset().mockImplementation(async (_since, by) => ({
     total: aggregate,
     groups: by === "upstream"
@@ -127,6 +128,47 @@ describe("usage dashboard and display-only Agent budgets", () => {
     expect(await screen.findByText("1,500")).toBeInTheDocument();
     expect(screen.getByText(/缓存读 400 · 缓存写 100 · 推理 80/)).toBeInTheDocument();
     expect(screen.getByRole("img", { name: /用量趋势/ })).toBeInTheDocument();
+  });
+
+  it("renders an empty token rail without inventing a 50/50 split", async () => {
+    vi.mocked(getStats).mockImplementation(async (_since, by) => ({
+      total: { ...aggregate, input_tokens: 0, output_tokens: 0 },
+      groups: by === "hour" || by === "day"
+        ? [[String(Date.now()), { ...aggregate, input_tokens: 0, output_tokens: 0 }]]
+        : [["codex", { ...aggregate, input_tokens: 0, output_tokens: 0 }]],
+      by,
+      empty: false,
+    }));
+
+    render(<Stats />);
+
+    expect(await screen.findByLabelText("暂无 Token 数据")).toBeInTheDocument();
+  });
+
+  it("does not overlap automatic dashboard refreshes", async () => {
+    render(<Stats />);
+    await screen.findByRole("combobox", { name: "自动刷新" });
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole("combobox", { name: "自动刷新" }));
+      fireEvent.click(within(screen.getByRole("listbox")).getByRole("option", { name: "30 秒" }));
+
+      const callsBeforeRefresh = vi.mocked(getStats).mock.calls.length;
+      vi.mocked(getStats).mockImplementation(() => new Promise(() => undefined));
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(getStats).toHaveBeenCalledTimes(callsBeforeRefresh + 4);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(getStats).toHaveBeenCalledTimes(callsBeforeRefresh + 4);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("switches the detail grouping without exposing a technical group-by select", async () => {

@@ -109,7 +109,8 @@ function ToneIcon({ type }: { type: "token" | "request" | "cost" | "success" | "
 
 function TokenRail({ aggregate }: { aggregate: AggView }) {
   const total = aggregate.input_tokens + aggregate.output_tokens;
-  const inputPercent = total ? (aggregate.input_tokens / total) * 100 : 50;
+  const inputPercent = total ? (aggregate.input_tokens / total) * 100 : 0;
+  const outputPercent = total ? 100 - inputPercent : 0;
   const cachePercent = aggregate.input_tokens
     ? Math.min(100, (aggregate.cache_read_tokens / aggregate.input_tokens) * 100)
     : 0;
@@ -119,11 +120,16 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
         <span><i className="tone-input" />输入 <strong>{compact(aggregate.input_tokens)}</strong></span>
         <span><i className="tone-output" />输出 <strong>{compact(aggregate.output_tokens)}</strong></span>
       </div>
-      <div className="usage-rail-track" aria-label={`输入占 ${inputPercent.toFixed(1)}%，输出占 ${(100 - inputPercent).toFixed(1)}%`}>
+      <div
+        className="usage-rail-track"
+        aria-label={total
+          ? `输入占 ${inputPercent.toFixed(1)}%，输出占 ${outputPercent.toFixed(1)}%`
+          : "暂无 Token 数据"}
+      >
         <div className="usage-rail-input" style={{ width: `${inputPercent}%` }}>
           <span className="usage-rail-cache" style={{ width: `${cachePercent}%` }} />
         </div>
-        <div className="usage-rail-output" style={{ width: `${100 - inputPercent}%` }} />
+        <div className="usage-rail-output" style={{ width: `${outputPercent}%` }} />
       </div>
       <div className="usage-rail-foot">
         <span><i className="tone-cache" />缓存命中覆盖输入的 <strong>{cacheRate(aggregate)}</strong></span>
@@ -150,6 +156,9 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
   const [refreshing, setRefreshing] = useState(false);
   const [receiptRefreshKey, setReceiptRefreshKey] = useState(0);
   const requestGeneration = useRef(0);
+  const dashboardInFlight = useRef(false);
+  const dashboardQueued = useRef(false);
+  const latestDashboardLoader = useRef<(background?: boolean) => Promise<void>>(async () => undefined);
 
   const [agents, setAgents] = useState<AgentUiMetadataView[]>([]);
   const [budgets, setBudgets] = useState<BudgetStatus[]>([]);
@@ -186,6 +195,11 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
 
   const loadDashboard = useCallback(async (background = false) => {
     const generation = ++requestGeneration.current;
+    if (dashboardInFlight.current) {
+      dashboardQueued.current = true;
+      return;
+    }
+    dashboardInFlight.current = true;
     if (background || data) setRefreshing(true);
     else setLoading(true);
     setErr("");
@@ -198,10 +212,18 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
         getStats(since, "model", agentFilter || null, null, upstreamFilter || null, null),
       ]);
       if (generation !== requestGeneration.current) return;
+      const nextUpstreams = upstreamData.groups.map(([name]) => name).filter((name) => name !== "(unrouted)");
+      const nextModels = modelData.groups.map(([name]) => name).filter((name) => name !== "(unrouted)");
       setData(nextData);
       setTrend(nextTrend);
-      setUpstreams(upstreamData.groups.map(([name]) => name).filter((name) => name !== "(unrouted)"));
-      setModels(modelData.groups.map(([name]) => name).filter((name) => name !== "(unrouted)"));
+      setUpstreams(nextUpstreams);
+      setModels(nextModels);
+      if (upstreamFilter && !nextUpstreams.includes(upstreamFilter)) {
+        setUpstreamFilter("");
+        setModelFilter("");
+      } else if (modelFilter && !nextModels.includes(modelFilter)) {
+        setModelFilter("");
+      }
       setReceiptRefreshKey((value) => value + 1);
     } catch (error) {
       if (generation === requestGeneration.current) setErr(String(error));
@@ -210,8 +232,14 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
         setLoading(false);
         setRefreshing(false);
       }
+      dashboardInFlight.current = false;
+      if (dashboardQueued.current) {
+        dashboardQueued.current = false;
+        queueMicrotask(() => void latestDashboardLoader.current(true));
+      }
     }
   }, [activeGroup, agentFilter, data, modelFilter, since, upstreamFilter]);
+  latestDashboardLoader.current = loadDashboard;
 
   useEffect(() => {
     void loadDashboard();
@@ -293,14 +321,8 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
     : budgets;
   const hasSelectedBudget = budgets.some((budget) => budget.agent_id === agentId);
   const groupLabel = GROUPS.find((group) => group.value === activeGroup)?.label ?? "明细";
-  const visibleUpstreams = useMemo(
-    () => upstreamFilter && !upstreams.includes(upstreamFilter) ? [upstreamFilter, ...upstreams] : upstreams,
-    [upstreamFilter, upstreams],
-  );
-  const visibleModels = useMemo(
-    () => modelFilter && !models.includes(modelFilter) ? [modelFilter, ...models] : models,
-    [modelFilter, models],
-  );
+  const visibleUpstreams = useMemo(() => upstreams, [upstreams]);
+  const visibleModels = useMemo(() => models, [models]);
 
   return (
     <section className="usage-page">

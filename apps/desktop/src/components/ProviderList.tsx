@@ -43,7 +43,7 @@ export default function ProviderList({
         <div>
           <span className="eyebrow">UPSTREAMS</span>
           <h2>供应商</h2>
-          <p className="sub">统一维护供应商和可用模型，主页与五个 Agent 共用这一份目录。</p>
+          <p className="sub">统一维护供应商和可用模型，主页与所有 Agent 共用这一份目录。</p>
         </div>
         <span className="count-badge">{providers.length} 个</span>
       </div>

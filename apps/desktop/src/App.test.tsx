@@ -592,6 +592,36 @@ describe("desktop station navigation", () => {
     expect(screen.getByLabelText("当前策略组")).toHaveValue("日常开发");
   });
 
+  it("serializes profile mutations with the rest of the home route commands", async () => {
+    const user = userEvent.setup();
+    let finishSave: ((value: ReturnType<typeof stateFixture>) => void) | undefined;
+    const current = stateFixture();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return current;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "save_home_route_as_profile") {
+        return new Promise((resolve) => {
+          finishSave = resolve;
+        });
+      }
+      if (command === "serve_start") return current;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "存为策略" }));
+    await user.type(screen.getByLabelText("策略组名称"), "并发保护");
+    await user.click(screen.getByRole("button", { name: "保存策略" }));
+
+    expect(screen.getByRole("button", { name: "保存并应用" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "保存并应用" }));
+    expect(invokeMock).not.toHaveBeenCalledWith("serve_start");
+
+    finishSave?.({ ...current, profiles: ["并发保护"] });
+    expect(await screen.findByText("策略组「并发保护」已加入草稿，请保存并应用")).toBeInTheDocument();
+  });
+
   it("opens Add Provider as a separate page and returns to the source page after saving", async () => {
     const user = userEvent.setup();
     invokeMock.mockImplementation(async (command) => {
