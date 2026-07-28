@@ -532,6 +532,8 @@ struct StateView {
     local_only: bool,
     /// Whether local_only can use cloud fallback when no local target is available; false is strict local routing.
     allow_cloud_fallback: bool,
+    /// Routing mode: tiered intelligent routing by default, or quota_first.
+    routing_mode: String,
     serve: ServeView,
     draft_revision: u64,
     saved_revision: u64,
@@ -1236,6 +1238,10 @@ impl AppInner {
             allow_cloud_fallback: self.draft["router"]["allow_cloud_fallback"]
                 .as_bool()
                 .unwrap_or(false),
+            routing_mode: self.draft["router"]["routing_mode"]
+                .as_str()
+                .unwrap_or("tiered")
+                .to_string(),
             serve: self.serve_view(),
             draft_revision: self.config_state.draft_revision(),
             saved_revision: self.config_state.saved_revision(),
@@ -1862,6 +1868,33 @@ fn set_local_routing(
         // Cloud fallback is meaningless when local-only is off, so clear both to avoid stale state.
         router.remove("local_only");
         router.remove("allow_cloud_fallback");
+    }
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["router"] = previous;
+        return Err(error);
+    }
+    Ok(inner.snapshot())
+}
+
+/// Switch between tiered (difficulty-based) and quota-first (allowance-draining)
+/// routing. The two are mutually exclusive top-level modes; the config carries
+/// only `quota_first` explicitly (tiered is the serde default, so it is cleared
+/// rather than written, keeping the document minimal).
+#[tauri::command]
+fn set_routing_mode(
+    state: State<'_, AppStateManaged>,
+    mode: String,
+) -> Result<StateView, String> {
+    if mode != "tiered" && mode != "quota_first" {
+        return Err(format!("未知路由模式：{mode}"));
+    }
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let previous = inner.draft["router"].clone();
+    if mode == "quota_first" {
+        inner.draft["router"]["routing_mode"] = json!("quota_first");
+    } else if let Some(router) = inner.draft["router"].as_object_mut() {
+        router.remove("routing_mode");
     }
     if let Err(error) = inner.observe_draft() {
         inner.draft["router"] = previous;
@@ -3644,6 +3677,7 @@ pub fn run() {
             add_free_provider,
             add_provider,
             set_local_routing,
+            set_routing_mode,
             edit_provider,
             discover_provider_models,
             test_provider,

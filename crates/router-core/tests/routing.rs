@@ -8,8 +8,9 @@ use token_station_protocol::{
     ResponseFormat, Role, ToolDef,
 };
 use token_station_router_core::{
-    Candidate, DecidedBy, Health, Heuristic, HintRoute, Match, NoRoute, RecoveryPolicy, Router,
-    RouterConfig, Rule, UnmetRequirement, UpstreamModel, UpstreamRef, Weights,
+    Candidate, DecidedBy, Health, Heuristic, HintRoute, Match, NoRoute, QuotaConfig, QuotaState,
+    RecoveryPolicy, ResetWindow, Router, RouterConfig, RoutingMode, Rule, UnmetRequirement,
+    UpstreamModel, UpstreamRef, Weights,
 };
 
 fn target(upstream: &str, model: &str) -> UpstreamModel {
@@ -73,6 +74,8 @@ fn config() -> RouterConfig {
         recovery: RecoveryPolicy::Strict,
         local_only: false,
         allow_cloud_fallback: false,
+        routing_mode: RoutingMode::Tiered,
+        quota: QuotaConfig::default(),
     }
 }
 
@@ -688,4 +691,134 @@ fn local_only_prefers_local_then_falls_back_within_a_pool() {
         .route(&ask("tl;dr"), &hints, &ejected_local)
         .expect("local ejected and fallback on → cloud serves");
     assert_eq!(decision.chosen, target("openai_personal", "gpt-5.5"));
+}
+
+// ── Quota-first mode ──────────────────────────────────────────────────────
+// The supply-side router: difficulty is ignored, accounts are ranked so the
+// allowance closing soonest is spent first, a conversation stays on the account
+// it warmed, and spent/ejected accounts drop out.
+
+fn quota_router() -> Router {
+    Router::new(RouterConfig {
+        routing_mode: RoutingMode::QuotaFirst,
+        quota: QuotaConfig::default(),
+        ..config()
+    })
+    .expect("a quota-first config needs no pools")
+}
+
+const FIVE_H_MS: u64 = 5 * 60 * 60 * 1000;
+
+fn quota_candidate(upstream: &str, quota: QuotaState) -> Candidate {
+    Candidate::new(target(upstream, "shared-model"), capable(200_000), Health::Healthy).quota(quota)
+}
+
+#[test]
+fn quota_first_serves_the_soonest_resetting_account_first() {
+    let accounts = vec![
+        quota_candidate("plan_slow", QuotaState::open(FIVE_H_MS)),
+        quota_candidate("plan_closing", QuotaState::open(20 * 60 * 1000)),
+    ];
+    let decision = quota_router()
+        .route_quota_first(&ask("anything"), &accounts, None)
+        .expect("routable");
+
+    assert_eq!(decision.chosen, target("plan_closing", "shared-model"));
+    assert_eq!(decision.decided_by, DecidedBy::Quota);
+    assert_eq!(decision.pool, "quota");
+    // The rest is the failover order: the slower-resetting account follows.
+    assert_eq!(decision.fallbacks, vec![target("plan_slow", "shared-model")]);
+}
+
+#[test]
+fn quota_first_keeps_a_conversation_on_the_account_it_warmed() {
+    // Same reset ⇒ affinity decides: the warmed account wins even though it is
+    // listed second.
+    let accounts = vec![
+        quota_candidate("plan_a", QuotaState::open(FIVE_H_MS / 2)),
+        quota_candidate("plan_b", QuotaState::open(FIVE_H_MS / 2)),
+    ];
+    let warmed = target("plan_b", "shared-model");
+    let decision = quota_router()
+        .route_quota_first(&ask("follow-up"), &accounts, Some(&warmed))
+        .expect("routable");
+    assert_eq!(decision.chosen, warmed);
+}
+
+#[test]
+fn quota_first_spills_off_a_warmed_but_rate_pressured_account() {
+    let pressured = QuotaState {
+        reset: Some(ResetWindow {
+            ms_until_reset: FIVE_H_MS / 2,
+            remaining_permille: 1000,
+        }),
+        rate_headroom_permille: 0,
+        rate_pressured: true,
+        exhausted: false,
+    };
+    let accounts = vec![
+        quota_candidate("plan_warm", pressured),
+        quota_candidate("plan_free", QuotaState::open(FIVE_H_MS / 2)),
+    ];
+    let warmed = target("plan_warm", "shared-model");
+    let decision = quota_router()
+        .route_quota_first(&ask("hi"), &accounts, Some(&warmed))
+        .expect("routable");
+    assert_eq!(
+        decision.chosen,
+        target("plan_free", "shared-model"),
+        "a throttled warmed account yields to a free one"
+    );
+}
+
+#[test]
+fn quota_first_skips_a_spent_allowance() {
+    let spent = QuotaState {
+        reset: Some(ResetWindow {
+            ms_until_reset: 60_000,
+            remaining_permille: 0,
+        }),
+        rate_headroom_permille: 1000,
+        rate_pressured: false,
+        exhausted: true,
+    };
+    let accounts = vec![
+        quota_candidate("plan_spent", spent),
+        quota_candidate("plan_left", QuotaState::open(FIVE_H_MS)),
+    ];
+    let decision = quota_router()
+        .route_quota_first(&ask("hi"), &accounts, None)
+        .expect("routable");
+    assert_eq!(decision.chosen, target("plan_left", "shared-model"));
+    assert!(decision.fallbacks.is_empty(), "the spent account is dropped, not a fallback");
+}
+
+#[test]
+fn quota_first_prefers_a_windowed_account_over_pay_as_you_go() {
+    let accounts = vec![
+        quota_candidate("metered", QuotaState::non_windowed()),
+        quota_candidate("windowed", QuotaState::open(FIVE_H_MS)),
+    ];
+    let decision = quota_router()
+        .route_quota_first(&ask("hi"), &accounts, None)
+        .expect("routable");
+    assert_eq!(
+        decision.chosen,
+        target("windowed", "shared-model"),
+        "spend the perishable windowed allowance before the always-metered one"
+    );
+}
+
+#[test]
+fn quota_first_reports_unavailable_when_every_account_is_ejected() {
+    let accounts = vec![
+        Candidate::new(target("a", "shared-model"), capable(200_000), Health::Unavailable)
+            .quota(QuotaState::open(FIVE_H_MS)),
+        Candidate::new(target("b", "shared-model"), capable(200_000), Health::Unavailable)
+            .quota(QuotaState::open(FIVE_H_MS)),
+    ];
+    let error = quota_router()
+        .route_quota_first(&ask("hi"), &accounts, None)
+        .expect_err("all ejected");
+    assert!(matches!(error, NoRoute::Unavailable { .. }));
 }

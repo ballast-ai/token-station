@@ -55,6 +55,7 @@ mod decision;
 mod features;
 mod health;
 mod lexicon;
+mod quota;
 mod route;
 mod source;
 
@@ -63,12 +64,16 @@ mod test_support;
 
 pub use config::{
     Band, CONFIG_VERSION, ConfigError, Heuristic, HintRoute, Match, RecoveryPolicy, RouterConfig,
-    Rule, Weights,
+    RoutingMode, Rule, Weights,
 };
 pub use decision::{
     DecidedBy, Decision, InvalidUpstreamRef, NoRoute, UnmetRequirement, UpstreamModel, UpstreamRef,
 };
 pub use features::{RequestFeatures, estimate_tokens};
 pub use health::{HealthPolicy, HealthTracker};
+pub use quota::{
+    DEFAULT_RESET_TIE_BAND_MS, QuotaConfig, QuotaRank, QuotaState, QuotaWeights, ResetWindow,
+    quota_rank,
+};
 pub use route::{Candidate, Health, Router};
 pub use source::{CacheError, ConfigCache, ConfigSource, StaticConfigSource};

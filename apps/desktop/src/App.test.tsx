@@ -74,6 +74,7 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
     profiles: [],
     local_only: false,
     allow_cloud_fallback: false,
+    routing_mode: "tiered",
     serve: serveFixture(),
     draft_revision: 0,
     saved_revision: 0,

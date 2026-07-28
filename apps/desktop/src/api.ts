@@ -295,6 +295,8 @@ export interface StateView {
   local_only: boolean;
   /** Whether local_only may fall back to cloud when no local target is available; false means strict local routing. */
   allow_cloud_fallback: boolean;
+  /** Routing mode: tiered intelligent routing by default, or quota_first. */
+  routing_mode: "tiered" | "quota_first";
   serve: ServeView;
   draft_revision: number;
   saved_revision: number;
@@ -682,6 +684,10 @@ export const setLocalRouting = (localOnly: boolean, allowCloudFallback: boolean)
     localOnly,
     allowCloudFallback,
   });
+
+/** Switch between tiered intelligent routing and quota-first routing. */
+export const setRoutingMode = (mode: "tiered" | "quota_first") =>
+  invoke<StateView>("set_routing_mode", { mode });
 
 export const editProvider = (name: string, base_url: string, api_key: string | null) =>
   invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });

@@ -1,9 +1,15 @@
 use serde::{Deserialize, Serialize};
 use token_station_protocol::{AgentHint, ChatRequest, ModelCapability};
 
-use crate::config::{ConfigError, RecoveryPolicy, RouterConfig};
+use crate::config::{ConfigError, RecoveryPolicy, RouterConfig, RoutingMode};
 use crate::decision::{DecidedBy, Decision, NoRoute, UnmetRequirement, UpstreamModel};
 use crate::features::RequestFeatures;
+use crate::quota::{QuotaConfig, QuotaState, quota_rank};
+
+/// The `pool` name a quota-first decision carries. Quota mode has no tiers, but
+/// [`Decision::pool`] is not optional, and a stable label keeps receipts and the
+/// quota viewer able to say "this went through quota routing".
+const QUOTA_POOL: &str = "quota";
 
 /// Whether an upstream is currently worth sending a request to.
 ///
@@ -37,6 +43,10 @@ pub struct Candidate {
     /// the upstream's `local` declaration; the router uses it to honor a
     /// `local_only` route without the data ever leaving the box.
     pub local: bool,
+    /// This account's quota picture, host-measured. Read only by
+    /// [`Router::route_quota_first`]; ignored in tiered mode. Defaults to a
+    /// non-windowed, fully-open account.
+    pub quota: QuotaState,
 }
 
 impl Candidate {
@@ -47,6 +57,7 @@ impl Candidate {
             capability,
             health,
             local: false,
+            quota: QuotaState::default(),
         }
     }
 
@@ -54,6 +65,13 @@ impl Candidate {
     #[must_use]
     pub fn local(mut self, local: bool) -> Self {
         self.local = local;
+        self
+    }
+
+    /// Attaches this account's measured quota state, for quota-first routing.
+    #[must_use]
+    pub fn quota(mut self, quota: QuotaState) -> Self {
+        self.quota = quota;
         self
     }
 }
@@ -75,6 +93,19 @@ impl Router {
     pub fn new(config: RouterConfig) -> Result<Self, ConfigError> {
         config.validate()?;
         Ok(Self { config })
+    }
+
+    /// Which routing philosophy this router runs. The host reads it to dispatch
+    /// between [`Self::route`] (tiered) and [`Self::route_quota_first`].
+    #[must_use]
+    pub fn routing_mode(&self) -> RoutingMode {
+        self.config.routing_mode
+    }
+
+    /// Quota-first tuning (weights, tie band). Meaningful only in quota mode.
+    #[must_use]
+    pub fn quota_config(&self) -> &QuotaConfig {
+        &self.config.quota
     }
 
     #[must_use]
@@ -146,6 +177,101 @@ impl Router {
             fallbacks: fallbacks.iter().map(|target| (*target).clone()).collect(),
             features,
             pool: pool.to_owned(),
+        })
+    }
+
+    /// Quota-first routing: ignore request difficulty and rank the caller's
+    /// quota-bearing accounts so the one whose allowance is closing soonest is
+    /// served first, keeping a conversation on the account it warmed unless that
+    /// account is rate-pressured. `last_used` is the account this conversation
+    /// was last routed to (prompt-cache affinity), or `None` for a fresh one.
+    ///
+    /// The full ranked order becomes the decision's chosen + fallbacks, so
+    /// failover simply walks down it. Capability is still enforced — a request
+    /// needing tools skips a model that lacks them — because that is
+    /// correctness, not the quality gating quota mode deliberately drops.
+    ///
+    /// # Errors
+    ///
+    /// [`NoRoute::Unsatisfiable`] when no supplied account can serve the request
+    /// at all; [`NoRoute::Unavailable`] when accounts could serve it but are all
+    /// out of rotation or have spent their allowance.
+    ///
+    /// # Panics
+    ///
+    /// Never: the `expect` fires only if `ranked` is empty, which the guard
+    /// above returns `Unavailable` for before reaching it.
+    pub fn route_quota_first(
+        &self,
+        request: &ChatRequest,
+        candidates: &[Candidate],
+        last_used: Option<&UpstreamModel>,
+    ) -> Result<Decision, NoRoute> {
+        let features = RequestFeatures::extract(request, &[]);
+        let cfg = &self.config.quota;
+
+        // Capability gate first: correctness, not quality. Report the first
+        // unmet requirement if nothing can serve, matching tiered routing.
+        let capable: Vec<&Candidate> = candidates
+            .iter()
+            .filter(|candidate| self.satisfies(candidate, &features).is_none())
+            .collect();
+        if capable.is_empty() {
+            let reason = candidates
+                .first()
+                .and_then(|candidate| self.satisfies(candidate, &features))
+                .unwrap_or(UnmetRequirement::Unknown);
+            return Err(NoRoute::Unsatisfiable {
+                pool: QUOTA_POOL.to_owned(),
+                reason,
+            });
+        }
+
+        // Rank the capable, in-rotation, non-exhausted accounts by quota. The
+        // index is the candidate's position in the operator's order, used only
+        // to break exact ties (earlier-added wins).
+        let mut ranked: Vec<(&Candidate, _)> = capable
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, candidate)| candidate.health != Health::Unavailable)
+            .filter_map(|(index, candidate)| {
+                let is_last_used = last_used == Some(&candidate.target);
+                let index = u32::try_from(index).unwrap_or(u32::MAX);
+                quota_rank(
+                    &candidate.quota,
+                    is_last_used,
+                    index,
+                    &cfg.weights,
+                    cfg.reset_tie_band_ms,
+                )
+                .map(|rank| (candidate, rank))
+            })
+            .collect();
+
+        if ranked.is_empty() {
+            // Capable candidates exist but all are out of rotation or exhausted.
+            return Err(NoRoute::Unavailable {
+                pool: QUOTA_POOL.to_owned(),
+            });
+        }
+
+        // Best first (a `QuotaRank` compares greater when preferred). Ranks
+        // embed the insertion index, so the order is total and deterministic.
+        ranked.sort_by_key(|(_, rank)| std::cmp::Reverse(*rank));
+
+        let targets: Vec<&UpstreamModel> = ranked
+            .iter()
+            .map(|(candidate, _)| &candidate.target)
+            .collect();
+        let (chosen, fallbacks) = targets.split_first().expect("ranked is non-empty");
+
+        Ok(Decision {
+            chosen: (*chosen).clone(),
+            decided_by: DecidedBy::Quota,
+            fallbacks: fallbacks.iter().map(|target| (*target).clone()).collect(),
+            features,
+            pool: QUOTA_POOL.to_owned(),
         })
     }
 

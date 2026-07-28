@@ -94,5 +94,7 @@ pub(crate) fn config() -> RouterConfig {
         recovery: crate::config::RecoveryPolicy::Strict,
         local_only: false,
         allow_cloud_fallback: false,
+        routing_mode: crate::config::RoutingMode::Tiered,
+        quota: crate::quota::QuotaConfig::default(),
     }
 }

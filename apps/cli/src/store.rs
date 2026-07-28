@@ -210,6 +210,70 @@ const MIGRATIONS: &[Migration] = &[
         to: 5,
         sql: "ALTER TABLE decisions ADD COLUMN conversation_tokens INTEGER NOT NULL DEFAULT 0;",
     },
+    Migration {
+        // v5 -> v6: admit the `quota` decision kind. A CHECK constraint cannot be
+        // altered in place, so the table is rebuilt with the widened check and
+        // its rows copied over. The copy names every column explicitly (not
+        // `SELECT *`): `conversation_tokens` was appended by an `ALTER` in v5, so
+        // in a database migrated up it is the last column, not the middle one the
+        // fresh schema declares — a positional copy would shift every column.
+        to: 6,
+        sql: "
+            DROP TABLE IF EXISTS decisions_v6;
+            CREATE TABLE decisions_v6 (
+                request_id TEXT PRIMARY KEY,
+                upstream TEXT NOT NULL,
+                model TEXT NOT NULL,
+                pool TEXT NOT NULL,
+                decision_kind TEXT NOT NULL
+                    CHECK (decision_kind IN ('rule', 'hint', 'heuristic', 'default', 'exact_model', 'quota')),
+                rule_id TEXT,
+                hint_kind TEXT,
+                hint_value TEXT,
+                heuristic_score INTEGER,
+                heuristic_threshold INTEGER,
+                fallbacks INTEGER NOT NULL,
+                est_input_tokens INTEGER NOT NULL,
+                conversation_tokens INTEGER NOT NULL DEFAULT 0,
+                message_count INTEGER NOT NULL,
+                tool_count INTEGER NOT NULL,
+                has_images INTEGER NOT NULL,
+                requires_json_schema INTEGER NOT NULL,
+                code_block_count INTEGER NOT NULL,
+                requested_max_output_tokens INTEGER,
+                hint_count INTEGER NOT NULL,
+                reasoning_marker_count INTEGER NOT NULL,
+                technical_term_count INTEGER NOT NULL,
+                simple_indicator_count INTEGER NOT NULL,
+                code_keyword_count INTEGER NOT NULL,
+                math_term_count INTEGER NOT NULL,
+                creative_term_count INTEGER NOT NULL,
+                multi_step_signal INTEGER NOT NULL,
+                question_count INTEGER NOT NULL,
+                system_format_hint INTEGER NOT NULL
+            );
+            INSERT INTO decisions_v6 (
+                request_id, upstream, model, pool, decision_kind, rule_id, hint_kind,
+                hint_value, heuristic_score, heuristic_threshold, fallbacks,
+                est_input_tokens, conversation_tokens, message_count, tool_count, has_images,
+                requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
+                reasoning_marker_count, technical_term_count, simple_indicator_count,
+                code_keyword_count, math_term_count, creative_term_count, multi_step_signal,
+                question_count, system_format_hint
+            )
+            SELECT
+                request_id, upstream, model, pool, decision_kind, rule_id, hint_kind,
+                hint_value, heuristic_score, heuristic_threshold, fallbacks,
+                est_input_tokens, conversation_tokens, message_count, tool_count, has_images,
+                requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
+                reasoning_marker_count, technical_term_count, simple_indicator_count,
+                code_keyword_count, math_term_count, creative_term_count, multi_step_signal,
+                question_count, system_format_hint
+            FROM decisions;
+            DROP TABLE decisions;
+            ALTER TABLE decisions_v6 RENAME TO decisions;
+        ",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -273,7 +337,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     model TEXT NOT NULL,
     pool TEXT NOT NULL,
     decision_kind TEXT NOT NULL
-        CHECK (decision_kind IN ('rule', 'hint', 'heuristic', 'default', 'exact_model')),
+        CHECK (decision_kind IN ('rule', 'hint', 'heuristic', 'default', 'exact_model', 'quota')),
     rule_id TEXT,
     hint_kind TEXT,
     hint_value TEXT,
@@ -424,6 +488,18 @@ fn decision_columns(decided_by: &DecidedBy) -> DecisionColumns {
         DecidedBy::ExactModel { model } => DecisionColumns {
             kind: "exact_model",
             rule_id: Some(model.clone()),
+            hint_kind: None,
+            hint_value: None,
+            score: None,
+            threshold: None,
+        },
+        // Quota-first mode. The chosen account lives in the decision's own
+        // columns; there is no tier-like sub-field to record. The `decisions`
+        // table's `decision_kind` CHECK is widened to admit 'quota' in the
+        // schema migration that ships with quota-first host wiring.
+        DecidedBy::Quota => DecisionColumns {
+            kind: "quota",
+            rule_id: None,
             hint_kind: None,
             hint_value: None,
             score: None,

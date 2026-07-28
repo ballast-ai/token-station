@@ -45,7 +45,9 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 /// - v4: adds the normalized, content-free request receipt tables.
 /// - v5: adds `conversation_tokens` (difficulty tokens excluding the system
 ///   prompt) alongside the whole-request `est_input_tokens`.
-pub const SCHEMA_VERSION: u32 = 5;
+/// - v6: widens the `decisions.decision_kind` check to admit `quota`
+///   (quota-first routing).
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Where the recorded cost came from. The local price table may only produce
 /// [`Self::Estimated`]; [`Self::Actual`] is reserved for future bill

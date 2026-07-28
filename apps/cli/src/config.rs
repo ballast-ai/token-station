@@ -451,6 +451,12 @@ pub struct UpstreamConfig {
     /// What this upstream serves. The provider adapter may refine it; with no
     /// network of its own it cannot replace it.
     pub models: Vec<ModelCapability>,
+    /// This account's quota plan for quota-first routing: its reset windows and
+    /// rate limit. Absent ⇒ the account is non-windowed (metered / pay-as-you-go)
+    /// and used only as a last resort. Populated by the desktop app's quota-mode
+    /// account picker; ignored entirely in tiered routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_plan: Option<crate::quota_tracker::QuotaPlan>,
 }
 
 /// Where a credential's value lives. Never the value.
