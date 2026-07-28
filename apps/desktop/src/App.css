@@ -4549,15 +4549,6 @@ pre.block {
   align-items: center;
 }
 
-.tier-grid.with-sync .tier-table-head,
-.route-panel .tier-grid.with-sync .tier-row {
-  grid-template-columns:
-    minmax(150px, .72fr)
-    minmax(170px, 1fr)
-    minmax(190px, 1.12fr)
-    minmax(90px, auto);
-}
-
 .tier-table-head {
   padding: 0 0 8px 34px;
 }
@@ -4638,18 +4629,6 @@ pre.block {
   color: var(--muted);
   font-size: 10px;
   text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tier-row-action {
-  display: flex;
-  justify-content: flex-end;
-  min-width: 90px;
-}
-
-.sync-tiers-action {
-  min-height: 32px;
-  padding-inline: 9px;
   white-space: nowrap;
 }
 
@@ -4870,14 +4849,6 @@ pre.block {
       minmax(160px, 1.08fr);
   }
 
-  .tier-grid.with-sync .tier-table-head,
-  .route-panel .tier-grid.with-sync .tier-row {
-    grid-template-columns:
-      minmax(135px, .72fr)
-      minmax(140px, 1fr)
-      minmax(160px, 1.08fr)
-      auto;
-  }
 }
 
 @media (max-width: 720px) {
@@ -4906,11 +4877,6 @@ pre.block {
 
   .tier-identity {
     margin-left: -34px;
-  }
-
-  .tier-row-action {
-    min-width: 0;
-    justify-content: flex-start;
   }
 
   .profile-create-row {
