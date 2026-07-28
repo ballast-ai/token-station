@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -102,11 +102,14 @@ describe("usage dashboard and display-only Agent budgets", () => {
   it("applies Agent, upstream, and model filters to the whole dashboard", async () => {
     const user = userEvent.setup();
     render(<Stats />);
-    expect(await screen.findAllByRole("option", { name: "Codex" })).toHaveLength(2);
+    expect(await screen.findByRole("combobox", { name: "Agent 过滤" })).toBeInTheDocument();
 
-    await user.selectOptions(screen.getByRole("combobox", { name: "Agent 过滤" }), "codex");
-    await user.selectOptions(await screen.findByRole("combobox", { name: "供应商过滤" }), "openai");
-    await user.selectOptions(await screen.findByRole("combobox", { name: "模型过滤" }), "gpt-5");
+    await user.click(screen.getByRole("combobox", { name: "Agent 过滤" }));
+    await user.click(within(screen.getByRole("listbox")).getByRole("option", { name: "Codex" }));
+    await user.click(await screen.findByRole("combobox", { name: "供应商过滤" }));
+    await user.click(within(screen.getByRole("listbox")).getByRole("option", { name: "openai" }));
+    await user.click(await screen.findByRole("combobox", { name: "模型过滤" }));
+    await user.click(within(screen.getByRole("listbox")).getByRole("option", { name: "gpt-5" }));
 
     await waitFor(() => expect(getStats).toHaveBeenCalledWith(
       "24h",
@@ -143,12 +146,16 @@ describe("usage dashboard and display-only Agent budgets", () => {
   });
 
   it("shows approaching usage as a warning and states that routing is unaffected", async () => {
+    const user = userEvent.setup();
     render(<Stats />);
 
     expect(await screen.findByText(/Codex 已使用 85\.0%/)).toBeInTheDocument();
     expect(screen.getByText(/仅提醒，不影响路由/)).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Future Agent" })).not.toBeInTheDocument();
-    expect(screen.getAllByRole("option", { name: "Codex" })).toHaveLength(2);
+    expect(screen.getAllByRole("option", { name: "Codex" })).toHaveLength(1);
+    await user.click(screen.getByRole("combobox", { name: "Agent 过滤" }));
+    expect(within(screen.getByRole("listbox")).getByRole("option", { name: "Codex" })).toBeInTheDocument();
+    expect(within(screen.getByRole("listbox")).queryByRole("option", { name: "Future Agent" })).not.toBeInTheDocument();
   });
 
   it("renders exceeded and expired states without turning them into enforcement", async () => {

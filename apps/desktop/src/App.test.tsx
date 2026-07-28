@@ -536,7 +536,8 @@ describe("desktop station navigation", () => {
     await screen.findByRole("heading", { name: "主页路由" });
     await user.click(navigation().getByRole("button", { name: "Codex" }));
     await user.click(screen.getByRole("radio", { name: "独立路由" }));
-    await user.selectOptions(screen.getByLabelText("上档供应商"), "deepseek");
+    await user.click(screen.getByLabelText("上档供应商"));
+    await user.click(screen.getByRole("option", { name: "deepseek" }));
     expect(invokeMock).toHaveBeenCalledWith("set_agent_tier", {
       agentId: "codex",
       slot: "high",
@@ -578,8 +579,9 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
+    await user.click(await screen.findByRole("button", { name: "存为策略" }));
     await user.type(await screen.findByLabelText("策略组名称"), "日常开发");
-    await user.click(screen.getByRole("button", { name: "另存为策略组" }));
+    await user.click(screen.getByRole("button", { name: "保存策略" }));
     expect(invokeMock).toHaveBeenCalledWith("save_home_route_as_profile", { name: "日常开发" });
     expect(await screen.findByText("策略组「日常开发」已加入草稿，请保存并应用")).toBeInTheDocument();
 
