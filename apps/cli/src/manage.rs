@@ -108,6 +108,9 @@ pub fn upstream_add(config: &mut ClientConfig, spec: &AddUpstream) -> Result<Str
             local: spec.local,
             access_tier: AccessTier::default(),
             models,
+            // Quota plans are declared by the desktop app's quota-mode picker,
+            // not by `upstream add`.
+            quota_plan: None,
         },
     );
 

@@ -35,12 +35,14 @@ use token_station_metrics::{
 };
 use token_station_plugin_runtime::{AgentPlugin, NoSecrets, PluginRuntime, ProviderPlugin};
 use token_station_protocol::{
-    AgentRequestEnvelope, Auth, ChatRequest, ChatResponse, Content, ErrorCode, ErrorEnvelope,
-    HeaderDigest, HttpMethod, HttpRequestDescriptor, HttpResponseParts, ModelCapability, Principal,
-    ProviderConfig, ResponseFormat, SecretRef, StreamChunk, StreamEvent, StreamOutcome, ToolDef,
+    AgentRequestEnvelope, Auth, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
+    ErrorEnvelope, HeaderDigest, HttpMethod, HttpRequestDescriptor, HttpResponseParts, Message,
+    ModelCapability, Principal, ProviderConfig, ResponseFormat, SecretRef, StreamChunk, StreamEvent,
+    StreamOutcome, ToolDef,
 };
 use token_station_router_core::{
-    Candidate, Decision, HealthPolicy, HealthTracker, Router, UpstreamModel, UpstreamRef,
+    Candidate, Decision, HealthPolicy, HealthTracker, Router, RoutingMode, UpstreamModel,
+    UpstreamRef,
 };
 
 use crate::admission::Admission;
@@ -545,6 +547,40 @@ fn record_route_decision(record: &mut RequestRecord, decision: &Decision) {
     record.decision = Some(DecisionRecord::from(decision));
 }
 
+/// Wall-clock milliseconds since the Unix epoch, for quota accounting. Quota
+/// windows and resets are wall-clock so they align with providers' real reset
+/// schedules and survive a restart, unlike the monotonic `Instant` health uses.
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// First text found in a message, across the plain-text and multi-part shapes.
+fn message_text(message: &Message) -> Option<&str> {
+    match message.content.as_ref()? {
+        Content::Text(text) => Some(text.as_str()),
+        Content::Parts(parts) => parts.iter().find_map(|part| match part {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        }),
+    }
+}
+
+/// A stable identity for the conversation a request belongs to, used only for
+/// quota-first prompt-cache affinity. Derived from the leading messages — the
+/// shared prefix a provider's prompt cache keys on, which survives across a
+/// conversation's turns — and hashed, so no request content is retained.
+/// Best-effort: a collision or a forgotten session just re-picks by quota.
+fn quota_session_key(request: &ChatRequest) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for text in request.messages.iter().take(2).filter_map(message_text) {
+        text.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
 fn record_actual_attempt_target(
     record: &mut RequestRecord,
     decision: &Decision,
@@ -658,6 +694,10 @@ pub struct Gateway {
     /// tracker, because it changes and this does not.
     catalog: Vec<(UpstreamModel, token_station_protocol::ModelCapability)>,
     health: std::sync::Mutex<HealthTracker>,
+    /// Quota-first accounting: per-account consumption, in-flight leases, and
+    /// conversation affinity. Consulted only in quota-first mode; kept warm in
+    /// tiered mode so a mode switch is seamless.
+    quota: std::sync::Mutex<crate::quota_tracker::QuotaTracker>,
     /// In-flight concurrency ceilings, global / per Agent / per Provider.
     admission: Admission,
     /// Versioned per-model prices; the version travels onto each priced record.
@@ -1079,6 +1119,8 @@ impl Gateway {
 
         let (local_upstreams, free_upstreams) = Self::upstream_boundary_sets(config);
 
+        let quota_plans = Self::quota_plans_from(config);
+
         let home_router = Router::new(config.router.clone()).map_err(|error| error.to_string())?;
         let mut agent_routers = BTreeMap::new();
         for agent_id in config.agent_routes.keys() {
@@ -1103,6 +1145,7 @@ impl Gateway {
                 eject_after: config.health.eject_after,
                 cooldown: Duration::from_millis(config.health.cooldown_ms),
             })),
+            quota: std::sync::Mutex::new(crate::quota_tracker::QuotaTracker::new(quota_plans)),
             admission: Admission::new(config.concurrency),
             pricing: config.pricing.clone(),
             secrets: SecretStore::from_config(config),
@@ -1634,19 +1677,30 @@ impl Gateway {
 
     /// The routing candidates as of this instant: the static catalog with the
     /// tracker's current verdict applied.
-    fn candidates(&self, now: std::time::Instant) -> Vec<Candidate> {
-        let health = self.health.lock().expect("health lock");
-        self.catalog
-            .iter()
-            .map(|(target, capability)| {
-                Candidate::new(
-                    target.clone(),
-                    capability.clone(),
-                    health.health_of(&target.upstream, &target.model, now),
-                )
-                .local(self.local_upstreams.contains(target.upstream.as_str()))
-            })
-            .collect()
+    fn candidates(&self, now: std::time::Instant, quota_now_ms: Option<u64>) -> Vec<Candidate> {
+        let mut candidates: Vec<Candidate> = {
+            let health = self.health.lock().expect("health lock");
+            self.catalog
+                .iter()
+                .map(|(target, capability)| {
+                    Candidate::new(
+                        target.clone(),
+                        capability.clone(),
+                        health.health_of(&target.upstream, &target.model, now),
+                    )
+                    .local(self.local_upstreams.contains(target.upstream.as_str()))
+                })
+                .collect()
+        };
+        // Quota state is host-measured and attached only in quota-first mode, so
+        // the tiered path is unchanged and pays nothing for it.
+        if let Some(now_ms) = quota_now_ms {
+            let quota = self.quota.lock().expect("quota lock");
+            for candidate in &mut candidates {
+                candidate.quota = quota.quota_state(candidate.target.upstream.as_str(), now_ms);
+            }
+        }
+        candidates
     }
 
     /// Feeds one attempt's outcome to the tracker; logs a transition. Health is
@@ -2035,19 +2089,39 @@ impl Gateway {
         record.requested_model = canonical_requested_model(&request.model, configured);
         record.stream = request.stream;
 
-        let candidates = self.candidates(std::time::Instant::now());
-        let mut decision = router
-            .route(&request, &hints, &candidates)
-            .map_err(|no_route| {
-                let code = no_route.error_code();
-                let status = if code == ErrorCode::Capability {
-                    400
-                } else {
-                    503
-                };
-                ErrorEnvelope::new(code, status, no_route.to_string())
-            })?;
-        retain_free_fallbacks(&mut decision, &self.free_upstreams);
+        // Quota-first routing keeps host-side state (consumption, in-flight
+        // leases, conversation affinity); tiered routing touches none of it, so
+        // the whole quota path is gated on the mode (`quota_now_ms.is_some()`)
+        // and costs the tiered path nothing.
+        let (quota_now_ms, session) = Self::quota_preamble(router, &request);
+        let quota_mode = quota_now_ms.is_some();
+
+        let candidates = self.candidates(std::time::Instant::now(), quota_now_ms);
+        let mut decision = if quota_mode {
+            let last = self
+                .quota
+                .lock()
+                .expect("quota lock")
+                .last_account(&session)
+                .cloned();
+            router.route_quota_first(&request, &candidates, last.as_ref())
+        } else {
+            router.route(&request, &hints, &candidates)
+        }
+        .map_err(|no_route| {
+            let code = no_route.error_code();
+            let status = if code == ErrorCode::Capability {
+                400
+            } else {
+                503
+            };
+            ErrorEnvelope::new(code, status, no_route.to_string())
+        })?;
+        // Free-provider fallback filtering is a tiered-mode feature; quota-mode
+        // fallbacks are the quota-ranked accounts and must not be pruned by it.
+        if !quota_mode {
+            retain_free_fallbacks(&mut decision, &self.free_upstreams);
+        }
         eprintln!(
             "route {} -> {} ({:?}), {} fallback(s)",
             request.model,
@@ -2057,7 +2131,69 @@ impl Gateway {
         );
         record_route_decision(record, &decision);
 
-        self.dispatch(ctx, agent, &request, &decision, emit, record)
+        // In quota mode, take an in-flight lease on the chosen account before
+        // dispatch so concurrent requests see the load and spread; settle the
+        // account below once the exchange finishes.
+        let lease = quota_now_ms.map(|now_ms| {
+            self.quota
+                .lock()
+                .expect("quota lock")
+                .grant(decision.chosen.upstream.as_str(), now_ms)
+        });
+
+        let result = self.dispatch(ctx, agent, &request, &decision, emit, record);
+
+        if let Some(now_ms) = quota_now_ms {
+            self.settle_quota(&session, lease.as_ref(), now_ms, record, &result);
+        }
+
+        result
+    }
+
+    /// Quota-first plans keyed by upstream, from the config. Only upstreams that
+    /// declared a plan get windowed tracking; the rest are non-windowed
+    /// (metered) and fall to the router's last-resort position.
+    fn quota_plans_from(
+        config: &ClientConfig,
+    ) -> std::collections::HashMap<String, crate::quota_tracker::QuotaPlan> {
+        config
+            .upstreams
+            .iter()
+            .filter_map(|(name, entry)| entry.quota_plan.clone().map(|plan| (name.clone(), plan)))
+            .collect()
+    }
+
+    /// Quota-first preamble: whether quota mode is on (as `Some(now_ms)` with a
+    /// single wall-clock read) and the conversation's affinity key. Returns
+    /// `(None, "")` in tiered mode so the caller pays nothing for it.
+    fn quota_preamble(router: &Router, request: &ChatRequest) -> (Option<u64>, String) {
+        if router.routing_mode() != RoutingMode::QuotaFirst {
+            return (None, String::new());
+        }
+        (Some(unix_millis()), quota_session_key(request))
+    }
+
+    /// After a quota-first exchange: release its in-flight lease, charge the
+    /// account that actually served, and remember it for this conversation's
+    /// next turn (prompt-cache affinity).
+    fn settle_quota(
+        &self,
+        session: &str,
+        lease: Option<&crate::quota_lease::LeaseId>,
+        now_ms: u64,
+        record: &RequestRecord,
+        result: &Result<(UpstreamModel, StreamOutcome), ErrorEnvelope>,
+    ) {
+        let mut quota = self.quota.lock().expect("quota lock");
+        if let Some(lease) = lease {
+            quota.release(lease);
+        }
+        if let Ok((served, _)) = result {
+            if let Some(usage) = &record.usage {
+                quota.record(served.upstream.as_str(), now_ms, usage);
+            }
+            quota.remember(session, served.clone());
+        }
     }
 
     /// Tries the decision's targets in order; moves on only while the error

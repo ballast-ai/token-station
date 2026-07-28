@@ -5,6 +5,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use token_station_protocol::{ChatRequest, Content, ContentPart, HintKind};
 
+use crate::quota::QuotaConfig;
 use crate::{RequestFeatures, UpstreamModel};
 
 /// The only config version this crate understands.
@@ -35,7 +36,9 @@ const DEFAULT_ASSUMED_CONTEXT_WINDOW: u32 = 8_192;
 pub struct RouterConfig {
     pub version: u32,
     /// Named, ordered lists of places a request can go. Order is the operator's
-    /// preference; the router only reorders by health.
+    /// preference; the router only reorders by health. Empty is legal only in
+    /// quota-first mode (tiered validation rejects it).
+    #[serde(default)]
     pub pools: BTreeMap<String, Vec<UpstreamModel>>,
     /// Layer 1. Checked in order; the first match wins and routing stops.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -49,7 +52,9 @@ pub struct RouterConfig {
     /// this *is* that layer, per the routing design's staged rollout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heuristic: Option<Heuristic>,
-    /// Where a request goes when nothing above decided.
+    /// Where a request goes when nothing above decided. Empty is legal only in
+    /// quota-first mode (tiered validation rejects it).
+    #[serde(default)]
     pub default_pool: String,
     #[serde(default = "assumed_context_window_default")]
     pub assumed_context_window: u32,
@@ -81,6 +86,30 @@ pub struct RouterConfig {
     /// means try local first, then cloud. Ignored unless `local_only` is set.
     #[serde(default)]
     pub allow_cloud_fallback: bool,
+    /// Which routing philosophy is active. Tiered (the default) routes by
+    /// request difficulty through the pools above; quota-first ignores
+    /// difficulty and drains the caller's quota-bearing accounts before they
+    /// refresh (see [`crate::Router::route_quota_first`]). The two are mutually
+    /// exclusive top-level modes.
+    #[serde(default)]
+    pub routing_mode: RoutingMode,
+    /// Tuning for quota-first routing. Ignored in tiered mode. Fully defaulted,
+    /// so flipping the mode on needs nothing else.
+    #[serde(default)]
+    pub quota: QuotaConfig,
+}
+
+/// The active routing philosophy. The two modes are mutually exclusive: tiered
+/// routes by request difficulty, quota-first by which allowance is closing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingMode {
+    /// Route by request difficulty through the tier pools. The default.
+    #[default]
+    Tiered,
+    /// Route by quota: drain the account whose window is closing soonest,
+    /// ignoring request difficulty. Pools/rules/hints/heuristic are unused.
+    QuotaFirst,
 }
 
 /// Failover behavior once the selected tier is exhausted, decoupled from which
@@ -429,6 +458,16 @@ impl RouterConfig {
         }
         if self.assumed_context_window == 0 {
             return Err(ConfigError::AssumedContextWindowIsZero);
+        }
+
+        // Quota-first mode uses none of the tier machinery — pools, the default
+        // pool, rules, hints, the heuristic, ordered recovery. Its accounts are
+        // the candidates the host supplies at route time, ranked by quota, so a
+        // quota-first config legitimately carries empty pools and an empty
+        // default pool. Skip the tiered validation entirely rather than force a
+        // dummy pool into existence.
+        if self.routing_mode == RoutingMode::QuotaFirst {
+            return Ok(());
         }
 
         if self.pools.is_empty() {

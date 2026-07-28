@@ -142,6 +142,10 @@ pub enum DecidedBy {
     /// router served it as-is rather than choosing a tier. `model` is the pinned
     /// wire name, so a decision record still says exactly what was asked for.
     ExactModel { model: String },
+    /// Quota-first mode chose this account because its allowance is closing
+    /// soonest (see [`crate::Router::route_quota_first`]). Request difficulty
+    /// played no part, so there is nothing tier-like to name.
+    Quota,
 }
 
 /// Where a request is going, why, and what to try if it fails.

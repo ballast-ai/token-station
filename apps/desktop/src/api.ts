@@ -295,6 +295,8 @@ export interface StateView {
   local_only: boolean;
   /** `local_only` 下本地无可用时是否许可退到云(默认关=严格本地)。 */
   allow_cloud_fallback: boolean;
+  /** 路由模式:`tiered`(三档智能路由,默认)或 `quota_first`(额度优先)。 */
+  routing_mode: "tiered" | "quota_first";
   serve: ServeView;
   draft_revision: number;
   saved_revision: number;
@@ -682,6 +684,10 @@ export const setLocalRouting = (localOnly: boolean, allowCloudFallback: boolean)
     localOnly,
     allowCloudFallback,
   });
+
+/** 切换路由模式:三档智能路由(`tiered`)或额度优先(`quota_first`)。 */
+export const setRoutingMode = (mode: "tiered" | "quota_first") =>
+  invoke<StateView>("set_routing_mode", { mode });
 
 export const editProvider = (name: string, base_url: string, api_key: string | null) =>
   invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });

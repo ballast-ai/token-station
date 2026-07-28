@@ -532,6 +532,8 @@ struct StateView {
     local_only: bool,
     /// `local_only` 下,本地无可用时是否许可退到云(默认关=严格本地)。
     allow_cloud_fallback: bool,
+    /// 路由模式:`tiered`(三档智能路由,默认)或 `quota_first`(额度优先)。
+    routing_mode: String,
     serve: ServeView,
     draft_revision: u64,
     saved_revision: u64,
@@ -1236,6 +1238,10 @@ impl AppInner {
             allow_cloud_fallback: self.draft["router"]["allow_cloud_fallback"]
                 .as_bool()
                 .unwrap_or(false),
+            routing_mode: self.draft["router"]["routing_mode"]
+                .as_str()
+                .unwrap_or("tiered")
+                .to_string(),
             serve: self.serve_view(),
             draft_revision: self.config_state.draft_revision(),
             saved_revision: self.config_state.saved_revision(),
@@ -1862,6 +1868,33 @@ fn set_local_routing(
         // 「只走本地」关掉后,云许可无意义,一并清除,避免残留误导。
         router.remove("local_only");
         router.remove("allow_cloud_fallback");
+    }
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["router"] = previous;
+        return Err(error);
+    }
+    Ok(inner.snapshot())
+}
+
+/// Switch between tiered (difficulty-based) and quota-first (allowance-draining)
+/// routing. The two are mutually exclusive top-level modes; the config carries
+/// only `quota_first` explicitly (tiered is the serde default, so it is cleared
+/// rather than written, keeping the document minimal).
+#[tauri::command]
+fn set_routing_mode(
+    state: State<'_, AppStateManaged>,
+    mode: String,
+) -> Result<StateView, String> {
+    if mode != "tiered" && mode != "quota_first" {
+        return Err(format!("未知路由模式：{mode}"));
+    }
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    let previous = inner.draft["router"].clone();
+    if mode == "quota_first" {
+        inner.draft["router"]["routing_mode"] = json!("quota_first");
+    } else if let Some(router) = inner.draft["router"].as_object_mut() {
+        router.remove("routing_mode");
     }
     if let Err(error) = inner.observe_draft() {
         inner.draft["router"] = previous;
@@ -3644,6 +3677,7 @@ pub fn run() {
             add_free_provider,
             add_provider,
             set_local_routing,
+            set_routing_mode,
             edit_provider,
             discover_provider_models,
             test_provider,
