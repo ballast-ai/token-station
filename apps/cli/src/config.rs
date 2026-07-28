@@ -558,10 +558,23 @@ impl ClientConfig {
             path: path.to_path_buf(),
             detail: error.to_string(),
         })?;
-        let config: Self = serde_json::from_str(&source).map_err(|error| ConfigError {
+        let mut config: Self = serde_json::from_str(&source).map_err(|error| ConfigError {
             path: path.to_path_buf(),
             detail: error.to_string(),
         })?;
+        // Early v1 files persisted `0` as the documented "unlimited" default.
+        // Loading maps that legacy representation to today's finite defaults;
+        // `save` remains strict and still rejects newly constructed zero limits.
+        let defaults = crate::admission::Limits::default();
+        if config.concurrency.global == 0 {
+            config.concurrency.global = defaults.global;
+        }
+        if config.concurrency.per_agent == 0 {
+            config.concurrency.per_agent = defaults.per_agent;
+        }
+        if config.concurrency.per_provider == 0 {
+            config.concurrency.per_provider = defaults.per_provider;
+        }
         config.validate().map_err(|detail| ConfigError {
             path: path.to_path_buf(),
             detail,
@@ -893,6 +906,61 @@ mod tests {
 
         assert_eq!(config.plugins.effective_agents(), ["agent-openai"]);
         assert!(config.agent_routes.is_empty());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn legacy_zero_concurrency_limits_load_as_finite_defaults_without_rewriting_source() {
+        let mut value = example();
+        value["concurrency"] = serde_json::json!({
+            "global": 0,
+            "per_agent": 0,
+            "per_provider": 0
+        });
+        let original = serde_json::to_vec(&value).expect("legacy fixture serializes");
+        let path = scratch(
+            "legacy-zero-concurrency",
+            std::str::from_utf8(&original).expect("JSON is UTF-8"),
+        );
+
+        let config =
+            ClientConfig::load(&path).expect("legacy zero limits migrate to finite defaults");
+
+        assert_eq!(config.concurrency.global, 64);
+        assert_eq!(config.concurrency.per_agent, 16);
+        assert_eq!(config.concurrency.per_provider, 16);
+        assert_eq!(
+            fs::read(&path).expect("legacy source remains readable"),
+            original
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn legacy_zero_migration_is_per_field_while_new_saves_stay_strict() {
+        let mut value = example();
+        value["concurrency"] = serde_json::json!({
+            "global": 0,
+            "per_agent": 7,
+            "per_provider": 0
+        });
+        let path = scratch("legacy-mixed-concurrency", &value.to_string());
+
+        let migrated =
+            ClientConfig::load(&path).expect("each legacy zero limit migrates independently");
+
+        assert_eq!(migrated.concurrency.global, 64);
+        assert_eq!(migrated.concurrency.per_agent, 7);
+        assert_eq!(migrated.concurrency.per_provider, 16);
+
+        let invalid: ClientConfig =
+            serde_json::from_value(value).expect("raw zero limits still deserialize");
+        let destination = path.with_extension("saved.json");
+        let error = invalid
+            .save(&destination)
+            .expect_err("new saves must not reintroduce unlimited concurrency");
+        assert!(error.to_string().contains("greater than zero"), "{error}");
+        assert!(!destination.exists());
         fs::remove_file(path).ok();
     }
 
