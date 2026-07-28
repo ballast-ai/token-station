@@ -160,13 +160,15 @@ impl ServerLifecycle {
 struct AppInner {
     /// Actual token-station.json configuration path.
     config_path: PathBuf,
-    /// Editable draft. Partial states are valid and are validated only when saved.
+    /// Authoritative config draft. Materialize and validate candidates before replacing current state.
     draft: Value,
     /// Preserve startup read or validation errors. Show a safe template but block
     /// writes so Save cannot silently overwrite the user's original file.
     load_error: Option<String>,
     /// Persistent identity of the editable saved config; Runtime Supervisor owns the running revision.
     config_state: ConfigState,
+    /// In-process editing state for Agent-specific routes. Tiers may be empty but never enter the savable global draft.
+    agent_route_drafts: BTreeMap<String, BTreeMap<String, TierView>>,
     /// Authoritative proxy-service lifecycle state.
     server: ServerLifecycle,
     /// Free-provider verification sends real upstream requests; an in-memory single-flight set limits duplication and abuse.
@@ -734,6 +736,7 @@ impl AppInner {
             draft,
             load_error,
             config_state,
+            agent_route_drafts: BTreeMap::new(),
             server: ServerLifecycle::stopped(),
             pending_free_providers: BTreeSet::new(),
             pending_provider_keys: BTreeMap::new(),
@@ -747,6 +750,34 @@ impl AppInner {
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Build a candidate configuration while holding the lock. Replace the authoritative draft only after complete materialization and successful revision recording.
+    /// The caller closure may modify only the configuration draft. Update other AppInner state separately after a successful commit.
+    fn edit_validated_draft<T>(
+        &mut self,
+        edit: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.ensure_editable()?;
+        let previous = self.draft.clone();
+        let result = match edit(self) {
+            Ok(result) => result,
+            Err(error) => {
+                self.draft = previous;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.materialize() {
+            self.draft = previous;
+            return Err(error);
+        }
+        let candidate = self.draft.clone();
+        self.draft = previous;
+        let mut candidate_state = self.config_state.clone();
+        candidate_state.observe_draft(&candidate)?;
+        self.draft = candidate;
+        self.config_state = candidate_state;
+        Ok(result)
     }
 
     fn save_draft(&mut self) -> Result<u64, String> {
@@ -1012,7 +1043,22 @@ impl AppInner {
             .unwrap_or("inherit")
     }
 
+    fn agent_route_view_mode(&self, agent_id: &str) -> &str {
+        if self.agent_route_drafts.contains_key(agent_id) {
+            "custom"
+        } else {
+            self.agent_route_mode(agent_id)
+        }
+    }
+
     fn agent_tier(&self, agent_id: &str, slot: &str) -> TierView {
+        if let Some(tier) = self
+            .agent_route_drafts
+            .get(agent_id)
+            .and_then(|tiers| tiers.get(slot))
+        {
+            return tier.clone();
+        }
         let target = match self.agent_route_mode(agent_id) {
             "custom" => &self.draft["agent_routes"][agent_id]["custom_route"][slot],
             "profile" => {
@@ -1030,7 +1076,8 @@ impl AppInner {
     }
 
     fn agent_profile(&self, agent_id: &str) -> Option<String> {
-        (self.agent_route_mode(agent_id) == "profile")
+        (!self.agent_route_drafts.contains_key(agent_id)
+            && self.agent_route_mode(agent_id) == "profile")
             .then(|| {
                 self.draft["agent_routes"][agent_id]["profile"]
                     .as_str()
@@ -1050,7 +1097,7 @@ impl AppInner {
         supported_agent_ids()
             .into_iter()
             .map(|agent_id| {
-                let mode = self.agent_route_mode(&agent_id).to_string();
+                let mode = self.agent_route_view_mode(&agent_id).to_string();
                 let tiers = ["high", "mid", "low"]
                     .into_iter()
                     .map(|slot| (slot.to_string(), self.agent_tier(&agent_id, slot)))
@@ -1059,7 +1106,7 @@ impl AppInner {
                     ["high", "mid", "low"].into_iter().find_map(|slot| {
                         let tier = self.agent_tier(&agent_id, slot);
                         (tier.upstream.is_none() || tier.model.is_none())
-                            .then(|| format!("{slot} 档尚未配置供应商和模型"))
+                            .then(|| format!("Agent `{agent_id}` 的 {slot} 档缺少供应商和模型"))
                     })
                 } else {
                     None
@@ -1378,54 +1425,30 @@ impl AppInner {
             .ok_or_else(|| format!("供应商 `{upstream}` 未配置模型 `{model}`"))
     }
 
-    fn seed_agent_custom_route(&mut self, agent_id: &str) {
-        if self.draft["agent_routes"][agent_id]["custom_route"].is_object() {
+    fn begin_agent_route_draft(&mut self, agent_id: &str) {
+        if self.agent_route_drafts.contains_key(agent_id) {
             return;
         }
-        let mut custom = serde_json::Map::new();
-        for (slot, pool) in [("high", TIER_HIGH), ("mid", TIER_MID), ("low", TIER_LOW)] {
-            let tier = self.tier(pool);
-            custom.insert(
-                slot.to_string(),
-                match (tier.upstream, tier.model) {
-                    (Some(upstream), Some(model)) => {
-                        json!({ "upstream": upstream, "model": model })
+        let stored = &self.draft["agent_routes"][agent_id]["custom_route"];
+        let tiers = ["high", "mid", "low"]
+            .into_iter()
+            .map(|slot| {
+                let target = &stored[slot];
+                let tier = if stored.is_object() {
+                    TierView {
+                        upstream: target["upstream"].as_str().map(str::to_owned),
+                        model: target["model"].as_str().map(str::to_owned),
                     }
-                    _ => Value::Null,
-                },
-            );
-        }
-        self.draft["agent_routes"][agent_id]["custom_route"] = Value::Object(custom);
+                } else {
+                    self.tier(pool_key(slot).expect("known UI tier slot"))
+                };
+                (slot.to_owned(), tier)
+            })
+            .collect();
+        self.agent_route_drafts.insert(agent_id.to_owned(), tiers);
     }
 
-    fn agent_custom_route_complete(&self, agent_id: &str) -> bool {
-        ["high", "mid", "low"].into_iter().all(|slot| {
-            let target = &self.draft["agent_routes"][agent_id]["custom_route"][slot];
-            target["upstream"].as_str().is_some() && target["model"].as_str().is_some()
-        })
-    }
-
-    fn set_agent_route_mode_value(&mut self, agent_id: &str, mode: &str) {
-        if mode == "custom" {
-            self.seed_agent_custom_route(agent_id);
-        } else if !self.agent_custom_route_complete(agent_id) {
-            // ClientConfig intentionally persists only executable routes. An
-            // incomplete desktop draft may be edited in custom mode, but once
-            // the user returns to inherit it must not poison an otherwise valid
-            // home configuration.
-            if let Some(route) = self.draft["agent_routes"][agent_id].as_object_mut() {
-                route.remove("custom_route");
-            }
-        }
-        if mode != "profile" {
-            if let Some(route) = self.draft["agent_routes"][agent_id].as_object_mut() {
-                route.remove("profile");
-            }
-        }
-        self.draft["agent_routes"][agent_id]["mode"] = json!(mode);
-    }
-
-    fn set_agent_tier_value(
+    fn set_agent_route_draft_tier(
         &mut self,
         agent_id: &str,
         slot: &str,
@@ -1434,20 +1457,93 @@ impl AppInner {
     ) -> Result<(), String> {
         ensure_known_agent_id(agent_id)?;
         pool_key(slot)?;
-        self.seed_agent_custom_route(agent_id);
-        match (upstream, model) {
+        let tier = match (upstream, model) {
             (Some(upstream), Some(model)) => {
                 self.validate_route_target(&upstream, &model)?;
-                self.draft["agent_routes"][agent_id]["custom_route"][slot] =
-                    json!({ "upstream": upstream, "model": model });
+                TierView {
+                    upstream: Some(upstream),
+                    model: Some(model),
+                }
             }
-            (None, None) => {
-                self.draft["agent_routes"][agent_id]["custom_route"][slot] = Value::Null;
-            }
-            _ => return Err("档位必须同时提供供应商和模型，或同时清空".to_string()),
-        }
-        self.draft["agent_routes"][agent_id]["mode"] = json!("custom");
+            (None, None) => TierView {
+                upstream: None,
+                model: None,
+            },
+            _ => return Err("档位必须同时提供供应商和模型，或同时清空".to_owned()),
+        };
+        self.begin_agent_route_draft(agent_id);
+        self.agent_route_drafts
+            .get_mut(agent_id)
+            .expect("route draft was just initialized")
+            .insert(slot.to_owned(), tier);
         Ok(())
+    }
+
+    fn complete_agent_route_draft(
+        agent_id: &str,
+        tiers: &BTreeMap<String, TierView>,
+    ) -> Result<Value, String> {
+        let mut route = serde_json::Map::new();
+        for slot in ["high", "mid", "low"] {
+            let tier = tiers.get(slot);
+            let upstream = tier.and_then(|tier| tier.upstream.as_deref());
+            let model = tier.and_then(|tier| tier.model.as_deref());
+            let target = match (upstream, model) {
+                (Some(upstream), Some(model)) => {
+                    json!({ "upstream": upstream, "model": model })
+                }
+                (None, None) => {
+                    return Err(format!("Agent `{agent_id}` 的 {slot} 档缺少供应商和模型"));
+                }
+                (None, Some(_)) => {
+                    return Err(format!("Agent `{agent_id}` 的 {slot} 档缺少供应商"));
+                }
+                (Some(_), None) => {
+                    return Err(format!("Agent `{agent_id}` 的 {slot} 档缺少模型"));
+                }
+            };
+            route.insert(slot.to_owned(), target);
+        }
+        Ok(Value::Object(route))
+    }
+
+    fn promote_agent_route_drafts(&mut self) -> Result<(), String> {
+        let routes: BTreeMap<String, Value> = self
+            .agent_route_drafts
+            .iter()
+            .map(|(agent_id, tiers)| {
+                Self::complete_agent_route_draft(agent_id, tiers)
+                    .map(|route| (agent_id.clone(), route))
+            })
+            .collect::<Result<_, _>>()?;
+        if routes.is_empty() {
+            return Ok(());
+        }
+        self.edit_validated_draft(|inner| {
+            if !inner.draft["agent_routes"].is_object() {
+                inner.draft["agent_routes"] = json!({});
+            }
+            for (agent_id, route) in &routes {
+                inner.draft["agent_routes"][agent_id] = json!({
+                    "mode": "custom",
+                    "custom_route": route,
+                });
+            }
+            Ok(())
+        })
+    }
+
+    fn set_agent_inherit_value(&mut self, agent_id: &str) {
+        if !self.draft["agent_routes"].is_object() {
+            self.draft["agent_routes"] = json!({});
+        }
+        if !self.draft["agent_routes"][agent_id].is_object() {
+            self.draft["agent_routes"][agent_id] = json!({});
+        }
+        if let Some(route) = self.draft["agent_routes"][agent_id].as_object_mut() {
+            route.remove("profile");
+        }
+        self.draft["agent_routes"][agent_id]["mode"] = json!("inherit");
     }
 
     fn save_home_route_as_profile_value(&mut self, name: &str) -> Result<(), String> {
@@ -2265,6 +2361,20 @@ fn replace_provider_models(
             }
         }
     }
+    for (agent_id, tiers) in &inner.agent_route_drafts {
+        for (slot, target) in tiers {
+            let refers_to_provider = target.upstream.as_deref() == Some(name);
+            let retained = target
+                .model
+                .as_deref()
+                .is_some_and(|model| normalized.iter().any(|candidate| candidate == model));
+            if refers_to_provider && !retained {
+                agent_blocked.push(format!("{agent_id}/{slot}"));
+            }
+        }
+    }
+    agent_blocked.sort();
+    agent_blocked.dedup();
     if !agent_blocked.is_empty() {
         return Err(format!(
             "不能移除 Agent 独立路由 {} 正在使用的模型，请先调整对应档位",
@@ -2408,7 +2518,15 @@ fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {
             }
         }
     }
+    for (agent_id, tiers) in &inner.agent_route_drafts {
+        for (slot, target) in tiers {
+            if target.upstream.as_deref() == Some(name) {
+                references.push(format!("Agent/{agent_id}/{slot}"));
+            }
+        }
+    }
     references.sort();
+    references.dedup();
     references
 }
 
@@ -2508,10 +2626,7 @@ fn set_tier(
 ) -> Result<StateView, String> {
     let pool = pool_key(&slot)?;
     let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-
-    inner.set_tier_value(pool, upstream, model)?;
-    inner.observe_draft()?;
+    inner.edit_validated_draft(|candidate| candidate.set_tier_value(pool, upstream, model))?;
     Ok(inner.snapshot())
 }
 
@@ -2523,8 +2638,7 @@ fn add_keyword(
     keyword: String,
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    inner.add_tier_keyword(&slot, &keyword)?;
+    inner.edit_validated_draft(|candidate| candidate.add_tier_keyword(&slot, &keyword))?;
     Ok(inner.snapshot())
 }
 
@@ -2536,8 +2650,7 @@ fn remove_keyword(
     keyword: String,
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    inner.remove_tier_keyword(&slot, &keyword)?;
+    inner.edit_validated_draft(|candidate| candidate.remove_tier_keyword(&slot, &keyword))?;
     Ok(inner.snapshot())
 }
 
@@ -2553,8 +2666,15 @@ fn set_agent_route_mode(
     }
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
-    inner.set_agent_route_mode_value(&agent_id, &mode);
-    inner.observe_draft()?;
+    if mode == "custom" {
+        inner.begin_agent_route_draft(&agent_id);
+        return Ok(inner.snapshot());
+    }
+    inner.edit_validated_draft(|candidate| {
+        candidate.set_agent_inherit_value(&agent_id);
+        Ok(())
+    })?;
+    inner.agent_route_drafts.remove(&agent_id);
     Ok(inner.snapshot())
 }
 
@@ -2568,8 +2688,7 @@ fn set_agent_tier(
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
-    inner.set_agent_tier_value(&agent_id, &slot, upstream, model)?;
-    inner.observe_draft()?;
+    inner.set_agent_route_draft_tier(&agent_id, &slot, upstream, model)?;
     Ok(inner.snapshot())
 }
 
@@ -2579,13 +2698,7 @@ fn save_home_route_as_profile(
     name: String,
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    let previous = inner.draft.clone();
-    inner.save_home_route_as_profile_value(&name)?;
-    if let Err(error) = inner.observe_draft() {
-        inner.draft = previous;
-        return Err(error);
-    }
+    inner.edit_validated_draft(|candidate| candidate.save_home_route_as_profile_value(&name))?;
     Ok(inner.snapshot())
 }
 
@@ -2596,45 +2709,40 @@ fn mount_agent_profile(
     profile: String,
 ) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    let previous = inner.draft.clone();
-    inner.mount_agent_profile_value(&agent_id, &profile)?;
-    if let Err(error) = inner.observe_draft() {
-        inner.draft = previous;
-        return Err(error);
-    }
+    inner.edit_validated_draft(|candidate| {
+        candidate.mount_agent_profile_value(&agent_id, &profile)
+    })?;
+    inner.agent_route_drafts.remove(&agent_id);
     Ok(inner.snapshot())
 }
 
 #[tauri::command]
 fn delete_profile(state: State<'_, AppStateManaged>, name: String) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    let previous = inner.draft.clone();
-    inner.delete_profile_value(&name)?;
-    if let Err(error) = inner.observe_draft() {
-        inner.draft = previous;
-        return Err(error);
-    }
+    inner.edit_validated_draft(|candidate| candidate.delete_profile_value(&name))?;
     Ok(inner.snapshot())
 }
 
 #[tauri::command]
 fn save_agent_routes(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
+    inner.promote_agent_route_drafts()?;
     inner.save_draft()?;
+    inner.agent_route_drafts.clear();
     Ok(inner.snapshot())
 }
 
 #[tauri::command]
 fn apply_home_route_to_all_agents(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    for agent_id in supported_agent_ids() {
-        inner.set_agent_route_mode_value(&agent_id, "inherit");
-    }
-    inner.observe_draft()?;
+    inner.edit_validated_draft(|candidate| {
+        for agent_id in supported_agent_ids() {
+            candidate.set_agent_inherit_value(&agent_id);
+        }
+        Ok(())
+    })?;
     inner.save_draft()?;
+    inner.agent_route_drafts.clear();
     Ok(inner.snapshot())
 }
 
@@ -4754,17 +4862,33 @@ mod tests {
         inner
             .set_tier_value(TIER_LOW, Some("provider".into()), Some("home".into()))
             .unwrap();
-        inner.set_agent_route_mode_value("codex", "custom");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        set_agent_route_mode(app.state(), "codex".to_owned(), "custom".to_owned()).unwrap();
         for slot in ["high", "mid", "low"] {
-            inner
-                .set_agent_tier_value("codex", slot, Some("provider".into()), Some("agent".into()))
-                .unwrap();
+            set_agent_tier(
+                app.state(),
+                "codex".to_owned(),
+                slot.to_owned(),
+                Some("provider".to_owned()),
+                Some("agent".to_owned()),
+            )
+            .unwrap();
         }
-        inner.set_agent_route_mode_value("codex", "inherit");
+        save_agent_routes(app.state()).unwrap();
+        set_agent_route_mode(app.state(), "codex".to_owned(), "inherit".to_owned()).unwrap();
 
-        let error = replace_provider_models(&mut inner, "provider", vec!["home".to_owned()])
-            .expect_err("inactive custom drafts still protect their model references");
+        let error = match update_provider_models(
+            app.state(),
+            "provider".to_owned(),
+            vec!["home".to_owned()],
+        ) {
+            Ok(_) => panic!("inactive custom drafts still protect their model references"),
+            Err(error) => error,
+        };
         assert!(error.contains("codex/high"), "{error}");
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
         assert_eq!(
             inner.draft["upstreams"]["provider"]["models"]
                 .as_array()
@@ -4772,6 +4896,95 @@ mod tests {
                 .len(),
             2
         );
+        drop(inner);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn provider_model_updates_protect_unsaved_agent_route_editors() {
+        let root = scratch_home("model-update-agent-editor");
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "home"}, {"model": "agent"}]
+        });
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        set_agent_route_mode(app.state(), "codex".to_owned(), "custom".to_owned()).unwrap();
+        set_agent_tier(
+            app.state(),
+            "codex".to_owned(),
+            "high".to_owned(),
+            Some("provider".to_owned()),
+            Some("agent".to_owned()),
+        )
+        .unwrap();
+
+        let error = match update_provider_models(
+            app.state(),
+            "provider".to_owned(),
+            vec!["home".to_owned()],
+        ) {
+            Ok(_) => panic!("an unsaved Agent editor must protect its selected model"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("codex/high"), "{error}");
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
+        assert_eq!(
+            inner.draft["upstreams"]["provider"]["models"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            inner.agent_route_drafts["codex"]["high"].model.as_deref(),
+            Some("agent")
+        );
+        drop(inner);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn provider_removal_reports_unsaved_agent_route_editor_references() {
+        let root = scratch_home("provider-removal-agent-editor");
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "agent"}]
+        });
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        set_agent_route_mode(app.state(), "codex".to_owned(), "custom".to_owned()).unwrap();
+        set_agent_tier(
+            app.state(),
+            "codex".to_owned(),
+            "high".to_owned(),
+            Some("provider".to_owned()),
+            Some("agent".to_owned()),
+        )
+        .unwrap();
+
+        let preview = preview_provider_removal(app.state(), "provider".to_owned()).unwrap();
+        assert!(!preview.can_remove);
+        assert_eq!(preview.references, ["Agent/codex/high"]);
+        let error = match remove_provider(app.state(), "provider".to_owned()) {
+            Ok(_) => panic!("an editor reference must block Provider removal"),
+            Err(error) => error,
+        };
+        assert!(error.contains("Agent/codex/high"), "{error}");
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -4961,6 +5174,197 @@ mod tests {
     }
 
     #[test]
+    fn entering_an_incomplete_agent_route_keeps_the_global_config_valid_and_clean() {
+        let root = scratch_home("agent-route-editor-isolation");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        )))));
+        let before = get_state(app.state());
+
+        let editing =
+            set_agent_route_mode(app.state(), "codex".to_owned(), "custom".to_owned()).unwrap();
+
+        assert_eq!(editing.agent_routes["codex"].mode, "custom");
+        assert_eq!(
+            editing.agent_routes["codex"].config_error.as_deref(),
+            Some("Agent `codex` 的 high 档缺少供应商和模型")
+        );
+        assert_eq!(editing.config_error, None);
+        assert_eq!(editing.draft_revision, before.draft_revision);
+        assert_eq!(editing.saved_revision, before.saved_revision);
+        assert_eq!(editing.config_dirty, before.config_dirty);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rejecting_an_agent_route_target_keeps_editor_and_global_state_unchanged() {
+        let root = scratch_home("agent-route-target-rollback");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        )))));
+        let before = get_state(app.state());
+
+        let error = match set_agent_tier(
+            app.state(),
+            "codex".to_owned(),
+            "high".to_owned(),
+            Some("missing-provider".to_owned()),
+            Some("missing-model".to_owned()),
+        ) {
+            Ok(_) => panic!("an unknown provider must be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, "未知供应商 `missing-provider`");
+        let after = get_state(app.state());
+        assert_eq!(after.agent_routes["codex"].mode, "inherit");
+        assert_eq!(after.agent_routes["codex"].config_error, None);
+        assert_eq!(after.config_error, None);
+        assert_eq!(after.draft_revision, before.draft_revision);
+        assert_eq!(after.saved_revision, before.saved_revision);
+        assert_eq!(after.config_dirty, before.config_dirty);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn incomplete_agent_editor_does_not_block_configuring_and_saving_home() {
+        let root = scratch_home("agent-route-home-save");
+        let config_path = root.join("token-station.json");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            config_path.clone(),
+            template_for_test(&root),
+            None,
+        )))));
+
+        set_agent_route_mode(app.state(), "codex".to_owned(), "custom".to_owned()).unwrap();
+        add_provider(
+            app.state(),
+            "provider".to_owned(),
+            "https://example.com/v1".to_owned(),
+            vec!["model".to_owned()],
+            None,
+            false,
+        )
+        .unwrap();
+        for slot in ["high", "mid", "low"] {
+            set_tier(
+                app.state(),
+                slot.to_owned(),
+                Some("provider".to_owned()),
+                Some("model".to_owned()),
+            )
+            .unwrap();
+        }
+
+        let saved = save_config(app.state()).unwrap();
+
+        assert_eq!(saved.config_error, None);
+        assert!(!saved.config_dirty);
+        assert_eq!(saved.agent_routes["codex"].mode, "custom");
+        assert_eq!(
+            saved.agent_routes["codex"].config_error.as_deref(),
+            Some("Agent `codex` 的 high 档缺少供应商和模型")
+        );
+        assert!(saved
+            .tiers
+            .values()
+            .all(|tier| tier.upstream.as_deref() == Some("provider")
+                && tier.model.as_deref() == Some("model")));
+        let config = ClientConfig::load(&config_path).unwrap();
+        assert!(
+            !config.agent_routes.contains_key("codex"),
+            "an incomplete editor must not enter the saved ClientConfig"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn saving_an_incomplete_agent_editor_fails_without_touching_config_state_or_disk() {
+        let root = scratch_home("agent-route-incomplete-save");
+        let config_path = root.join("token-station.json");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            config_path.clone(),
+            template_for_test(&root),
+            None,
+        )))));
+        let editing =
+            set_agent_route_mode(app.state(), "codex".to_owned(), "custom".to_owned()).unwrap();
+
+        let error = match save_agent_routes(app.state()) {
+            Ok(_) => panic!("an incomplete Agent editor cannot be saved"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, "Agent `codex` 的 high 档缺少供应商和模型");
+        let after = get_state(app.state());
+        assert_eq!(after.agent_routes["codex"].mode, "custom");
+        assert_eq!(after.config_error, None);
+        assert_eq!(after.draft_revision, editing.draft_revision);
+        assert_eq!(after.saved_revision, editing.saved_revision);
+        assert_eq!(after.config_dirty, editing.config_dirty);
+        assert!(!config_path.exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn completing_and_saving_an_agent_editor_commits_one_valid_custom_route() {
+        let root = scratch_home("agent-route-complete-save");
+        let config_path = root.join("token-station.json");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            config_path.clone(),
+            template_for_test(&root),
+            None,
+        )))));
+        add_provider(
+            app.state(),
+            "provider".to_owned(),
+            "https://example.com/v1".to_owned(),
+            vec!["model".to_owned()],
+            None,
+            false,
+        )
+        .unwrap();
+        let before =
+            set_agent_route_mode(app.state(), "codex".to_owned(), "custom".to_owned()).unwrap();
+        for slot in ["high", "mid", "low"] {
+            let editing = set_agent_tier(
+                app.state(),
+                "codex".to_owned(),
+                slot.to_owned(),
+                Some("provider".to_owned()),
+                Some("model".to_owned()),
+            )
+            .unwrap();
+            assert_eq!(editing.config_error, None);
+            assert_eq!(editing.draft_revision, before.draft_revision);
+        }
+
+        let saved = save_agent_routes(app.state()).unwrap();
+
+        assert_eq!(saved.agent_routes["codex"].mode, "custom");
+        assert_eq!(saved.agent_routes["codex"].config_error, None);
+        assert!(!saved.config_dirty);
+        assert!(saved.draft_revision > before.draft_revision);
+        assert_eq!(saved.draft_revision, saved.saved_revision);
+        let config = ClientConfig::load(&config_path).unwrap();
+        let route = config.agent_routes["codex"].custom_route.as_ref().unwrap();
+        for target in [&route.high, &route.mid, &route.low] {
+            assert_eq!(target.upstream.as_str(), "provider");
+            assert_eq!(target.model, "model");
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn agent_route_drafts_seed_from_home_validate_targets_and_preserve_complete_profiles() {
         let root = scratch_home("agent-route-draft");
         let mut inner = AppInner::new(
@@ -4978,33 +5382,47 @@ mod tests {
                 .set_tier_value(pool, Some("provider".into()), Some("home".into()))
                 .unwrap();
         }
-
-        inner.set_agent_route_mode_value("codex", "custom");
-        assert!(inner.agent_custom_route_complete("codex"));
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        let editing =
+            set_agent_route_mode(app.state(), "codex".to_owned(), "custom".to_owned()).unwrap();
         assert_eq!(
-            inner.agent_tier("codex", "high").model.as_deref(),
+            editing.agent_routes["codex"].tiers["high"].model.as_deref(),
             Some("home")
         );
-        inner
-            .set_agent_tier_value(
-                "codex",
-                "high",
-                Some("provider".into()),
-                Some("agent".into()),
-            )
-            .unwrap();
-        assert!(inner
-            .set_agent_tier_value(
-                "future-agent",
-                "high",
-                Some("provider".into()),
-                Some("agent".into()),
-            )
-            .unwrap_err()
-            .contains("未知 Agent"));
-        let config = inner
-            .materialize()
-            .expect("complete custom profile validates");
+        set_agent_tier(
+            app.state(),
+            "codex".to_owned(),
+            "high".to_owned(),
+            Some("provider".to_owned()),
+            Some("agent".to_owned()),
+        )
+        .unwrap();
+        let unknown = match set_agent_tier(
+            app.state(),
+            "future-agent".to_owned(),
+            "high".to_owned(),
+            Some("provider".to_owned()),
+            Some("agent".to_owned()),
+        ) {
+            Ok(_) => panic!("an unknown Agent must be rejected"),
+            Err(error) => error,
+        };
+        assert!(unknown.contains("未知 Agent"), "{unknown}");
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            assert!(
+                !inner
+                    .materialize()
+                    .unwrap()
+                    .agent_routes
+                    .contains_key("codex"),
+                "editor state stays outside ClientConfig until save"
+            );
+        }
+        save_agent_routes(app.state()).unwrap();
+        let config = ClientConfig::load(&root.join("token-station.json")).unwrap();
         assert_eq!(
             config.agent_routes["codex"]
                 .custom_route
@@ -5015,9 +5433,14 @@ mod tests {
             "agent"
         );
 
-        inner.set_agent_route_mode_value("codex", "inherit");
+        let inherited =
+            set_agent_route_mode(app.state(), "codex".to_owned(), "inherit".to_owned()).unwrap();
+        assert_eq!(inherited.agent_routes["codex"].mode, "inherit");
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
         assert!(inner.draft["agent_routes"]["codex"]["custom_route"].is_object());
         assert!(inner.materialize().is_ok());
+        drop(inner);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -5037,13 +5460,22 @@ mod tests {
         inner
             .set_tier_value(TIER_LOW, Some("provider".into()), Some("model".into()))
             .unwrap();
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
 
-        inner.set_agent_route_mode_value("codex", "custom");
-        assert!(!inner.agent_custom_route_complete("codex"));
-        assert!(inner.materialize().is_err());
-        inner.set_agent_route_mode_value("codex", "inherit");
+        let editing =
+            set_agent_route_mode(app.state(), "codex".to_owned(), "custom".to_owned()).unwrap();
+        assert!(editing.agent_routes["codex"].config_error.is_some());
+        assert_eq!(editing.config_error, None);
+        let inherited =
+            set_agent_route_mode(app.state(), "codex".to_owned(), "inherit".to_owned()).unwrap();
+        assert_eq!(inherited.agent_routes["codex"].mode, "inherit");
+        assert_eq!(inherited.config_error, None);
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
         assert!(inner.draft["agent_routes"]["codex"]["custom_route"].is_null());
         assert!(inner.materialize().is_ok());
+        drop(inner);
         std::fs::remove_dir_all(root).ok();
     }
 
