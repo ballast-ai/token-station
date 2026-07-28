@@ -543,8 +543,16 @@ describe("model selection and provider model management", () => {
     const user = userEvent.setup();
     render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: "刷新模型" }));
-    expect(await screen.findByText("下架：old-model（仍保留引用）")).toBeInTheDocument();
-    expect(screen.getByText("新增：new-model")).toBeInTheDocument();
+    expect(await screen.findByText((_, element) =>
+      Boolean(
+        element?.classList.contains("removed")
+        && element.textContent?.includes("old-model")
+        && element.textContent.includes("仍保留引用"),
+      ),
+    )).toBeInTheDocument();
+    expect(screen.getByText((_, element) =>
+      Boolean(element?.classList.contains("added") && element.textContent?.includes("new-model")),
+    )).toBeInTheDocument();
     expect(screen.getByText(/已下架/)).toBeInTheDocument();
   });
 

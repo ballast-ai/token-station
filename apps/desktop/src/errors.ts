@@ -1,10 +1,28 @@
+import type { Language } from "./components/LanguageProvider";
+
 export interface HumanError {
   layer: string;
   message: string;
   suggestion: string;
 }
 
-const ERROR_GUIDANCE: Record<string, HumanError> = {
+const ENGLISH_ERROR_GUIDANCE: Record<string, HumanError> = {
+  invalid_request: { layer: "Request", message: "The upstream rejected an invalid request.", suggestion: "Check the client parameters and selected protocol." },
+  auth: { layer: "Authentication · Key", message: "The upstream rejected the credential.", suggestion: "Check that the provider API key is valid and has permission." },
+  payment_required: { layer: "Account · Balance", message: "The account has insufficient balance or the endpoint requires payment.", suggestion: "Check the provider subscription and account credit." },
+  rate_limit: { layer: "Rate limit", message: "The upstream rate limit was reached.", suggestion: "Retry later or reduce concurrency." },
+  capacity: { layer: "Capacity", message: "The upstream has no available capacity right now.", suggestion: "Retry later or configure a fallback provider." },
+  capability: { layer: "Capability", message: "The model does not support a capability required by this request.", suggestion: "Select a model that explicitly supports the required capability." },
+  context_length: { layer: "Context", message: "The request exceeds the model context window.", suggestion: "Shorten the input or select a model with a larger context window." },
+  content_policy: { layer: "Content policy", message: "The upstream rejected the request under its content policy.", suggestion: "Adjust the request content and retry." },
+  upstream_unavailable: { layer: "Network · Upstream", message: "The upstream connection or transport failed.", suggestion: "Check the base URL, network, and egress settings." },
+  transport_truncated: { layer: "Network", message: "The connection ended early and the response is incomplete.", suggestion: "Retry and use the request ID to inspect the upstream failure." },
+  provider_protocol_error: { layer: "Protocol", message: "The upstream returned a response that does not match the protocol.", suggestion: "Check that the provider and adapter are compatible." },
+  timeout: { layer: "Timeout", message: "The upstream did not finish within the request budget.", suggestion: "Retry or switch providers." },
+  internal: { layer: "Local proxy", message: "The proxy failed while processing the request.", suggestion: "Copy the request ID and inspect the local logs." },
+};
+
+const CHINESE_ERROR_GUIDANCE: Record<string, HumanError> = {
   invalid_request: { layer: "请求", message: "请求格式不合法，上游拒绝处理。", suggestion: "检查客户端参数和所选协议。" },
   auth: { layer: "鉴权 · Key", message: "凭据被上游拒绝。", suggestion: "检查 Provider API Key 是否正确、有效且有权限。" },
   payment_required: { layer: "账户 · 余额", message: "账户余额不足或端点需要付费。", suggestion: "检查 Provider 订阅和账户额度。" },
@@ -20,11 +38,21 @@ const ERROR_GUIDANCE: Record<string, HumanError> = {
   internal: { layer: "本地代理", message: "代理内部处理失败。", suggestion: "复制请求 ID 并查看本地日志。" },
 };
 
-export function humanizeErrorCode(code: string | null | undefined): HumanError | null {
+export function humanizeErrorCode(
+  code: string | null | undefined,
+  language: Language = "en",
+): HumanError | null {
   if (!code) return null;
-  return ERROR_GUIDANCE[code] ?? {
-    layer: "未知",
-    message: `未归类的错误码：${code}`,
-    suggestion: "复制请求 ID 并查看本地日志。",
-  };
+  const guidance = language === "zh-CN" ? CHINESE_ERROR_GUIDANCE : ENGLISH_ERROR_GUIDANCE;
+  return guidance[code] ?? (language === "zh-CN"
+    ? {
+        layer: "未知",
+        message: `未归类的错误码：${code}`,
+        suggestion: "复制请求 ID 并查看本地日志。",
+      }
+    : {
+        layer: "Unknown",
+        message: `Unclassified error code: ${code}`,
+        suggestion: "Copy the request ID and inspect the local logs.",
+      });
 }

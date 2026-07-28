@@ -7,6 +7,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
+import { useLocalizedCopy } from "./LanguageProvider";
 
 export interface CompactComboboxOption {
   value: string;
@@ -32,9 +33,10 @@ export default function CompactCombobox({
   value,
   options,
   disabled = false,
-  placeholder = "请选择",
+  placeholder,
   onChange,
 }: CompactComboboxProps) {
+  const { copy } = useLocalizedCopy();
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [query, setQuery] = useState("");
@@ -202,7 +204,7 @@ export default function CompactCombobox({
         }}
       >
         <span className={selected ? "" : "placeholder-copy"}>
-          {selected?.label ?? placeholder}
+          {selected?.label ?? placeholder ?? copy("Select", "请选择")}
         </span>
         <svg viewBox="0 0 16 16" aria-hidden="true">
           <path d="m4 6 4 4 4-4" />
@@ -218,8 +220,8 @@ export default function CompactCombobox({
                 ref={searchRef}
                 type="search"
                 value={query}
-                aria-label={`搜索${ariaLabel}`}
-                placeholder="搜索"
+                aria-label={copy(`Search ${ariaLabel}`, `搜索${ariaLabel}`)}
+                placeholder={copy("Search", "搜索")}
                 onChange={(event) => {
                   setQuery(event.target.value);
                   setActiveIndex(0);
@@ -294,10 +296,14 @@ export default function CompactCombobox({
               </button>
             ))}
             {visibleOptions.length === 0 && (
-              <div className="compact-combobox-empty">没有匹配项</div>
+              <div className="compact-combobox-empty">
+                {copy("No matching options", "没有匹配项")}
+              </div>
             )}
             {!normalizedQuery && options.length > INITIAL_OPTION_LIMIT && (
-              <div className="compact-combobox-limit">输入名称可搜索其余选项</div>
+              <div className="compact-combobox-limit">
+                {copy("Enter a name to search the remaining options", "输入名称可搜索其余选项")}
+              </div>
             )}
           </div>
         </div>

@@ -176,7 +176,7 @@ function navigation() {
 }
 
 beforeEach(() => {
-  window.localStorage.removeItem(LANGUAGE_STORAGE_KEY);
+  window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "zh-CN");
   listenMock.mockReset();
   listenMock.mockResolvedValue(vi.fn());
   const initial = stateFixture();
@@ -205,16 +205,16 @@ it("renders a supported virtual Agent entirely from registry metadata", async ()
 
 describe("desktop station navigation", () => {
   it("maps the four revision relationships to stable save copy", () => {
-    expect(configSaveStatus(stateFixture())).toBe("无改动");
-    expect(configSaveStatus(stateFixture({ config_dirty: true, draft_revision: 2, saved_revision: 1 }))).toBe("有未保存更改");
+    expect(configSaveStatus(stateFixture(), "zh-CN")).toBe("无改动");
+    expect(configSaveStatus(stateFixture({ config_dirty: true, draft_revision: 2, saved_revision: 1 }), "zh-CN")).toBe("有未保存更改");
     expect(configSaveStatus(stateFixture({
       saved_revision: 2,
       serve: serveFixture({ app_runtime: "running", listener_reachable: true, running_revision: 1 }),
-    }))).toBe("已保存尚未应用");
+    }), "zh-CN")).toBe("已保存尚未应用");
     expect(configSaveStatus(stateFixture({
       saved_revision: 2,
       serve: serveFixture({ app_runtime: "running", listener_reachable: true, running_revision: 2 }),
-    }))).toBe("运行中 revision 2");
+    }), "zh-CN")).toBe("运行中 revision 2");
   });
 
   it("shows the revision save state and makes 保存并应用 start a real apply", async () => {
@@ -456,21 +456,47 @@ describe("desktop station navigation", () => {
     expect(await screen.findByRole("heading", { name: "主页路由" })).toBeInTheDocument();
   });
 
-  it("switches and persists the interface language from Settings", async () => {
+  it("renders the primary desktop surface in English by default", async () => {
     const user = userEvent.setup();
+    window.localStorage.removeItem(LANGUAGE_STORAGE_KEY);
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "设置" }));
-    await user.click(screen.getByRole("button", { name: /语言/ }));
-    expect(screen.getByRole("heading", { name: "界面语言" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Home routing" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Smart routing" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save and apply" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Providers" })).toBeInTheDocument();
+    expect(screen.queryByText("主页路由")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("radio", { name: /English/ }));
+    await user.click(screen.getByRole("button", { name: "Usage" }));
+    expect(await screen.findByRole("heading", { name: "Usage" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Home" }));
+    await user.click(screen.getByRole("button", { name: "Add provider" }));
+    expect(await screen.findByRole("heading", { name: "Add provider" })).toBeInTheDocument();
+    expect(screen.getByText("MiniMax (China)")).toBeInTheDocument();
+    expect(screen.queryByText("MiniMax（中国）")).not.toBeInTheDocument();
+  });
 
-    expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+  it("switches the whole interface to Simplified Chinese and persists the choice", async () => {
+    const user = userEvent.setup();
+    window.localStorage.removeItem(LANGUAGE_STORAGE_KEY);
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: /Language/ }));
+    expect(screen.getByRole("heading", { name: "Interface language" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /English/ })).toHaveAttribute("aria-checked", "true");
-    expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("en");
-    expect(document.documentElement).toHaveAttribute("lang", "en");
+
+    await user.click(screen.getByRole("radio", { name: /简体中文/ }));
+
+    expect(screen.getByRole("heading", { name: "设置", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /简体中文/ })).toHaveAttribute("aria-checked", "true");
+    await user.click(screen.getByRole("button", { name: /返回/ }));
+    expect(await screen.findByRole("heading", { name: "主页路由" })).toBeInTheDocument();
+    expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("zh-CN");
+    expect(document.documentElement).toHaveAttribute("lang", "zh-CN");
   });
 
   it("moves virtual key to Settings, masks it, and starts or stops the proxy from the top bar", async () => {
@@ -583,7 +609,7 @@ describe("desktop station navigation", () => {
     await user.type(await screen.findByLabelText("策略组名称"), "日常开发");
     await user.click(screen.getByRole("button", { name: "保存策略" }));
     expect(invokeMock).toHaveBeenCalledWith("save_home_route_as_profile", { name: "日常开发" });
-    expect(await screen.findByText("策略组「日常开发」已加入草稿，请保存并应用")).toBeInTheDocument();
+    expect(await screen.findByText("策略组“日常开发”已加入草稿，请保存并应用。")).toBeInTheDocument();
 
     await user.click(navigation().getByRole("button", { name: "Codex" }));
     await user.click(screen.getByRole("radio", { name: "挂载策略组" }));
@@ -619,7 +645,7 @@ describe("desktop station navigation", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("serve_start");
 
     finishSave?.({ ...current, profiles: ["并发保护"] });
-    expect(await screen.findByText("策略组「并发保护」已加入草稿，请保存并应用")).toBeInTheDocument();
+    expect(await screen.findByText("策略组“并发保护”已加入草稿，请保存并应用。")).toBeInTheDocument();
   });
 
   it("opens Add Provider as a separate page and returns to the source page after saving", async () => {

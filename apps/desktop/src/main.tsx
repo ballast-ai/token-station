@@ -7,11 +7,11 @@ import { installGlobalDiagnostics } from "./diagnostics";
 installGlobalDiagnostics();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-    <RecoveryBoundary>
-      <LanguageProvider>
+    <LanguageProvider>
+      <RecoveryBoundary>
         <ThemeProvider>
           <AppBootstrap />
         </ThemeProvider>
-      </LanguageProvider>
-    </RecoveryBoundary>,
+      </RecoveryBoundary>
+    </LanguageProvider>,
 );

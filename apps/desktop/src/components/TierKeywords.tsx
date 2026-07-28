@@ -1,18 +1,9 @@
 import { useState } from "react";
 import type { TierSlot } from "../api";
+import { useLocalizedCopy } from "./LanguageProvider";
 
 /** 三档关键词库的静态文案。顺序=优先级(强→中→弱),与内核 rules 定序一致:
  *  同一句话同时命中两档的词时向上升档。列表只显示用户自己加的词,从空开始。 */
-const TIER_META: {
-  slot: TierSlot;
-  label: string;
-  hint: string;
-  placeholder: string;
-}[] = [
-  { slot: "high", label: "强模型", hint: "命中这些词 → 直接上最强档", placeholder: "输入关键词,回车加入" },
-  { slot: "mid", label: "中模型", hint: "命中这些词 → 走中档", placeholder: "输入关键词,回车加入" },
-  { slot: "low", label: "弱模型", hint: "命中这些词 → 走便宜快档", placeholder: "输入关键词,回车加入" },
-];
 
 export interface TierKeywordsProps {
   keywords: Record<TierSlot, string[]>;
@@ -30,6 +21,32 @@ export default function TierKeywords({
   onAdd,
   onRemove,
 }: TierKeywordsProps) {
+  const { copy } = useLocalizedCopy();
+  const tierMeta: {
+    slot: TierSlot;
+    label: string;
+    hint: string;
+    placeholder: string;
+  }[] = [
+    {
+      slot: "high",
+      label: copy("High model", "强模型"),
+      hint: copy("Matches go directly to the high tier", "命中这些词 → 直接上最强档"),
+      placeholder: copy("Enter a keyword and press Return", "输入关键词，回车加入"),
+    },
+    {
+      slot: "mid",
+      label: copy("Medium model", "中模型"),
+      hint: copy("Matches go to the medium tier", "命中这些词 → 走中档"),
+      placeholder: copy("Enter a keyword and press Return", "输入关键词，回车加入"),
+    },
+    {
+      slot: "low",
+      label: copy("Low model", "弱模型"),
+      hint: copy("Matches go to the fast, low-cost tier", "命中这些词 → 走便宜快档"),
+      placeholder: copy("Enter a keyword and press Return", "输入关键词，回车加入"),
+    },
+  ];
   // 每档一个独立输入框状态。
   const [drafts, setDrafts] = useState<Record<TierSlot, string>>({
     high: "",
@@ -48,7 +65,7 @@ export default function TierKeywords({
 
   return (
     <div className="keyword-grid">
-      {TIER_META.map(({ slot, label, hint, placeholder }) => {
+      {tierMeta.map(({ slot, label, hint, placeholder }) => {
         const words = keywords[slot] ?? [];
         const ready = configured[slot];
         const rowDisabled = disabled || !ready;
@@ -65,8 +82,14 @@ export default function TierKeywords({
                 {words.length === 0 && (
                   <span className="keyword-empty">
                     {ready
-                      ? "这一档还没有关键词 —— 加一个,含它的请求就归你管、走这一档"
-                      : "先在上方为该档选好供应商和模型"}
+                      ? copy(
+                          "No keywords yet. Add one to keep matching requests in this tier.",
+                          "这一档还没有关键词。添加关键词后，匹配的请求会固定到这一档。",
+                        )
+                      : copy(
+                          "Select a provider and model for this tier first.",
+                          "先在上方为该档选好供应商和模型。",
+                        )}
                   </span>
                 )}
                 {words.map((word) => (
@@ -75,7 +98,7 @@ export default function TierKeywords({
                     <button
                       type="button"
                       className="keyword-remove"
-                      aria-label={`删除关键词 ${word}`}
+                      aria-label={copy(`Delete keyword ${word}`, `删除关键词 ${word}`)}
                       disabled={disabled}
                       onClick={() => void onRemove(slot, word)}
                     >
@@ -88,7 +111,7 @@ export default function TierKeywords({
               <div className="keyword-add">
                 <input
                   className="input"
-                  placeholder={ready ? placeholder : "该档未配置模型"}
+                  placeholder={ready ? placeholder : copy("This tier has no model", "该档未配置模型")}
                   value={drafts[slot]}
                   disabled={rowDisabled}
                   onChange={(event) => setDraft(slot, event.target.value)}
@@ -105,7 +128,7 @@ export default function TierKeywords({
                   disabled={rowDisabled || !drafts[slot].trim()}
                   onClick={() => submit(slot)}
                 >
-                  添加
+                  {copy("Add", "添加")}
                 </button>
               </div>
             </div>

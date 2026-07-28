@@ -150,6 +150,16 @@ function FreeCatalogHarness() {
 }
 
 describe("AddProviderPage", () => {
+  it("renders localized provider names in the default English interface", () => {
+    window.localStorage.removeItem("token-station-language");
+    renderPage();
+
+    expect(screen.getByText("MiniMax (China)")).toBeInTheDocument();
+    expect(screen.getByText("Local Ollama")).toBeInTheDocument();
+    expect(screen.queryByText("MiniMax（中国）")).not.toBeInTheDocument();
+    expect(screen.queryByText("本地 Ollama")).not.toBeInTheDocument();
+  });
+
   it("switches the unified catalog to free APIs", async () => {
     const user = userEvent.setup();
     const onCatalogModeChange = vi.fn();
