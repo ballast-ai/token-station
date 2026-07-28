@@ -85,13 +85,28 @@ export default function CompactCombobox({
 
   useLayoutEffect(() => {
     if (!open) return undefined;
+    const viewportPadding = 12;
+    const gap = 6;
+    const minimumMenuHeight = 120;
+    const maximumMenuHeight = 360;
+    const trigger = triggerRef.current;
+    const initialRect = trigger?.getBoundingClientRect();
+    if (trigger && initialRect) {
+      const initialSpaceBelow = window.innerHeight - initialRect.bottom - viewportPadding - gap;
+      if (initialSpaceBelow < minimumMenuHeight) {
+        const previousScrollMarginBottom = trigger.style.scrollMarginBottom;
+        trigger.style.scrollMarginBottom =
+          `${minimumMenuHeight + viewportPadding + gap}px`;
+        trigger.scrollIntoView({ block: "nearest", inline: "nearest" });
+        trigger.style.scrollMarginBottom = previousScrollMarginBottom;
+      }
+    }
+
     const positionPopover = () => {
       const rect = triggerRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const viewportPadding = 12;
-      const gap = 6;
       const spaceBelow = window.innerHeight - rect.bottom - viewportPadding - gap;
-      const maxHeight = Math.max(120, Math.min(360, spaceBelow));
+      const maxHeight = Math.max(0, Math.min(maximumMenuHeight, spaceBelow));
       setPopoverStyle({
         left: Math.max(viewportPadding, rect.left),
         top: rect.bottom + gap,

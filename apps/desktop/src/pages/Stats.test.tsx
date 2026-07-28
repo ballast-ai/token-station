@@ -58,6 +58,31 @@ const aggregate = {
   unpriced_requests: 1,
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
+function statsView(by: string | null, total = aggregate) {
+  return {
+    total,
+    groups: by === "upstream"
+      ? [["openai", total] as [string, typeof total]]
+      : by === "model"
+        ? [["gpt-5", total] as [string, typeof total]]
+        : by === "hour" || by === "day"
+          ? [[String(Date.now()), total] as [string, typeof total]]
+          : [["codex", total] as [string, typeof total]],
+    by,
+    empty: false,
+  };
+}
+
 beforeEach(() => {
   vi.useRealTimers();
   vi.mocked(getStats).mockReset().mockImplementation(async (_since, by) => ({
@@ -166,6 +191,118 @@ describe("usage dashboard and display-only Agent budgets", () => {
         await vi.advanceTimersByTimeAsync(30_000);
       });
       expect(getStats).toHaveBeenCalledTimes(callsBeforeRefresh + 4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("commits a slow refresh result before running one coalesced follow-up", async () => {
+    const { unmount } = render(<Stats />);
+    await screen.findByText("1,500");
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole("combobox", { name: "自动刷新" }));
+      fireEvent.click(within(screen.getByRole("listbox")).getByRole("option", { name: "30 秒" }));
+
+      const callsBeforeRefresh = vi.mocked(getStats).mock.calls.length;
+      const pending: Array<{
+        by: string | null;
+        request: ReturnType<typeof deferred<ReturnType<typeof statsView>>>;
+      }> = [];
+      vi.mocked(getStats).mockImplementation((_since, by) => {
+        const request = deferred<ReturnType<typeof statsView>>();
+        pending.push({ by, request });
+        return request.promise;
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(getStats).toHaveBeenCalledTimes(callsBeforeRefresh + 4);
+
+      const slowTotal = { ...aggregate, input_tokens: 2_000, output_tokens: 333 };
+      await act(async () => {
+        for (const { by, request } of pending.slice(0, 4)) {
+          request.resolve(statsView(by, slowTotal));
+        }
+        await Promise.all(pending.slice(0, 4).map(({ request }) => request.promise));
+        await Promise.resolve();
+      });
+
+      expect(screen.getAllByTitle("2,333").length).toBeGreaterThan(0);
+      expect(getStats).toHaveBeenCalledTimes(callsBeforeRefresh + 8);
+    } finally {
+      unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a failed request batch in flight until every sibling settles", async () => {
+    render(<Stats />);
+    await screen.findByText("1,500");
+
+    const siblings = Array.from(
+      { length: 3 },
+      () => deferred<ReturnType<typeof statsView>>(),
+    );
+    let call = 0;
+    vi.mocked(getStats).mockImplementation((_since, by) => {
+      if (call++ === 0) return Promise.reject(new Error("stats failed"));
+      return siblings[call - 2].promise.then(() => statsView(by));
+    });
+
+    const refresh = screen.getByRole("button", { name: "刷新用量" });
+    fireEvent.click(refresh);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(refresh).toBeDisabled();
+
+    await act(async () => {
+      for (const sibling of siblings) sibling.resolve(statsView("agent"));
+      await Promise.all(siblings.map(({ promise }) => promise));
+    });
+    await waitFor(() => expect(refresh).not.toBeDisabled());
+    expect(screen.getByText(/stats failed/)).toBeInTheDocument();
+  });
+
+  it("does not start a queued refresh after the page unmounts", async () => {
+    const { unmount } = render(<Stats />);
+    await screen.findByText("1,500");
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole("combobox", { name: "自动刷新" }));
+      fireEvent.click(within(screen.getByRole("listbox")).getByRole("option", { name: "30 秒" }));
+
+      const pending: Array<{
+        by: string | null;
+        request: ReturnType<typeof deferred<ReturnType<typeof statsView>>>;
+      }> = [];
+      vi.mocked(getStats).mockImplementation((_since, by) => {
+        const request = deferred<ReturnType<typeof statsView>>();
+        pending.push({ by, request });
+        return request.promise;
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(pending).toHaveLength(4);
+
+      unmount();
+      await act(async () => {
+        for (const { by, request } of pending) request.resolve(statsView(by));
+        await Promise.all(pending.map(({ request }) => request.promise));
+        await Promise.resolve();
+      });
+
+      expect(pending).toHaveLength(4);
     } finally {
       vi.useRealTimers();
     }

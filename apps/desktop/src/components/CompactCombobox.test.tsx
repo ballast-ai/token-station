@@ -88,10 +88,22 @@ describe("CompactCombobox", () => {
     expect(screen.getByLabelText("搜索模型")).toBeInTheDocument();
   });
 
-  it("always opens below the trigger even when space is tighter below", async () => {
+  it("scrolls the trigger into view and keeps a downward menu inside the viewport", async () => {
     const user = userEvent.setup();
     const originalInnerHeight = window.innerHeight;
-    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 600 });
+
+    render(
+      <CompactCombobox ariaLabel="供应商" value="minimax" options={OPTIONS} onChange={vi.fn()} />,
+    );
+    const trigger = screen.getByRole("combobox", { name: "供应商" });
+    const rectSpy = vi.spyOn(trigger, "getBoundingClientRect").mockReturnValueOnce({
       x: 32,
       y: 520,
       top: 520,
@@ -101,19 +113,43 @@ describe("CompactCombobox", () => {
       width: 440,
       height: 40,
       toJSON: () => ({}),
+    }).mockReturnValue({
+      x: 32,
+      y: 380,
+      top: 380,
+      right: 472,
+      bottom: 420,
+      left: 32,
+      width: 440,
+      height: 40,
+      toJSON: () => ({}),
     });
-    Object.defineProperty(window, "innerHeight", { configurable: true, value: 600 });
 
-    render(
-      <CompactCombobox ariaLabel="供应商" value="minimax" options={OPTIONS} onChange={vi.fn()} />,
-    );
-    await user.click(screen.getByRole("combobox", { name: "供应商" }));
+    try {
+      await user.click(trigger);
 
-    expect(screen.getByRole("listbox").parentElement).toHaveStyle({
-      bottom: "auto",
-      top: "566px",
-    });
-    rectSpy.mockRestore();
-    Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
+      const popover = screen.getByRole("listbox").parentElement;
+      expect(popover).toHaveStyle({
+        bottom: "auto",
+        top: "426px",
+        maxHeight: "162px",
+      });
+      expect(
+        Number.parseFloat(popover?.style.top ?? "0")
+          + Number.parseFloat(popover?.style.maxHeight ?? "0"),
+      ).toBeLessThanOrEqual(window.innerHeight - 12);
+    } finally {
+      rectSpy.mockRestore();
+      if (originalScrollIntoView) {
+        Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+          configurable: true,
+          value: originalScrollIntoView,
+        });
+      } else {
+        delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+      }
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+    }
   });
 });
