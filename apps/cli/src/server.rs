@@ -206,6 +206,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> std::io::Result<()
             get(admin_plugins).options(admin_preflight),
         )
         .route("/admin/egress", get(admin_egress).options(admin_preflight))
+        .route("/admin/quota", get(admin_quota).options(admin_preflight))
         .fallback(chat)
         .with_state(state);
 
@@ -514,6 +515,19 @@ async fn admin_egress(State(state): State<AppState>, headers: HeaderMap) -> Resp
         return with_cors(unauthorized("/admin/egress"), loopback_origin(&headers));
     }
     admin_reply(Ok(state.gateway.egress_routes()), loopback_origin(&headers))
+}
+
+async fn admin_quota(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !admitted(&state, &headers) {
+        return with_cors(unauthorized("/admin/quota"), loopback_origin(&headers));
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+    admin_reply(
+        Ok(state.gateway.quota_snapshot(now_ms)),
+        loopback_origin(&headers),
+    )
 }
 
 async fn chat(State(state): State<AppState>, request: Request<Body>) -> Response {
