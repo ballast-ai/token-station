@@ -305,6 +305,39 @@ mod tests {
     }
 
     #[test]
+    fn in_flight_load_saturates_headroom_so_routing_spreads_off_a_filling_account() {
+        // The no-oversend guarantee: as concurrent requests pile onto one account
+        // its rate headroom falls and it turns "pressured", so the next ranking
+        // spills the load elsewhere instead of over-sending a single account past
+        // its rate limit. With a known 10/min limit, each in-flight request
+        // commits 10% of the budget.
+        let plan = QuotaPlan {
+            windows: vec![],
+            rate_limit_per_min: Some(10),
+            unit: PlanUnit::Requests,
+        };
+        let mut t = tracker("acct", plan);
+        assert_eq!(t.quota_state("acct", 0).rate_headroom_permille, 1000);
+
+        let ids: Vec<_> = (0..10).map(|_| t.grant("acct", 0)).collect();
+        let saturated = t.quota_state("acct", 0);
+        assert_eq!(
+            saturated.rate_headroom_permille, 0,
+            "10 in-flight saturate a 10/min budget"
+        );
+        assert!(
+            saturated.rate_pressured,
+            "a saturated account is pressured, so the router spills off it"
+        );
+
+        // Load is impending, not permanent: releasing restores full headroom.
+        for id in ids {
+            t.release(&id);
+        }
+        assert_eq!(t.quota_state("acct", 0).rate_headroom_permille, 1000);
+    }
+
+    #[test]
     fn cooling_applies_to_unplanned_accounts_and_caps_absurd_waits() {
         // An account with no configured plan can still be 429'd/402'd.
         let mut t = tracker("planned", token_plan(1000));
