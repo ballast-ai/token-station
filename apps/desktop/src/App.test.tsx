@@ -619,7 +619,7 @@ describe("desktop station navigation", () => {
       "aria-checked",
       "true",
     );
-    expect(screen.getByRole("button", { name: "保存独立路由" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存并重启" })).toBeDisabled();
   });
 
   it("saves the home route as a reusable profile and mounts it from an Agent page", async () => {

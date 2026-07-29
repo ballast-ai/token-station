@@ -835,6 +835,10 @@ export const deleteProfile = (name: string) =>
 
 export const saveAgentRoutes = () => invoke<StateView>("save_agent_routes");
 
+/** 保存并热重启**单个 Agent**的路由(代理运行中时即时生效,不影响其它 Agent)。 */
+export const restartAgentRoute = (agentId: string) =>
+  invoke<StateView>("restart_agent_route", { agentId });
+
 export const applyHomeRouteToAllAgents = () =>
   invoke<StateView>("apply_home_route_to_all_agents");
 

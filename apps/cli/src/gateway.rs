@@ -41,8 +41,8 @@ use token_station_protocol::{
     StreamOutcome, ToolDef,
 };
 use token_station_router_core::{
-    Candidate, Decision, HealthPolicy, HealthTracker, Router, RoutingMode, UpstreamModel,
-    UpstreamRef,
+    Candidate, Decision, HealthPolicy, HealthTracker, Router, RouterConfig, RoutingMode,
+    UpstreamModel, UpstreamRef,
 };
 
 use crate::admission::Admission;
@@ -682,10 +682,16 @@ pub struct Gateway {
     /// keeps the gateway available, while this list makes the degradation
     /// visible to callers.
     skipped_agents: Vec<(String, String)>,
-    home_router: Router,
+    home_router: Arc<Router>,
     /// Only custom routes are materialized. Missing/inherit entries use the
     /// home router, so old configurations allocate no duplicate routers.
-    agent_routers: BTreeMap<String, Router>,
+    ///
+    /// Behind a `RwLock` of `Arc<Router>` so one Agent's route can be hot-
+    /// swapped in place ([`Gateway::reload_agent_router`]) without rebuilding the
+    /// whole gateway: a request grabs its `Arc` under a brief read lock and owns
+    /// it for the exchange, so a concurrent reload only affects the *next*
+    /// request to that Agent and never touches any other Agent.
+    agent_routers: std::sync::RwLock<BTreeMap<String, Arc<Router>>>,
     /// Namespaces admitted by loaded adapter capabilities or an explicit
     /// route. This keeps scoped URLs extensible without letting an arbitrary
     /// syntactically-valid name inherit the home router.
@@ -1129,13 +1135,14 @@ impl Gateway {
 
         let quota_plans = Self::quota_plans_from(config);
 
-        let home_router = Router::new(config.router.clone()).map_err(|error| error.to_string())?;
+        let home_router =
+            Arc::new(Router::new(config.router.clone()).map_err(|error| error.to_string())?);
         let mut agent_routers = BTreeMap::new();
         for agent_id in config.agent_routes.keys() {
             if let Some(router) = config.custom_router_for_agent(agent_id)? {
                 let router = Router::new(router)
                     .map_err(|error| format!("Agent `{agent_id}` route: {error}"))?;
-                agent_routers.insert(agent_id.clone(), router);
+                agent_routers.insert(agent_id.clone(), Arc::new(router));
             }
         }
 
@@ -1143,7 +1150,7 @@ impl Gateway {
             agents: loaded_agents.ready,
             skipped_agents: loaded_agents.skipped,
             home_router,
-            agent_routers,
+            agent_routers: std::sync::RwLock::new(agent_routers),
             supported_agent_ids,
             upstreams,
             local_upstreams,
@@ -1174,6 +1181,43 @@ impl Gateway {
     #[must_use]
     pub fn global_concurrency_limit(&self) -> usize {
         usize::try_from(self.admission.global_limit()).unwrap_or(usize::MAX)
+    }
+
+    /// Hot-swap one Agent's route without rebuilding the gateway. `router`
+    /// materialized from that Agent's saved config: `Some` installs a custom
+    /// router, `None` clears it so the Agent inherits Home again. Only the next
+    /// request to this Agent sees the change; in-flight requests (which already
+    /// own their `Arc<Router>`) and every other Agent are untouched — so applying
+    /// one Agent's routing never interrupts the others.
+    ///
+    /// # Errors
+    ///
+    /// The router config is invalid (`Router::new` rejected it).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `agent_routers` lock is poisoned (a prior holder panicked).
+    pub fn reload_agent_router(
+        &self,
+        agent_id: &str,
+        router: Option<RouterConfig>,
+    ) -> Result<(), String> {
+        let built = match router {
+            Some(config) => Some(Arc::new(
+                Router::new(config).map_err(|error| format!("Agent `{agent_id}` route: {error}"))?,
+            )),
+            None => None,
+        };
+        let mut routers = self.agent_routers.write().expect("agent_routers lock");
+        match built {
+            Some(router) => {
+                routers.insert(agent_id.to_owned(), router);
+            }
+            None => {
+                routers.remove(agent_id);
+            }
+        }
+        Ok(())
     }
 
     /// How many distinct models the catalog advertises.
@@ -1863,6 +1907,10 @@ impl Gateway {
 
     /// The normal request pipeline with a host-validated Agent routing scope.
     /// `None` is the backward-compatible, unnamespaced home route.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `agent_routers` lock is poisoned (a prior holder panicked).
     #[allow(clippy::too_many_arguments)] // the request pipeline's real surface
     #[allow(clippy::too_many_lines)] // admission + scope + dispatch, read top-down
     pub fn chat_scoped(
@@ -1883,12 +1931,15 @@ impl Gateway {
                 u64::try_from(epoch.as_millis()).unwrap_or(u64::MAX)
             });
 
-        let router = match agent_id {
-            None => &self.home_router,
+        let router: Arc<Router> = match agent_id {
+            None => Arc::clone(&self.home_router),
             Some(agent_id) if self.supported_agent_ids.contains(agent_id) => self
                 .agent_routers
+                .read()
+                .expect("agent_routers lock")
                 .get(agent_id)
-                .unwrap_or(&self.home_router),
+                .cloned()
+                .unwrap_or_else(|| Arc::clone(&self.home_router)),
             Some(agent_id) => {
                 let mut record = begin_record(started_at_ms, String::new(), None, running_revision);
                 let refusal = ErrorEnvelope::new(
@@ -1964,7 +2015,7 @@ impl Gateway {
             match self.chat_inner(
                 ctx,
                 agent,
-                router,
+                &router,
                 method,
                 path,
                 headers,
