@@ -23,6 +23,12 @@ interface HomePageProps {
   routingMode: "tiered" | "quota_first";
   quotaAccounts: QuotaAccount[];
   onSaveQuota: (accounts: QuotaAccount[]) => void;
+  onSaveQuotaPlan: (
+    upstream: string,
+    lenMs: number,
+    limit: number,
+    unit: "tokens" | "requests",
+  ) => void;
   onViewQuotaUsage: () => void;
   serveRunning: boolean;
   busy: boolean;
@@ -54,6 +60,7 @@ export default function HomePage({
   routingMode,
   quotaAccounts,
   onSaveQuota,
+  onSaveQuotaPlan,
   onViewQuotaUsage,
   serveRunning,
   busy,
@@ -128,6 +135,7 @@ export default function HomePage({
           applying={applying}
           onSave={onSaveQuota}
           onViewUsage={onViewQuotaUsage}
+          onSavePlan={onSaveQuotaPlan}
         />
       ) : (
       <>

@@ -457,6 +457,19 @@ struct ProviderView {
     /// This upstream runs on the local machine; `local_only` routing keeps to it.
     local: bool,
     access_tier: String,
+    /// The declared quota plan (window + limit + unit) used for local estimation
+    /// in quota-first mode, if the user set one. `None` ⇒ non-windowed / metered.
+    quota_plan: Option<QuotaPlanView>,
+}
+
+/// A provider's declared quota plan, flattened to its primary reset window for
+/// the UI (the common case is one window, e.g. a token allowance per 5 hours).
+#[derive(Serialize)]
+struct QuotaPlanView {
+    len_ms: u64,
+    limit: u64,
+    unit: String,
+    rate_limit_per_min: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -911,6 +924,17 @@ impl AppInner {
                         .and_then(Value::as_str)
                         .unwrap_or("paid")
                         .to_owned(),
+                    quota_plan: up["quota_plan"]["windows"][0].as_object().map(|window| {
+                        QuotaPlanView {
+                            len_ms: window["len_ms"].as_u64().unwrap_or(0),
+                            limit: window["limit"].as_u64().unwrap_or(0),
+                            unit: up["quota_plan"]["unit"]
+                                .as_str()
+                                .unwrap_or("tokens")
+                                .to_owned(),
+                            rate_limit_per_min: up["quota_plan"]["rate_limit_per_min"].as_u64(),
+                        }
+                    }),
                 }
             })
             .collect()
@@ -2134,6 +2158,52 @@ fn set_quota_accounts(
     }
     if let Err(error) = inner.observe_draft() {
         inner.draft["router"] = previous;
+        return Err(error);
+    }
+    Ok(inner.snapshot())
+}
+
+/// Declares (or clears) a provider's quota plan for local estimation: one reset
+/// window (`len_ms` + `limit`), the unit it counts in, and an optional
+/// requests-per-minute rate limit. A zero limit or window clears the plan (the
+/// account falls back to non-windowed / authoritative-only). Written under
+/// `upstreams[name].quota_plan`, feeding the account ledger's estimate.
+#[tauri::command]
+fn set_quota_plan(
+    state: State<'_, AppStateManaged>,
+    upstream: String,
+    len_ms: u64,
+    limit: u64,
+    unit: String,
+    rate_limit_per_min: Option<u64>,
+) -> Result<StateView, String> {
+    let upstream = upstream.trim().to_owned();
+    if unit != "tokens" && unit != "requests" {
+        return Err(format!("未知额度单位：{unit}"));
+    }
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    if !inner.draft["upstreams"][&upstream].is_object() {
+        return Err(format!("未知供应商 `{upstream}`"));
+    }
+
+    let previous = inner.draft["upstreams"][&upstream].clone();
+    if limit == 0 || len_ms == 0 {
+        if let Some(up) = inner.draft["upstreams"][&upstream].as_object_mut() {
+            up.remove("quota_plan");
+        }
+    } else {
+        let mut plan = json!({
+            "windows": [{ "len_ms": len_ms, "limit": limit }],
+            "unit": unit,
+        });
+        if let Some(rate) = rate_limit_per_min.filter(|rate| *rate > 0) {
+            plan["rate_limit_per_min"] = json!(rate);
+        }
+        inner.draft["upstreams"][&upstream]["quota_plan"] = plan;
+    }
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["upstreams"][&upstream] = previous;
         return Err(error);
     }
     Ok(inner.snapshot())
@@ -3958,6 +4028,7 @@ pub fn run() {
             set_local_routing,
             set_routing_mode,
             set_quota_accounts,
+            set_quota_plan,
             get_quota_snapshot,
             edit_provider,
             discover_provider_models,
@@ -6811,6 +6882,101 @@ mod tests {
             let state = app.state::<AppStateManaged>();
             let inner = state.0.lock().unwrap();
             assert!(inner.draft["router"].get("quota_accounts").is_none());
+        }
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn quota_plan_declares_a_window_validates_and_clears() {
+        let root = scratch_home("quota-plan");
+        let inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        add_provider(
+            app.state(),
+            "deepseek".to_owned(),
+            "https://api.deepseek.com/v1".to_owned(),
+            vec!["deepseek-v4-flash".to_owned()],
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Declare a 5h / 1,000,000-token plan with a 60/min rate limit.
+        let view = set_quota_plan(
+            app.state(),
+            "deepseek".to_owned(),
+            18_000_000,
+            1_000_000,
+            "tokens".to_owned(),
+            Some(60),
+        )
+        .unwrap();
+        let plan = view
+            .providers
+            .iter()
+            .find(|p| p.name == "deepseek")
+            .unwrap()
+            .quota_plan
+            .as_ref()
+            .unwrap();
+        assert_eq!(plan.len_ms, 18_000_000);
+        assert_eq!(plan.limit, 1_000_000);
+        assert_eq!(plan.unit, "tokens");
+        assert_eq!(plan.rate_limit_per_min, Some(60));
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            assert_eq!(
+                inner.draft["upstreams"]["deepseek"]["quota_plan"]["windows"][0]["limit"],
+                json!(1_000_000)
+            );
+        }
+
+        // Unknown provider and unknown unit are rejected.
+        assert!(
+            set_quota_plan(app.state(), "nope".to_owned(), 1, 1, "tokens".to_owned(), None).is_err()
+        );
+        assert!(
+            set_quota_plan(
+                app.state(),
+                "deepseek".to_owned(),
+                1,
+                1,
+                "credits".to_owned(),
+                None
+            )
+            .is_err()
+        );
+
+        // A zero limit clears the plan entirely.
+        let cleared = set_quota_plan(
+            app.state(),
+            "deepseek".to_owned(),
+            18_000_000,
+            0,
+            "tokens".to_owned(),
+            None,
+        )
+        .unwrap();
+        assert!(
+            cleared
+                .providers
+                .iter()
+                .find(|p| p.name == "deepseek")
+                .unwrap()
+                .quota_plan
+                .is_none()
+        );
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            assert!(inner.draft["upstreams"]["deepseek"].get("quota_plan").is_none());
         }
 
         std::fs::remove_dir_all(root).ok();

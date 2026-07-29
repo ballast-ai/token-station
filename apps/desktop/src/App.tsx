@@ -18,6 +18,7 @@ import {
   setAdminEndpoint,
   setLocalRouting,
   setQuotaAccounts,
+  setQuotaPlan,
   setRoutingMode,
   setTier,
   type AgentRouteView,
@@ -369,6 +370,14 @@ function StationApp() {
       return serveStart();
     });
 
+  // Store provider quota plans in the draft for local estimates; the next Save and Apply activates them.
+  const saveQuotaPlan = (
+    upstream: string,
+    lenMs: number,
+    limit: number,
+    unit: "tokens" | "requests",
+  ) => void run(() => setQuotaPlan(upstream, lenMs, limit, unit, null));
+
   return (
     <AppShell
       view={view}
@@ -402,6 +411,7 @@ function StationApp() {
           routingMode={state.routing_mode}
           quotaAccounts={state.quota_accounts ?? []}
           onSaveQuota={saveQuota}
+          onSaveQuotaPlan={saveQuotaPlan}
           onViewQuotaUsage={() => navigate("quota-usage")}
           serveRunning={runtimeHealthy}
           busy={busy}
@@ -467,6 +477,7 @@ function StationApp() {
           onStateChange={showState}
           onRescan={rescanAgents}
           onSaveQuota={saveQuota}
+          onSaveQuotaPlan={saveQuotaPlan}
           onViewQuotaUsage={() => navigate("quota-usage")}
         />
       )}

@@ -18,6 +18,15 @@ export interface ProviderView {
   /** Locally hosted provider, such as Ollama. Local-only routing uses this to keep traffic on the machine. */
   local?: boolean;
   access_tier?: "free" | "paid";
+  /** Declared quota plan for local estimates; absent means non-windowed or usage-based. */
+  quota_plan?: QuotaPlanView | null;
+}
+
+export interface QuotaPlanView {
+  len_ms: number;
+  limit: number;
+  unit: "tokens" | "requests";
+  rate_limit_per_min: number | null;
 }
 
 export type CapabilityState = "verified" | "declared" | "unsupported" | "unknown";
@@ -730,6 +739,22 @@ export const setQuotaAccounts = (accounts: QuotaAccount[]) =>
 
 /** Query the running gateway's live quota snapshot; requires the proxy to be running. */
 export const getQuotaSnapshot = () => invoke<QuotaSnapshot>("get_quota_snapshot");
+
+/** Declare or clear a provider quota plan for local estimates; zero limit or len_ms clears it. */
+export const setQuotaPlan = (
+  upstream: string,
+  lenMs: number,
+  limit: number,
+  unit: "tokens" | "requests",
+  rateLimitPerMin: number | null,
+) =>
+  invoke<StateView>("set_quota_plan", {
+    upstream,
+    lenMs,
+    limit,
+    unit,
+    rateLimitPerMin,
+  });
 
 export const editProvider = (name: string, base_url: string, api_key: string | null) =>
   invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });
