@@ -395,7 +395,6 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
             "查看 AI 模型的消耗、成本与稳定性。只聚合本地请求元数据，不含 prompt 或 response 内容。",
           )}</p>
         </div>
-        <div className="usage-scope-note"><span aria-hidden="true">●</span> {copy("Local read-only", "本地只读")}</div>
       </header>
 
       <div className="usage-toolbar" aria-label={copy("Usage filters", "用量筛选")}>

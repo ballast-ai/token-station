@@ -96,5 +96,6 @@ pub(crate) fn config() -> RouterConfig {
         allow_cloud_fallback: false,
         routing_mode: crate::config::RoutingMode::Tiered,
         quota: crate::quota::QuotaConfig::default(),
+        quota_accounts: Vec::new(),
     }
 }

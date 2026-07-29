@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   type ProviderView,
+  type QuotaAccount,
   type StateView,
   type TierSlot,
   type TierView,
@@ -9,6 +10,7 @@ import TierRouteEditor from "../components/TierRouteEditor";
 import TierKeywords from "../components/TierKeywords";
 import ProviderList from "../components/ProviderList";
 import RecentReceipts from "../components/RecentReceipts";
+import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 
 interface HomePageProps {
@@ -18,6 +20,9 @@ interface HomePageProps {
   tiers: Record<TierSlot, TierView>;
   keywords: Record<TierSlot, string[]>;
   profiles: string[];
+  routingMode: "tiered" | "quota_first";
+  quotaAccounts: QuotaAccount[];
+  onSaveQuota: (accounts: QuotaAccount[]) => void;
   serveRunning: boolean;
   busy: boolean;
   applying: boolean;
@@ -45,6 +50,9 @@ export default function HomePage({
   tiers,
   keywords,
   profiles,
+  routingMode,
+  quotaAccounts,
+  onSaveQuota,
   serveRunning,
   busy,
   applying,
@@ -110,6 +118,16 @@ export default function HomePage({
         </div>
       </header>
 
+      {routingMode === "quota_first" ? (
+        <QuotaPriorityPanel
+          providers={providers}
+          accounts={quotaAccounts}
+          busy={busy}
+          applying={applying}
+          onSave={onSaveQuota}
+        />
+      ) : (
+      <>
       <section className="panel route-panel">
         <div className="panel-head split-heading">
           <div>
@@ -291,6 +309,8 @@ export default function HomePage({
           </label>
         )}
       </section>
+      </>
+      )}
 
       <RecentReceipts />
 

@@ -78,6 +78,7 @@ const state: StateView = {
   local_only: false,
   allow_cloud_fallback: false,
   routing_mode: "tiered",
+  quota_accounts: [],
   serve: {
     phase: "stopped", app_runtime: "stopped", listener_reachable: false,
     agent_connected: false, running_revision: null, instance_id: null,

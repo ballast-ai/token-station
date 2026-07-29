@@ -18,6 +18,8 @@ interface AppShellProps {
   agents: AgentView[];
   scanBusy: boolean;
   commandBusy: boolean;
+  routingMode: "tiered" | "quota_first";
+  onSetRoutingMode: (mode: "tiered" | "quota_first") => void;
   onNavigate: (view: AppView) => void;
   onRescan: () => void;
   onToggleServe: () => void;
@@ -67,12 +69,14 @@ export default function AppShell({
   agents,
   scanBusy,
   commandBusy,
+  routingMode,
+  onSetRoutingMode,
   onNavigate,
   onRescan,
   onToggleServe,
   children,
 }: AppShellProps) {
-  const { t } = useLanguage();
+  const { t, copy } = useLanguage();
   const scanned = new Map(agents.map((agent) => [agent.metadata.agent_id, agent]));
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   const taskRunning = serve.app_runtime === "running";
@@ -179,6 +183,35 @@ export default function AppShell({
                     : t("serve.start")}
             </button>
           </div>
+
+          {(view === "home" || view.startsWith("agent:")) && (
+            <div
+              className="mode-switch topbar-mode-switch"
+              role="radiogroup"
+              aria-label={copy("Routing mode", "路由模式")}
+            >
+              <button
+                type="button"
+                role="radio"
+                aria-checked={routingMode === "tiered"}
+                className={routingMode === "tiered" ? "active" : ""}
+                disabled={commandBusy}
+                onClick={() => onSetRoutingMode("tiered")}
+              >
+                {copy("Smart Routing", "三档智能路由")}
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={routingMode === "quota_first"}
+                className={routingMode === "quota_first" ? "active" : ""}
+                disabled={commandBusy}
+                onClick={() => onSetRoutingMode("quota_first")}
+              >
+                {copy("Quota-First", "额度优先")}
+              </button>
+            </div>
+          )}
 
           <div className="top-actions">
             <button

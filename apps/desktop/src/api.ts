@@ -250,6 +250,13 @@ export interface AgentRouteView {
   tiers: Record<TierSlot, TierView>;
   config_error: string | null;
   profile: string | null;
+  /** 该 Agent 的有效路由模式：自身覆盖优先，否则跟随主页默认。 */
+  routing_mode: "tiered" | "quota_first";
+}
+
+export interface QuotaAccount {
+  upstream: string;
+  model: string;
 }
 
 export interface SettingsView {
@@ -297,6 +304,8 @@ export interface StateView {
   allow_cloud_fallback: boolean;
   /** 路由模式:`tiered`(三档智能路由,默认)或 `quota_first`(额度优先)。 */
   routing_mode: "tiered" | "quota_first";
+  /** 额度优先轮换账户(供应商+模型),按优先级顺序;全局共享。 */
+  quota_accounts: QuotaAccount[];
   serve: ServeView;
   draft_revision: number;
   saved_revision: number;
@@ -686,8 +695,11 @@ export const setLocalRouting = (localOnly: boolean, allowCloudFallback: boolean)
   });
 
 /** 切换路由模式:三档智能路由(`tiered`)或额度优先(`quota_first`)。 */
-export const setRoutingMode = (mode: "tiered" | "quota_first") =>
-  invoke<StateView>("set_routing_mode", { mode });
+export const setRoutingMode = (mode: "tiered" | "quota_first", agentId?: string) =>
+  invoke<StateView>("set_routing_mode", { mode, agentId: agentId ?? null });
+
+export const setQuotaAccounts = (accounts: QuotaAccount[]) =>
+  invoke<StateView>("set_quota_accounts", { accounts });
 
 export const editProvider = (name: string, base_url: string, api_key: string | null) =>
   invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });

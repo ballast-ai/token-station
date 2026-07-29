@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use token_station_protocol::{ModelCapability, ProviderEndpoint};
-use token_station_router_core::{ConfigSource, RouterConfig, UpstreamModel, UpstreamRef};
+use token_station_router_core::{
+    ConfigSource, RouterConfig, RoutingMode, UpstreamModel, UpstreamRef,
+};
 
 const TIER_HIGH: &str = "tier_high";
 const TIER_MID: &str = "tier_mid";
@@ -249,6 +251,14 @@ pub struct AgentRouteConfig {
     pub custom_route: Option<AgentTierRoutes>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// Per-Agent override of the top-level routing philosophy (tiered vs
+    /// quota-first). Independent of `mode`, which only picks the *tier source*
+    /// (home / custom / profile). `None` inherits the home router's
+    /// [`RouterConfig::routing_mode`], so an Agent that never touched the toggle
+    /// tracks the Home default. Set explicitly, it pins that Agent regardless of
+    /// later Home changes — this is what makes each Agent switch independently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_mode: Option<RoutingMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -505,25 +515,42 @@ impl ClientConfig {
         let Some(route) = self.agent_routes.get(agent_id) else {
             return Ok(None);
         };
-        match route.mode {
-            AgentRouteMode::Inherit => Ok(None),
-            AgentRouteMode::Custom => route
-                .custom_route
-                .as_ref()
-                .ok_or_else(|| format!("Agent `{agent_id}` custom mode requires custom_route"))
-                .and_then(|tiers| tiers.materialize(&self.router).map(Some)),
+        // The tier source (home / custom / profile) is one axis; the routing
+        // philosophy (tiered / quota-first) is a second, independent one. Build
+        // the tier base first, then stamp the effective mode over it.
+        let tier_base: Option<RouterConfig> = match route.mode {
+            AgentRouteMode::Inherit => None,
+            AgentRouteMode::Custom => Some(
+                route
+                    .custom_route
+                    .as_ref()
+                    .ok_or_else(|| format!("Agent `{agent_id}` custom mode requires custom_route"))
+                    .and_then(|tiers| tiers.materialize(&self.router))?,
+            ),
             AgentRouteMode::Profile => {
                 let name = route
                     .profile
                     .as_deref()
                     .ok_or_else(|| format!("Agent `{agent_id}` profile mode requires a profile"))?;
-                self.profiles
-                    .get(name)
-                    .ok_or_else(|| format!("Agent `{agent_id}` mounts unknown profile `{name}`"))?
-                    .materialize(&self.router)
-                    .map(Some)
+                Some(
+                    self.profiles
+                        .get(name)
+                        .ok_or_else(|| {
+                            format!("Agent `{agent_id}` mounts unknown profile `{name}`")
+                        })?
+                        .materialize(&self.router)?,
+                )
             }
+        };
+        let effective_mode = route.routing_mode.unwrap_or(self.router.routing_mode);
+        // Pure inheritance on both axes → no per-Agent router; the home router
+        // serves it directly (keeps the fast path and the config minimal).
+        if tier_base.is_none() && effective_mode == self.router.routing_mode {
+            return Ok(None);
         }
+        let mut router = tier_base.unwrap_or_else(|| self.router.clone());
+        router.routing_mode = effective_mode;
+        Ok(Some(router))
     }
 
     fn validate_agent_tiers(&self, owner: &str, tiers: &AgentTierRoutes) -> Result<(), String> {
@@ -964,6 +991,55 @@ mod tests {
                 .is_none()
         );
         assert!(config.agent_routes["opencode"].custom_route.is_some());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn per_agent_routing_mode_override_is_independent_of_tier_source() {
+        let mut value = example();
+        // Home stays tiered (the default). One Agent flips to quota-first while
+        // otherwise inheriting Home's tiers; another keeps a custom tier route
+        // but explicitly pins tiered. A third is pure inheritance.
+        value["agent_routes"] = serde_json::json!({
+            "codex": { "mode": "inherit", "routing_mode": "quota_first" },
+            "opencode": {
+                "mode": "custom",
+                "custom_route": three_tiers("openai_personal", "gpt-5.5"),
+                "routing_mode": "tiered"
+            },
+            "claude-code": { "mode": "inherit" }
+        });
+        let path = scratch("per-agent-mode", &value.to_string());
+        let config = ClientConfig::load(&path).expect("routing_mode overrides validate");
+
+        // Inherit tiers + quota override → a per-Agent router materializes with
+        // the home tiers but quota-first mode.
+        let codex = config
+            .custom_router_for_agent("codex")
+            .expect("known Agent")
+            .expect("quota override forces a per-Agent router");
+        assert_eq!(codex.routing_mode, token_station_router_core::RoutingMode::QuotaFirst);
+        assert_eq!(
+            codex.pools, config.router.pools,
+            "quota override must not alter the inherited tier pools"
+        );
+
+        // Custom tiers + explicit tiered (matches home) → still a router (custom
+        // tiers), and the mode is tiered.
+        let opencode = config
+            .custom_router_for_agent("opencode")
+            .expect("known Agent")
+            .expect("custom tiers still materialize");
+        assert_eq!(opencode.routing_mode, token_station_router_core::RoutingMode::Tiered);
+        assert_eq!(opencode.pools["tier_high"][0].model, "gpt-5.5");
+
+        // Pure inheritance on both axes → no per-Agent router.
+        assert!(
+            config
+                .custom_router_for_agent("claude-code")
+                .expect("known Agent")
+                .is_none()
+        );
         fs::remove_file(path).ok();
     }
 
