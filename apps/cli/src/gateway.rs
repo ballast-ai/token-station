@@ -55,6 +55,14 @@ use crate::secrets::SecretStore;
 
 /// Caps on what crosses the proxy, applied by the host per architecture section 6.
 pub(crate) const MAX_INBOUND_BODY: usize = 10 * 1024 * 1024;
+
+/// Per-request timeout for a background quota-balance poll. Short: it must never
+/// hold up shutdown or pile up behind a slow endpoint.
+const QUOTA_POLL_TIMEOUT_SECS: u64 = 10;
+
+/// How often the background poller refreshes balance endpoints. Balances change
+/// slowly and the endpoints are rate-limited, so a few minutes is plenty.
+pub const QUOTA_POLL_INTERVAL_SECS: u64 = 300;
 const MAX_UPSTREAM_BODY: u64 = 32 * 1024 * 1024;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(120);
 const CANCEL_READ_POLL: Duration = Duration::from_millis(100);
@@ -1231,6 +1239,61 @@ impl Gateway {
             .expect("quota lock")
             .snapshot(&upstreams, now_ms);
         json!({ "now_ms": now_ms, "accounts": accounts })
+    }
+
+    /// One pass of active quota polling: for each upstream with a balance
+    /// endpoint we understand (currently `OpenRouter`'s `/key`), fetch its
+    /// remaining credits and record them as an authoritative reading. This is
+    /// the L2 path for providers that do not stamp their allowance on chat
+    /// responses. Best-effort: any upstream that errors is skipped, never
+    /// failing the pass; it touches only the balance endpoint, never chat.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the quota mutex is poisoned (a prior holder panicked).
+    pub fn poll_quota_once(&self) {
+        let agent = match build_egress_agent(
+            &self.egress.policy,
+            Duration::from_secs(QUOTA_POLL_TIMEOUT_SECS),
+            &self.secrets,
+        ) {
+            Ok(agent) => agent,
+            Err(error) => {
+                eprintln!("quota poll: egress agent unavailable: {error}");
+                return;
+            }
+        };
+        let now_ms = unix_millis();
+        for (name, upstream) in &self.upstreams {
+            let base = String::from(upstream.config.base_url.clone());
+            if !crate::quota_fetch::is_openrouter(&base) {
+                continue;
+            }
+            let Some(auth) = upstream.config.auth.as_ref() else {
+                continue;
+            };
+            let Ok(key) = self.secrets.resolve(name, auth.as_str()) else {
+                continue;
+            };
+            let url = format!("{}/key", base.trim_end_matches('/'));
+            let authorization = format!("Bearer {key}");
+            let Ok(response) = agent
+                .get(&url)
+                .header("authorization", authorization.as_str())
+                .call()
+            else {
+                continue;
+            };
+            let Ok(body) = response.into_body().read_to_string() else {
+                continue;
+            };
+            if let Some(window) = crate::quota_fetch::parse_openrouter_key(&body) {
+                self.quota
+                    .lock()
+                    .expect("quota lock")
+                    .note_authoritative(name.as_str(), now_ms, vec![window]);
+            }
+        }
     }
 
     /// `upstream test <name>`: one minimal real completion per declared model.

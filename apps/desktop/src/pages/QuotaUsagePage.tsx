@@ -17,6 +17,9 @@ interface QuotaUsagePageProps {
 /** Refresh interval for lightweight polling that keeps runtime quota data current. */
 const REFRESH_MS = 5000;
 
+/** Values above this threshold mean no reset, such as OpenRouter prepaid balance with u64::MAX. */
+const NO_RESET_MS = 100 * 24 * 60 * 60 * 1000;
+
 function permilleToPercent(permille: number): number {
   return Math.round((permille / 1000) * 1000) / 10;
 }
@@ -194,7 +197,9 @@ function QuotaAccountCard({
                 <div className="quota-window-meta">
                   <strong>{percent}%</strong>
                   <span>
-                    {copy("resets in", "距刷新")} {formatDuration(window.ms_until_reset)}
+                    {window.ms_until_reset >= NO_RESET_MS
+                      ? copy("no reset (balance)", "余额 · 不刷新")
+                      : `${copy("resets in", "距刷新")} ${formatDuration(window.ms_until_reset)}`}
                   </span>
                 </div>
               </div>

@@ -181,6 +181,24 @@ impl AppState {
 /// Only from the accept loop itself; per-request failures are responses.
 pub async fn serve(state: AppState, listener: TcpListener) -> std::io::Result<()> {
     let control = state.control.clone();
+
+    // Background quota poller: refresh balance-endpoint accounts (OpenRouter's
+    // `/key`) on an interval. `poll_quota_once` blocks on a network call, so it
+    // runs on a blocking thread; the task is aborted when `serve` returns, so it
+    // never outlives the server. The first tick fires immediately for prompt
+    // initial data.
+    let poller_gateway = std::sync::Arc::clone(&state.gateway);
+    let poller = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            crate::gateway::QUOTA_POLL_INTERVAL_SECS,
+        ));
+        loop {
+            interval.tick().await;
+            let gateway = std::sync::Arc::clone(&poller_gateway);
+            let _ = tokio::task::spawn_blocking(move || gateway.poll_quota_once()).await;
+        }
+    });
+
     // `/v1/models` stays an explicit GET; everything else is a fallback so any
     // inbound path an adapter might claim (OpenAI `/v1/chat/completions`,
     // Anthropic `/v1/messages`, …) reaches the gateway, which asks each
@@ -210,14 +228,17 @@ pub async fn serve(state: AppState, listener: TcpListener) -> std::io::Result<()
         .fallback(chat)
         .with_state(state);
 
-    axum::serve(listener, app)
+    let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {}
                 () = control.wait_for_stop() => {}
             }
         })
-        .await
+        .await;
+    // The server is done accepting; stop the poller so it never outlives serve.
+    poller.abort();
+    result
 }
 
 /// The inbound gate. Loopback keeps the network out; this keeps out every

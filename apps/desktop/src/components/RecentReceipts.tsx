@@ -77,7 +77,8 @@ function formatQuotaDecision(
       `剩 ${(quota.remaining_permille / 10).toFixed(0)}%`,
     ));
   }
-  if (quota.reset_ms != null && quota.reset_ms > 0) {
+  const NO_RESET_MS = 100 * 24 * 60 * 60 * 1000;
+  if (quota.reset_ms != null && quota.reset_ms > 0 && quota.reset_ms < NO_RESET_MS) {
     const minutes = Math.round(quota.reset_ms / 60000);
     parts.push(copy(`resets in ${minutes}m`, `${minutes}分钟后刷新`));
   }
