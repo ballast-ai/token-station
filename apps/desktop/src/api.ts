@@ -18,6 +18,15 @@ export interface ProviderView {
   /** 本机运行的供应商(如本地 Ollama);「只走本地」路由据此把流量锁在本机。 */
   local?: boolean;
   access_tier?: "free" | "paid";
+  /** 已声明的额度计划(供本地估算);未设则为非窗口/按量。 */
+  quota_plan?: QuotaPlanView | null;
+}
+
+export interface QuotaPlanView {
+  len_ms: number;
+  limit: number;
+  unit: "tokens" | "requests";
+  rate_limit_per_min: number | null;
 }
 
 export type CapabilityState = "verified" | "declared" | "unsupported" | "unknown";
@@ -730,6 +739,22 @@ export const setQuotaAccounts = (accounts: QuotaAccount[]) =>
 
 /** 查询运行中网关的实时额度快照(需代理运行)。 */
 export const getQuotaSnapshot = () => invoke<QuotaSnapshot>("get_quota_snapshot");
+
+/** 声明/清除某供应商的额度计划(供本地估算);limit 或 len_ms 为 0 即清除。 */
+export const setQuotaPlan = (
+  upstream: string,
+  lenMs: number,
+  limit: number,
+  unit: "tokens" | "requests",
+  rateLimitPerMin: number | null,
+) =>
+  invoke<StateView>("set_quota_plan", {
+    upstream,
+    lenMs,
+    limit,
+    unit,
+    rateLimitPerMin,
+  });
 
 export const editProvider = (name: string, base_url: string, api_key: string | null) =>
   invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });

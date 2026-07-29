@@ -1456,6 +1456,47 @@ body {
 .topbar-mode-switch button { padding: 7px 14px; font-size: 12px; font-weight: 500; }
 
 /* Quota-first panel */
+/* ── 额度计划编辑(面板内,供本地估算) ──────────────────────────── */
+.quota-plan-section {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quota-plan-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 2px;
+}
+
+.quota-plan-head strong {
+  font-size: 13px;
+}
+
+.quota-plan-head span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.quota-plan-row {
+  display: grid;
+  grid-template-columns: 1fr 120px 130px 110px;
+  gap: 8px;
+  align-items: center;
+}
+
+.quota-plan-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── 实时额度查看页 ─────────────────────────────────────────────── */
 .quota-usage-grid {
   display: grid;

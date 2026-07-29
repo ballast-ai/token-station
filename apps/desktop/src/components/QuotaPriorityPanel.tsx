@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { ProviderView, QuotaAccount } from "../api";
+import type { ProviderView, QuotaAccount, QuotaPlanView } from "../api";
 import CompactCombobox, { type CompactComboboxOption } from "./CompactCombobox";
 import { useLocalizedCopy } from "./LanguageProvider";
 
@@ -13,7 +13,21 @@ interface QuotaPriorityPanelProps {
   onSave: (accounts: QuotaAccount[]) => void;
   /** 跳转到实时额度查看页。 */
   onViewUsage: () => void;
+  /** 声明/清除某供应商的额度计划(用于本地估算)。 */
+  onSavePlan: (
+    upstream: string,
+    lenMs: number,
+    limit: number,
+    unit: "tokens" | "requests",
+  ) => void;
 }
+
+/** 额度计划的窗口预设,覆盖最常见的订阅刷新周期。 */
+const WINDOW_PRESETS: { label: [string, string]; ms: number }[] = [
+  { label: ["5 hours", "5 小时"], ms: 5 * 60 * 60 * 1000 },
+  { label: ["1 day", "1 天"], ms: 24 * 60 * 60 * 1000 },
+  { label: ["1 week", "1 周"], ms: 7 * 24 * 60 * 60 * 1000 },
+];
 
 type QuotaEntry = QuotaAccount;
 
@@ -29,6 +43,7 @@ export default function QuotaPriorityPanel({
   applying,
   onSave,
   onViewUsage,
+  onSavePlan,
 }: QuotaPriorityPanelProps) {
   const { copy } = useLocalizedCopy();
   // 有序账户列表 —— 行顺序即同额度时的调用优先级。以已持久化的 accounts 为初值。
@@ -79,6 +94,11 @@ export default function QuotaPriorityPanel({
       ...(provider?.models ?? []).map((model) => ({ value: model, label: model })),
     ];
   };
+
+  // 参与轮换的去重供应商(计划是按供应商的,与具体模型无关)。
+  const planProviders = Array.from(
+    new Set(entries.map((entry) => entry.upstream).filter(Boolean)),
+  );
 
   return (
     <section className="panel quota-panel">
@@ -170,6 +190,30 @@ export default function QuotaPriorityPanel({
         </div>
       )}
 
+      {planProviders.length > 0 && (
+        <div className="quota-plan-section">
+          <div className="quota-plan-head">
+            <strong>{copy("Quota plans (optional)", "额度计划(可选)")}</strong>
+            <span>
+              {copy(
+                "Declare each provider's reset window and allowance so its remaining can be estimated locally. Providers that report their own limits don't need this.",
+                "为各供应商声明刷新窗口与额度上限,即可本地估算剩余;会自行上报限额的供应商无需填写。",
+              )}
+            </span>
+          </div>
+          {planProviders.map((upstream) => (
+            <QuotaPlanRow
+              key={upstream}
+              upstream={upstream}
+              plan={providers.find((p) => p.name === upstream)?.quota_plan ?? null}
+              busy={busy}
+              copy={copy}
+              onSavePlan={onSavePlan}
+            />
+          ))}
+        </div>
+      )}
+
       <footer className="panel-foot route-actions">
         <button
           className="btn primary"
@@ -181,5 +225,92 @@ export default function QuotaPriorityPanel({
         </button>
       </footer>
     </section>
+  );
+}
+
+/** 单个供应商的额度计划编辑行:刷新窗口 + 额度上限 + 单位。上限为空即清除计划。 */
+function QuotaPlanRow({
+  upstream,
+  plan,
+  busy,
+  copy,
+  onSavePlan,
+}: {
+  upstream: string;
+  plan: QuotaPlanView | null;
+  busy: boolean;
+  copy: (english: string, simplifiedChinese: string) => string;
+  onSavePlan: (
+    upstream: string,
+    lenMs: number,
+    limit: number,
+    unit: "tokens" | "requests",
+  ) => void;
+}) {
+  const presetOf = (lenMs: number | undefined): number =>
+    lenMs && WINDOW_PRESETS.some((preset) => preset.ms === lenMs) ? lenMs : WINDOW_PRESETS[0].ms;
+  const [lenMs, setLenMs] = useState(presetOf(plan?.len_ms));
+  const [limit, setLimit] = useState(plan?.limit ? String(plan.limit) : "");
+  const [unit, setUnit] = useState<"tokens" | "requests">(plan?.unit ?? "tokens");
+
+  // 外部计划变化(保存后 state 刷新)时重新同步本地字段。
+  useEffect(() => {
+    setLenMs(presetOf(plan?.len_ms));
+    setLimit(plan?.limit ? String(plan.limit) : "");
+    setUnit(plan?.unit ?? "tokens");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plan?.len_ms, plan?.limit, plan?.unit]);
+
+  const commit = (nextLen: number, nextLimit: string, nextUnit: "tokens" | "requests") => {
+    const parsed = Number.parseInt(nextLimit, 10);
+    onSavePlan(upstream, nextLen, Number.isFinite(parsed) ? Math.max(0, parsed) : 0, nextUnit);
+  };
+
+  return (
+    <div className="quota-plan-row">
+      <span className="quota-plan-name">{upstream}</span>
+      <select
+        className="select"
+        aria-label={copy(`${upstream} reset window`, `${upstream} 刷新窗口`)}
+        value={lenMs}
+        disabled={busy}
+        onChange={(event) => {
+          const next = Number(event.target.value);
+          setLenMs(next);
+          commit(next, limit, unit);
+        }}
+      >
+        {WINDOW_PRESETS.map((preset) => (
+          <option key={preset.ms} value={preset.ms}>
+            {copy(preset.label[0], preset.label[1])}
+          </option>
+        ))}
+      </select>
+      <input
+        className="input"
+        type="number"
+        min={0}
+        aria-label={copy(`${upstream} allowance`, `${upstream} 额度上限`)}
+        placeholder={copy("Limit", "额度上限")}
+        value={limit}
+        disabled={busy}
+        onChange={(event) => setLimit(event.target.value)}
+        onBlur={() => commit(lenMs, limit, unit)}
+      />
+      <select
+        className="select"
+        aria-label={copy(`${upstream} unit`, `${upstream} 单位`)}
+        value={unit}
+        disabled={busy}
+        onChange={(event) => {
+          const next = event.target.value as "tokens" | "requests";
+          setUnit(next);
+          commit(lenMs, limit, next);
+        }}
+      >
+        <option value="tokens">tokens</option>
+        <option value="requests">requests</option>
+      </select>
+    </div>
   );
 }

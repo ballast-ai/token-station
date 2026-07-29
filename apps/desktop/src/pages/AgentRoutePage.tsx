@@ -36,6 +36,12 @@ interface AgentRoutePageProps {
   onStateChange: (state: StateView, message?: string) => void;
   onRescan: () => void | Promise<void>;
   onSaveQuota: (accounts: QuotaAccount[]) => void;
+  onSaveQuotaPlan: (
+    upstream: string,
+    lenMs: number,
+    limit: number,
+    unit: "tokens" | "requests",
+  ) => void;
   onViewQuotaUsage: () => void;
 }
 
@@ -142,6 +148,7 @@ export default function AgentRoutePage({
   onStateChange,
   onRescan,
   onSaveQuota,
+  onSaveQuotaPlan,
   onViewQuotaUsage,
 }: AgentRoutePageProps) {
   const { copy } = useLocalizedCopy();
@@ -407,6 +414,7 @@ export default function AgentRoutePage({
           applying={applying}
           onSave={onSaveQuota}
           onViewUsage={onViewQuotaUsage}
+          onSavePlan={onSaveQuotaPlan}
         />
       ) : (
       <section className="panel route-panel">
