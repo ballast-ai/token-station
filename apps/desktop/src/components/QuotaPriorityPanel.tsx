@@ -11,6 +11,8 @@ interface QuotaPriorityPanelProps {
   applying: boolean;
   /** Save and Apply sends the complete account list, excluding incomplete rows, for persistence and restart. */
   onSave: (accounts: QuotaAccount[]) => void;
+  /** Navigate to the live quota page. */
+  onViewUsage: () => void;
 }
 
 type QuotaEntry = QuotaAccount;
@@ -26,6 +28,7 @@ export default function QuotaPriorityPanel({
   busy,
   applying,
   onSave,
+  onViewUsage,
 }: QuotaPriorityPanelProps) {
   const { copy } = useLocalizedCopy();
   // Ordered account list; row order is the tie-break priority. Initialize from persisted accounts.
@@ -89,6 +92,9 @@ export default function QuotaPriorityPanel({
             )}
           </p>
         </div>
+        <button type="button" className="btn quiet" onClick={onViewUsage}>
+          {copy("Live quota", "实时额度")}
+        </button>
       </div>
 
       <p className="quota-hint">

@@ -1456,6 +1456,190 @@ body {
 .topbar-mode-switch button { padding: 7px 14px; font-size: 12px; font-weight: 500; }
 
 /* Quota-first panel */
+/* ── 实时额度查看页 ─────────────────────────────────────────────── */
+.quota-usage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.quota-account-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.quota-account-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.quota-account-head h2 {
+  margin: 0 0 6px;
+  font-size: 15px;
+}
+
+.quota-source-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--line);
+}
+
+.quota-source-badge.authoritative {
+  color: #1f7a4d;
+  background: rgba(31, 122, 77, 0.1);
+  border-color: rgba(31, 122, 77, 0.3);
+}
+
+.quota-source-badge.estimated {
+  color: var(--muted);
+  background: var(--surface-2);
+}
+
+.quota-source-badge.none {
+  color: var(--muted);
+  background: transparent;
+}
+
+.quota-account-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.quota-flag {
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: var(--surface-2);
+}
+
+.quota-flag.cooling,
+.quota-flag.exhausted {
+  color: var(--danger);
+  background: rgba(190, 63, 74, 0.08);
+  border-color: rgba(190, 63, 74, 0.28);
+}
+
+.quota-flag.pressured {
+  color: #9a6a00;
+  background: rgba(154, 106, 0, 0.1);
+  border-color: rgba(154, 106, 0, 0.28);
+}
+
+.quota-window-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.quota-window-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.quota-window-bar {
+  flex: 1;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.quota-window-fill {
+  display: block;
+  height: 100%;
+  background: var(--signal);
+  transition: width 0.3s ease;
+}
+
+.quota-window-fill.mid {
+  background: #d9a400;
+}
+
+.quota-window-fill.low {
+  background: var(--danger);
+}
+
+.quota-window-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 92px;
+  font-size: 12px;
+}
+
+.quota-window-meta strong {
+  font-size: 13px;
+}
+
+.quota-window-meta span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.quota-window-none {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.quota-rate-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.quota-usage-empty {
+  text-align: center;
+  color: var(--muted);
+}
+
+.quota-usage-empty strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ink, inherit);
+}
+
+.quota-usage-caveat {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 16px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.quota-usage-caveat svg {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin-top: 1px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+
 .quota-hint {
   display: flex;
   align-items: flex-start;

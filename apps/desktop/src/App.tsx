@@ -43,6 +43,7 @@ import AddProviderPage, {
 import AgentRoutePage from "./pages/AgentRoutePage";
 import FreeProviderConfigPage from "./pages/FreeProviderConfigPage";
 import HomePage from "./pages/HomePage";
+import QuotaUsagePage from "./pages/QuotaUsagePage";
 import SettingsHub from "./pages/SettingsHub";
 import Stats from "./pages/Stats";
 import "./App.css";
@@ -303,7 +304,12 @@ function StationApp() {
   const navigate = (next: AppView) => {
     if (freeProviderBusy) return;
     if (next === view) return;
-    if (next === "usage" || next === "settings" || next === "add-provider") {
+    if (
+      next === "usage" ||
+      next === "quota-usage" ||
+      next === "settings" ||
+      next === "add-provider"
+    ) {
       viewHistoryRef.current.push(view);
     } else {
       viewHistoryRef.current = [];
@@ -396,6 +402,7 @@ function StationApp() {
           routingMode={state.routing_mode}
           quotaAccounts={state.quota_accounts ?? []}
           onSaveQuota={saveQuota}
+          onViewQuotaUsage={() => navigate("quota-usage")}
           serveRunning={runtimeHealthy}
           busy={busy}
           applying={state.serve.phase === "starting"}
@@ -460,6 +467,7 @@ function StationApp() {
           onStateChange={showState}
           onRescan={rescanAgents}
           onSaveQuota={saveQuota}
+          onViewQuotaUsage={() => navigate("quota-usage")}
         />
       )}
 
@@ -476,6 +484,9 @@ function StationApp() {
       )}
 
       {view === "usage" && <Stats onBack={navigateBack} />}
+      {view === "quota-usage" && (
+        <QuotaUsagePage providers={state.providers} onBack={navigateBack} />
+      )}
       {view === "settings" && (
         <SettingsHub
           settings={state.settings}

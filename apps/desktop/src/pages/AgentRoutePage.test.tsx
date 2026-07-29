@@ -112,6 +112,7 @@ describe("AgentRoutePage multi-install admission", () => {
         onStateChange={vi.fn()}
         onRescan={vi.fn()}
         onSaveQuota={vi.fn()}
+        onViewQuotaUsage={vi.fn()}
       />,
     );
 
@@ -189,6 +190,7 @@ describe("AgentRoutePage multi-install admission", () => {
         onStateChange={vi.fn()}
         onRescan={vi.fn()}
         onSaveQuota={vi.fn()}
+        onViewQuotaUsage={vi.fn()}
       />,
     );
 
