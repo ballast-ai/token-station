@@ -55,13 +55,10 @@ tauri = { version = "2", default-features = false, features = ["test"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes"] }
-keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.186"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }

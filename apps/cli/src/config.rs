@@ -105,7 +105,7 @@ pub struct ProxyAuthConfig {
 
 impl AuthConfig {
     fn source_count(&self) -> usize {
-        usize::from(self.keyring)
+        usize::from(self.store)
             + usize::from(self.env.is_some())
             + usize::from(self.file.is_some())
     }
@@ -474,15 +474,20 @@ pub struct UpstreamConfig {
 pub struct AuthConfig {
     /// The slot name the provider adapter will see, e.g. `provider_api_key`.
     pub slot: String,
-    /// Read from the OS keychain, where `token-station-cli key set` put it.
-    /// The preferred source: survives reboots, never sits in a file.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub keyring: bool,
-    /// Read from this environment variable at request time.
+    /// Read from the local secrets store (`secrets.json`, mode 0600, in the data
+    /// directory). The default source. `alias = "keyring"` keeps configs written
+    /// before the OS-keychain removal loading unchanged.
+    #[serde(
+        default,
+        alias = "keyring",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub store: bool,
+    /// Read from this environment variable at request time — for users who keep
+    /// credentials out of the store entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
-    /// Read from this file (trimmed) at request time. The degraded path for
-    /// hosts without a keychain; mind the file's permissions.
+    /// Read from this file (trimmed) at request time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<PathBuf>,
 }
@@ -686,7 +691,7 @@ impl ClientConfig {
                 let sources = auth.source_count();
                 if sources != 1 {
                     return Err(format!(
-                        "upstream `{name}` auth for slot `{}` must name exactly one source                          (keyring / env / file), found {sources}",
+                        "upstream `{name}` auth for slot `{}` must name exactly one source                          (store / env / file), found {sources}",
                         auth.slot
                     ));
                 }

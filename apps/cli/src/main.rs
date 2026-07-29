@@ -261,7 +261,7 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
         Command::Serve => serve(&cli.config),
-        Command::Key(command) => key(&command),
+        Command::Key(command) => key(&command, &cli.config),
         Command::Upstream(UpstreamCommand::List) => {
             let config = load(&cli.config)?;
             print!("{}", manage::upstream_list(&config));
@@ -473,7 +473,8 @@ fn mutate(
     Ok(())
 }
 
-fn key(command: &KeyCommand) -> Result<(), String> {
+fn key(command: &KeyCommand, config_path: &Path) -> Result<(), String> {
+    let data_dir = load(config_path)?.data.dir;
     match command {
         // `key set` reads from stdin: a key in argv is a key in `ps` output
         // and shell history.
@@ -484,13 +485,13 @@ fn key(command: &KeyCommand) -> Result<(), String> {
             if value.is_empty() {
                 return Err("no key on stdin; nothing stored".to_owned());
             }
-            secrets::keyring_set(upstream, slot, value)?;
-            eprintln!("stored in the OS keychain as {upstream}/{slot}");
+            secrets::store_set(&data_dir, upstream, slot, value)?;
+            eprintln!("stored in the local secrets store as {upstream}/{slot}");
             Ok(())
         }
         KeyCommand::Remove { upstream, slot } => {
-            secrets::keyring_remove(upstream, slot)?;
-            eprintln!("removed {upstream}/{slot} from the OS keychain");
+            secrets::store_remove(&data_dir, upstream, slot)?;
+            eprintln!("removed {upstream}/{slot} from the local secrets store");
             Ok(())
         }
     }

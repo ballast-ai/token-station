@@ -30,7 +30,7 @@ use super::plan::{
 };
 use super::registry::AgentRegistry;
 use super::snapshot::{
-    FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, OsKeychainMasterKeyStore, SnapshotStore,
+    FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, SnapshotStore,
 };
 use super::transaction::{
     Clock, ConfirmedOperation, FsAtomicConfigWriter, ParseOnlyVerifier, RecoveryStatus,
@@ -395,19 +395,14 @@ fn snapshot_master_key_path(paths: &AgentIntegrationPaths) -> PathBuf {
         .join("snapshot-master.key")
 }
 
-/// 一次性把快照主密钥从 OS 钥匙串迁到本地文件(仅当文件尚不存在时)。钥匙串仍可读
-/// → 原样搬过来,已有快照继续可解密;钥匙串已失效 → 生成全新文件密钥(旧快照随之
-/// 无法解密,但那把旧密钥本就已经丢了)。非破坏性:不删除任何快照或归属记录。
-fn migrate_master_key_off_keychain(key_path: &Path) {
+/// 确保快照主密钥文件存在(0600),不存在则生成。OS 钥匙串已彻底移除:密钥只存本地
+/// 私有文件。非破坏性:不删除任何快照或归属记录。(从更早只有钥匙串密钥的版本升级
+/// 上来时,旧快照无法解密,但开发版重签名本就已让那把钥匙串密钥失效。)
+fn ensure_master_key_file(key_path: &Path) {
     if key_path.exists() {
         return;
     }
-    let store = FileMasterKeyStore::new(key_path.to_path_buf());
-    if let Ok(existing) = OsKeychainMasterKeyStore.load() {
-        let _ = super::safe_fs::write_atomic_private(key_path, existing.as_ref());
-    } else {
-        let _ = store.load_or_create(true);
-    }
+    let _ = FileMasterKeyStore::new(key_path.to_path_buf()).load_or_create(true);
 }
 
 /// 把 `removals`(一组 Remove 操作)应用到 `target` 配置并原子写回,保留原权限。
@@ -465,7 +460,7 @@ impl AgentCommandState {
         // 钥匙串条目失效,导致恢复/断开彻底锁死(用户反馈的 code=agent_operation_rejected)。
         // 快照本就加密、且备份的是本来就明文躺在磁盘上的配置,密钥落文件安全性不变。
         let key_path = snapshot_master_key_path(&paths);
-        migrate_master_key_off_keychain(&key_path);
+        ensure_master_key_file(&key_path);
         Self::new_with_master_key(paths, Arc::new(FileMasterKeyStore::new(key_path)))
     }
 

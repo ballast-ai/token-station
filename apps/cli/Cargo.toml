@@ -29,13 +29,10 @@ ureq = { version = "=3.3.0", features = ["socks-proxy"] }
 # The OS keychain, one backend per platform. Linux uses the desktop
 # secret-service over D-Bus; headless boxes fall back to `auth.file`.
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
