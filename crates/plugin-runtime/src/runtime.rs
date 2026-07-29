@@ -55,6 +55,14 @@ impl PluginRuntime {
         let mut config = Config::new();
         config.epoch_interruption(true);
         config.wasm_component_model(true);
+        // On-disk compilation cache: without it every component recompiles from
+        // scratch on each start (seconds of Cranelift per plugin — the bulk of
+        // startup). Best-effort — if the cache cannot be set up we simply keep
+        // compiling. wasmtime keys entries on content + config, so a changed
+        // plugin (or an upgraded engine) recompiles only what actually differs.
+        if let Ok(cache) = wasmtime::Cache::from_file(None) {
+            config.cache(Some(cache));
+        }
         let engine = Engine::new(&config)?;
 
         let ticker = TickerGuard::start(engine.clone());
