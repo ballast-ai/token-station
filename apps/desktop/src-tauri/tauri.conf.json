@@ -26,6 +26,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Agent-agnostic smart routing proxy for LLM APIs",
+    "longDescription": "Token Station is a local gateway that routes each Agent's requests to the right model by task complexity or by draining quota-bearing accounts before they reset. Runs an embedded router with sandboxed WASM adapters; credentials stay on this device.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

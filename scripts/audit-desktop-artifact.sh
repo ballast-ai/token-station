@@ -88,8 +88,25 @@ case "$(uname -s)" in
       exit 1
     }
     ;;
+  Linux)
+    # Linux packages (deb / AppImage / rpm) are not code-signed, so the audit
+    # verifies the binary is a real Linux executable and at least one package was
+    # produced — not a signature.
+    [[ -x "$binary" ]] || { echo "Linux binary missing or not executable: $binary" >&2; exit 1; }
+    file "$binary" | grep -Fq "ELF" || {
+      echo "Linux binary is not an ELF executable: $binary" >&2
+      exit 1
+    }
+    deb="$(find "$bundle_root/deb" -maxdepth 1 -type f -name '*.deb' -print -quit 2>/dev/null || true)"
+    appimage="$(find "$bundle_root/appimage" -maxdepth 1 -type f -name '*.AppImage' -print -quit 2>/dev/null || true)"
+    rpm="$(find "$bundle_root/rpm" -maxdepth 1 -type f -name '*.rpm' -print -quit 2>/dev/null || true)"
+    [[ -n "$deb" || -n "$appimage" || -n "$rpm" ]] || {
+      echo "no Linux package (.deb / .AppImage / .rpm) found under $bundle_root" >&2
+      exit 1
+    }
+    ;;
   *)
-    echo "desktop artifact audit is supported only on macOS and Windows" >&2
+    echo "desktop artifact audit is supported on macOS, Windows, and Linux" >&2
     exit 1
     ;;
 esac
