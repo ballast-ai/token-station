@@ -30,7 +30,7 @@ use super::plan::{
 };
 use super::registry::AgentRegistry;
 use super::snapshot::{
-    FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, OsKeychainMasterKeyStore, SnapshotStore,
+    FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, SnapshotStore,
 };
 use super::transaction::{
     Clock, ConfirmedOperation, FsAtomicConfigWriter, ParseOnlyVerifier, RecoveryStatus,
@@ -395,19 +395,14 @@ fn snapshot_master_key_path(paths: &AgentIntegrationPaths) -> PathBuf {
         .join("snapshot-master.key")
 }
 
-/// Migrate the snapshot master key once from the OS keychain to a local file, only if the file does not exist. The keychain remains readable
-/// → copy unchanged so existing snapshots remain decryptable; invalid keychain → generate a new file key (old snapshots then
-/// cannot be decrypted, but the old key was already lost). Non-destructive: does not delete snapshots or ownership records.
-fn migrate_master_key_off_keychain(key_path: &Path) {
+/// Ensure the snapshot master-key file exists (0600), and generate it if absent. The OS keychain is fully removed; the key exists only in a local
+/// private file. Non-destructive: does not delete snapshots or ownership records. (When upgrading from an earlier version that used only a keychain key
+/// during startup, old snapshots cannot be decrypted, but development re-signing already invalidated that keychain key.)
+fn ensure_master_key_file(key_path: &Path) {
     if key_path.exists() {
         return;
     }
-    let store = FileMasterKeyStore::new(key_path.to_path_buf());
-    if let Ok(existing) = OsKeychainMasterKeyStore.load() {
-        let _ = super::safe_fs::write_atomic_private(key_path, existing.as_ref());
-    } else {
-        let _ = store.load_or_create(true);
-    }
+    let _ = FileMasterKeyStore::new(key_path.to_path_buf()).load_or_create(true);
 }
 
 /// Apply `removals` (a set of Remove operations) to the `target` configuration and write it atomically while preserving original permissions.
@@ -465,7 +460,7 @@ impl AgentCommandState {
         // Keychain entries become invalid and block recovery or disconnect. User reports show code=agent_operation_rejected.
         // Snapshots are encrypted and back up configuration already stored as plaintext on disk. File key storage does not change security.
         let key_path = snapshot_master_key_path(&paths);
-        migrate_master_key_off_keychain(&key_path);
+        ensure_master_key_file(&key_path);
         Self::new_with_master_key(paths, Arc::new(FileMasterKeyStore::new(key_path)))
     }
 

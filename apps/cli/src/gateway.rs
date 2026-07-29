@@ -1156,7 +1156,7 @@ impl Gateway {
             quota: std::sync::Mutex::new(crate::quota_tracker::QuotaTracker::new(quota_plans)),
             admission: Admission::new(config.concurrency),
             pricing: config.pricing.clone(),
-            secrets: SecretStore::from_config(config),
+            secrets: SecretStore::from_config(config, &config.data.dir),
             egress: EgressPolicy::new(config.egress.clone()),
             recorder,
             models_document: json!({ "object": "list", "data": models_document }).to_string(),
@@ -3429,7 +3429,7 @@ mod egress_policy_tests {
             }
         });
         let config: crate::config::ClientConfig = serde_json::from_value(value).unwrap();
-        let secrets = SecretStore::from_config(&config);
+        let secrets = SecretStore::from_config(&config, &config.data.dir);
         let proxy = EgressPolicy::new(config.egress.clone())
             .proxy(&secrets)
             .unwrap()

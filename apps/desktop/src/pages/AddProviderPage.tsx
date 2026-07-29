@@ -624,7 +624,7 @@ export default function AddProviderPage({
                   className="input mono"
                   type="password"
                   autoComplete="off"
-                  placeholder={copy("Stored only in the system keychain", "只保存在系统钥匙串")}
+                  placeholder={copy("Stored on this device only", "只保存在本机")}
                   value={key}
                   disabled={disabled}
                   onChange={(event) => setKey(event.target.value)}

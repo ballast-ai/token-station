@@ -722,7 +722,7 @@ describe("desktop station navigation", () => {
     // The provider picker is a brand-card catalog; click by visible label instead of selecting an option.
     await user.click(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" }));
     expect(screen.getByRole("button", { name: "添加供应商" })).toBeInTheDocument();
-    await user.type(screen.getByPlaceholderText("只保存在系统钥匙串"), "secret-test");
+    await user.type(screen.getByPlaceholderText("只保存在本机"), "secret-test");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "OpenCode" })).toBeInTheDocument();
     expect(screen.getByText("供应商已添加")).toBeInTheDocument();

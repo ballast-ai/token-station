@@ -158,8 +158,8 @@ export default function FreeProviderConfigPage({
             <div>
               <h2>{copy("Verify credentials", "验证凭据")}</h2>
               <p className="sub">{copy(
-                "The key is written to the system keychain only after verification and is cleared from memory when you leave.",
-                "Key 只在验证成功后写入系统钥匙串；离开本页即从内存清除。",
+                "The key is saved to this device only after verification and is cleared from memory when you leave.",
+                "Key 只在验证成功后保存到本机；离开本页即从内存清除。",
               )}</p>
             </div>
           </div>

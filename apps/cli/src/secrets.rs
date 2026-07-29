@@ -1,143 +1,162 @@
 //! Credential resolution: slot names in, values out, never the reverse.
 //!
-//! The interim sources — environment variables and key files — hold the slot
-//! shape the OS keychain (`C1#4`) will take over: resolve at request time, by
-//! name, so a rotated key is picked up without a restart. Nothing here logs a
-//! value, and errors name the slot and the source, never what was read.
+//! Secrets live in a local **store file** — `secrets.json` (mode 0600) under the
+//! data directory — a JSON map of `"<upstream>/<slot>" -> value`. This replaces
+//! the OS keychain: no per-key OS prompt, one uniform mechanism across macOS /
+//! Windows / Linux. Environment variables and standalone key files stay
+//! supported for users who prefer to keep credentials out of the store.
+//!
+//! The store is plaintext-on-disk (0600), like the tools this integrates with
+//! (e.g. cc-switch's `auth.json`). It is written atomically with a private
+//! mode via [`crate::private_fs`]. Nothing here logs a value, and errors name
+//! the slot and the source, never what was read.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use crate::config::{AuthConfig, ClientConfig, EgressConfig};
 
-/// The keychain service every entry lives under; the user is
-/// `<upstream>/<slot>`.
-pub const KEYRING_SERVICE: &str = "token-station";
 const EGRESS_SECRET_OWNER: &str = "egress-proxy";
+
+/// The local secrets store file name, under the data directory.
+pub const SECRETS_FILE: &str = "secrets.json";
+
+fn store_key(upstream: &str, slot: &str) -> String {
+    format!("{upstream}/{slot}")
+}
+
+fn store_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(SECRETS_FILE)
+}
+
+/// Load the secrets map, or an empty one if the file is absent or unreadable.
+fn load_store(data_dir: &Path) -> BTreeMap<String, String> {
+    std::fs::read_to_string(store_path(data_dir))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn write_store(data_dir: &Path, map: &BTreeMap<String, String>) -> Result<(), String> {
+    let mut rendered = serde_json::to_string_pretty(map)
+        .map_err(|error| format!("secrets store does not serialize: {error}"))?;
+    rendered.push('\n');
+    crate::private_fs::write_atomic_private(&store_path(data_dir), rendered.as_bytes())
+        .map_err(|error| format!("secrets store write: {error}"))
+}
+
+/// Write `value` for `(upstream, slot)` into the local secrets store (0600).
+///
+/// # Errors
+///
+/// The store cannot be serialized or written. The message never carries a value.
+pub fn store_set(data_dir: &Path, upstream: &str, slot: &str, value: &str) -> Result<(), String> {
+    let mut map = load_store(data_dir);
+    map.insert(store_key(upstream, slot), value.to_owned());
+    write_store(data_dir, &map)
+}
+
+/// Read `(upstream, slot)` from the local secrets store.
+///
+/// # Errors
+///
+/// The slot is absent. The message never carries a value.
+pub fn store_get(data_dir: &Path, upstream: &str, slot: &str) -> Result<String, String> {
+    load_store(data_dir)
+        .get(&store_key(upstream, slot))
+        .cloned()
+        .ok_or_else(|| format!("secret `{upstream}/{slot}` is not in the local store"))
+}
+
+/// Remove `(upstream, slot)` from the local secrets store. A no-op if absent.
+///
+/// # Errors
+///
+/// The store cannot be written back after removing the entry.
+pub fn store_remove(data_dir: &Path, upstream: &str, slot: &str) -> Result<(), String> {
+    let mut map = load_store(data_dir);
+    if map.remove(&store_key(upstream, slot)).is_some() {
+        write_store(data_dir, &map)?;
+    }
+    Ok(())
+}
 
 /// Where each slot's value lives.
 #[derive(Debug, Clone)]
 enum Source {
-    Keyring,
+    /// The local secrets store file (`secrets.json`).
+    Store,
     Env(String),
-    File(std::path::PathBuf),
+    File(PathBuf),
 }
 
-/// The keychain entry for one upstream's slot.
-///
-/// # Errors
-///
-/// The platform keychain's own message; it never contains a value.
-fn keyring_entry(upstream: &str, slot: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYRING_SERVICE, &format!("{upstream}/{slot}"))
-        .map_err(|error| format!("keychain entry for `{upstream}/{slot}`: {error}"))
-}
-
-/// Writes a credential into the OS keychain (`key set`).
-///
-/// # Errors
-///
-/// The platform keychain's message, value-free.
-pub fn keyring_set(upstream: &str, slot: &str, value: &str) -> Result<(), String> {
-    keyring_entry(upstream, slot)?
-        .set_password(value)
-        .map_err(|error| format!("keychain write for `{upstream}/{slot}`: {error}"))
-}
-
-/// Reads a credential from the OS keychain for a recoverable key rotation.
-///
-/// # Errors
-///
-/// The platform keychain's own message; it never contains the credential.
-pub fn keyring_get(upstream: &str, slot: &str) -> Result<String, String> {
-    keyring_entry(upstream, slot)?
-        .get_password()
-        .map_err(|error| format!("keychain read for `{upstream}/{slot}`: {error}"))
-}
-
-/// Deletes a credential from the OS keychain (`key remove`).
-///
-/// # Errors
-///
-/// The platform keychain's message, value-free.
-pub fn keyring_remove(upstream: &str, slot: &str) -> Result<(), String> {
-    keyring_entry(upstream, slot)?
-        .delete_credential()
-        .map_err(|error| format!("keychain delete for `{upstream}/{slot}`: {error}"))
-}
-
-/// Resolves credential slots for every configured upstream.
-#[derive(Debug, Clone, Default)]
+/// Resolves configured credential slots to their values at request time.
+#[derive(Default)]
 pub struct SecretStore {
     /// Keyed by (upstream, slot): the same slot name may point at different
     /// values on different upstreams — two OpenAI-compatible upstreams both
     /// call their key `provider_api_key`.
     sources: BTreeMap<(String, String), Source>,
+    /// The loaded local secrets store (`secrets.json`), for `Source::Store`.
+    store: BTreeMap<String, String>,
+}
+
+fn source_of(auth: &AuthConfig) -> Option<Source> {
+    if auth.store {
+        Some(Source::Store)
+    } else {
+        match (&auth.env, &auth.file) {
+            (Some(name), _) => Some(Source::Env(name.clone())),
+            (_, Some(path)) => Some(Source::File(path.clone())),
+            // Refused by config validation before this runs.
+            (None, None) => None,
+        }
+    }
 }
 
 impl SecretStore {
+    /// Build the resolver from a full client config, loading the local secrets
+    /// store from `data_dir` for any slot that lives in it.
     #[must_use]
-    pub fn from_config(config: &ClientConfig) -> Self {
+    pub fn from_config(config: &ClientConfig, data_dir: &Path) -> Self {
         let mut sources = BTreeMap::new();
         for (upstream, entry) in &config.upstreams {
-            if let Some(AuthConfig {
-                slot,
-                keyring,
-                env,
-                file,
-            }) = &entry.auth
-            {
-                let source = if *keyring {
-                    Source::Keyring
-                } else {
-                    match (env, file) {
-                        (Some(name), _) => Source::Env(name.clone()),
-                        (_, Some(path)) => Source::File(path.clone()),
-                        // Refused by config validation before this runs.
-                        (None, None) => continue,
-                    }
-                };
-                sources.insert((upstream.clone(), slot.clone()), source);
+            if let Some(auth) = &entry.auth {
+                if let Some(source) = source_of(auth) {
+                    sources.insert((upstream.clone(), auth.slot.clone()), source);
+                }
             }
         }
-        if let Some(auth) = &config.egress.auth {
-            let credential = &auth.credential;
-            let source = if credential.keyring {
-                Source::Keyring
-            } else {
-                match (&credential.env, &credential.file) {
-                    (Some(name), _) => Source::Env(name.clone()),
-                    (_, Some(path)) => Source::File(path.clone()),
-                    (None, None) => return Self { sources },
-                }
-            };
-            sources.insert(
-                (EGRESS_SECRET_OWNER.to_string(), credential.slot.clone()),
-                source,
-            );
+        if let Some(egress_auth) = &config.egress.auth {
+            if let Some(source) = source_of(&egress_auth.credential) {
+                sources.insert(
+                    (EGRESS_SECRET_OWNER.to_string(), egress_auth.credential.slot.clone()),
+                    source,
+                );
+            }
         }
-        Self { sources }
+        Self {
+            sources,
+            store: load_store(data_dir),
+        }
     }
 
+    /// Build a resolver for just the egress proxy credential.
     #[must_use]
-    pub fn from_egress_config(egress: &EgressConfig) -> Self {
+    pub fn from_egress_config(egress: &EgressConfig, data_dir: &Path) -> Self {
         let mut sources = BTreeMap::new();
-        if let Some(auth) = &egress.auth {
-            let credential = &auth.credential;
-            let source = if credential.keyring {
-                Source::Keyring
-            } else {
-                match (&credential.env, &credential.file) {
-                    (Some(name), _) => Source::Env(name.clone()),
-                    (_, Some(path)) => Source::File(path.clone()),
-                    (None, None) => return Self { sources },
-                }
-            };
-            sources.insert(
-                (EGRESS_SECRET_OWNER.to_string(), credential.slot.clone()),
-                source,
-            );
+        if let Some(egress_auth) = &egress.auth {
+            if let Some(source) = source_of(&egress_auth.credential) {
+                sources.insert(
+                    (EGRESS_SECRET_OWNER.to_string(), egress_auth.credential.slot.clone()),
+                    source,
+                );
+            }
         }
-        Self { sources }
+        Self {
+            sources,
+            store: load_store(data_dir),
+        }
     }
 
     /// The value for `slot` on `upstream`.
@@ -155,10 +174,12 @@ impl SecretStore {
             })?;
 
         let value = match source {
-            Source::Keyring => keyring_entry(upstream, slot)?
-                .get_password()
-                .map_err(|error| {
-                    format!("secret `{slot}`: not in the OS keychain (run `key set`): {error}")
+            Source::Store => self
+                .store
+                .get(&store_key(upstream, slot))
+                .cloned()
+                .ok_or_else(|| {
+                    format!("secret `{slot}`: not in the local store (re-enter the key)")
                 }),
             Source::Env(name) => std::env::var(name)
                 .map_err(|_| format!("secret `{slot}`: environment variable `{name}` is not set")),
@@ -187,9 +208,18 @@ impl SecretStore {
 
 #[cfg(test)]
 mod tests {
-    use super::SecretStore;
+    use super::{SecretStore, store_get, store_remove, store_set};
     use crate::config::ClientConfig;
     use std::fs;
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "token-station-secrets-{}-{tag}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
 
     fn store_with_file(key_contents: &str) -> (SecretStore, std::path::PathBuf) {
         let key_path = std::env::temp_dir().join(format!(
@@ -207,79 +237,75 @@ mod tests {
         });
         let config: ClientConfig =
             serde_json::from_value(config).expect("example with file auth parses");
-        (SecretStore::from_config(&config), key_path)
+        (
+            SecretStore::from_config(&config, &std::env::temp_dir()),
+            key_path,
+        )
     }
 
     #[test]
     fn a_file_backed_secret_is_read_and_trimmed() {
         let (store, path) = store_with_file("sk-test-abc\n");
-
         assert_eq!(
-            store
-                .resolve("openai_personal", "provider_api_key")
-                .as_deref(),
+            store.resolve("openai_personal", "provider_api_key").as_deref(),
             Ok("sk-test-abc")
         );
-
         fs::remove_file(path).ok();
     }
 
     #[test]
     fn an_empty_key_file_is_an_error_not_an_empty_bearer_token() {
         let (store, path) = store_with_file("  \n");
-
         let error = store
             .resolve("openai_personal", "provider_api_key")
             .expect_err("empty is not a credential");
         assert!(error.contains("empty"), "{error}");
-
         fs::remove_file(path).ok();
     }
 
     #[test]
-    fn a_missing_keychain_entry_points_the_operator_at_key_set() {
-        // The mock backend gives each Entry an independent store, so it can
-        // prove the missing-entry path and the message, not a shared
-        // round-trip — that one is `keychain_round_trip_on_a_real_keychain`.
-        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+    fn the_local_store_round_trips_a_secret_and_is_removable() {
+        let dir = scratch_dir("round-trip");
+        store_set(&dir, "openai_personal", "provider_api_key", "sk-test-abc").expect("sets");
+        assert_eq!(
+            store_get(&dir, "openai_personal", "provider_api_key").as_deref(),
+            Ok("sk-test-abc")
+        );
 
+        // Wired through a config, `store: true` resolves from the same file.
         let mut config: serde_json::Value =
             serde_json::from_str(crate::EXAMPLE_CONFIG).expect("example parses");
         config["upstreams"]["openai_personal"]["auth"] =
-            serde_json::json!({ "slot": "provider_api_key", "keyring": true });
-        let config: crate::config::ClientConfig =
-            serde_json::from_value(config).expect("keyring auth parses");
-        let store = SecretStore::from_config(&config);
+            serde_json::json!({ "slot": "provider_api_key", "store": true });
+        let config: ClientConfig =
+            serde_json::from_value(config).expect("store auth parses");
+        let store = SecretStore::from_config(&config, &dir);
+        assert_eq!(
+            store.resolve("openai_personal", "provider_api_key").as_deref(),
+            Ok("sk-test-abc")
+        );
+
+        store_remove(&dir, "openai_personal", "provider_api_key").expect("removes");
+        assert!(store_get(&dir, "openai_personal", "provider_api_key").is_err());
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_missing_store_entry_points_the_operator_at_re_entering() {
+        let dir = scratch_dir("missing");
+        let mut config: serde_json::Value =
+            serde_json::from_str(crate::EXAMPLE_CONFIG).expect("example parses");
+        config["upstreams"]["openai_personal"]["auth"] =
+            serde_json::json!({ "slot": "provider_api_key", "store": true });
+        let config: ClientConfig =
+            serde_json::from_value(config).expect("store auth parses");
+        let store = SecretStore::from_config(&config, &dir);
 
         let missing = store
             .resolve("openai_personal", "provider_api_key")
             .expect_err("nothing set");
-        assert!(missing.contains("key set"), "{missing}");
+        assert!(missing.contains("re-enter"), "{missing}");
         assert!(!missing.contains("sk-"), "no value material in errors");
-    }
-
-    #[test]
-    #[ignore = "needs a real OS keychain; run locally with --ignored"]
-    fn keychain_round_trip_on_a_real_keychain() {
-        super::keyring_set("ts_test_upstream", "provider_api_key", "sk-test-abc").expect("sets");
-
-        let entry = super::keyring_entry("ts_test_upstream", "provider_api_key").expect("entry");
-        assert_eq!(entry.get_password().expect("round-trips"), "sk-test-abc");
-
-        super::keyring_remove("ts_test_upstream", "provider_api_key").expect("removes");
-        assert!(entry.get_password().is_err());
-    }
-
-    #[test]
-    fn errors_name_the_slot_and_source_but_never_a_value() {
-        let (store, path) = store_with_file("sk-live-secret");
-
-        let error = store
-            .resolve("openai_personal", "wrong_slot")
-            .expect_err("no such slot");
-        assert!(!error.contains("sk-live-secret"));
-        assert!(error.contains("wrong_slot"));
-
-        fs::remove_file(path).ok();
+        fs::remove_dir_all(dir).ok();
     }
 }

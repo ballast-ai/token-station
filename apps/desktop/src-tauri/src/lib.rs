@@ -821,12 +821,14 @@ impl AppInner {
         let config = self.materialize()?;
         let draft = self.draft.clone();
         let revision = self.config_state.prepare_save(&draft)?;
+        let data_dir = self.data_dir();
         let mut applied_keys: Vec<(String, Option<String>)> = Vec::new();
         for (upstream, value) in &self.pending_provider_keys {
-            let previous = secrets::keyring_get(upstream, "provider_api_key").ok();
-            if let Err(error) = secrets::keyring_set(upstream, "provider_api_key", value) {
+            let previous = secrets::store_get(&data_dir, upstream, "provider_api_key").ok();
+            if let Err(error) = secrets::store_set(&data_dir, upstream, "provider_api_key", value) {
                 for (applied, old_value) in applied_keys.iter().rev() {
-                    restore_provider_key(applied, "provider_api_key", old_value.as_deref()).ok();
+                    restore_provider_key(&data_dir, applied, "provider_api_key", old_value.as_deref())
+                        .ok();
                 }
                 return Err(error);
             }
@@ -836,7 +838,7 @@ impl AppInner {
             let mut rollback_errors = Vec::new();
             for (upstream, previous) in applied_keys.iter().rev() {
                 if let Err(rollback_error) =
-                    restore_provider_key(upstream, "provider_api_key", previous.as_deref())
+                    restore_provider_key(&data_dir, upstream, "provider_api_key", previous.as_deref())
                 {
                     rollback_errors.push(rollback_error);
                 }
@@ -1768,10 +1770,15 @@ fn is_free_provider_value(provider: &Value) -> bool {
     provider["access_tier"].as_str() == Some("free")
 }
 
-fn restore_provider_key(upstream: &str, slot: &str, previous: Option<&str>) -> Result<(), String> {
+fn restore_provider_key(
+    data_dir: &std::path::Path,
+    upstream: &str,
+    slot: &str,
+    previous: Option<&str>,
+) -> Result<(), String> {
     match previous {
-        Some(value) => secrets::keyring_set(upstream, slot, value),
-        None => secrets::keyring_remove(upstream, slot),
+        Some(value) => secrets::store_set(data_dir, upstream, slot, value),
+        None => secrets::store_remove(data_dir, upstream, slot),
     }
 }
 
@@ -1856,7 +1863,7 @@ async fn add_free_provider(
             .insert(preset.upstream_name.to_owned());
         (
             egress.clone(),
-            secrets::SecretStore::from_egress_config(&egress),
+            secrets::SecretStore::from_egress_config(&egress, &inner.data_dir()),
             inner.config_state.draft_revision(),
             tombstone,
         )
@@ -1927,7 +1934,7 @@ async fn add_free_provider(
         "provider": "openai-compatible",
         "base_url": preset.base_url,
         "access_tier": "free",
-        "auth": { "slot": "provider_api_key", "keyring": true },
+        "auth": { "slot": "provider_api_key", "store": true },
         "models": model_objs,
     });
     if let Err(error) = inner.observe_draft() {
@@ -2015,7 +2022,7 @@ fn add_provider(
         .filter(|key| !key.is_empty())
         .map(str::to_owned);
     if api_key.is_some() {
-        up["auth"] = json!({ "slot": "provider_api_key", "keyring": true });
+        up["auth"] = json!({ "slot": "provider_api_key", "store": true });
     }
 
     inner.draft["upstreams"][&name] = up;
@@ -2027,7 +2034,7 @@ fn add_provider(
         return Err(error);
     }
     if let Some(key) = api_key {
-        if let Err(key_error) = secrets::keyring_set(&name, "provider_api_key", &key) {
+        if let Err(key_error) = secrets::store_set(&inner.data_dir(), &name, "provider_api_key", &key) {
             inner.draft["upstreams"]
                 .as_object_mut()
                 .expect("upstreams is an object")
@@ -2274,14 +2281,14 @@ fn edit_provider(
     inner.draft["upstreams"][&name]["base_url"] = json!(base_url);
     if api_key.is_some() {
         inner.draft["upstreams"][&name]["auth"] =
-            json!({ "slot": "provider_api_key", "keyring": true });
+            json!({ "slot": "provider_api_key", "store": true });
     }
     if let Err(error) = inner.observe_draft() {
         inner.draft["upstreams"][&name] = previous;
         return Err(error);
     }
     if let Some(key) = api_key {
-        if let Err(key_error) = secrets::keyring_set(&name, "provider_api_key", &key) {
+        if let Err(key_error) = secrets::store_set(&inner.data_dir(), &name, "provider_api_key", &key) {
             inner.draft["upstreams"][&name] = previous;
             return match inner.observe_draft() {
                 Ok(()) => Err(key_error),
@@ -2430,7 +2437,7 @@ async fn discover_provider_models(
             inner.data_dir(),
             credential,
             config.egress.clone(),
-            secrets::SecretStore::from_config(&config),
+            secrets::SecretStore::from_config(&config, &inner.data_dir()),
         )
     };
 
@@ -3423,7 +3430,7 @@ fn set_settings(
         if !egress_auth_username.is_empty() || !egress_auth_slot.is_empty() {
             egress["auth"] = json!({
                 "username": egress_auth_username,
-                "credential": { "slot": egress_auth_slot, "keyring": true }
+                "credential": { "slot": egress_auth_slot, "store": true }
             });
         }
         egress
@@ -3609,7 +3616,7 @@ async fn suggest_model_price(
         (
             inner.data_dir(),
             config.egress.clone(),
-            secrets::SecretStore::from_config(&config),
+            secrets::SecretStore::from_config(&config, &inner.data_dir()),
         )
     };
     tauri::async_runtime::spawn_blocking(move || {
@@ -4185,7 +4192,7 @@ mod tests {
             "provider": "openai-compatible",
             "base_url": "https://integrate.api.nvidia.com/v1",
             "access_tier": "free",
-            "auth": { "slot": "provider_api_key", "keyring": true },
+            "auth": { "slot": "provider_api_key", "store": true },
             "models": [{
                 "model": "openai/gpt-oss-120b",
                 "tool_state": "unknown",
@@ -5372,7 +5379,7 @@ mod tests {
         draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://trusted.example/v1",
-            "auth": {"slot": "provider_api_key", "keyring": true},
+            "auth": {"slot": "provider_api_key", "store": true},
             "models": [{"model": "model"}]
         });
         let inner = AppInner::new(root.join("token-station.json"), draft, None);

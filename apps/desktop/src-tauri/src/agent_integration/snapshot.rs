@@ -16,8 +16,6 @@ const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 const INDEX_SCHEMA_VERSION: u32 = 1;
 const ALGORITHM: &str = "AES-256-GCM";
 const KEY_ID: &str = "snapshot-master-key-v1";
-const KEYCHAIN_SERVICE: &str = "com.tokenstation.desktop.agent-snapshots";
-const KEYCHAIN_ACCOUNT: &str = "snapshot-master-key-v1";
 const INDEX_FILE: &str = "index.json";
 const MAX_INDEX_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_ENVELOPE_BYTES: u64 = 20 * 1024 * 1024;
@@ -112,67 +110,6 @@ impl MasterKeyStore for FileMasterKeyStore {
             .try_into()
             .map_err(|_| "快照主密钥文件长度无效,或已损坏".to_string())?;
         Ok(Zeroizing::new(key))
-    }
-}
-
-pub struct OsKeychainMasterKeyStore;
-
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-impl OsKeychainMasterKeyStore {
-    fn entry() -> Result<keyring::Entry, String> {
-        keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-            .map_err(|_| "无法打开快照 OS keychain 条目".to_string())
-    }
-
-    fn decode(secret: Vec<u8>) -> Result<Zeroizing<[u8; 32]>, String> {
-        let key: [u8; 32] = secret
-            .try_into()
-            .map_err(|_| "快照 OS keychain 主密钥长度无效".to_string())?;
-        Ok(Zeroizing::new(key))
-    }
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-impl MasterKeyStore for OsKeychainMasterKeyStore {
-    fn load_or_create(&self, allow_create: bool) -> Result<Zeroizing<[u8; 32]>, String> {
-        let entry = Self::entry()?;
-        match entry.get_secret() {
-            Ok(secret) => Self::decode(secret),
-            Err(keyring::Error::NoEntry) if allow_create => {
-                let mut generated = Zeroizing::new([0_u8; 32]);
-                getrandom::fill(generated.as_mut())
-                    .map_err(|_| "生成快照主密钥失败".to_string())?;
-                entry
-                    .set_secret(generated.as_ref())
-                    .map_err(|_| "写入快照 OS keychain 失败".to_string())?;
-                Self::decode(
-                    entry
-                        .get_secret()
-                        .map_err(|_| "回读快照 OS keychain 失败".to_string())?,
-                )
-            }
-            Err(keyring::Error::NoEntry) => Err("快照主密钥缺失，已有快照不可安全解密".to_string()),
-            Err(_) => Err("快照 OS keychain 不可访问或已锁定".to_string()),
-        }
-    }
-
-    fn load(&self) -> Result<Zeroizing<[u8; 32]>, String> {
-        Self::decode(
-            Self::entry()?
-                .get_secret()
-                .map_err(|_| "快照 OS keychain 不可访问、已锁定或密钥缺失".to_string())?,
-        )
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-impl MasterKeyStore for OsKeychainMasterKeyStore {
-    fn load_or_create(&self, _allow_create: bool) -> Result<Zeroizing<[u8; 32]>, String> {
-        Err("当前平台不支持快照 OS keychain".to_string())
-    }
-
-    fn load(&self) -> Result<Zeroizing<[u8; 32]>, String> {
-        Err("当前平台不支持快照 OS keychain".to_string())
     }
 }
 
@@ -973,16 +910,6 @@ mod tests {
             assert!(decode_lower_hex(invalid).is_err());
         }
         assert!(hex_nibble(b'g').is_err());
-        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-        {
-            assert!(OsKeychainMasterKeyStore::decode(vec![0_u8; 31]).is_err());
-            assert_eq!(
-                OsKeychainMasterKeyStore::decode(vec![9_u8; 32])
-                    .unwrap()
-                    .as_ref(),
-                &[9_u8; 32]
-            );
-        }
 
         assert!(validate_index(SnapshotIndex {
             schema_version: 99,

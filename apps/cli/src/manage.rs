@@ -68,7 +68,7 @@ pub fn upstream_add(config: &mut ClientConfig, spec: &AddUpstream) -> Result<Str
         .auth
         .map(|source| parse_auth_spec(source, spec.slot))
         .transpose()?;
-    let keyring_hint = matches!(&auth, Some(auth) if auth.keyring);
+    let store_hint = matches!(&auth, Some(auth) if auth.store);
 
     let mut summary = format!(
         "added upstream `{}` ({}, {} model(s))",
@@ -91,7 +91,7 @@ pub fn upstream_add(config: &mut ClientConfig, spec: &AddUpstream) -> Result<Str
             "; not in any pool yet — no route reaches it until one names it"
         );
     }
-    if keyring_hint {
+    if store_hint {
         let _ = write!(
             summary,
             "\nstore the credential with: token-station-cli key set {} {}",
@@ -157,10 +157,10 @@ pub fn upstream_remove(config: &mut ClientConfig, name: &str) -> Result<String, 
 
     let mut summary = format!("removed upstream `{name}`");
     if let Some(auth) = &entry.auth {
-        if auth.keyring {
+        if auth.store {
             let _ = write!(
                 summary,
-                "\nits keychain entry survives; delete it with: token-station-cli key remove \
+                "\nits stored credential survives; delete it with: token-station-cli key remove \
                  {name} {}",
                 auth.slot
             );
@@ -182,8 +182,8 @@ pub fn upstream_list(config: &ClientConfig) -> String {
     ]];
     for (name, entry) in &config.upstreams {
         let auth = entry.auth.as_ref().map_or("none".to_owned(), |auth| {
-            if auth.keyring {
-                format!("keyring:{}", auth.slot)
+            if auth.store {
+                format!("store:{}", auth.slot)
             } else if let Some(variable) = &auth.env {
                 format!("env:{variable}")
             } else if let Some(path) = &auth.file {
@@ -425,17 +425,17 @@ fn parse_model_spec(raw: &str) -> Result<ModelCapability, String> {
     Ok(capability)
 }
 
-/// `keyring` | `env:<VAR>` | `file:<PATH>` — where the credential *lives*;
+/// `store` | `env:<VAR>` | `file:<PATH>` — where the credential *lives*;
 /// the value itself never appears on a command line.
 fn parse_auth_spec(source: &str, slot: &str) -> Result<AuthConfig, String> {
     let mut auth = AuthConfig {
         slot: slot.to_owned(),
-        keyring: false,
+        store: false,
         env: None,
         file: None,
     };
-    if source == "keyring" {
-        auth.keyring = true;
+    if source == "store" || source == "keyring" {
+        auth.store = true;
     } else if let Some(variable) = source.strip_prefix("env:") {
         auth.env = Some(variable.to_owned());
     } else if let Some(path) = source.strip_prefix("file:") {
