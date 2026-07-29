@@ -6,6 +6,7 @@ import {
   planAgentConnection,
   planAgentDisconnect,
   saveAgentRoutes,
+  restartAgentRoute,
   setAgentRouteMode,
   setAgentTier,
   type AgentInstallationView,
@@ -270,10 +271,11 @@ export default function AgentRoutePage({
     );
   };
 
+  // Save and hot-restart only this Agent's route when the proxy is running; do not affect other Agents.
   const saveRoute = () => runState(
-    saveAgentRoutes,
+    () => restartAgentRoute(metadata.agent_id),
     serveRunning
-      ? copy("Custom routing saved · Restart the proxy to apply", "独立路由已保存 · 重启代理后生效")
+      ? copy("Custom routing saved and restarted for this Agent", "独立路由已保存并对此 Agent 生效")
       : copy("Custom routing saved", "独立路由已保存"),
   );
 
@@ -459,7 +461,7 @@ export default function AgentRoutePage({
         <footer className="panel-foot route-actions">
           {route.mode === "custom" ? (
             <>
-              <button className="btn primary" type="button" disabled={busy || Boolean(route.config_error)} onClick={() => void saveRoute()}>{copy("Save custom routing", "保存独立路由")}</button>
+              <button className="btn primary" type="button" disabled={busy || Boolean(route.config_error)} onClick={() => void saveRoute()}>{copy("Save & restart", "保存并重启")}</button>
               <button className="btn" type="button" disabled={busy} onClick={() => void restoreHome()}>{copy("Restore home routing", "恢复主页路由")}</button>
             </>
           ) : route.mode === "profile" ? (

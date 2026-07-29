@@ -835,6 +835,10 @@ export const deleteProfile = (name: string) =>
 
 export const saveAgentRoutes = () => invoke<StateView>("save_agent_routes");
 
+/** Save and hot-restart one Agent route; apply immediately without affecting other Agents. */
+export const restartAgentRoute = (agentId: string) =>
+  invoke<StateView>("restart_agent_route", { agentId });
+
 export const applyHomeRouteToAllAgents = () =>
   invoke<StateView>("apply_home_route_to_all_agents");
 

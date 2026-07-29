@@ -88,6 +88,17 @@ impl RunningServer {
         !self.serve_task.is_finished()
     }
 
+    /// Hot-swap one Agent's route on the running gateway — no full restart, so
+    /// other Agents' traffic is untouched. `router` is `None` to clear a custom
+    /// route (inherit Home) or `Some` to install one.
+    pub(crate) fn reload_agent_router(
+        &self,
+        agent_id: &str,
+        router: Option<token_station_router_core::RouterConfig>,
+    ) -> Result<(), String> {
+        self.app_state.gateway.reload_agent_router(agent_id, router)
+    }
+
     #[cfg(test)]
     pub(crate) fn abort_task(&self) {
         self.serve_task.abort();

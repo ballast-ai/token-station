@@ -2987,6 +2987,38 @@ fn save_agent_routes(state: State<'_, AppStateManaged>) -> Result<StateView, Str
     Ok(inner.snapshot())
 }
 
+/// Save one Agent's route and apply it immediately by hot-swapping just that
+/// Agent's router on the running gateway — no full restart, so every other
+/// Agent's in-flight and new requests are undisturbed. If the proxy is not
+/// running, this behaves like `save_agent_routes` (the route applies on next
+/// start). Drives the per-Agent "Save & restart" button.
+#[tauri::command]
+fn restart_agent_route(
+    state: State<'_, AppStateManaged>,
+    agent_id: String,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    if !supported_agent_ids().contains(&agent_id) {
+        return Err(format!("未知 Agent：{agent_id}"));
+    }
+    // Persist the draft exactly as "save custom routing" does.
+    inner.promote_agent_route_drafts()?;
+    inner.save_draft()?;
+    inner.agent_route_drafts.clear();
+
+    // Materialize this one Agent's router from the saved config and hot-swap it
+    // on the running gateway. `None` ⇒ the Agent inherits Home, so the reload
+    // clears its per-Agent router.
+    let config = inner.materialize()?;
+    let router = config.custom_router_for_agent(&agent_id)?;
+    if let ServerLifecycle::Running { server, .. } = &inner.server {
+        server
+            .reload_agent_router(&agent_id, router)
+            .map_err(|error| format!("热重启 Agent 路由失败：{error}"))?;
+    }
+    Ok(inner.snapshot())
+}
+
 #[tauri::command]
 fn apply_home_route_to_all_agents(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
@@ -4055,6 +4087,7 @@ pub fn run() {
             delete_profile,
             save_config,
             save_agent_routes,
+            restart_agent_route,
             apply_home_route_to_all_agents,
             serve_start,
             serve_stop,
