@@ -19,6 +19,9 @@ wasmtime = { version = "46", default-features = false, features = [
     "runtime",
     "component-model",
     "cranelift",
+    # 编译缓存：同一批 WASM 组件每次启动都现编译(Cranelift)要数秒/个,启动全花在这。
+    # 内置缓存按内容+配置哈希落盘,重启直接反序列化;unsafe 全在 wasmtime 内部。
+    "cache",
     # 测试用手写 WAT 构造「import 了 wasi:sockets 的组件」来证明拒收路径；
     # 生产加载的是二进制 .wasm，不经过 wat。
     "wat",

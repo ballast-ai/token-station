@@ -232,7 +232,9 @@ fn gate_manifest(
     Ok(manifest)
 }
 
-/// Gate 2: the compiled component and its imports.
+/// Gate 2: the compiled component and its imports. Compilation is cached by the
+/// engine (see [`crate::runtime::PluginRuntime::new`]), so a repeated start
+/// deserializes rather than recompiling.
 fn gate_component(
     runtime: &PluginRuntime,
     wasm: &[u8],
