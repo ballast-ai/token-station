@@ -837,6 +837,33 @@ mod tests {
     }
 
     #[test]
+    fn every_cross_platform_agent_has_linux_install_and_config_locations() {
+        use super::super::types::Platform;
+        let registry = AgentRegistry::builtin().unwrap();
+        for descriptor in registry.descriptors() {
+            // Claude Desktop ships only on macOS/Windows — no Linux build.
+            if descriptor.agent_id == "claude-desktop" {
+                continue;
+            }
+            assert!(
+                descriptor
+                    .known_install_locations
+                    .get(&Platform::Linux)
+                    .is_some_and(|paths| !paths.is_empty()),
+                "{} has no Linux install locations",
+                descriptor.agent_id
+            );
+            let has_linux_config = descriptor.config_locations.iter().any(|location| {
+                location
+                    .platform_defaults
+                    .get(&Platform::Linux)
+                    .is_some_and(|paths| !paths.is_empty())
+            });
+            assert!(has_linux_config, "{} has no Linux config path", descriptor.agent_id);
+        }
+    }
+
+    #[test]
     fn registry_boundary_matrix_rejects_ambiguous_metadata_paths_and_capabilities() {
         for path in [
             "",

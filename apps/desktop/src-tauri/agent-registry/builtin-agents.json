@@ -93,7 +93,19 @@
       "admission": "supported",
       "executable_candidates": ["codex"],
       "known_install_locations": {
-        "macos": ["/Applications/ChatGPT.app/Contents/Resources/codex"]
+        "macos": ["/Applications/ChatGPT.app/Contents/Resources/codex"],
+        "linux": [
+          "${HOME}/.local/bin/codex",
+          "${HOME}/.cargo/bin/codex",
+          "/usr/local/bin/codex",
+          "/usr/bin/codex"
+        ],
+        "wsl": [
+          "${HOME}/.local/bin/codex",
+          "${HOME}/.cargo/bin/codex",
+          "/usr/local/bin/codex",
+          "/usr/bin/codex"
+        ]
       },
       "version_probe": {
         "argv": ["--version"],
@@ -304,7 +316,19 @@
       "admission": "supported",
       "executable_candidates": ["opencode"],
       "known_install_locations": {
-        "macos": ["/opt/homebrew/bin/opencode"]
+        "macos": ["/opt/homebrew/bin/opencode"],
+        "linux": [
+          "${HOME}/.local/bin/opencode",
+          "${HOME}/.opencode/bin/opencode",
+          "/usr/local/bin/opencode",
+          "/usr/bin/opencode"
+        ],
+        "wsl": [
+          "${HOME}/.local/bin/opencode",
+          "${HOME}/.opencode/bin/opencode",
+          "/usr/local/bin/opencode",
+          "/usr/bin/opencode"
+        ]
       },
       "version_probe": {
         "argv": ["--version"],
