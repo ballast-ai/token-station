@@ -11,6 +11,8 @@ interface QuotaPriorityPanelProps {
   applying: boolean;
   /** 保存并应用:上抛当前的完整账户列表(已过滤未选完的行),由上层落库+重启。 */
   onSave: (accounts: QuotaAccount[]) => void;
+  /** 跳转到实时额度查看页。 */
+  onViewUsage: () => void;
 }
 
 type QuotaEntry = QuotaAccount;
@@ -26,6 +28,7 @@ export default function QuotaPriorityPanel({
   busy,
   applying,
   onSave,
+  onViewUsage,
 }: QuotaPriorityPanelProps) {
   const { copy } = useLocalizedCopy();
   // 有序账户列表 —— 行顺序即同额度时的调用优先级。以已持久化的 accounts 为初值。
@@ -89,6 +92,9 @@ export default function QuotaPriorityPanel({
             )}
           </p>
         </div>
+        <button type="button" className="btn quiet" onClick={onViewUsage}>
+          {copy("Live quota", "实时额度")}
+        </button>
       </div>
 
       <p className="quota-hint">

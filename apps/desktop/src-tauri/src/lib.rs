@@ -2139,6 +2139,37 @@ fn set_quota_accounts(
     Ok(inner.snapshot())
 }
 
+/// Live quota snapshot for the viewer: queries the running gateway's
+/// `/admin/quota` over loopback with the virtual key. Runtime-only — the quota
+/// picture lives in the gateway's memory, not the config or the metrics store —
+/// so this needs the proxy running.
+#[tauri::command]
+fn get_quota_snapshot(state: State<'_, AppStateManaged>) -> Result<serde_json::Value, String> {
+    let (listen, key) = {
+        let inner = state.0.lock().unwrap();
+        let serve = inner.serve_view();
+        (serve.listen, serve.virtual_key)
+    };
+    let Some(key) = key else {
+        return Err("代理未运行——启动代理后可查看实时额度".to_owned());
+    };
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(3)))
+            .build(),
+    );
+    let response = agent
+        .get(format!("http://{listen}/admin/quota"))
+        .header("authorization", &format!("Bearer {key}"))
+        .call()
+        .map_err(|error| format!("查询额度失败：{error}"))?;
+    let body = response
+        .into_body()
+        .read_to_string()
+        .map_err(|error| format!("读取额度响应失败：{error}"))?;
+    serde_json::from_str(&body).map_err(|error| format!("额度响应不是合法 JSON：{error}"))
+}
+
 #[tauri::command]
 fn edit_provider(
     state: State<'_, AppStateManaged>,
@@ -3927,6 +3958,7 @@ pub fn run() {
             set_local_routing,
             set_routing_mode,
             set_quota_accounts,
+            get_quota_snapshot,
             edit_provider,
             discover_provider_models,
             test_provider,

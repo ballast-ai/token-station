@@ -259,6 +259,33 @@ export interface QuotaAccount {
   model: string;
 }
 
+/** 运行时额度来源:供应商响应头(权威)/ 本地账本估算 / 无数据。 */
+export type QuotaSource = "authoritative" | "estimated" | "none";
+
+export interface QuotaWindowSnapshot {
+  len_ms: number;
+  limit: number;
+  used: number;
+  remaining_permille: number;
+  ms_until_reset: number;
+}
+
+export interface QuotaAccountSnapshot {
+  upstream: string;
+  windows: QuotaWindowSnapshot[];
+  rate_headroom_permille: number;
+  rate_pressured: boolean;
+  inflight: number;
+  exhausted: boolean;
+  cooling_ms_remaining: number;
+  source: QuotaSource;
+}
+
+export interface QuotaSnapshot {
+  now_ms: number;
+  accounts: QuotaAccountSnapshot[];
+}
+
 export interface SettingsView {
   listen: string;
   auth: boolean;
@@ -700,6 +727,9 @@ export const setRoutingMode = (mode: "tiered" | "quota_first", agentId?: string)
 
 export const setQuotaAccounts = (accounts: QuotaAccount[]) =>
   invoke<StateView>("set_quota_accounts", { accounts });
+
+/** 查询运行中网关的实时额度快照(需代理运行)。 */
+export const getQuotaSnapshot = () => invoke<QuotaSnapshot>("get_quota_snapshot");
 
 export const editProvider = (name: string, base_url: string, api_key: string | null) =>
   invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });

@@ -6,6 +6,7 @@ import { useLanguage } from "./LanguageProvider";
 export type AppView =
   | "home"
   | "usage"
+  | "quota-usage"
   | "settings"
   | "add-provider"
   | `free-provider:${string}`

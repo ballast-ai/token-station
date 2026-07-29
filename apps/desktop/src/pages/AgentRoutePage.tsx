@@ -36,6 +36,7 @@ interface AgentRoutePageProps {
   onStateChange: (state: StateView, message?: string) => void;
   onRescan: () => void | Promise<void>;
   onSaveQuota: (accounts: QuotaAccount[]) => void;
+  onViewQuotaUsage: () => void;
 }
 
 /** 每个 Agent 的"接入改动已展示过"标记键;localStorage 持久,故只出现一次。 */
@@ -141,6 +142,7 @@ export default function AgentRoutePage({
   onStateChange,
   onRescan,
   onSaveQuota,
+  onViewQuotaUsage,
 }: AgentRoutePageProps) {
   const { copy } = useLocalizedCopy();
   const [selectedPath, setSelectedPath] = useState("");
@@ -404,6 +406,7 @@ export default function AgentRoutePage({
           busy={busy}
           applying={applying}
           onSave={onSaveQuota}
+          onViewUsage={onViewQuotaUsage}
         />
       ) : (
       <section className="panel route-panel">
