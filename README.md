@@ -5,7 +5,9 @@
 A loopback LLM proxy with local routing. Point your IDE, agent, or any
 OpenAI-compatible client at `127.0.0.1`, and token-station routes each request
 to the right upstream — your own API keys, your local models — by rules you
-wrote, on your machine, with nothing about your prompts ever leaving it.
+wrote and evaluated on your machine. Requests routed to a cloud provider are
+sent to that configured provider; strict local mode uses verified loopback
+providers only.
 
 ```
 IDE / agent ──▶ 127.0.0.1:8787 ──▶ rules → hints → heuristic → default
@@ -55,9 +57,9 @@ cp apps/cli/example-config.json token-station.json
 ./target/release/token-station-cli serve
 ```
 
-Then point your client at `http://127.0.0.1:8787/v1` with the virtual key that
-`serve` printed. Ask for model `auto` and the router decides; ask for a
-concrete model and you get it.
+Then point your client at `http://127.0.0.1:8787/v1` with the owner-only
+virtual key stored at `token-station-data/virtual-key`. Ask for model `auto`
+and the router decides; ask for a concrete model and you get it.
 
 Manage it from the same binary: `upstream list/add/remove/test`,
 `rule list`, `config set/edit`, `stats` (volume, errors, latency, tokens —

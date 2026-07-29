@@ -205,10 +205,9 @@ fn a_hung_guest_is_cut_off_at_the_deadline_not_at_infinity() {
     let elapsed = started.elapsed();
 
     assert_eq!(refused.code, ErrorCode::Internal);
-    assert!(
-        refused.message.contains("did not answer"),
-        "{}",
-        refused.message
+    assert_eq!(
+        refused.message,
+        "adapter trapped or exceeded a resource limit"
     );
     assert!(
         elapsed < Duration::from_secs(10),
@@ -230,10 +229,9 @@ fn a_guest_that_allocates_past_the_limit_traps_instead_of_pressuring_the_host() 
         .expect_err("256MB against a 64MB limit must fail");
 
     assert_eq!(refused.code, ErrorCode::Internal);
-    assert!(
-        refused.message.contains("did not answer"),
-        "{}",
-        refused.message
+    assert_eq!(
+        refused.message,
+        "adapter trapped or exceeded a resource limit"
     );
 }
 

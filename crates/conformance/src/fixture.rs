@@ -24,9 +24,12 @@
 use std::error::Error;
 use std::fmt;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+
+const MAX_FIXTURE_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Which adapter function a fixture family exercises.
 pub trait Family: Copy + Eq + fmt::Debug + Sized + 'static {
@@ -264,7 +267,34 @@ fn family_of<F: Family>(stem: &str) -> Result<Option<F>, FixtureError> {
 }
 
 fn read_json(path: &Path, case: &str) -> Result<Value, FixtureError> {
-    let source = fs::read_to_string(path).map_err(|source| FixtureError::Unreadable {
+    let file = fs::File::open(path).map_err(|source| FixtureError::Unreadable {
+        path: path.to_path_buf(),
+        detail: source.to_string(),
+    })?;
+    let metadata = file.metadata().map_err(|source| FixtureError::Unreadable {
+        path: path.to_path_buf(),
+        detail: source.to_string(),
+    })?;
+    if metadata.len() > MAX_FIXTURE_FILE_BYTES {
+        return Err(FixtureError::Unreadable {
+            path: path.to_path_buf(),
+            detail: format!("fixture exceeds the {MAX_FIXTURE_FILE_BYTES} byte limit"),
+        });
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    file.take(MAX_FIXTURE_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| FixtureError::Unreadable {
+            path: path.to_path_buf(),
+            detail: source.to_string(),
+        })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_FIXTURE_FILE_BYTES {
+        return Err(FixtureError::Unreadable {
+            path: path.to_path_buf(),
+            detail: format!("fixture exceeds the {MAX_FIXTURE_FILE_BYTES} byte limit"),
+        });
+    }
+    let source = String::from_utf8(bytes).map_err(|source| FixtureError::Unreadable {
         path: path.to_path_buf(),
         detail: source.to_string(),
     })?;
@@ -321,7 +351,8 @@ impl Error for FixtureError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentFamily, Family, FixtureError, ProviderFamily, family_of};
+    use super::{AgentFamily, Family, FixtureError, FixturePack, ProviderFamily, family_of};
+    use std::fs;
 
     #[test]
     fn a_file_from_the_other_role_is_skipped_not_refused() {
@@ -373,5 +404,25 @@ mod tests {
     fn stream_families_host_no_unknown_field() {
         assert_eq!(ProviderFamily::Stream.unknown_field_pointer(), None);
         assert_eq!(AgentFamily::Stream.unknown_field_pointer(), None);
+    }
+
+    #[test]
+    fn a_single_fixture_file_cannot_allocate_without_bound() {
+        let directory = std::env::temp_dir().join(format!(
+            "token-station-oversized-fixture-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("scratch creates");
+        fs::write(
+            directory.join("agent.normalize.large.input.json"),
+            vec![b' '; 2 * 1024 * 1024 + 1],
+        )
+        .expect("fixture writes");
+
+        let error = FixturePack::<AgentFamily>::load(&directory)
+            .expect_err("oversized fixture must be refused before JSON parsing");
+        assert!(error.to_string().contains("limit"), "{error}");
+        fs::remove_dir_all(directory).ok();
     }
 }

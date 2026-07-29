@@ -886,12 +886,19 @@ export function setAdminEndpoint(serve: ServeView) {
   adminKey = reachable ? serve.virtual_key : null;
 }
 
-// 纯浏览器模式(无 Tauri 壳)没有 get_state 可问:从 localStorage 取端点,
-// 默认本机默认端口。用法:localStorage.setItem("ts_listen","127.0.0.1:8787");
-// localStorage.setItem("ts_key","<虚拟key>") 后刷新页面。
+export function browserAdminEndpoint(storage: Pick<Storage, "getItem">) {
+  return {
+    base: `http://${storage.getItem("ts_listen") ?? "127.0.0.1:8787"}`,
+    key: null,
+  } as const;
+}
+
+// 纯浏览器模式(无 Tauri 壳)只允许从 localStorage 取非敏感监听端点。
+// 虚拟 key 永不进入持久化 Web Storage；启用鉴权时使用 Tauri 壳。
 if (!IN_TAURI) {
-  adminBase = `http://${localStorage.getItem("ts_listen") ?? "127.0.0.1:8787"}`;
-  adminKey = localStorage.getItem("ts_key");
+  const endpoint = browserAdminEndpoint(localStorage);
+  adminBase = endpoint.base;
+  adminKey = endpoint.key;
 }
 
 async function dataGet<T>(path: string, ipcFallback: () => Promise<T>): Promise<T> {
@@ -908,7 +915,7 @@ async function dataGet<T>(path: string, ipcFallback: () => Promise<T>): Promise<
   }
   if (IN_TAURI) return ipcFallback();
   throw new Error(
-    "无法连接本地代理:请确认 token-station serve 已启动,并在 localStorage 配置 ts_listen / ts_key",
+    "无法连接本地代理：请确认 token-station serve 已启动；启用鉴权时请使用桌面 App",
   );
 }
 
