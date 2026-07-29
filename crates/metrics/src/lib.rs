@@ -47,7 +47,9 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 ///   prompt) alongside the whole-request `est_input_tokens`.
 /// - v6: widens the `decisions.decision_kind` check to admit `quota`
 ///   (quota-first routing).
-pub const SCHEMA_VERSION: u32 = 6;
+/// - v7: adds the quota-decision snapshot columns (why a quota-first route
+///   picked its account: reset/headroom/pressured/exhausted).
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Where the recorded cost came from. The local price table may only produce
 /// [`Self::Estimated`]; [`Self::Actual`] is reserved for future bill
@@ -83,6 +85,25 @@ pub struct DecisionRecord {
     pub decided_by: DecidedBy,
     pub fallbacks: u32,
     pub features: RequestFeatures,
+    /// Why quota-first routing picked this account (its window/rate picture at
+    /// decision time). Present only for quota-first routes; `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<QuotaDecisionSnapshot>,
+}
+
+/// The chosen account's quota picture at the moment a quota-first route was
+/// decided — a read-only diagnostic ("why this account"), never a credential or
+/// free-form content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaDecisionSnapshot {
+    /// Milliseconds until the binding window resets; `None` when non-windowed.
+    pub reset_ms: Option<u64>,
+    /// Remaining allowance of that window, in permille (`0..=1000`).
+    pub remaining_permille: Option<u16>,
+    /// Instantaneous rate headroom in permille (in-flight already folded in).
+    pub headroom_permille: u16,
+    pub pressured: bool,
+    pub exhausted: bool,
 }
 
 impl From<&Decision> for DecisionRecord {
@@ -94,6 +115,7 @@ impl From<&Decision> for DecisionRecord {
             decided_by: decision.decided_by.clone(),
             fallbacks: u32::try_from(decision.fallbacks.len()).unwrap_or(u32::MAX),
             features: decision.features,
+            quota: None,
         }
     }
 }

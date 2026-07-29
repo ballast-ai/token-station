@@ -166,7 +166,17 @@ export type ReceiptDecidedByView =
   | { tier: "hint"; kind: "step_type" | "task_type" | "preference" | "capability"; value: string }
   | { tier: "heuristic"; score: number; threshold: number }
   | { tier: "default" }
-  | { tier: "exact_model"; model: string };
+  | { tier: "exact_model"; model: string }
+  | { tier: "quota" };
+
+/** 额度优先决策快照:为什么选了这个账户(决策时的窗口/速率画像)。 */
+export interface ReceiptQuotaView {
+  reset_ms: number | null;
+  remaining_permille: number | null;
+  headroom_permille: number;
+  pressured: boolean;
+  exhausted: boolean;
+}
 
 export interface ReceiptRouteView {
   upstream: string;
@@ -175,6 +185,8 @@ export interface ReceiptRouteView {
   decided_by: ReceiptDecidedByView;
   fallbacks: number;
   features: ReceiptFeaturesView;
+  /** 仅额度优先路由存在;三档路由为 undefined。 */
+  quota?: ReceiptQuotaView | null;
 }
 
 export interface ReceiptAttemptView {

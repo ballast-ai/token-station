@@ -2182,6 +2182,25 @@ impl Gateway {
             decision.fallbacks.len()
         );
         record_route_decision(record, &decision);
+        // In quota mode, record why this account was chosen — its window/rate
+        // picture at decision time — for the receipt ("why this account").
+        if quota_mode {
+            if let Some(candidate) = candidates.iter().find(|c| c.target == decision.chosen) {
+                if let Some(recorded) = record.decision.as_mut() {
+                    recorded.quota = Some(token_station_metrics::QuotaDecisionSnapshot {
+                        reset_ms: candidate.quota.reset.as_ref().map(|r| r.ms_until_reset),
+                        remaining_permille: candidate
+                            .quota
+                            .reset
+                            .as_ref()
+                            .map(|r| r.remaining_permille),
+                        headroom_permille: candidate.quota.rate_headroom_permille,
+                        pressured: candidate.quota.rate_pressured,
+                        exhausted: candidate.quota.exhausted,
+                    });
+                }
+            }
+        }
 
         // In quota mode, take an in-flight lease on the chosen account before
         // dispatch so concurrent requests see the load and spread; settle the
