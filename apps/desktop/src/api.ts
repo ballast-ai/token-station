@@ -904,12 +904,19 @@ export function setAdminEndpoint(serve: ServeView) {
   adminKey = reachable ? serve.virtual_key : null;
 }
 
-// Browser-only mode without a Tauri shell cannot call get_state. Read the endpoint from localStorage,
-// Default local host and port. Usage: localStorage.setItem("ts_listen","127.0.0.1:8787");
-// Refresh the page after `localStorage.setItem("ts_key","<virtual key>")`.
+export function browserAdminEndpoint(storage: Pick<Storage, "getItem">) {
+  return {
+    base: `http://${storage.getItem("ts_listen") ?? "127.0.0.1:8787"}`,
+    key: null,
+  } as const;
+}
+
+// Browser-only mode may read only the non-sensitive listen endpoint from localStorage.
+// Never persist the virtual key in Web Storage; use the Tauri shell when auth is enabled.
 if (!IN_TAURI) {
-  adminBase = `http://${localStorage.getItem("ts_listen") ?? "127.0.0.1:8787"}`;
-  adminKey = localStorage.getItem("ts_key");
+  const endpoint = browserAdminEndpoint(localStorage);
+  adminBase = endpoint.base;
+  adminKey = endpoint.key;
 }
 
 async function dataGet<T>(path: string, ipcFallback: () => Promise<T>): Promise<T> {
@@ -926,7 +933,7 @@ async function dataGet<T>(path: string, ipcFallback: () => Promise<T>): Promise<
   }
   if (IN_TAURI) return ipcFallback();
   throw new Error(
-    "无法连接本地代理:请确认 token-station serve 已启动,并在 localStorage 配置 ts_listen / ts_key",
+    "无法连接本地代理：请确认 token-station serve 已启动；启用鉴权时请使用桌面 App",
   );
 }
 

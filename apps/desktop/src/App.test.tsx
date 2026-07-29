@@ -575,6 +575,53 @@ describe("desktop station navigation", () => {
     });
   });
 
+  it("returns home without promoting or discarding an incomplete Agent editor", async () => {
+    const user = userEvent.setup();
+    let current = stateFixture();
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "get_state") return current;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "set_agent_route_mode") {
+        const { agentId, mode } = args as { agentId: string; mode: "inherit" | "custom" };
+        current = {
+          ...current,
+          agent_routes: {
+            ...current.agent_routes,
+            [agentId]: {
+              ...current.agent_routes[agentId],
+              mode,
+              config_error: mode === "custom"
+                ? "Agent `codex` 的 high 档缺少供应商和模型"
+                : null,
+            },
+          },
+        };
+        return current;
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+    render(<App />);
+
+    await user.click((await screen.findByLabelText("主导航"))
+      .querySelector<HTMLButtonElement>('button[title^="Codex"]')!);
+    await user.click(screen.getByRole("radio", { name: "独立路由" }));
+    expect(screen.getByText("Agent `codex` 的 high 档缺少供应商和模型")).toBeInTheDocument();
+
+    await user.click(navigation().getByRole("button", { name: "主页" }));
+
+    expect(await screen.findByRole("heading", { name: "主页路由" })).toBeInTheDocument();
+    expect(screen.queryByText(/配置结构不合法/)).toBeNull();
+    expect(invokeMock).not.toHaveBeenCalledWith("save_agent_routes");
+
+    await user.click(navigation().getByRole("button", { name: "Codex" }));
+    expect(screen.getByRole("radio", { name: "独立路由" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "保存独立路由" })).toBeDisabled();
+  });
+
   it("saves the home route as a reusable profile and mounts it from an Agent page", async () => {
     const user = userEvent.setup();
     const provider = { name: "deepseek", provider: "openai-compatible", base_url: "https://example.test/v1", models: ["deepseek-chat"], has_auth: true };

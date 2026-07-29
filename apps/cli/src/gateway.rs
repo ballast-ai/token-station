@@ -54,7 +54,7 @@ use crate::config::{ClientConfig, EgressConfig};
 use crate::secrets::SecretStore;
 
 /// Caps on what crosses the proxy, applied by the host per architecture section 6.
-const MAX_INBOUND_BODY: usize = 10 * 1024 * 1024;
+pub(crate) const MAX_INBOUND_BODY: usize = 10 * 1024 * 1024;
 const MAX_UPSTREAM_BODY: u64 = 32 * 1024 * 1024;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(120);
 const CANCEL_READ_POLL: Duration = Duration::from_millis(100);
@@ -1161,6 +1161,13 @@ impl Gateway {
         &self.models_document
     }
 
+    /// Upper bound for blocking request workers. The async server acquires a
+    /// slot before it consumes an authenticated body or spawns a worker.
+    #[must_use]
+    pub fn global_concurrency_limit(&self) -> usize {
+        usize::try_from(self.admission.global_limit()).unwrap_or(usize::MAX)
+    }
+
     /// How many distinct models the catalog advertises.
     #[must_use]
     pub fn catalog_size(&self) -> usize {
@@ -1974,8 +1981,8 @@ impl Gateway {
                 Ok(outcome) if outcome.matched => return Some(agent),
                 Ok(_) => {}
                 Err(envelope) => eprintln!(
-                    "agent `{}` match_inbound errored, skipping: {} ({:?})",
-                    agent.protocol, envelope.message, envelope.code
+                    "agent `{}` match_inbound errored, skipping ({:?})",
+                    agent.protocol, envelope.code
                 ),
             }
         }
@@ -2151,8 +2158,7 @@ impl Gateway {
             retain_free_fallbacks(&mut decision, &self.free_upstreams);
         }
         eprintln!(
-            "route {} -> {} ({:?}), {} fallback(s)",
-            request.model,
+            "route -> {} ({:?}), {} fallback(s)",
             decision.chosen,
             decision.decided_by,
             decision.fallbacks.len()
@@ -2309,10 +2315,7 @@ impl Gateway {
                 Err(error) => {
                     self.observe(&target.upstream, &target.model, Err(&error));
                     let retriable = error.code.is_retriable_elsewhere();
-                    eprintln!(
-                        "upstream {target} failed: {} ({:?})",
-                        error.message, error.code
-                    );
+                    eprintln!("upstream {target} failed ({:?})", error.code);
                     if !retriable {
                         last_error = Some(error);
                         break;

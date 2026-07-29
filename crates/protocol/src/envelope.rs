@@ -19,8 +19,8 @@ struct HeaderDigestWire {
 ///
 /// An `agent-adapter` needs to know *which* headers arrived — that is how it
 /// recognises its own protocol and finds hint headers — but it must never see an
-/// inbound key. So a digest keeps every header *name* and only non-credential
-/// *values*.
+/// inbound key. So a digest keeps every normalized header *name* and values
+/// only for a closed metadata catalog the agent ABI actually consumes.
 ///
 /// Redaction is re-applied on deserialization. Without that, the invariant would
 /// hold only for digests built in-process, and a fixture or a cached envelope
@@ -44,9 +44,13 @@ impl HeaderDigest {
         let mut names = BTreeSet::new();
         let mut values = BTreeMap::new();
         for (name, value) in headers {
-            let name = name.into();
-            if !is_credential_header(&name) {
-                values.insert(name.clone(), value.into());
+            let name = name.into().to_ascii_lowercase();
+            let value = value.into();
+            if !is_credential_header(&name)
+                && is_agent_metadata_value_header(&name)
+                && value.len() <= 4096
+            {
+                values.insert(name.clone(), value);
             }
             names.insert(name);
         }
@@ -70,6 +74,10 @@ impl HeaderDigest {
     pub fn contains(&self, name: &str) -> bool {
         self.names.contains(name)
     }
+}
+
+fn is_agent_metadata_value_header(name: &str) -> bool {
+    matches!(name, "content-type" | "anthropic-version" | "x-agent-step")
 }
 
 impl From<HeaderDigestWire> for HeaderDigest {
@@ -142,6 +150,24 @@ mod tests {
         assert!(digest.contains("authorization"));
         assert_eq!(digest.value("authorization"), None);
         assert_eq!(digest.value("content-type"), Some("application/json"));
+    }
+
+    #[test]
+    fn digest_exposes_values_only_for_the_closed_agent_metadata_catalog() {
+        let digest = HeaderDigest::redacting([
+            ("x-agent-step", "planning"),
+            ("content-type", "application/json"),
+            ("x-private-session-token", "internal-secret"),
+        ]);
+
+        assert_eq!(digest.value("x-agent-step"), Some("planning"));
+        assert_eq!(digest.value("content-type"), Some("application/json"));
+        assert!(digest.contains("x-private-session-token"));
+        assert_eq!(
+            digest.value("x-private-session-token"),
+            None,
+            "an unknown private header value must never enter an agent plugin"
+        );
     }
 
     #[test]

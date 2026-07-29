@@ -4,8 +4,8 @@
 
 本地回环的 LLM 代理 + 本地路由。IDE、Agent 或任何 OpenAI 兼容客户端指向
 `127.0.0.1`，token-station 按你写的规则把每个请求路由到合适的上游——你自己的
-API key、你本机的模型——路由决策全部发生在你的机器上，prompt 的任何内容都
-不会离开它。
+API key、你本机的模型——规则与路由决策全部发生在你的机器上。走云端供应商的
+请求会发送给该供应商；严格本地模式只允许经过校验的回环地址供应商。
 
 ```
 IDE / Agent ──▶ 127.0.0.1:8787 ──▶ 规则 → hint → 启发式 → 默认池
@@ -49,8 +49,9 @@ cp apps/cli/example-config.json token-station.json
 ./target/release/token-station-cli serve
 ```
 
-客户端指向 `http://127.0.0.1:8787/v1`，带上 `serve` 打印的虚拟 key。请求
-`auto` 由路由器决策；请求具体模型就给你那个模型。
+客户端指向 `http://127.0.0.1:8787/v1`，带上保存在
+`token-station-data/virtual-key` 的仅属主可读虚拟 key。请求 `auto` 由路由器
+决策；请求具体模型就给你那个模型。
 
 管理面在同一个二进制里：`upstream list/add/remove/test`、`rule list`、
 `config set/edit`、`stats`（用量/错误/延迟/token，读本地指标库）。

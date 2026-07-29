@@ -33,11 +33,13 @@ impl FileLog {
     pub fn open(dir: &std::path::Path) -> Result<Self, String> {
         std::fs::create_dir_all(dir)
             .map_err(|error| format!("data dir `{}`: {error}", dir.display()))?;
+        crate::private_fs::ensure_private_dir(dir)
+            .map_err(|error| format!("data dir `{}`: {error}", dir.display()))?;
         let path = dir.join("requests.log");
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
+        let file = private_append_options()
             .open(&path)
+            .map_err(|error| format!("request log `{}`: {error}", path.display()))?;
+        crate::private_fs::make_private(&path)
             .map_err(|error| format!("request log `{}`: {error}", path.display()))?;
         Ok(Self {
             path,
@@ -56,15 +58,23 @@ impl FileLog {
                 let _ = std::fs::rename(from, to);
             }
             std::fs::rename(&self.path, self.path.with_extension("log.1"))?;
-            *file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)?;
+            *file = private_append_options().open(&self.path)?;
         }
 
         file.write_all(line.as_bytes())?;
         file.write_all(b"\n")
     }
+}
+
+fn private_append_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
 }
 
 impl Recorder for FileLog {
