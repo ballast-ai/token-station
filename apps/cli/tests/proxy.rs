@@ -2929,6 +2929,149 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
     }
 }
 
+fn start_quota_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &Path) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-proxy-quota-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let upstream = |mock: &MockUpstream| {
+        json!({
+            "provider": "openai-compatible",
+            "base_url": mock.base_url(),
+            "auth": { "slot": "provider_api_key", "file": key_file },
+            "models": [ { "model": "gpt-5.5", "tool": true, "context_window": 400_000 } ]
+        })
+    };
+    // Quota-first mode with an explicit account order: mock_primary is the
+    // preferred account (index 0). `eject_after: 3` keeps a single 429 from
+    // health-ejecting the primary, so the only thing that can drop it from
+    // rotation on the next request is the quota cooldown under test.
+    let config = json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "health": { "eject_after": 3, "cooldown_ms": 500 },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agent": "agent-openai",
+            "providers": { "openai-compatible": "provider-openai-compatible" }
+        },
+        "upstreams": {
+            "mock_primary": upstream(primary),
+            "mock_fallback": upstream(fallback)
+        },
+        "router": {
+            "version": 1,
+            "routing_mode": "quota_first",
+            "quota_accounts": [
+                { "upstream": "mock_primary", "model": "gpt-5.5" },
+                { "upstream": "mock_fallback", "model": "gpt-5.5" }
+            ]
+        }
+    });
+    let config: ClientConfig = serde_json::from_value(config).expect("test config parses");
+    let recorder = Arc::new(token_station_cli::filelog::Recorders(vec![
+        Box::new(token_station_cli::filelog::FileLog::open(&config.data.dir).expect("log opens")),
+        Box::new(
+            token_station_cli::store::SqliteStore::open(&config.data.dir.join("metrics.sqlite"))
+                .expect("store opens"),
+        ),
+    ]));
+    let gateway = Arc::new(Gateway::new(&config, recorder).expect("gateway assembles"));
+    let (virtual_key, _) =
+        token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
+    let state = server::AppState::new(
+        gateway,
+        Some(Arc::from(virtual_key.as_str())),
+        Arc::new(token_station_cli::admin::AdminContext {
+            data_dir: config.data.dir.clone(),
+            router: config.router.clone(),
+            plugins: config.plugins.clone(),
+        }),
+    );
+    let control = state.control.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let address = listener.local_addr().expect("bound");
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tokio builds");
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("listener converts");
+            server::serve(state, listener).await.expect("server runs");
+        });
+    });
+    Proxy {
+        url: format!("http://{address}"),
+        data_dir,
+        virtual_key,
+        control,
+    }
+}
+
+#[test]
+fn quota_first_cools_an_account_the_upstream_rate_limited() {
+    // The preferred account (mock_primary) hits a 429; the exchange fails over
+    // to mock_fallback and succeeds. The 429 is ground truth that primary's
+    // allowance is spent, so the L1 feedback loop cools it — and a *later,
+    // unrelated* request must skip primary entirely rather than re-provoking the
+    // rate limit.
+    let ok = json!({
+        "id": "cmpl-1",
+        "object": "chat.completion",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "ok" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 1 }
+    });
+    // No `Retry-After` on the 429, so the cooldown uses the default and no
+    // inter-attempt wait slows the test. The mock repeats its last scripted
+    // response, so a 2nd hit on primary (i.e. a cooldown failure) would still
+    // 429 — but the assertion below catches it by hit count.
+    let primary = MockUpstream::start(vec![vec![http_json(
+        429,
+        &json!({ "error": { "message": "slow down" } }).to_string(),
+    )]]);
+    let fallback = MockUpstream::start(vec![vec![http_json(200, &ok.to_string())]]);
+    let key = key_file("quota-cooldown", "sk-test-key-abc\n");
+    let proxy = start_quota_proxy_two(&primary, &fallback, &key);
+
+    // Request 1: quota prefers primary (listed first) → 429 → retries fallback → 200.
+    let (s1, b1) = post_chat(
+        &proxy,
+        &json!({ "model": "auto", "messages": [{ "role": "user", "content": "first question" }] }),
+        None,
+    );
+    assert_eq!(s1, 200, "{b1}");
+    assert_eq!(primary.hits(), 1, "request 1 tries the preferred account");
+    assert_eq!(fallback.hits(), 1, "and fails over to the healthy account");
+
+    // Request 2 is a *different* conversation (distinct messages ⇒ no session
+    // affinity to the fallback), so without the cooldown quota routing would
+    // again prefer primary and re-provoke the 429. It must instead skip the
+    // cooling account and go straight to the fallback.
+    let (s2, b2) = post_chat(
+        &proxy,
+        &json!({ "model": "auto", "messages": [{ "role": "user", "content": "an entirely separate ask" }] }),
+        None,
+    );
+    assert_eq!(s2, 200, "{b2}");
+    assert_eq!(
+        primary.hits(),
+        1,
+        "the cooled account is not retried by the next request"
+    );
+    assert_eq!(fallback.hits(), 2, "the healthy account serves it directly");
+}
+
 fn start_proxy_many(upstream: &MockUpstream, count: usize, key_file: &Path) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(

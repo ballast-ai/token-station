@@ -28,6 +28,16 @@ use crate::quota_lease::{DEFAULT_LEASE_MS, InflightLeases, LeaseId, apply_inflig
 /// quota — so a modest bound keeps memory flat under churn.
 pub const DEFAULT_SESSION_CAPACITY: usize = 4096;
 
+/// Cooldown applied to an account when the upstream reports a quota/rate refusal
+/// (429/402) but supplies no usable `Retry-After`. Long enough to stop hammering
+/// a spent allowance, short enough to recover promptly once it clears.
+pub const DEFAULT_QUOTA_COOLDOWN_MS: u64 = 60_000;
+
+/// Ceiling on any single cooldown, so one upstream's oversized `Retry-After`
+/// cannot park an account out of rotation for an unbounded stretch. Past this we
+/// re-probe (and, if still limited, re-cool) rather than trust an arbitrary wait.
+pub const MAX_QUOTA_COOLDOWN_MS: u64 = 60 * 60 * 1000;
+
 /// What a plan's windows are counted in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -99,6 +109,12 @@ pub struct QuotaTracker {
     sessions: HashMap<String, UpstreamModel>,
     session_order: VecDeque<String>,
     session_capacity: usize,
+    /// Per-upstream "cooling until" wall-clock (ms). Set when the upstream itself
+    /// refuses for quota/rate reasons — the ground-truth signal that this
+    /// allowance is spent regardless of what the local ledger estimated. While
+    /// cooling, the account reports `exhausted` and drops out of rotation. Keyed
+    /// by upstream so it works even for accounts with no configured plan.
+    cooling_until_ms: HashMap<String, u64>,
 }
 
 impl QuotaTracker {
@@ -117,6 +133,7 @@ impl QuotaTracker {
             sessions: HashMap::new(),
             session_order: VecDeque::new(),
             session_capacity: DEFAULT_SESSION_CAPACITY.max(1),
+            cooling_until_ms: HashMap::new(),
         }
     }
 
@@ -134,7 +151,31 @@ impl QuotaTracker {
             apply_inflight_penalty(state.rate_headroom_permille, inflight, rate_limit);
         state.rate_pressured =
             state.rate_pressured || state.rate_headroom_permille <= RATE_PRESSURE_PERMILLE;
+        // Ground-truth override: while the upstream is cooling from a real
+        // quota/rate refusal, the account is exhausted no matter what the local
+        // ledger estimated. Nothing routes to it until the cooldown elapses.
+        if self
+            .cooling_until_ms
+            .get(upstream)
+            .is_some_and(|until| now_ms < *until)
+        {
+            state.exhausted = true;
+        }
         state
+    }
+
+    /// Cool an account after the upstream itself refused it for quota/rate
+    /// reasons (429/402). `cooldown_ms` is the upstream's `Retry-After` when
+    /// present (else [`DEFAULT_QUOTA_COOLDOWN_MS`]), capped by
+    /// [`MAX_QUOTA_COOLDOWN_MS`]. Until it elapses the account reports
+    /// `exhausted` and drops out of quota rotation — the L1 feedback loop that
+    /// keeps routing from hammering a spent allowance.
+    pub fn note_rate_limited(&mut self, upstream: &str, now_ms: u64, cooldown_ms: u64) {
+        let until = now_ms.saturating_add(cooldown_ms.min(MAX_QUOTA_COOLDOWN_MS));
+        self.cooling_until_ms
+            .entry(upstream.to_owned())
+            .and_modify(|current| *current = (*current).max(until))
+            .or_insert(until);
     }
 
     /// Take an in-flight lease on `upstream` when a request is dispatched to it.
@@ -244,6 +285,37 @@ mod tests {
         assert_eq!(t.quota_state("acct", 0).rate_headroom_permille, 900);
         t.release(&lease);
         assert_eq!(t.quota_state("acct", 0).rate_headroom_permille, 1000);
+    }
+
+    #[test]
+    fn a_rate_limited_account_cools_off_until_its_retry_after_elapses() {
+        let mut t = tracker("acct", token_plan(1_000_000));
+        // Plenty of allowance ⇒ not exhausted on its own.
+        assert!(!t.quota_state("acct", 0).exhausted);
+        // The upstream returned 429 with a 30s Retry-After: cool it.
+        t.note_rate_limited("acct", 0, 30_000);
+        assert!(
+            t.quota_state("acct", 10_000).exhausted,
+            "cooling forces exhausted so the router drops it from rotation"
+        );
+        assert!(t.quota_state("acct", 29_999).exhausted);
+        // At/after the cooldown it recovers on its own — no manual clear needed.
+        assert!(!t.quota_state("acct", 30_000).exhausted);
+        assert!(!t.quota_state("acct", 60_000).exhausted);
+    }
+
+    #[test]
+    fn cooling_applies_to_unplanned_accounts_and_caps_absurd_waits() {
+        // An account with no configured plan can still be 429'd/402'd.
+        let mut t = tracker("planned", token_plan(1000));
+        t.note_rate_limited("pay_go", 0, 5_000);
+        assert!(t.quota_state("pay_go", 1_000).exhausted);
+        assert!(!t.quota_state("pay_go", 5_000).exhausted);
+        // An oversized Retry-After is capped so an upstream can't park an account
+        // out of rotation indefinitely.
+        t.note_rate_limited("pay_go", 0, u64::MAX);
+        assert!(t.quota_state("pay_go", MAX_QUOTA_COOLDOWN_MS - 1).exhausted);
+        assert!(!t.quota_state("pay_go", MAX_QUOTA_COOLDOWN_MS).exhausted);
     }
 
     #[test]
