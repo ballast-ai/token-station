@@ -492,6 +492,7 @@ mod tests {
         let mut config = example();
         let models = vec!["qwen3,tool".to_owned()];
         let spec = AddUpstream {
+            base_url: "http://127.0.0.1:1234/v1",
             local: true,
             ..add_spec("lmstudio_local", &models)
         };

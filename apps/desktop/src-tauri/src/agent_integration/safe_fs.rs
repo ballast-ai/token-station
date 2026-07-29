@@ -41,13 +41,31 @@ pub fn verify_private_file(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+pub fn harden_private_file(path: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secure file is not a real file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    verify_private_file(path)
+}
+
 pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "target has no parent")
     })?;
     ensure_private_dir(parent)?;
-    if path.exists() {
-        verify_private_file(path)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => verify_private_file(path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
     let temporary = unique_temporary_path(path)?;
     let result = (|| {
@@ -208,11 +226,36 @@ mod tests {
                 std::io::ErrorKind::InvalidInput
             );
 
+            let broken_symlink = root.join("broken-file-link");
+            symlink(root.join("missing-target"), &broken_symlink).unwrap();
+            assert_eq!(
+                write_atomic_private(&broken_symlink, b"replacement")
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+
             std::fs::set_permissions(&regular_file, std::fs::Permissions::from_mode(0o644))
                 .unwrap();
             assert_eq!(
                 verify_private_file(&regular_file).unwrap_err().kind(),
                 std::io::ErrorKind::PermissionDenied
+            );
+            harden_private_file(&regular_file).unwrap();
+            assert_eq!(
+                std::fs::metadata(&regular_file)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+
+            let file_link = root.join("file-link");
+            symlink(&regular_file, &file_link).unwrap();
+            assert_eq!(
+                harden_private_file(&file_link).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput
             );
         }
 

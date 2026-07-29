@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -11,11 +10,18 @@ use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, Prov
 
 const CACHE_VERSION: u32 = 2;
 const CACHE_FILE: &str = "model-catalog-cache.json";
+const MAX_CACHE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_PROVIDERS: usize = 128;
+pub(crate) const MAX_MODELS_PER_PROVIDER: usize = 4_096;
+pub(crate) const MAX_MODEL_ID_BYTES: usize = 512;
+const MAX_PROVIDER_NAME_BYTES: usize = 128;
+const MAX_BASE_URL_BYTES: usize = 2_048;
+const MAX_REMOVED_MODELS: usize = 512;
+const REMOVED_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(6);
 
 static CACHE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ModelDiscoveryView {
@@ -388,6 +394,9 @@ fn parse_models(document: &Value) -> Result<Vec<CatalogModelView>, String> {
         else {
             continue;
         };
+        if model.len() > MAX_MODEL_ID_BYTES {
+            return Err(format!("模型 ID 超过 {MAX_MODEL_ID_BYTES} 字节上限"));
+        }
         let vision = explicit_image_input_state(item);
         models
             .entry(model.to_owned())
@@ -405,6 +414,11 @@ fn parse_models(document: &Value) -> Result<Vec<CatalogModelView>, String> {
                 last_seen_ms: None,
                 catalog_state: CatalogState::Active,
             });
+        if models.len() > MAX_MODELS_PER_PROVIDER {
+            return Err(format!(
+                "模型数量超过单供应商 {MAX_MODELS_PER_PROVIDER} 个上限"
+            ));
+        }
     }
     Ok(models.into_values().collect())
 }
@@ -462,14 +476,21 @@ fn cache_path(data_dir: &Path) -> PathBuf {
 }
 
 fn load_cache(data_dir: &Path) -> CacheFile {
-    let Some(text) = std::fs::read_to_string(cache_path(data_dir)).ok() else {
+    let path = cache_path(data_dir);
+    let Some(metadata) = std::fs::metadata(&path).ok() else {
+        return CacheFile::default();
+    };
+    if metadata.len() > MAX_CACHE_BYTES {
+        return CacheFile::default();
+    }
+    let Some(text) = std::fs::read_to_string(path).ok() else {
         return CacheFile::default();
     };
     if let Some(cache) = serde_json::from_str::<CacheFile>(&text)
         .ok()
         .filter(|cache| cache.version == CACHE_VERSION)
     {
-        return cache;
+        return bounded_cache(cache, now_ms());
     }
     let Some(old) = serde_json::from_str::<CacheFileV1>(&text)
         .ok()
@@ -477,36 +498,95 @@ fn load_cache(data_dir: &Path) -> CacheFile {
     else {
         return CacheFile::default();
     };
-    CacheFile {
-        version: CACHE_VERSION,
-        providers: old
+    bounded_cache(
+        CacheFile {
+            version: CACHE_VERSION,
+            providers: old
+                .providers
+                .into_iter()
+                .map(|(name, entry)| {
+                    let models = entry
+                        .models
+                        .into_iter()
+                        .map(|model| {
+                            unknown_catalog_model(
+                                model,
+                                CatalogSource::Cache,
+                                Some(entry.fetched_at_ms),
+                                CatalogState::Active,
+                            )
+                        })
+                        .collect();
+                    (
+                        name,
+                        CacheEntry {
+                            base_url: entry.base_url,
+                            revision: 1,
+                            models,
+                            fetched_at_ms: entry.fetched_at_ms,
+                        },
+                    )
+                })
+                .collect(),
+        },
+        now_ms(),
+    )
+}
+
+fn bounded_cache(mut cache: CacheFile, now: u64) -> CacheFile {
+    let removed_cutoff = now.saturating_sub(REMOVED_TTL_MS);
+    cache.providers.retain(|name, entry| {
+        if name.is_empty()
+            || name.len() > MAX_PROVIDER_NAME_BYTES
+            || entry.base_url.len() > MAX_BASE_URL_BYTES
+        {
+            return false;
+        }
+        entry.models.retain(|model| {
+            !model.model.is_empty()
+                && model.model.len() <= MAX_MODEL_ID_BYTES
+                && (model.catalog_state != CatalogState::Removed
+                    || model
+                        .last_seen_ms
+                        .is_some_and(|seen| seen >= removed_cutoff))
+        });
+        entry.models.sort_by(|left, right| {
+            let left_removed = left.catalog_state == CatalogState::Removed;
+            let right_removed = right.catalog_state == CatalogState::Removed;
+            left_removed
+                .cmp(&right_removed)
+                .then_with(|| right.last_seen_ms.cmp(&left.last_seen_ms))
+                .then_with(|| left.model.cmp(&right.model))
+        });
+        let mut removed_kept = 0usize;
+        entry.models.retain(|model| {
+            if model.catalog_state != CatalogState::Removed {
+                return true;
+            }
+            removed_kept = removed_kept.saturating_add(1);
+            removed_kept <= MAX_REMOVED_MODELS
+        });
+        entry.models.truncate(MAX_MODELS_PER_PROVIDER);
+        entry
+            .models
+            .sort_by(|left, right| left.model.cmp(&right.model));
+        true
+    });
+    if cache.providers.len() > MAX_PROVIDERS {
+        let mut oldest: Vec<_> = cache
             .providers
+            .iter()
+            .map(|(name, entry)| (entry.fetched_at_ms, name.clone()))
+            .collect();
+        oldest.sort();
+        for (_, name) in oldest
             .into_iter()
-            .map(|(name, entry)| {
-                let models = entry
-                    .models
-                    .into_iter()
-                    .map(|model| {
-                        unknown_catalog_model(
-                            model,
-                            CatalogSource::Cache,
-                            Some(entry.fetched_at_ms),
-                            CatalogState::Active,
-                        )
-                    })
-                    .collect();
-                (
-                    name,
-                    CacheEntry {
-                        base_url: entry.base_url,
-                        revision: 1,
-                        models,
-                        fetched_at_ms: entry.fetched_at_ms,
-                    },
-                )
-            })
-            .collect(),
+            .take(cache.providers.len() - MAX_PROVIDERS)
+        {
+            cache.providers.remove(&name);
+        }
     }
+    cache
 }
 
 fn read_cached_entry(data_dir: &Path, name: &str, base_url: &str) -> Option<CacheEntry> {
@@ -555,10 +635,26 @@ fn write_cache(data_dir: &Path, name: &str, entry: CacheEntry) -> Result<(), Str
         .get_or_init(|| Mutex::new(()))
         .lock()
         .map_err(|_| "模型缓存写锁已损坏".to_owned())?;
+    if name.is_empty() || name.len() > MAX_PROVIDER_NAME_BYTES {
+        return Err(format!("供应商名称超过 {MAX_PROVIDER_NAME_BYTES} 字节上限"));
+    }
+    if entry.base_url.len() > MAX_BASE_URL_BYTES {
+        return Err(format!(
+            "供应商 Base URL 超过 {MAX_BASE_URL_BYTES} 字节上限"
+        ));
+    }
+    if entry.models.len() > MAX_MODELS_PER_PROVIDER
+        || entry
+            .models
+            .iter()
+            .any(|model| model.model.is_empty() || model.model.len() > MAX_MODEL_ID_BYTES)
+    {
+        return Err("模型缓存条目超过资源上限".to_owned());
+    }
     std::fs::create_dir_all(data_dir).map_err(|error| format!("创建数据目录失败：{error}"))?;
     let mut cache = load_cache(data_dir);
     cache.providers.insert(name.to_owned(), entry);
-    persist_cache(data_dir, &cache)
+    persist_cache(data_dir, &bounded_cache(cache, now_ms()))
 }
 
 /// Invalidates every catalog fact tied to one Provider identity.
@@ -584,20 +680,18 @@ fn persist_cache(data_dir: &Path, cache: &CacheFile) -> Result<(), String> {
     let mut rendered = serde_json::to_string_pretty(&cache)
         .map_err(|error| format!("序列化模型缓存失败：{error}"))?;
     rendered.push('\n');
-
-    let path = cache_path(data_dir);
-    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = data_dir.join(format!(
-        ".{CACHE_FILE}.{}.{}.tmp",
-        std::process::id(),
-        sequence
-    ));
-    std::fs::write(&temporary, rendered).map_err(|error| format!("写模型缓存失败：{error}"))?;
-    if let Err(error) = std::fs::rename(&temporary, &path) {
-        std::fs::remove_file(&temporary).ok();
-        return Err(format!("保存模型缓存失败：{error}"));
+    if u64::try_from(rendered.len()).unwrap_or(u64::MAX) > MAX_CACHE_BYTES {
+        return Err(format!(
+            "模型缓存超过 {} MiB 上限",
+            MAX_CACHE_BYTES / 1024 / 1024
+        ));
     }
-    Ok(())
+
+    crate::agent_integration::safe_fs::write_atomic_private(
+        &cache_path(data_dir),
+        rendered.as_bytes(),
+    )
+    .map_err(|error| format!("保存模型缓存失败：{error}"))
 }
 
 fn now_ms() -> u64 {
@@ -615,7 +709,7 @@ mod tests {
     use super::{
         catalog_for_provider, discover_with_cache, fetch_models, parse_models, read_cached_entry,
         remove_provider, status_message, unknown_catalog_model, write_cache, CacheEntry,
-        CatalogSource, CatalogState,
+        CatalogSource, CatalogState, MAX_MODELS_PER_PROVIDER, MAX_MODEL_ID_BYTES,
     };
     use serde_json::json;
     use std::io::{Read, Write};
@@ -711,6 +805,19 @@ mod tests {
         assert_eq!(models[0].vision, CapabilityState::Unsupported);
         assert_eq!(models[1].model, "z-model");
         assert_eq!(models[1].vision, CapabilityState::Verified);
+    }
+
+    #[test]
+    fn model_directory_rejects_unbounded_cardinality_and_identifier_size() {
+        let oversized = "x".repeat(MAX_MODEL_ID_BYTES + 1);
+        let error = parse_models(&json!({"data": [{"id": oversized}]})).unwrap_err();
+        assert!(error.contains("模型 ID"));
+
+        let data: Vec<_> = (0..=MAX_MODELS_PER_PROVIDER)
+            .map(|index| json!({"id": format!("model-{index}")}))
+            .collect();
+        let error = parse_models(&json!({"data": data})).unwrap_err();
+        assert!(error.contains("模型数量"));
     }
 
     #[test]

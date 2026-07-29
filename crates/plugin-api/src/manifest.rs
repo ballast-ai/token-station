@@ -212,6 +212,7 @@ impl AdapterManifest {
         if self.name.is_empty() {
             return Err(ManifestError::MissingName);
         }
+        validate_plugin_name(&self.name)?;
         if !is_semver_triple(&self.version) {
             return Err(ManifestError::InvalidVersion(self.version.clone()));
         }
@@ -275,6 +276,57 @@ impl AdapterManifest {
         if self.conformance.fixtures.is_empty() {
             return Err(ManifestError::MissingFixtures);
         }
+        validate_package_relative_path(&self.conformance.fixtures)?;
+        Ok(())
+    }
+}
+
+/// Validates the one-component package identity used below the plugin root.
+///
+/// # Errors
+///
+/// Returns [`ManifestError::InvalidName`] unless `value` is lowercase ASCII
+/// kebab-case, starts with an alphanumeric byte, ends with an alphanumeric byte,
+/// and is at most 64 bytes.
+pub fn validate_plugin_name(value: &str) -> Result<(), ManifestError> {
+    let bytes = value.as_bytes();
+    let valid = !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-');
+    if valid {
+        Ok(())
+    } else {
+        Err(ManifestError::InvalidName(value.to_owned()))
+    }
+}
+
+/// Validates a normalized package-relative path without consulting the file
+/// system. Runtime walkers still reject symlinks and special files.
+///
+/// # Errors
+///
+/// Returns [`ManifestError::InvalidFixturesPath`] for absolute, parent-relative,
+/// platform-ambiguous, empty-component, control-character, or over-deep paths.
+pub fn validate_package_relative_path(value: &str) -> Result<(), ManifestError> {
+    let normalized = value.strip_suffix('/').unwrap_or(value);
+    let components: Vec<_> = normalized.split('/').collect();
+    let invalid = value.is_empty()
+        || value.len() > 256
+        || value.starts_with('/')
+        || value.ends_with("//")
+        || value.contains('\\')
+        || value.chars().any(char::is_control)
+        || components.len() > 16
+        || components
+            .iter()
+            .any(|component| component.is_empty() || matches!(*component, "." | ".."));
+    if invalid {
+        Err(ManifestError::InvalidFixturesPath(value.to_owned()))
+    } else {
         Ok(())
     }
 }
@@ -304,6 +356,7 @@ fn is_semver_triple(value: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestError {
     MissingName,
+    InvalidName(String),
     InvalidVersion(String),
     ApiVersionDoesNotMatchKind,
     NetworkPermissionDenied,
@@ -318,12 +371,17 @@ pub enum ManifestError {
     ProviderAdapterCannotExtractHints,
     ConformanceSuiteDoesNotMatchKind,
     MissingFixtures,
+    InvalidFixturesPath(String),
 }
 
 impl fmt::Display for ManifestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingName => f.write_str("manifest declares no name"),
+            Self::InvalidName(name) => write!(
+                f,
+                "plugin name `{name}` must be one lowercase kebab-case component of at most 64 bytes"
+            ),
             Self::InvalidVersion(version) => {
                 write!(f, "version `{version}` is not a `major.minor.patch` triple")
             }
@@ -361,6 +419,10 @@ impl fmt::Display for ManifestError {
                 f.write_str("conformance.required_suite does not match the adapter kind")
             }
             Self::MissingFixtures => f.write_str("conformance.fixtures is empty"),
+            Self::InvalidFixturesPath(path) => write!(
+                f,
+                "conformance.fixtures `{path}` must be a normalized relative package path"
+            ),
         }
     }
 }
@@ -516,6 +578,53 @@ mod tests {
         manifest.providers.clear();
 
         assert_eq!(manifest.validate(), Err(ManifestError::MissingName));
+    }
+
+    #[test]
+    fn plugin_identity_rejects_every_non_component_name() {
+        let overlong = "a".repeat(65);
+        for unsafe_name in [
+            "..",
+            "../outside",
+            "nested/plugin",
+            r"nested\plugin",
+            "/absolute",
+            r"C:\absolute",
+            "Uppercase",
+            "-leading",
+            "trailing-",
+            "contains space",
+            "line\nbreak",
+            overlong.as_str(),
+        ] {
+            let mut manifest = provider_manifest();
+            manifest.name = unsafe_name.to_owned();
+            assert!(
+                manifest.validate().is_err(),
+                "plugin name must be one bounded lowercase filesystem component: {unsafe_name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn conformance_fixtures_reject_paths_that_can_escape_or_change_meaning() {
+        for unsafe_path in [
+            "..",
+            "../fixtures",
+            "fixtures/../outside",
+            "/absolute",
+            r"C:\absolute",
+            r"fixtures\windows",
+            "fixtures//nested",
+            "./fixtures",
+        ] {
+            let mut manifest = provider_manifest();
+            manifest.conformance.fixtures = unsafe_path.to_owned();
+            assert!(
+                manifest.validate().is_err(),
+                "fixtures must be a normalized relative path below the package: {unsafe_path:?}"
+            );
+        }
     }
 
     #[test]

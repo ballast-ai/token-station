@@ -72,7 +72,7 @@ fn scaffold_build_test_install_serves_the_new_dialect() {
         registry
             .package("provider-acme")
             .expect("catalogued")
-            .verified
+            .conformance_passed
     );
     std::fs::remove_dir_all(scratch).ok();
 }

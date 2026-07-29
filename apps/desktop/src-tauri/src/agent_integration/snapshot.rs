@@ -51,9 +51,9 @@ impl FileMasterKeyStore {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 impl MasterKeyStore for FileMasterKeyStore {
     fn load_or_create(&self, allow_create: bool) -> Result<Zeroizing<[u8; 32]>, String> {
-        use std::os::unix::fs::PermissionsExt;
-
         if self.path.exists() {
+            verify_private_file(&self.path)
+                .map_err(|_| "快照主密钥文件权限过宽或不是普通文件".to_string())?;
             let raw =
                 std::fs::read(&self.path).map_err(|_| "无法读取快照主密钥文件".to_string())?;
             let key: [u8; 32] = raw
@@ -66,17 +66,14 @@ impl MasterKeyStore for FileMasterKeyStore {
         }
         let mut generated = Zeroizing::new([0_u8; 32]);
         getrandom::fill(generated.as_mut()).map_err(|_| "生成快照主密钥失败".to_string())?;
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir).map_err(|_| "创建快照主密钥父目录失败".to_string())?;
-        }
-        std::fs::write(&self.path, generated.as_ref())
+        write_atomic_private(&self.path, generated.as_ref())
             .map_err(|_| "写入快照主密钥文件失败".to_string())?;
-        std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| "设置快照主密钥权限失败".to_string())?;
         Ok(generated)
     }
 
     fn load(&self) -> Result<Zeroizing<[u8; 32]>, String> {
+        verify_private_file(&self.path)
+            .map_err(|_| "快照主密钥文件权限过宽或不是普通文件".to_string())?;
         let raw = std::fs::read(&self.path).map_err(|_| "无法读取快照主密钥文件".to_string())?;
         let key: [u8; 32] = raw
             .try_into()
@@ -89,6 +86,8 @@ impl MasterKeyStore for FileMasterKeyStore {
 impl MasterKeyStore for FileMasterKeyStore {
     fn load_or_create(&self, allow_create: bool) -> Result<Zeroizing<[u8; 32]>, String> {
         if self.path.exists() {
+            verify_private_file(&self.path)
+                .map_err(|_| "快照主密钥文件不是普通文件".to_string())?;
             let raw =
                 std::fs::read(&self.path).map_err(|_| "无法读取快照主密钥文件".to_string())?;
             let key: [u8; 32] = raw
@@ -101,15 +100,13 @@ impl MasterKeyStore for FileMasterKeyStore {
         }
         let mut generated = Zeroizing::new([0_u8; 32]);
         getrandom::fill(generated.as_mut()).map_err(|_| "生成快照主密钥失败".to_string())?;
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir).map_err(|_| "创建快照主密钥父目录失败".to_string())?;
-        }
-        std::fs::write(&self.path, generated.as_ref())
+        write_atomic_private(&self.path, generated.as_ref())
             .map_err(|_| "写入快照主密钥文件失败".to_string())?;
         Ok(generated)
     }
 
     fn load(&self) -> Result<Zeroizing<[u8; 32]>, String> {
+        verify_private_file(&self.path).map_err(|_| "快照主密钥文件不是普通文件".to_string())?;
         let raw = std::fs::read(&self.path).map_err(|_| "无法读取快照主密钥文件".to_string())?;
         let key: [u8; 32] = raw
             .try_into()

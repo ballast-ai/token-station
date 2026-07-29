@@ -46,6 +46,14 @@ impl fmt::Display for SecretRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretBoundaryError {
     header: String,
+    reason: HeaderBoundaryReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderBoundaryReason {
+    Credential,
+    HostOwned,
+    Invalid,
 }
 
 impl SecretBoundaryError {
@@ -57,11 +65,21 @@ impl SecretBoundaryError {
 
 impl fmt::Display for SecretBoundaryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "header `{}` carries a credential; name it with a SecretRef and let the host inject it",
-            self.header
-        )
+        match self.reason {
+            HeaderBoundaryReason::Credential => write!(
+                f,
+                "header `{}` carries a credential; name it with a SecretRef and let the host inject it",
+                self.header
+            ),
+            HeaderBoundaryReason::HostOwned => write!(
+                f,
+                "header `{}` controls HTTP routing or framing and is owned by the host",
+                self.header
+            ),
+            HeaderBoundaryReason::Invalid => {
+                write!(f, "header `{}` has an invalid HTTP field name", self.header)
+            }
+        }
     }
 }
 
@@ -242,9 +260,41 @@ impl SafeHeaders {
         for (name, value) in headers {
             let name = name.into();
             if is_credential_header(&name) {
-                return Err(SecretBoundaryError { header: name });
+                return Err(SecretBoundaryError {
+                    header: name,
+                    reason: HeaderBoundaryReason::Credential,
+                });
             }
-            checked.insert(name, value.into());
+            let normalized = name.to_ascii_lowercase();
+            if normalized.is_empty()
+                || !normalized
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+            {
+                return Err(SecretBoundaryError {
+                    header: name,
+                    reason: HeaderBoundaryReason::Invalid,
+                });
+            }
+            if matches!(
+                normalized.as_str(),
+                "host"
+                    | "content-length"
+                    | "transfer-encoding"
+                    | "connection"
+                    | "proxy-authorization"
+                    | "proxy-authenticate"
+                    | "keep-alive"
+                    | "te"
+                    | "trailer"
+                    | "upgrade"
+            ) {
+                return Err(SecretBoundaryError {
+                    header: name,
+                    reason: HeaderBoundaryReason::HostOwned,
+                });
+            }
+            checked.insert(normalized, value.into());
         }
         Ok(Self(checked))
     }
@@ -409,6 +459,24 @@ mod tests {
             parsed.is_err(),
             "a fixture must not be able to smuggle a credential back in"
         );
+    }
+
+    #[test]
+    fn safe_headers_reject_routing_and_http_framing_headers_case_insensitively() {
+        for name in [
+            "Host",
+            "Content-Length",
+            "Transfer-Encoding",
+            "Connection",
+            "Proxy-Authorization",
+            "TE",
+            "Trailer",
+            "Upgrade",
+        ] {
+            let error = SafeHeaders::try_new([(name, "attacker-controlled")])
+                .expect_err("the host, not a plugin, owns routing and framing");
+            assert_eq!(error.header(), name);
+        }
     }
 
     #[test]

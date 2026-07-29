@@ -11,14 +11,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::Router;
-use axum::body::{Body, Bytes};
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use axum::response::Response;
 use axum::routing::get;
 use serde::Deserialize;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use crate::admin::AdminContext;
 use crate::cancel::CancelToken;
-use crate::gateway::{Gateway, Reply};
+use crate::gateway::{Gateway, MAX_INBOUND_BODY, Reply};
 use crate::request_context::RequestContext;
 use crate::virtual_key;
 
@@ -142,6 +142,8 @@ pub struct AppState {
     pub running_revision: Option<u64>,
     /// Server-owned accept/drain/request lifecycle.
     pub control: ServerControl,
+    /// Bounds blocking workers before request bodies are consumed.
+    worker_slots: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -151,12 +153,14 @@ impl AppState {
         virtual_key: Option<Arc<str>>,
         admin: Arc<AdminContext>,
     ) -> Self {
+        let worker_limit = gateway.global_concurrency_limit();
         Self {
             gateway,
             virtual_key,
             admin,
             running_revision: None,
             control: ServerControl::new(),
+            worker_slots: Arc::new(Semaphore::new(worker_limit)),
         }
     }
 
@@ -345,6 +349,41 @@ fn invalid_namespace(detail: &str) -> Response {
         .expect("a json response builds")
 }
 
+fn bounded_refusal(path: &str, status: StatusCode, code: &str, message: &str) -> Response {
+    let body = match path {
+        "/v1/messages" => serde_json::json!({
+            "type": "error",
+            "error": { "type": code, "message": message }
+        }),
+        _ => serde_json::json!({
+            "error": { "message": message, "type": code, "code": code }
+        }),
+    };
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("a json response builds")
+}
+
+fn concurrency_refusal(path: &str) -> Response {
+    bounded_refusal(
+        path,
+        StatusCode::TOO_MANY_REQUESTS,
+        "concurrency_limit",
+        "the local proxy is at its configured concurrency limit",
+    )
+}
+
+fn payload_too_large(path: &str) -> Response {
+    bounded_refusal(
+        path,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "invalid_request",
+        "request body exceeds the local proxy's limit",
+    )
+}
+
 /// The CORS allowance for `/admin/*`: echo the origin back — but only a
 /// loopback one. The data plane exists for local UIs (a browser running the
 /// frontend dev server, the desktop shell); a web origin never qualifies, so
@@ -424,24 +463,33 @@ async fn admin_stats(
     if !admitted(&state, &headers) {
         return with_cors(unauthorized("/admin/stats"), loopback_origin(&headers));
     }
-    admin_reply(
-        state.admin.stats(
+    let origin = loopback_origin(&headers);
+    let admin = Arc::clone(&state.admin);
+    let result = tokio::task::spawn_blocking(move || {
+        admin.stats(
             &query.since,
             query.by.as_deref(),
             query.agent.as_deref(),
             query.source.as_deref(),
             query.upstream.as_deref(),
             query.model.as_deref(),
-        ),
-        loopback_origin(&headers),
-    )
+        )
+    })
+    .await
+    .unwrap_or_else(|_| Err("admin stats worker failed".to_owned()));
+    admin_reply(result, origin)
 }
 
 async fn admin_receipts(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !admitted(&state, &headers) {
         return with_cors(unauthorized("/admin/receipts"), loopback_origin(&headers));
     }
-    admin_reply(state.admin.recent_receipts(), loopback_origin(&headers))
+    let origin = loopback_origin(&headers);
+    let admin = Arc::clone(&state.admin);
+    let result = tokio::task::spawn_blocking(move || admin.recent_receipts())
+        .await
+        .unwrap_or_else(|_| Err("admin receipts worker failed".to_owned()));
+    admin_reply(result, origin)
 }
 
 async fn admin_router_table(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -468,13 +516,11 @@ async fn admin_egress(State(state): State<AppState>, headers: HeaderMap) -> Resp
     admin_reply(Ok(state.gateway.egress_routes()), loopback_origin(&headers))
 }
 
-async fn chat(
-    State(state): State<AppState>,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+async fn chat(State(state): State<AppState>, request: Request<Body>) -> Response {
+    let (parts, body) = request.into_parts();
+    let method = parts.method;
+    let uri = parts.uri;
+    let headers = parts.headers;
     let scoped = match parse_inbound_path(uri.path()) {
         Ok(scoped) => scoped,
         Err(detail) => return invalid_namespace(&detail),
@@ -485,6 +531,12 @@ async fn chat(
     if method == Method::GET && scoped.canonical_path == "/v1/models" {
         return models_response(&state);
     }
+    let Ok(worker_permit) = Arc::clone(&state.worker_slots).try_acquire_owned() else {
+        return concurrency_refusal(scoped.canonical_path);
+    };
+    let Ok(body) = to_bytes(body, MAX_INBOUND_BODY).await else {
+        return payload_too_large(scoped.canonical_path);
+    };
     let gateway = Arc::clone(&state.gateway);
     // The method and path feed the gateway's `match_inbound` step, which picks
     // the inbound adapter. Owned copies cross into the blocking thread.
@@ -513,6 +565,7 @@ async fn chat(
     let mut cancel_on_drop = Some(CancelOnDrop(ctx.token()));
     let in_flight = state.control.begin_request();
     let worker = tokio::task::spawn_blocking(move || {
+        let _worker_permit = worker_permit;
         let _in_flight = in_flight;
         gateway.chat_scoped(
             &ctx,

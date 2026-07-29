@@ -7,7 +7,7 @@ use token_station_conformance::{
 };
 use token_station_plugin_api::{AdapterKind, AdapterManifest, AdapterMetadata};
 use token_station_protocol::{
-    ChatRequest, ChatResponse, ErrorEnvelope, HttpRequestDescriptor, HttpResponseParts,
+    ChatRequest, ChatResponse, ErrorCode, ErrorEnvelope, HttpRequestDescriptor, HttpResponseParts,
     ModelCapability, ProviderConfig, StreamChunk, StreamEvent,
 };
 use wasmtime::Store;
@@ -283,6 +283,15 @@ impl ProviderAdapter for ProviderPlugin {
         // One instance per stream: `parse-stream-chunk` holds the unparsed
         // tail as instance state, so sharing an instance across streams would
         // interleave two providers' bodies.
+        let Some(permit) = self.runtime.try_acquire_stream() else {
+            return Box::new(BrokenStreamParser {
+                envelope: ErrorEnvelope::new(
+                    ErrorCode::Internal,
+                    503,
+                    "adapter stream instance limit reached",
+                ),
+            });
+        };
         match instantiate(
             &self.runtime,
             &self.component,
@@ -293,6 +302,7 @@ impl ProviderAdapter for ProviderPlugin {
             Ok(handle) => Box::new(WasmStreamParser {
                 runtime: self.runtime.clone(),
                 handle,
+                _permit: permit,
             }),
             Err(error) => Box::new(BrokenStreamParser {
                 envelope: trap_envelope(&error),
@@ -313,6 +323,7 @@ impl fmt::Debug for ProviderPlugin {
 struct WasmStreamParser {
     runtime: PluginRuntime,
     handle: InstanceHandle,
+    _permit: crate::runtime::StreamPermit,
 }
 
 impl StreamParser for WasmStreamParser {

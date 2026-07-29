@@ -5,7 +5,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -13,7 +12,6 @@ use serde_json::Value;
 
 const VERSION: u32 = 1;
 const FILE: &str = "provider-tombstones.json";
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -118,23 +116,11 @@ fn load(data_dir: &Path) -> Result<TombstoneFile, String> {
 }
 
 fn persist(data_dir: &Path, file: &TombstoneFile) -> Result<(), String> {
-    std::fs::create_dir_all(data_dir)
-        .map_err(|error| format!("创建 Provider 回收站目录失败：{error}"))?;
     let mut rendered = serde_json::to_string_pretty(file)
         .map_err(|error| format!("序列化 Provider 回收站失败：{error}"))?;
     rendered.push('\n');
-    let temporary = data_dir.join(format!(
-        ".{FILE}.{}.{}.tmp",
-        std::process::id(),
-        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::write(&temporary, rendered)
-        .map_err(|error| format!("写 Provider 回收站失败：{error}"))?;
-    if let Err(error) = std::fs::rename(&temporary, path(data_dir)) {
-        std::fs::remove_file(&temporary).ok();
-        return Err(format!("保存 Provider 回收站失败：{error}"));
-    }
-    Ok(())
+    crate::agent_integration::safe_fs::write_atomic_private(&path(data_dir), rendered.as_bytes())
+        .map_err(|error| format!("保存 Provider 回收站失败：{error}"))
 }
 
 fn now_ms() -> u64 {
