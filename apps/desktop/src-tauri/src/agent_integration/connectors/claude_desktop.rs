@@ -93,15 +93,20 @@ static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
 };
 
 fn profile_path(home: &Path) -> PathBuf {
+    // Claude Desktop ships only on Windows and macOS — there is no Linux build,
+    // and the Registry has no Linux discovery entry, so this connector is never
+    // active on Linux. The non-Windows arm is therefore the macOS layout; on any
+    // other platform it is inert (the agent is never discovered to reach here).
     #[cfg(target_os = "windows")]
     {
-        return home
-            .join("AppData/Local/Claude-3p/configLibrary")
-            .join(format!("{PROFILE_ID}.json"));
+        home.join("AppData/Local/Claude-3p/configLibrary")
+            .join(format!("{PROFILE_ID}.json"))
     }
     #[cfg(not(target_os = "windows"))]
-    home.join("Library/Application Support/Claude-3p/configLibrary")
-        .join(format!("{PROFILE_ID}.json"))
+    {
+        home.join("Library/Application Support/Claude-3p/configLibrary")
+            .join(format!("{PROFILE_ID}.json"))
+    }
 }
 
 fn replace(path: ConfigPath, value: Value) -> PatchOperation {
