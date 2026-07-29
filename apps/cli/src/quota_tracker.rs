@@ -18,10 +18,94 @@ use std::collections::{HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use token_station_protocol::Usage;
-use token_station_router_core::{QuotaState, UpstreamModel};
+use token_station_router_core::{QuotaState, ResetWindow, UpstreamModel};
 
-use crate::quota_ledger::{AccountLedger, RATE_PRESSURE_PERMILLE, SlidingWindow};
+use crate::quota_ledger::{
+    AccountLedger, RATE_PRESSURE_PERMILLE, SlidingWindow, WindowSnapshot,
+};
 use crate::quota_lease::{DEFAULT_LEASE_MS, InflightLeases, LeaseId, apply_inflight_penalty};
+
+/// How long a provider-reported (authoritative) quota reading is trusted before
+/// it goes stale and the local ledger estimate takes over again. Providers stamp
+/// their limits on every response, so a live account refreshes this well within
+/// the window; a quiet account falls back to the estimate rather than showing an
+/// old absolute number as if it were current.
+pub const AUTHORITATIVE_TTL_MS: u64 = 5 * 60 * 1000;
+
+/// Where an account's window figures came from — surfaced to the viewer so a
+/// provider-reported number is never shown as if it were a local guess, and vice
+/// versa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaSource {
+    /// Provider-reported via response headers (no local blind spot).
+    Authoritative,
+    /// Locally counted from traffic through this gateway only (a lower bound on
+    /// real usage — the user may spend the same key elsewhere).
+    Estimated,
+    /// No windowed plan and no provider reading: nothing to show but rate/cooling.
+    None,
+}
+
+/// A provider-reported quota reading with the instant it was observed, so it can
+/// be aged out after [`AUTHORITATIVE_TTL_MS`].
+#[derive(Debug, Clone)]
+struct Authoritative {
+    windows: Vec<WindowSnapshot>,
+    observed_at_ms: u64,
+}
+
+/// The full per-account picture for the quota viewer: every window, the rate
+/// state, in-flight load, cooling, and where the figures came from.
+#[derive(Debug, Clone, Serialize)]
+pub struct QuotaAccountSnapshot {
+    pub upstream: String,
+    pub windows: Vec<QuotaWindowSnapshot>,
+    pub rate_headroom_permille: u16,
+    pub rate_pressured: bool,
+    pub inflight: u32,
+    pub exhausted: bool,
+    /// Milliseconds left on an active rate/quota cooldown (from a real upstream
+    /// refusal); `0` when not cooling.
+    pub cooling_ms_remaining: u64,
+    pub source: QuotaSource,
+}
+
+/// One window in a [`QuotaAccountSnapshot`], serialization-ready for the viewer.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct QuotaWindowSnapshot {
+    pub len_ms: u64,
+    pub limit: u64,
+    pub used: u64,
+    pub remaining_permille: u16,
+    pub ms_until_reset: u64,
+}
+
+impl From<WindowSnapshot> for QuotaWindowSnapshot {
+    fn from(w: WindowSnapshot) -> Self {
+        Self {
+            len_ms: w.len_ms,
+            limit: w.limit,
+            used: w.used,
+            remaining_permille: w.remaining_permille,
+            ms_until_reset: w.ms_until_reset,
+        }
+    }
+}
+
+/// The `(reset, exhausted)` the router needs, derived from a set of windows: the
+/// soonest-closing window drives urgency, and any spent window binds.
+fn binding_of(windows: &[WindowSnapshot]) -> (Option<ResetWindow>, bool) {
+    let reset = windows
+        .iter()
+        .min_by_key(|w| w.ms_until_reset)
+        .map(|w| ResetWindow {
+            ms_until_reset: w.ms_until_reset,
+            remaining_permille: w.remaining_permille,
+        });
+    let exhausted = windows.iter().any(|w| w.remaining_permille == 0);
+    (reset, exhausted)
+}
 
 /// How many conversations' last-account affinity to remember before evicting the
 /// oldest. Affinity is best-effort — a forgotten conversation just re-picks by
@@ -115,6 +199,10 @@ pub struct QuotaTracker {
     /// cooling, the account reports `exhausted` and drops out of rotation. Keyed
     /// by upstream so it works even for accounts with no configured plan.
     cooling_until_ms: HashMap<String, u64>,
+    /// Per-upstream provider-reported quota, preferred over the local ledger
+    /// while fresh (within [`AUTHORITATIVE_TTL_MS`]). This is the L2 layer: no
+    /// local blind spot, because the provider counts all of the key's usage.
+    authoritative: HashMap<String, Authoritative>,
 }
 
 impl QuotaTracker {
@@ -134,7 +222,24 @@ impl QuotaTracker {
             session_order: VecDeque::new(),
             session_capacity: DEFAULT_SESSION_CAPACITY.max(1),
             cooling_until_ms: HashMap::new(),
+            authoritative: HashMap::new(),
         }
+    }
+
+    /// Fresh provider-reported windows for `upstream`, or `None` if there is no
+    /// reading or it has aged past [`AUTHORITATIVE_TTL_MS`].
+    fn fresh_authoritative(&self, upstream: &str, now_ms: u64) -> Option<&[WindowSnapshot]> {
+        self.authoritative.get(upstream).and_then(|a| {
+            (now_ms.saturating_sub(a.observed_at_ms) < AUTHORITATIVE_TTL_MS)
+                .then_some(a.windows.as_slice())
+        })
+    }
+
+    /// Whether `upstream` is cooling from a real rate/quota refusal at `now_ms`.
+    fn is_cooling(&self, upstream: &str, now_ms: u64) -> bool {
+        self.cooling_until_ms
+            .get(upstream)
+            .is_some_and(|until| now_ms < *until)
     }
 
     /// The router-facing quota picture for `upstream` at `now_ms`, with this
@@ -146,19 +251,23 @@ impl QuotaTracker {
             Some(account) => (account.ledger.quota_state(now_ms), account.rate_limit_per_min),
             None => (QuotaState::non_windowed(), None),
         };
+        // A fresh provider reading wins over the local estimate for the windowed
+        // picture (reset + exhausted) — it has no blind spot. Rate headroom stays
+        // local (instantaneous, and folded with in-flight below).
+        if let Some(windows) = self.fresh_authoritative(upstream, now_ms) {
+            let (reset, exhausted) = binding_of(windows);
+            state.reset = reset;
+            state.exhausted = exhausted;
+        }
         let inflight = self.leases.inflight(now_ms, upstream);
         state.rate_headroom_permille =
             apply_inflight_penalty(state.rate_headroom_permille, inflight, rate_limit);
         state.rate_pressured =
             state.rate_pressured || state.rate_headroom_permille <= RATE_PRESSURE_PERMILLE;
         // Ground-truth override: while the upstream is cooling from a real
-        // quota/rate refusal, the account is exhausted no matter what the local
-        // ledger estimated. Nothing routes to it until the cooldown elapses.
-        if self
-            .cooling_until_ms
-            .get(upstream)
-            .is_some_and(|until| now_ms < *until)
-        {
+        // quota/rate refusal, the account is exhausted no matter what the ledger
+        // or authoritative reading said. Nothing routes to it until it elapses.
+        if self.is_cooling(upstream, now_ms) {
             state.exhausted = true;
         }
         state
@@ -176,6 +285,84 @@ impl QuotaTracker {
             .entry(upstream.to_owned())
             .and_modify(|current| *current = (*current).max(until))
             .or_insert(until);
+    }
+
+    /// Record a provider-reported (authoritative) quota reading for `upstream`,
+    /// parsed from response headers. Preferred over the local estimate while
+    /// fresh; an empty `windows` clears any stale reading. This is the L2 layer.
+    pub fn note_authoritative(
+        &mut self,
+        upstream: &str,
+        now_ms: u64,
+        windows: Vec<WindowSnapshot>,
+    ) {
+        if windows.is_empty() {
+            self.authoritative.remove(upstream);
+            return;
+        }
+        self.authoritative.insert(
+            upstream.to_owned(),
+            Authoritative {
+                windows,
+                observed_at_ms: now_ms,
+            },
+        );
+    }
+
+    /// Full per-account picture for the quota viewer, one entry per requested
+    /// upstream (so callers control which accounts appear), with figures tagged
+    /// by [`QuotaSource`]. Windowed detail prefers a fresh provider reading, then
+    /// the local ledger estimate; rate/in-flight/cooling are always live.
+    #[must_use]
+    pub fn snapshot(&self, upstreams: &[String], now_ms: u64) -> Vec<QuotaAccountSnapshot> {
+        upstreams
+            .iter()
+            .map(|upstream| {
+                let (windows, source) = if let Some(w) =
+                    self.fresh_authoritative(upstream, now_ms)
+                {
+                    (w.to_vec(), QuotaSource::Authoritative)
+                } else if let Some(account) = self.accounts.get(upstream) {
+                    let w = account.ledger.window_snapshots(now_ms);
+                    let source = if w.is_empty() {
+                        QuotaSource::None
+                    } else {
+                        QuotaSource::Estimated
+                    };
+                    (w, source)
+                } else {
+                    (Vec::new(), QuotaSource::None)
+                };
+
+                let (_, window_exhausted) = binding_of(&windows);
+                let rate_limit = self
+                    .accounts
+                    .get(upstream)
+                    .and_then(|a| a.rate_limit_per_min);
+                let ledger_headroom = self
+                    .accounts
+                    .get(upstream)
+                    .map_or(1000, |a| a.ledger.rate_headroom_permille(now_ms));
+                let inflight = self.leases.inflight(now_ms, upstream);
+                let rate_headroom_permille =
+                    apply_inflight_penalty(ledger_headroom, inflight, rate_limit);
+                let cooling = self
+                    .cooling_until_ms
+                    .get(upstream)
+                    .map_or(0, |until| until.saturating_sub(now_ms));
+
+                QuotaAccountSnapshot {
+                    upstream: upstream.clone(),
+                    windows: windows.into_iter().map(Into::into).collect(),
+                    rate_headroom_permille,
+                    rate_pressured: rate_headroom_permille <= RATE_PRESSURE_PERMILLE,
+                    inflight,
+                    exhausted: window_exhausted || self.is_cooling(upstream, now_ms),
+                    cooling_ms_remaining: cooling,
+                    source,
+                }
+            })
+            .collect()
     }
 
     /// Take an in-flight lease on `upstream` when a request is dispatched to it.
@@ -220,8 +407,19 @@ impl QuotaTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quota_ledger::WindowSnapshot;
 
     const FIVE_H: u64 = 5 * 60 * 60 * 1000;
+
+    fn window(remaining_permille: u16, ms_until_reset: u64) -> WindowSnapshot {
+        WindowSnapshot {
+            len_ms: FIVE_H,
+            limit: 1000,
+            used: u64::from(1000 - remaining_permille),
+            remaining_permille,
+            ms_until_reset,
+        }
+    }
 
     fn token_plan(limit: u64) -> QuotaPlan {
         QuotaPlan {
@@ -302,6 +500,58 @@ mod tests {
         // At/after the cooldown it recovers on its own — no manual clear needed.
         assert!(!t.quota_state("acct", 30_000).exhausted);
         assert!(!t.quota_state("acct", 60_000).exhausted);
+    }
+
+    #[test]
+    fn a_fresh_authoritative_reading_overrides_the_local_estimate_then_ages_out() {
+        let mut t = tracker("acct", token_plan(1000));
+        t.record("acct", 0, &usage(600, 0)); // 600 of 1000 used ⇒ 400‰ left
+        assert_eq!(
+            t.quota_state("acct", 0).reset.unwrap().remaining_permille,
+            400
+        );
+
+        // The provider reports only 50‰ left (it sees the key's usage elsewhere
+        // too) with a sooner reset. That wins over the local estimate.
+        t.note_authoritative("acct", 0, vec![window(50, FIVE_H / 2)]);
+        let fresh = t.quota_state("acct", 0);
+        assert_eq!(fresh.reset.as_ref().unwrap().remaining_permille, 50);
+        assert_eq!(fresh.reset.as_ref().unwrap().ms_until_reset, FIVE_H / 2);
+
+        // Past the TTL the reading is stale and the local estimate takes back over.
+        let stale = t.quota_state("acct", AUTHORITATIVE_TTL_MS);
+        assert_eq!(
+            stale.reset.as_ref().unwrap().remaining_permille,
+            400,
+            "the local estimate resumes once the provider reading ages out"
+        );
+    }
+
+    #[test]
+    fn snapshot_tags_each_accounts_source_and_reflects_cooling() {
+        let mut t = tracker("planned", token_plan(1000));
+        // A provider reading for one account, an exhausted window.
+        t.note_authoritative("live", 0, vec![window(0, FIVE_H)]);
+        // A cooldown from a real 429 on a third, plan-less account.
+        t.note_rate_limited("cooled", 0, 30_000);
+
+        let upstreams = ["planned", "live", "cooled", "unknown"].map(String::from);
+        let snap = t.snapshot(&upstreams, 1_000);
+        let by = |u: &str| snap.iter().find(|s| s.upstream == u).expect("present");
+
+        // Locally counted plan → Estimated, one window shown.
+        assert!(matches!(by("planned").source, QuotaSource::Estimated));
+        assert_eq!(by("planned").windows.len(), 1);
+        // Provider-reported → Authoritative, and its spent window ⇒ exhausted.
+        assert!(matches!(by("live").source, QuotaSource::Authoritative));
+        assert!(by("live").exhausted);
+        // Plan-less but cooling → no window source, yet exhausted + cooling shown.
+        assert!(matches!(by("cooled").source, QuotaSource::None));
+        assert!(by("cooled").exhausted);
+        assert!(by("cooled").cooling_ms_remaining > 0);
+        // Unknown upstream → nothing to show, no windows.
+        assert!(matches!(by("unknown").source, QuotaSource::None));
+        assert!(by("unknown").windows.is_empty());
     }
 
     #[test]
