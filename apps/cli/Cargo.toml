@@ -26,14 +26,9 @@ tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "signal"] }
 tokio-stream = "0.1.18"
 ureq = { version = "=3.3.0", features = ["socks-proxy"] }
 
-# The OS keychain, one backend per platform. Linux uses the desktop
-# secret-service over D-Bus; headless boxes fall back to `auth.file`.
-[target.'cfg(target_os = "macos")'.dependencies]
-
-[target.'cfg(target_os = "windows")'.dependencies]
-
-[target.'cfg(target_os = "linux")'.dependencies]
-
+# Unix file-permission primitives (0600 on the local secrets store, etc.).
+# Credentials live in a local file across all platforms — no OS keychain — so
+# there are no per-OS credential backends to declare here.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
