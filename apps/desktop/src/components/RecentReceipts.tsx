@@ -58,9 +58,36 @@ function formatDecisionReason(
       );
     case "exact_model":
       return copy(`Exact model · ${reason.model}`, `指定模型 · ${reason.model}`);
+    case "quota":
+      return copy("Quota-first", "额度优先");
     default:
       return copy("Default route", "默认路由");
   }
+}
+
+/** One-line quota decision summary: remaining quota, time to reset, rate headroom, and state. */
+function formatQuotaDecision(
+  quota: NonNullable<ReceiptRouteView["quota"]>,
+  copy: (english: string, simplifiedChinese: string) => string,
+): string {
+  const parts: string[] = [];
+  if (quota.remaining_permille != null) {
+    parts.push(copy(
+      `${(quota.remaining_permille / 10).toFixed(0)}% left`,
+      `剩 ${(quota.remaining_permille / 10).toFixed(0)}%`,
+    ));
+  }
+  if (quota.reset_ms != null && quota.reset_ms > 0) {
+    const minutes = Math.round(quota.reset_ms / 60000);
+    parts.push(copy(`resets in ${minutes}m`, `${minutes}分钟后刷新`));
+  }
+  parts.push(copy(
+    `headroom ${(quota.headroom_permille / 10).toFixed(0)}%`,
+    `速率余量 ${(quota.headroom_permille / 10).toFixed(0)}%`,
+  ));
+  if (quota.exhausted) parts.push(copy("exhausted", "已耗尽"));
+  else if (quota.pressured) parts.push(copy("pressured", "速率吃紧"));
+  return parts.join(" · ");
 }
 
 function formatFeatures(
@@ -108,6 +135,11 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
                 )}
               </span>
               <small>{formatFeatures(receipt.decision.features, copy)}</small>
+              {receipt.decision.quota && (
+                <small className="receipt-quota-line">
+                  {formatQuotaDecision(receipt.decision.quota, copy)}
+                </small>
+              )}
             </div>
           </div>
         ) : (

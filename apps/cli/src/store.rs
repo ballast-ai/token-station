@@ -20,8 +20,8 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, Transaction, named_params, types::Type,
 };
 use token_station_metrics::{
-    AttemptRecord, ConversionRecord, ConversionStage, CostKind, DecisionRecord, ReceiptView,
-    Recorder, RequestRecord, RoutingRecord, SCHEMA_VERSION,
+    AttemptRecord, ConversionRecord, ConversionStage, CostKind, DecisionRecord,
+    QuotaDecisionSnapshot, ReceiptView, Recorder, RequestRecord, RoutingRecord, SCHEMA_VERSION,
 };
 use token_station_protocol::{ErrorCode, HintKind, StreamOutcome, Usage};
 use token_station_router_core::{DecidedBy, RequestFeatures};
@@ -274,6 +274,19 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE decisions_v6 RENAME TO decisions;
         ",
     },
+    Migration {
+        to: 7,
+        // The quota-first decision snapshot: five nullable columns, so an
+        // ALTER (no table rebuild) is enough. NULL on every existing row and on
+        // tiered routes.
+        sql: "
+            ALTER TABLE decisions ADD COLUMN quota_reset_ms INTEGER;
+            ALTER TABLE decisions ADD COLUMN quota_remaining_permille INTEGER;
+            ALTER TABLE decisions ADD COLUMN quota_headroom_permille INTEGER;
+            ALTER TABLE decisions ADD COLUMN quota_pressured INTEGER;
+            ALTER TABLE decisions ADD COLUMN quota_exhausted INTEGER;
+        ",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -361,7 +374,13 @@ CREATE TABLE IF NOT EXISTS decisions (
     creative_term_count INTEGER NOT NULL,
     multi_step_signal INTEGER NOT NULL,
     question_count INTEGER NOT NULL,
-    system_format_hint INTEGER NOT NULL
+    system_format_hint INTEGER NOT NULL,
+    -- quota-first decision snapshot (NULL for tiered routes)
+    quota_reset_ms INTEGER,
+    quota_remaining_permille INTEGER,
+    quota_headroom_permille INTEGER,
+    quota_pressured INTEGER,
+    quota_exhausted INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS attempts (
@@ -931,6 +950,7 @@ fn insert_decision(
 ) -> Result<(), rusqlite::Error> {
     let columns = decision_columns(&decision.decided_by);
     let features = decision.features;
+    let quota = decision.quota.as_ref();
     transaction.execute(
         "INSERT INTO decisions (
             request_id, upstream, model, pool, decision_kind, rule_id, hint_kind,
@@ -939,7 +959,9 @@ fn insert_decision(
             requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
             reasoning_marker_count, technical_term_count, simple_indicator_count,
             code_keyword_count, math_term_count, creative_term_count, multi_step_signal,
-            question_count, system_format_hint
+            question_count, system_format_hint,
+            quota_reset_ms, quota_remaining_permille, quota_headroom_permille,
+            quota_pressured, quota_exhausted
          ) VALUES (
             :request_id, :upstream, :model, :pool, :decision_kind, :rule_id, :hint_kind,
             :hint_value, :heuristic_score, :heuristic_threshold, :fallbacks,
@@ -947,7 +969,9 @@ fn insert_decision(
             :requires_json_schema, :code_block_count, :requested_max_output_tokens, :hint_count,
             :reasoning_marker_count, :technical_term_count, :simple_indicator_count,
             :code_keyword_count, :math_term_count, :creative_term_count, :multi_step_signal,
-            :question_count, :system_format_hint
+            :question_count, :system_format_hint,
+            :quota_reset_ms, :quota_remaining_permille, :quota_headroom_permille,
+            :quota_pressured, :quota_exhausted
          )",
         named_params! {
             ":request_id": request_id,
@@ -979,6 +1003,13 @@ fn insert_decision(
             ":multi_step_signal": features.multi_step_signal,
             ":question_count": features.question_count,
             ":system_format_hint": features.system_format_hint,
+            ":quota_reset_ms": quota
+                .and_then(|q| q.reset_ms)
+                .map(|ms| i64::try_from(ms).unwrap_or(i64::MAX)),
+            ":quota_remaining_permille": quota.and_then(|q| q.remaining_permille),
+            ":quota_headroom_permille": quota.map(|q| q.headroom_permille),
+            ":quota_pressured": quota.map(|q| q.pressured),
+            ":quota_exhausted": quota.map(|q| q.exhausted),
         },
     )?;
     Ok(())
@@ -1056,6 +1087,7 @@ fn decided_by(
         "exact_model" => Ok(DecidedBy::ExactModel {
             model: rule_id.unwrap_or_default(),
         }),
+        "quota" => Ok(DecidedBy::Quota),
         other => Err(invalid_enum(column, "decision kind", other)),
     }
 }
@@ -1276,12 +1308,28 @@ fn read_decision(
                     requires_json_schema, code_block_count, requested_max_output_tokens, hint_count,
                     reasoning_marker_count, technical_term_count, simple_indicator_count,
                     code_keyword_count, math_term_count, creative_term_count, multi_step_signal,
-                    question_count, system_format_hint
+                    question_count, system_format_hint,
+                    quota_reset_ms, quota_remaining_permille, quota_headroom_permille,
+                    quota_pressured, quota_exhausted
                FROM decisions WHERE request_id = ?1",
             [request_id],
             |row| {
                 let kind = row.get::<_, String>(3)?;
                 let hint_kind_value = row.get::<_, Option<String>>(5)?;
+                // Quota snapshot (all NULL for tiered routes). Headroom is always
+                // present on a quota route, so it gates whether we build one.
+                let quota_reset: Option<i64> = row.get(28)?;
+                let quota_remaining: Option<u16> = row.get(29)?;
+                let quota_headroom: Option<u16> = row.get(30)?;
+                let quota_pressured: Option<bool> = row.get(31)?;
+                let quota_exhausted: Option<bool> = row.get(32)?;
+                let quota = quota_headroom.map(|headroom| QuotaDecisionSnapshot {
+                    reset_ms: quota_reset.map(|ms| u64::try_from(ms).unwrap_or(0)),
+                    remaining_permille: quota_remaining,
+                    headroom_permille: headroom,
+                    pressured: quota_pressured.unwrap_or(false),
+                    exhausted: quota_exhausted.unwrap_or(false),
+                });
                 Ok(DecisionRecord {
                     upstream: row.get(0)?,
                     model: row.get(1)?,
@@ -1316,6 +1364,7 @@ fn read_decision(
                         question_count: row.get(26)?,
                         system_format_hint: row.get(27)?,
                     },
+                    quota,
                 })
             },
         )
@@ -1390,8 +1439,8 @@ impl Recorder for SqliteStore {
 mod tests {
     use super::{ReceiptQuery, SqliteStore, recent_receipts};
     use token_station_metrics::{
-        AttemptRecord, ConversionRecord, ConversionStage, CostKind, DecisionRecord, Recorder,
-        RequestRecord, RoutingRecord,
+        AttemptRecord, ConversionRecord, ConversionStage, CostKind, DecisionRecord,
+        QuotaDecisionSnapshot, Recorder, RequestRecord, RoutingRecord,
     };
     use token_station_protocol::{ErrorCode, StreamOutcome, Usage};
     use token_station_router_core::{DecidedBy, RequestFeatures};
@@ -1458,6 +1507,7 @@ mod tests {
             decided_by: DecidedBy::Default,
             fallbacks: 1,
             features,
+            quota: None,
         };
         let mut record = RequestRecord::begin(started_at_ms, "openai-chat-completions");
         record.request_id = request_id.to_owned();
@@ -1548,6 +1598,52 @@ mod tests {
             .query_row("SELECT count(*) FROM requests", [], |row| row.get(0))
             .expect("counts");
         assert_eq!(count, 1);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_quota_decision_snapshot_round_trips_through_the_store() {
+        let path = scratch("quota-decision");
+        std::fs::remove_file(&path).ok();
+
+        {
+            let store = SqliteStore::open(&path).expect("creates");
+            let mut record = RequestRecord::begin(1_752_000_000_000, "openai-chat-completions");
+            record.request_id = "req_1752000000000_9".to_owned();
+            record.requested_model = "auto".to_owned();
+            record.status = 200;
+            record.attempts = 1;
+            record.decision = Some(DecisionRecord {
+                upstream: "claude_pro".to_owned(),
+                model: "claude".to_owned(),
+                pool: "quota".to_owned(),
+                decided_by: DecidedBy::Quota,
+                fallbacks: 1,
+                features: RequestFeatures::default(),
+                quota: Some(QuotaDecisionSnapshot {
+                    reset_ms: Some(1_200_000),
+                    remaining_permille: Some(640),
+                    headroom_permille: 900,
+                    pressured: false,
+                    exhausted: false,
+                }),
+            });
+            store.record(&record);
+        }
+
+        let receipts = recent_receipts(&path, 10).expect("reads");
+        assert_eq!(receipts.len(), 1);
+        let quota = receipts[0]
+            .decision
+            .as_ref()
+            .and_then(|decision| decision.quota.as_ref())
+            .expect("the quota snapshot survives write + read");
+        assert_eq!(quota.reset_ms, Some(1_200_000));
+        assert_eq!(quota.remaining_permille, Some(640));
+        assert_eq!(quota.headroom_permille, 900);
+        assert!(!quota.pressured);
+        assert!(!quota.exhausted);
 
         std::fs::remove_file(path).ok();
     }

@@ -166,7 +166,17 @@ export type ReceiptDecidedByView =
   | { tier: "hint"; kind: "step_type" | "task_type" | "preference" | "capability"; value: string }
   | { tier: "heuristic"; score: number; threshold: number }
   | { tier: "default" }
-  | { tier: "exact_model"; model: string };
+  | { tier: "exact_model"; model: string }
+  | { tier: "quota" };
+
+/** Quota-first decision snapshot explaining the selected account's window and rate state. */
+export interface ReceiptQuotaView {
+  reset_ms: number | null;
+  remaining_permille: number | null;
+  headroom_permille: number;
+  pressured: boolean;
+  exhausted: boolean;
+}
 
 export interface ReceiptRouteView {
   upstream: string;
@@ -175,6 +185,8 @@ export interface ReceiptRouteView {
   decided_by: ReceiptDecidedByView;
   fallbacks: number;
   features: ReceiptFeaturesView;
+  /** Present only for quota-first routing; undefined for tiered routing. */
+  quota?: ReceiptQuotaView | null;
 }
 
 export interface ReceiptAttemptView {
