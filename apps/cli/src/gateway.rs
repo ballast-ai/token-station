@@ -1707,17 +1707,45 @@ impl Gateway {
     /// tracked per (upstream, wire model), so one model's failures never eject
     /// another model on the same upstream.
     fn observe(&self, upstream: &UpstreamRef, model: &str, outcome: Result<(), &ErrorEnvelope>) {
-        let mut health = self.health.lock().expect("health lock");
-        match outcome {
-            Ok(()) => health.observe_success(upstream, model),
-            Err(envelope) => {
-                if health.observe_failure(upstream, model, envelope.code, std::time::Instant::now())
-                {
-                    eprintln!(
-                        "upstream {upstream} model {model} ejected from rotation ({:?})",
-                        envelope.code
-                    );
+        {
+            let mut health = self.health.lock().expect("health lock");
+            match outcome {
+                Ok(()) => health.observe_success(upstream, model),
+                Err(envelope) => {
+                    if health.observe_failure(
+                        upstream,
+                        model,
+                        envelope.code,
+                        std::time::Instant::now(),
+                    ) {
+                        eprintln!(
+                            "upstream {upstream} model {model} ejected from rotation ({:?})",
+                            envelope.code
+                        );
+                    }
                 }
+            }
+        }
+        // L1 quota feedback loop: a real rate/quota refusal from the upstream is
+        // ground truth that this account's allowance is (for now) spent, so we
+        // cool it in the quota tracker and quota-first routing stops selecting it
+        // until it recovers — honoring the upstream's `Retry-After` when given.
+        // `PaymentRequired` (402, out of funds) counts too. Cross-mode but inert
+        // in tiered mode, where quota state is never read. Locked separately from
+        // health above to keep the two mutexes strictly un-nested.
+        if let Err(envelope) = outcome {
+            if matches!(
+                envelope.code,
+                ErrorCode::RateLimit | ErrorCode::PaymentRequired
+            ) {
+                let cooldown = envelope
+                    .retry_after_ms
+                    .unwrap_or(crate::quota_tracker::DEFAULT_QUOTA_COOLDOWN_MS);
+                self.quota.lock().expect("quota lock").note_rate_limited(
+                    upstream.as_str(),
+                    unix_millis(),
+                    cooldown,
+                );
             }
         }
     }
