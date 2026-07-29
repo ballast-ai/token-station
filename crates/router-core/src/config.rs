@@ -97,6 +97,13 @@ pub struct RouterConfig {
     /// so flipping the mode on needs nothing else.
     #[serde(default)]
     pub quota: QuotaConfig,
+    /// The ordered accounts (upstream + model) that participate in quota-first
+    /// rotation. Order is the operator's priority: it breaks exact quota ties
+    /// (earlier wins). When non-empty in quota-first mode, only these accounts
+    /// route, and only in this order; empty falls back to every host-supplied
+    /// candidate (the pre-selection behavior). Ignored in tiered mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quota_accounts: Vec<UpstreamModel>,
 }
 
 /// The active routing philosophy. The two modes are mutually exclusive: tiered

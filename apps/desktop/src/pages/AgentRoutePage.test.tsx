@@ -102,12 +102,16 @@ describe("AgentRoutePage multi-install admission", () => {
           },
           config_error: null,
           profile: null,
+          routing_mode: "tiered",
         }}
         providers={[]}
         profiles={[]}
+        quotaAccounts={[]}
         serveRunning
+        applying={false}
         onStateChange={vi.fn()}
         onRescan={vi.fn()}
+        onSaveQuota={vi.fn()}
       />,
     );
 
@@ -175,12 +179,16 @@ describe("AgentRoutePage multi-install admission", () => {
           },
           config_error: null,
           profile: null,
+          routing_mode: "tiered",
         }}
         providers={[]}
         profiles={[]}
+        quotaAccounts={[]}
         serveRunning
+        applying={false}
         onStateChange={vi.fn()}
         onRescan={vi.fn()}
+        onSaveQuota={vi.fn()}
       />,
     );
 

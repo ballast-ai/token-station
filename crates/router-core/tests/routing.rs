@@ -76,6 +76,7 @@ fn config() -> RouterConfig {
         allow_cloud_fallback: false,
         routing_mode: RoutingMode::Tiered,
         quota: QuotaConfig::default(),
+        quota_accounts: Vec::new(),
     }
 }
 
@@ -707,6 +708,16 @@ fn quota_router() -> Router {
     .expect("a quota-first config needs no pools")
 }
 
+fn quota_router_with_accounts(accounts: Vec<UpstreamModel>) -> Router {
+    Router::new(RouterConfig {
+        routing_mode: RoutingMode::QuotaFirst,
+        quota: QuotaConfig::default(),
+        quota_accounts: accounts,
+        ..config()
+    })
+    .expect("a quota-first config needs no pools")
+}
+
 const FIVE_H_MS: u64 = 5 * 60 * 60 * 1000;
 
 fn quota_candidate(upstream: &str, quota: QuotaState) -> Candidate {
@@ -728,6 +739,46 @@ fn quota_first_serves_the_soonest_resetting_account_first() {
     assert_eq!(decision.pool, "quota");
     // The rest is the failover order: the slower-resetting account follows.
     assert_eq!(decision.fallbacks, vec![target("plan_slow", "shared-model")]);
+}
+
+#[test]
+fn quota_first_restricts_to_selected_accounts_and_honors_their_order() {
+    // The host supplies three candidates, but the operator selected only two, in
+    // an explicit order. The unselected one never routes, and exact ties break
+    // by that selection order — not by which the host happened to list first.
+    let accounts = vec![
+        quota_candidate("plan_a", QuotaState::open(FIVE_H_MS / 2)),
+        quota_candidate("plan_b", QuotaState::open(FIVE_H_MS / 2)),
+        // plan_c resets soonest — it would win if it were in the selection.
+        quota_candidate("plan_c", QuotaState::open(20 * 60 * 1000)),
+    ];
+    let selected = vec![
+        target("plan_b", "shared-model"),
+        target("plan_a", "shared-model"),
+    ];
+    let decision = quota_router_with_accounts(selected)
+        .route_quota_first(&ask("anything"), &accounts, None)
+        .expect("routable");
+    // Same reset, no affinity ⇒ selection order decides: plan_b (listed first).
+    assert_eq!(decision.chosen, target("plan_b", "shared-model"));
+    // Only the two selected accounts route; the soonest-resetting plan_c is out.
+    assert_eq!(decision.fallbacks, vec![target("plan_a", "shared-model")]);
+}
+
+#[test]
+fn quota_first_ignores_a_selected_account_the_host_did_not_supply() {
+    // A selected (upstream, model) with no matching supplied candidate is simply
+    // absent from rotation — the selection can't conjure a candidate.
+    let accounts = vec![quota_candidate("plan_a", QuotaState::open(FIVE_H_MS / 2))];
+    let selected = vec![
+        target("plan_missing", "shared-model"),
+        target("plan_a", "shared-model"),
+    ];
+    let decision = quota_router_with_accounts(selected)
+        .route_quota_first(&ask("hi"), &accounts, None)
+        .expect("routable");
+    assert_eq!(decision.chosen, target("plan_a", "shared-model"));
+    assert!(decision.fallbacks.is_empty());
 }
 
 #[test]

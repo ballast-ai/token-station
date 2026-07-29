@@ -250,6 +250,13 @@ export interface AgentRouteView {
   tiers: Record<TierSlot, TierView>;
   config_error: string | null;
   profile: string | null;
+  /** Effective routing mode for this Agent: its override first, otherwise the home default. */
+  routing_mode: "tiered" | "quota_first";
+}
+
+export interface QuotaAccount {
+  upstream: string;
+  model: string;
 }
 
 export interface SettingsView {
@@ -297,6 +304,8 @@ export interface StateView {
   allow_cloud_fallback: boolean;
   /** Routing mode: tiered intelligent routing by default, or quota_first. */
   routing_mode: "tiered" | "quota_first";
+  /** Globally shared quota-first rotation accounts, provider plus model, in priority order. */
+  quota_accounts: QuotaAccount[];
   serve: ServeView;
   draft_revision: number;
   saved_revision: number;
@@ -686,8 +695,11 @@ export const setLocalRouting = (localOnly: boolean, allowCloudFallback: boolean)
   });
 
 /** Switch between tiered intelligent routing and quota-first routing. */
-export const setRoutingMode = (mode: "tiered" | "quota_first") =>
-  invoke<StateView>("set_routing_mode", { mode });
+export const setRoutingMode = (mode: "tiered" | "quota_first", agentId?: string) =>
+  invoke<StateView>("set_routing_mode", { mode, agentId: agentId ?? null });
+
+export const setQuotaAccounts = (accounts: QuotaAccount[]) =>
+  invoke<StateView>("set_quota_accounts", { accounts });
 
 export const editProvider = (name: string, base_url: string, api_key: string | null) =>
   invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });

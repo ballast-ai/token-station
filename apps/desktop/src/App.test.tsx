@@ -22,6 +22,7 @@ const emptyRoute: AgentRouteView = {
   },
   config_error: null,
   profile: null,
+  routing_mode: "tiered",
 };
 
 const registryFixture: AgentUiMetadataView[] = [
@@ -75,6 +76,7 @@ function stateFixture(overrides: Partial<StateView> = {}): StateView {
     local_only: false,
     allow_cloud_fallback: false,
     routing_mode: "tiered",
+    quota_accounts: [],
     serve: serveFixture(),
     draft_revision: 0,
     saved_revision: 0,

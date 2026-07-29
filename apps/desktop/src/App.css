@@ -1450,6 +1450,80 @@ body {
 }
 .mode-switch button.active { color: var(--signal); background: var(--surface); box-shadow: 0 2px 8px rgba(30, 40, 70, .08); }
 
+/* Routing-mode switch in the top bar: don't compress, and give its labels a bit
+   more room than the compact Agent-page switch. */
+.topbar-mode-switch { flex: 0 0 auto; }
+.topbar-mode-switch button { padding: 7px 14px; font-size: 12px; font-weight: 500; }
+
+/* Quota-first panel */
+.quota-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 2px 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.quota-hint svg {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin-top: 1px;
+  fill: none;
+  stroke: var(--signal);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+.quota-hint strong { color: var(--signal); font-weight: 600; }
+.quota-entry-grid { display: flex; flex-direction: column; gap: 10px; }
+.quota-entry-head,
+.quota-entry-row {
+  display: grid;
+  grid-template-columns: 64px 1fr 1fr 32px;
+  gap: 12px;
+  align-items: center;
+}
+.quota-entry-head {
+  padding: 0 4px 2px;
+  font-size: 11px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.quota-provider-order {
+  justify-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--signal);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.quota-entry-remove {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+.quota-entry-remove:hover { color: var(--danger, #e53935); border-color: var(--danger, #e53935); }
+.quota-empty { padding: 6px 4px; font-size: 12px; color: var(--muted); }
+.quota-add-btn { align-self: flex-start; margin-top: 2px; }
+
 /* Shared subpage back action */
 .page-back {
   width: max-content;

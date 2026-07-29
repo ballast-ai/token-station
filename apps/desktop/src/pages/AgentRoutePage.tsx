@@ -14,11 +14,13 @@ import {
   type AgentUiMetadataView,
   type AgentView,
   type ProviderView,
+  type QuotaAccount,
   type StateView,
   type TierSlot,
 } from "../api";
 import TierRouteEditor from "../components/TierRouteEditor";
 import InstallationPicker from "../components/InstallationPicker";
+import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 
@@ -28,9 +30,12 @@ interface AgentRoutePageProps {
   route: AgentRouteView;
   providers: ProviderView[];
   profiles: string[];
+  quotaAccounts: QuotaAccount[];
   serveRunning: boolean;
+  applying: boolean;
   onStateChange: (state: StateView, message?: string) => void;
   onRescan: () => void | Promise<void>;
+  onSaveQuota: (accounts: QuotaAccount[]) => void;
 }
 
 /** Per-Agent key recording that connection changes were shown; localStorage makes it appear only once. */
@@ -130,9 +135,12 @@ export default function AgentRoutePage({
   route,
   providers,
   profiles,
+  quotaAccounts,
   serveRunning,
+  applying,
   onStateChange,
   onRescan,
+  onSaveQuota,
 }: AgentRoutePageProps) {
   const { copy } = useLocalizedCopy();
   const [selectedPath, setSelectedPath] = useState("");
@@ -389,6 +397,15 @@ export default function AgentRoutePage({
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner err">{error}</div>}
 
+      {route.routing_mode === "quota_first" ? (
+        <QuotaPriorityPanel
+          providers={providers}
+          accounts={quotaAccounts}
+          busy={busy}
+          applying={applying}
+          onSave={onSaveQuota}
+        />
+      ) : (
       <section className="panel route-panel">
         <div className="panel-head split-heading">
           <div>
@@ -448,6 +465,7 @@ export default function AgentRoutePage({
           {route.config_error && <span className="foot-hint error-text">{route.config_error}</span>}
         </footer>
       </section>
+      )}
     </div>
   );
 }

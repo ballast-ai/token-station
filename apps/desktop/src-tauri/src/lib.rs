@@ -485,6 +485,25 @@ struct AgentRouteView {
     tiers: std::collections::BTreeMap<String, TierView>,
     config_error: Option<String>,
     profile: Option<String>,
+    /// Effective routing philosophy for this Agent: its own override if set,
+    /// otherwise the Home default. Drives the per-Agent top-bar toggle and which
+    /// page body (three-tier vs quota-first) the Agent renders.
+    routing_mode: String,
+}
+
+/// One account (upstream + model) in the quota-first rotation, in priority
+/// order. Shared across every scope in quota mode — the pool of allowances to
+/// drain is global; only the per-Agent *mode* is independent.
+#[derive(Serialize)]
+struct QuotaAccountView {
+    upstream: String,
+    model: String,
+}
+
+#[derive(serde::Deserialize)]
+struct QuotaAccountArg {
+    upstream: String,
+    model: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -534,6 +553,8 @@ struct StateView {
     allow_cloud_fallback: bool,
     /// Routing mode: tiered intelligent routing by default, or quota_first.
     routing_mode: String,
+    /// Globally shared quota-first rotation accounts, provider plus model, in priority order.
+    quota_accounts: Vec<QuotaAccountView>,
     serve: ServeView,
     draft_revision: u64,
     saved_revision: u64,
@@ -1023,10 +1044,17 @@ impl AppInner {
     }
 
     fn agent_routes_view(&self) -> std::collections::BTreeMap<String, AgentRouteView> {
+        let home_mode = self.draft["router"]["routing_mode"]
+            .as_str()
+            .unwrap_or("tiered");
         supported_agent_ids()
             .into_iter()
             .map(|agent_id| {
                 let mode = self.agent_route_mode(&agent_id).to_string();
+                let routing_mode = self.draft["agent_routes"][&agent_id]["routing_mode"]
+                    .as_str()
+                    .unwrap_or(home_mode)
+                    .to_string();
                 let tiers = ["high", "mid", "low"]
                     .into_iter()
                     .map(|slot| (slot.to_string(), self.agent_tier(&agent_id, slot)))
@@ -1047,10 +1075,28 @@ impl AppInner {
                         tiers,
                         config_error,
                         profile: self.agent_profile(&agent_id),
+                        routing_mode,
                     },
                 )
             })
             .collect()
+    }
+
+    fn quota_accounts_view(&self) -> Vec<QuotaAccountView> {
+        self.draft["router"]["quota_accounts"]
+            .as_array()
+            .map(|accounts| {
+                accounts
+                    .iter()
+                    .filter_map(|account| {
+                        Some(QuotaAccountView {
+                            upstream: account["upstream"].as_str()?.to_owned(),
+                            model: account["model"].as_str()?.to_owned(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Rebuild tier-pool references, heuristic bands, and default from configured
@@ -1242,6 +1288,7 @@ impl AppInner {
                 .as_str()
                 .unwrap_or("tiered")
                 .to_string(),
+            quota_accounts: self.quota_accounts_view(),
             serve: self.serve_view(),
             draft_revision: self.config_state.draft_revision(),
             saved_revision: self.config_state.saved_revision(),
@@ -1884,17 +1931,84 @@ fn set_local_routing(
 fn set_routing_mode(
     state: State<'_, AppStateManaged>,
     mode: String,
+    agent_id: Option<String>,
 ) -> Result<StateView, String> {
     if mode != "tiered" && mode != "quota_first" {
         return Err(format!("未知路由模式：{mode}"));
     }
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+
+    // Per-Agent switch: pin this one Agent's routing_mode without touching Home
+    // or its siblings. Unlike Home, we write BOTH modes explicitly — for an
+    // Agent a missing key means "inherit Home", so clearing it on tiered would
+    // wrongly re-inherit a quota-first Home. An explicit value is what keeps the
+    // Agent independent of later Home changes. ("Restore home routing" is the
+    // path back to inheritance; it clears the key.)
+    if let Some(agent_id) = agent_id {
+        if !supported_agent_ids().contains(&agent_id) {
+            return Err(format!("未知 Agent：{agent_id}"));
+        }
+        let previous = inner.draft["agent_routes"][&agent_id].clone();
+        if !inner.draft["agent_routes"][&agent_id].is_object() {
+            inner.draft["agent_routes"][&agent_id] = json!({ "mode": "inherit" });
+        }
+        inner.draft["agent_routes"][&agent_id]["routing_mode"] = json!(mode);
+        if let Err(error) = inner.observe_draft() {
+            inner.draft["agent_routes"][&agent_id] = previous;
+            return Err(error);
+        }
+        return Ok(inner.snapshot());
+    }
+
     let previous = inner.draft["router"].clone();
     if mode == "quota_first" {
         inner.draft["router"]["routing_mode"] = json!("quota_first");
     } else if let Some(router) = inner.draft["router"].as_object_mut() {
         router.remove("routing_mode");
+    }
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["router"] = previous;
+        return Err(error);
+    }
+    Ok(inner.snapshot())
+}
+
+/// Persists the quota-first rotation list (ordered upstream+model accounts). The
+/// order is the operator's priority; it lands verbatim in
+/// `router.quota_accounts` and drives `Router::route_quota_first`. Incomplete
+/// rows (a provider picked but no model yet) are dropped, complete ones are
+/// validated against the configured catalog, and exact duplicates are collapsed
+/// while keeping first-seen order.
+#[tauri::command]
+fn set_quota_accounts(
+    state: State<'_, AppStateManaged>,
+    accounts: Vec<QuotaAccountArg>,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut clean: Vec<Value> = Vec::new();
+    for account in &accounts {
+        let upstream = account.upstream.trim();
+        let model = account.model.trim();
+        if upstream.is_empty() || model.is_empty() {
+            continue;
+        }
+        inner.validate_route_target(upstream, model)?;
+        if seen.insert((upstream.to_owned(), model.to_owned())) {
+            clean.push(json!({ "upstream": upstream, "model": model }));
+        }
+    }
+
+    let previous = inner.draft["router"].clone();
+    if clean.is_empty() {
+        if let Some(router) = inner.draft["router"].as_object_mut() {
+            router.remove("quota_accounts");
+        }
+    } else {
+        inner.draft["router"]["quota_accounts"] = Value::Array(clean);
     }
     if let Err(error) = inner.observe_draft() {
         inner.draft["router"] = previous;
@@ -3678,6 +3792,7 @@ pub fn run() {
             add_provider,
             set_local_routing,
             set_routing_mode,
+            set_quota_accounts,
             edit_provider,
             discover_provider_models,
             test_provider,
@@ -5960,6 +6075,170 @@ mod tests {
             let inner = state.0.lock().unwrap();
             assert!(inner.draft["router"].get("local_only").is_none());
             assert!(inner.draft["router"].get("allow_cloud_fallback").is_none());
+        }
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn routing_mode_switches_per_agent_without_touching_home_or_siblings() {
+        let root = scratch_home("per-agent-routing-mode");
+        let inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+        // Home default is tiered, and every Agent inherits it.
+        let view = get_state(app.state());
+        assert_eq!(view.routing_mode, "tiered");
+        assert!(
+            view.agent_routes.values().all(|r| r.routing_mode == "tiered"),
+            "every Agent inherits the tiered home default"
+        );
+
+        // Flip Home to quota-first: the Home view flips, and Agents that never
+        // overrode follow it.
+        let view = set_routing_mode(app.state(), "quota_first".to_owned(), None).unwrap();
+        assert_eq!(view.routing_mode, "quota_first");
+        assert!(
+            view.agent_routes.values().all(|r| r.routing_mode == "quota_first"),
+            "un-overridden Agents follow the new Home default"
+        );
+
+        // Pin one Agent back to tiered while Home stays quota-first. Only that
+        // Agent changes; Home and its siblings keep quota-first.
+        let view =
+            set_routing_mode(app.state(), "tiered".to_owned(), Some("codex".to_owned())).unwrap();
+        assert_eq!(view.routing_mode, "quota_first", "Home is untouched");
+        assert_eq!(view.agent_routes["codex"].routing_mode, "tiered");
+        assert!(
+            view.agent_routes
+                .iter()
+                .filter(|(id, _)| id.as_str() != "codex")
+                .all(|(_, r)| r.routing_mode == "quota_first"),
+            "sibling Agents are untouched by the per-Agent switch"
+        );
+        // The Agent's mode is written explicitly (not cleared), so it stays
+        // pinned independent of Home — the whole point of a per-Agent switch.
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            assert_eq!(
+                inner.draft["agent_routes"]["codex"]["routing_mode"].as_str(),
+                Some("tiered")
+            );
+        }
+
+        // Flipping Home back to tiered leaves the pinned Agent alone (still an
+        // explicit "tiered" override), and un-pinned siblings follow Home.
+        let view = set_routing_mode(app.state(), "tiered".to_owned(), None).unwrap();
+        assert_eq!(view.routing_mode, "tiered");
+        assert_eq!(view.agent_routes["codex"].routing_mode, "tiered");
+        assert!(
+            view.agent_routes
+                .iter()
+                .filter(|(id, _)| id.as_str() != "codex")
+                .all(|(_, r)| r.routing_mode == "tiered"),
+            "un-pinned siblings track the tiered Home again"
+        );
+
+        // Switching the pinned Agent to quota-first writes the explicit value.
+        let view =
+            set_routing_mode(app.state(), "quota_first".to_owned(), Some("codex".to_owned()))
+                .unwrap();
+        assert_eq!(view.agent_routes["codex"].routing_mode, "quota_first");
+        assert_eq!(view.routing_mode, "tiered", "Home stays tiered");
+
+        // Unknown Agent is rejected.
+        assert!(
+            set_routing_mode(app.state(), "quota_first".to_owned(), Some("nope".to_owned()))
+                .is_err()
+        );
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn quota_accounts_persist_validate_dedupe_and_drop_incomplete_rows() {
+        let root = scratch_home("quota-accounts");
+        let inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+        add_provider(
+            app.state(),
+            "deepseek".to_owned(),
+            "https://api.deepseek.com/v1".to_owned(),
+            vec!["deepseek-v4-flash".to_owned(), "deepseek-v4-pro".to_owned()],
+            None,
+            false,
+        )
+        .unwrap();
+        add_provider(
+            app.state(),
+            "ollama".to_owned(),
+            "http://127.0.0.1:11434/v1".to_owned(),
+            vec!["qwen2.5".to_owned()],
+            None,
+            true,
+        )
+        .unwrap();
+
+        // A valid pick, an incomplete row (no model → dropped), another valid
+        // pick, then an exact duplicate of the first (→ collapsed). Order is
+        // preserved as the operator's priority.
+        let arg = |upstream: &str, model: &str| QuotaAccountArg {
+            upstream: upstream.to_owned(),
+            model: model.to_owned(),
+        };
+        let view = set_quota_accounts(
+            app.state(),
+            vec![
+                arg("deepseek", "deepseek-v4-flash"),
+                arg("deepseek", ""),
+                arg("ollama", "qwen2.5"),
+                arg("deepseek", "deepseek-v4-flash"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(view.quota_accounts.len(), 2);
+        assert_eq!(view.quota_accounts[0].upstream, "deepseek");
+        assert_eq!(view.quota_accounts[0].model, "deepseek-v4-flash");
+        assert_eq!(view.quota_accounts[1].upstream, "ollama");
+        assert_eq!(view.quota_accounts[1].model, "qwen2.5");
+
+        // The list lands verbatim under router.quota_accounts (the router-core
+        // key that drives quota routing).
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            let stored = inner.draft["router"]["quota_accounts"].as_array().unwrap();
+            assert_eq!(stored.len(), 2);
+            assert_eq!(stored[0]["upstream"], json!("deepseek"));
+            assert_eq!(stored[0]["model"], json!("deepseek-v4-flash"));
+        }
+
+        // An account referencing a model the provider never declared is rejected,
+        // and the previously saved list is left intact.
+        assert!(
+            set_quota_accounts(app.state(), vec![arg("deepseek", "ghost-model")]).is_err()
+        );
+        assert_eq!(get_state(app.state()).quota_accounts.len(), 2);
+
+        // Clearing removes the key entirely (tiered configs stay minimal).
+        let cleared = set_quota_accounts(app.state(), vec![]).unwrap();
+        assert!(cleared.quota_accounts.is_empty());
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            assert!(inner.draft["router"].get("quota_accounts").is_none());
         }
 
         std::fs::remove_dir_all(root).ok();

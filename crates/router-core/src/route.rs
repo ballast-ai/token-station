@@ -210,14 +210,32 @@ impl Router {
         let features = RequestFeatures::extract(request, &[]);
         let cfg = &self.config.quota;
 
+        // Restrict to the operator's selected accounts, in their chosen order —
+        // that order is the candidate priority (it breaks exact quota ties). An
+        // account naming an (upstream, model) the host didn't supply is simply
+        // absent from rotation. Empty selection keeps the pre-selection behavior:
+        // every supplied candidate participates, in host order.
+        let pool: Vec<&Candidate> = if self.config.quota_accounts.is_empty() {
+            candidates.iter().collect()
+        } else {
+            self.config
+                .quota_accounts
+                .iter()
+                .filter_map(|account| {
+                    candidates.iter().find(|candidate| candidate.target == *account)
+                })
+                .collect()
+        };
+
         // Capability gate first: correctness, not quality. Report the first
         // unmet requirement if nothing can serve, matching tiered routing.
-        let capable: Vec<&Candidate> = candidates
+        let capable: Vec<&Candidate> = pool
             .iter()
+            .copied()
             .filter(|candidate| self.satisfies(candidate, &features).is_none())
             .collect();
         if capable.is_empty() {
-            let reason = candidates
+            let reason = pool
                 .first()
                 .and_then(|candidate| self.satisfies(candidate, &features))
                 .unwrap_or(UnmetRequirement::Unknown);

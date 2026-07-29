@@ -17,11 +17,14 @@ import {
   serveStop,
   setAdminEndpoint,
   setLocalRouting,
+  setQuotaAccounts,
+  setRoutingMode,
   setTier,
   type AgentRouteView,
   type AgentUiMetadataView,
   type AgentView,
   type FreeProviderPresetView,
+  type QuotaAccount,
   type ServeView,
   type StateView,
   type TierSlot,
@@ -58,7 +61,13 @@ function hasErrorCode(error: unknown, code: string): boolean {
 }
 
 function emptyAgentRoute(state: StateView): AgentRouteView {
-  return { mode: "inherit", tiers: state.tiers, config_error: null, profile: null };
+  return {
+    mode: "inherit",
+    tiers: state.tiers,
+    config_error: null,
+    profile: null,
+    routing_mode: state.routing_mode,
+  };
 }
 
 export function configSaveStatus(state: StateView, language: Language = "en"): string {
@@ -347,6 +356,13 @@ function StationApp() {
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
   const saveStatus = configSaveStatus(state, language);
 
+  // Quota-first Save and Apply persists the account list before restarting the proxy.
+  const saveQuota = (accounts: QuotaAccount[]) =>
+    void run(async () => {
+      await setQuotaAccounts(accounts);
+      return serveStart();
+    });
+
   return (
     <AppShell
       view={view}
@@ -355,6 +371,8 @@ function StationApp() {
       agents={agents}
       scanBusy={scanBusy}
       commandBusy={serveBusy || busy || freeProviderBusy}
+      routingMode={agentId && route ? route.routing_mode : state.routing_mode}
+      onSetRoutingMode={(mode) => void run(() => setRoutingMode(mode, agentId ?? undefined))}
       onNavigate={navigate}
       onRescan={() => void rescanAgents()}
       onToggleServe={() => void toggleServe()}
@@ -375,6 +393,9 @@ function StationApp() {
           providerRecoveryError={state.provider_recovery_error ?? null}
           tiers={state.tiers}
           profiles={state.profiles ?? []}
+          routingMode={state.routing_mode}
+          quotaAccounts={state.quota_accounts ?? []}
+          onSaveQuota={saveQuota}
           serveRunning={runtimeHealthy}
           busy={busy}
           applying={state.serve.phase === "starting"}
@@ -433,9 +454,12 @@ function StationApp() {
           route={route}
           profiles={state.profiles ?? []}
           providers={state.providers}
+          quotaAccounts={state.quota_accounts ?? []}
           serveRunning={runtimeHealthy}
+          applying={state.serve.phase === "starting"}
           onStateChange={showState}
           onRescan={rescanAgents}
+          onSaveQuota={saveQuota}
         />
       )}
 
