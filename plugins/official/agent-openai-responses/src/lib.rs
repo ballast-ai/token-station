@@ -369,28 +369,34 @@ fn tools_of(value: &Value) -> Result<Vec<ToolDef>, String> {
         .as_array()
         .into_iter()
         .flatten()
-        .map(|tool| {
-            let kind = tool
-                .get("type")
-                .and_then(Value::as_str)
-                .ok_or_else(|| invalid("tool declares no type"))?;
+        .filter_map(|tool| {
+            let kind = match tool.get("type").and_then(Value::as_str) {
+                Some(kind) => kind,
+                None => return Some(Err(invalid("tool declares no type"))),
+            };
+            // Only `function` tools have a Canonical IR representation. Built-in
+            // and server-side Responses tool types — web_search, file_search,
+            // local_shell, computer, code_interpreter, mcp, namespace, … — carry
+            // no IR shape, so we drop them at the inbound boundary instead of
+            // refusing the whole request. Honest degradation (matching the
+            // structured-output path): the function tools still route and run,
+            // and Codex's requests, which pair function tools with built-ins we
+            // can't model, stop being dead on arrival.
             if kind != "function" {
-                return Err(capability(format!(
-                    "unsupported Responses tool type {kind}"
-                )));
+                return None;
             }
-            Ok(ToolDef {
-                name: tool
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| invalid("function tool declares no name"))?
-                    .to_owned(),
+            let name = match tool.get("name").and_then(Value::as_str) {
+                Some(name) => name.to_owned(),
+                None => return Some(Err(invalid("function tool declares no name"))),
+            };
+            Some(Ok(ToolDef {
+                name,
                 description: tool
                     .get("description")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 parameters: tool.get("parameters").cloned().unwrap_or_else(|| json!({})),
-            })
+            }))
         })
         .collect()
 }
