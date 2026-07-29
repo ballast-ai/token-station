@@ -127,6 +127,31 @@ impl SlidingWindow {
         let idx = self.index_at(now_ms);
         idx.saturating_add(1).saturating_mul(self.len_ms) - now_ms
     }
+
+    /// Full display detail for one window as of `now_ms` — richer than the
+    /// router-facing [`QuotaState`], which keeps only the single binding window.
+    #[must_use]
+    pub fn snapshot(&self, now_ms: u64) -> WindowSnapshot {
+        WindowSnapshot {
+            len_ms: self.len_ms,
+            limit: self.limit,
+            used: self.effective_used(now_ms).min(self.limit),
+            remaining_permille: self.remaining_permille(now_ms),
+            ms_until_reset: self.ms_until_reset(now_ms),
+        }
+    }
+}
+
+/// One window's full picture for the quota viewer: its period, allowance, how
+/// much is used, and when it resets. Pure display detail; the router ranks on
+/// [`QuotaState`] instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowSnapshot {
+    pub len_ms: u64,
+    pub limit: u64,
+    pub used: u64,
+    pub remaining_permille: u16,
+    pub ms_until_reset: u64,
 }
 
 /// One account's self-counted quota: its (possibly several) reset windows and
@@ -207,6 +232,25 @@ impl AccountLedger {
             rate_pressured,
             exhausted,
         }
+    }
+
+    /// Full per-window detail for the viewer, in the plan's declared order. Empty
+    /// for a non-windowed (pay-as-you-go / unmeasured) account.
+    #[must_use]
+    pub fn window_snapshots(&self, now_ms: u64) -> Vec<WindowSnapshot> {
+        self.windows
+            .iter()
+            .map(|window| window.snapshot(now_ms))
+            .collect()
+    }
+
+    /// Instantaneous rate headroom (permille) from the local rate window, before
+    /// any in-flight penalty. Full headroom when the account is not rate-tracked.
+    #[must_use]
+    pub fn rate_headroom_permille(&self, now_ms: u64) -> u16 {
+        self.rate
+            .as_ref()
+            .map_or(1000, |rate| rate.remaining_permille(now_ms))
     }
 }
 
