@@ -3072,6 +3072,74 @@ fn quota_first_cools_an_account_the_upstream_rate_limited() {
     assert_eq!(fallback.hits(), 2, "the healthy account serves it directly");
 }
 
+#[test]
+fn quota_snapshot_reports_authoritative_windows_from_response_headers() {
+    // A successful response carries the provider's own remaining/limit/reset
+    // headers; the gateway harvests them (L2) and the /admin/quota snapshot
+    // reports that account's window as authoritative, no local estimate needed.
+    let ok = json!({
+        "id": "cmpl-1",
+        "object": "chat.completion",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "ok" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 1 }
+    });
+    let primary = MockUpstream::start(vec![vec![http_json_with_headers(
+        200,
+        &ok.to_string(),
+        &[
+            ("x-ratelimit-limit-tokens", "1000"),
+            ("x-ratelimit-remaining-tokens", "250"),
+            ("x-ratelimit-reset-tokens", "300"),
+        ],
+    )]]);
+    let fallback = MockUpstream::start(vec![vec![http_json(200, &ok.to_string())]]);
+    let key = key_file("quota-snapshot", "sk-test-key-abc\n");
+    let proxy = start_quota_proxy_two(&primary, &fallback, &key);
+
+    let (status, body) = post_chat(
+        &proxy,
+        &json!({ "model": "auto", "messages": [{ "role": "user", "content": "hi" }] }),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(primary.hits(), 1, "routed to the preferred account");
+
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    let snapshot = agent
+        .get(format!("{}/admin/quota", proxy.url))
+        .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+        .call()
+        .expect("admin/quota answers");
+    assert_eq!(snapshot.status().as_u16(), 200);
+    let snapshot: Value = serde_json::from_str(
+        &snapshot.into_body().read_to_string().expect("body reads"),
+    )
+    .expect("snapshot is JSON");
+
+    let accounts = snapshot["accounts"].as_array().expect("accounts array");
+    let primary_account = accounts
+        .iter()
+        .find(|account| account["upstream"] == "mock_primary")
+        .expect("mock_primary present");
+    assert_eq!(
+        primary_account["source"], "authoritative",
+        "figures came from the provider's headers, not a local estimate"
+    );
+    let window = &primary_account["windows"][0];
+    assert_eq!(window["limit"], 1000);
+    assert_eq!(window["remaining_permille"], 250);
+    assert_eq!(window["ms_until_reset"], 300_000);
+}
+
 fn start_proxy_many(upstream: &MockUpstream, count: usize, key_file: &Path) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(

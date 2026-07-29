@@ -1215,6 +1215,24 @@ impl Gateway {
         })
     }
 
+    /// The live quota picture for every configured upstream: each account's
+    /// windows (provider-reported or locally estimated, tagged by source), rate
+    /// headroom, in-flight load, and any active cooldown. Powers the quota
+    /// viewer; read-only, and it never carries a credential.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the quota mutex is poisoned (a prior holder panicked).
+    pub fn quota_snapshot(&self, now_ms: u64) -> Value {
+        let upstreams: Vec<String> = self.upstreams.keys().cloned().collect();
+        let accounts = self
+            .quota
+            .lock()
+            .expect("quota lock")
+            .snapshot(&upstreams, now_ms);
+        json!({ "now_ms": now_ms, "accounts": accounts })
+    }
+
     /// `upstream test <name>`: one minimal real completion per declared model.
     ///
     /// Runs the production southbound path — provider adapter, exfiltration
@@ -2693,6 +2711,18 @@ impl Gateway {
                 Ok(error) => Err(error),
                 Err(outcome) => Ok(outcome),
             };
+        }
+
+        // L2 authoritative quota: harvest the provider's own remaining/reset
+        // headers off this successful response and record them for the account.
+        // Mode-agnostic (cheap; only read in quota-first mode) so the data is
+        // already warm whenever the user is in quota mode. Never touches the body.
+        let windows = crate::quota_headers::parse_quota_windows(&response.headers, unix_millis());
+        if !windows.is_empty() {
+            self.quota
+                .lock()
+                .expect("quota lock")
+                .note_authoritative(target.upstream.as_str(), unix_millis(), windows);
         }
 
         if request.stream {
