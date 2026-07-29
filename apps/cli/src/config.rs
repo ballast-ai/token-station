@@ -57,8 +57,7 @@ pub struct ClientConfig {
     #[serde(default)]
     pub health: HealthConfig,
     /// In-flight concurrency ceilings (global / per Agent / per Provider).
-    /// Optional; defaults to unlimited, so an unconfigured deployment is
-    /// unchanged.
+    /// Optional; defaults to finite process-safe ceilings.
     #[serde(default)]
     pub concurrency: crate::admission::Limits,
     /// Versioned per-model prices. Optional; an empty table leaves every cost
@@ -592,10 +591,23 @@ impl ClientConfig {
             path: path.to_path_buf(),
             detail: error.to_string(),
         })?;
-        let config: Self = serde_json::from_str(&source).map_err(|error| ConfigError {
+        let mut config: Self = serde_json::from_str(&source).map_err(|error| ConfigError {
             path: path.to_path_buf(),
             detail: error.to_string(),
         })?;
+        // Early v1 files persisted `0` as the documented "unlimited" default.
+        // Loading maps that legacy representation to today's finite defaults;
+        // `save` remains strict and still rejects newly constructed zero limits.
+        let defaults = crate::admission::Limits::default();
+        if config.concurrency.global == 0 {
+            config.concurrency.global = defaults.global;
+        }
+        if config.concurrency.per_agent == 0 {
+            config.concurrency.per_agent = defaults.per_agent;
+        }
+        if config.concurrency.per_provider == 0 {
+            config.concurrency.per_provider = defaults.per_provider;
+        }
         config.validate().map_err(|detail| ConfigError {
             path: path.to_path_buf(),
             detail,
@@ -625,19 +637,23 @@ impl ClientConfig {
             serde_json::to_string_pretty(self).map_err(|error| fail(error.to_string()))?;
         rendered.push('\n');
 
-        let file_name = path
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .ok_or_else(|| fail("path has no file name".to_owned()))?;
-        let temp = path.with_file_name(format!(".{file_name}.tmp"));
-        fs::write(&temp, rendered).map_err(|error| fail(error.to_string()))?;
-        fs::rename(&temp, path).map_err(|error| fail(error.to_string()))?;
+        crate::private_fs::write_atomic_private(path, rendered.as_bytes())
+            .map_err(|error| fail(error.to_string()))?;
         Ok(())
     }
 
     fn validate(&self) -> Result<(), String> {
         if self.version != 1 {
             return Err(format!("config version {} is not 1", self.version));
+        }
+        if self.concurrency.global == 0
+            || self.concurrency.per_agent == 0
+            || self.concurrency.per_provider == 0
+        {
+            return Err(
+                "concurrency.global, concurrency.per_agent and concurrency.per_provider must all be greater than zero"
+                    .to_owned(),
+            );
         }
 
         if self.plugins.effective_agents().is_empty() {
@@ -665,6 +681,7 @@ impl ClientConfig {
         for (name, upstream) in &self.upstreams {
             token_station_router_core::UpstreamRef::new(name.clone())
                 .map_err(|error| error.to_string())?;
+            validate_local_identity(name, upstream)?;
             if let Some(auth) = &upstream.auth {
                 let sources = auth.source_count();
                 if sources != 1 {
@@ -739,6 +756,15 @@ impl ClientConfig {
 
         Ok(())
     }
+}
+
+fn validate_local_identity(name: &str, upstream: &UpstreamConfig) -> Result<(), String> {
+    if upstream.local && !upstream.base_url.is_loopback() {
+        return Err(format!(
+            "upstream `{name}` is marked local but its base_url is not a loopback endpoint"
+        ));
+    }
+    Ok(())
 }
 
 /// The file could not be read, parsed, or structurally validated.
@@ -828,6 +854,17 @@ mod tests {
     }
 
     #[test]
+    fn a_local_upstream_label_cannot_authorize_a_remote_endpoint() {
+        let mut value = example();
+        value["upstreams"]["openai_personal"]["local"] = serde_json::json!(true);
+        let path = scratch("remote-labelled-local", &value.to_string());
+        let error = ClientConfig::load(&path)
+            .expect_err("strict local routing must be grounded in a loopback endpoint");
+        assert!(error.to_string().contains("loopback"), "{error}");
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn egress_policy_supports_direct_http_socks_and_rejects_inline_credentials() {
         assert_eq!(EgressConfig::default().proxy_parts().unwrap(), None);
         let http = EgressConfig {
@@ -902,6 +939,61 @@ mod tests {
 
         assert_eq!(config.plugins.effective_agents(), ["agent-openai"]);
         assert!(config.agent_routes.is_empty());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn legacy_zero_concurrency_limits_load_as_finite_defaults_without_rewriting_source() {
+        let mut value = example();
+        value["concurrency"] = serde_json::json!({
+            "global": 0,
+            "per_agent": 0,
+            "per_provider": 0
+        });
+        let original = serde_json::to_vec(&value).expect("legacy fixture serializes");
+        let path = scratch(
+            "legacy-zero-concurrency",
+            std::str::from_utf8(&original).expect("JSON is UTF-8"),
+        );
+
+        let config =
+            ClientConfig::load(&path).expect("legacy zero limits migrate to finite defaults");
+
+        assert_eq!(config.concurrency.global, 64);
+        assert_eq!(config.concurrency.per_agent, 16);
+        assert_eq!(config.concurrency.per_provider, 16);
+        assert_eq!(
+            fs::read(&path).expect("legacy source remains readable"),
+            original
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn legacy_zero_migration_is_per_field_while_new_saves_stay_strict() {
+        let mut value = example();
+        value["concurrency"] = serde_json::json!({
+            "global": 0,
+            "per_agent": 7,
+            "per_provider": 0
+        });
+        let path = scratch("legacy-mixed-concurrency", &value.to_string());
+
+        let migrated =
+            ClientConfig::load(&path).expect("each legacy zero limit migrates independently");
+
+        assert_eq!(migrated.concurrency.global, 64);
+        assert_eq!(migrated.concurrency.per_agent, 7);
+        assert_eq!(migrated.concurrency.per_provider, 16);
+
+        let invalid: ClientConfig =
+            serde_json::from_value(value).expect("raw zero limits still deserialize");
+        let destination = path.with_extension("saved.json");
+        let error = invalid
+            .save(&destination)
+            .expect_err("new saves must not reintroduce unlimited concurrency");
+        assert!(error.to_string().contains("greater than zero"), "{error}");
+        assert!(!destination.exists());
         fs::remove_file(path).ok();
     }
 

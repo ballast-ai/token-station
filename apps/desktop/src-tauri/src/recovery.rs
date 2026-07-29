@@ -217,11 +217,22 @@ pub(crate) fn append_frontend_event(
     line.push(b'\n');
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+        restrict_directory_permissions(parent)?;
+    }
+    if let Ok(metadata) = fs::symlink_metadata(log_path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("frontend diagnostic log is not a regular file".to_owned());
+        }
     }
     let current_len = fs::metadata(log_path).map(|meta| meta.len()).unwrap_or(0);
     let truncate = current_len.saturating_add(line.len() as u64) > MAX_LOG_BYTES;
     let mut options = OpenOptions::new();
     options.create(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
     if truncate {
         options.truncate(true);
     } else {

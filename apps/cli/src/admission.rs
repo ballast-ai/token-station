@@ -5,8 +5,8 @@
 //! requests and nothing pushes back. Each level is a counting gate: entering
 //! takes a permit, the permit is released when the returned guard drops, and a
 //! request that would exceed a limit is refused with a protocol 429 rather than
-//! silently piling on. A limit of `0` means "unlimited" — the default, so an
-//! unconfigured deployment behaves exactly as before.
+//! silently piling on. Every default is finite; `0` is invalid and fails
+//! closed rather than turning a missing or misspelled limit into "unlimited".
 //!
 //! Sync on purpose: the data plane runs on a blocking thread, so the gate is a
 //! plain atomic, usable from that thread without a runtime.
@@ -16,16 +16,42 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// The per-level ceilings. `0` is unlimited (the default).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+const DEFAULT_GLOBAL: u32 = 64;
+const DEFAULT_PER_AGENT: u32 = 16;
+const DEFAULT_PER_PROVIDER: u32 = 16;
+
+const fn default_global() -> u32 {
+    DEFAULT_GLOBAL
+}
+
+const fn default_per_agent() -> u32 {
+    DEFAULT_PER_AGENT
+}
+
+const fn default_per_provider() -> u32 {
+    DEFAULT_PER_PROVIDER
+}
+
+/// The per-level ceilings. Every value must be greater than zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
-    #[serde(default)]
+    #[serde(default = "default_global")]
     pub global: u32,
-    #[serde(default)]
+    #[serde(default = "default_per_agent")]
     pub per_agent: u32,
-    #[serde(default)]
+    #[serde(default = "default_per_provider")]
     pub per_provider: u32,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            global: DEFAULT_GLOBAL,
+            per_agent: DEFAULT_PER_AGENT,
+            per_provider: DEFAULT_PER_PROVIDER,
+        }
+    }
 }
 
 /// A held permit. Dropping it returns the permit to its counter.
@@ -46,8 +72,7 @@ impl Drop for Permit {
 /// caller's cue to refuse with 429.
 fn try_take(counter: &Arc<AtomicU32>, limit: u32) -> Option<Permit> {
     if limit == 0 {
-        // Unlimited: hand back a permit that counts nothing.
-        return Some(Permit { counter: None });
+        return None;
     }
     let mut current = counter.load(Ordering::Acquire);
     loop {
@@ -90,6 +115,11 @@ impl Admission {
         }
     }
 
+    #[must_use]
+    pub const fn global_limit(&self) -> u32 {
+        self.limits.global
+    }
+
     /// A permit against the global ceiling.
     pub fn enter_global(&self) -> Option<Permit> {
         try_take(&self.global, self.limits.global)
@@ -123,10 +153,21 @@ mod tests {
     use super::{Admission, Limits};
 
     #[test]
-    fn an_unlimited_gate_never_refuses() {
+    fn default_limits_bound_every_admission_level() {
+        let limits = Limits::default();
+        assert!(limits.global > 0);
+        assert!(limits.per_agent > 0);
+        assert!(limits.per_provider > 0);
+    }
+
+    #[test]
+    fn the_default_gate_is_finite_and_admits_normal_load() {
         let admission = Admission::new(Limits::default());
-        let permits: Vec<_> = (0..1000).map(|_| admission.enter_global()).collect();
+        let permits: Vec<_> = (0..Limits::default().global)
+            .map(|_| admission.enter_global())
+            .collect();
         assert!(permits.iter().all(Option::is_some));
+        assert!(admission.enter_global().is_none());
     }
 
     #[test]

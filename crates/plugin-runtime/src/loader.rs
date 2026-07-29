@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,6 +22,10 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::provider::SecretSigner;
 use crate::runtime::PluginRuntime;
+
+const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
+const MAX_COMPONENT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ABI_JSON_BYTES: usize = 16 * 1024 * 1024;
 
 /// Interface prefixes no adapter of any kind may import.
 ///
@@ -155,21 +160,46 @@ pub(crate) fn read_package(
     extra_forbidden: &[&str],
 ) -> Result<(AdapterManifest, Component), LoadError> {
     let manifest_path = dir.join("manifest.json");
+    let manifest_bytes =
+        read_file_limited(&manifest_path, MAX_MANIFEST_BYTES).map_err(|error| {
+            LoadError::Unreadable {
+                path: manifest_path.clone(),
+                detail: error,
+            }
+        })?;
     let manifest_source =
-        fs::read_to_string(&manifest_path).map_err(|error| LoadError::Unreadable {
+        String::from_utf8(manifest_bytes).map_err(|error| LoadError::Unreadable {
             path: manifest_path,
             detail: error.to_string(),
         })?;
     let manifest = gate_manifest(&manifest_source, expected_kind)?;
 
     let wasm_path = dir.join("adapter.wasm");
-    let wasm = fs::read(&wasm_path).map_err(|error| LoadError::Unreadable {
-        path: wasm_path,
-        detail: error.to_string(),
+    let wasm = read_file_limited(&wasm_path, MAX_COMPONENT_BYTES).map_err(|error| {
+        LoadError::Unreadable {
+            path: wasm_path,
+            detail: error,
+        }
     })?;
     let component = gate_component(runtime, &wasm, extra_forbidden)?;
 
     Ok((manifest, component))
+}
+
+fn read_file_limited(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if metadata.len() > limit {
+        return Err(format!("file exceeds the {limit} byte limit"));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+        return Err(format!("file exceeds the {limit} byte limit"));
+    }
+    Ok(bytes)
 }
 
 /// The filesystem-free twin of [`read_package`]: same gates, same order, for
@@ -227,20 +257,27 @@ fn gate_component(
 /// returns something else on its error channel gets an `internal` envelope
 /// quoting it, so the failure is still attributed to the adapter.
 pub(crate) fn parse_error_envelope(error_json: &str) -> ErrorEnvelope {
+    if error_json.len() > MAX_ABI_JSON_BYTES {
+        return ErrorEnvelope::new(
+            ErrorCode::Internal,
+            500,
+            "adapter error output exceeded the host limit",
+        );
+    }
     serde_json::from_str(error_json).unwrap_or_else(|_| {
         ErrorEnvelope::new(
             ErrorCode::Internal,
             500,
-            format!("adapter returned a malformed error: {error_json}"),
+            "adapter returned a malformed error envelope",
         )
     })
 }
 
-pub(crate) fn trap_envelope(trap: &wasmtime::Error) -> ErrorEnvelope {
+pub(crate) fn trap_envelope(_: &wasmtime::Error) -> ErrorEnvelope {
     ErrorEnvelope::new(
         ErrorCode::Internal,
         500,
-        format!("adapter did not answer: {trap}"),
+        "adapter trapped or exceeded a resource limit",
     )
 }
 
@@ -257,6 +294,13 @@ pub(crate) fn to_json<T: serde::Serialize>(value: &T) -> Result<String, ErrorEnv
 pub(crate) fn from_json<T: for<'de> serde::Deserialize<'de>>(
     json: &str,
 ) -> Result<T, ErrorEnvelope> {
+    if json.len() > MAX_ABI_JSON_BYTES {
+        return Err(ErrorEnvelope::new(
+            ErrorCode::Internal,
+            500,
+            "adapter JSON output exceeded the host limit",
+        ));
+    }
     serde_json::from_str(json).map_err(|error| {
         ErrorEnvelope::new(
             ErrorCode::Internal,
@@ -264,4 +308,16 @@ pub(crate) fn from_json<T: for<'de> serde::Deserialize<'de>>(
             format!("adapter returned JSON that is not the canonical form: {error}"),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn adapter_json_output_is_bounded_before_parsing() {
+        let oversized = serde_json::to_string(&"x".repeat(16 * 1024 * 1024 + 1))
+            .expect("test string serializes");
+        let error = super::from_json::<String>(&oversized)
+            .expect_err("a guest may not force an unbounded host allocation");
+        assert!(error.message.contains("limit"), "{}", error.message);
+    }
 }

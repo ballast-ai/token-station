@@ -27,6 +27,7 @@ pub mod gateway;
 pub mod manage;
 pub mod plugins;
 pub mod pricing;
+mod private_fs;
 pub mod quota_ledger;
 pub mod quota_lease;
 pub mod quota_tracker;

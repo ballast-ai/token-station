@@ -3745,6 +3745,35 @@ fn without_the_virtual_key_the_door_stays_shut() {
     std::fs::remove_file(key).ok();
 }
 
+#[test]
+fn unauthorized_requests_are_rejected_before_the_server_reads_the_body() {
+    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
+    let key = key_file("auth-before-body", "sk-test-key-abc");
+    let proxy = start_proxy(&mock, &key);
+    let host = proxy.url.strip_prefix("http://").expect("loopback URL");
+    let mut stream = TcpStream::connect(host).expect("loopback connects");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("bounded read");
+    write!(
+        stream,
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: {host}\r\n\
+         Content-Type: application/json\r\nContent-Length: 104857600\r\n\
+         Connection: close\r\n\r\n"
+    )
+    .expect("request headers write");
+    stream.flush().expect("request headers flush");
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("authentication refusal arrives without waiting for the declared body");
+    assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+    assert_eq!(mock.hits(), 0, "unauthorized bytes never reach the gateway");
+
+    std::fs::remove_file(key).ok();
+}
+
 // ---------------------------------------------------------------------------
 // `/admin/*` — the read-only data plane behind the same virtual-key gate.
 

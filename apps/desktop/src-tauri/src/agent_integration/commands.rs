@@ -404,16 +404,7 @@ fn migrate_master_key_off_keychain(key_path: &Path) {
     }
     let store = FileMasterKeyStore::new(key_path.to_path_buf());
     if let Ok(existing) = OsKeychainMasterKeyStore.load() {
-        if let Some(dir) = key_path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if std::fs::write(key_path, existing.as_ref()).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600));
-            }
-        }
+        let _ = super::safe_fs::write_atomic_private(key_path, existing.as_ref());
     } else {
         let _ = store.load_or_create(true);
     }

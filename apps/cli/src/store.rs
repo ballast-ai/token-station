@@ -637,6 +637,7 @@ impl SqliteStore {
         path: &Path,
         pricing: &crate::pricing::PriceTable,
     ) -> Result<usize, String> {
+        const BATCH_SIZE: usize = 500;
         if !path.exists() || pricing.models.is_empty() {
             return Ok(0);
         }
@@ -645,58 +646,71 @@ impl SqliteStore {
             .connection
             .lock()
             .map_err(|_| "cost backfill store lock is poisoned".to_owned())?;
-        let transaction = connection
-            .transaction()
-            .map_err(|error| format!("cost backfill transaction: {error}"))?;
-        let candidates = {
-            let mut statement = transaction
-                .prepare(
-                    "SELECT id, model,
-                            COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
-                            COALESCE(cache_read_tokens, 0), COALESCE(cache_write_tokens, 0),
-                            COALESCE(reasoning_tokens, 0)
-                       FROM requests
-                      WHERE cost_kind = 'unknown'
-                        AND model IS NOT NULL
-                        AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL)",
-                )
-                .map_err(|error| format!("cost backfill query: {error}"))?;
-            statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        Usage {
-                            input_tokens: narrow(row.get::<_, i64>(2)?),
-                            output_tokens: narrow(row.get::<_, i64>(3)?),
-                            cache_read_tokens: narrow(row.get::<_, i64>(4)?),
-                            cache_write_tokens: narrow(row.get::<_, i64>(5)?),
-                            reasoning_tokens: narrow(row.get::<_, i64>(6)?),
-                            ..Usage::default()
+        let mut updated = 0usize;
+        let mut last_id = 0i64;
+        loop {
+            let transaction = connection
+                .transaction()
+                .map_err(|error| format!("cost backfill transaction: {error}"))?;
+            let candidates = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT id, model,
+                                COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
+                                COALESCE(cache_read_tokens, 0), COALESCE(cache_write_tokens, 0),
+                                COALESCE(reasoning_tokens, 0)
+                           FROM requests
+                          WHERE id > ?1
+                            AND cost_kind = 'unknown'
+                            AND model IS NOT NULL
+                            AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL)
+                          ORDER BY id
+                          LIMIT ?2",
+                    )
+                    .map_err(|error| format!("cost backfill query: {error}"))?;
+                statement
+                    .query_map(
+                        rusqlite::params![last_id, i64::try_from(BATCH_SIZE).unwrap_or(i64::MAX)],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, String>(1)?,
+                                Usage {
+                                    input_tokens: narrow(row.get::<_, i64>(2)?),
+                                    output_tokens: narrow(row.get::<_, i64>(3)?),
+                                    cache_read_tokens: narrow(row.get::<_, i64>(4)?),
+                                    cache_write_tokens: narrow(row.get::<_, i64>(5)?),
+                                    reasoning_tokens: narrow(row.get::<_, i64>(6)?),
+                                    ..Usage::default()
+                                },
+                            ))
                         },
-                    ))
-                })
-                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
-                .map_err(|error| format!("cost backfill decode: {error}"))?
-        };
-
-        let mut updated = 0;
-        for (id, model, usage) in candidates {
-            let Some((cost, version)) = pricing.price(&model, &usage) else {
-                continue;
+                    )
+                    .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                    .map_err(|error| format!("cost backfill decode: {error}"))?
             };
-            updated += transaction
-                .execute(
-                    "UPDATE requests
-                        SET cost_kind = 'estimated', cost_micros = ?1, price_version = ?2
-                      WHERE id = ?3 AND cost_kind = 'unknown'",
-                    rusqlite::params![cost, version, id],
-                )
-                .map_err(|error| format!("cost backfill update: {error}"))?;
+            let batch_len = candidates.len();
+            for (id, model, usage) in candidates {
+                last_id = id;
+                let Some((cost, version)) = pricing.price(&model, &usage) else {
+                    continue;
+                };
+                updated += transaction
+                    .execute(
+                        "UPDATE requests
+                            SET cost_kind = 'estimated', cost_micros = ?1, price_version = ?2
+                          WHERE id = ?3 AND cost_kind = 'unknown'",
+                        rusqlite::params![cost, version, id],
+                    )
+                    .map_err(|error| format!("cost backfill update: {error}"))?;
+            }
+            transaction
+                .commit()
+                .map_err(|error| format!("cost backfill commit: {error}"))?;
+            if batch_len < BATCH_SIZE {
+                break;
+            }
         }
-        transaction
-            .commit()
-            .map_err(|error| format!("cost backfill commit: {error}"))?;
         Ok(updated)
     }
 

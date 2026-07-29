@@ -241,19 +241,11 @@ fn read_ledger(path: &Path) -> Option<RevisionLedger> {
 }
 
 fn write_ledger(path: &Path, ledger: &RevisionLedger) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "revision sidecar 路径没有父目录".to_owned())?;
-    fs::create_dir_all(parent).map_err(|_| "创建 revision sidecar 目录失败".to_owned())?;
     let mut rendered =
         serde_json::to_vec_pretty(ledger).map_err(|_| "序列化 revision sidecar 失败".to_owned())?;
     rendered.push(b'\n');
-    let temporary = path.with_file_name(format!(".{LEDGER_FILE}.tmp"));
-    fs::write(&temporary, rendered).map_err(|_| "写 revision sidecar 失败".to_owned())?;
-    fs::rename(&temporary, path).map_err(|_| {
-        fs::remove_file(&temporary).ok();
-        "提交 revision sidecar 失败".to_owned()
-    })
+    crate::agent_integration::safe_fs::write_atomic_private(path, &rendered)
+        .map_err(|_| "提交 revision sidecar 失败".to_owned())
 }
 
 #[cfg(test)]

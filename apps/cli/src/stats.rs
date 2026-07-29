@@ -13,6 +13,11 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags};
 use token_station_metrics::SCHEMA_VERSION;
 
+/// Exact percentiles require retaining the selected latencies. Refuse an
+/// unbounded historical scan instead of allowing a local admin request to
+/// consume memory proportional to an operator-controlled database.
+pub(crate) const MAX_STATS_ROWS: usize = 100_000;
+
 /// What `--by` groups on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupBy {
@@ -213,7 +218,7 @@ pub fn collect_filtered(
                AND (?6 IS NULL OR model = ?6)",
         )
         .map_err(|error| format!("metrics query: {error}"))?;
-    let rows = statement
+    let mapped = statement
         .query_map(
             rusqlite::params![
                 i64::try_from(start_ms.unwrap_or(0)).unwrap_or(i64::MAX),
@@ -246,8 +251,12 @@ pub fn collect_filtered(
                 })
             },
         )
-        .and_then(Iterator::collect::<Result<Vec<Row>, _>>)
         .map_err(|error| format!("metrics query: {error}"))?;
+    let mut rows = Vec::new();
+    for row in mapped {
+        enforce_stats_row_limit(rows.len().saturating_add(1))?;
+        rows.push(row.map_err(|error| format!("metrics query: {error}"))?);
+    }
 
     let total = aggregate(rows.iter());
     let groups = match group_by {
@@ -265,6 +274,16 @@ pub fn collect_filtered(
     };
 
     Ok(Report { total, groups })
+}
+
+fn enforce_stats_row_limit(selected_rows: usize) -> Result<(), String> {
+    if selected_rows > MAX_STATS_ROWS {
+        return Err(format!(
+            "stats query selects more than {MAX_STATS_ROWS} receipts; narrow the time window or \
+             add an exact filter"
+        ));
+    }
+    Ok(())
 }
 
 /// Renders a report as an aligned table, totals last.
@@ -442,7 +461,9 @@ fn percentage(part: u64, whole: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{GroupBy, StatsFilter, collect, parse_since};
+    use super::{
+        GroupBy, MAX_STATS_ROWS, StatsFilter, collect, enforce_stats_row_limit, parse_since,
+    };
     use crate::store::SqliteStore;
     use std::path::PathBuf;
     use token_station_metrics::{Recorder, RequestRecord, RoutingRecord};
@@ -516,6 +537,13 @@ mod tests {
         assert_eq!(report.total.cost_micros, None, "no pricing table yet");
 
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn stats_scan_has_a_hard_process_memory_boundary() {
+        assert!(enforce_stats_row_limit(MAX_STATS_ROWS).is_ok());
+        let error = enforce_stats_row_limit(MAX_STATS_ROWS + 1).unwrap_err();
+        assert!(error.contains("narrow the time window"));
     }
 
     #[test]
