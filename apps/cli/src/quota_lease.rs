@@ -190,4 +190,66 @@ mod tests {
         // Saturates without underflowing.
         assert_eq!(apply_inflight_penalty(200, 50, None), 0);
     }
+
+    // ── P0② concurrency / no-oversend ────────────────────────────────────────
+
+    #[test]
+    fn concurrent_grant_release_leaks_no_in_flight_count() {
+        // The gateway holds one QuotaTracker (hence one InflightLeases) behind a
+        // Mutex and hits it from many request threads. Every grant that settles
+        // must release cleanly, whatever the interleaving, so no account is left
+        // with a phantom in-flight count that would wrongly steer routing away
+        // from it forever. Global serials must stay unique so a release never
+        // removes a different request's lease.
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let leases = Arc::new(Mutex::new(InflightLeases::new(DEFAULT_LEASE_MS)));
+        let threads = 16;
+        let per_thread = 500;
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                let leases = Arc::clone(&leases);
+                thread::spawn(move || {
+                    // 16 threads contend over 4 shared accounts.
+                    let account = format!("acct-{}", t % 4);
+                    for _ in 0..per_thread {
+                        let id = leases.lock().expect("lease lock").grant(1_000, &account);
+                        leases.lock().expect("lease lock").release(&id);
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("thread joins");
+        }
+
+        let guard = leases.lock().expect("lease lock");
+        for account in 0..4 {
+            assert_eq!(
+                guard.inflight(1_000, &format!("acct-{account}")),
+                0,
+                "every granted lease was released — no leak under concurrency"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flood_of_unreleased_leases_all_self_heal_at_expiry() {
+        // Abnormal-exit path at scale: a thousand requests crash/hang holding a
+        // lease and never release. The in-flight count must self-heal at expiry
+        // without any release, so a run of failures cannot park an account out
+        // of rotation permanently.
+        let mut leases = InflightLeases::new(DEFAULT_LEASE_MS);
+        for _ in 0..1_000 {
+            leases.grant(5_000, "acct");
+        }
+        assert_eq!(leases.inflight(5_000, "acct"), 1_000);
+        assert_eq!(leases.inflight(5_000 + DEFAULT_LEASE_MS - 1, "acct"), 1_000);
+        assert_eq!(
+            leases.inflight(5_000 + DEFAULT_LEASE_MS, "acct"),
+            0,
+            "all leaked leases expire together — the count fully self-heals"
+        );
+    }
 }
