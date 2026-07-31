@@ -3780,19 +3780,6 @@ fn serve_stop(app: AppHandle, state: State<'_, AppStateManaged>) -> StateView {
     begin_serve_stop(app, state.inner())
 }
 
-/// Claude Code:写 `~/.claude/settings.json` 的 env 块(key 内嵌,CC 直接读,无需
-/// 手动 export)。CC 走 Anthropic 协议——端到端还需 agent-anthropic 适配器就位。
-/// 判断 `plugins` 配置里是否已挂上能讲 Anthropic 的入站适配器。看 `agents` 列表
-/// 与废弃的单串 `agent` 两处适配器名——不看 providers,避免误判。agent-anthropic
-/// 一旦进配置,CC 安全闸就据此自动解封。
-pub(crate) fn inbound_adapter_ready(plugins: &Value, expected: &str) -> bool {
-    let hits = |value: &Value| value.as_str() == Some(expected);
-    let in_list = plugins["agents"]
-        .as_array()
-        .is_some_and(|arr| arr.iter().any(hits));
-    in_list || hits(&plugins["agent"])
-}
-
 /// 入站适配器的展示串:优先 `agents` 列表(逗号连接),否则回退单串 `agent`。
 fn agents_display(plugins: &Value) -> String {
     let list: Vec<&str> = plugins["agents"]
@@ -5348,27 +5335,6 @@ mod tests {
 
         assert_eq!(prepared["plugins"]["agents"], json!(desktop_agents()));
         std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn inbound_readiness_requires_exact_adapter_names() {
-        let plugins = json!({
-            "agents": [
-                "agent-anthropic-proxy",
-                "agent-openai-responses-beta",
-                "agent-openai-compatible"
-            ]
-        });
-        assert!(!inbound_adapter_ready(&plugins, "agent-anthropic"));
-        assert!(!inbound_adapter_ready(&plugins, "agent-openai-responses"));
-        assert!(!inbound_adapter_ready(&plugins, "agent-openai"));
-
-        let plugins = json!({
-            "agents": ["agent-anthropic", "agent-openai-responses", "agent-openai"]
-        });
-        assert!(inbound_adapter_ready(&plugins, "agent-anthropic"));
-        assert!(inbound_adapter_ready(&plugins, "agent-openai-responses"));
-        assert!(inbound_adapter_ready(&plugins, "agent-openai"));
     }
 
     #[test]

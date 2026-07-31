@@ -482,6 +482,7 @@ export interface AgentCompatibilityView {
 export interface AgentInstallationView {
   discovery: AgentDiscoveryView;
   compatibility: AgentCompatibilityView;
+  adapter_ready: boolean | null;
   managed: boolean;
   connected: boolean;
 }

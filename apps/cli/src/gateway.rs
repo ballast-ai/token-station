@@ -759,6 +759,7 @@ enum AttemptTerminal {
 /// One loaded inbound adapter and the protocol its manifest declares. The
 /// gateway holds several and asks each `match_inbound` which claims a request.
 struct LoadedAgent {
+    package: String,
     plugin: AgentPlugin,
     protocol: String,
 }
@@ -1127,7 +1128,11 @@ impl Gateway {
             .first()
             .cloned()
             .ok_or_else(|| "declares no protocol".to_owned())?;
-        Ok(LoadedAgent { plugin, protocol })
+        Ok(LoadedAgent {
+            package: package.to_owned(),
+            plugin,
+            protocol,
+        })
     }
 
     fn load_agents(
@@ -1378,6 +1383,14 @@ impl Gateway {
     #[must_use]
     pub fn skipped_agents(&self) -> &[(String, String)] {
         &self.skipped_agents
+    }
+
+    /// Whether this running Gateway actually loaded the configured inbound
+    /// adapter package. This intentionally reports the immutable runtime
+    /// composition rather than repeating configuration intent.
+    #[must_use]
+    pub fn agent_adapter_ready(&self, package: &str) -> bool {
+        self.agents.iter().any(|agent| agent.package == package)
     }
 
     /// Value-free explanation of the actual running egress resolution for

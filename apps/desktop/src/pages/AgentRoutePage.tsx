@@ -86,6 +86,21 @@ function statusCopy(
       ),
     };
   }
+  if (installation?.adapter_ready === false) {
+    return {
+      tone: "danger",
+      label: copy("Adapter unavailable", "适配器未就绪"),
+      detail: installation.managed
+        ? copy(
+            "The managed configuration still exists, but the running Gateway did not load its required inbound adapter. Requests cannot be served; restore the original configuration or repair the adapter and restart the proxy.",
+            "接管配置仍存在，但当前 Gateway 未加载所需入站适配器，无法处理请求。请恢复原始配置，或修复适配器后重启代理。",
+          )
+        : copy(
+            "The running Gateway did not load the required inbound adapter. No Agent configuration was changed.",
+            "当前 Gateway 未加载所需入站适配器，暂不可接入；Agent 配置未被修改。",
+          ),
+    };
+  }
   if (installation?.connected) {
     return {
       tone: "success",
@@ -175,6 +190,7 @@ export default function AgentRoutePage({
   const managed = installation?.managed ?? false;
   const canConnect = Boolean(
     installation
+      && installation.adapter_ready !== false
       && (["DETECTED_VERIFIED", "CONNECTED"].includes(installation.compatibility.status)
         || isExactMultiInstallSelection(agent, installation)),
   );

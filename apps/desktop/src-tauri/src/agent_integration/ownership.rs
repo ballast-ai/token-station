@@ -6,7 +6,7 @@ use ring::hmac;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use super::config_codec::{semantic_json, ConfigDocument};
+use super::config_codec::{semantic_json, ConfigDocument, DocumentFormat};
 use super::safe_fs::{ensure_private_dir, verify_private_file, write_atomic_private};
 use super::types::ConfigPath;
 
@@ -40,6 +40,8 @@ pub struct OwnershipRecord {
 #[serde(deny_unknown_fields)]
 pub struct CompanionOwnership {
     pub target_config_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_format: Option<DocumentFormat>,
     pub baseline_snapshot_id: String,
     pub last_transaction_snapshot_id: String,
     pub before_hash: String,

@@ -8,6 +8,7 @@ function installation(path: string, version: string | null): AgentInstallationVi
   return {
     managed: false,
     connected: false,
+    adapter_ready: true,
     discovery: {
       agent_id: "claude-code",
       executable_path: path,
