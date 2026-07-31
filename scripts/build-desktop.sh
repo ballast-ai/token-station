@@ -95,6 +95,8 @@ if [[ -n "$test_version" ]]; then
   test_version_config="$stage/test-version.json"
   printf '%s\n' "{\"version\":\"$test_version\"}" >"$test_version_config"
   tauri_args+=(--config "$test_version_config")
+  # Installer lifecycle builds need the underlying candle/light diagnostics.
+  tauri_args+=(-v -v)
 fi
 bundle_root="$root/apps/desktop/src-tauri/target/release/bundle"
 binary_path="$root/apps/desktop/src-tauri/target/release/token-station-desktop"
