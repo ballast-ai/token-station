@@ -2128,7 +2128,14 @@ impl Gateway {
         headers: &[(String, String)],
         body: &[u8],
         record: &mut RequestRecord,
-    ) -> Result<(ChatRequest, Vec<token_station_protocol::AgentHint>), ErrorEnvelope> {
+    ) -> Result<
+        (
+            ChatRequest,
+            Vec<token_station_protocol::AgentHint>,
+            Value,
+        ),
+        ErrorEnvelope,
+    > {
         let inbound_protocol = record.protocol.clone();
         if body.len() > MAX_INBOUND_BODY {
             let error = ErrorEnvelope::new(
@@ -2228,7 +2235,17 @@ impl Gateway {
             }
         };
         let hints = agent.plugin.extract_agent_hint(&envelope)?;
-        Ok((request, hints))
+        // Carry the caller's original tool declarations forward, untouched, so
+        // the outbound render can restore Codex tool kinds (custom/local_shell/
+        // namespace) that `normalize_inbound` flattened into plain functions.
+        // The gateway only transports this blob; all Codex semantics live in the
+        // agent plugin, which rebuilds its restore map from it at render time.
+        let inbound_tools = envelope
+            .body
+            .get("tools")
+            .cloned()
+            .unwrap_or(Value::Null);
+        Ok((request, hints, inbound_tools))
     }
 
     /// The pipeline. Returns `Err` only before anything was emitted, so the
@@ -2246,7 +2263,8 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
-        let (request, hints) = Self::normalize_request(agent, method, path, headers, body, record)?;
+        let (request, hints, inbound_tools) =
+            Self::normalize_request(agent, method, path, headers, body, record)?;
         // Privacy boundary: the persisted requested model is a configured name
         // or a hashed `unlisted:` token — never the caller's raw string.
         let configured = self
@@ -2326,7 +2344,7 @@ impl Gateway {
                 .grant(decision.chosen.upstream.as_str(), now_ms)
         });
 
-        let result = self.dispatch(ctx, agent, &request, &decision, emit, record);
+        let result = self.dispatch(ctx, agent, &request, &inbound_tools, &decision, emit, record);
 
         if let Some(now_ms) = quota_now_ms {
             self.settle_quota(&session, lease.as_ref(), now_ms, record, &result);
@@ -2388,6 +2406,7 @@ impl Gateway {
         ctx: &RequestContext,
         agent: &LoadedAgent,
         request: &ChatRequest,
+        inbound_tools: &Value,
         decision: &Decision,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
@@ -2432,6 +2451,7 @@ impl Gateway {
                 budget.per_attempt_timeout,
                 agent,
                 request,
+                inbound_tools,
                 target,
                 emit,
                 record,
@@ -2655,6 +2675,7 @@ impl Gateway {
         agent: &LoadedAgent,
         upstream: &Upstream,
         response: UpstreamResponse,
+        inbound_tools: &Value,
         target: &UpstreamModel,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
@@ -2665,6 +2686,7 @@ impl Gateway {
             "stream_id": format!("stream-{sequence}"),
             "response_id": format!("msg_token_station_{sequence}"),
             "model": target.model,
+            "inbound_tools": inbound_tools,
         });
         let result = Self::relay_stream(
             ctx,
@@ -2704,6 +2726,7 @@ impl Gateway {
         agent: &LoadedAgent,
         upstream: &Upstream,
         response: UpstreamResponse,
+        inbound_tools: &Value,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
@@ -2738,6 +2761,7 @@ impl Gateway {
             "protocol": record.protocol,
             "response_id": chat_response.id,
             "model": chat_response.model,
+            "inbound_tools": inbound_tools,
         });
         let rendered = agent
             .plugin
@@ -2777,6 +2801,7 @@ impl Gateway {
         attempt_timeout: Duration,
         agent: &LoadedAgent,
         request: &ChatRequest,
+        inbound_tools: &Value,
         target: &UpstreamModel,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
@@ -2859,9 +2884,26 @@ impl Gateway {
         }
 
         if request.stream {
-            Self::translate_stream_response(ctx, agent, upstream, response, target, emit, record)
+            Self::translate_stream_response(
+                ctx,
+                agent,
+                upstream,
+                response,
+                inbound_tools,
+                target,
+                emit,
+                record,
+            )
         } else {
-            Self::translate_nonstream_response(ctx, agent, upstream, response, emit, record)
+            Self::translate_nonstream_response(
+                ctx,
+                agent,
+                upstream,
+                response,
+                inbound_tools,
+                emit,
+                record,
+            )
         }
     }
 
