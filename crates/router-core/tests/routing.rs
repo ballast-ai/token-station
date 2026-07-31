@@ -362,20 +362,18 @@ fn the_operators_order_survives_inside_a_health_class() {
 }
 
 #[test]
-fn an_unavailable_pool_is_retriable_and_an_incapable_one_is_not() {
+fn an_all_ejected_pool_degrades_to_last_resort_and_an_incapable_one_hard_fails() {
     let mut removed = candidates();
     removed[0].health = Health::Unavailable; // the only member of `cheap`
 
-    let all_down = router()
+    // Every capable candidate in `cheap` is ejected. Rather than a hard 503 for
+    // the length of a cooldown, the pool degrades to a last-resort probe: the
+    // ejected candidate is offered so a single-candidate pool keeps making
+    // progress (a successful probe clears the ejection).
+    let last_resort = router()
         .route(&ask("hi"), &[], &removed)
-        .expect_err("nothing left in `cheap`");
-    assert_eq!(
-        all_down,
-        NoRoute::Unavailable {
-            pool: "cheap".to_owned()
-        }
-    );
-    assert!(all_down.error_code().is_retriable_elsewhere());
+        .expect("an all-ejected pool degrades to a last-resort probe, not a 503");
+    assert_eq!(last_resort.chosen, removed[0].target);
 
     // `cheap` holds a model that reports no vision support.
     let mut request = ask("what is in this image");
