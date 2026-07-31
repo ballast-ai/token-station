@@ -112,14 +112,12 @@ pub fn apply_inflight_penalty(
     rate_limit_per_min: Option<u64>,
 ) -> u16 {
     let penalty = match rate_limit_per_min {
-        Some(limit) if limit > 0 => u32::try_from(
-            u64::from(inflight)
-                .saturating_mul(1000)
-                / limit,
-        )
-        .unwrap_or(1000)
-        .min(1000),
-        _ => inflight.saturating_mul(DEFAULT_INFLIGHT_DOCK_PERMILLE).min(1000),
+        Some(limit) if limit > 0 => u32::try_from(u64::from(inflight).saturating_mul(1000) / limit)
+            .unwrap_or(1000)
+            .min(1000),
+        _ => inflight
+            .saturating_mul(DEFAULT_INFLIGHT_DOCK_PERMILLE)
+            .min(1000),
     };
     let penalty = u16::try_from(penalty).unwrap_or(1000);
     headroom_permille.saturating_sub(penalty)

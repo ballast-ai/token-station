@@ -217,6 +217,11 @@ impl AtomicConfigWriter for FsAtomicConfigWriter {
                 stage: AtomicWriteStage::Replace,
                 target_replaced: false,
             })?;
+            #[cfg(windows)]
+            super::safe_fs::verify_private_file(target).map_err(|_| AtomicWriteFailure {
+                stage: AtomicWriteStage::Permission,
+                target_replaced: true,
+            })?;
             sync_parent(parent).map_err(|_| AtomicWriteFailure {
                 stage: AtomicWriteStage::DirectoryFsync,
                 target_replaced: true,
@@ -281,48 +286,7 @@ fn apply_metadata(
 /// protection boundary, just as on Unix root can read a 0600 file.
 #[cfg(windows)]
 fn apply_windows_owner_dacl(path: &Path) -> Result<(), ()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-    };
-    use windows_sys::Win32::Security::{
-        SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-    };
-
-    // OW is the current file owner. P disables inheritance, so a permissive
-    // parent directory cannot reintroduce another local reader after rename.
-    let sddl: Vec<u16> = "D:P(A;;FA;;;OW)".encode_utf16().chain(Some(0)).collect();
-    let mut descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    // SAFETY: both UTF-16 inputs are NUL terminated and descriptor is released
-    // with LocalFree exactly once on every path after successful allocation.
-    let created = unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            SDDL_REVISION_1,
-            &mut descriptor,
-            std::ptr::null_mut(),
-        )
-    };
-    if created == 0 || descriptor.is_null() {
-        return Err(());
-    }
-    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: path and descriptor remain valid for the synchronous Win32 call.
-    let applied = unsafe {
-        SetFileSecurityW(
-            path.as_ptr(),
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            descriptor,
-        )
-    };
-    // SAFETY: descriptor was allocated by ConvertStringSecurityDescriptor…
-    unsafe { LocalFree(descriptor.cast()) };
-    if applied == 0 {
-        Err(())
-    } else {
-        Ok(())
-    }
+    token_station_private_fs::harden_private_file(path).map_err(|_| ())
 }
 
 #[cfg(not(unix))]

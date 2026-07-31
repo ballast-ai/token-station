@@ -7,17 +7,32 @@ wit_bindgen::generate!({
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use exports::token_station::adapter::agent_adapter::{AdapterHealth, AdapterMetadata, Guest};
 use serde_json::{json, Value};
 use token_station::adapter::common::{AdapterKind, HealthStatus};
 use token_station_protocol::{
     AgentHint, AgentRequestEnvelope, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
-    ErrorEnvelope, Extensions, FinishReason, HintKind, ImageUrl, Message, Role, Sampling,
-    StreamEvent, ToolCall, ToolChoice, ToolDef, Usage,
+    ErrorEnvelope, Extensions, FinishReason, HintKind, ImageUrl, Message, ResponseFormat, Role,
+    Sampling, StreamEvent, ToolCall, ToolChoice, ToolDef, Usage,
 };
 
 struct ResponsesClient;
+
+const LOCAL_SHELL_TOOL_NAME: &str = "__token_station_responses_local_shell";
+const CONTINUATION_KEY_EXTENSION: &str = "token_station_private_continuation_key";
+const CONTINUATION_SCOPE_EXTENSION: &str = "token_station_continuation_scope";
+const TRANSIENT_INSTRUCTIONS_EXTENSION: &str = "responses_transient_instructions";
+const TOOL_NAMESPACES_EXTENSION: &str = "responses_tool_namespaces";
+const MAX_TOOL_NAME_BYTES: usize = 128;
+const MAX_NAMESPACE_NAME_BYTES: usize = 64;
+const CONTINUATION_TTL_MS: u64 = 30 * 60 * 1_000;
+const PENDING_CONTINUATION_TTL_MS: u64 = 5 * 60 * 1_000;
+const MAX_CONTINUATION_ENTRIES: usize = 64;
+const MAX_PENDING_CONTINUATIONS: usize = 64;
+const MAX_CONTINUATION_ENTRY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CONTINUATION_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
 const DIRECT_REQUEST_FIELDS: &[&str] = &[
     "model",
@@ -32,6 +47,7 @@ const DIRECT_REQUEST_FIELDS: &[&str] = &[
     "tool_choice",
     "parallel_tool_calls",
     "reasoning",
+    "text",
 ];
 
 fn fail(envelope: &ErrorEnvelope) -> String {
@@ -71,15 +87,15 @@ fn as_u32(value: &Value, field: &str) -> Result<u32, String> {
         .ok_or_else(|| invalid(format!("{field} must be an unsigned 32-bit integer")))
 }
 
-fn validate_text_format(body: &Value) -> Result<(), String> {
+fn response_format_of(body: &Value) -> Result<Option<ResponseFormat>, String> {
     let Some(text) = body.get("text").filter(|value| !value.is_null()) else {
-        return Ok(());
+        return Ok(None);
     };
     let text = text
         .as_object()
         .ok_or_else(|| invalid("text must be an object"))?;
     let Some(format) = text.get("format").filter(|value| !value.is_null()) else {
-        return Ok(());
+        return Ok(None);
     };
     let format = format
         .as_object()
@@ -90,10 +106,24 @@ fn validate_text_format(body: &Value) -> Result<(), String> {
         .ok_or_else(|| invalid("text.format declares no string type"))?;
 
     match kind {
-        "text" => Ok(()),
-        "json_schema" | "json_object" => Err(capability(
-            "Responses structured output requires an approved Canonical IR/provider mapping",
-        )),
+        "text" => Ok(Some(ResponseFormat::Text)),
+        "json_object" => Ok(Some(ResponseFormat::JsonObject)),
+        "json_schema" => {
+            let schema = format
+                .get("schema")
+                .filter(|value| value.is_object())
+                .ok_or_else(|| invalid("text.format json_schema declares no schema object"))?;
+            let mut normalized = serde_json::Map::new();
+            for key in ["name", "description", "strict"] {
+                if let Some(value) = format.get(key) {
+                    normalized.insert(key.to_owned(), value.clone());
+                }
+            }
+            normalized.insert("schema".to_owned(), schema.clone());
+            Ok(Some(ResponseFormat::JsonSchema {
+                json_schema: Value::Object(normalized),
+            }))
+        }
         kind => Err(capability(format!(
             "unsupported Responses text.format type {kind}"
         ))),
@@ -101,28 +131,32 @@ fn validate_text_format(body: &Value) -> Result<(), String> {
 }
 
 fn validate_semantic_options(body: &Value) -> Result<(), String> {
-    if body
+    if let Some(previous) = body
         .get("previous_response_id")
-        .is_some_and(|value| !value.is_null())
+        .filter(|value| !value.is_null())
     {
-        return Err(capability(
-            "Responses previous_response_id requires stateful response chaining that Canonical IR does not represent",
-        ));
+        if !previous
+            .as_str()
+            .is_some_and(|value| !value.is_empty() && value.len() <= 256)
+        {
+            return Err(invalid(
+                "previous_response_id must be a non-empty string of at most 256 bytes",
+            ));
+        }
     }
 
     match body.get("tool_choice") {
         None | Some(Value::Null) => {}
-        Some(Value::String(choice)) if choice == "auto" => {}
+        Some(Value::String(choice)) if matches!(choice.as_str(), "auto" | "none" | "required") => {}
         Some(Value::String(choice)) => {
             return Err(capability(format!(
                 "Responses tool_choice {choice} cannot be preserved by Canonical IR"
             )));
         }
-        Some(Value::Object(_)) => {
-            return Err(capability(
-                "Responses forced tool_choice cannot be preserved by Canonical IR",
-            ));
-        }
+        Some(Value::Object(choice))
+            if choice.get("type").and_then(Value::as_str) == Some("function")
+                && choice.get("name").is_some_and(Value::is_string) => {}
+        Some(Value::Object(_)) => return Err(invalid("forced tool_choice is malformed")),
         Some(_) => return Err(invalid("tool_choice must be a string or object")),
     }
 
@@ -153,6 +187,150 @@ fn validate_semantic_options(body: &Value) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn tool_choice_of(value: Option<&Value>) -> Result<Option<ToolChoice>, String> {
+    match value.filter(|value| !value.is_null()) {
+        None => Ok(None),
+        Some(Value::String(choice)) if choice == "auto" => Ok(Some(ToolChoice::Auto)),
+        Some(Value::String(choice)) if choice == "none" => Ok(Some(ToolChoice::None)),
+        Some(Value::String(choice)) if choice == "required" => Ok(Some(ToolChoice::Required)),
+        Some(Value::Object(choice))
+            if choice.get("type").and_then(Value::as_str) == Some("function") =>
+        {
+            let name = choice
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("forced function tool_choice declares no name"))?;
+            let name = match choice.get("namespace").filter(|value| !value.is_null()) {
+                Some(namespace) => flattened_namespace_tool_name(
+                    namespace
+                        .as_str()
+                        .ok_or_else(|| invalid("forced tool_choice namespace must be a string"))?,
+                    name,
+                )?,
+                None => name.to_owned(),
+            };
+            Ok(Some(ToolChoice::Other(json!({
+                "type": "function",
+                "function": {"name": name}
+            }))))
+        }
+        Some(Value::Object(_)) => Err(invalid("forced tool_choice is malformed")),
+        Some(_) => Err(invalid("tool_choice must be a string or object")),
+    }
+}
+
+fn valid_tool_component(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn flattened_namespace_tool_name(namespace: &str, name: &str) -> Result<String, String> {
+    if !valid_tool_component(namespace, MAX_NAMESPACE_NAME_BYTES) {
+        return Err(invalid(
+            "Responses namespace tool declares an invalid namespace",
+        ));
+    }
+    if !valid_tool_component(name, MAX_TOOL_NAME_BYTES) {
+        return Err(invalid(
+            "Responses namespace tool declares an invalid function name",
+        ));
+    }
+    let flattened = if namespace.ends_with("__") {
+        format!("{namespace}{name}")
+    } else {
+        format!("{namespace}__{name}")
+    };
+    if flattened.len() > MAX_TOOL_NAME_BYTES {
+        return Err(capability(
+            "Responses namespace and function name exceed the provider tool-name limit",
+        ));
+    }
+    Ok(flattened)
+}
+
+#[derive(Clone)]
+struct FlattenedNamespaceTool {
+    flattened_name: String,
+    namespace: String,
+    name: String,
+    description: Option<String>,
+    parameters: Value,
+    strict: Option<bool>,
+}
+
+fn flattened_namespace_tools(tool: &Value) -> Result<Vec<FlattenedNamespaceTool>, String> {
+    let namespace = tool
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("namespace tool declares no name"))?;
+    let namespace_description = match tool.get("description").filter(|value| !value.is_null()) {
+        Some(description) => Some(
+            description
+                .as_str()
+                .ok_or_else(|| invalid("namespace tool description must be a string"))?,
+        ),
+        None => None,
+    };
+    let tools = tool
+        .get("tools")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("namespace tool declares no tools array"))?;
+    tools
+        .iter()
+        .map(|nested| {
+            if nested.get("type").and_then(Value::as_str) != Some("function") {
+                return Err(capability(
+                    "Responses namespace contains a non-function client tool",
+                ));
+            }
+            let name = nested
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("namespace function declares no name"))?;
+            let flattened_name = flattened_namespace_tool_name(namespace, name)?;
+            let nested_description = match nested
+                .get("description")
+                .filter(|value| !value.is_null())
+            {
+                Some(description) => Some(
+                    description
+                        .as_str()
+                        .ok_or_else(|| invalid("namespace function description must be a string"))?
+                        .to_owned(),
+                ),
+                None => None,
+            };
+            let description = match (namespace_description, nested_description) {
+                (Some(namespace), Some(function)) => Some(format!("{namespace}\n\n{function}")),
+                (Some(namespace), None) => Some(namespace.to_owned()),
+                (None, description) => description,
+            };
+            let strict = match nested.get("strict").filter(|value| !value.is_null()) {
+                Some(strict) => Some(
+                    strict
+                        .as_bool()
+                        .ok_or_else(|| invalid("namespace function strict must be a boolean"))?,
+                ),
+                None => None,
+            };
+            Ok(FlattenedNamespaceTool {
+                flattened_name,
+                namespace: namespace.to_owned(),
+                name: name.to_owned(),
+                description,
+                parameters: nested
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+                strict,
+            })
+        })
+        .collect()
 }
 
 fn image_part(block: &Value) -> Result<ContentPart, String> {
@@ -250,13 +428,14 @@ fn function_call_item(item: &Value) -> Result<Message, String> {
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid("function_call declares no name"))?;
-    // A replayed namespace call carries a `namespace` field alongside the bare
-    // child name (this is how `restore_tool_call_item` emitted it). Flatten it
-    // back to the `<namespace>__<child>` name the tool was declared under, so
-    // history lines up with the current turn's tools.
-    let name = match item.get("namespace").and_then(Value::as_str) {
-        Some(namespace) if !namespace.is_empty() => flatten_namespace_name(namespace, name),
-        _ => name.to_owned(),
+    let name = match item.get("namespace").filter(|value| !value.is_null()) {
+        Some(namespace) => flattened_namespace_tool_name(
+            namespace
+                .as_str()
+                .ok_or_else(|| invalid("function_call namespace must be a string"))?,
+            name,
+        )?,
+        None => name.to_owned(),
     };
     let arguments = item
         .get("arguments")
@@ -372,6 +551,103 @@ fn function_output_item(item: &Value) -> Result<Message, String> {
     })
 }
 
+fn local_shell_call_item(item: &Value) -> Result<Message, String> {
+    let call_id = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("local_shell_call declares no call_id"))?;
+    let action = item
+        .get("action")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| invalid("local_shell_call declares no action object"))?;
+    Ok(Message {
+        role: Role::Assistant,
+        content: None,
+        tool_calls: vec![ToolCall {
+            id: call_id.to_owned(),
+            name: LOCAL_SHELL_TOOL_NAME.to_owned(),
+            arguments: json!({"action": action}).to_string(),
+        }],
+        tool_call_id: None,
+        name: None,
+        extensions: Extensions::new(),
+    })
+}
+
+fn local_shell_output_item(item: &Value) -> Result<Message, String> {
+    let call_id = item
+        .get("call_id")
+        .or_else(|| item.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("local_shell_call_output declares no id"))?;
+    let output = item
+        .get("output")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("local_shell_call_output declares no string output"))?;
+    Ok(Message {
+        role: Role::Tool,
+        content: Some(Content::Text(output.to_owned())),
+        tool_calls: Vec::new(),
+        tool_call_id: Some(call_id.to_owned()),
+        name: Some(LOCAL_SHELL_TOOL_NAME.to_owned()),
+        extensions: Extensions::new(),
+    })
+}
+
+fn reasoning_item(item: &Value) -> Result<Message, String> {
+    let mut parts = Vec::new();
+    if let Some(summary) = item.get("summary").filter(|value| !value.is_null()) {
+        let summary = summary
+            .as_array()
+            .ok_or_else(|| invalid("reasoning summary must be an array"))?;
+        for part in summary {
+            match part.get("type").and_then(Value::as_str) {
+                Some("summary_text") => parts.push(ContentPart::Thinking {
+                    thinking: part
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| invalid("reasoning summary_text declares no text"))?
+                        .to_owned(),
+                    signature: None,
+                }),
+                Some(kind) => {
+                    return Err(capability(format!(
+                        "unsupported Responses reasoning summary item {kind}"
+                    )));
+                }
+                None => return Err(invalid("reasoning summary item declares no type")),
+            }
+        }
+    }
+    let mut extensions = Extensions::new();
+    if let Some(id) = item.get("id").filter(|value| !value.is_null()) {
+        let id = id
+            .as_str()
+            .ok_or_else(|| invalid("reasoning id must be a string"))?;
+        extensions.insert("responses_reasoning_id".to_owned(), json!(id));
+    }
+    if let Some(encrypted) = item
+        .get("encrypted_content")
+        .filter(|value| !value.is_null())
+    {
+        let encrypted = encrypted
+            .as_str()
+            .ok_or_else(|| invalid("reasoning encrypted_content must be a string"))?;
+        extensions.insert(
+            "responses_reasoning_encrypted_content".to_owned(),
+            json!(encrypted),
+        );
+    }
+    Ok(Message {
+        role: Role::Assistant,
+        content: (!parts.is_empty()).then_some(Content::Parts(parts)),
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        name: None,
+        extensions,
+    })
+}
+
 fn merge_content(target: &mut Option<Content>, incoming: Option<Content>) {
     let Some(incoming) = incoming else {
         return;
@@ -417,6 +693,7 @@ fn coalesce_assistant_messages(messages: Vec<Message>) -> Vec<Message> {
                 .expect("the preceding assistant message was just checked");
             merge_content(&mut previous.content, message.content.take());
             previous.tool_calls.append(&mut message.tool_calls);
+            previous.extensions.append(&mut message.extensions);
         } else {
             coalesced.push(message);
         }
@@ -440,9 +717,9 @@ fn input_messages(input: &Value) -> Result<Vec<Message>, String> {
                     }
                     Some("tool_search_call") => tool_search_call_item(item),
                     Some("tool_search_output") => tool_result_item(item, "tool_search_output"),
-                    Some("reasoning") => Err(capability(
-                        "Responses reasoning items require an approved Canonical IR extension",
-                    )),
+                    Some("local_shell_call") => local_shell_call_item(item),
+                    Some("local_shell_call_output") => local_shell_output_item(item),
+                    Some("reasoning") => reasoning_item(item),
                     Some(kind) => Err(capability(format!(
                         "unsupported Responses input item {kind}"
                     ))),
@@ -726,116 +1003,186 @@ fn push_tool(
     Ok(())
 }
 
-/// Codex pairs `function` tools with built-ins (`local_shell`, `custom`,
-/// `namespace`, `tool_search`) and hosted tools (`web_search`, `file_search`,
-/// `code_interpreter`, …). Only `function` maps cleanly to Canonical IR, but
-/// dropping the rest hands the model a smaller tool set than the client declared
-/// (a fake success), and failing the whole request leaves Codex dead on arrival.
-/// So, following CC Switch, we translate every tool to a `function` the model can
-/// call: `namespace` children are lifted to top-level functions with the stable
-/// flat name `<namespace>__<child>` (a collision is a hard error, never a silent
-/// overwrite), and every other type becomes a function carrying its declared
-/// name/description/parameters. Client-executed tools (local_shell, custom,
-/// namespace) then run inside Codex exactly as before.
-///
-/// LIMITATION: response-side name restoration (flat name → `{name, namespace}`,
-/// and `function_call` → `custom_tool_call`/`local_shell_call` items) needs the
-/// host to thread a restore map from the request into the render context, since
-/// `normalize_inbound` and `render_*` are separate stateless calls. Until that
-/// lands, namespace tool calls come back flat. Genuinely server-hosted tools
-/// (web_search, file_search, …) only truly execute on an upstream that owns
-/// them; on other providers they are best-effort, at CC Switch parity.
 fn tools_of(value: &Value) -> Result<Vec<ToolDef>, String> {
-    let mut tools = Vec::new();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut definitions = Vec::new();
+    let mut names = BTreeSet::new();
     for tool in value.as_array().into_iter().flatten() {
-        let kind = match tool.get("type").and_then(Value::as_str) {
-            Some(kind) => kind,
-            None => return Err(invalid("tool declares no type")),
-        };
-        let description = tool
-            .get("description")
+        let kind = tool
+            .get("type")
             .and_then(Value::as_str)
-            .map(str::to_owned);
-        let parameters = tool.get("parameters").cloned().unwrap_or_else(|| json!({}));
-        match kind {
-            "function" => {
+            .ok_or_else(|| invalid("tool declares no type"))?;
+        if kind == "local_shell" {
+            let definition = ToolDef {
+                name: LOCAL_SHELL_TOOL_NAME.to_owned(),
+                description: Some(
+                    "Execute one argv command in the Codex client's local shell.".to_owned(),
+                ),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"const": "exec"},
+                                "command": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1
+                                },
+                                "env": {
+                                    "type": "object",
+                                    "additionalProperties": {"type": "string"}
+                                },
+                                "timeout_ms": {"type": "integer", "minimum": 1},
+                                "user": {"type": "string"},
+                                "working_directory": {"type": "string"}
+                            },
+                            "required": ["type", "command"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action"],
+                    "additionalProperties": false
+                }),
+            };
+            if !names.insert(definition.name.clone()) {
+                return Err(invalid("Responses tools contain a duplicate provider name"));
+            }
+            definitions.push(definition);
+            continue;
+        }
+        if kind == "namespace" {
+            for flattened in flattened_namespace_tools(tool)? {
+                if !names.insert(flattened.flattened_name.clone()) {
+                    return Err(invalid(
+                        "Responses namespace tools collide after provider flattening",
+                    ));
+                }
+                definitions.push(ToolDef {
+                    name: flattened.flattened_name,
+                    description: flattened.description,
+                    parameters: flattened.parameters,
+                });
+            }
+            continue;
+        }
+        if kind == "custom" {
+            push_tool(
+                &mut definitions,
+                &mut names,
+                custom_tool_name(tool),
+                Some(custom_tool_description(tool)),
+                custom_tool_parameters(),
+            )?;
+            continue;
+        }
+        if kind == "tool_search" {
+            push_tool(
+                &mut definitions,
+                &mut names,
+                TOOL_SEARCH_PROXY_NAME.to_owned(),
+                Some(
+                    "Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task."
+                        .to_owned(),
+                ),
+                tool_search_parameters(),
+            )?;
+            continue;
+        }
+        if kind == "web_search"
+            && tool.get("external_web_access").and_then(Value::as_bool) == Some(false)
+        {
+            continue;
+        }
+        if kind != "function" {
+            return Err(capability(format!(
+                "unsupported enabled Responses tool type {kind}"
+            )));
+        }
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("function tool declares no name"))?
+            .to_owned();
+        if !names.insert(name.clone()) {
+            return Err(invalid("Responses tools contain a duplicate provider name"));
+        }
+        definitions.push(ToolDef {
+            name,
+            description: tool
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            parameters: tool.get("parameters").cloned().unwrap_or_else(|| json!({})),
+        });
+    }
+    Ok(definitions)
+}
+
+fn tool_extensions(value: &Value) -> Result<Extensions, String> {
+    let mut strict = serde_json::Map::new();
+    let mut namespaces = serde_json::Map::new();
+    let mut disabled_provider_tools = Vec::new();
+    for tool in value.as_array().into_iter().flatten() {
+        match tool.get("type").and_then(Value::as_str) {
+            Some("function") => {
                 let name = tool
                     .get("name")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| invalid("function tool declares no name"))?
-                    .to_owned();
-                push_tool(&mut tools, &mut seen, name, description, parameters)?;
-            }
-            "namespace" => {
-                let namespace = tool
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| invalid("namespace tool declares no name"))?;
-                for child in tool
-                    .get("tools")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    let child_name = child
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| invalid("namespace child tool declares no name"))?;
-                    let flat = flatten_namespace_name(namespace, child_name);
-                    push_tool(
-                        &mut tools,
-                        &mut seen,
-                        flat,
-                        child
-                            .get("description")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        child.get("parameters").cloned().unwrap_or_else(|| json!({})),
-                    )?;
+                    .ok_or_else(|| invalid("function tool declares no name"))?;
+                if let Some(value) = tool.get("strict").filter(|value| !value.is_null()) {
+                    let value = value
+                        .as_bool()
+                        .ok_or_else(|| invalid("function tool strict must be a boolean"))?;
+                    strict.insert(name.to_owned(), json!(value));
                 }
             }
-            // A custom (freeform-grammar) tool has no JSON schema — the model
-            // returns a raw string. Wrap that in a fixed `{ input: string }`
-            // schema so it rides the function-tool path; `restore_tool_call_item`
-            // unwraps it back into a `custom_tool_call` on the way out.
-            "custom" => {
-                push_tool(
-                    &mut tools,
-                    &mut seen,
-                    custom_tool_name(tool),
-                    Some(custom_tool_description(tool)),
-                    custom_tool_parameters(),
-                )?;
+            Some("namespace") => {
+                for flattened in flattened_namespace_tools(tool)? {
+                    if namespaces
+                        .insert(
+                            flattened.flattened_name.clone(),
+                            json!({
+                                "namespace": flattened.namespace,
+                                "name": flattened.name
+                            }),
+                        )
+                        .is_some()
+                    {
+                        return Err(invalid(
+                            "Responses namespace tools collide after provider flattening",
+                        ));
+                    }
+                    if let Some(value) = flattened.strict {
+                        strict.insert(flattened.flattened_name, json!(value));
+                    }
+                }
             }
-            // The `tool_search` built-in is proxied as a function with a fixed
-            // query/limit schema; `restore_tool_call_item` turns the call back
-            // into a `tool_search_call`.
-            "tool_search" => {
-                push_tool(
-                    &mut tools,
-                    &mut seen,
-                    TOOL_SEARCH_PROXY_NAME.to_owned(),
-                    Some(
-                        "Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task."
-                            .to_owned(),
-                    ),
-                    tool_search_parameters(),
-                )?;
+            Some("web_search")
+                if tool.get("external_web_access").and_then(Value::as_bool) == Some(false) =>
+            {
+                disabled_provider_tools.push(tool.clone());
             }
-            // local_shell, web_search, file_search, code_interpreter, computer,
-            // mcp, image_generation, … → a function tool named after its declared
-            // name, or its type when it has none.
-            _ => {
-                let name = tool
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map_or_else(|| kind.to_owned(), str::to_owned);
-                push_tool(&mut tools, &mut seen, name, description, parameters)?;
-            }
+            _ => {}
         }
     }
-    Ok(tools)
+    let mut extensions = Extensions::new();
+    if !strict.is_empty() {
+        extensions.insert("responses_tool_strict".to_owned(), Value::Object(strict));
+    }
+    if !namespaces.is_empty() {
+        extensions.insert(
+            TOOL_NAMESPACES_EXTENSION.to_owned(),
+            Value::Object(namespaces),
+        );
+    }
+    if !disabled_provider_tools.is_empty() {
+        extensions.insert(
+            "responses_disabled_provider_tools".to_owned(),
+            Value::Array(disabled_provider_tools),
+        );
+    }
+    Ok(extensions)
 }
 
 fn request_extensions(body: &Value) -> Extensions {
@@ -847,59 +1194,450 @@ fn request_extensions(body: &Value) -> Extensions {
         .collect()
 }
 
-fn text_parts(content: Option<&Content>) -> Result<Vec<Value>, String> {
+#[derive(Clone)]
+struct ContinuationHistory {
+    messages: Vec<Message>,
+    created_at_ms: u64,
+    sequence: u64,
+    bytes: usize,
+}
+
+struct PendingContinuation {
+    scope: String,
+    messages: Vec<Message>,
+    created_at_ms: u64,
+    sequence: u64,
+    bytes: usize,
+}
+
+#[derive(Default)]
+struct ContinuationStore {
+    history: BTreeMap<(String, String), ContinuationHistory>,
+    pending: BTreeMap<String, PendingContinuation>,
+    next_sequence: u64,
+    total_bytes: usize,
+}
+
+impl ContinuationStore {
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| {
+                u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+            })
+    }
+
+    fn allocate_sequence(&mut self) -> u64 {
+        self.next_sequence = self.next_sequence.wrapping_add(1).max(1);
+        self.next_sequence
+    }
+
+    fn prune(&mut self, now_ms: u64) {
+        let expired_history: Vec<_> = self
+            .history
+            .iter()
+            .filter(|(_, entry)| now_ms.saturating_sub(entry.created_at_ms) >= CONTINUATION_TTL_MS)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in expired_history {
+            if let Some(entry) = self.history.remove(&key) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+            }
+        }
+        let expired_pending: Vec<_> = self
+            .pending
+            .iter()
+            .filter(|(_, entry)| {
+                now_ms.saturating_sub(entry.created_at_ms) >= PENDING_CONTINUATION_TTL_MS
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in expired_pending {
+            if let Some(entry) = self.pending.remove(&key) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+            }
+        }
+    }
+
+    fn evict_oldest(&mut self) -> bool {
+        let oldest_history = self
+            .history
+            .iter()
+            .map(|(key, entry)| (entry.sequence, key.clone()))
+            .min_by_key(|(sequence, _)| *sequence);
+        let oldest_pending = self
+            .pending
+            .iter()
+            .map(|(key, entry)| (entry.sequence, key.clone()))
+            .min_by_key(|(sequence, _)| *sequence);
+        if oldest_history.is_none() && oldest_pending.is_none() {
+            return false;
+        }
+        match (oldest_history, oldest_pending) {
+            (None, None) => unreachable!("empty store returned above"),
+            (Some((_, key)), None) => {
+                if let Some(entry) = self.history.remove(&key) {
+                    self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+                }
+            }
+            (None, Some((_, key))) => {
+                if let Some(entry) = self.pending.remove(&key) {
+                    self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+                }
+            }
+            (Some((history_sequence, history_key)), Some((pending_sequence, pending_key))) => {
+                if history_sequence <= pending_sequence {
+                    if let Some(entry) = self.history.remove(&history_key) {
+                        self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+                    }
+                } else if let Some(entry) = self.pending.remove(&pending_key) {
+                    self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+                }
+            }
+        }
+        true
+    }
+
+    fn history(&mut self, scope: &str, response_id: &str) -> Result<Vec<Message>, String> {
+        self.prune(Self::now_ms());
+        self.history
+            .get(&(scope.to_owned(), response_id.to_owned()))
+            .map(|entry| entry.messages.clone())
+            .ok_or_else(|| {
+                invalid(
+                    "continuation_expired: previous_response_id is unknown, expired, or belongs to another Agent scope",
+                )
+            })
+    }
+
+    fn begin(&mut self, key: String, scope: String, messages: Vec<Message>) -> Result<(), String> {
+        let now_ms = Self::now_ms();
+        self.prune(now_ms);
+        if self.pending.contains_key(&key) {
+            return Err(invalid("continuation request key is already in flight"));
+        }
+        let bytes = serde_json::to_vec(&messages).map_err(internal)?.len();
+        if bytes > MAX_CONTINUATION_ENTRY_BYTES {
+            return Err(invalid(
+                "continuation request history exceeds the in-memory entry limit",
+            ));
+        }
+        while self.pending.len() >= MAX_PENDING_CONTINUATIONS
+            || self.total_bytes.saturating_add(bytes) > MAX_CONTINUATION_TOTAL_BYTES
+        {
+            if !self.evict_oldest() {
+                break;
+            }
+        }
+        if self.total_bytes.saturating_add(bytes) > MAX_CONTINUATION_TOTAL_BYTES {
+            return Err(invalid(
+                "continuation request history exceeds the in-memory store limit",
+            ));
+        }
+        let sequence = self.allocate_sequence();
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        self.pending.insert(
+            key,
+            PendingContinuation {
+                scope,
+                messages,
+                created_at_ms: now_ms,
+                sequence,
+                bytes,
+            },
+        );
+        Ok(())
+    }
+
+    fn abandon(&mut self, continuation_key: &str) {
+        if let Some(entry) = self.pending.remove(continuation_key) {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+        }
+    }
+
+    fn complete(
+        &mut self,
+        continuation_key: &str,
+        response_id: &str,
+        assistant_messages: impl IntoIterator<Item = Message>,
+    ) {
+        let Some(mut pending) = self.pending.remove(continuation_key) else {
+            return;
+        };
+        self.total_bytes = self.total_bytes.saturating_sub(pending.bytes);
+        pending.messages.retain(|message| {
+            message
+                .extensions
+                .get(TRANSIENT_INSTRUCTIONS_EXTENSION)
+                .and_then(Value::as_bool)
+                != Some(true)
+        });
+        pending.messages.extend(assistant_messages);
+        let Ok(encoded) = serde_json::to_vec(&pending.messages) else {
+            return;
+        };
+        if encoded.len() > MAX_CONTINUATION_ENTRY_BYTES {
+            return;
+        }
+        let now_ms = Self::now_ms();
+        self.prune(now_ms);
+        let history_key = (pending.scope, response_id.to_owned());
+        if let Some(previous) = self.history.remove(&history_key) {
+            self.total_bytes = self.total_bytes.saturating_sub(previous.bytes);
+        }
+        while self.history.len() >= MAX_CONTINUATION_ENTRIES
+            || self.total_bytes.saturating_add(encoded.len()) > MAX_CONTINUATION_TOTAL_BYTES
+        {
+            if !self.evict_oldest() {
+                break;
+            }
+        }
+        if self.total_bytes.saturating_add(encoded.len()) > MAX_CONTINUATION_TOTAL_BYTES {
+            return;
+        }
+        let sequence = self.allocate_sequence();
+        self.total_bytes = self.total_bytes.saturating_add(encoded.len());
+        self.history.insert(
+            history_key,
+            ContinuationHistory {
+                messages: pending.messages,
+                created_at_ms: now_ms,
+                sequence,
+                bytes: encoded.len(),
+            },
+        );
+    }
+}
+
+thread_local! {
+    static CONTINUATIONS: RefCell<ContinuationStore> =
+        RefCell::new(ContinuationStore::default());
+}
+
+fn continuation_scope(envelope: &AgentRequestEnvelope) -> Result<String, String> {
+    let scope = envelope
+        .extensions
+        .get(CONTINUATION_SCOPE_EXTENSION)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            format!(
+                "{}:{}",
+                envelope.agent_tool.as_deref().unwrap_or("unknown-agent"),
+                envelope.principal.subject
+            )
+        });
+    if scope.is_empty() || scope.len() > 256 {
+        return Err(invalid("continuation scope is invalid"));
+    }
+    Ok(scope)
+}
+
+fn continuation_request_key(envelope: &AgentRequestEnvelope) -> Result<Option<String>, String> {
+    let Some(key) = envelope
+        .extensions
+        .get(CONTINUATION_KEY_EXTENSION)
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+    if key.is_empty()
+        || key.len() > 256
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(invalid("continuation request key is invalid"));
+    }
+    Ok(Some(key.to_owned()))
+}
+
+fn continuation_key(context: &Value) -> Option<&str> {
+    context
+        .get(CONTINUATION_KEY_EXTENSION)
+        .and_then(Value::as_str)
+}
+
+struct RenderedContent {
+    message: Vec<Value>,
+    reasoning_summary: Vec<Value>,
+    encrypted_reasoning: Option<String>,
+}
+
+fn rendered_content(content: Option<&Content>) -> Result<RenderedContent, String> {
+    let mut rendered = RenderedContent {
+        message: Vec::new(),
+        reasoning_summary: Vec::new(),
+        encrypted_reasoning: None,
+    };
     match content {
-        None => Ok(Vec::new()),
-        Some(Content::Text(text)) => Ok(vec![json!({
+        None => {}
+        Some(Content::Text(text)) => rendered.message.push(json!({
             "type": "output_text",
             "text": text
-        })]),
-        Some(Content::Parts(parts)) => parts
-            .iter()
-            .map(|part| match part {
-                ContentPart::Text { text } => Ok(json!({
+        })),
+        Some(Content::Parts(parts)) => {
+            for part in parts {
+                match part {
+                    ContentPart::Text { text } => rendered.message.push(json!({
                     "type": "output_text",
                     "text": text
-                })),
-                ContentPart::ImageUrl { .. } => Err(capability(
-                    "Responses assistant image output is not represented by the Canonical IR",
-                )),
-                // 0.3.0: reasoning renders as a Responses reasoning text part;
-                // its signature has no Responses wire slot.
-                ContentPart::Thinking { thinking, .. } => Ok(json!({
-                    "type": "reasoning_text",
-                    "text": thinking
-                })),
-                ContentPart::RedactedThinking { .. } => Err(capability(
-                    "Responses output cannot render encrypted reasoning blocks",
-                )),
-                // 0.3.0: unmodeled parts survive verbatim instead of silently
-                // dropping content.
-                ContentPart::Unknown(value) => Ok(value.clone()),
-            })
-            .collect(),
+                    })),
+                    ContentPart::ImageUrl { .. } => {
+                        return Err(capability(
+                            "Responses assistant image output is not represented by the Canonical IR",
+                        ));
+                    }
+                    ContentPart::Thinking {
+                        thinking,
+                        signature,
+                    } => {
+                        rendered.reasoning_summary.push(json!({
+                            "type": "summary_text",
+                            "text": thinking
+                        }));
+                        if let Some(signature) = signature {
+                            rendered.encrypted_reasoning = Some(signature.clone());
+                        }
+                    }
+                    ContentPart::RedactedThinking { data } => {
+                        rendered.encrypted_reasoning = Some(data.clone());
+                    }
+                    // 0.3.0: unmodeled parts survive verbatim instead of
+                    // silently dropping content.
+                    ContentPart::Unknown(value) => rendered.message.push(value.clone()),
+                }
+            }
+        }
     }
+    Ok(rendered)
+}
+
+fn response_tool_identity(
+    context: &Value,
+    provider_name: &str,
+) -> Result<(String, Option<String>), String> {
+    let Some(identity) = context
+        .get(TOOL_NAMESPACES_EXTENSION)
+        .and_then(Value::as_object)
+        .and_then(|namespaces| namespaces.get(provider_name))
+    else {
+        return Ok((provider_name.to_owned(), None));
+    };
+    let namespace = identity
+        .get("namespace")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("namespace render context declares no namespace"))?;
+    let name = identity
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("namespace render context declares no function name"))?;
+    if flattened_namespace_tool_name(namespace, name)? != provider_name {
+        return Err(invalid(
+            "namespace render context does not match the provider tool name",
+        ));
+    }
+    Ok((name.to_owned(), Some(namespace.to_owned())))
+}
+
+fn response_function_call_item(
+    id: String,
+    status: &str,
+    call_id: &str,
+    provider_name: &str,
+    arguments: &str,
+    context: &Value,
+) -> Result<Value, String> {
+    let (name, namespace) = response_tool_identity(context, provider_name)?;
+    Ok(response_function_call_item_with_identity(
+        id,
+        status,
+        call_id,
+        &name,
+        namespace.as_deref(),
+        arguments,
+    ))
+}
+
+fn response_function_call_item_with_identity(
+    id: String,
+    status: &str,
+    call_id: &str,
+    name: &str,
+    namespace: Option<&str>,
+    arguments: &str,
+) -> Value {
+    let mut item = json!({
+        "type": "function_call",
+        "id": id,
+        "status": status,
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments
+    });
+    if let Some(namespace) = namespace {
+        item["namespace"] = json!(namespace);
+    }
+    item
 }
 
 fn response_output(
     response: &ChatResponse,
     response_id: &str,
-    restore: &BTreeMap<String, RestoredTool>,
+    context: &Value,
 ) -> Result<Vec<Value>, String> {
+    let restore = restore_map(context.get("inbound_tools").unwrap_or(&Value::Null));
     let mut output = Vec::new();
     for choice in &response.choices {
-        let content = text_parts(choice.message.content.as_ref())?;
-        if !content.is_empty() {
+        let content = rendered_content(choice.message.content.as_ref())?;
+        if !content.reasoning_summary.is_empty() || content.encrypted_reasoning.is_some() {
+            output.push(json!({
+                "type": "reasoning",
+                "id": format!("rs_{response_id}_{}", choice.index),
+                "status": "completed",
+                "summary": content.reasoning_summary,
+                "encrypted_content": content.encrypted_reasoning
+            }));
+        }
+        if !content.message.is_empty() {
             output.push(json!({
                 "type": "message",
                 "id": format!("msg_{response_id}_{}", choice.index),
                 "status": "completed",
                 "role": "assistant",
-                "content": content
+                "content": content.message
             }));
         }
         for call in &choice.message.tool_calls {
-            output.push(restore_tool_call_item(call, restore));
+            if call.name == LOCAL_SHELL_TOOL_NAME {
+                let arguments: Value = serde_json::from_str(&call.arguments).map_err(|error| {
+                    invalid(format!(
+                        "local shell tool returned invalid arguments: {error}"
+                    ))
+                })?;
+                let action = arguments
+                    .get("action")
+                    .filter(|value| value.is_object())
+                    .ok_or_else(|| invalid("local shell tool returned no action object"))?;
+                output.push(json!({
+                    "type": "local_shell_call",
+                    "id": format!("ls_{}", call.id),
+                    "status": "completed",
+                    "call_id": call.id,
+                    "action": action
+                }));
+            } else if restore.contains_key(&call.name) {
+                output.push(restore_tool_call_item(call, &restore));
+            } else {
+                output.push(response_function_call_item(
+                    format!("fc_{}", call.id),
+                    "completed",
+                    &call.id,
+                    &call.name,
+                    &call.arguments,
+                    context,
+                )?);
+            }
         }
     }
     Ok(output)
@@ -988,6 +1726,8 @@ struct TextStream {
 struct ToolStream {
     output_index: u32,
     call_id: String,
+    response_name: String,
+    namespace: Option<String>,
     name: String,
     arguments: String,
     /// The `output_item` id (`ctc_` for a restored custom tool, `fc_` otherwise),
@@ -996,11 +1736,20 @@ struct ToolStream {
     item_id: String,
 }
 
+#[derive(Clone)]
+struct ReasoningStream {
+    output_index: u32,
+    content: String,
+    encrypted_content: String,
+}
+
 struct StreamState {
     response_id: String,
     model: String,
+    continuation_key: Option<String>,
     text: BTreeMap<u32, TextStream>,
     tools: BTreeMap<u32, ToolStream>,
+    reasoning: BTreeMap<u32, ReasoningStream>,
     next_output_index: u32,
     usage: Usage,
     /// Flat-name → original Codex tool kind, built once from the request's tools
@@ -1010,12 +1759,19 @@ struct StreamState {
 }
 
 impl StreamState {
-    fn new(response_id: String, model: String, restore: BTreeMap<String, RestoredTool>) -> Self {
+    fn new(
+        response_id: String,
+        model: String,
+        continuation_key: Option<String>,
+        restore: BTreeMap<String, RestoredTool>,
+    ) -> Self {
         Self {
             response_id,
             model,
+            continuation_key,
             text: BTreeMap::new(),
             tools: BTreeMap::new(),
+            reasoning: BTreeMap::new(),
             next_output_index: 0,
             usage: Usage::default(),
             restore,
@@ -1041,23 +1797,27 @@ fn ensure_stream<'a>(
     stream_id: &str,
     response_id: &str,
     model: &str,
+    continuation_key: Option<&str>,
     inbound_tools: &Value,
 ) -> Result<(&'a mut StreamState, bool), String> {
     let created = !states.contains_key(stream_id);
     if created {
         states.insert(
             stream_id.to_owned(),
-            // The restore map is built once, here, rather than on every event.
             StreamState::new(
                 response_id.to_owned(),
                 model.to_owned(),
+                continuation_key.map(str::to_owned),
+                // The restore map is built once, here, rather than on every event.
                 restore_map(inbound_tools),
             ),
         );
     }
-    let context_changed = states
-        .get(stream_id)
-        .is_some_and(|state| state.response_id != response_id || state.model != model);
+    let context_changed = states.get(stream_id).is_some_and(|state| {
+        state.response_id != response_id
+            || state.model != model
+            || state.continuation_key.as_deref() != continuation_key
+    });
     if context_changed {
         states.remove(stream_id);
         return Err(invalid(
@@ -1066,6 +1826,49 @@ fn ensure_stream<'a>(
     }
     let state = states.get_mut(stream_id).expect("state inserted");
     Ok((state, created))
+}
+
+fn stream_assistant_messages(state: &StreamState) -> Vec<Message> {
+    let mut indices = std::collections::BTreeSet::new();
+    indices.extend(state.text.keys().copied());
+    indices.extend(state.tools.keys().copied());
+    indices.extend(state.reasoning.keys().copied());
+    indices
+        .into_iter()
+        .map(|index| {
+            let mut parts = Vec::new();
+            if let Some(reasoning) = state.reasoning.get(&index) {
+                parts.push(ContentPart::Thinking {
+                    thinking: reasoning.content.clone(),
+                    signature: (!reasoning.encrypted_content.is_empty())
+                        .then(|| reasoning.encrypted_content.clone()),
+                });
+            }
+            if let Some(text) = state.text.get(&index) {
+                parts.push(ContentPart::Text {
+                    text: text.content.clone(),
+                });
+            }
+            Message {
+                role: Role::Assistant,
+                content: (!parts.is_empty()).then_some(Content::Parts(parts)),
+                tool_calls: state
+                    .tools
+                    .get(&index)
+                    .map(|call| {
+                        vec![ToolCall {
+                            id: call.call_id.clone(),
+                            name: call.name.clone(),
+                            arguments: call.arguments.clone(),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                tool_call_id: None,
+                name: None,
+                extensions: Extensions::new(),
+            }
+        })
+        .collect()
 }
 
 fn started_event(state: &StreamState) -> Result<String, String> {
@@ -1090,7 +1893,48 @@ fn stream_done(state: StreamState, finish_reason: Option<FinishReason>) -> Resul
     // Each entry: (output_index, done item, optional custom input to emit on the
     // `custom_tool_call_input` family just before the item's `output_item.done`).
     let mut completed: Vec<(u32, Value, Option<(String, String)>)> =
-        Vec::with_capacity(state.text.len() + state.tools.len());
+        Vec::with_capacity(state.text.len() + state.tools.len() + state.reasoning.len());
+    for (index, reasoning) in state.reasoning {
+        let item_id = format!("rs_{}_{}", state.response_id, index);
+        rendered.push_str(&sse(
+            "response.reasoning_summary_text.done",
+            json!({
+                "type": "response.reasoning_summary_text.done",
+                "item_id": item_id,
+                "output_index": reasoning.output_index,
+                "summary_index": 0,
+                "text": reasoning.content
+            }),
+        )?);
+        rendered.push_str(&sse(
+            "response.reasoning_summary_part.done",
+            json!({
+                "type": "response.reasoning_summary_part.done",
+                "item_id": item_id,
+                "output_index": reasoning.output_index,
+                "summary_index": 0,
+                "part": {
+                    "type": "summary_text",
+                    "text": reasoning.content
+                }
+            }),
+        )?);
+        let item = json!({
+            "type": "reasoning",
+            "id": item_id,
+            "status": "completed",
+            "summary": [{
+                "type": "summary_text",
+                "text": reasoning.content
+            }],
+            "encrypted_content": if reasoning.encrypted_content.is_empty() {
+                Value::Null
+            } else {
+                json!(reasoning.encrypted_content)
+            }
+        });
+        completed.push((reasoning.output_index, item, None));
+    }
     for (index, text) in state.text {
         let item = json!({
             "type": "message",
@@ -1102,8 +1946,50 @@ fn stream_done(state: StreamState, finish_reason: Option<FinishReason>) -> Resul
         completed.push((text.output_index, item, None));
     }
     for (_, call) in state.tools {
-        let item =
-            restored_tool_item(&call.call_id, &call.name, &call.arguments, "completed", &state.restore);
+        let item = if call.name == LOCAL_SHELL_TOOL_NAME {
+            let arguments: Value = serde_json::from_str(&call.arguments).map_err(|error| {
+                invalid(format!(
+                    "local shell stream returned invalid arguments: {error}"
+                ))
+            })?;
+            let action = arguments
+                .get("action")
+                .filter(|value| value.is_object())
+                .ok_or_else(|| invalid("local shell stream returned no action object"))?;
+            let item = json!({
+                "type": "local_shell_call",
+                "id": format!("ls_{}", call.call_id),
+                "status": "completed",
+                "call_id": call.call_id,
+                "action": action
+            });
+            rendered.push_str(&sse(
+                "response.output_item.added",
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": call.output_index,
+                    "item": item
+                }),
+            )?);
+            item
+        } else if state.restore.contains_key(&call.name) {
+            restored_tool_item(
+                &call.call_id,
+                &call.name,
+                &call.arguments,
+                "completed",
+                &state.restore,
+            )
+        } else {
+            response_function_call_item_with_identity(
+                format!("fc_{}", call.call_id),
+                "completed",
+                &call.call_id,
+                &call.response_name,
+                call.namespace.as_deref(),
+                &call.arguments,
+            )
+        };
         // A custom tool buffered its `{ input }` arguments; unwrap them now for
         // the input delta/done events its client consumes.
         let custom_input = is_custom_restore(&call.name, &state.restore).then(|| {
@@ -1233,19 +2119,33 @@ impl Guest for ResponsesClient {
     fn normalize_inbound(envelope: String) -> Result<String, String> {
         let envelope: AgentRequestEnvelope = parse_input(&envelope)?;
         let body = &envelope.body;
-        validate_text_format(body)?;
         validate_semantic_options(body)?;
+        let response_format = response_format_of(body)?;
         let model = body
             .get("model")
             .and_then(Value::as_str)
             .ok_or_else(|| invalid("request declares no model"))?
             .to_owned();
+        let scope = continuation_scope(&envelope)?;
         let mut messages = Vec::new();
         if let Some(instructions) = body.get("instructions").filter(|value| !value.is_null()) {
             let instructions = instructions
                 .as_str()
                 .ok_or_else(|| invalid("instructions must be a string"))?;
-            messages.push(Message::text(Role::System, instructions));
+            let mut message = Message::text(Role::System, instructions);
+            message
+                .extensions
+                .insert(TRANSIENT_INSTRUCTIONS_EXTENSION.to_owned(), json!(true));
+            messages.push(message);
+        }
+        if let Some(previous_response_id) = body.get("previous_response_id").and_then(Value::as_str)
+        {
+            let history = CONTINUATIONS.with(|continuations| {
+                continuations
+                    .borrow_mut()
+                    .history(&scope, previous_response_id)
+            })?;
+            messages.extend(history);
         }
         let input = body
             .get("input")
@@ -1261,7 +2161,10 @@ impl Guest for ResponsesClient {
                 .transpose()?,
             stop: Vec::new(),
         };
+        let tools = tools_of(body.get("tools").unwrap_or(&Value::Null))?;
+        let tool_choice = tool_choice_of(body.get("tool_choice"))?;
         let mut extensions = request_extensions(body);
+        extensions.extend(tool_extensions(body.get("tools").unwrap_or(&Value::Null))?);
         // `parallel_tool_calls` has no first-class Canonical IR field; it rides
         // the extensions passthrough so the outbound provider request preserves
         // it verbatim (OpenAI-compatible providers accept it alongside tools).
@@ -1277,16 +2180,30 @@ impl Guest for ResponsesClient {
         {
             extensions.insert("reasoning_effort".to_owned(), json!(effort));
         }
+        if let Some(summary) = body
+            .get("reasoning")
+            .and_then(|reasoning| reasoning.get("summary"))
+            .filter(|value| !value.is_null())
+        {
+            extensions.insert("responses_reasoning_summary".to_owned(), summary.clone());
+        }
+        if let Some(continuation_key) = continuation_request_key(&envelope)? {
+            CONTINUATIONS.with(|continuations| {
+                continuations
+                    .borrow_mut()
+                    .begin(continuation_key.clone(), scope, messages.clone())
+            })?;
+            extensions.insert(
+                CONTINUATION_KEY_EXTENSION.to_owned(),
+                json!(continuation_key),
+            );
+        }
         to_output(&ChatRequest {
             model,
             messages,
-            tools: tools_of(body.get("tools").unwrap_or(&Value::Null))?,
-            response_format: None,
-            // `validate_request` already refused everything but `auto`.
-            tool_choice: body
-                .get("tool_choice")
-                .filter(|value| !value.is_null())
-                .map(|_| ToolChoice::Auto),
+            tools,
+            response_format,
+            tool_choice,
             sampling,
             stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
             extensions,
@@ -1308,19 +2225,28 @@ impl Guest for ResponsesClient {
         let response: ChatResponse = parse_input(&response)?;
         let context: Value = parse_input(&context)?;
         let (response_id, model) = context_identity(&context, &response.id, &response.model);
-        let restore = restore_map(context.get("inbound_tools").unwrap_or(&Value::Null));
         let finish_reason = response
             .choices
             .iter()
             .find_map(|choice| choice.finish_reason.clone());
-        let output = response_output(&response, &response_id, &restore)?;
-        to_output(&response_object(
+        let output = response_output(&response, &response_id, &context)?;
+        let rendered = to_output(&response_object(
             &response_id,
             &model,
             output,
             response.usage,
             finish_reason,
-        ))
+        ))?;
+        if let Some(key) = continuation_key(&context) {
+            CONTINUATIONS.with(|continuations| {
+                continuations.borrow_mut().complete(
+                    key,
+                    &response_id,
+                    response.choices.iter().map(|choice| choice.message.clone()),
+                );
+            });
+        }
+        Ok(rendered)
     }
 
     fn render_stream_event(event: String, context: String) -> Result<String, String> {
@@ -1343,6 +2269,11 @@ impl Guest for ResponsesClient {
             STREAMS.with(|streams| {
                 streams.borrow_mut().remove(stream_id);
             });
+            if let Some(key) = continuation_key(&context) {
+                CONTINUATIONS.with(|continuations| {
+                    continuations.borrow_mut().abandon(key);
+                });
+            }
             let response = json!({
                 "id": response_id,
                 "object": "response",
@@ -1367,19 +2298,97 @@ impl Guest for ResponsesClient {
         let inbound_tools = context.get("inbound_tools").cloned().unwrap_or(Value::Null);
         let data = STREAMS.with(|streams| {
             let mut states = streams.borrow_mut();
-            let (state, created) =
-                ensure_stream(&mut states, stream_id, response_id, model, &inbound_tools)?;
+            let (state, created) = ensure_stream(
+                &mut states,
+                stream_id,
+                response_id,
+                model,
+                continuation_key(&context),
+                &inbound_tools,
+            )?;
             let mut rendered = if created {
                 started_event(state)?
             } else {
                 String::new()
             };
             match event {
-                // 0.3.0 thinking events have no Responses rendering yet: the
-                // reasoning-summary SSE family is stateful and unimplemented,
-                // so reasoning deltas render nothing rather than a malformed
-                // frame.
-                StreamEvent::ThinkingDelta { .. } | StreamEvent::ThinkingSignatureDelta { .. } => {}
+                StreamEvent::ThinkingDelta {
+                    index,
+                    thinking_delta,
+                } => {
+                    let item_id = format!("rs_{}_{}", state.response_id, index);
+                    if !state.reasoning.contains_key(&index) {
+                        let output_index = state.allocate_output_index()?;
+                        rendered.push_str(&sse(
+                            "response.output_item.added",
+                            json!({
+                                "type": "response.output_item.added",
+                                "output_index": output_index,
+                                "item": {
+                                    "type": "reasoning",
+                                    "id": item_id,
+                                    "status": "in_progress",
+                                    "summary": []
+                                }
+                            }),
+                        )?);
+                        rendered.push_str(&sse(
+                            "response.reasoning_summary_part.added",
+                            json!({
+                                "type": "response.reasoning_summary_part.added",
+                                "item_id": item_id,
+                                "output_index": output_index,
+                                "summary_index": 0,
+                                "part": {
+                                    "type": "summary_text",
+                                    "text": ""
+                                }
+                            }),
+                        )?);
+                        state.reasoning.insert(
+                            index,
+                            ReasoningStream {
+                                output_index,
+                                content: String::new(),
+                                encrypted_content: String::new(),
+                            },
+                        );
+                    }
+                    let reasoning = state.reasoning.get_mut(&index).expect("reasoning inserted");
+                    reasoning.content.push_str(&thinking_delta);
+                    rendered.push_str(&sse(
+                        "response.reasoning_summary_text.delta",
+                        json!({
+                            "type": "response.reasoning_summary_text.delta",
+                            "item_id": item_id,
+                            "output_index": reasoning.output_index,
+                            "summary_index": 0,
+                            "delta": thinking_delta
+                        }),
+                    )?);
+                }
+                StreamEvent::ThinkingSignatureDelta {
+                    index,
+                    signature_delta,
+                } => {
+                    if !state.reasoning.contains_key(&index) {
+                        let output_index = state.allocate_output_index()?;
+                        state.reasoning.insert(
+                            index,
+                            ReasoningStream {
+                                output_index,
+                                content: String::new(),
+                                encrypted_content: String::new(),
+                            },
+                        );
+                    }
+                    state
+                        .reasoning
+                        .get_mut(&index)
+                        .expect("reasoning inserted")
+                        .encrypted_content
+                        .push_str(&signature_delta);
+                }
                 StreamEvent::Delta { index, content } => {
                     let item_id = format!("msg_{}_{}", state.response_id, index);
                     if !state.text.contains_key(&index) {
@@ -1446,6 +2455,8 @@ impl Guest for ResponsesClient {
                         let call_name = name.clone().ok_or_else(|| {
                             invalid("first tool-call stream fragment declares no name")
                         })?;
+                        let (response_name, namespace) =
+                            response_tool_identity(&context, &call_name)?;
                         let output_index = state.allocate_output_index()?;
                         // Announce the item in its restored shape (custom_tool_call
                         // / namespaced function_call / function_call) with its final
@@ -1456,18 +2467,34 @@ impl Guest for ResponsesClient {
                         let call = ToolStream {
                             output_index,
                             call_id,
+                            response_name,
+                            namespace,
                             name: call_name,
                             arguments: String::new(),
                             item_id,
                         };
-                        rendered.push_str(&sse(
-                            "response.output_item.added",
-                            json!({
-                                "type": "response.output_item.added",
-                                "output_index": output_index,
-                                "item": added_item
-                            }),
-                        )?);
+                        if call.name != LOCAL_SHELL_TOOL_NAME {
+                            let item = if state.restore.contains_key(&call.name) {
+                                added_item
+                            } else {
+                                response_function_call_item_with_identity(
+                                    format!("fc_{}", call.call_id),
+                                    "in_progress",
+                                    &call.call_id,
+                                    &call.response_name,
+                                    call.namespace.as_deref(),
+                                    "",
+                                )
+                            };
+                            rendered.push_str(&sse(
+                                "response.output_item.added",
+                                json!({
+                                    "type": "response.output_item.added",
+                                    "output_index": output_index,
+                                    "item": item
+                                }),
+                            )?);
+                        }
                         state.tools.insert(index, call);
                     }
                     let call = state.tools.get_mut(&index).expect("tool inserted");
@@ -1487,7 +2514,9 @@ impl Guest for ResponsesClient {
                     // input is buffered and emitted once at `stream_done` on the
                     // `custom_tool_call_input` family. Everything else streams its
                     // arguments delta as usual.
-                    if !is_custom_restore(&call_name, &state.restore) {
+                    if call_name != LOCAL_SHELL_TOOL_NAME
+                        && !is_custom_restore(&call_name, &state.restore)
+                    {
                         rendered.push_str(&sse(
                             "response.function_call_arguments.delta",
                             json!({
@@ -1508,6 +2537,16 @@ impl Guest for ResponsesClient {
                     stop_sequence: _,
                 } => {
                     let state = states.remove(stream_id).expect("state inserted");
+                    if let Some(key) = state.continuation_key.as_deref() {
+                        let assistant_messages = stream_assistant_messages(&state);
+                        CONTINUATIONS.with(|continuations| {
+                            continuations.borrow_mut().complete(
+                                key,
+                                &state.response_id,
+                                assistant_messages,
+                            );
+                        });
+                    }
                     rendered.push_str(&stream_done(state, finish_reason)?);
                 }
                 StreamEvent::Error { .. } => unreachable!("error handled above"),
@@ -1526,6 +2565,407 @@ impl Guest for ResponsesClient {
                 "message": error.message
             }
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use token_station_protocol::{Choice, ToolCall};
+
+    fn responses_envelope(body: Value) -> String {
+        static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+        let request_number = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        serde_json::to_string(&AgentRequestEnvelope {
+            protocol: "openai-responses".to_owned(),
+            agent_tool: Some("codex".to_owned()),
+            headers: Default::default(),
+            principal: token_station_protocol::Principal {
+                subject: "local".to_owned(),
+                tenant: None,
+            },
+            hints: Vec::new(),
+            body,
+            extensions: [
+                (
+                    "token_station_continuation_scope".to_owned(),
+                    json!("codex:local"),
+                ),
+                (
+                    "token_station_private_continuation_key".to_owned(),
+                    json!(format!("test-request-{request_number}")),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .expect("Responses envelope serializes")
+    }
+
+    #[test]
+    fn previous_response_id_replays_bounded_in_memory_history() {
+        let first: ChatRequest = serde_json::from_str(
+            &<ResponsesClient as Guest>::normalize_inbound(responses_envelope(json!({
+                "model": "deepseek-chat",
+                "input": "first turn",
+                "store": false
+            })))
+            .expect("first turn normalizes"),
+        )
+        .expect("canonical request parses");
+        let continuation_key = first.extensions["token_station_private_continuation_key"]
+            .as_str()
+            .expect("normalization assigns an opaque continuation key")
+            .to_owned();
+        let response = ChatResponse {
+            id: "resp_first".to_owned(),
+            model: "deepseek-chat".to_owned(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message::text(Role::Assistant, "first answer"),
+                finish_reason: Some(FinishReason::Stop),
+                stop_sequence: None,
+            }],
+            usage: Usage::default(),
+            extensions: Extensions::new(),
+        };
+        <ResponsesClient as Guest>::render_response(
+            serde_json::to_string(&response).expect("response serializes"),
+            json!({
+                "response_id": "resp_first",
+                "model": "deepseek-chat",
+                "token_station_private_continuation_key": continuation_key
+            })
+            .to_string(),
+        )
+        .expect("first response renders and becomes continuation history");
+
+        let second: ChatRequest = serde_json::from_str(
+            &<ResponsesClient as Guest>::normalize_inbound(responses_envelope(json!({
+                "model": "deepseek-chat",
+                "previous_response_id": "resp_first",
+                "input": "second turn",
+                "store": false
+            })))
+            .expect("known previous_response_id normalizes"),
+        )
+        .expect("second canonical request parses");
+
+        assert_eq!(second.messages.len(), 3);
+        assert_eq!(second.messages[0], Message::text(Role::User, "first turn"));
+        assert_eq!(
+            second.messages[1],
+            Message::text(Role::Assistant, "first answer")
+        );
+        assert_eq!(second.messages[2], Message::text(Role::User, "second turn"));
+    }
+
+    #[test]
+    fn unknown_previous_response_id_fails_explicitly() {
+        let error = <ResponsesClient as Guest>::normalize_inbound(responses_envelope(json!({
+            "model": "deepseek-chat",
+            "previous_response_id": "resp_missing",
+            "input": "continue"
+        })))
+        .expect_err("an unknown response id must never be treated as empty history");
+
+        assert!(error.contains("continuation_expired"), "{error}");
+        assert!(error.contains("previous_response_id"), "{error}");
+    }
+
+    #[test]
+    fn reasoning_items_preserve_summary_and_opaque_continuation_data() {
+        let messages = input_messages(&json!([
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "Inspect the file first."}],
+                "encrypted_content": "opaque-reasoning-ticket"
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "read_file",
+                "arguments": "{\"path\":\"hello.py\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "print('hello')"
+            }
+        ]))
+        .expect("Codex reasoning and tool history normalize");
+
+        let assistant = &messages[0];
+        assert!(matches!(
+            assistant.content.as_ref(),
+            Some(Content::Parts(parts))
+                if matches!(
+                    parts.as_slice(),
+                    [ContentPart::Thinking { thinking, .. }]
+                        if thinking == "Inspect the file first."
+                )
+        ));
+        assert_eq!(
+            assistant.extensions["responses_reasoning_id"],
+            json!("rs_1")
+        );
+        assert_eq!(
+            assistant.extensions["responses_reasoning_encrypted_content"],
+            json!("opaque-reasoning-ticket")
+        );
+        assert_eq!(assistant.tool_calls[0].id, "call_1");
+        assert_eq!(messages[1].tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn local_shell_tools_translate_to_provider_functions_and_back() {
+        let tools = tools_of(&json!([{"type": "local_shell"}]))
+            .expect("local shell has a canonical provider mapping");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "__token_station_responses_local_shell");
+
+        let response = ChatResponse {
+            id: "resp_1".to_owned(),
+            model: "deepseek".to_owned(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: Role::Assistant,
+                    content: None,
+                    tool_calls: vec![ToolCall {
+                        id: "call_shell_1".to_owned(),
+                        name: "__token_station_responses_local_shell".to_owned(),
+                        arguments: json!({
+                            "action": {
+                                "type": "exec",
+                                "command": ["python", "-V"],
+                                "timeout_ms": 10000
+                            }
+                        })
+                        .to_string(),
+                    }],
+                    tool_call_id: None,
+                    name: None,
+                    extensions: Extensions::new(),
+                },
+                finish_reason: Some(FinishReason::ToolCalls),
+                stop_sequence: None,
+            }],
+            usage: Usage::default(),
+            extensions: Extensions::new(),
+        };
+
+        let output = response_output(&response, "resp_1", &json!({}))
+            .expect("provider tool call renders to Responses");
+        assert_eq!(output[0]["type"], json!("local_shell_call"));
+        assert_eq!(output[0]["call_id"], json!("call_shell_1"));
+        assert_eq!(output[0]["action"]["command"][0], json!("python"));
+    }
+
+    #[test]
+    fn local_shell_history_keeps_call_and_result_correlation() {
+        let messages = input_messages(&json!([
+            {
+                "type": "local_shell_call",
+                "call_id": "call_shell_1",
+                "action": {
+                    "type": "exec",
+                    "command": ["python", "-V"],
+                    "timeout_ms": 10000
+                }
+            },
+            {
+                "type": "local_shell_call_output",
+                "id": "call_shell_1",
+                "output": "Python 3.13"
+            }
+        ]))
+        .expect("local shell history normalizes");
+
+        assert_eq!(messages[0].tool_calls[0].id, "call_shell_1");
+        assert_eq!(messages[0].tool_calls[0].name, LOCAL_SHELL_TOOL_NAME);
+        assert_eq!(messages[1].tool_call_id.as_deref(), Some("call_shell_1"));
+        assert_eq!(messages[1].name.as_deref(), Some(LOCAL_SHELL_TOOL_NAME));
+    }
+
+    #[test]
+    fn namespace_tools_flatten_without_losing_the_reverse_identity() {
+        let request: ChatRequest = serde_json::from_str(
+            &<ResponsesClient as Guest>::normalize_inbound(responses_envelope(json!({
+                "model": "deepseek-chat",
+                "input": [
+                    {"type": "message", "role": "user", "content": "spawn one worker"},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_spawn_1",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": "{\"task\":\"inspect\"}"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_spawn_1",
+                        "output": "worker complete"
+                    }
+                ],
+                "tools": [{
+                    "type": "namespace",
+                    "name": "multi_agent_v1",
+                    "description": "Manage isolated workers.",
+                    "tools": [{
+                        "type": "function",
+                        "name": "spawn_agent",
+                        "description": "Spawn one worker.",
+                        "strict": true,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"task": {"type": "string"}},
+                            "required": ["task"],
+                            "additionalProperties": false
+                        }
+                    }]
+                }]
+            })))
+            .expect("Codex namespace tools normalize"),
+        )
+        .expect("canonical request parses");
+
+        assert_eq!(request.tools.len(), 1);
+        assert_eq!(request.tools[0].name, "multi_agent_v1__spawn_agent");
+        assert_eq!(
+            request.messages[1].tool_calls[0].name,
+            "multi_agent_v1__spawn_agent"
+        );
+        assert_eq!(
+            request.extensions["responses_tool_strict"]["multi_agent_v1__spawn_agent"],
+            json!(true)
+        );
+        assert_eq!(
+            request.extensions["responses_tool_namespaces"]["multi_agent_v1__spawn_agent"],
+            json!({"namespace":"multi_agent_v1","name":"spawn_agent"})
+        );
+    }
+
+    #[test]
+    fn typed_semantic_options_and_tool_metadata_survive_normalization() {
+        assert_eq!(
+            tool_choice_of(Some(&json!("required"))).expect("required is typed"),
+            Some(ToolChoice::Required)
+        );
+        assert_eq!(
+            tool_choice_of(Some(&json!({"type":"function","name":"read_file"})))
+                .expect("forced function is preserved"),
+            Some(ToolChoice::Other(
+                json!({"type":"function","function":{"name":"read_file"}})
+            ))
+        );
+        assert_eq!(
+            response_format_of(&json!({
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "answer",
+                        "strict": true,
+                        "schema": {"type":"object"}
+                    }
+                }
+            }))
+            .expect("structured output is typed"),
+            Some(ResponseFormat::JsonSchema {
+                json_schema: json!({
+                    "name":"answer",
+                    "strict":true,
+                    "schema":{"type":"object"}
+                })
+            })
+        );
+
+        let metadata = tool_extensions(&json!([
+            {"type":"function","name":"read_file","strict":true},
+            {"type":"web_search","external_web_access":false}
+        ]))
+        .expect("tool metadata is valid");
+        assert_eq!(metadata["responses_tool_strict"]["read_file"], json!(true));
+        assert_eq!(
+            metadata["responses_disabled_provider_tools"][0]["type"],
+            json!("web_search")
+        );
+    }
+
+    #[test]
+    fn response_reasoning_is_a_separate_responses_output_item() {
+        let response = ChatResponse {
+            id: "resp_reasoning".to_owned(),
+            model: "deepseek-reasoner".to_owned(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: Role::Assistant,
+                    content: Some(Content::Parts(vec![
+                        ContentPart::Thinking {
+                            thinking: "Inspect first.".to_owned(),
+                            signature: None,
+                        },
+                        ContentPart::Text {
+                            text: "Done.".to_owned(),
+                        },
+                    ])),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    name: None,
+                    extensions: Extensions::new(),
+                },
+                finish_reason: Some(FinishReason::Stop),
+                stop_sequence: None,
+            }],
+            usage: Usage::default(),
+            extensions: Extensions::new(),
+        };
+
+        let output = response_output(&response, "resp_reasoning", &json!({}))
+            .expect("reasoning has a Responses representation");
+        assert_eq!(output[0]["type"], json!("reasoning"));
+        assert_eq!(
+            output[0]["summary"][0],
+            json!({"type":"summary_text","text":"Inspect first."})
+        );
+        assert_eq!(output[1]["type"], json!("message"));
+        assert_eq!(output[1]["content"][0]["text"], json!("Done."));
+    }
+
+    #[test]
+    fn streamed_reasoning_has_delta_done_and_terminal_response_events() {
+        let context = json!({
+            "stream_id":"reasoning-unit-stream",
+            "response_id":"resp_stream_reasoning",
+            "model":"deepseek-reasoner"
+        })
+        .to_string();
+        let delta = <ResponsesClient as Guest>::render_stream_event(
+            serde_json::to_string(&StreamEvent::ThinkingDelta {
+                index: 0,
+                thinking_delta: "Inspect first.".to_owned(),
+            })
+            .expect("event serializes"),
+            context.clone(),
+        )
+        .expect("reasoning delta renders");
+        assert!(delta.contains("response.reasoning_summary_text.delta"));
+
+        let done = <ResponsesClient as Guest>::render_stream_event(
+            serde_json::to_string(&StreamEvent::Done {
+                finish_reason: Some(FinishReason::Stop),
+                stop_sequence: None,
+            })
+            .expect("event serializes"),
+            context,
+        )
+        .expect("terminal event renders");
+        assert!(done.contains("response.reasoning_summary_text.done"));
+        assert!(done.contains("response.output_item.done"));
+        assert!(done.contains("response.completed"));
     }
 }
 

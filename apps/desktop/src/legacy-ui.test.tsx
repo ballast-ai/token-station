@@ -151,6 +151,7 @@ describe("legacy desktop read-only pages", () => {
     });
     render(<RouterTable />);
     expect(await screen.findByText("阈值 42")).toBeInTheDocument();
+    expect(screen.getByText(/难度词只看最后一条用户消息/)).toBeInTheDocument();
     expect(screen.getByText("openai · gpt")).toBeInTheDocument();
     expect(screen.getByText("— 未配 —")).toBeInTheDocument();
     expect(screen.getByText(/local · \?/)).toBeInTheDocument();
@@ -348,13 +349,32 @@ describe("settings and update actions", () => {
     expect(await screen.findByText(/settings denied/)).toBeInTheDocument();
   });
 
+  it("focuses and describes the proxy URL for a structured settings error", async () => {
+    vi.mocked(setSettings).mockRejectedValue({
+      field: "egress_proxy_url",
+      reason_code: "invalid_proxy_url",
+      message: "代理地址无效",
+    });
+    const user = userEvent.setup();
+    render(<Settings settings={settings} serveRunning={false} onSaved={vi.fn()} />);
+    await user.selectOptions(screen.getByLabelText("出口模式"), "http");
+    const proxyUrl = screen.getByLabelText("代理 URL");
+    await user.type(proxyUrl, "ftp://invalid.example");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("代理地址无效");
+    await waitFor(() => expect(proxyUrl).toHaveFocus());
+    expect(proxyUrl).toHaveAttribute("aria-invalid", "true");
+    expect(proxyUrl).toHaveAccessibleDescription("代理地址无效");
+  });
+
   it("reports newer and current releases and copies a release URL", async () => {
     vi.mocked(checkUpgrade)
       .mockResolvedValueOnce({ current: "0.1.0", latest_tag: "v0.2.0", html_url: "https://example.invalid/release", newer: true })
       .mockResolvedValueOnce({ current: "0.2.0", latest_tag: "v0.2.0", html_url: "", newer: false });
     const user = userEvent.setup();
     const writeText = vi.spyOn(navigator.clipboard, "writeText");
-    render(<About version="0.1.0" />);
+    render(<About desktopVersion="0.1.0" coreVersion="0.2.0" />);
     await user.click(screen.getByRole("button", { name: "检查更新" }));
     expect(await screen.findByText(/有新版本/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "复制链接" }));
@@ -366,9 +386,26 @@ describe("settings and update actions", () => {
   it("shows update check failures", async () => {
     vi.mocked(checkUpgrade).mockRejectedValue(new Error("upgrade down"));
     const user = userEvent.setup();
-    render(<About version="0.1.0" />);
+    render(<About desktopVersion="0.1.0" coreVersion="0.2.0" />);
     await user.click(screen.getByRole("button", { name: "检查更新" }));
     expect(await screen.findByText(/upgrade down/)).toBeInTheDocument();
+  });
+
+  it("shows an unpublished release as a normal result instead of a GitHub 404", async () => {
+    vi.mocked(checkUpgrade).mockResolvedValue({
+      status: "no_published_release",
+      current: "0.1.0",
+      latest_tag: "",
+      html_url: "",
+      newer: false,
+      message: "暂无公开发布版本",
+    });
+    const user = userEvent.setup();
+    render(<About desktopVersion="0.1.0" coreVersion="0.2.0" />);
+    await user.click(screen.getByRole("button", { name: "检查更新" }));
+
+    expect(await screen.findByText("暂无公开发布版本")).toBeInTheDocument();
+    expect(screen.queryByText(/404/)).not.toBeInTheDocument();
   });
 });
 

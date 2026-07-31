@@ -6,6 +6,7 @@ members = [
     "crates/metrics",
     "crates/plugin-api",
     "crates/plugin-runtime",
+    "crates/private-fs",
     "crates/protocol",
     "crates/release",
     "crates/router-core",
@@ -28,7 +29,7 @@ exclude = [
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/GlimpseEngine/token-station"
-rust-version = "1.85"
+rust-version = "1.95"
 # 版本号缺失的 path 依赖本来就过不了 `cargo publish`，这里只是把事实声明出来，
 # 让 cargo-deny 的 wildcard 检查得以对 workspace 内部依赖放行。到 conformance
 # 需要作为独立发布物拆出去那天（架构 §9.1），翻转此标志并给依赖补版本号——

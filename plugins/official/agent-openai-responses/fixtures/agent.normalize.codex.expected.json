@@ -3,7 +3,8 @@
   "messages": [
     {
       "role": "system",
-      "content": "Be concise."
+      "content": "Be concise.",
+      "responses_transient_instructions": true
     },
     {
       "role": "user",
@@ -67,5 +68,8 @@
   },
   "stream": true,
   "tool_choice": "auto",
-  "parallel_tool_calls": true
+  "parallel_tool_calls": true,
+  "responses_tool_strict": {
+    "read_marker": false
+  }
 }

@@ -101,9 +101,34 @@ fn tool_calls_to_openai(calls: &[ToolCall]) -> Value {
 fn content_to_json(content: Option<&Content>) -> Value {
     match content {
         Some(Content::Text(text)) => json!(text),
-        Some(Content::Parts(parts)) => json!(parts),
+        Some(Content::Parts(parts)) => {
+            let text = parts.iter().fold(String::new(), |mut text, part| {
+                if let ContentPart::Text { text: part } = part {
+                    text.push_str(part);
+                }
+                text
+            });
+            if text.is_empty() {
+                Value::Null
+            } else {
+                json!(text)
+            }
+        }
         None => Value::Null,
     }
+}
+
+fn reasoning_to_json(content: Option<&Content>) -> Option<Value> {
+    let Content::Parts(parts) = content? else {
+        return None;
+    };
+    let reasoning = parts.iter().fold(String::new(), |mut reasoning, part| {
+        if let ContentPart::Thinking { thinking, .. } = part {
+            reasoning.push_str(thinking);
+        }
+        reasoning
+    });
+    (!reasoning.is_empty()).then(|| json!(reasoning))
 }
 
 fn validate_response_format(body: &Value) -> Result<(), String> {
@@ -285,6 +310,9 @@ impl Guest for OpenAiClient {
                     "content".to_owned(),
                     content_to_json(choice.message.content.as_ref()),
                 );
+                if let Some(reasoning) = reasoning_to_json(choice.message.content.as_ref()) {
+                    message.insert("reasoning_content".to_owned(), reasoning);
+                }
                 if !choice.message.tool_calls.is_empty() {
                     message.insert(
                         "tool_calls".to_owned(),
@@ -397,6 +425,38 @@ impl Guest for OpenAiClient {
                 "code": code,
             },
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_completion_content_is_always_text_or_null() {
+        let mixed = Content::Parts(vec![
+            ContentPart::Thinking {
+                thinking: "private reasoning".to_owned(),
+                signature: None,
+            },
+            ContentPart::Text {
+                text: "Hello".to_owned(),
+            },
+            ContentPart::Text {
+                text: ", world".to_owned(),
+            },
+        ]);
+        assert_eq!(content_to_json(Some(&mixed)), json!("Hello, world"));
+        assert_eq!(
+            reasoning_to_json(Some(&mixed)),
+            Some(json!("private reasoning"))
+        );
+
+        let reasoning_only = Content::Parts(vec![ContentPart::Thinking {
+            thinking: "private reasoning".to_owned(),
+            signature: None,
+        }]);
+        assert_eq!(content_to_json(Some(&reasoning_only)), Value::Null);
     }
 }
 

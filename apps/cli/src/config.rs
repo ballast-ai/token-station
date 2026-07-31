@@ -105,9 +105,7 @@ pub struct ProxyAuthConfig {
 
 impl AuthConfig {
     fn source_count(&self) -> usize {
-        usize::from(self.store)
-            + usize::from(self.env.is_some())
-            + usize::from(self.file.is_some())
+        usize::from(self.store) + usize::from(self.env.is_some()) + usize::from(self.file.is_some())
     }
 }
 
@@ -188,17 +186,16 @@ impl EgressConfig {
                 return Err(format!("egress no_proxy entry `{entry}` is invalid"));
             }
         }
-        if let Some(auth) = &self.auth {
-            if auth.username.is_empty()
+        if let Some(auth) = &self.auth
+            && (auth.username.is_empty()
                 || auth.username.len() > 128
                 || auth.username.chars().any(char::is_control)
-                || auth.credential.source_count() != 1
-            {
-                return Err(
-                    "egress proxy auth requires a safe username and exactly one credential source"
-                        .to_string(),
-                );
-            }
+                || auth.credential.source_count() != 1)
+        {
+            return Err(
+                "egress proxy auth requires a safe username and exactly one credential source"
+                    .to_string(),
+            );
         }
         Ok(Some((scheme.to_string(), host.to_string(), port)))
     }
@@ -514,11 +511,7 @@ pub struct AuthConfig {
     /// Read from the local secrets store (`secrets.json`, mode 0600, in the data
     /// directory). The default source. `alias = "keyring"` keeps configs written
     /// before the OS-keychain removal loading unchanged.
-    #[serde(
-        default,
-        alias = "keyring",
-        skip_serializing_if = "std::ops::Not::not"
-    )]
+    #[serde(default, alias = "keyring", skip_serializing_if = "std::ops::Not::not")]
     pub store: bool,
     /// Read from this environment variable at request time — for users who keep
     /// credentials out of the store entirely.
@@ -684,7 +677,16 @@ impl ClientConfig {
         Ok(())
     }
 
-    fn validate(&self) -> Result<(), String> {
+    /// Validate semantic and cross-field constraints after deserialization.
+    ///
+    /// Desktop candidate-edit transactions call this before replacing their
+    /// authoritative draft so an invalid proxy or route never reaches disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first closed, user-actionable semantic or cross-field
+    /// validation failure.
+    pub fn validate(&self) -> Result<(), String> {
         if self.version != 1 {
             return Err(format!("config version {} is not 1", self.version));
         }
@@ -1184,7 +1186,10 @@ mod tests {
             .custom_router_for_agent("codex")
             .expect("known Agent")
             .expect("quota override forces a per-Agent router");
-        assert_eq!(codex.routing_mode, token_station_router_core::RoutingMode::QuotaFirst);
+        assert_eq!(
+            codex.routing_mode,
+            token_station_router_core::RoutingMode::QuotaFirst
+        );
         assert_eq!(
             codex.pools, config.router.pools,
             "quota override must not alter the inherited tier pools"
@@ -1196,7 +1201,10 @@ mod tests {
             .custom_router_for_agent("opencode")
             .expect("known Agent")
             .expect("custom tiers still materialize");
-        assert_eq!(opencode.routing_mode, token_station_router_core::RoutingMode::Tiered);
+        assert_eq!(
+            opencode.routing_mode,
+            token_station_router_core::RoutingMode::Tiered
+        );
         assert_eq!(opencode.pools["tier_high"][0].model, "gpt-5.5");
 
         // Pure inheritance on both axes → no per-Agent router.

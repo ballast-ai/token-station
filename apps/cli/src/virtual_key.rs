@@ -11,7 +11,6 @@
 //! configuration: the config file is meant to be shareable and diffable, and a
 //! file that holds a credential is neither.
 
-use std::io::Write;
 use std::path::Path;
 
 /// `ts-` + 48 hex characters (24 random bytes).
@@ -29,43 +28,40 @@ const KEY_BYTES: usize = 24;
 pub fn load_or_create(data_dir: &Path) -> Result<(String, bool), String> {
     let path = data_dir.join("virtual-key");
 
-    match std::fs::read_to_string(&path) {
-        Ok(existing) => {
-            let existing = existing.trim();
-            if existing.is_empty() {
-                return Err(format!(
-                    "`{}` exists but is empty; delete it to generate a new key",
-                    path.display()
-                ));
-            }
-            Ok((existing.to_owned(), false))
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {
+            token_station_private_fs::harden_private_file(&path)
+                .map_err(|error| format!("virtual key `{}`: {error}", path.display()))?;
+            read_existing(&path)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir_all(data_dir)
-                .map_err(|error| format!("data dir `{}`: {error}", data_dir.display()))?;
-
             let mut random = [0u8; KEY_BYTES];
             getrandom::fill(&mut random)
                 .map_err(|error| format!("system randomness unavailable: {error}"))?;
             let key = format!("ts-{}", hex(&random));
-
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
+            let created = token_station_private_fs::create_private_file(&path, key.as_bytes())
+                .map_err(|error| format!("virtual key `{}`: {error}", path.display()))?;
+            if created {
+                Ok((key, true))
+            } else {
+                read_existing(&path)
             }
-            let mut file = options
-                .open(&path)
-                .map_err(|error| format!("virtual key `{}`: {error}", path.display()))?;
-            file.write_all(key.as_bytes())
-                .map_err(|error| format!("virtual key `{}`: {error}", path.display()))?;
-
-            Ok((key, true))
         }
         Err(error) => Err(format!("virtual key `{}`: {error}", path.display())),
     }
+}
+
+fn read_existing(path: &Path) -> Result<(String, bool), String> {
+    let existing = std::fs::read_to_string(path)
+        .map_err(|error| format!("virtual key `{}`: {error}", path.display()))?;
+    let existing = existing.trim();
+    if existing.is_empty() {
+        return Err(format!(
+            "`{}` exists but is empty; delete it to generate a new key",
+            path.display()
+        ));
+    }
+    Ok((existing.to_owned(), false))
 }
 
 fn hex(bytes: &[u8]) -> String {

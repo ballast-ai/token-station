@@ -51,7 +51,7 @@ impl Connector for OpenClawConnector {
     }
 
     fn config_path(&self, home: &Path) -> PathBuf {
-        home.join(".openclaw/openclaw.json")
+        home.join(".openclaw").join("openclaw.json")
     }
 
     fn create_dir_error(&self) -> &'static str {

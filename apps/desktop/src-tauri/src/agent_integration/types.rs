@@ -60,6 +60,11 @@ pub enum ProbeRuntime {
         resolution_sources: Vec<RuntimeResolutionSource>,
         known_install_locations: BTreeMap<Platform, Vec<String>>,
     },
+    NodePackage {
+        interpreter_candidates: Vec<String>,
+        resolution_sources: Vec<RuntimeResolutionSource>,
+        known_install_locations: BTreeMap<Platform, Vec<String>>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -67,6 +72,7 @@ pub enum ProbeRuntime {
 pub enum RuntimeResolutionSource {
     ObservedEntrySibling,
     KnownInstallLocations,
+    Path,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -152,6 +158,7 @@ pub struct DiscoveryRecord {
 pub enum BinarySource {
     Homebrew,
     NpmGlobal,
+    MicrosoftStore,
     Path,
     KnownPath,
     EnvOverride,
@@ -169,6 +176,7 @@ pub struct DiscoveryEvidence {
 #[serde(rename_all = "snake_case")]
 pub enum DiscoverySource {
     KnownPath,
+    PackageManager,
     Path,
     EnvOverride,
 }

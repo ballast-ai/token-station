@@ -1957,6 +1957,7 @@ dependencies = [
  "token-station-metrics",
  "token-station-plugin-api",
  "token-station-plugin-runtime",
+ "token-station-private-fs",
  "token-station-protocol",
  "token-station-release",
  "token-station-router-core",
@@ -2005,6 +2006,14 @@ dependencies = [
  "token-station-protocol",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "token-station-private-fs"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -135,7 +135,7 @@ mod tests {
 
     use super::*;
     use crate::agent_integration::config_codec::{
-        apply_patch, parse_source_bytes, render_document,
+        apply_patch, parse_source_bytes, render_document, semantic_json,
     };
     use crate::agent_integration::types::PatchKind;
 
@@ -225,6 +225,65 @@ mod tests {
             render_document(&document, connector.label()).unwrap(),
             String::from_utf8_lossy(source)
         );
+    }
+
+    #[test]
+    fn gemini_connection_switches_and_restores_the_auth_mode_in_one_plan() {
+        let root = std::env::temp_dir().join(format!(
+            "token-station-gemini-companion-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let primary = root.join(".env");
+        let settings = root.join("settings.json");
+        std::fs::write(
+            &settings,
+            br#"{"security":{"auth":{"selectedType":"vertex-ai"}},"keep":true}"#,
+        )
+        .unwrap();
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/gemini-cli",
+            token: Some("fixture-virtual-key"),
+            adapter_ready: true,
+        };
+
+        let companions = find_connector("gemini-cli-v1")
+            .unwrap()
+            .companion_projections(&primary, &input)
+            .unwrap();
+        assert_eq!(companions.len(), 1);
+        assert_eq!(companions[0].target_path, settings);
+        let projected = parse_source_bytes(
+            Some(companions[0].projected_bytes.as_slice()),
+            DocumentFormat::Json,
+            companions[0].label,
+        )
+        .unwrap();
+        let semantic = semantic_json(&projected).unwrap();
+        assert_eq!(
+            semantic["security"]["auth"]["selectedType"],
+            json!("gemini-api-key")
+        );
+        assert_eq!(semantic["keep"], json!(true));
+
+        let baseline = parse_source_bytes(
+            Some(companions[0].source_bytes.as_slice()),
+            DocumentFormat::Json,
+            companions[0].label,
+        )
+        .unwrap();
+        let mut restored = projected;
+        crate::agent_integration::config_codec::project_owned_paths(
+            &mut restored,
+            &baseline,
+            &companions[0].owned_paths,
+        )
+        .unwrap();
+        assert_eq!(
+            semantic_json(&restored).unwrap()["security"]["auth"]["selectedType"],
+            json!("vertex-ai")
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

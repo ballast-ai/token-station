@@ -376,7 +376,7 @@ struct Row {
 
 impl Row {
     fn is_error(&self) -> bool {
-        self.error_code.is_some() || self.status >= 400
+        self.status != 499 && (self.error_code.is_some() || self.status >= 400)
     }
 
     /// The bucket this row lands in; requests that failed before a routing
@@ -466,8 +466,8 @@ mod tests {
     };
     use crate::store::SqliteStore;
     use std::path::PathBuf;
-    use token_station_metrics::{Recorder, RequestRecord, RoutingRecord};
-    use token_station_router_core::{DecidedBy, RequestFeatures};
+    use token_station_metrics::{RecordedDecidedBy, Recorder, RequestRecord, RoutingRecord};
+    use token_station_router_core::RequestFeatures;
 
     fn record(
         started_at_ms: u64,
@@ -485,7 +485,7 @@ mod tests {
             upstream: name.to_owned(),
             model: "m1".to_owned(),
             pool: "main".to_owned(),
-            decided_by: DecidedBy::Default,
+            decided_by: RecordedDecidedBy::Default,
             fallbacks: 0,
             features: RequestFeatures::default(),
         });
@@ -607,6 +607,23 @@ mod tests {
 
         let report = collect(&path, None, None).expect("collects");
         assert_eq!(report.total.errors, 1, "status alone would lie");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_client_cancel_is_counted_as_a_request_but_not_an_error() {
+        let path = std::env::temp_dir().join(format!(
+            "ts-stats-{}-client-cancel.sqlite",
+            std::process::id()
+        ));
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        store.record(&record(1, 50, 499, Some("mock_primary"), None));
+
+        let report = collect(&path, None, None).expect("collects");
+        assert_eq!(report.total.requests, 1);
+        assert_eq!(report.total.errors, 0);
 
         std::fs::remove_file(path).ok();
     }

@@ -101,7 +101,9 @@ fn run_probe_once(
     probe: &VersionProbe,
     environment: &ScanEnvironment,
 ) -> ProbeOutcome {
-    if unsupported_script_shim(executable, environment.platform) {
+    if unsupported_script_shim(executable, environment.platform)
+        && !matches!(probe.runtime, Some(ProbeRuntime::NodePackage { .. }))
+    {
         return broken_probe(
             ReasonCode::ExecutableNotRunnable,
             "已发现脚本 shim；为避免调用系统 shell，本版本不执行该入口",
@@ -304,7 +306,166 @@ fn resolve_probe_command(
                 arguments,
             })
         }
+        ProbeRuntime::NodePackage {
+            interpreter_candidates,
+            resolution_sources,
+            known_install_locations,
+        } => {
+            if is_native_executable(&canonical_executable) {
+                return Ok(ResolvedProbeCommand {
+                    observed_executable: observed_entry.to_path_buf(),
+                    canonical_executable: canonical_executable.clone(),
+                    observed_program: observed_entry.to_path_buf(),
+                    canonical_program: canonical_executable,
+                    arguments: probe.argv.iter().map(std::ffi::OsString::from).collect(),
+                });
+            }
+            let script = if unsupported_script_shim(executable, environment.platform) {
+                resolve_npm_shim_entry(&canonical_executable)
+                    .map_err(|message| broken_probe(ReasonCode::ExecutableNotRunnable, message))?
+            } else {
+                if !matches_declared_env_shebang(&canonical_executable, interpreter_candidates) {
+                    return Err(broken_probe(
+                        ReasonCode::ExecutableNotRunnable,
+                        "版本探测脚本既不是受支持的 npm shim，也不匹配内置 node shebang",
+                    ));
+                }
+                canonical_executable.clone()
+            };
+            let (observed_program, canonical_program) = resolve_interpreter(
+                observed_entry,
+                interpreter_candidates,
+                resolution_sources,
+                known_install_locations,
+                environment,
+            )
+            .map_err(|message| broken_probe(ReasonCode::ExecutableNotRunnable, message))?;
+            let mut arguments = Vec::with_capacity(probe.argv.len() + 1);
+            arguments.push(script.into_os_string());
+            arguments.extend(probe.argv.iter().map(std::ffi::OsString::from));
+            Ok(ResolvedProbeCommand {
+                observed_executable: observed_entry.to_path_buf(),
+                canonical_executable,
+                observed_program,
+                canonical_program,
+                arguments,
+            })
+        }
     }
+}
+
+fn resolve_npm_shim_entry(shim: &Path) -> Result<PathBuf, &'static str> {
+    const SHIM_LIMIT: u64 = 64 * 1024;
+    const PACKAGE_LIMIT: u64 = 64 * 1024;
+
+    let metadata = std::fs::metadata(shim).map_err(|_| "无法读取 npm shim")?;
+    if !metadata.is_file() || metadata.len() > SHIM_LIMIT {
+        return Err("npm shim 不是受限大小的普通文件");
+    }
+    let text = std::fs::read_to_string(shim).map_err(|_| "npm shim 不是 UTF-8 文本")?;
+    if text.contains('\0') || text.lines().count() > 256 {
+        return Err("npm shim 超出安全解析边界");
+    }
+    let parent = shim.parent().ok_or("npm shim 没有父目录")?;
+    let node_modules = std::fs::canonicalize(parent.join("node_modules"))
+        .map_err(|_| "npm shim 相邻 node_modules 不存在")?;
+    let normalized = text.replace('\\', "/");
+    let lower = normalized.to_ascii_lowercase();
+    let marker = "node_modules/";
+    let marker_start = lower
+        .find(marker)
+        .ok_or("npm shim 没有声明 node_modules 入口")?;
+    let tail = &normalized[marker_start + marker.len()..];
+    let entry_tail = tail
+        .split(|character: char| {
+            character.is_whitespace()
+                || matches!(character, '"' | '\'' | '%' | '&' | '|' | '<' | '>')
+        })
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or("npm shim 入口格式无效")?;
+    let components = entry_tail.split('/').collect::<Vec<_>>();
+    let package_component_count = if components.first().is_some_and(|item| item.starts_with('@')) {
+        2
+    } else {
+        1
+    };
+    if components.len() <= package_component_count
+        || components
+            .iter()
+            .any(|component| component.is_empty() || matches!(*component, "." | ".."))
+    {
+        return Err("npm shim 包路径无效");
+    }
+    let package_relative = components[..package_component_count].join("/");
+    let package_root = std::fs::canonicalize(node_modules.join(&package_relative))
+        .map_err(|_| "npm shim 指向的包目录不存在")?;
+    if !package_root.starts_with(&node_modules) {
+        return Err("npm shim 包目录逃逸 node_modules");
+    }
+    let package_json = package_root.join("package.json");
+    let package_metadata =
+        std::fs::metadata(&package_json).map_err(|_| "npm 包缺少 package.json")?;
+    if !package_metadata.is_file() || package_metadata.len() > PACKAGE_LIMIT {
+        return Err("npm package.json 超出安全解析边界");
+    }
+    let package: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&package_json).map_err(|_| "无法读取 npm package.json")?,
+    )
+    .map_err(|_| "npm package.json 不是有效 JSON")?;
+    let command_name = shim
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or("npm shim 命令名无效")?;
+    let bin = match package.get("bin") {
+        Some(serde_json::Value::String(bin)) => bin.as_str(),
+        Some(serde_json::Value::Object(bins)) => bins
+            .get(command_name)
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                (bins.len() == 1)
+                    .then(|| bins.values().next().and_then(serde_json::Value::as_str))
+                    .flatten()
+            })
+            .ok_or("npm package.json.bin 没有匹配 shim 命令")?,
+        _ => return Err("npm package.json.bin 无效"),
+    };
+    let bin_path = Path::new(bin);
+    if bin_path.is_absolute()
+        || bin_path.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err("npm package.json.bin 不是包内相对路径");
+    }
+    let extension = bin_path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "js" | "mjs" | "cjs") {
+        return Err("npm package.json.bin 不是受支持的 node 脚本");
+    }
+    let entry = std::fs::canonicalize(package_root.join(bin_path))
+        .map_err(|_| "npm package.json.bin 入口不存在")?;
+    if !entry.starts_with(&package_root)
+        || !std::fs::metadata(&entry).is_ok_and(|metadata| metadata.is_file())
+    {
+        return Err("npm package.json.bin 入口逃逸包目录");
+    }
+    let declared = format!(
+        "node_modules/{}/{}",
+        package_relative,
+        bin.replace('\\', "/").trim_start_matches("./")
+    )
+    .to_ascii_lowercase();
+    if !lower.contains(&declared) {
+        return Err("npm shim 与 package.json.bin 不一致");
+    }
+    Ok(entry)
 }
 
 fn matches_declared_env_shebang(executable: &Path, candidates: &[String]) -> bool {
@@ -347,6 +508,11 @@ fn resolve_interpreter(
                 .into_iter()
                 .flatten()
                 .filter_map(|template| expand_template(template, environment))
+                .collect(),
+            RuntimeResolutionSource::Path => environment
+                .path_entries
+                .iter()
+                .flat_map(|directory| candidates.iter().map(move |name| directory.join(name)))
                 .collect(),
         };
         let mut resolved = BTreeMap::new();
@@ -592,6 +758,11 @@ fn classify_binary_installation(
         );
     }
     if evidence
+        .iter()
+        .any(|item| item.source == DiscoverySource::PackageManager)
+    {
+        (BinarySource::MicrosoftStore, None)
+    } else if evidence
         .iter()
         .any(|item| item.source == DiscoverySource::Path)
     {
@@ -875,7 +1046,10 @@ fn mark_path_default(installations: &mut BTreeMap<String, Installation>) {
                 (
                     if evidence.is_path_default {
                         0
-                    } else if evidence.source == DiscoverySource::KnownPath {
+                    } else if matches!(
+                        evidence.source,
+                        DiscoverySource::KnownPath | DiscoverySource::PackageManager
+                    ) {
                         1
                     } else {
                         2
@@ -900,7 +1074,10 @@ fn executable_permission(
             .extension()
             .and_then(std::ffi::OsStr::to_str)
             .is_some_and(|extension| {
-                matches!(extension.to_ascii_lowercase().as_str(), "exe" | "com")
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "exe" | "com" | "cmd"
+                )
             });
     }
     #[cfg(unix)]
@@ -1380,6 +1557,40 @@ mod tests {
                 diagnostics: Vec::new(),
             }
         }
+    }
+
+    #[test]
+    fn npm_shim_resolves_only_the_adjacent_packages_declared_bin() {
+        let root = scratch("npm-shim");
+        let npm = root.join("npm");
+        let package = npm.join("node_modules/@google/gemini-cli");
+        let entry = package.join("dist/index.js");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, b"#!/usr/bin/env node\n").unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            br#"{"name":"@google/gemini-cli","bin":{"gemini":"dist/index.js"}}"#,
+        )
+        .unwrap();
+        let shim = npm.join("gemini.cmd");
+        std::fs::write(
+            &shim,
+            br#"@"%~dp0\node.exe" "%~dp0\node_modules\@google\gemini-cli\dist\index.js" %*"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_npm_shim_entry(&shim).unwrap(),
+            std::fs::canonicalize(&entry).unwrap()
+        );
+
+        std::fs::write(
+            package.join("package.json"),
+            br#"{"name":"@google/gemini-cli","bin":{"gemini":"../outside.js"}}"#,
+        )
+        .unwrap();
+        assert!(resolve_npm_shim_entry(&shim).is_err());
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

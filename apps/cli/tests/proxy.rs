@@ -103,11 +103,14 @@ impl ConnectionTrap {
         let worker_hits = Arc::clone(&hits);
         let worker_stop = Arc::clone(&stop);
         let worker = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(60);
+            let deadline = Instant::now() + Duration::from_secs(150);
             while !worker_stop.load(Ordering::SeqCst) && Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         worker_hits.fetch_add(1, Ordering::SeqCst);
+                        stream
+                            .set_nonblocking(false)
+                            .expect("accepted trap stream becomes blocking");
                         stream
                             .set_read_timeout(Some(Duration::from_millis(250)))
                             .expect("bounded trap read");
@@ -294,26 +297,26 @@ fn read_http_request(stream: &mut TcpStream) -> Seen {
     let (mut header_end, mut content_length) = (None, 0usize);
 
     loop {
-        if header_end.is_none() {
-            if let Some(position) = find(&buffer, b"\r\n\r\n") {
-                header_end = Some(position + 4);
-                let head = String::from_utf8_lossy(&buffer[..position]).to_string();
-                content_length = head
-                    .lines()
-                    .find_map(|line| {
-                        line.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .map(str::trim)
-                            .map(str::to_owned)
-                    })
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(0);
-            }
+        if header_end.is_none()
+            && let Some(position) = find(&buffer, b"\r\n\r\n")
+        {
+            header_end = Some(position + 4);
+            let head = String::from_utf8_lossy(&buffer[..position]).to_string();
+            content_length = head
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(str::trim)
+                        .map(str::to_owned)
+                })
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
         }
-        if let Some(end) = header_end {
-            if buffer.len() >= end + content_length {
-                break;
-            }
+        if let Some(end) = header_end
+            && buffer.len() >= end + content_length
+        {
+            break;
         }
         let read = stream.read(&mut chunk).expect("mock reads");
         if read == 0 {
@@ -852,12 +855,89 @@ fn read_marker_tool() -> Value {
     })
 }
 
+fn namespace_read_marker_tool() -> Value {
+    json!({
+        "type": "namespace",
+        "name": "workspace_v1",
+        "description": "Read workspace files.",
+        "tools": [{
+            "type": "function",
+            "name": "read_marker",
+            "description": "Read one marker.",
+            "strict": true,
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }
+        }]
+    })
+}
+
+fn assert_namespace_stream_events(events: &[Value]) {
+    let added: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "response.output_item.added")
+        .map(|event| {
+            (
+                event["output_index"].as_u64().unwrap(),
+                event["item"]["type"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(added, vec![(0, "message"), (1, "function_call")]);
+    let added_call = events
+        .iter()
+        .find(|event| {
+            event["type"] == "response.output_item.added"
+                && event["item"]["type"] == "function_call"
+        })
+        .expect("streamed function call is added");
+    assert_eq!(added_call["item"]["namespace"], json!("workspace_v1"));
+    assert_eq!(added_call["item"]["name"], json!("read_marker"));
+    let function_delta_indices: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "response.function_call_arguments.delta")
+        .map(|event| event["output_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(function_delta_indices, vec![1, 1]);
+    let text_delta_indices: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "response.output_text.delta")
+        .map(|event| event["output_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(text_delta_indices, vec![0, 0]);
+    let done_indices: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "response.output_item.done")
+        .map(|event| event["output_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(done_indices, vec![0, 1]);
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("completed event");
+    assert_eq!(completed["response"]["output"][0]["type"], json!("message"));
+    assert_eq!(
+        completed["response"]["output"][1]["type"],
+        json!("function_call")
+    );
+    assert_eq!(
+        completed["response"]["output"][1]["namespace"],
+        json!("workspace_v1")
+    );
+    assert_eq!(
+        completed["response"]["output"][1]["name"],
+        json!("read_marker")
+    );
+}
+
 const EGRESS_CHILD_MODE: &str = "TOKEN_STATION_EGRESS_CHILD_MODE";
 const EGRESS_TARGET_URL: &str = "TOKEN_STATION_EGRESS_TARGET_URL";
 const EGRESS_PROXY_URL: &str = "TOKEN_STATION_EGRESS_PROXY_URL";
 const EGRESS_KEY_FILE: &str = "TOKEN_STATION_EGRESS_KEY_FILE";
 const EGRESS_PLUGIN_DIR: &str = "TOKEN_STATION_EGRESS_PLUGIN_DIR";
-const EGRESS_CHILD_TIMEOUT: Duration = Duration::from_secs(120);
+const EGRESS_CHILD_TIMEOUT: Duration = Duration::from_mins(2);
 const PROXY_ENV_VARS: [&str; 8] = [
     "ALL_PROXY",
     "all_proxy",
@@ -1169,7 +1249,7 @@ fn redirects_to_other_hosts_loopback_and_metadata_never_receive_a_second_hop() {
 }
 
 #[test]
-fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_records_499() {
+fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_returns_503() {
     let mock = MockUpstream::start_hanging();
     let key = key_file("hung-drain", "sk-test-key-abc\n");
     let proxy = start_proxy(&mock, &key);
@@ -1236,18 +1316,19 @@ fn a_hung_upstream_is_force_cancelled_after_the_five_second_grace_and_records_49
     );
     assert_eq!(
         client.join().expect("client joins"),
-        499,
-        "an uncommitted stream cancelled by drain is surfaced as cancellation"
+        503,
+        "an uncommitted stream cancelled by server drain is explicitly retryable"
     );
 
     settle();
     let row = last_row(&proxy.data_dir);
-    assert_eq!(row["status"], "Integer(499)");
+    assert_eq!(row["status"], "Integer(503)");
+    assert_eq!(row["error_code"], "Text(\"upstream_unavailable\")");
     std::fs::remove_file(key).ok();
 }
 
 #[test]
-fn a_cancelled_non_stream_body_is_499_not_a_provider_failure() {
+fn a_server_drained_non_stream_body_returns_503_without_hanging() {
     let mock = MockUpstream::start_hanging();
     let key = key_file("hung-json-cancel", "sk-test-key-abc\n");
     let proxy = start_proxy(&mock, &key);
@@ -1283,11 +1364,11 @@ fn a_cancelled_non_stream_body_is_499_not_a_provider_failure() {
     }
     assert_eq!(mock.hits(), 1);
     proxy.control.cancel_in_flight();
-    assert_eq!(client.join().expect("client joins"), 499);
+    assert_eq!(client.join().expect("client joins"), 503);
     settle();
     let row = last_row(&proxy.data_dir);
-    assert_eq!(row["status"], "Integer(499)");
-    assert_eq!(row["error_code"], "Null");
+    assert_eq!(row["status"], "Integer(503)");
+    assert_eq!(row["error_code"], "Text(\"upstream_unavailable\")");
     std::fs::remove_file(key).ok();
 }
 
@@ -1646,8 +1727,18 @@ fn a_responses_request_round_trips_through_the_existing_provider_pipeline() {
 }
 
 #[test]
-fn responses_structured_output_fails_before_the_upstream() {
-    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
+fn responses_structured_output_round_trips_through_the_provider() {
+    let answer = json!({
+        "id": "chatcmpl-structured",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "{\"answer\":true}"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 3}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let key = key_file("responses-structured-output", "sk-test-key-abc");
     let proxy = start_proxy_with_agent(&mock, &key, true, "agent-openai-responses");
     let token = proxy.virtual_key.clone();
@@ -1669,48 +1760,127 @@ fn responses_structured_output_fails_before_the_upstream() {
         &token,
     );
 
-    assert_eq!(status, 400, "{body}");
+    assert_eq!(status, 200, "{body}");
     assert_eq!(content_type.as_deref(), Some("application/json"));
-    let body: Value = serde_json::from_str(&body).expect("the refusal is JSON");
-    assert_eq!(body["error"]["code"], json!("unsupported_capability"));
-    assert_eq!(mock.hits(), 0, "the adapter must reject before routing");
+    let body: Value = serde_json::from_str(&body).expect("the response is JSON");
+    assert_eq!(body["status"], json!("completed"));
+    assert_eq!(
+        body["output"][0]["content"][0]["text"],
+        json!("{\"answer\":true}")
+    );
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0].body["response_format"]["type"],
+        json!("json_schema")
+    );
+    assert_eq!(
+        seen[0].body["response_format"]["json_schema"]["name"],
+        json!("answer")
+    );
+    assert_eq!(
+        seen[0].body["response_format"]["json_schema"]["strict"],
+        json!(true)
+    );
 
     settle();
     let row = last_row(&proxy.data_dir);
-    assert_eq!(row["status"], "Integer(400)");
-    assert_eq!(row["error_code"], "Text(\"capability\")");
-    assert_eq!(row["attempts"], "Integer(0)");
-    assert_eq!(row["upstream"], "Null");
+    assert_eq!(row["status"], "Integer(200)");
+    assert_eq!(row["error_code"], "Null");
+    assert_eq!(row["attempts"], "Integer(1)");
+    assert_eq!(row["upstream"], "Text(\"mock_primary\")");
 
     std::fs::remove_file(key).ok();
 }
 
 #[test]
-fn responses_semantic_options_fail_before_the_upstream_when_the_ir_cannot_preserve_them() {
+fn an_unknown_responses_continuation_fails_explicitly_before_the_upstream() {
     let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
     let key = key_file("responses-semantic-options", "sk-test-key-abc");
     let proxy = start_proxy_with_agent(&mock, &key, true, "agent-openai-responses");
     let token = proxy.virtual_key.clone();
 
-    for unsupported in [
-        json!({"previous_response_id": "resp_previous"}),
-        json!({"tool_choice": "required"}),
-    ] {
-        let mut request = json!({"model": "auto", "input": "hi"});
-        request
-            .as_object_mut()
-            .unwrap()
-            .extend(unsupported.as_object().unwrap().clone());
+    let request = json!({
+        "model": "auto",
+        "input": "hi",
+        "previous_response_id": "resp_previous"
+    });
+    let (status, content_type, body) = send_responses(&proxy, &request, &token);
 
-        let (status, content_type, body) = send_responses(&proxy, &request, &token);
+    assert_eq!(status, 400, "request={request} body={body}");
+    assert_eq!(content_type.as_deref(), Some("application/json"));
+    let body: Value = serde_json::from_str(&body).expect("the refusal is JSON");
+    assert_eq!(body["error"]["code"], json!("invalid_request"));
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("continuation_expired")),
+        "{body}"
+    );
+    assert_eq!(mock.hits(), 0, "expired continuations stop before routing");
+    std::fs::remove_file(key).ok();
+}
 
-        assert_eq!(status, 400, "request={request} body={body}");
-        assert_eq!(content_type.as_deref(), Some("application/json"));
-        let body: Value = serde_json::from_str(&body).expect("the refusal is JSON");
-        assert_eq!(body["error"]["code"], json!("unsupported_capability"));
-    }
+#[test]
+fn responses_previous_response_id_replays_history_through_the_provider_pipeline() {
+    let first_answer = json!({
+        "id": "chatcmpl-continuation-1",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "first answer"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2}
+    });
+    let second_answer = json!({
+        "id": "chatcmpl-continuation-2",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "second answer"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 8, "completion_tokens": 2}
+    });
+    let mock = MockUpstream::start(vec![
+        vec![http_json(200, &first_answer.to_string())],
+        vec![http_json(200, &second_answer.to_string())],
+    ]);
+    let key = key_file("responses-continuation", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-openai-responses");
+    let token = proxy.virtual_key.clone();
 
-    assert_eq!(mock.hits(), 0, "semantic refusals happen before routing");
+    let (first_status, _, first_body) = send_responses(
+        &proxy,
+        &json!({"model": "auto", "input": "first turn", "store": false}),
+        &token,
+    );
+    assert_eq!(first_status, 200, "{first_body}");
+    let first_body: Value = serde_json::from_str(&first_body).expect("first response is JSON");
+    assert_eq!(first_body["id"], json!("chatcmpl-continuation-1"));
+
+    let (second_status, _, second_body) = send_responses(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "input": "second turn",
+            "previous_response_id": "chatcmpl-continuation-1",
+            "store": false
+        }),
+        &token,
+    );
+    assert_eq!(second_status, 200, "{second_body}");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 2);
+    let messages = seen[1].body["messages"]
+        .as_array()
+        .expect("continued provider request has messages");
+    assert_eq!(messages.len(), 3, "{}", seen[1].body);
+    assert_eq!(messages[0]["content"], json!("first turn"));
+    assert_eq!(messages[1]["content"], json!("first answer"));
+    assert_eq!(messages[2]["content"], json!("second turn"));
+
     std::fs::remove_file(key).ok();
 }
 
@@ -1820,10 +1990,10 @@ fn responses_reasoning_effort_maps_to_the_upstream_parameter() {
 }
 
 #[test]
-fn a_responses_stream_is_incremental_and_protocol_shaped() {
+fn a_responses_namespace_stream_is_incremental_and_protocol_shaped() {
     let sse = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"M4_\"}}]}\n\n",
-        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_stream\",\"function\":{\"name\":\"read_marker\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_stream\",\"function\":{\"name\":\"workspace_v1__read_marker\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"STREAM_OK\"}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"marker.txt\\\"}\"}}]}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -1849,7 +2019,8 @@ fn a_responses_stream_is_incremental_and_protocol_shaped() {
         &json!({
             "model": "auto",
             "input": "Return the marker.",
-            "stream": true
+            "stream": true,
+            "tools": [namespace_read_marker_tool()]
         }),
         &token,
     );
@@ -1871,43 +2042,11 @@ fn a_responses_stream_is_incremental_and_protocol_shaped() {
 
     let events = sse_events(&body);
     assert_responses_terminal_is_unique_and_last(&events, &body);
-    let added: Vec<_> = events
-        .iter()
-        .filter(|event| event["type"] == "response.output_item.added")
-        .map(|event| {
-            (
-                event["output_index"].as_u64().unwrap(),
-                event["item"]["type"].as_str().unwrap(),
-            )
-        })
-        .collect();
-    assert_eq!(added, vec![(0, "message"), (1, "function_call")]);
-    let function_delta_indices: Vec<_> = events
-        .iter()
-        .filter(|event| event["type"] == "response.function_call_arguments.delta")
-        .map(|event| event["output_index"].as_u64().unwrap())
-        .collect();
-    assert_eq!(function_delta_indices, vec![1, 1]);
-    let text_delta_indices: Vec<_> = events
-        .iter()
-        .filter(|event| event["type"] == "response.output_text.delta")
-        .map(|event| event["output_index"].as_u64().unwrap())
-        .collect();
-    assert_eq!(text_delta_indices, vec![0, 0]);
-    let done_indices: Vec<_> = events
-        .iter()
-        .filter(|event| event["type"] == "response.output_item.done")
-        .map(|event| event["output_index"].as_u64().unwrap())
-        .collect();
-    assert_eq!(done_indices, vec![0, 1]);
-    let completed = events
-        .iter()
-        .find(|event| event["type"] == "response.completed")
-        .expect("completed event");
-    assert_eq!(completed["response"]["output"][0]["type"], json!("message"));
+    assert_namespace_stream_events(&events);
+    let seen = mock.seen();
     assert_eq!(
-        completed["response"]["output"][1]["type"],
-        json!("function_call")
+        seen[0].body["tools"][0]["function"]["name"],
+        json!("workspace_v1__read_marker")
     );
 
     settle();
@@ -2027,6 +2166,78 @@ fn responses_function_call_and_output_complete_a_second_turn() {
     assert_eq!(seen.len(), 2);
     assert_responses_tool_follow_up(&seen[1].body);
 
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn responses_namespace_tool_is_flattened_for_the_provider_and_restored_for_codex() {
+    let tool_answer = json!({
+        "id": "chatcmpl-namespace-tool",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_spawn_1",
+                    "type": "function",
+                    "function": {
+                        "name": "multi_agent_v1__spawn_agent",
+                        "arguments": "{\"task\":\"inspect\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 8, "completion_tokens": 3}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &tool_answer.to_string())]]);
+    let key = key_file("responses-namespace-tool", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-openai-responses");
+    let token = proxy.virtual_key.clone();
+
+    let (status, _, response) = send_responses(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "input": "Spawn one worker.",
+            "stream": false,
+            "tools": [{
+                "type": "namespace",
+                "name": "multi_agent_v1",
+                "description": "Manage isolated workers.",
+                "tools": [{
+                    "type": "function",
+                    "name": "spawn_agent",
+                    "description": "Spawn one worker.",
+                    "strict": true,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"task": {"type": "string"}},
+                        "required": ["task"],
+                        "additionalProperties": false
+                    }
+                }]
+            }]
+        }),
+        &token,
+    );
+
+    assert_eq!(status, 200, "{response}");
+    let response: Value = serde_json::from_str(&response).expect("Responses body is JSON");
+    assert_eq!(response["output"][0]["type"], json!("function_call"));
+    assert_eq!(response["output"][0]["namespace"], json!("multi_agent_v1"));
+    assert_eq!(response["output"][0]["name"], json!("spawn_agent"));
+    assert_eq!(response["output"][0]["call_id"], json!("call_spawn_1"));
+
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0].body["tools"][0]["function"]["name"],
+        json!("multi_agent_v1__spawn_agent")
+    );
+    assert_eq!(seen[0].body["tools"][0]["function"]["strict"], json!(true));
     std::fs::remove_file(key).ok();
 }
 
@@ -3055,7 +3266,11 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
     }
 }
 
-fn start_quota_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &Path) -> Proxy {
+fn start_quota_proxy_two(
+    primary: &MockUpstream,
+    fallback: &MockUpstream,
+    key_file: &Path,
+) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
         "ts-proxy-quota-{}-{}",
@@ -3246,10 +3461,9 @@ fn quota_snapshot_reports_authoritative_windows_from_response_headers() {
         .call()
         .expect("admin/quota answers");
     assert_eq!(snapshot.status().as_u16(), 200);
-    let snapshot: Value = serde_json::from_str(
-        &snapshot.into_body().read_to_string().expect("body reads"),
-    )
-    .expect("snapshot is JSON");
+    let snapshot: Value =
+        serde_json::from_str(&snapshot.into_body().read_to_string().expect("body reads"))
+            .expect("snapshot is JSON");
 
     let accounts = snapshot["accounts"].as_array().expect("accounts array");
     let primary_account = accounts

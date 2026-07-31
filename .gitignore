@@ -37,3 +37,5 @@ plugins/official/*/adapter.wasm
 # 汇报资产（截图 / PPT 生成脚本，本地产物不入库）
 /.report-assets/
 .gstack/
+# Local runtime configuration can contain provider and proxy credentials.
+/token-station.json

@@ -20,11 +20,13 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, Transaction, named_params, types::Type,
 };
 use token_station_metrics::{
-    AttemptRecord, ConversionRecord, ConversionStage, CostKind, DecisionRecord,
-    QuotaDecisionSnapshot, ReceiptView, Recorder, RequestRecord, RoutingRecord, SCHEMA_VERSION,
+    AttemptRecord, ConversionOutcome, ConversionReasonCode, ConversionReasonDetail,
+    ConversionRecord, ConversionStage, CostKind, DecisionRecord, QuotaDecisionSnapshot,
+    ReceiptView, RecordedDecidedBy, Recorder, RequestPathKind, RequestRecord, RoutingRecord,
+    SCHEMA_VERSION,
 };
 use token_station_protocol::{ErrorCode, HintKind, StreamOutcome, Usage};
-use token_station_router_core::{DecidedBy, RequestFeatures};
+use token_station_router_core::RequestFeatures;
 
 /// One forward, idempotent step from schema `to - 1` to schema `to`.
 struct Migration {
@@ -287,6 +289,39 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE decisions ADD COLUMN quota_exhausted INTEGER;
         ",
     },
+    Migration {
+        to: 8,
+        // Content-free request diagnostics and conversion cancellation/reason
+        // semantics. Existing rows retain unknown transport metadata, and
+        // legacy conversion rows derive their outcome from `succeeded`.
+        sql: "
+            ALTER TABLE requests ADD COLUMN request_method TEXT;
+            ALTER TABLE requests ADD COLUMN path_kind TEXT NOT NULL DEFAULT 'unknown'
+                CHECK (path_kind IN (
+                    'chat_completions', 'responses', 'messages',
+                    'gemini_generate_content', 'models', 'embeddings', 'admin',
+                    'unknown_agent_endpoint', 'unknown'
+                ));
+            ALTER TABLE conversion_reports ADD COLUMN outcome TEXT NOT NULL DEFAULT 'unknown'
+                CHECK (outcome IN ('succeeded', 'failed', 'cancelled', 'unknown'));
+            ALTER TABLE conversion_reports ADD COLUMN reason_code TEXT
+                CHECK (reason_code IS NULL OR reason_code IN (
+                    'unsupported_tool_type', 'provider_tool_unsupported',
+                    'stateful_chaining', 'structured_output', 'reasoning_item',
+                    'unsupported_media', 'invalid_json', 'invalid_protocol_shape',
+                    'adapter_failure'
+                ));
+            ALTER TABLE conversion_reports ADD COLUMN reason_detail TEXT
+                CHECK (reason_detail IS NULL OR reason_detail IN (
+                    'local_shell', 'web_search', 'function_tool',
+                    'previous_response_id', 'json_schema', 'reasoning', 'image',
+                    'request_body', 'other_tool_type'
+                ));
+            UPDATE conversion_reports
+               SET outcome = CASE WHEN succeeded THEN 'succeeded' ELSE 'failed' END
+             WHERE outcome = 'unknown';
+        ",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -336,7 +371,14 @@ CREATE TABLE IF NOT EXISTS requests (
     cost_kind           TEXT NOT NULL DEFAULT 'unknown'
         CHECK (cost_kind IN ('actual', 'estimated', 'unknown')),
     -- the price table version cost_micros was computed under (NULL if unpriced)
-    price_version       INTEGER
+    price_version       INTEGER,
+    request_method      TEXT,
+    path_kind           TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (path_kind IN (
+            'chat_completions', 'responses', 'messages',
+            'gemini_generate_content', 'models', 'embeddings', 'admin',
+            'unknown_agent_endpoint', 'unknown'
+        ))
 );
 CREATE INDEX IF NOT EXISTS requests_started_at ON requests (started_at_ms);
 -- A stable accounting id is unique: writing the same request twice (a derived
@@ -411,6 +453,19 @@ CREATE TABLE IF NOT EXISTS conversion_reports (
     target_protocol TEXT NOT NULL,
     succeeded INTEGER NOT NULL,
     error_code TEXT,
+    outcome TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (outcome IN ('succeeded', 'failed', 'cancelled', 'unknown')),
+    reason_code TEXT CHECK (reason_code IS NULL OR reason_code IN (
+        'unsupported_tool_type', 'provider_tool_unsupported',
+        'stateful_chaining', 'structured_output', 'reasoning_item',
+        'unsupported_media', 'invalid_json', 'invalid_protocol_shape',
+        'adapter_failure'
+    )),
+    reason_detail TEXT CHECK (reason_detail IS NULL OR reason_detail IN (
+        'local_shell', 'web_search', 'function_tool',
+        'previous_response_id', 'json_schema', 'reasoning', 'image',
+        'request_body', 'other_tool_type'
+    )),
     PRIMARY KEY (request_id, ordinal)
 );
 ";
@@ -458,7 +513,7 @@ fn stream_outcome_name(outcome: StreamOutcome) -> &'static str {
     }
 }
 
-/// Storage columns for the closed [`DecidedBy`] vocabulary. Values are either
+/// Storage columns for the closed [`RecordedDecidedBy`] vocabulary. Values are either
 /// configured identifiers or bounded numeric facts; no generic detail string
 /// is introduced.
 struct DecisionColumns {
@@ -470,9 +525,9 @@ struct DecisionColumns {
     threshold: Option<u32>,
 }
 
-fn decision_columns(decided_by: &DecidedBy) -> DecisionColumns {
+fn decision_columns(decided_by: &RecordedDecidedBy) -> DecisionColumns {
     match decided_by {
-        DecidedBy::Rule { rule } => DecisionColumns {
+        RecordedDecidedBy::Rule { rule } => DecisionColumns {
             kind: "rule",
             rule_id: Some(rule.clone()),
             hint_kind: None,
@@ -480,7 +535,7 @@ fn decision_columns(decided_by: &DecidedBy) -> DecisionColumns {
             score: None,
             threshold: None,
         },
-        DecidedBy::Hint { kind, value } => DecisionColumns {
+        RecordedDecidedBy::Hint { kind, value } => DecisionColumns {
             kind: "hint",
             rule_id: None,
             hint_kind: Some(hint_kind_name(*kind).to_owned()),
@@ -488,15 +543,18 @@ fn decision_columns(decided_by: &DecidedBy) -> DecisionColumns {
             score: None,
             threshold: None,
         },
-        DecidedBy::Heuristic { score, threshold } => DecisionColumns {
+        RecordedDecidedBy::Heuristic {
+            score,
+            matched_band_at_least,
+        } => DecisionColumns {
             kind: "heuristic",
             rule_id: None,
             hint_kind: None,
             hint_value: None,
             score: Some(*score),
-            threshold: Some(*threshold),
+            threshold: Some(*matched_band_at_least),
         },
-        DecidedBy::Default => DecisionColumns {
+        RecordedDecidedBy::Default => DecisionColumns {
             kind: "default",
             rule_id: None,
             hint_kind: None,
@@ -504,7 +562,7 @@ fn decision_columns(decided_by: &DecidedBy) -> DecisionColumns {
             score: None,
             threshold: None,
         },
-        DecidedBy::ExactModel { model } => DecisionColumns {
+        RecordedDecidedBy::ExactModel { model } => DecisionColumns {
             kind: "exact_model",
             rule_id: Some(model.clone()),
             hint_kind: None,
@@ -516,7 +574,7 @@ fn decision_columns(decided_by: &DecidedBy) -> DecisionColumns {
         // columns; there is no tier-like sub-field to record. The `decisions`
         // table's `decision_kind` CHECK is widened to admit 'quota' in the
         // schema migration that ships with quota-first host wiring.
-        DecidedBy::Quota => DecisionColumns {
+        RecordedDecidedBy::Quota => DecisionColumns {
             kind: "quota",
             rule_id: None,
             hint_kind: None,
@@ -577,7 +635,8 @@ impl SqliteStore {
                AND (
                     ?5 IS NULL
                     OR (?5 = 'success' AND status >= 200 AND status < 400 AND error_code IS NULL)
-                    OR (?5 = 'error' AND (status < 200 OR status >= 400 OR error_code IS NOT NULL))
+                    OR (?5 = 'error' AND status <> 499
+                        AND (status < 200 OR status >= 400 OR error_code IS NOT NULL))
                )";
         let total = connection
             .query_row(
@@ -604,7 +663,7 @@ impl SqliteStore {
                         requires_json_schema, code_block_count, requested_max_output_tokens,
                         hint_count, input_tokens, output_tokens, cache_read_tokens,
                         cache_write_tokens, reasoning_tokens, cost_kind, cost_micros, price_version,
-                        attempts
+                        attempts, request_method, path_kind
                    FROM requests
                   {where_sql}
                   ORDER BY started_at_ms DESC, request_id DESC, id DESC
@@ -832,7 +891,7 @@ impl SqliteStore {
             // unique index dedups it rather than double-counting. Child rows are
             // inserted only when this statement actually inserted the parent.
             "INSERT OR IGNORE INTO requests (
-                request_id, agent_id, running_revision,
+                request_id, agent_id, running_revision, request_method, path_kind,
                 started_at_ms, latency_ms, protocol, requested_model, stream, status,
                 error_code, attempts,
                 upstream, model, pool, tier, rule_id, hint_kind, hint_value,
@@ -842,7 +901,7 @@ impl SqliteStore {
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
                 reasoning_tokens, cost_micros, cost_kind, price_version
             ) VALUES (
-                :request_id, :agent_id, :running_revision,
+                :request_id, :agent_id, :running_revision, :request_method, :path_kind,
                 :started_at_ms, :latency_ms, :protocol, :requested_model, :stream, :status,
                 :error_code, :attempts,
                 :upstream, :model, :pool, :tier, :rule_id, :hint_kind, :hint_value,
@@ -856,6 +915,8 @@ impl SqliteStore {
                 ":request_id": record.request_id,
                 ":agent_id": record.agent_id,
                 ":running_revision": record.running_revision.map(wide),
+                ":request_method": record.request_method,
+                ":path_kind": record.path_kind.as_str(),
                 ":started_at_ms": wide(record.started_at_ms),
                 ":latency_ms": wide(record.latency_ms),
                 ":protocol": record.protocol,
@@ -924,8 +985,8 @@ impl SqliteStore {
             transaction.execute(
                 "INSERT INTO conversion_reports (
                     request_id, ordinal, stage, source_protocol, target_protocol,
-                    succeeded, error_code
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    succeeded, error_code, outcome, reason_code, reason_detail
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
                     record.request_id,
                     conversion.ordinal,
@@ -934,6 +995,9 @@ impl SqliteStore {
                     conversion.target_protocol,
                     conversion.succeeded,
                     conversion.error_code.map(ErrorCode::as_str),
+                    conversion.outcome.as_str(),
+                    conversion.reason_code.map(ConversionReasonCode::as_str),
+                    conversion.reason_detail.map(ConversionReasonDetail::as_str),
                 ],
             )?;
         }
@@ -1070,24 +1134,24 @@ fn decided_by(
     hint_value: Option<String>,
     score: Option<u32>,
     threshold: Option<u32>,
-) -> Result<DecidedBy, rusqlite::Error> {
+) -> Result<RecordedDecidedBy, rusqlite::Error> {
     match kind {
-        "rule" => Ok(DecidedBy::Rule {
+        "rule" => Ok(RecordedDecidedBy::Rule {
             rule: rule_id.unwrap_or_default(),
         }),
-        "hint" => Ok(DecidedBy::Hint {
+        "hint" => Ok(RecordedDecidedBy::Hint {
             kind: hint_kind(column, hint_kind_value.unwrap_or(""))?,
             value: hint_value.unwrap_or_default(),
         }),
-        "heuristic" => Ok(DecidedBy::Heuristic {
+        "heuristic" => Ok(RecordedDecidedBy::Heuristic {
             score: score.unwrap_or(0),
-            threshold: threshold.unwrap_or(0),
+            matched_band_at_least: threshold.unwrap_or(0),
         }),
-        "default" | "" => Ok(DecidedBy::Default),
-        "exact_model" => Ok(DecidedBy::ExactModel {
+        "default" | "" => Ok(RecordedDecidedBy::Default),
+        "exact_model" => Ok(RecordedDecidedBy::ExactModel {
             model: rule_id.unwrap_or_default(),
         }),
-        "quota" => Ok(DecidedBy::Quota),
+        "quota" => Ok(RecordedDecidedBy::Quota),
         other => Err(invalid_enum(column, "decision kind", other)),
     }
 }
@@ -1119,6 +1183,67 @@ fn conversion_stage(column: usize, value: &str) -> Result<ConversionStage, rusql
         "outbound_render" => Ok(ConversionStage::OutboundRender),
         "stream_translate" => Ok(ConversionStage::StreamTranslate),
         other => Err(invalid_enum(column, "conversion stage", other)),
+    }
+}
+
+fn conversion_outcome(column: usize, value: &str) -> Result<ConversionOutcome, rusqlite::Error> {
+    match value {
+        "succeeded" => Ok(ConversionOutcome::Succeeded),
+        "failed" => Ok(ConversionOutcome::Failed),
+        "cancelled" => Ok(ConversionOutcome::Cancelled),
+        "unknown" => Ok(ConversionOutcome::Unknown),
+        other => Err(invalid_enum(column, "conversion outcome", other)),
+    }
+}
+
+fn conversion_reason_code(
+    column: usize,
+    value: &str,
+) -> Result<ConversionReasonCode, rusqlite::Error> {
+    match value {
+        "unsupported_tool_type" => Ok(ConversionReasonCode::UnsupportedToolType),
+        "provider_tool_unsupported" => Ok(ConversionReasonCode::ProviderToolUnsupported),
+        "stateful_chaining" => Ok(ConversionReasonCode::StatefulChaining),
+        "structured_output" => Ok(ConversionReasonCode::StructuredOutput),
+        "reasoning_item" => Ok(ConversionReasonCode::ReasoningItem),
+        "unsupported_media" => Ok(ConversionReasonCode::UnsupportedMedia),
+        "invalid_json" => Ok(ConversionReasonCode::InvalidJson),
+        "invalid_protocol_shape" => Ok(ConversionReasonCode::InvalidProtocolShape),
+        "adapter_failure" => Ok(ConversionReasonCode::AdapterFailure),
+        other => Err(invalid_enum(column, "conversion reason code", other)),
+    }
+}
+
+fn conversion_reason_detail(
+    column: usize,
+    value: &str,
+) -> Result<ConversionReasonDetail, rusqlite::Error> {
+    match value {
+        "local_shell" => Ok(ConversionReasonDetail::LocalShell),
+        "web_search" => Ok(ConversionReasonDetail::WebSearch),
+        "function_tool" => Ok(ConversionReasonDetail::FunctionTool),
+        "previous_response_id" => Ok(ConversionReasonDetail::PreviousResponseId),
+        "json_schema" => Ok(ConversionReasonDetail::JsonSchema),
+        "reasoning" => Ok(ConversionReasonDetail::Reasoning),
+        "image" => Ok(ConversionReasonDetail::Image),
+        "request_body" => Ok(ConversionReasonDetail::RequestBody),
+        "other_tool_type" => Ok(ConversionReasonDetail::OtherToolType),
+        other => Err(invalid_enum(column, "conversion reason detail", other)),
+    }
+}
+
+fn request_path_kind(column: usize, value: &str) -> Result<RequestPathKind, rusqlite::Error> {
+    match value {
+        "chat_completions" => Ok(RequestPathKind::ChatCompletions),
+        "responses" => Ok(RequestPathKind::Responses),
+        "messages" => Ok(RequestPathKind::Messages),
+        "gemini_generate_content" => Ok(RequestPathKind::GeminiGenerateContent),
+        "models" => Ok(RequestPathKind::Models),
+        "embeddings" => Ok(RequestPathKind::Embeddings),
+        "admin" => Ok(RequestPathKind::Admin),
+        "unknown_agent_endpoint" => Ok(RequestPathKind::UnknownAgentEndpoint),
+        "unknown" => Ok(RequestPathKind::Unknown),
+        other => Err(invalid_enum(column, "request path kind", other)),
     }
 }
 
@@ -1172,7 +1297,7 @@ impl SqliteStore {
                         requires_json_schema, code_block_count, requested_max_output_tokens,
                         hint_count, input_tokens, output_tokens, cache_read_tokens,
                         cache_write_tokens, reasoning_tokens, cost_kind, cost_micros, price_version,
-                        attempts
+                        attempts, request_method, path_kind
                    FROM requests
                   ORDER BY started_at_ms DESC, request_id DESC, id DESC
                   LIMIT ?1",
@@ -1279,6 +1404,8 @@ fn receipt_seed(row: &Row<'_>) -> Result<ReceiptSeed, rusqlite::Error> {
             protocol: row.get(4)?,
             agent_id: row.get(9)?,
             running_revision: row.get::<_, Option<i64>>(10)?.map(narrow),
+            request_method: row.get(38)?,
+            path_kind: request_path_kind(39, &row.get::<_, String>(39)?)?,
             requested_model: row.get(5)?,
             stream: row.get(6)?,
             status: row.get(7)?,
@@ -1407,19 +1534,31 @@ fn read_conversions(
     request_id: &str,
 ) -> Result<Vec<ConversionRecord>, rusqlite::Error> {
     let mut statement = connection.prepare(
-        "SELECT ordinal, stage, source_protocol, target_protocol, succeeded, error_code
+        "SELECT ordinal, stage, source_protocol, target_protocol, succeeded, error_code,
+                outcome, reason_code, reason_detail
            FROM conversion_reports WHERE request_id = ?1 ORDER BY ordinal",
     )?;
     statement
         .query_map([request_id], |row| {
             let raw_error_code = row.get::<_, Option<String>>(5)?;
+            let raw_reason_code = row.get::<_, Option<String>>(7)?;
+            let raw_reason_detail = row.get::<_, Option<String>>(8)?;
             Ok(ConversionRecord {
                 ordinal: row.get(0)?,
                 stage: conversion_stage(1, &row.get::<_, String>(1)?)?,
                 source_protocol: row.get(2)?,
                 target_protocol: row.get(3)?,
                 succeeded: row.get(4)?,
+                outcome: conversion_outcome(6, &row.get::<_, String>(6)?)?,
                 error_code: optional_error_code(5, raw_error_code.as_deref())?,
+                reason_code: raw_reason_code
+                    .as_deref()
+                    .map(|value| conversion_reason_code(7, value))
+                    .transpose()?,
+                reason_detail: raw_reason_detail
+                    .as_deref()
+                    .map(|value| conversion_reason_detail(8, value))
+                    .transpose()?,
             })
         })?
         .collect()
@@ -1439,11 +1578,12 @@ impl Recorder for SqliteStore {
 mod tests {
     use super::{ReceiptQuery, SqliteStore, recent_receipts};
     use token_station_metrics::{
-        AttemptRecord, ConversionRecord, ConversionStage, CostKind, DecisionRecord,
-        QuotaDecisionSnapshot, Recorder, RequestRecord, RoutingRecord,
+        AttemptRecord, ConversionOutcome, ConversionRecord, ConversionStage, CostKind,
+        DecisionRecord, QuotaDecisionSnapshot, RecordedDecidedBy, Recorder, RequestRecord,
+        RoutingRecord,
     };
     use token_station_protocol::{ErrorCode, StreamOutcome, Usage};
-    use token_station_router_core::{DecidedBy, RequestFeatures};
+    use token_station_router_core::RequestFeatures;
 
     const V3_SCHEMA: &str = "
         CREATE TABLE requests (
@@ -1504,7 +1644,7 @@ mod tests {
             upstream: "primary".to_owned(),
             model: "model-a".to_owned(),
             pool: "main".to_owned(),
-            decided_by: DecidedBy::Default,
+            decided_by: RecordedDecidedBy::Default,
             fallbacks: 1,
             features,
             quota: None,
@@ -1520,7 +1660,7 @@ mod tests {
             upstream: "fallback".to_owned(),
             model: "model-b".to_owned(),
             pool: "main".to_owned(),
-            decided_by: DecidedBy::Default,
+            decided_by: RecordedDecidedBy::Default,
             fallbacks: 1,
             features,
         });
@@ -1554,7 +1694,10 @@ mod tests {
                 source_protocol: "openai-chat-completions".to_owned(),
                 target_protocol: "token-station-chat".to_owned(),
                 succeeded: true,
+                outcome: ConversionOutcome::Succeeded,
                 error_code: None,
+                reason_code: None,
+                reason_detail: None,
             },
             ConversionRecord {
                 ordinal: 2,
@@ -1562,7 +1705,10 @@ mod tests {
                 source_protocol: "openai-compatible".to_owned(),
                 target_protocol: "token-station-chat".to_owned(),
                 succeeded: true,
+                outcome: ConversionOutcome::Succeeded,
                 error_code: None,
+                reason_code: None,
+                reason_detail: None,
             },
         ];
         record.usage = Some(Usage {
@@ -1618,7 +1764,7 @@ mod tests {
                 upstream: "claude_pro".to_owned(),
                 model: "claude".to_owned(),
                 pool: "quota".to_owned(),
-                decided_by: DecidedBy::Quota,
+                decided_by: RecordedDecidedBy::Quota,
                 fallbacks: 1,
                 features: RequestFeatures::default(),
                 quota: Some(QuotaDecisionSnapshot {

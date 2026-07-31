@@ -101,10 +101,9 @@ impl SlidingWindow {
         // The previous bucket's weight decays linearly as the current one fills.
         let prev_weight = self.len_ms - elapsed;
         // Bounded above by `prev`, so it always fits back into u64.
-        let prev_contribution = u64::try_from(
-            u128::from(prev) * u128::from(prev_weight) / u128::from(self.len_ms),
-        )
-        .unwrap_or(prev);
+        let prev_contribution =
+            u64::try_from(u128::from(prev) * u128::from(prev_weight) / u128::from(self.len_ms))
+                .unwrap_or(prev);
         curr.saturating_add(prev_contribution)
     }
 
@@ -321,7 +320,10 @@ mod tests {
         // A 5h window (fresh) and a weekly window that is spent.
         let weekly = 7 * 24 * 60 * 60 * 1000;
         let mut ledger = AccountLedger::new(
-            vec![SlidingWindow::new(FIVE_H, 1000), SlidingWindow::new(weekly, 500)],
+            vec![
+                SlidingWindow::new(FIVE_H, 1000),
+                SlidingWindow::new(weekly, 500),
+            ],
             None,
         );
         ledger.record(0, 500); // spends the weekly window, dents the 5h one

@@ -47,6 +47,13 @@ pub struct Asset {
     pub browser_download_url: String,
 }
 
+/// Product-level result of checking the latest-release endpoint.
+#[derive(Debug, Clone)]
+pub enum CheckResult {
+    Published(Release),
+    NoPublishedRelease,
+}
+
 /// Asks `endpoint` for the latest release. One anonymous GET; nothing about
 /// this machine goes out but the request itself.
 ///
@@ -54,9 +61,32 @@ pub struct Asset {
 ///
 /// Transport failure, a non-200, or a body that is not a release.
 pub fn check(endpoint: &str) -> Result<Release, String> {
+    match check_latest(endpoint)? {
+        CheckResult::Published(release) => Ok(release),
+        CheckResult::NoPublishedRelease => Err("no published release is available".to_owned()),
+    }
+}
+
+/// Same check with HTTP 404 represented as a normal product state rather than
+/// an internal GitHub API error.
+///
+/// # Errors
+///
+/// Transport failure, another non-200 status, or an invalid release body.
+pub fn check_latest(endpoint: &str) -> Result<CheckResult, String> {
     let url = format!("{endpoint}/releases/latest");
-    let body = http_get_string(&url, MAX_METADATA_DOWNLOAD)?;
-    serde_json::from_str(&body).map_err(|error| format!("release listing: {error}"))
+    let response = raw_http_response(&url)?;
+    match response.status().as_u16() {
+        404 => Ok(CheckResult::NoPublishedRelease),
+        200 => {
+            let body = read_response_bytes(response, &url, MAX_METADATA_DOWNLOAD)?;
+            let body = String::from_utf8(body).map_err(|_| format!("GET {url}: not UTF-8"))?;
+            serde_json::from_str(&body)
+                .map(CheckResult::Published)
+                .map_err(|error| format!("release listing: {error}"))
+        }
+        status => Err(format!("GET {url}: HTTP {status}")),
+    }
 }
 
 /// Whether `tag` (e.g. `v0.2.0`) is newer than `current` (e.g. `0.1.0`).
@@ -170,7 +200,7 @@ const MAX_DOWNLOAD: u64 = 256 * 1024 * 1024;
 const MAX_METADATA_DOWNLOAD: u64 = 1024 * 1024;
 const MAX_SIGNATURE_DOWNLOAD: u64 = 64 * 1024;
 
-fn http_response(url: &str) -> Result<ureq::http::Response<ureq::Body>, String> {
+fn raw_http_response(url: &str) -> Result<ureq::http::Response<ureq::Body>, String> {
     let http = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .http_status_as_error(false)
@@ -178,15 +208,18 @@ fn http_response(url: &str) -> Result<ureq::http::Response<ureq::Body>, String> 
             .proxy(None)
             .build(),
     );
-    let response = http
-        .get(url)
+    http.get(url)
         // The GitHub API requires a User-Agent; ours says only what asked.
         .header(
             "user-agent",
             concat!("token-station-cli/", env!("CARGO_PKG_VERSION")),
         )
         .call()
-        .map_err(|error| format!("GET {url}: {error}"))?;
+        .map_err(|error| format!("GET {url}: {error}"))
+}
+
+fn http_response(url: &str) -> Result<ureq::http::Response<ureq::Body>, String> {
+    let response = raw_http_response(url)?;
     let status = response.status().as_u16();
     if status != 200 {
         return Err(format!("GET {url}: HTTP {status}"));
@@ -196,6 +229,14 @@ fn http_response(url: &str) -> Result<ureq::http::Response<ureq::Body>, String> 
 
 fn http_get_bytes(url: &str, limit: u64) -> Result<Vec<u8>, String> {
     let response = http_response(url)?;
+    read_response_bytes(response, url, limit)
+}
+
+fn read_response_bytes(
+    response: ureq::http::Response<ureq::Body>,
+    url: &str,
+    limit: u64,
+) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     response
         .into_body()

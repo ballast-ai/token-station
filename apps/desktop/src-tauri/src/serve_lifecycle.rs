@@ -245,7 +245,18 @@ fn bind_with_retry(listen: &str) -> Result<StdTcpListener, StartFailure> {
                 std::thread::sleep(Duration::from_millis(20));
                 drop(error);
             }
-            Err(error) => return Err(StartFailure::new("listen_bind", error)),
+            Err(error) => {
+                return Err(if error.kind() == std::io::ErrorKind::AddrInUse {
+                    StartFailure::new(
+                        "listen_bind",
+                        format!(
+                            "监听地址 {listen} 已被占用。请关闭另一个 Token Station CLI/桌面实例或占用该端口的程序，或在设置中更换监听端口"
+                        ),
+                    )
+                } else {
+                    StartFailure::new("listen_bind", format!("无法监听 {listen}：{error}"))
+                });
+            }
         }
     }
 }
@@ -340,4 +351,20 @@ pub(crate) fn prepare_server(config: ClientConfig) -> Result<PreparedServer, Sta
         listen: config.server.listen,
         virtual_key,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn occupied_listener_error_names_the_address_and_recovery() {
+        let occupied = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let listen = occupied.local_addr().unwrap().to_string();
+        let error = bind_with_retry(&listen).unwrap_err().public_message();
+
+        assert!(error.contains(&listen), "{error}");
+        assert!(error.contains("已被占用"), "{error}");
+        assert!(error.contains("更换监听端口"), "{error}");
+    }
 }

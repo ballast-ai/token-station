@@ -24,8 +24,49 @@ done
 [[ -f "$binary" ]] || { echo "desktop executable missing: $binary" >&2; exit 1; }
 
 strings_file="$(mktemp "${TMPDIR:-/tmp}/token-station-strings.XXXXXX")"
+self_test_report="$(mktemp "${TMPDIR:-/tmp}/token-station-self-test.XXXXXX")"
 readonly strings_file
-trap 'rm -f "$strings_file"' EXIT
+readonly self_test_report
+trap 'rm -f "$strings_file" "$self_test_report"' EXIT
+
+self_test_output="$self_test_report"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) self_test_output="$(cygpath -w "$self_test_report")" ;;
+esac
+"$binary" --self-test-bundled-plugins "$self_test_output" || {
+  echo "desktop executable builtin-plugin self-test failed" >&2
+  [[ -s "$self_test_report" ]] && sed -n '1,120p' "$self_test_report" >&2
+  exit 1
+}
+node - "$self_test_report" <<'NODE'
+const fs = require("node:fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const expected = [
+  "agent-anthropic",
+  "agent-gemini",
+  "agent-openai",
+  "agent-openai-responses",
+  "provider-openai-compatible",
+];
+const actual = Array.isArray(report.plugins)
+  ? report.plugins.map((plugin) => plugin.id).sort()
+  : [];
+if (
+  report.passed !== true ||
+  report.bundle?.id !== "com.tokenstation.desktop" ||
+  report.storage?.data_directory_private !== true ||
+  report.storage?.private_file_verified !== true ||
+  report.storage?.credential_read !== false ||
+  report.gateway?.loadable !== true ||
+  JSON.stringify(actual) !== JSON.stringify(expected) ||
+  report.plugins.some(
+    (plugin) => plugin.source !== "builtin" || plugin.loadable !== true,
+  )
+) {
+  throw new Error(`installed desktop self-test report is incomplete: ${JSON.stringify(report)}`);
+}
+NODE
+
 strings -a "$binary" >"$strings_file"
 
 if grep -Fq "$source_root" "$strings_file"; then
@@ -79,7 +120,14 @@ case "$(uname -s)" in
     fi
     ;;
   MINGW*|MSYS*|CYGWIN*)
-    [[ "$mode" == "local" ]] && exit 0
+    installer="$(find "$bundle_root/msi" -maxdepth 1 -type f -name '*.msi' -print -quit 2>/dev/null || true)"
+    [[ -n "$installer" ]] || { echo "Windows MSI missing under $bundle_root/msi" >&2; exit 1; }
+    nsis="$(find "$bundle_root/nsis" -maxdepth 1 -type f -name '*.exe' -print -quit 2>/dev/null || true)"
+    [[ -z "$nsis" ]] || { echo "Windows formal build unexpectedly produced NSIS: $nsis" >&2; exit 1; }
+    [[ "$mode" == "local" ]] && {
+      echo "desktop artifact audit: PASS"
+      exit 0
+    }
     windows_binary="$(cygpath -w "$binary")"
     status="$(powershell.exe -NoProfile -NonInteractive -Command \
       "(Get-AuthenticodeSignature -LiteralPath '$windows_binary').Status")"
@@ -87,8 +135,6 @@ case "$(uname -s)" in
       echo "Windows production executable signature is not valid: $status" >&2
       exit 1
     }
-    installer="$(find "$bundle_root" -type f \( -name '*.exe' -o -name '*.msi' \) -print -quit)"
-    [[ -n "$installer" ]] || { echo "Windows installer missing under $bundle_root" >&2; exit 1; }
     windows_installer="$(cygpath -w "$installer")"
     status="$(powershell.exe -NoProfile -NonInteractive -Command \
       "(Get-AuthenticodeSignature -LiteralPath '$windows_installer').Status")"

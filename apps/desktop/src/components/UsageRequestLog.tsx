@@ -199,6 +199,7 @@ export default function UsageRequestLog({
           </div>
           <div className={`usage-log-list ${loading ? "refreshing" : ""}`}>
             {data.items.map((receipt) => {
+              const cancelled = receipt.status === 499;
               const success = receipt.status >= 200
                 && receipt.status < 400
                 && receipt.error_code == null;
@@ -212,8 +213,8 @@ export default function UsageRequestLog({
                       <small>{receipt.agent_id ?? copy("Unknown Agent", "未知 Agent")}</small>
                       <strong>{routeOf(receipt, copy("No route", "未产生路由"))}</strong>
                     </span>
-                    <span className={`usage-log-status ${success ? "success" : "error"}`}>
-                      HTTP {receipt.status}
+                    <span className={`usage-log-status ${success ? "success" : cancelled ? "" : "error"}`}>
+                      {cancelled ? copy("Cancelled", "已取消") : `HTTP ${receipt.status}`}
                     </span>
                     <span>{tokenTotal(receipt)}</span>
                     <span>{receipt.latency_ms.toLocaleString()} ms</span>
@@ -224,6 +225,10 @@ export default function UsageRequestLog({
                       <span><small>{copy("Request ID", "请求 ID")}</small><code>{receipt.request_id}</code></span>
                       <span><small>{copy("Requested model", "请求模型")}</small><strong>{receipt.requested_model}</strong></span>
                       <span><small>{copy("Protocol", "协议")}</small><strong>{receipt.protocol}</strong></span>
+                      <span>
+                        <small>{copy("Endpoint", "端点")}</small>
+                        <strong>{receipt.request_method ?? "—"} · {receipt.path_kind ?? "unknown"}</strong>
+                      </span>
                       <span>
                         <small>{copy("Transport", "传输")}</small>
                         <strong>{receipt.stream ? copy("Streaming", "流式") : copy("Non-streaming", "非流式")}</strong>

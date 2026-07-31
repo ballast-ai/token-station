@@ -109,6 +109,10 @@ fn internal(detail: impl std::fmt::Display) -> String {
     ))
 }
 
+fn capability(detail: impl Into<String>) -> String {
+    fail(&ErrorEnvelope::new(ErrorCode::Capability, 400, detail))
+}
+
 fn provider_protocol_error(message: &'static str) -> ErrorEnvelope {
     ErrorEnvelope::new(ErrorCode::ProviderProtocolError, 502, message)
 }
@@ -143,17 +147,61 @@ fn index_of(value: &Value) -> u32 {
 }
 
 /// A `Message` in the OpenAI request dialect.
-fn message_to_openai(message: &Message) -> Value {
+fn message_to_openai(message: &Message) -> Result<Value, String> {
     let mut out = Map::new();
     out.insert("role".to_owned(), json!(message.role));
     if let Some(content) = &message.content {
-        out.insert(
-            "content".to_owned(),
-            match content {
-                Content::Text(text) => json!(text),
-                Content::Parts(parts) => json!(parts),
-            },
-        );
+        match content {
+            Content::Text(text) => {
+                out.insert("content".to_owned(), json!(text));
+            }
+            Content::Parts(parts) => {
+                let mut text = String::new();
+                let mut reasoning = String::new();
+                let mut multimodal = Vec::new();
+                let mut requires_array = false;
+                for part in parts {
+                    match part {
+                        ContentPart::Text { text: part_text } => {
+                            text.push_str(part_text);
+                            multimodal.push(json!({"type": "text", "text": part_text}));
+                        }
+                        ContentPart::ImageUrl { image_url } => {
+                            requires_array = true;
+                            multimodal.push(json!({
+                                "type": "image_url",
+                                "image_url": image_url
+                            }));
+                        }
+                        ContentPart::Thinking { thinking, .. } => {
+                            reasoning.push_str(thinking);
+                        }
+                        ContentPart::RedactedThinking { .. } => {
+                            return Err(capability(
+                                "OpenAI-compatible Chat Completions cannot replay redacted reasoning",
+                            ));
+                        }
+                        ContentPart::Unknown(value) => {
+                            requires_array = true;
+                            multimodal.push(value.clone());
+                        }
+                    }
+                }
+                out.insert(
+                    "content".to_owned(),
+                    if requires_array {
+                        Value::Array(multimodal)
+                    } else if text.is_empty() {
+                        Value::Null
+                    } else {
+                        json!(text)
+                    },
+                );
+                if !reasoning.is_empty() {
+                    out.insert("reasoning_content".to_owned(), json!(reasoning));
+                }
+            }
+        }
     }
     if !message.tool_calls.is_empty() {
         let calls: Vec<Value> = message
@@ -175,15 +223,21 @@ fn message_to_openai(message: &Message) -> Value {
     if let Some(name) = &message.name {
         out.insert("name".to_owned(), json!(name));
     }
-    Value::Object(out)
+    Ok(Value::Object(out))
 }
 
-fn body_of(request: &ChatRequest) -> Value {
+fn body_of(request: &ChatRequest) -> Result<Value, String> {
     let mut body = Map::new();
     body.insert("model".to_owned(), json!(request.model));
     body.insert(
         "messages".to_owned(),
-        Value::Array(request.messages.iter().map(message_to_openai).collect()),
+        Value::Array(
+            request
+                .messages
+                .iter()
+                .map(message_to_openai)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
     );
     if request.stream {
         body.insert("stream".to_owned(), json!(true));
@@ -209,14 +263,19 @@ fn body_of(request: &ChatRequest) -> Value {
             .tools
             .iter()
             .map(|tool| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.parameters,
-                    },
-                })
+                let mut function = Map::new();
+                function.insert("name".to_owned(), json!(tool.name));
+                function.insert("description".to_owned(), json!(tool.description));
+                function.insert("parameters".to_owned(), tool.parameters.clone());
+                if let Some(strict) = request
+                    .extensions
+                    .get("responses_tool_strict")
+                    .and_then(|strict| strict.get(&tool.name))
+                    .and_then(Value::as_bool)
+                {
+                    function.insert("strict".to_owned(), json!(strict));
+                }
+                json!({"type": "function", "function": function})
             })
             .collect();
         body.insert("tools".to_owned(), Value::Array(tools));
@@ -241,7 +300,7 @@ fn body_of(request: &ChatRequest) -> Value {
         };
         body.insert("response_format".to_owned(), format);
     }
-    Value::Object(body)
+    Ok(Value::Object(body))
 }
 
 /// Whether `reasoning_effort` may be sent for the chosen model. An undeclared
@@ -255,9 +314,7 @@ fn reasoning_effort_allowed(request: &ChatRequest, config: &ProviderConfig) -> b
         .find(|capability| capability.model == request.model)
         .map_or(true, |capability| {
             capability.supported_parameters.is_empty()
-                || capability
-                    .supported_parameters
-                    .contains("reasoning_effort")
+                || capability.supported_parameters.contains("reasoning_effort")
         })
 }
 
@@ -407,12 +464,16 @@ impl Guest for OpenAiCompatible {
         );
         descriptor.headers =
             SafeHeaders::try_new([("content-type", "application/json")]).map_err(internal)?;
-        let mut body = body_of(&request);
+        let mut body = body_of(&request)?;
         // `reasoning_effort` arrives through the extensions passthrough. Render
         // it unless the chosen model explicitly enumerates its parameters and
         // omits it — an empty (undeclared) set is treated optimistically, matching
         // how the sampling params above render unconditionally.
-        if let Some(effort) = request.extensions.get("reasoning_effort").and_then(Value::as_str) {
+        if let Some(effort) = request
+            .extensions
+            .get("reasoning_effort")
+            .and_then(Value::as_str)
+        {
             if reasoning_effort_allowed(&request, &config) {
                 if let Value::Object(map) = &mut body {
                     map.insert("reasoning_effort".to_owned(), json!(effort));
@@ -621,6 +682,73 @@ impl Guest for OpenAiCompatible {
             .and_then(|value| value.parse::<u64>().ok())
             .map(|seconds| seconds.saturating_mul(1000));
         to_output(&envelope)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assistant_parts_render_text_and_reasoning_in_separate_wire_fields() {
+        let message = Message {
+            role: Role::Assistant,
+            content: Some(Content::Parts(vec![
+                ContentPart::Thinking {
+                    thinking: "inspect".to_owned(),
+                    signature: None,
+                },
+                ContentPart::Text {
+                    text: "Hello".to_owned(),
+                },
+                ContentPart::Text {
+                    text: ", world".to_owned(),
+                },
+            ])),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            extensions: Extensions::new(),
+        };
+
+        let wire = message_to_openai(&message).expect("assistant parts are representable");
+        assert_eq!(wire["content"], json!("Hello, world"));
+        assert_eq!(wire["reasoning_content"], json!("inspect"));
+    }
+
+    #[test]
+    fn multimodal_user_parts_keep_openai_image_content_shape() {
+        let message = Message {
+            role: Role::User,
+            content: Some(Content::Parts(vec![
+                ContentPart::Text {
+                    text: "What is this?".to_owned(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: token_station_protocol::ImageUrl {
+                        url: "data:image/png;base64,AA==".to_owned(),
+                        detail: Some("low".to_owned()),
+                    },
+                },
+            ])),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            extensions: Extensions::new(),
+        };
+
+        let wire = message_to_openai(&message).expect("multimodal user parts are representable");
+        assert_eq!(
+            wire["content"][0],
+            json!({"type":"text","text":"What is this?"})
+        );
+        assert_eq!(
+            wire["content"][1],
+            json!({
+                "type":"image_url",
+                "image_url":{"url":"data:image/png;base64,AA==","detail":"low"}
+            })
+        );
     }
 }
 

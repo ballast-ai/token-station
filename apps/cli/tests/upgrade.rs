@@ -1,3 +1,5 @@
+#![cfg(any(target_os = "linux", target_os = "macos"))]
+
 //! The upgrade trust chain, exercised for real: a scripted "GitHub" serves a
 //! release whose manifest was signed with a test key, and the client accepts
 //! it only when every link holds — and refuses it when any link is cut.
@@ -145,6 +147,15 @@ fn a_signed_release_downloads_and_verifies() {
         std::fs::read(&path).expect("downloaded"),
         b"pretend this is a tarball"
     );
+}
+
+#[test]
+fn a_missing_latest_release_is_a_normal_product_state() {
+    let server = MockReleases::start(BTreeMap::new());
+    assert!(matches!(
+        upgrade::check_latest(&server.base).expect("HTTP 404 is not an infrastructure failure"),
+        upgrade::CheckResult::NoPublishedRelease
+    ));
 }
 
 #[test]

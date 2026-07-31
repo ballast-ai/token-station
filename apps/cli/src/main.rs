@@ -314,8 +314,11 @@ fn run(cli: Cli) -> Result<(), String> {
             manage::set_switch(config, &switch, value)
         }),
         Command::Config(ConfigCommand::Edit) => {
-            let editor = std::env::var("VISUAL")
-                .or_else(|_| std::env::var("EDITOR"))
+            let configured_editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR"));
+            #[cfg(windows)]
+            let editor = configured_editor.unwrap_or_else(|_| "notepad.exe".to_owned());
+            #[cfg(not(windows))]
+            let editor = configured_editor
                 .map_err(|_| "config edit needs $VISUAL or $EDITOR set".to_owned())?;
             let summary = manage::edit(&cli.config, &editor)?;
             println!("{summary}");

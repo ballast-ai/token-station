@@ -791,10 +791,10 @@ pub fn info(config: &ClientConfig, name: &str) -> Result<String, String> {
         }
     }
     let _ = writeln!(out, "suite: {}", manifest.conformance.required_suite);
-    if let PackageSource::Dir(dir) = &package.source {
-        if let Ok(sha256) = sha256_file(&dir.join("adapter.wasm")) {
-            let _ = writeln!(out, "adapter.wasm sha256: {sha256}");
-        }
+    if let PackageSource::Dir(dir) = &package.source
+        && let Ok(sha256) = sha256_file(&dir.join("adapter.wasm"))
+    {
+        let _ = writeln!(out, "adapter.wasm sha256: {sha256}");
     }
     Ok(out)
 }

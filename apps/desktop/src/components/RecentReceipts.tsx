@@ -53,8 +53,8 @@ function formatDecisionReason(
       return copy(`Hint · ${reason.kind}/${reason.value}`, `提示 · ${reason.kind}/${reason.value}`);
     case "heuristic":
       return copy(
-        `Heuristic · ${reason.score}/${reason.threshold}`,
-        `启发式 · ${reason.score}/${reason.threshold}`,
+        `Heuristic score ${reason.score} · matched band ≥ ${reason.matched_band_at_least}`,
+        `启发式评分 ${reason.score} · 命中档位下界 ≥ ${reason.matched_band_at_least}`,
       );
     case "exact_model":
       return copy(`Exact model · ${reason.model}`, `指定模型 · ${reason.model}`);
@@ -178,9 +178,13 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
             <div>
               <strong>{conversion.stage}</strong>
               <span>{conversion.source_protocol} → {conversion.target_protocol}</span>
-              <small>{conversion.succeeded
-                ? copy("Succeeded", "成功")
-                : conversion.error_code ?? copy("Failed", "失败")}</small>
+              <small>{conversion.outcome === "cancelled"
+                ? copy("Cancelled by client", "客户端已取消")
+                : conversion.succeeded
+                  ? copy("Succeeded", "成功")
+                  : [conversion.error_code, conversion.reason_code, conversion.reason_detail]
+                    .filter(Boolean)
+                    .join(" · ") || copy("Failed", "失败")}</small>
             </div>
           </div>
         )) : <p className="receipt-section-empty">{copy("No conversion records", "没有转换记录")}</p>}
