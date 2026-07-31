@@ -1506,7 +1506,9 @@ fn unix_time_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::collections::BTreeSet;
 
     use super::*;
 
@@ -1540,8 +1542,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 5);
     }
 
+    #[cfg(unix)]
     struct FixedProbe;
 
+    #[cfg(unix)]
     impl ProbeRunner for FixedProbe {
         fn run(
             &self,
@@ -1661,6 +1665,7 @@ mod tests {
         path
     }
 
+    #[cfg(unix)]
     fn environment(root: &Path) -> ScanEnvironment {
         ScanEnvironment {
             platform: Platform::Macos,
@@ -1674,6 +1679,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn tree_manifest(root: &Path) -> BTreeMap<String, String> {
         fn visit(root: &Path, current: &Path, manifest: &mut BTreeMap<String, String>) {
             let mut entries: Vec<_> = std::fs::read_dir(current)
