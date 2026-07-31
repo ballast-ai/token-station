@@ -111,10 +111,16 @@ fn validate_tool_choice(body: &Value) -> Result<(), String> {
         ));
     }
 
+    // `auto`/`any` translate losslessly to the Canonical `ToolChoice`; a forced
+    // specific `tool` is accepted but degraded to `auto` on this translate path
+    // (see the mapping in `normalize_inbound`). The old message blamed "Canonical
+    // IR", which is false — `ToolChoice::Other` can carry any shape; the real
+    // constraint is the downstream OpenAI-compatible chat provider. The native
+    // Anthropic passthrough path carries `{type:tool}` + server tools intact.
     match kind {
-        "auto" => Ok(()),
+        "auto" | "any" | "tool" => Ok(()),
         _ => Err(capability(format!(
-            "Anthropic tool_choice type {kind} cannot be preserved by Canonical IR"
+            "Anthropic tool_choice type {kind} is not supported by the configured chat provider"
         ))),
     }
 }
@@ -816,11 +822,22 @@ impl Guest for AnthropicClient {
             messages: parse_messages(body)?,
             tools: parse_tools(body)?,
             response_format: None,
-            // `validate_tool_choice` already refused everything but `auto`.
+            // Translate honestly at the wire boundary. `any` is lossless →
+            // `Required` (every OpenAI-compatible upstream understands it). A
+            // forced specific `tool` degrades to `Auto`: the egress serializes
+            // `ToolChoice` verbatim and the chat wire expects
+            // `{type:function,function:{name}}`, not Anthropic's `{type:tool,name}`
+            // — and the forced tool is frequently a native/server tool the chat
+            // provider can't run. `validate_tool_choice` already refused any other
+            // shape. (The native Anthropic passthrough path preserves `{type:tool}`
+            // and server tools instead of taking this translate path.)
             tool_choice: body
                 .get("tool_choice")
                 .filter(|value| !value.is_null())
-                .map(|_| ToolChoice::Auto),
+                .map(|value| match value.get("type").and_then(Value::as_str) {
+                    Some("any") => ToolChoice::Required,
+                    _ => ToolChoice::Auto,
+                }),
             sampling: Sampling {
                 temperature: body.get("temperature").and_then(Value::as_f64),
                 top_p: body.get("top_p").and_then(Value::as_f64),

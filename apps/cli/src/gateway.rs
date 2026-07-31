@@ -37,8 +37,8 @@ use token_station_plugin_runtime::{AgentPlugin, NoSecrets, PluginRuntime, Provid
 use token_station_protocol::{
     AgentRequestEnvelope, Auth, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
     ErrorEnvelope, HeaderDigest, HttpMethod, HttpRequestDescriptor, HttpResponseParts, Message,
-    ModelCapability, Principal, ProviderConfig, ResponseFormat, SecretRef, StreamChunk, StreamEvent,
-    StreamOutcome, ToolDef,
+    ModelCapability, Principal, ProviderApi, ProviderConfig, ResponseFormat, SafeHeaders, SecretRef,
+    StreamChunk, StreamEvent, StreamOutcome, ToolDef,
 };
 use token_station_router_core::{
     Candidate, Decision, HealthPolicy, HealthTracker, Router, RouterConfig, RoutingMode,
@@ -50,7 +50,7 @@ use crate::cancel::CancelToken;
 use crate::request_context::RequestContext;
 use crate::sse::SseFrameDecoder;
 
-use crate::config::{ClientConfig, EgressConfig};
+use crate::config::{ApiDialect, ClientConfig, EgressConfig};
 use crate::secrets::SecretStore;
 
 /// Caps on what crosses the proxy, applied by the host per architecture section 6.
@@ -510,6 +510,20 @@ fn record_conversion(
     });
 }
 
+/// A receipt-only [`ErrorCode`] for an upstream HTTP status on the passthrough
+/// path. The client already received the verbatim body; this only shapes the
+/// receipt and the health verdict — a 5xx counts toward ejection (real server
+/// trouble), while 4xx / 429 / auth do not (a client or quota problem, not an
+/// unwell upstream).
+fn passthrough_error_code(status: u16) -> ErrorCode {
+    match status {
+        401 | 403 => ErrorCode::Auth,
+        429 => ErrorCode::RateLimit,
+        server if server >= 500 => ErrorCode::UpstreamUnavailable,
+        _ => ErrorCode::InvalidRequest,
+    }
+}
+
 fn attempt_receipt(
     target: &UpstreamModel,
     ordinal: u32,
@@ -604,6 +618,10 @@ fn record_actual_attempt_target(
 struct Upstream {
     config: ProviderConfig,
     plugin: Arc<ProviderPlugin>,
+    /// The wire dialect, carried host-side only (never enters a WASM plugin).
+    /// `AnthropicNative` diverts an anthropic-messages request onto the verbatim
+    /// passthrough path instead of the Canonical-IR provider render.
+    dialect: ApiDialect,
 }
 
 enum AttemptTerminal {
@@ -1127,6 +1145,7 @@ impl Gateway {
                 Upstream {
                     config: provider_config,
                     plugin,
+                    dialect: entry.api_dialect,
                 },
             );
         }
@@ -2263,6 +2282,20 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
+        // Native Anthropic passthrough: an anthropic-messages request that routes
+        // to an `anthropic-native` upstream is forwarded verbatim — preserving
+        // server tools (web_search), tool_choice:{type:tool}, server-tool history
+        // and thinking — instead of being lowered through the Canonical IR. The
+        // decision runs on a minimal request (model only) so `normalize_inbound`,
+        // which would reject server-tool history blocks, is never called here.
+        if agent.protocol == "anthropic-messages" {
+            if let Some(served) =
+                self.try_anthropic_passthrough(ctx, router, headers, body, emit, record)?
+            {
+                return Ok(served);
+            }
+        }
+
         let (request, hints, inbound_tools) =
             Self::normalize_request(agent, method, path, headers, body, record)?;
         // Privacy boundary: the persisted requested model is a configured name
@@ -2534,7 +2567,9 @@ impl Gateway {
                 record.status = 200;
                 self.observe(upstream, model, Ok(()));
             }
-            StreamOutcome::FailedAfterPartial | StreamOutcome::FailedBeforeOutput => {
+            StreamOutcome::FailedBeforeOutput => {
+                // Never produced a byte: a genuine "upstream unwell" signal —
+                // charge health so a truly broken upstream is ejected.
                 let code = record.error_code.unwrap_or(ErrorCode::UpstreamUnavailable);
                 record.error_code = Some(code);
                 if record.status < 400 {
@@ -2545,6 +2580,21 @@ impl Gateway {
                     model,
                     Err(&ErrorEnvelope::new(code, record.status, "")),
                 );
+            }
+            StreamOutcome::FailedAfterPartial => {
+                // A mid-stream drop AFTER a 200 (auth, model and generation all
+                // succeeded) is overwhelmingly transient/concurrency-driven — one
+                // of many parallel SSE streams dropped — not "upstream down". Keep
+                // the receipt truthful (still a 502 transport_truncated to the
+                // client and metrics) but do NOT count it toward ejection: a few
+                // transient truncations must not empty a single-candidate pool and
+                // manufacture a cooldown-long outage. Genuinely unwell upstreams
+                // still eject via FailedBeforeOutput / Timeout / pre-output errors.
+                let code = record.error_code.unwrap_or(ErrorCode::TransportTruncated);
+                record.error_code = Some(code);
+                if record.status < 400 {
+                    record.status = 502;
+                }
             }
             StreamOutcome::ClientCancelled => {
                 // A cancel is not the upstream's failure: no health penalty.
@@ -2905,6 +2955,318 @@ impl Gateway {
                 record,
             )
         }
+    }
+
+    /// Native Anthropic passthrough decision + execution. Returns `Some(served)`
+    /// when an anthropic-messages request routed to an `anthropic-native` upstream
+    /// and was forwarded verbatim; `None` when it is not a passthrough and the
+    /// caller must fall through to the Canonical-IR pipeline. Never runs
+    /// `normalize_inbound`, so server-tool history and `tool_choice:{type:tool}` —
+    /// which the IR path rejects — survive.
+    fn try_anthropic_passthrough(
+        &self,
+        ctx: &RequestContext,
+        router: &Router,
+        raw_headers: &[(String, String)],
+        body: &[u8],
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<Option<(UpstreamModel, StreamOutcome)>, ErrorEnvelope> {
+        // A body that is oversized or not JSON falls through, so the normal path
+        // reports the size / parse error in its usual shape.
+        if body.len() > MAX_INBOUND_BODY {
+            return Ok(None);
+        }
+        let Ok(body_value) = serde_json::from_slice::<Value>(body) else {
+            return Ok(None);
+        };
+        let Some(model) = body_value.get("model").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let stream = body_value
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        // Route a minimal request (model only) to learn which upstream would
+        // serve it; passthrough is a tiered, non-quota decision. A routing
+        // failure falls through so the normal path surfaces the real error.
+        let mut mini = ChatRequest::new(model, Vec::new());
+        mini.stream = stream;
+        let candidates = self.candidates(std::time::Instant::now(), None);
+        let Ok(decision) = router.route(&mini, &[], &candidates) else {
+            return Ok(None);
+        };
+        let Some(upstream) = self.upstreams.get(decision.chosen.upstream.as_str()) else {
+            return Ok(None);
+        };
+        if upstream.dialect != ApiDialect::AnthropicNative {
+            return Ok(None);
+        }
+
+        // Committed to the passthrough path.
+        let configured = self
+            .catalog
+            .iter()
+            .any(|(target, _)| target.model == decision.chosen.model);
+        record.requested_model = canonical_requested_model(model, configured);
+        record.stream = stream;
+        record_route_decision(record, &decision);
+
+        let attempt_timeout = AttemptBudget::for_request(ctx).per_attempt_timeout;
+        let outcome = self.passthrough_upstream(
+            ctx,
+            &decision.chosen,
+            raw_headers,
+            &body_value,
+            stream,
+            attempt_timeout,
+            emit,
+            record,
+        )?;
+        Ok(Some((decision.chosen, outcome)))
+    }
+
+    /// Forwards the caller's Anthropic Messages body verbatim (only the routed
+    /// model name is rewritten) to `base_url` + `/messages`, then relays the
+    /// upstream response. Reuses the host's `authorize` egress gate and `send`
+    /// path, so egress-to-base_url-only, credential isolation and redirect refusal
+    /// are preserved; the client's own auth headers can never reach the upstream.
+    #[allow(clippy::too_many_arguments)]
+    fn passthrough_upstream(
+        &self,
+        ctx: &RequestContext,
+        target: &UpstreamModel,
+        raw_headers: &[(String, String)],
+        body: &Value,
+        stream: bool,
+        attempt_timeout: Duration,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<StreamOutcome, ErrorEnvelope> {
+        const ANTHROPIC: &str = "anthropic-messages";
+        let upstream = self.upstreams.get(target.upstream.as_str()).ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorCode::Internal,
+                500,
+                format!("upstream `{}` vanished from configuration", target.upstream),
+            )
+        })?;
+
+        // Verbatim body, except the caller's model is remapped to the routed one.
+        let mut forwarded = body.clone();
+        if let Some(object) = forwarded.as_object_mut() {
+            object.insert("model".to_owned(), json!(target.model));
+        }
+
+        let mut descriptor = HttpRequestDescriptor::new(
+            HttpMethod::Post,
+            upstream.config.base_url.resolve(ProviderApi::Messages),
+        );
+        descriptor.headers = Self::curate_passthrough_headers(raw_headers)?;
+        descriptor.body = Some(forwarded);
+        descriptor.auth = upstream.config.auth.clone().map(Auth::bearer);
+
+        // The same exfiltration gate as build_provider_request: the URL must sit
+        // inside base_url and the credential slot must match, checked before the
+        // key is even resolved.
+        if let Err(refusal) = upstream.config.authorize(&descriptor) {
+            let error = ErrorEnvelope::new(ErrorCode::Internal, 500, refusal.to_string());
+            record_conversion(
+                record,
+                ConversionStage::ProviderRequest,
+                ANTHROPIC,
+                ANTHROPIC,
+                false,
+                Some(error.code),
+            );
+            return Err(error);
+        }
+        record_conversion(
+            record,
+            ConversionStage::ProviderRequest,
+            ANTHROPIC,
+            ANTHROPIC,
+            true,
+            None,
+        );
+
+        let response =
+            match self.send(ctx, attempt_timeout, &descriptor, target.upstream.as_str()) {
+                Err(_) if ctx.is_cancelled() => {
+                    Self::emit_cancelled(emit);
+                    return Ok(StreamOutcome::ClientCancelled);
+                }
+                Err(error) => {
+                    record_conversion(
+                        record,
+                        ConversionStage::ProviderResponse,
+                        ANTHROPIC,
+                        ANTHROPIC,
+                        false,
+                        Some(error.code),
+                    );
+                    return Err(error);
+                }
+                Ok(response) => response,
+            };
+
+        if let Err(error) = EgressPolicy::reject_redirect(response.status) {
+            record_conversion(
+                record,
+                ConversionStage::ProviderResponse,
+                ANTHROPIC,
+                ANTHROPIC,
+                false,
+                Some(error.code),
+            );
+            return Err(error);
+        }
+
+        // L2 authoritative quota: harvest remaining/reset headers, never the body.
+        let windows = crate::quota_headers::parse_quota_windows(&response.headers, unix_millis());
+        if !windows.is_empty() {
+            self.quota
+                .lock()
+                .expect("quota lock")
+                .note_authoritative(target.upstream.as_str(), unix_millis(), windows);
+        }
+
+        // Upstream error: return its status + body VERBATIM (Claude Code depends
+        // on the original error body to self-heal), never token-station's wrapped
+        // shape. Record the real status so the receipt stays truthful.
+        if response.status >= 400 {
+            let code = passthrough_error_code(response.status);
+            let parts = response.into_parts()?;
+            record.status = parts.status;
+            record.error_code = Some(code);
+            record_conversion(
+                record,
+                ConversionStage::ProviderResponse,
+                ANTHROPIC,
+                ANTHROPIC,
+                false,
+                Some(code),
+            );
+            emit(Reply::BeginJson(JsonReply {
+                status: parts.status,
+                body: parts.body,
+            }));
+            // FailedBeforeOutput preserves the already-set >=400 status through
+            // settle (which only overwrites a <400 status) and charges health only
+            // for the retriable server-error codes.
+            return Ok(StreamOutcome::FailedBeforeOutput);
+        }
+
+        record_conversion(
+            record,
+            ConversionStage::ProviderResponse,
+            ANTHROPIC,
+            ANTHROPIC,
+            true,
+            None,
+        );
+
+        if stream {
+            Self::relay_raw_sse(ctx, response, emit, record)
+        } else {
+            let parts = response.into_parts()?;
+            emit(Reply::BeginJson(JsonReply {
+                status: parts.status,
+                body: parts.body,
+            }));
+            Ok(StreamOutcome::Complete)
+        }
+    }
+
+    /// Relays an upstream SSE stream to the client byte-for-byte (whole frames,
+    /// unmodified) — a passthrough must never re-frame the Anthropic event stream.
+    /// A clean EOF is a completed stream; a socket error after the first byte is a
+    /// post-200 truncation (FailedAfterPartial → transient, does not eject).
+    fn relay_raw_sse(
+        ctx: &RequestContext,
+        response: UpstreamResponse,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+    ) -> Result<StreamOutcome, ErrorEnvelope> {
+        let mut reader = response.reader;
+        let mut buffer = [0u8; STREAM_READ];
+        let mut committed = false;
+        loop {
+            if ctx.is_cancelled() {
+                if !committed {
+                    Self::emit_cancelled(emit);
+                }
+                return Ok(StreamOutcome::ClientCancelled);
+            }
+            match reader.read(&mut buffer) {
+                Ok(0) => return Ok(StreamOutcome::Complete),
+                Ok(read) => {
+                    if !committed && !emit(Reply::BeginStream) {
+                        return Ok(StreamOutcome::ClientCancelled);
+                    }
+                    committed = true;
+                    let chunk = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                    if !emit(Reply::Chunk(chunk)) {
+                        return Ok(StreamOutcome::ClientCancelled);
+                    }
+                }
+                Err(_) => {
+                    if ctx.is_cancelled() {
+                        if !committed {
+                            Self::emit_cancelled(emit);
+                        }
+                        return Ok(StreamOutcome::ClientCancelled);
+                    }
+                    if committed {
+                        record.error_code = Some(ErrorCode::TransportTruncated);
+                        if record.status < 400 {
+                            record.status = 502;
+                        }
+                        return Ok(StreamOutcome::FailedAfterPartial);
+                    }
+                    return Err(ErrorEnvelope::new(
+                        ErrorCode::TransportTruncated,
+                        502,
+                        "upstream connection broke while streaming",
+                    ));
+                }
+            }
+        }
+    }
+
+    /// The allowlist of caller headers forwarded verbatim on the passthrough: the
+    /// non-credential metadata the Anthropic wire needs. Everything else is
+    /// dropped. `SafeHeaders::try_new` additionally rejects any credential or
+    /// host-owned header fail-closed, so the client's own auth can never ride
+    /// upstream even if this list regressed.
+    fn curate_passthrough_headers(
+        raw_headers: &[(String, String)],
+    ) -> Result<SafeHeaders, ErrorEnvelope> {
+        const FORWARD: [&str; 4] = [
+            "content-type",
+            "accept",
+            "anthropic-version",
+            "anthropic-beta",
+        ];
+        let mut kept: Vec<(String, String)> = raw_headers
+            .iter()
+            .filter(|(name, _)| FORWARD.contains(&name.to_ascii_lowercase().as_str()))
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
+            .collect();
+        if !kept.iter().any(|(name, _)| name == "content-type") {
+            kept.push(("content-type".to_owned(), "application/json".to_owned()));
+        }
+        if !kept.iter().any(|(name, _)| name == "anthropic-version") {
+            kept.push(("anthropic-version".to_owned(), "2023-06-01".to_owned()));
+        }
+        SafeHeaders::try_new(kept).map_err(|error| {
+            ErrorEnvelope::new(
+                ErrorCode::Internal,
+                500,
+                format!("passthrough header rejected: {error}"),
+            )
+        })
     }
 
     /// Resolves the descriptor into a real HTTP exchange.

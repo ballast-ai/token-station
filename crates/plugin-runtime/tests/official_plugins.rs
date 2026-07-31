@@ -21,7 +21,7 @@ use token_station_plugin_runtime::{
 };
 use token_station_protocol::{
     AgentRequestEnvelope, ChatResponse, ErrorCode, ErrorEnvelope, Extensions, FinishReason,
-    HeaderDigest, Principal, StreamEvent,
+    HeaderDigest, Principal, StreamEvent, ToolChoice,
 };
 
 fn repo_root() -> &'static Path {
@@ -803,6 +803,53 @@ fn anthropic_vendor_tools_are_translated_to_function_tools() {
         .normalize_inbound(&request(serde_json::json!([{"name": "broken"}])))
         .expect_err("a user tool without input_schema is malformed");
     assert_eq!(invalid.code, ErrorCode::InvalidRequest);
+}
+
+#[test]
+fn anthropic_tool_choice_is_translated_not_refused() {
+    // The old code 400'd every tool_choice except "auto" with a message that
+    // wrongly blamed the Canonical IR. Now: "any" -> Required (lossless),
+    // "tool" -> Auto (honest degrade on the translate path), "auto" -> Auto, and
+    // a genuinely unknown type is a clean capability error naming the real
+    // constraint (the chat provider), never the IR.
+    let plugin =
+        AgentPlugin::load(&runtime(), anthropic_agent_package()).expect("loads clean");
+    let request = |choice: serde_json::Value| {
+        envelope(
+            "anthropic-messages",
+            json!({
+                "model": "claude-x",
+                "max_tokens": 256,
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"name": "read_file", "description": "read", "input_schema": {"type": "object"}}],
+                "tool_choice": choice
+            }),
+        )
+    };
+
+    let any = plugin
+        .normalize_inbound(&request(json!({"type": "any"})))
+        .expect("any translates");
+    assert_eq!(any.tool_choice, Some(ToolChoice::Required));
+
+    let tool = plugin
+        .normalize_inbound(&request(json!({"type": "tool", "name": "read_file"})))
+        .expect("a forced tool translates (degraded)");
+    assert_eq!(tool.tool_choice, Some(ToolChoice::Auto));
+
+    let auto = plugin
+        .normalize_inbound(&request(json!({"type": "auto"})))
+        .expect("auto translates");
+    assert_eq!(auto.tool_choice, Some(ToolChoice::Auto));
+
+    let unknown = plugin
+        .normalize_inbound(&request(json!({"type": "mystery"})))
+        .expect_err("an unknown tool_choice type is a capability error");
+    assert_eq!(unknown.code, ErrorCode::Capability);
+    assert!(
+        !unknown.message.contains("Canonical IR"),
+        "the error must name the chat provider, not blame the IR"
+    );
 }
 
 #[test]

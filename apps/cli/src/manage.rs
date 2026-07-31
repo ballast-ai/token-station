@@ -107,6 +107,9 @@ pub fn upstream_add(config: &mut ClientConfig, spec: &AddUpstream) -> Result<Str
             auth,
             local: spec.local,
             access_tier: AccessTier::default(),
+            // `upstream add` creates a Canonical-IR (translated) upstream;
+            // anthropic-native passthrough is opted into by editing the config.
+            api_dialect: crate::config::ApiDialect::default(),
             models,
             // Quota plans are declared by the desktop app's quota-mode picker,
             // not by `upstream add`.
