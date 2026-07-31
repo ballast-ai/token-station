@@ -457,7 +457,13 @@ fn start_proxy_with_agents_and_budgets(
         config["agent_budgets"] = agent_budgets;
     }
     let config: ClientConfig = serde_json::from_value(config).expect("test config parses");
+    spawn_proxy(config)
+}
 
+/// The shared server-spawn tail: recorders, gateway, virtual key, and a
+/// background server bound to a loopback port.
+fn spawn_proxy(config: ClientConfig) -> Proxy {
+    let data_dir = config.data.dir.clone();
     let mut sinks: Vec<Box<dyn token_station_metrics::Recorder>> = vec![Box::new(
         token_station_cli::filelog::FileLog::open(&config.data.dir).expect("log opens"),
     )];
@@ -507,6 +513,46 @@ fn start_proxy_with_agents_and_budgets(
         virtual_key,
         control,
     }
+}
+
+/// A proxy whose single upstream is marked `api_dialect: anthropic-native`, so an
+/// anthropic-messages request is forwarded verbatim to the mock instead of being
+/// lowered through the Canonical IR.
+fn start_native_anthropic_proxy(upstream: &MockUpstream, key_file: &Path) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-native-proxy-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let config = json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-anthropic"],
+            "providers": { "openai-compatible": "provider-openai-compatible" }
+        },
+        "upstreams": {
+            "deepseek_native": {
+                "provider": "openai-compatible",
+                "api_dialect": "anthropic-native",
+                "base_url": upstream.base_url(),
+                "auth": { "slot": "provider_api_key", "file": key_file },
+                "models": [
+                    { "model": "deepseek-chat", "tool": true, "tool_state": "verified", "context_window": 128_000 }
+                ]
+            }
+        },
+        "router": {
+            "version": 1,
+            "pools": { "main": [ { "upstream": "deepseek_native", "model": "deepseek-chat" } ] },
+            "default_pool": "main"
+        }
+    });
+    let config: ClientConfig = serde_json::from_value(config).expect("native config parses");
+    spawn_proxy(config)
 }
 
 fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Path) -> Proxy {
@@ -2139,37 +2185,117 @@ fn anthropic_enabled_thinking_is_refused_before_upstream() {
 }
 
 #[test]
-fn anthropic_forced_tool_choice_fails_before_the_upstream() {
-    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
+fn anthropic_forced_tool_choice_is_translated_and_reaches_the_upstream() {
+    // A forced tool_choice used to 400 before routing with a message that wrongly
+    // blamed the Canonical IR. It now translates on this Chat-translate path
+    // ("any" -> Required, "tool" -> Auto) and the request reaches the upstream;
+    // the exact per-shape mapping is covered by the plugin's wasm unit test. (The
+    // native-Anthropic passthrough path preserves {type:tool} verbatim instead.)
+    let upstream_answer = json!({
+        "id": "chatcmpl-tc",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "done"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let key = key_file("anthropic-tool-choice", "sk-test-key-abc");
     let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
 
-    for tool_choice in [
-        json!({"type": "any"}),
-        json!({"type": "tool", "name": "read_marker"}),
-    ] {
-        let (status, body) = post_messages(
-            &proxy,
-            &json!({
-                "model": "auto",
-                "max_tokens": 64,
-                "messages": [{"role": "user", "content": "read the marker"}],
-                "tools": [{
-                    "name": "read_marker",
-                    "description": "read a marker",
-                    "input_schema": {"type": "object"}
-                }],
-                "tool_choice": tool_choice
-            }),
-            &proxy.virtual_key,
-        );
+    let (status, body) = post_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "read the marker"}],
+            "tools": [{
+                "name": "read_marker",
+                "description": "read a marker",
+                "input_schema": {"type": "object"}
+            }],
+            "tool_choice": {"type": "tool", "name": "read_marker"}
+        }),
+        &proxy.virtual_key,
+    );
 
-        assert_eq!(status, 400, "body={body}");
-        let body: Value = serde_json::from_str(&body).expect("Anthropic error JSON");
-        assert_eq!(body["error"]["type"], json!("invalid_request_error"));
-    }
+    assert_eq!(
+        status, 200,
+        "a translated forced tool_choice reaches the upstream, body={body}"
+    );
+    assert!(
+        !body.contains("Canonical IR"),
+        "the old IR-blaming refusal must be gone, body={body}"
+    );
+    assert_eq!(mock.hits(), 1, "the forced tool_choice reached the upstream");
+    std::fs::remove_file(key).ok();
+}
 
-    assert_eq!(mock.hits(), 0, "tool choice is rejected before routing");
+#[test]
+fn anthropic_native_passthrough_forwards_verbatim_and_injects_the_upstream_key() {
+    // An anthropic-native upstream forwards the caller's Messages body verbatim —
+    // the web_search server tool and tool_choice:{type:tool} the Canonical IR
+    // would drop or refuse reach the upstream intact — while the host injects the
+    // upstream credential and never forwards the client's own token.
+    let upstream_answer = json!({
+        "id": "msg_native_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "searched"}],
+        "usage": {"input_tokens": 4, "output_tokens": 2}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("passthrough-native", "sk-upstream-secret\n");
+    let proxy = start_native_anthropic_proxy(&mock, &key);
+
+    let (status, body) = post_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "search the web for joyai"}],
+            "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+            "tool_choice": {"type": "tool", "name": "web_search"}
+        }),
+        &proxy.virtual_key,
+    );
+
+    // The client receives the upstream's response verbatim.
+    assert_eq!(status, 200, "body={body}");
+    assert!(
+        body.contains("msg_native_1"),
+        "upstream body relayed verbatim, body={body}"
+    );
+
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1, "exactly one upstream hit");
+    let forwarded = &seen[0];
+    // base_url is origin-only, so it resolves to /v1/messages.
+    assert_eq!(forwarded.path, "/v1/messages");
+    // The server tool and forced tool_choice survived verbatim (NOT translated to
+    // a function or refused).
+    assert_eq!(
+        forwarded.body["tools"][0]["type"],
+        json!("web_search_20250305")
+    );
+    assert_eq!(forwarded.body["tool_choice"]["type"], json!("tool"));
+    // Only the model was remapped to the routed upstream model.
+    assert_eq!(forwarded.body["model"], json!("deepseek-chat"));
+    // The upstream saw the injected upstream key; the client's own virtual key
+    // never reached it.
+    assert_eq!(
+        forwarded.authorization.as_deref(),
+        Some("Bearer sk-upstream-secret")
+    );
+    let client_token = format!("Bearer {}", proxy.virtual_key);
+    assert_ne!(
+        forwarded.authorization.as_deref(),
+        Some(client_token.as_str()),
+        "the client's own token must never reach the upstream"
+    );
     std::fs::remove_file(key).ok();
 }
 

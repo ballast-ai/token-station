@@ -457,6 +457,19 @@ pub struct UpstreamConfig {
     /// use different upstream names and keyring slots; routing order is unchanged.
     #[serde(default, skip_serializing_if = "AccessTier::is_paid")]
     pub access_tier: AccessTier,
+    /// The wire dialect this upstream speaks natively. Default `translated`
+    /// keeps the Canonical-IR path (inbound adapter → `ChatRequest` → provider
+    /// plugin → OpenAI Chat Completions). `anthropic-native` forwards the caller's
+    /// original Anthropic Messages body verbatim to `base_url` + `/messages`,
+    /// preserving server tools (`web_search`), `tool_choice:{type:tool}`,
+    /// server-tool result history and thinking — the things the Canonical IR
+    /// cannot round-trip. Only meaningful for an anthropic-messages inbound whose
+    /// upstream genuinely speaks the Anthropic wire (e.g. DeepSeek's `/anthropic`
+    /// endpoint). `base_url` must end at the version segment, e.g.
+    /// `https://api.deepseek.com/anthropic/v1`, so the resolved URL is
+    /// `…/anthropic/v1/messages`.
+    #[serde(default, skip_serializing_if = "ApiDialect::is_default")]
+    pub api_dialect: ApiDialect,
     /// What this upstream serves. The provider adapter may refine it; with no
     /// network of its own it cannot replace it.
     pub models: Vec<ModelCapability>,
@@ -466,6 +479,30 @@ pub struct UpstreamConfig {
     /// account picker; ignored entirely in tiered routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_plan: Option<crate::quota_tracker::QuotaPlan>,
+}
+
+/// The wire dialect an upstream speaks, which decides whether a request is
+/// lowered through the Canonical IR or forwarded verbatim. Mirrors CC Switch's
+/// `apiFormat`, which likewise defaults to native Anthropic passthrough.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApiDialect {
+    /// Lower the request into the Canonical IR and render it to the provider's
+    /// OpenAI Chat Completions endpoint (today's behavior for every upstream).
+    #[default]
+    Translated,
+    /// Forward the caller's original Anthropic Messages body verbatim to
+    /// `base_url` + `/messages`, bypassing the Canonical IR.
+    AnthropicNative,
+}
+
+impl ApiDialect {
+    /// True for the default (`Translated`), so it is omitted on serialize and
+    /// every existing config keeps loading under `deny_unknown_fields`.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Translated)
+    }
 }
 
 /// Where a credential's value lives. Never the value.
@@ -816,9 +853,41 @@ impl ConfigSource for FileRouterSource {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccessTier, ClientConfig, EgressConfig, EgressMode};
+    use super::{AccessTier, ApiDialect, ClientConfig, EgressConfig, EgressMode, UpstreamConfig};
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn api_dialect_defaults_to_translated_and_round_trips() {
+        // A legacy upstream with no `api_dialect` still loads under
+        // deny_unknown_fields and defaults to the Canonical-IR (translated) path.
+        let legacy: UpstreamConfig = serde_json::from_value(serde_json::json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.deepseek.com/v1",
+            "models": [{ "model": "deepseek-chat" }]
+        }))
+        .expect("legacy upstream parses");
+        assert_eq!(legacy.api_dialect, ApiDialect::Translated);
+
+        // The default is omitted on serialize, so re-saving a legacy config does
+        // not sprout the field.
+        let reserialized = serde_json::to_value(&legacy).expect("serializes");
+        assert!(reserialized.get("api_dialect").is_none());
+
+        // An explicit anthropic-native upstream parses.
+        let native: UpstreamConfig = serde_json::from_value(serde_json::json!({
+            "provider": "openai-compatible",
+            "api_dialect": "anthropic-native",
+            "base_url": "https://api.deepseek.com/anthropic/v1",
+            "models": [{ "model": "deepseek-chat" }]
+        }))
+        .expect("anthropic-native upstream parses");
+        assert_eq!(native.api_dialect, ApiDialect::AnthropicNative);
+        assert_eq!(
+            serde_json::to_value(&native).expect("serializes")["api_dialect"],
+            serde_json::json!("anthropic-native")
+        );
+    }
 
     fn scratch(name: &str, contents: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
