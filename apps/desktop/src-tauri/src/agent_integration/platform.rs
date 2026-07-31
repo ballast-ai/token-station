@@ -139,14 +139,41 @@ pub(crate) fn executable_candidates(
 }
 
 #[cfg(target_os = "windows")]
+struct WindowsRuntimeApartment;
+
+#[cfg(target_os = "windows")]
+impl WindowsRuntimeApartment {
+    fn initialize_mta() -> Option<Self> {
+        use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+
+        // SAFETY: a successful call, including S_FALSE, is balanced by this
+        // guard's Drop implementation on the same synchronous call stack.
+        unsafe { RoInitialize(RO_INIT_MULTITHREADED) }
+            .ok()
+            .map(|()| Self)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsRuntimeApartment {
+    fn drop(&mut self) {
+        use windows::Win32::System::WinRT::RoUninitialize;
+
+        // SAFETY: the guard exists only after RoInitialize succeeded on this
+        // thread, and is dropped on the same stack before discovery returns.
+        unsafe { RoUninitialize() };
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn windows_store_codex_candidates() -> Vec<PathBuf> {
     use windows::core::HSTRING;
     use windows::Management::Deployment::PackageManager;
 
     // A desktop process may already be running in an STA. In that case
-    // `initialize_mta` reports RPC_E_CHANGED_MODE, but WinRT remains usable on
+    // RoInitialize reports RPC_E_CHANGED_MODE, but WinRT remains usable on
     // the initialized apartment, so discovery still attempts the read-only API.
-    let _apartment = windows::core::initialize_mta().ok();
+    let _apartment = WindowsRuntimeApartment::initialize_mta();
     let Ok(manager) = PackageManager::new() else {
         return Vec::new();
     };
