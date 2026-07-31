@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type { ServeView, SettingsView, StateView } from "../api";
+import type {
+  AgentUiMetadataView,
+  ServeView,
+  SettingsView,
+  StateView,
+} from "../api";
+import { AgentIcon } from "../brandIcons";
 import {
   LanguageBoundary,
   useLanguage,
@@ -13,7 +19,14 @@ import Plugins from "./Plugins";
 import RouterTable from "./RouterTable";
 import Settings from "./Settings";
 
-type SettingsSection = "general" | "router" | "plugins" | "appearance" | "language" | "about";
+type SettingsSection =
+  | "general"
+  | "agent-visibility"
+  | "router"
+  | "plugins"
+  | "appearance"
+  | "language"
+  | "about";
 
 const SECTIONS: Array<{
   id: SettingsSection;
@@ -21,6 +34,11 @@ const SECTIONS: Array<{
   description: TranslationKey;
 }> = [
   { id: "general", label: "settings.general", description: "settings.generalHint" },
+  {
+    id: "agent-visibility",
+    label: "settings.agentVisibility",
+    description: "settings.agentVisibilityHint",
+  },
   { id: "router", label: "settings.router", description: "settings.routerHint" },
   { id: "plugins", label: "settings.plugins", description: "settings.pluginsHint" },
   { id: "appearance", label: "settings.appearance", description: "settings.appearanceHint" },
@@ -121,6 +139,83 @@ function AppearancePanel() {
   );
 }
 
+function AgentVisibilityPanel({
+  registry,
+  hiddenAgentIds,
+  onVisibilityChange,
+}: {
+  registry: AgentUiMetadataView[];
+  hiddenAgentIds: ReadonlySet<string>;
+  onVisibilityChange: (agentId: string, visible: boolean) => void;
+}) {
+  const { t } = useLanguage();
+  const visibleCount = registry.reduce(
+    (count, metadata) => count + Number(!hiddenAgentIds.has(metadata.agent_id)),
+    0,
+  );
+
+  return (
+    <section className="agent-visibility-panel">
+      <div className="panel-head">
+        <h2>{t("agentVisibility.title")}</h2>
+        <p className="sub">{t("agentVisibility.description")}</p>
+        <span
+          className="agent-visibility-status"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {t("agentVisibility.count", {
+            visible: visibleCount,
+            total: registry.length,
+          })}
+        </span>
+      </div>
+
+      {registry.length > 0 ? (
+        <div
+          className="agent-visibility-list"
+          role="group"
+          aria-label={t("agentVisibility.groupLabel")}
+        >
+          {registry.map((metadata) => {
+            const visible = !hiddenAgentIds.has(metadata.agent_id);
+            return (
+              <button
+                key={metadata.agent_id}
+                className="agent-visibility-row"
+                type="button"
+                role="switch"
+                aria-checked={visible}
+                onClick={() => onVisibilityChange(metadata.agent_id, !visible)}
+              >
+                <span className="agent-visibility-icon" aria-hidden="true">
+                  <AgentIcon
+                    id={metadata.agent_id}
+                    fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)}
+                    size={22}
+                  />
+                </span>
+                <span className="agent-visibility-name">
+                  {metadata.display_name}
+                </span>
+                <span
+                  className="agent-visibility-switch"
+                  aria-hidden="true"
+                >
+                  <span className="agent-visibility-switch-thumb" />
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="agent-visibility-empty">{t("agentVisibility.empty")}</p>
+      )}
+    </section>
+  );
+}
+
 const LANGUAGE_OPTIONS: Array<{
   value: Language;
   label: string;
@@ -166,11 +261,22 @@ function LanguagePanel() {
 interface SettingsHubProps {
   settings: SettingsView;
   serve: ServeView;
+  registry: AgentUiMetadataView[];
+  hiddenAgentIds: ReadonlySet<string>;
+  onAgentVisibilityChange: (agentId: string, visible: boolean) => void;
   onSaved: (state: StateView) => void;
   onBack?: () => void;
 }
 
-function SettingsHubContent({ settings, serve, onSaved, onBack }: SettingsHubProps) {
+function SettingsHubContent({
+  settings,
+  serve,
+  registry,
+  hiddenAgentIds,
+  onAgentVisibilityChange,
+  onSaved,
+  onBack,
+}: SettingsHubProps) {
   const [section, setSection] = useState<SettingsSection>("general");
   const { t } = useLanguage();
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
@@ -200,6 +306,13 @@ function SettingsHubContent({ settings, serve, onSaved, onBack }: SettingsHubPro
             <VirtualKeyCard serve={serve} />
             <Settings settings={settings} serveRunning={runtimeHealthy} onSaved={onSaved} />
           </>
+        )}
+        {section === "agent-visibility" && (
+          <AgentVisibilityPanel
+            registry={registry}
+            hiddenAgentIds={hiddenAgentIds}
+            onVisibilityChange={onAgentVisibilityChange}
+          />
         )}
         {section === "router" && <RouterTable />}
         {section === "plugins" && <Plugins />}
