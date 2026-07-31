@@ -43,6 +43,12 @@ if ! rustup target list --installed | grep -qx "$wasm_target"; then
   rustup target add "$wasm_target"
 fi
 
+# Set the path remap BEFORE building the plugins. Otherwise the plugin wasm is
+# compiled with the real source checkout path baked into its panic/location
+# strings, and `include_bytes!` (the bundled-plugins layer) then embeds that
+# path into the desktop binary — a leak the artifact audit rejects.
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$root=/build"
+
 mkdir -p "$stage/plugins-dist"
 for plugin in "${plugins[@]}"; do
   source="$root/plugins/official/$plugin"
@@ -54,7 +60,6 @@ for plugin in "${plugins[@]}"; do
 done
 
 export TOKEN_STATION_PLUGINS_DIST="$stage/plugins-dist"
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$root=/build"
 
 cargo test --locked \
   --manifest-path "$root/apps/desktop/src-tauri/Cargo.toml" \
