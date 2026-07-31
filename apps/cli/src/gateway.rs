@@ -38,8 +38,8 @@ use token_station_plugin_runtime::{AgentPlugin, NoSecrets, PluginRuntime, Provid
 use token_station_protocol::{
     AgentRequestEnvelope, Auth, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
     ErrorEnvelope, HeaderDigest, HttpMethod, HttpRequestDescriptor, HttpResponseParts, Message,
-    ModelCapability, Principal, ProviderApi, ProviderConfig, ResponseFormat, SafeHeaders, SecretRef,
-    StreamChunk, StreamEvent, StreamOutcome, ToolDef,
+    ModelCapability, Principal, ProviderApi, ProviderConfig, ResponseFormat, SafeHeaders,
+    SecretRef, StreamChunk, StreamEvent, StreamOutcome, ToolDef,
 };
 use token_station_router_core::{
     Candidate, Decision, HealthPolicy, HealthTracker, Router, RouterConfig, RoutingMode,
@@ -2314,14 +2314,7 @@ impl Gateway {
         headers: &[(String, String)],
         body: &[u8],
         record: &mut RequestRecord,
-    ) -> Result<
-        (
-            ChatRequest,
-            Vec<token_station_protocol::AgentHint>,
-            Value,
-        ),
-        ErrorEnvelope,
-    > {
+    ) -> Result<(ChatRequest, Vec<token_station_protocol::AgentHint>, Value), ErrorEnvelope> {
         let inbound_protocol = record.protocol.clone();
         if body.len() > MAX_INBOUND_BODY {
             let error = ErrorEnvelope::new(
@@ -2441,11 +2434,7 @@ impl Gateway {
         // namespace) that `normalize_inbound` flattened into plain functions.
         // The gateway only transports this blob; all Codex semantics live in the
         // agent plugin, which rebuilds its restore map from it at render time.
-        let inbound_tools = envelope
-            .body
-            .get("tools")
-            .cloned()
-            .unwrap_or(Value::Null);
+        let inbound_tools = envelope.body.get("tools").cloned().unwrap_or(Value::Null);
         Ok((request, hints, inbound_tools))
     }
 
@@ -2554,7 +2543,15 @@ impl Gateway {
                 .grant(decision.chosen.upstream.as_str(), now_ms)
         });
 
-        let result = self.dispatch(ctx, agent, &request, &inbound_tools, &decision, emit, record);
+        let result = self.dispatch(
+            ctx,
+            agent,
+            &request,
+            &inbound_tools,
+            &decision,
+            emit,
+            record,
+        );
 
         if let Some(now_ms) = quota_now_ms {
             self.settle_quota(&session, lease.as_ref(), now_ms, record, &result);
@@ -3305,13 +3302,16 @@ impl Gateway {
         record: &mut RequestRecord,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         const ANTHROPIC: &str = "anthropic-messages";
-        let upstream = self.upstreams.get(target.upstream.as_str()).ok_or_else(|| {
-            ErrorEnvelope::new(
-                ErrorCode::Internal,
-                500,
-                format!("upstream `{}` vanished from configuration", target.upstream),
-            )
-        })?;
+        let upstream = self
+            .upstreams
+            .get(target.upstream.as_str())
+            .ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCode::Internal,
+                    500,
+                    format!("upstream `{}` vanished from configuration", target.upstream),
+                )
+            })?;
 
         // Verbatim body, except the caller's model is remapped to the routed one.
         let mut forwarded = body.clone();
@@ -3351,25 +3351,25 @@ impl Gateway {
             None,
         );
 
-        let response =
-            match self.send(ctx, attempt_timeout, &descriptor, target.upstream.as_str()) {
-                Err(_) if ctx.is_cancelled() => {
-                    Self::emit_cancelled(emit);
-                    return Ok(StreamOutcome::ClientCancelled);
-                }
-                Err(error) => {
-                    record_conversion(
-                        record,
-                        ConversionStage::ProviderResponse,
-                        ANTHROPIC,
-                        ANTHROPIC,
-                        false,
-                        Some(error.code),
-                    );
-                    return Err(error);
-                }
-                Ok(response) => response,
-            };
+        let response = match self.send(ctx, attempt_timeout, &descriptor, target.upstream.as_str())
+        {
+            Err(_) if ctx.is_cancelled() => {
+                Self::emit_cancelled(emit);
+                return Ok(StreamOutcome::ClientCancelled);
+            }
+            Err(error) => {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    ANTHROPIC,
+                    ANTHROPIC,
+                    false,
+                    Some(error.code),
+                );
+                return Err(error);
+            }
+            Ok(response) => response,
+        };
 
         if let Err(error) = EgressPolicy::reject_redirect(response.status) {
             record_conversion(
@@ -3386,10 +3386,11 @@ impl Gateway {
         // L2 authoritative quota: harvest remaining/reset headers, never the body.
         let windows = crate::quota_headers::parse_quota_windows(&response.headers, unix_millis());
         if !windows.is_empty() {
-            self.quota
-                .lock()
-                .expect("quota lock")
-                .note_authoritative(target.upstream.as_str(), unix_millis(), windows);
+            self.quota.lock().expect("quota lock").note_authoritative(
+                target.upstream.as_str(),
+                unix_millis(),
+                windows,
+            );
         }
 
         // Upstream error: return its status + body VERBATIM (Claude Code depends

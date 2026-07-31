@@ -769,7 +769,10 @@ enum RestoredTool {
     /// namespaced registry. (`local_shell` is deliberately absent: like CC
     /// Switch, an unrepresentable built-in degrades to a plain function rather
     /// than an invented `local_shell_call` restoration.)
-    Namespace { namespace: String, child: String },
+    Namespace {
+        namespace: String,
+        child: String,
+    },
 }
 
 /// The `query`/`limit` schema Codex's `tool_search` built-in is translated into,
@@ -1094,16 +1097,16 @@ fn tools_of(value: &Value) -> Result<Vec<ToolDef>, String> {
         {
             continue;
         }
-        if kind != "function" {
-            return Err(capability(format!(
-                "unsupported enabled Responses tool type {kind}"
-            )));
-        }
-        let name = tool
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("function tool declares no name"))?
-            .to_owned();
+        let name = if kind == "function" {
+            tool.get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("function tool declares no name"))?
+                .to_owned()
+        } else {
+            tool.get("name")
+                .and_then(Value::as_str)
+                .map_or_else(|| kind.to_owned(), str::to_owned)
+        };
         if !names.insert(name.clone()) {
             return Err(invalid("Responses tools contain a duplicate provider name"));
         }
@@ -2462,8 +2465,13 @@ impl Guest for ResponsesClient {
                         // / namespaced function_call / function_call) with its final
                         // id, so every later delta/done event lines up.
                         let item_id = tool_item_id(&call_id, &call_name, &state.restore);
-                        let added_item =
-                            restored_tool_item(&call_id, &call_name, "", "in_progress", &state.restore);
+                        let added_item = restored_tool_item(
+                            &call_id,
+                            &call_name,
+                            "",
+                            "in_progress",
+                            &state.restore,
+                        );
                         let call = ToolStream {
                             output_index,
                             call_id,
