@@ -6,7 +6,7 @@ wit_bindgen::generate!({
 });
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use exports::token_station::adapter::agent_adapter::{AdapterHealth, AdapterMetadata, Guest};
 use serde_json::{json, Value};
@@ -250,6 +250,14 @@ fn function_call_item(item: &Value) -> Result<Message, String> {
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid("function_call declares no name"))?;
+    // A replayed namespace call carries a `namespace` field alongside the bare
+    // child name (this is how `restore_tool_call_item` emitted it). Flatten it
+    // back to the `<namespace>__<child>` name the tool was declared under, so
+    // history lines up with the current turn's tools.
+    let name = match item.get("namespace").and_then(Value::as_str) {
+        Some(namespace) if !namespace.is_empty() => flatten_namespace_name(namespace, name),
+        _ => name.to_owned(),
+    };
     let arguments = item
         .get("arguments")
         .and_then(Value::as_str)
@@ -259,8 +267,85 @@ fn function_call_item(item: &Value) -> Result<Message, String> {
         content: None,
         tool_calls: vec![ToolCall {
             id: call_id.to_owned(),
-            name: name.to_owned(),
+            name,
             arguments: arguments.to_owned(),
+        }],
+        tool_call_id: None,
+        name: None,
+        extensions: Extensions::new(),
+    })
+}
+
+/// A replayed `custom_tool_call` from a prior turn. Codex sends the custom
+/// tool's raw string in `input`; wrap it back into the `{ input: <string> }`
+/// arguments the flattened function tool was declared with, so the assistant
+/// turn is byte-consistent with how the model would have produced it.
+fn custom_tool_call_item(item: &Value) -> Result<Message, String> {
+    let call_id = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("custom_tool_call declares no call_id"))?;
+    let name = item
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("custom_tool_call declares no name"))?;
+    let input = item.get("input").cloned().unwrap_or_else(|| json!(""));
+    let arguments = json!({ CUSTOM_TOOL_INPUT_FIELD: input }).to_string();
+    Ok(Message {
+        role: Role::Assistant,
+        content: None,
+        tool_calls: vec![ToolCall {
+            id: call_id.to_owned(),
+            name: name.to_owned(),
+            arguments,
+        }],
+        tool_call_id: None,
+        name: None,
+        extensions: Extensions::new(),
+    })
+}
+
+/// A replayed `custom_tool_call_output` or `tool_search_output` from a prior
+/// turn: the tool's result, keyed by `call_id`, becomes a Canonical tool
+/// message exactly like a `function_call_output`.
+fn tool_result_item(item: &Value, kind: &str) -> Result<Message, String> {
+    let call_id = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid(format!("{kind} declares no call_id")))?;
+    let content = content_value(
+        item.get("output").unwrap_or(&Value::Null),
+        "tool result output",
+    )?;
+    Ok(Message {
+        role: Role::Tool,
+        content,
+        tool_calls: Vec::new(),
+        tool_call_id: Some(call_id.to_owned()),
+        name: None,
+        extensions: Extensions::new(),
+    })
+}
+
+/// A replayed `tool_search_call` from a prior turn. Its arguments object is
+/// serialized back into the flattened `tool_search` function's arguments string.
+fn tool_search_call_item(item: &Value) -> Result<Message, String> {
+    let call_id = item
+        .get("call_id")
+        .or_else(|| item.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("tool_search_call declares no call_id"))?;
+    let arguments = match item.get("arguments") {
+        Some(value) => serde_json::to_string(value).map_err(internal)?,
+        None => "{}".to_owned(),
+    };
+    Ok(Message {
+        role: Role::Assistant,
+        content: None,
+        tool_calls: vec![ToolCall {
+            id: call_id.to_owned(),
+            name: TOOL_SEARCH_PROXY_NAME.to_owned(),
+            arguments,
         }],
         tool_call_id: None,
         name: None,
@@ -349,6 +434,12 @@ fn input_messages(input: &Value) -> Result<Vec<Message>, String> {
                     Some("message") | None if item.get("role").is_some() => message_item(item),
                     Some("function_call") => function_call_item(item),
                     Some("function_call_output") => function_output_item(item),
+                    Some("custom_tool_call") => custom_tool_call_item(item),
+                    Some("custom_tool_call_output") => {
+                        tool_result_item(item, "custom_tool_call_output")
+                    }
+                    Some("tool_search_call") => tool_search_call_item(item),
+                    Some("tool_search_output") => tool_result_item(item, "tool_search_output"),
                     Some("reasoning") => Err(capability(
                         "Responses reasoning items require an approved Canonical IR extension",
                     )),
@@ -364,41 +455,387 @@ fn input_messages(input: &Value) -> Result<Vec<Message>, String> {
     }
 }
 
-fn tools_of(value: &Value) -> Result<Vec<ToolDef>, String> {
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|tool| {
-            let kind = match tool.get("type").and_then(Value::as_str) {
-                Some(kind) => kind,
-                None => return Some(Err(invalid("tool declares no type"))),
-            };
-            // Only `function` tools have a Canonical IR representation. Built-in
-            // and server-side Responses tool types — web_search, file_search,
-            // local_shell, computer, code_interpreter, mcp, namespace, … — carry
-            // no IR shape, so we drop them at the inbound boundary instead of
-            // refusing the whole request. Honest degradation (matching the
-            // structured-output path): the function tools still route and run,
-            // and Codex's requests, which pair function tools with built-ins we
-            // can't model, stop being dead on arrival.
-            if kind != "function" {
-                return None;
+/// Joins a namespace and a child tool into a flat, deterministic function name.
+/// Kept in sync with CC Switch's `<namespace>__<child>` scheme so the intent is
+/// legible; response-side restoration (flat name → `{name, namespace}`) is a
+/// host/context follow-up (see the design doc), so today the round trip arrives
+/// flat.
+const NAMESPACE_SEPARATOR: &str = "__";
+
+/// Custom (freeform-grammar) Codex tools carry a raw string `input`, not a JSON
+/// schema. To route them through the Canonical function-tool path we wrap that
+/// string in a single required `input` property — kept in sync with CC Switch's
+/// `CUSTOM_TOOL_INPUT_FIELD` — and unwrap it again when restoring the call so
+/// the round trip is exact.
+const CUSTOM_TOOL_INPUT_FIELD: &str = "input";
+const CUSTOM_TOOL_INPUT_DESCRIPTION: &str = "Raw string input for the original custom tool. Preserve formatting exactly and follow the original tool definition embedded in the description.";
+const CUSTOM_TOOL_PRESERVED_METADATA_HEADING: &str = "Original tool definition:";
+
+/// The fixed proxy name Codex's `tool_search` built-in is translated to (kept in
+/// sync with CC Switch's `TOOL_SEARCH_PROXY_NAME`), so the response side can
+/// recognize and restore it to a `tool_search_call`.
+const TOOL_SEARCH_PROXY_NAME: &str = "tool_search";
+
+/// The original Codex tool kind behind a flattened Canonical function name.
+/// Derived at render time from the request's own tool declarations (threaded
+/// into the render context as `inbound_tools`), so the response side can restore
+/// the item type Codex expects. Mirrors CC Switch's `CodexToolContext`, which
+/// likewise rebuilds the map from the request rather than threading state.
+enum RestoredTool {
+    Custom,
+    /// The `tool_search` built-in, proxied as a `tool_search` function and
+    /// restored to a `tool_search_call` (client-executed).
+    ToolSearch,
+    /// A `namespace` child, flattened on the way in to `<namespace>__<child>`.
+    /// Restored to a `function_call` bearing the bare child `name` plus a
+    /// `namespace` field, which is how Codex matches it against its own
+    /// namespaced registry. (`local_shell` is deliberately absent: like CC
+    /// Switch, an unrepresentable built-in degrades to a plain function rather
+    /// than an invented `local_shell_call` restoration.)
+    Namespace { namespace: String, child: String },
+}
+
+/// The `query`/`limit` schema Codex's `tool_search` built-in is translated into,
+/// mirroring CC Switch's `add_tool_search_tool`.
+fn tool_search_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search query for tools or connectors to load."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of tool groups to return."
             }
-            let name = match tool.get("name").and_then(Value::as_str) {
-                Some(name) => name.to_owned(),
-                None => return Some(Err(invalid("function tool declares no name"))),
-            };
-            Some(Ok(ToolDef {
-                name,
-                description: tool
-                    .get("description")
+        },
+        "required": ["query"]
+    })
+}
+
+/// Parse tool-call `arguments` into the object a `tool_search_call` carries: the
+/// parsed object, `{}` when empty, or `{ "query": <raw> }` when unparseable.
+/// Mirrors CC Switch `parse_tool_arguments_object`.
+fn parse_tool_arguments_object(arguments: &str) -> Value {
+    if arguments.trim().is_empty() {
+        return json!({});
+    }
+    serde_json::from_str::<Value>(arguments)
+        .ok()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({ "query": arguments }))
+}
+
+/// The flat, deterministic function name a `namespace` child is lifted to.
+/// Shared by `tools_of` (request), [`restore_map`] (response) and
+/// [`function_call_item`] (replayed history) so all three derive the exact same
+/// name — the consistency CC Switch gets from deriving both directions from the
+/// same request tools.
+fn flatten_namespace_name(namespace: &str, child: &str) -> String {
+    format!("{namespace}{NAMESPACE_SEPARATOR}{child}")
+}
+
+/// The wrapped `{ "input": "<string>" }` parameter schema every custom tool is
+/// translated into. Fixed shape so the model always emits an `input` string we
+/// can unwrap on the way back.
+fn custom_tool_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            CUSTOM_TOOL_INPUT_FIELD: {
+                "type": "string",
+                "description": CUSTOM_TOOL_INPUT_DESCRIPTION
+            }
+        },
+        "required": [CUSTOM_TOOL_INPUT_FIELD]
+    })
+}
+
+/// A custom tool has no schema slot for its grammar/`format`, so its whole
+/// original definition is embedded in the flattened function's description —
+/// the model follows it to produce the raw `input`. Mirrors CC Switch's
+/// `responses_custom_tool_description`.
+fn custom_tool_description(tool: &Value) -> String {
+    format!(
+        "{CUSTOM_TOOL_PRESERVED_METADATA_HEADING}\n```json\n{}\n```",
+        serde_json::to_string(tool).unwrap_or_default()
+    )
+}
+
+/// The flattened function name for a custom tool: its declared `name`, or the
+/// bare `custom` type when it declares none. Kept identical between `tools_of`
+/// (request) and [`restore_map`] (response) so the two stay consistent.
+fn custom_tool_name(tool: &Value) -> String {
+    tool.get("name")
+        .and_then(Value::as_str)
+        .map_or_else(|| "custom".to_owned(), str::to_owned)
+}
+
+/// Build the flat-name → original-kind restore map from the request's tool
+/// declarations. Only kinds that need response-side restoration are recorded;
+/// everything else round-trips as a plain `function_call` (map miss).
+fn restore_map(inbound_tools: &Value) -> BTreeMap<String, RestoredTool> {
+    let mut map = BTreeMap::new();
+    for tool in inbound_tools.as_array().into_iter().flatten() {
+        match tool.get("type").and_then(Value::as_str) {
+            Some("custom") => {
+                map.insert(custom_tool_name(tool), RestoredTool::Custom);
+            }
+            Some("tool_search") => {
+                map.insert(TOOL_SEARCH_PROXY_NAME.to_owned(), RestoredTool::ToolSearch);
+            }
+            // Mirror `tools_of`'s namespace flattening exactly: every named
+            // child is lifted, so every flat name maps back to its child.
+            Some("namespace") => {
+                let Some(namespace) = tool.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                for child in tool
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(child) = child.get("name").and_then(Value::as_str) {
+                        map.insert(
+                            flatten_namespace_name(namespace, child),
+                            RestoredTool::Namespace {
+                                namespace: namespace.to_owned(),
+                                child: child.to_owned(),
+                            },
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    map
+}
+
+/// Unwrap the raw custom-tool `input` string from the `{ "input": ... }` chat
+/// arguments the model produced. Mirrors CC Switch
+/// `custom_tool_input_from_chat_arguments`.
+fn custom_tool_input_from_arguments(arguments: &str) -> Value {
+    if arguments.trim().is_empty() {
+        return json!("");
+    }
+    match serde_json::from_str::<Value>(arguments) {
+        Ok(Value::Object(mut obj)) => obj
+            .remove(CUSTOM_TOOL_INPUT_FIELD)
+            .unwrap_or_else(|| json!(arguments)),
+        _ => json!(arguments),
+    }
+}
+
+/// Render one Canonical tool call as the Responses output item Codex expects:
+/// a `custom_tool_call` when the request declared it as a custom tool, else a
+/// plain `function_call`.
+/// The Responses output item for one tool call, restored to the shape Codex
+/// expects. `status` and `arguments` are parameters so the streaming path can
+/// reuse it for both the `in_progress` `output_item.added` (empty arguments)
+/// and the `completed` `output_item.done`.
+fn restored_tool_item(
+    call_id: &str,
+    name: &str,
+    arguments: &str,
+    status: &str,
+    restore: &BTreeMap<String, RestoredTool>,
+) -> Value {
+    match restore.get(name) {
+        Some(RestoredTool::Custom) => json!({
+            "id": format!("ctc_{call_id}"),
+            "type": "custom_tool_call",
+            "status": status,
+            "call_id": call_id,
+            "name": name,
+            "input": custom_tool_input_from_arguments(arguments)
+        }),
+        // `tool_search` is client-executed and carries its arguments as a parsed
+        // object; it has neither an item id nor a name on the wire.
+        Some(RestoredTool::ToolSearch) => json!({
+            "type": "tool_search_call",
+            "status": status,
+            "call_id": call_id,
+            "execution": "client",
+            "arguments": parse_tool_arguments_object(arguments)
+        }),
+        // A namespace child comes back as a plain function_call bearing the bare
+        // child name plus a `namespace` field, so Codex can match it against its
+        // namespaced tool registry.
+        Some(RestoredTool::Namespace { namespace, child }) => json!({
+            "type": "function_call",
+            "id": format!("fc_{call_id}"),
+            "status": status,
+            "call_id": call_id,
+            "name": child,
+            "namespace": namespace,
+            "arguments": arguments
+        }),
+        None => json!({
+            "type": "function_call",
+            "id": format!("fc_{call_id}"),
+            "status": status,
+            "call_id": call_id,
+            "name": name,
+            "arguments": arguments
+        }),
+    }
+}
+
+fn restore_tool_call_item(call: &ToolCall, restore: &BTreeMap<String, RestoredTool>) -> Value {
+    restored_tool_item(&call.id, &call.name, &call.arguments, "completed", restore)
+}
+
+/// Whether a tool name was declared as a custom tool — its streamed input rides
+/// the `custom_tool_call_input` SSE family instead of `function_call_arguments`.
+fn is_custom_restore(name: &str, restore: &BTreeMap<String, RestoredTool>) -> bool {
+    matches!(restore.get(name), Some(RestoredTool::Custom))
+}
+
+/// The Responses output-item id for a tool call: `ctc_` for a restored custom
+/// tool, `fc_` otherwise. Must match the `id` [`restored_tool_item`] emits.
+fn tool_item_id(call_id: &str, name: &str, restore: &BTreeMap<String, RestoredTool>) -> String {
+    if is_custom_restore(name, restore) {
+        format!("ctc_{call_id}")
+    } else {
+        format!("fc_{call_id}")
+    }
+}
+
+fn push_tool(
+    tools: &mut Vec<ToolDef>,
+    seen: &mut BTreeSet<String>,
+    name: String,
+    description: Option<String>,
+    parameters: Value,
+) -> Result<(), String> {
+    // A collision after flattening would silently drop one tool. Fail loudly and
+    // ask the caller to rename, exactly as CC Switch does — never overwrite.
+    if !seen.insert(name.clone()) {
+        return Err(invalid(format!(
+            "tool name `{name}` collides after namespace flattening; rename one of the tools"
+        )));
+    }
+    tools.push(ToolDef {
+        name,
+        description,
+        parameters,
+    });
+    Ok(())
+}
+
+/// Codex pairs `function` tools with built-ins (`local_shell`, `custom`,
+/// `namespace`, `tool_search`) and hosted tools (`web_search`, `file_search`,
+/// `code_interpreter`, …). Only `function` maps cleanly to Canonical IR, but
+/// dropping the rest hands the model a smaller tool set than the client declared
+/// (a fake success), and failing the whole request leaves Codex dead on arrival.
+/// So, following CC Switch, we translate every tool to a `function` the model can
+/// call: `namespace` children are lifted to top-level functions with the stable
+/// flat name `<namespace>__<child>` (a collision is a hard error, never a silent
+/// overwrite), and every other type becomes a function carrying its declared
+/// name/description/parameters. Client-executed tools (local_shell, custom,
+/// namespace) then run inside Codex exactly as before.
+///
+/// LIMITATION: response-side name restoration (flat name → `{name, namespace}`,
+/// and `function_call` → `custom_tool_call`/`local_shell_call` items) needs the
+/// host to thread a restore map from the request into the render context, since
+/// `normalize_inbound` and `render_*` are separate stateless calls. Until that
+/// lands, namespace tool calls come back flat. Genuinely server-hosted tools
+/// (web_search, file_search, …) only truly execute on an upstream that owns
+/// them; on other providers they are best-effort, at CC Switch parity.
+fn tools_of(value: &Value) -> Result<Vec<ToolDef>, String> {
+    let mut tools = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for tool in value.as_array().into_iter().flatten() {
+        let kind = match tool.get("type").and_then(Value::as_str) {
+            Some(kind) => kind,
+            None => return Err(invalid("tool declares no type")),
+        };
+        let description = tool
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let parameters = tool.get("parameters").cloned().unwrap_or_else(|| json!({}));
+        match kind {
+            "function" => {
+                let name = tool
+                    .get("name")
                     .and_then(Value::as_str)
-                    .map(str::to_owned),
-                parameters: tool.get("parameters").cloned().unwrap_or_else(|| json!({})),
-            }))
-        })
-        .collect()
+                    .ok_or_else(|| invalid("function tool declares no name"))?
+                    .to_owned();
+                push_tool(&mut tools, &mut seen, name, description, parameters)?;
+            }
+            "namespace" => {
+                let namespace = tool
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| invalid("namespace tool declares no name"))?;
+                for child in tool
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let child_name = child
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| invalid("namespace child tool declares no name"))?;
+                    let flat = flatten_namespace_name(namespace, child_name);
+                    push_tool(
+                        &mut tools,
+                        &mut seen,
+                        flat,
+                        child
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        child.get("parameters").cloned().unwrap_or_else(|| json!({})),
+                    )?;
+                }
+            }
+            // A custom (freeform-grammar) tool has no JSON schema — the model
+            // returns a raw string. Wrap that in a fixed `{ input: string }`
+            // schema so it rides the function-tool path; `restore_tool_call_item`
+            // unwraps it back into a `custom_tool_call` on the way out.
+            "custom" => {
+                push_tool(
+                    &mut tools,
+                    &mut seen,
+                    custom_tool_name(tool),
+                    Some(custom_tool_description(tool)),
+                    custom_tool_parameters(),
+                )?;
+            }
+            // The `tool_search` built-in is proxied as a function with a fixed
+            // query/limit schema; `restore_tool_call_item` turns the call back
+            // into a `tool_search_call`.
+            "tool_search" => {
+                push_tool(
+                    &mut tools,
+                    &mut seen,
+                    TOOL_SEARCH_PROXY_NAME.to_owned(),
+                    Some(
+                        "Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task."
+                            .to_owned(),
+                    ),
+                    tool_search_parameters(),
+                )?;
+            }
+            // local_shell, web_search, file_search, code_interpreter, computer,
+            // mcp, image_generation, … → a function tool named after its declared
+            // name, or its type when it has none.
+            _ => {
+                let name = tool
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map_or_else(|| kind.to_owned(), str::to_owned);
+                push_tool(&mut tools, &mut seen, name, description, parameters)?;
+            }
+        }
+    }
+    Ok(tools)
 }
 
 fn request_extensions(body: &Value) -> Extensions {
@@ -444,7 +881,11 @@ fn text_parts(content: Option<&Content>) -> Result<Vec<Value>, String> {
     }
 }
 
-fn response_output(response: &ChatResponse, response_id: &str) -> Result<Vec<Value>, String> {
+fn response_output(
+    response: &ChatResponse,
+    response_id: &str,
+    restore: &BTreeMap<String, RestoredTool>,
+) -> Result<Vec<Value>, String> {
     let mut output = Vec::new();
     for choice in &response.choices {
         let content = text_parts(choice.message.content.as_ref())?;
@@ -458,14 +899,7 @@ fn response_output(response: &ChatResponse, response_id: &str) -> Result<Vec<Val
             }));
         }
         for call in &choice.message.tool_calls {
-            output.push(json!({
-                "type": "function_call",
-                "id": format!("fc_{}", call.id),
-                "status": "completed",
-                "call_id": call.id,
-                "name": call.name,
-                "arguments": call.arguments
-            }));
+            output.push(restore_tool_call_item(call, restore));
         }
     }
     Ok(output)
@@ -556,6 +990,10 @@ struct ToolStream {
     call_id: String,
     name: String,
     arguments: String,
+    /// The `output_item` id (`ctc_` for a restored custom tool, `fc_` otherwise),
+    /// fixed when the item is first announced so every later delta/done event
+    /// references the same id.
+    item_id: String,
 }
 
 struct StreamState {
@@ -565,10 +1003,14 @@ struct StreamState {
     tools: BTreeMap<u32, ToolStream>,
     next_output_index: u32,
     usage: Usage,
+    /// Flat-name → original Codex tool kind, built once from the request's tools
+    /// so streamed tool calls restore to the same shapes as the non-streaming
+    /// path. Empty when the caller declared no restorable tools.
+    restore: BTreeMap<String, RestoredTool>,
 }
 
 impl StreamState {
-    fn new(response_id: String, model: String) -> Self {
+    fn new(response_id: String, model: String, restore: BTreeMap<String, RestoredTool>) -> Self {
         Self {
             response_id,
             model,
@@ -576,6 +1018,7 @@ impl StreamState {
             tools: BTreeMap::new(),
             next_output_index: 0,
             usage: Usage::default(),
+            restore,
         }
     }
 
@@ -598,12 +1041,18 @@ fn ensure_stream<'a>(
     stream_id: &str,
     response_id: &str,
     model: &str,
+    inbound_tools: &Value,
 ) -> Result<(&'a mut StreamState, bool), String> {
     let created = !states.contains_key(stream_id);
     if created {
         states.insert(
             stream_id.to_owned(),
-            StreamState::new(response_id.to_owned(), model.to_owned()),
+            // The restore map is built once, here, rather than on every event.
+            StreamState::new(
+                response_id.to_owned(),
+                model.to_owned(),
+                restore_map(inbound_tools),
+            ),
         );
     }
     let context_changed = states
@@ -638,7 +1087,10 @@ fn started_event(state: &StreamState) -> Result<String, String> {
 
 fn stream_done(state: StreamState, finish_reason: Option<FinishReason>) -> Result<String, String> {
     let mut rendered = String::new();
-    let mut completed = Vec::with_capacity(state.text.len() + state.tools.len());
+    // Each entry: (output_index, done item, optional custom input to emit on the
+    // `custom_tool_call_input` family just before the item's `output_item.done`).
+    let mut completed: Vec<(u32, Value, Option<(String, String)>)> =
+        Vec::with_capacity(state.text.len() + state.tools.len());
     for (index, text) in state.text {
         let item = json!({
             "type": "message",
@@ -647,23 +1099,50 @@ fn stream_done(state: StreamState, finish_reason: Option<FinishReason>) -> Resul
             "role": "assistant",
             "content": [{"type": "output_text", "text": text.content}]
         });
-        completed.push((text.output_index, item));
+        completed.push((text.output_index, item, None));
     }
     for (_, call) in state.tools {
-        let item = json!({
-            "type": "function_call",
-            "id": format!("fc_{}", call.call_id),
-            "status": "completed",
-            "call_id": call.call_id,
-            "name": call.name,
-            "arguments": call.arguments
+        let item =
+            restored_tool_item(&call.call_id, &call.name, &call.arguments, "completed", &state.restore);
+        // A custom tool buffered its `{ input }` arguments; unwrap them now for
+        // the input delta/done events its client consumes.
+        let custom_input = is_custom_restore(&call.name, &state.restore).then(|| {
+            (
+                call.item_id.clone(),
+                custom_tool_input_from_arguments(&call.arguments)
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
         });
-        completed.push((call.output_index, item));
+        completed.push((call.output_index, item, custom_input));
     }
-    completed.sort_by_key(|(output_index, _)| *output_index);
+    completed.sort_by_key(|(output_index, _, _)| *output_index);
 
     let mut output = Vec::with_capacity(completed.len());
-    for (output_index, item) in completed {
+    for (output_index, item, custom_input) in completed {
+        if let Some((item_id, input)) = custom_input {
+            if !input.is_empty() {
+                rendered.push_str(&sse(
+                    "response.custom_tool_call_input.delta",
+                    json!({
+                        "type": "response.custom_tool_call_input.delta",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "delta": input
+                    }),
+                )?);
+            }
+            rendered.push_str(&sse(
+                "response.custom_tool_call_input.done",
+                json!({
+                    "type": "response.custom_tool_call_input.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "input": input
+                }),
+            )?);
+        }
         rendered.push_str(&sse(
             "response.output_item.done",
             json!({
@@ -829,11 +1308,12 @@ impl Guest for ResponsesClient {
         let response: ChatResponse = parse_input(&response)?;
         let context: Value = parse_input(&context)?;
         let (response_id, model) = context_identity(&context, &response.id, &response.model);
+        let restore = restore_map(context.get("inbound_tools").unwrap_or(&Value::Null));
         let finish_reason = response
             .choices
             .iter()
             .find_map(|choice| choice.finish_reason.clone());
-        let output = response_output(&response, &response_id)?;
+        let output = response_output(&response, &response_id, &restore)?;
         to_output(&response_object(
             &response_id,
             &model,
@@ -884,9 +1364,11 @@ impl Guest for ResponsesClient {
             }));
         }
 
+        let inbound_tools = context.get("inbound_tools").cloned().unwrap_or(Value::Null);
         let data = STREAMS.with(|streams| {
             let mut states = streams.borrow_mut();
-            let (state, created) = ensure_stream(&mut states, stream_id, response_id, model)?;
+            let (state, created) =
+                ensure_stream(&mut states, stream_id, response_id, model, &inbound_tools)?;
             let mut rendered = if created {
                 started_event(state)?
             } else {
@@ -965,25 +1447,25 @@ impl Guest for ResponsesClient {
                             invalid("first tool-call stream fragment declares no name")
                         })?;
                         let output_index = state.allocate_output_index()?;
+                        // Announce the item in its restored shape (custom_tool_call
+                        // / namespaced function_call / function_call) with its final
+                        // id, so every later delta/done event lines up.
+                        let item_id = tool_item_id(&call_id, &call_name, &state.restore);
+                        let added_item =
+                            restored_tool_item(&call_id, &call_name, "", "in_progress", &state.restore);
                         let call = ToolStream {
                             output_index,
                             call_id,
                             name: call_name,
                             arguments: String::new(),
+                            item_id,
                         };
                         rendered.push_str(&sse(
                             "response.output_item.added",
                             json!({
                                 "type": "response.output_item.added",
                                 "output_index": output_index,
-                                "item": {
-                                    "type": "function_call",
-                                    "id": format!("fc_{}", call.call_id),
-                                    "status": "in_progress",
-                                    "call_id": call.call_id,
-                                    "name": call.name,
-                                    "arguments": ""
-                                }
+                                "item": added_item
                             }),
                         )?);
                         state.tools.insert(index, call);
@@ -997,15 +1479,25 @@ impl Guest for ResponsesClient {
                         ));
                     }
                     call.arguments.push_str(&arguments_delta);
-                    rendered.push_str(&sse(
-                        "response.function_call_arguments.delta",
-                        json!({
-                            "type": "response.function_call_arguments.delta",
-                            "item_id": format!("fc_{}", call.call_id),
-                            "output_index": call.output_index,
-                            "delta": arguments_delta
-                        }),
-                    )?);
+                    let item_id = call.item_id.clone();
+                    let output_index = call.output_index;
+                    let call_name = call.name.clone();
+                    // A custom tool's arguments arrive as `{ "input": … }` JSON
+                    // fragments that cannot be unwrapped incrementally, so its
+                    // input is buffered and emitted once at `stream_done` on the
+                    // `custom_tool_call_input` family. Everything else streams its
+                    // arguments delta as usual.
+                    if !is_custom_restore(&call_name, &state.restore) {
+                        rendered.push_str(&sse(
+                            "response.function_call_arguments.delta",
+                            json!({
+                                "type": "response.function_call_arguments.delta",
+                                "item_id": item_id,
+                                "output_index": output_index,
+                                "delta": arguments_delta
+                            }),
+                        )?);
+                    }
                 }
                 StreamEvent::Usage { usage } => {
                     state.usage = usage;

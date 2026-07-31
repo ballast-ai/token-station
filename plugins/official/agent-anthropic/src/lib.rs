@@ -182,6 +182,28 @@ fn parse_plain_block(block: &Value) -> Result<ContentPart, String> {
         Some("thinking" | "redacted_thinking") => Err(capability(
             "Anthropic thinking blocks require an approved Canonical IR extension",
         )),
+        // Server-tool history blocks. These arrive on a follow-up turn after a
+        // native Anthropic upstream ran a server tool. Canonical IR has no
+        // representation for them, so a multi-turn continuation that carries
+        // server-tool results cannot be replayed. Name them explicitly rather
+        // than reporting a generic "unsupported content block", so the failure
+        // is actionable (native Anthropic route, or an approved IR extension).
+        Some(
+            kind @ ("server_tool_use"
+            | "web_search_tool_result"
+            | "web_fetch_tool_result"
+            | "code_execution_tool_result"
+            | "mcp_tool_use"
+            | "mcp_tool_result"),
+        ) => Err(capability(format!(
+            "Anthropic server-tool history block `{kind}` cannot be replayed through Canonical \
+             IR; continuing a conversation that carries server-tool results needs a native \
+             Anthropic route or an approved IR extension."
+        ))),
+        Some(kind @ ("document" | "search_result")) => Err(capability(format!(
+            "Anthropic tool-result content block `{kind}` has no Canonical IR representation; its \
+             structure would be lost if flattened to plain text."
+        ))),
         Some(kind) => Err(capability(format!(
             "unsupported Anthropic content block `{kind}`"
         ))),
@@ -397,23 +419,68 @@ fn parse_tools(body: &Value) -> Result<Vec<ToolDef>, String> {
         .into_iter()
         .flatten()
         .map(|tool| {
-            Ok(ToolDef {
-                name: tool
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| invalid("tool declares no name"))?
-                    .to_owned(),
-                description: tool
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                parameters: tool
-                    .get("input_schema")
+            let name = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("tool declares no name"))?
+                .to_owned();
+            let description = tool
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            // A user-defined tool carries no `type` (classic API) or
+            // `type == "custom"`, described by a JSON `input_schema`. Anthropic's
+            // server tools (web_search, web_fetch, code_execution, tool_search,
+            // mcp, advisor) and its client-executed schema tools (bash,
+            // text_editor, computer, memory) share this array but carry a
+            // versioned `type` and an Anthropic-defined schema instead of
+            // `input_schema`. Following CC Switch, translate every tool to a
+            // Canonical function tool so the model can call it — client-executed
+            // tools then run in the client exactly as before, rather than being
+            // dropped or refused. A user tool keeps its strict `input_schema`
+            // requirement (a plain tool with no schema is malformed); a
+            // vendor-typed tool defaults to an empty schema when it declares none.
+            let is_user_tool = matches!(
+                tool.get("type").and_then(Value::as_str),
+                None | Some("custom")
+            );
+            let parameters = if is_user_tool {
+                tool.get("input_schema")
                     .cloned()
-                    .ok_or_else(|| invalid("tool declares no input_schema"))?,
+                    .ok_or_else(|| invalid("tool declares no input_schema"))?
+            } else {
+                tool.get("input_schema")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}))
+            };
+            Ok(ToolDef {
+                name,
+                description,
+                parameters,
             })
         })
         .collect()
+}
+
+/// Maps Anthropic `output_config.effort` onto the provider-neutral
+/// `reasoning_effort` extension the OpenAI-compatible provider renders. Anthropic
+/// `low`/`medium`/`high` pass through; `max` clamps to `high`, the ceiling the
+/// OpenAI `reasoning_effort` wire accepts. The `xhigh` dialect CC Switch emits
+/// for `max` belongs to xAI/Codex Responses upstreams, not generic
+/// OpenAI-compatible providers — sending it here risks a 400, so it is not used
+/// until a native Responses passthrough exists. Unknown values are dropped,
+/// matching the field's optimistic passthrough, and the provider's own
+/// `reasoning_effort_allowed` gate still drops it for models that opt out.
+fn reasoning_effort_from_output_config(body: &Value) -> Option<&'static str> {
+    match body
+        .pointer("/output_config/effort")
+        .and_then(Value::as_str)?
+    {
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" | "max" => Some("high"),
+        _ => None,
+    }
 }
 
 fn request_extensions(body: &Value) -> Extensions {
@@ -426,6 +493,9 @@ fn request_extensions(body: &Value) -> Extensions {
         .collect();
     if let Some(thinking) = body.get("thinking").filter(|value| !value.is_null()) {
         extensions.insert(ANTHROPIC_THINKING_EXTENSION.to_owned(), thinking.clone());
+    }
+    if let Some(effort) = reasoning_effort_from_output_config(body) {
+        extensions.insert("reasoning_effort".to_owned(), json!(effort));
     }
     extensions
 }

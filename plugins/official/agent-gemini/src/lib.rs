@@ -206,10 +206,35 @@ fn parse_tools(body: &Value) -> Result<Vec<ToolDef>, String> {
         .ok_or_else(|| invalid("tools must be an array"))?;
     let mut definitions = Vec::new();
     for group in tools {
-        let declarations = group
-            .get("functionDeclarations")
-            .and_then(Value::as_array)
-            .ok_or_else(|| capability("only Gemini functionDeclarations tools are supported"))?;
+        let declarations = match group.get("functionDeclarations").and_then(Value::as_array) {
+            Some(declarations) => declarations,
+            None => {
+                // Gemini hosted tools — Google Search grounding, URL Context,
+                // Code Execution — arrive as their own group keys
+                // ({"google_search": {}}, {"url_context": {}},
+                // {"code_execution": {}}) and are executed by Google's servers,
+                // not the router. Canonical IR only carries functionDeclarations.
+                // Name the hosted tool and fail closed rather than emitting a
+                // generic "unsupported": the failure is then actionable (native
+                // Gemini route, or disable the tool on the Agent).
+                let named = group
+                    .as_object()
+                    .map(|group| {
+                        group
+                            .keys()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .filter(|keys| !keys.is_empty())
+                    .unwrap_or_else(|| "unknown".to_owned());
+                return Err(capability(format!(
+                    "Gemini hosted tools ({named}) are executed by Google's servers and have no \
+                     Canonical IR representation; only functionDeclarations are supported. Route \
+                     to a native Gemini upstream or disable the tool on the Agent."
+                )));
+            }
+        };
         for declaration in declarations {
             let name = declaration
                 .get("name")

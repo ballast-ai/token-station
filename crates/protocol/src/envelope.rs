@@ -77,7 +77,21 @@ impl HeaderDigest {
 }
 
 fn is_agent_metadata_value_header(name: &str) -> bool {
-    matches!(name, "content-type" | "anthropic-version" | "x-agent-step")
+    matches!(
+        name,
+        // Content negotiation and hint metadata.
+        "content-type" | "anthropic-version" | "x-agent-step"
+            // Capability opt-in headers. `anthropic-beta` (and the OpenAI
+            // equivalent) name beta features whose body fields the adapter must
+            // handle as a group — the beta header and its paired body field are
+            // one capability. Without the value, an adapter sees only that a
+            // beta was requested, not which one, and cannot forward or refuse it
+            // as a group. These are feature flags, not credentials
+            // (`is_credential_header` still runs first), so their values belong
+            // in the closed metadata catalog.
+            | "anthropic-beta"
+            | "openai-beta"
+    )
 }
 
 impl From<HeaderDigestWire> for HeaderDigest {
@@ -157,11 +171,21 @@ mod tests {
         let digest = HeaderDigest::redacting([
             ("x-agent-step", "planning"),
             ("content-type", "application/json"),
+            (
+                "anthropic-beta",
+                "context-management-2025-06-27,web-search-2025-03-05",
+            ),
             ("x-private-session-token", "internal-secret"),
         ]);
 
         assert_eq!(digest.value("x-agent-step"), Some("planning"));
         assert_eq!(digest.value("content-type"), Some("application/json"));
+        // Beta capability flags reach the adapter so header/body pairs stay
+        // grouped; they are metadata, not credentials.
+        assert_eq!(
+            digest.value("anthropic-beta"),
+            Some("context-management-2025-06-27,web-search-2025-03-05")
+        );
         assert!(digest.contains("x-private-session-token"));
         assert_eq!(
             digest.value("x-private-session-token"),
