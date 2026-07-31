@@ -50,6 +50,7 @@ SCRIPT
   cat >"$fake_bin/cargo" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "${RUSTFLAGS:-<unset>}" >>"$TEST_STATE/cargo-rustflags"
 SCRIPT
 
   cat >"$fake_bin/npx" <<'SCRIPT'
@@ -70,6 +71,7 @@ SCRIPT
 run_build() {
   env \
     PATH="$fake_bin:/usr/bin:/bin" \
+    RUSTFLAGS= \
     TEST_STATE="$state" \
     "$repo/scripts/build-desktop.sh" "$@"
 }
@@ -90,7 +92,18 @@ test_test_version_build_enables_two_verbose_levels() {
     || fail "test-version build did not pass two verbosity flags to Tauri"
 }
 
+test_all_rust_builds_remap_the_checkout_path() {
+  make_fixture path-remap
+  run_build --local --target x86_64-pc-windows-msvc >/dev/null
+
+  repo_root="$(cd "$repo" && pwd)"
+  expected="--remap-path-prefix=$repo_root=/build"
+  [[ "$(grep -Fxc -- "$expected" "$state/cargo-rustflags" || true)" == "6" ]] \
+    || fail "plugin and Desktop Rust builds did not share the checkout path remap"
+}
+
 test_normal_build_does_not_enable_verbose_tauri_logs
 test_test_version_build_enables_two_verbose_levels
+test_all_rust_builds_remap_the_checkout_path
 
 echo "build-desktop verbosity tests: PASS"

@@ -56,6 +56,9 @@ stage="$(mktemp -d "${TMPDIR:-/tmp}/token-station-desktop.XXXXXX")"
 readonly stage
 trap 'rm -rf "$stage"' EXIT
 
+# Apply the checkout remap to both the embedded WASI plugins and the host binary.
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$root=/build"
+
 if ! rustup target list --installed | grep -qx "$wasm_target"; then
   rustup target add "$wasm_target"
 fi
