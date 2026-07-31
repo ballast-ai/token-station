@@ -55,7 +55,7 @@ token-station-private-fs = { path = "../../../crates/private-fs" }
 tauri = { version = "2", default-features = false, features = ["test"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "=0.61.3", features = ["ApplicationModel", "Management_Deployment", "Storage_Search"] }
+windows = { version = "=0.61.3", features = ["ApplicationModel", "Management_Deployment", "Storage_Search", "Win32_System_WinRT"] }
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes"] }
 
 [target.'cfg(unix)'.dependencies]
