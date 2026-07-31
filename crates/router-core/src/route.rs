@@ -473,7 +473,10 @@ impl Router {
                     });
                 }
             } else {
-                match self.usable_targets(&local, features, pool) {
+                // No last-resort on the local subset: an empty rotation here MUST
+                // return Err so `local_only` can either reach for cloud (when
+                // authorized) or refuse — never pin a dead local as a last resort.
+                match self.usable_targets(&local, features, pool, false) {
                     Ok(targets) => return Ok(targets),
                     // Local candidates exist but none can serve or all are ejected.
                     // Leave the box only when cloud fallback was authorized.
@@ -486,7 +489,9 @@ impl Router {
             }
         }
 
-        self.usable_targets(&installed, features, pool)
+        // Final full-pool selection: apply the single-candidate last-resort so a
+        // wholly-ejected pool degrades to a probe instead of a hard 503.
+        self.usable_targets(&installed, features, pool, true)
     }
 
     /// Drops what cannot serve the request and what is out of rotation, then
@@ -497,6 +502,7 @@ impl Router {
         installed: &[&'a Candidate],
         features: &RequestFeatures,
         pool: &str,
+        last_resort: bool,
     ) -> Result<Vec<&'a UpstreamModel>, NoRoute> {
         let capable: Vec<&Candidate> = installed
             .iter()
@@ -517,18 +523,35 @@ impl Router {
             });
         }
 
-        let mut usable: Vec<&Candidate> = capable
-            .into_iter()
+        let in_rotation: Vec<&Candidate> = capable
+            .iter()
+            .copied()
             .filter(|candidate| candidate.health != Health::Unavailable)
             .collect();
+        let mut usable = if in_rotation.is_empty() {
+            if last_resort {
+                // Single-candidate failsafe: every capable candidate is ejected.
+                // Rather than a hard 503 for the length of a cooldown, degrade to
+                // a last-resort probe of the ejected candidate(s) so a lone pool
+                // keeps making progress — a successful probe clears the ejection.
+                // Only applies to the final full-pool selection; the `local_only`
+                // local-subset probe passes `false` so its empty rotation still
+                // signals "reach for cloud" (or refuse) rather than pinning a
+                // dead local. Multi-candidate pools are byte-identical to before:
+                // this branch fires only when rotation would otherwise be EMPTY.
+                capable
+            } else {
+                return Err(NoRoute::Unavailable {
+                    pool: pool.to_owned(),
+                });
+            }
+        } else {
+            in_rotation
+        };
 
-        if usable.is_empty() {
-            return Err(NoRoute::Unavailable {
-                pool: pool.to_owned(),
-            });
-        }
-
-        // Stable, so the operator's order survives inside a health class.
+        // Stable, so the operator's order survives inside a health class; the
+        // `Health` ordering (Healthy < Degraded < Unavailable) keeps the
+        // least-bad candidate first even in the last-resort branch.
         usable.sort_by_key(|candidate| candidate.health);
 
         Ok(usable
