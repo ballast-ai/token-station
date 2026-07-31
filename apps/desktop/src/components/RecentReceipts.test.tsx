@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getRecentReceipts, type ReceiptFeaturesView, type ReceiptView } from "../api";
@@ -67,21 +67,237 @@ function receipt(index: number, overrides: Partial<ReceiptView> = {}): ReceiptVi
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 beforeEach(() => {
   vi.mocked(getRecentReceipts).mockReset();
 });
 
 describe("RecentReceipts", () => {
-  it("mount 时只读取一次并把异常超量结果截断为 5 条", async () => {
-    vi.mocked(getRecentReceipts).mockResolvedValue(Array.from({ length: 7 }, (_, index) => receipt(index + 1)));
-    const { rerender } = render(<RecentReceipts />);
+  it("挂载立即读取并把异常超量结果截断为 5 条", async () => {
+    vi.mocked(getRecentReceipts).mockResolvedValue(
+      Array.from({ length: 7 }, (_, index) => receipt(index + 1)),
+    );
+    render(<RecentReceipts />);
 
     expect(await screen.findAllByTestId("receipt-row")).toHaveLength(5);
     expect(getRecentReceipts).toHaveBeenCalledTimes(1);
     expect(getRecentReceipts).toHaveBeenCalledWith(5);
+  });
 
-    rerender(<RecentReceipts />);
-    expect(getRecentReceipts).toHaveBeenCalledTimes(1);
+  it("用户可手动刷新，等待期间保留旧回执并在成功后显示新回执", async () => {
+    const user = userEvent.setup();
+    let resolveRefresh!: (value: ReceiptView[]) => void;
+    vi.mocked(getRecentReceipts)
+      .mockResolvedValueOnce([receipt(1, {
+        routing: { ...receipt(1).routing!, model: "old-model" },
+      })])
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveRefresh = resolve;
+      }));
+    render(<RecentReceipts />);
+
+    expect(await screen.findByText("provider-final/old-model")).toBeInTheDocument();
+    const refreshButton = screen.getByRole("button", { name: "刷新最近请求" });
+
+    await user.click(refreshButton);
+
+    expect(getRecentReceipts).toHaveBeenCalledTimes(2);
+    expect(refreshButton).toBeDisabled();
+    expect(refreshButton).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByText("provider-final/old-model")).toBeInTheDocument();
+
+    resolveRefresh([receipt(2, {
+      routing: { ...receipt(2).routing!, model: "new-model" },
+    })]);
+
+    expect(await screen.findByText("provider-final/new-model")).toBeInTheDocument();
+    expect(screen.queryByText("provider-final/old-model")).not.toBeInTheDocument();
+    await waitFor(() => expect(refreshButton).not.toBeDisabled());
+  });
+
+  it("页面可见时每 10 秒刷新，隐藏时暂停并在窗口重新聚焦时立即刷新", async () => {
+    vi.useFakeTimers();
+    const initialVisibility = document.visibilityState;
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
+    vi.mocked(getRecentReceipts).mockResolvedValue([]);
+    const { unmount } = render(<RecentReceipts />);
+
+    try {
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(getRecentReceipts).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9_999);
+      });
+      expect(getRecentReceipts).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(getRecentReceipts).toHaveBeenCalledTimes(2);
+
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "hidden",
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(getRecentReceipts).toHaveBeenCalledTimes(2);
+
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "visible",
+      });
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+        await Promise.resolve();
+      });
+      expect(getRecentReceipts).toHaveBeenCalledTimes(3);
+    } finally {
+      unmount();
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: initialVisibility,
+      });
+      vi.useRealTimers();
+    }
+  });
+
+  it("慢刷新期间合并重复触发，并在一次后续读取完成前保持 busy", async () => {
+    vi.useFakeTimers();
+    const firstRefresh = deferred<ReceiptView[]>();
+    const followUpRefresh = deferred<ReceiptView[]>();
+    vi.mocked(getRecentReceipts)
+      .mockResolvedValueOnce([receipt(1)])
+      .mockImplementationOnce(() => firstRefresh.promise)
+      .mockImplementationOnce(() => followUpRefresh.promise);
+    const { unmount } = render(<RecentReceipts />);
+
+    try {
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const refreshButton = screen.getByRole("button", { name: "刷新最近请求" });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(getRecentReceipts).toHaveBeenCalledTimes(2);
+      expect(refreshButton).toBeDisabled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20_000);
+        window.dispatchEvent(new Event("focus"));
+      });
+      expect(getRecentReceipts).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        firstRefresh.resolve([receipt(2)]);
+        await firstRefresh.promise;
+        await Promise.resolve();
+      });
+      expect(getRecentReceipts).toHaveBeenCalledTimes(3);
+      expect(refreshButton).toBeDisabled();
+
+      await act(async () => {
+        followUpRefresh.resolve([receipt(3)]);
+        await followUpRefresh.promise;
+        await Promise.resolve();
+      });
+      expect(refreshButton).not.toBeDisabled();
+    } finally {
+      unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("后台刷新失败时保留旧数据和成功时间，并在重试成功后清除警告", async () => {
+    const user = userEvent.setup();
+    vi.mocked(getRecentReceipts)
+      .mockResolvedValueOnce([receipt(1)])
+      .mockRejectedValueOnce(new Error("database busy"))
+      .mockResolvedValueOnce([receipt(2)]);
+    render(<RecentReceipts />);
+
+    expect(await screen.findByText("provider-final/model-final")).toBeInTheDocument();
+    const updatedAt = screen.getByTestId("receipt-updated-at");
+    const successfulDateTime = updatedAt.getAttribute("dateTime");
+    const refreshButton = screen.getByRole("button", { name: "刷新最近请求" });
+
+    await user.click(refreshButton);
+
+    expect(await screen.findByText(/更新失败，当前显示上次数据/)).toBeInTheDocument();
+    expect(screen.getByText("provider-final/model-final")).toBeInTheDocument();
+    expect(screen.getByTestId("receipt-updated-at")).toHaveAttribute(
+      "dateTime",
+      successfulDateTime,
+    );
+
+    await user.click(refreshButton);
+
+    await waitFor(() => expect(getRecentReceipts).toHaveBeenCalledTimes(3));
+    expect(await screen.findByText("request-2")).toBeInTheDocument();
+    expect(screen.queryByText(/更新失败，当前显示上次数据/)).not.toBeInTheDocument();
+  });
+
+  it("相同回执刷新后保持已展开详情", async () => {
+    const user = userEvent.setup();
+    vi.mocked(getRecentReceipts)
+      .mockResolvedValueOnce([receipt(1)])
+      .mockResolvedValueOnce([receipt(1)]);
+    render(<RecentReceipts />);
+
+    const row = (await screen.findAllByTestId("receipt-row"))[0] as HTMLDetailsElement;
+    await user.click(row.querySelector("summary")!);
+    expect(row.open).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "刷新最近请求" }));
+
+    await waitFor(() => expect(getRecentReceipts).toHaveBeenCalledTimes(2));
+    expect(row.open).toBe(true);
+  });
+
+  it("卸载后忽略迟到结果且不执行已排队刷新", async () => {
+    vi.useFakeTimers();
+    const slowRefresh = deferred<ReceiptView[]>();
+    vi.mocked(getRecentReceipts)
+      .mockResolvedValueOnce([receipt(1)])
+      .mockImplementationOnce(() => slowRefresh.promise);
+    const { unmount } = render(<RecentReceipts />);
+
+    try {
+      await act(async () => {
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(20_000);
+      });
+      expect(getRecentReceipts).toHaveBeenCalledTimes(2);
+
+      unmount();
+      await act(async () => {
+        slowRefresh.resolve([receipt(2)]);
+        await slowRefresh.promise;
+        await Promise.resolve();
+      });
+
+      expect(getRecentReceipts).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("按 decision → attempts → conversions 展开固定详情", async () => {

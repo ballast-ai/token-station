@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getRecentReceipts,
   type ReceiptDecidedByView,
@@ -10,11 +10,21 @@ import { humanizeErrorCode } from "../errors";
 import { useLocalizedCopy } from "./LanguageProvider";
 
 const MAX_RECEIPTS = 5;
+const AUTO_REFRESH_MS = 10_000;
 
 function formatTime(timestamp: number, locale: string): string {
   return new Date(timestamp).toLocaleString(locale, {
     month: "2-digit",
     day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+function formatUpdatedAt(timestamp: number, locale: string): string {
+  return new Date(timestamp).toLocaleTimeString(locale, {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
@@ -207,24 +217,99 @@ function CopyRequestId({ requestId }: { requestId: string }) {
   );
 }
 
+function RefreshIcon() {
+  return (
+    <svg
+      data-icon="inline-start"
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+    >
+      <path d="M13.4 5.8A5.8 5.8 0 1 0 13 10.6" />
+      <path d="M13.5 2.8v3.4h-3.4" />
+    </svg>
+  );
+}
+
 export default function RecentReceipts() {
   const { language, copy } = useLocalizedCopy();
   const [receipts, setReceipts] = useState<ReceiptView[] | null>(null);
   const [error, setError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
+  const mounted = useRef(true);
+  const inFlight = useRef(false);
+  const queued = useRef(false);
+  const latestLoader = useRef<(background?: boolean) => Promise<void>>(async () => undefined);
+
+  const loadReceipts = useCallback(async (background = false) => {
+    if (inFlight.current) {
+      queued.current = true;
+      return;
+    }
+    inFlight.current = true;
+    if (background) setRefreshing(true);
+    setError("");
+    try {
+      const result = await getRecentReceipts(MAX_RECEIPTS);
+      if (mounted.current) {
+        const next = result.slice(0, MAX_RECEIPTS);
+        setReceipts((current) => {
+          if (
+            current
+            && current.length === next.length
+            && current.every((receipt, index) => receipt.request_id === next[index]?.request_id)
+          ) {
+            return current;
+          }
+          return next;
+        });
+        setLastUpdatedAt(Date.now());
+      }
+    } catch (caught) {
+      if (mounted.current) setError(String(caught));
+    } finally {
+      inFlight.current = false;
+      if (
+        mounted.current
+        && queued.current
+        && document.visibilityState === "visible"
+      ) {
+        queued.current = false;
+        queueMicrotask(() => {
+          if (mounted.current && document.visibilityState === "visible") {
+            void latestLoader.current(true);
+          }
+        });
+      } else {
+        queued.current = false;
+        if (mounted.current) setRefreshing(false);
+      }
+    }
+  }, []);
+  latestLoader.current = loadReceipts;
 
   useEffect(() => {
-    let active = true;
-    getRecentReceipts(MAX_RECEIPTS)
-      .then((result) => {
-        if (active) setReceipts(result.slice(0, MAX_RECEIPTS));
-      })
-      .catch((caught) => {
-        if (active) setError(String(caught));
-      });
+    mounted.current = true;
+    void loadReceipts();
     return () => {
-      active = false;
+      mounted.current = false;
+      queued.current = false;
     };
-  }, []);
+  }, [loadReceipts]);
+
+  useEffect(() => {
+    const refreshVisiblePage = () => {
+      if (document.visibilityState === "visible") void loadReceipts(true);
+    };
+    const timer = window.setInterval(refreshVisiblePage, AUTO_REFRESH_MS);
+    window.addEventListener("focus", refreshVisiblePage);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshVisiblePage);
+    };
+  }, [loadReceipts]);
+
+  const busy = refreshing || (receipts === null && !error);
 
   return (
     <section className="panel receipt-panel" aria-labelledby="recent-receipts-heading">
@@ -237,12 +322,44 @@ export default function RecentReceipts() {
             "仅保留路由、终态与用量元数据，不记录请求或响应正文。",
           )}</p>
         </div>
-        {receipts && receipts.length > 0 && (
-          <span className="count-badge">{copy(
-            `${receipts.length} records`,
-            `${receipts.length} 条`,
-          )}</span>
-        )}
+        <div className="receipt-refresh-actions">
+          <span className="receipt-refresh-note">
+            {copy("Refreshes every 10 seconds", "每 10 秒自动刷新")}
+            {lastUpdatedAt != null && (
+              <>
+                {" · "}
+                <time
+                  data-testid="receipt-updated-at"
+                  dateTime={new Date(lastUpdatedAt).toISOString()}
+                >
+                  {copy(
+                    `${formatUpdatedAt(lastUpdatedAt, language)} updated`,
+                    `${formatUpdatedAt(lastUpdatedAt, language)} 更新`,
+                  )}
+                </time>
+              </>
+            )}
+          </span>
+          {receipts && receipts.length > 0 && (
+            <span className="count-badge">{copy(
+              `${receipts.length} records`,
+              `${receipts.length} 条`,
+            )}</span>
+          )}
+          <button
+            type="button"
+            className={`btn receipt-refresh-button${busy ? " busy" : ""}`}
+            aria-label={copy("Refresh recent requests", "刷新最近请求")}
+            aria-busy={busy}
+            disabled={busy}
+            onClick={() => void loadReceipts(true)}
+          >
+            <RefreshIcon />
+            <span>{busy
+              ? copy("Refreshing…", "刷新中…")
+              : copy("Refresh", "刷新")}</span>
+          </button>
+        </div>
       </div>
 
       {!receipts && !error && (
@@ -251,10 +368,18 @@ export default function RecentReceipts() {
           "正在读取请求回执…",
         )}</div>
       )}
-      {error && (
+      {error && receipts === null && (
         <div className="receipt-state error-text" role="alert">
           {copy(`Failed to load request receipts: ${error}`, `请求回执读取失败：${error}`)}
         </div>
+      )}
+      {error && receipts !== null && (
+        <p className="receipt-refresh-error error-text" role="status">
+          {copy(
+            `Refresh failed; showing the last successful data: ${error}`,
+            `更新失败，当前显示上次数据：${error}`,
+          )}
+        </p>
       )}
       {receipts?.length === 0 && (
         <div className="empty-state">

@@ -6122,3 +6122,115 @@ a:focus-visible {
     transition: none;
   }
 }
+
+/* Recent receipts: compact shadcn-style refresh controls. */
+.receipt-refresh-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.receipt-refresh-note {
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.receipt-refresh-note time {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.receipt-refresh-button {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--surface);
+  font-size: 11.5px;
+  font-weight: 550;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.receipt-refresh-button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--ink) 24%, var(--line-strong));
+  background: var(--surface-2);
+}
+
+.receipt-refresh-button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.receipt-refresh-button:disabled {
+  color: var(--muted);
+  cursor: wait;
+  opacity: .7;
+}
+
+.receipt-refresh-button svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.receipt-refresh-button.busy svg {
+  animation: receipt-refresh-spin .8s linear infinite;
+}
+
+@keyframes receipt-refresh-spin {
+  to { transform: rotate(360deg); }
+}
+
+.receipt-refresh-error {
+  margin: -4px 0 10px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 20%, var(--line));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--danger) 5%, var(--surface));
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+@media (max-width: 760px) {
+  .receipt-panel > .panel-head {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .receipt-refresh-actions {
+    justify-content: flex-start;
+  }
+
+  .receipt-refresh-note {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .receipt-refresh-button,
+  .receipt-refresh-button.busy svg {
+    animation: none;
+    transition: none;
+  }
+}
