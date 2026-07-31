@@ -17,6 +17,13 @@ import UsageRequestLog from "../components/UsageRequestLog";
 import UsageTrendChart, { type UsageTrendRange } from "../components/UsageTrendChart";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 
+export function formatBudgetAmount(micros: number): string {
+  if (micros === 0) return "0.00";
+  const amount = micros / 1_000_000;
+  if (Math.abs(amount) >= 0.01) return amount.toFixed(2);
+  return amount.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+}
+
 type GroupValue = "agent" | "upstream" | "model" | "status";
 
 const EMPTY_AGG: AggView = {
@@ -616,8 +623,8 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
                   <div>
                     <strong>{budgetWarning(budget, displayName(budget.agent_id), copy)}</strong>
                     <small>{copy(
-                      `Remaining ${(budget.remaining_micros / 1_000_000).toFixed(2)} / Limit ${(budget.limit_micros / 1_000_000).toFixed(2)}`,
-                      `剩余 ${(budget.remaining_micros / 1_000_000).toFixed(2)} / 上限 ${(budget.limit_micros / 1_000_000).toFixed(2)}`,
+                      `Remaining ${formatBudgetAmount(budget.remaining_micros)} / Limit ${formatBudgetAmount(budget.limit_micros)}`,
+                      `剩余 ${formatBudgetAmount(budget.remaining_micros)} / 上限 ${formatBudgetAmount(budget.limit_micros)}`,
                     )}</small>
                   </div>
                   <div className="usage-budget-progress"><span style={{ width: `${percent}%` }} /></div>

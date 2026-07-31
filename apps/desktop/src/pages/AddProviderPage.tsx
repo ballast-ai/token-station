@@ -99,6 +99,8 @@ export default function AddProviderPage({
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [key, setKey] = useState("");
+  const [credentialSource, setCredentialSource] = useState<"store" | "env" | "file">("store");
+  const [credentialReference, setCredentialReference] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
   const [extraModels, setExtraModels] = useState<string[]>([]);
   const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
@@ -221,6 +223,8 @@ export default function AddProviderPage({
     setName(selected?.id ?? "");
     setUrl(selected?.baseUrl ?? "");
     setLocal(selected?.local ?? false);
+    setCredentialSource("store");
+    setCredentialReference("");
     setPicked(selected ? [...selected.models] : []);
     setExtraModels([]);
     setDiscoveredModels([]);
@@ -234,6 +238,8 @@ export default function AddProviderPage({
     setName("");
     setUrl("");
     setKey("");
+    setCredentialSource("store");
+    setCredentialReference("");
     setPicked([]);
     setEndpointPreview(null);
     setEndpointError("");
@@ -254,6 +260,18 @@ export default function AddProviderPage({
         warning: copy(
           "Enter a provider name and base URL first.",
           "请先填写供应商名称和 Base URL。",
+        ),
+      });
+      return;
+    }
+    if (needsKey && credentialSource !== "store") {
+      setDiscovery({
+        models: [],
+        source: "none",
+        fetched_at_ms: null,
+        warning: copy(
+          "Save the env/file credential reference before loading the model catalog.",
+          "env/file 只保存引用；请先保存供应商，再读取模型目录。",
         ),
       });
       return;
@@ -300,10 +318,27 @@ export default function AddProviderPage({
     if (picked.length === 0) {
       return setError(copy("Select at least one model.", "请至少选择一个模型。"));
     }
+    if (needsKey && credentialSource === "store" && !key.trim()) {
+      return setError(copy("Enter an API key.", "请填写 API Key。"));
+    }
+    if (needsKey && credentialSource !== "store" && !credentialReference.trim()) {
+      return setError(copy(
+        "Enter the environment variable name or absolute file path.",
+        "请填写环境变量名或凭据文件绝对路径。",
+      ));
+    }
     setSaving(true);
     setError("");
     try {
-      const next = await addProvider(name.trim(), url.trim(), picked, needsKey ? key : null, local);
+      const next = await addProvider(
+        name.trim(),
+        url.trim(),
+        picked,
+        needsKey && credentialSource === "store" ? key : null,
+        local,
+        needsKey ? credentialSource : "none",
+        needsKey && credentialSource !== "store" ? credentialReference.trim() : null,
+      );
       onAdded(
         next,
         isExisting
@@ -618,18 +653,63 @@ export default function AddProviderPage({
               )}
             </div>
             {needsKey ? (
-              <label className="field-label form-span">
-                API Key
-                <input
-                  className="input mono"
-                  type="password"
-                  autoComplete="off"
-                  placeholder={copy("Stored on this device only", "只保存在本机")}
-                  value={key}
-                  disabled={disabled}
-                  onChange={(event) => setKey(event.target.value)}
-                />
-              </label>
+              <div className="form-span">
+                {credentialSource === "store" && (
+                  <label className="field-label">
+                    API Key
+                    <input
+                      className="input mono"
+                      type="password"
+                      autoComplete="off"
+                      placeholder={copy("Stored in local secrets.json", "保存在本机 secrets.json")}
+                      value={key}
+                      disabled={disabled}
+                      onChange={(event) => setKey(event.target.value)}
+                    />
+                  </label>
+                )}
+                <details className="credential-source-advanced">
+                  <summary>{copy("Advanced credential source", "高级凭据来源")}</summary>
+                  <label className="field-label">
+                    {copy("Credential source", "凭据来源")}
+                    <select
+                      aria-label={copy("Credential source", "凭据来源")}
+                      value={credentialSource}
+                      disabled={disabled}
+                      onChange={(event) => {
+                        setCredentialSource(event.target.value as typeof credentialSource);
+                        setKey("");
+                        setCredentialReference("");
+                      }}
+                    >
+                      <option value="store">{copy("Local store (default)", "本地存储（默认）")}</option>
+                      <option value="env">{copy("Environment variable", "环境变量")}</option>
+                      <option value="file">{copy("Credential file", "凭据文件")}</option>
+                    </select>
+                  </label>
+                  {credentialSource !== "store" && (
+                    <label className="field-label">
+                      {credentialSource === "env"
+                        ? copy("Environment variable name", "环境变量名")
+                        : copy("Absolute credential file path", "凭据文件绝对路径")}
+                      <input
+                        className="input mono"
+                        aria-label={credentialSource === "env"
+                          ? copy("Environment variable name", "环境变量名")
+                          : copy("Absolute credential file path", "凭据文件绝对路径")}
+                        value={credentialReference}
+                        disabled={disabled}
+                        placeholder={credentialSource === "env" ? "DEEPSEEK_API_KEY" : "/absolute/path/provider.key"}
+                        onChange={(event) => setCredentialReference(event.target.value)}
+                      />
+                    </label>
+                  )}
+                  <p className="inline-note">{copy(
+                    "env/file stores only the reference. Token Station reads the value at request time.",
+                    "env/file 只保存引用，Token Station 在请求时读取凭据值。",
+                  )}</p>
+                </details>
+              </div>
             ) : (
               <div className="local-provider-note form-span">
                 {copy("Local provider. No API key required.", "本地供应商，无需 API Key。")}

@@ -159,15 +159,15 @@ pub fn upstream_remove(config: &mut ClientConfig, name: &str) -> Result<String, 
     }
 
     let mut summary = format!("removed upstream `{name}`");
-    if let Some(auth) = &entry.auth {
-        if auth.store {
-            let _ = write!(
-                summary,
-                "\nits stored credential survives; delete it with: token-station-cli key remove \
-                 {name} {}",
-                auth.slot
-            );
-        }
+    if let Some(auth) = &entry.auth
+        && auth.store
+    {
+        let _ = write!(
+            summary,
+            "\nits stored credential survives; delete it with: token-station-cli key remove \
+             {name} {}",
+            auth.slot
+        );
     }
     config.upstreams.remove(name);
     Ok(summary)
@@ -334,12 +334,9 @@ pub fn edit(config_path: &Path, editor: &str) -> Result<String, String> {
         })?;
     }
 
-    let mut words = editor.split_whitespace();
-    let program = words
-        .next()
-        .ok_or_else(|| "the editor command is empty".to_owned())?;
+    let (program, arguments) = editor_command(editor)?;
     let status = std::process::Command::new(program)
-        .args(words)
+        .args(arguments)
         .arg(&draft)
         .status()
         .map_err(|error| format!("cannot launch editor `{editor}`: {error}"))?;
@@ -365,6 +362,21 @@ pub fn edit(config_path: &Path, editor: &str) -> Result<String, String> {
     } else {
         "configuration updated".to_owned()
     })
+}
+
+fn editor_command(editor: &str) -> Result<(String, Vec<String>), String> {
+    let editor = editor.trim();
+    if editor.is_empty() {
+        return Err("the editor command is empty".to_owned());
+    }
+    if Path::new(editor).is_file() {
+        return Ok((editor.to_owned(), Vec::new()));
+    }
+    let mut words = editor.split_whitespace();
+    let program = words
+        .next()
+        .ok_or_else(|| "the editor command is empty".to_owned())?;
+    Ok((program.to_owned(), words.map(str::to_owned).collect()))
 }
 
 fn keep_draft(draft: &Path, detail: &str) -> String {
@@ -673,6 +685,23 @@ mod tests {
         assert!(listing.contains("env:OPENAI_API_KEY"), "{listing}");
         assert!(listing.contains("none"), "ollama has no auth: {listing}");
         assert!(listing.contains("https://api.openai.com/v1"), "{listing}");
+    }
+
+    #[test]
+    fn an_editor_executable_path_with_spaces_is_not_split() {
+        let dir = std::env::temp_dir().join(format!("ts editor path {}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join(if cfg!(windows) {
+            "editor.exe"
+        } else {
+            "editor"
+        });
+        std::fs::write(&executable, b"fixture").unwrap();
+
+        let (program, arguments) = super::editor_command(executable.to_str().unwrap()).unwrap();
+        assert_eq!(program, executable.to_string_lossy());
+        assert!(arguments.is_empty());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[cfg(unix)]

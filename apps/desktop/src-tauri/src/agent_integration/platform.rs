@@ -101,6 +101,15 @@ pub(crate) fn executable_candidates(
     environment: &ScanEnvironment,
 ) -> Vec<ExecutableCandidate> {
     let mut candidates = Vec::new();
+    if descriptor.agent_id == "codex" && environment.platform == Platform::Windows {
+        candidates.extend(windows_store_codex_candidates().into_iter().map(|path| {
+            ExecutableCandidate {
+                path,
+                source: DiscoverySource::PackageManager,
+                path_order: None,
+            }
+        }));
+    }
     if let Some(templates) = descriptor
         .known_install_locations
         .get(&environment.platform)
@@ -127,6 +136,72 @@ pub(crate) fn executable_candidates(
         }
     }
     candidates
+}
+
+#[cfg(target_os = "windows")]
+fn windows_store_codex_candidates() -> Vec<PathBuf> {
+    use windows::core::HSTRING;
+    use windows::Management::Deployment::PackageManager;
+
+    // A desktop process may already be running in an STA. In that case
+    // `initialize_mta` reports RPC_E_CHANGED_MODE, but WinRT remains usable on
+    // the initialized apartment, so discovery still attempts the read-only API.
+    let _apartment = windows::core::initialize_mta().ok();
+    let Ok(manager) = PackageManager::new() else {
+        return Vec::new();
+    };
+    let Ok(packages) = manager.FindPackagesByUserSecurityId(&HSTRING::new()) else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::new();
+    for package in packages {
+        let Ok(id) = package.Id() else {
+            continue;
+        };
+        let Ok(name) = id.Name() else {
+            continue;
+        };
+        if !is_codex_store_package_name(&name.to_string()) {
+            continue;
+        }
+        let Ok(location) = package.InstalledLocation() else {
+            continue;
+        };
+        let Ok(root) = location.Path() else {
+            continue;
+        };
+        candidates.extend(codex_store_relative_entries(PathBuf::from(
+            root.to_string(),
+        )));
+    }
+    candidates
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_store_codex_candidates() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn is_codex_store_package_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == "openai.codex" || name == "openai.chatgpt" || name.starts_with("openai.codex.")
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn codex_store_relative_entries(root: PathBuf) -> Vec<PathBuf> {
+    [
+        ["app", "resources", "codex.exe"].as_slice(),
+        ["resources", "codex.exe"].as_slice(),
+    ]
+    .into_iter()
+    .map(|parts| {
+        parts
+            .iter()
+            .fold(root.clone(), |path, part| path.join(part))
+    })
+    .collect()
 }
 
 fn path_executable_names(name: &str, platform: Platform) -> Vec<String> {
@@ -358,5 +433,22 @@ mod tests {
         assert!(paths.contains(&"C:/Tools/claude.exe".to_string()));
         assert!(paths.contains(&"C:/Tools/claude.cmd".to_string()));
         assert!(!paths.contains(&"C:/Tools/claude".to_string()));
+    }
+
+    #[test]
+    fn codex_store_identity_and_relative_cli_entries_are_closed() {
+        assert!(is_codex_store_package_name("OpenAI.Codex"));
+        assert!(is_codex_store_package_name("OpenAI.Codex.Preview"));
+        assert!(is_codex_store_package_name("OpenAI.ChatGPT"));
+        assert!(!is_codex_store_package_name("ThirdParty.Codex"));
+
+        let paths = codex_store_relative_entries(PathBuf::from("C:/Program Files/WindowsApps/pkg"));
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("C:/Program Files/WindowsApps/pkg/app/resources/codex.exe"),
+                PathBuf::from("C:/Program Files/WindowsApps/pkg/resources/codex.exe"),
+            ]
+        );
     }
 }

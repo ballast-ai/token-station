@@ -306,6 +306,11 @@ fn validate_probe(descriptor: &AgentDescriptor) -> Result<(), String> {
                 interpreter_candidates,
                 resolution_sources,
                 known_install_locations,
+            }
+            | ProbeRuntime::NodePackage {
+                interpreter_candidates,
+                resolution_sources,
+                known_install_locations,
             } => {
                 if interpreter_candidates.is_empty() || interpreter_candidates.len() > 8 {
                     return Err(format!(
@@ -325,9 +330,9 @@ fn validate_probe(descriptor: &AgentDescriptor) -> Result<(), String> {
                         candidate,
                     )?;
                 }
-                if resolution_sources.is_empty() || resolution_sources.len() > 2 {
+                if resolution_sources.is_empty() || resolution_sources.len() > 3 {
                     return Err(format!(
-                        "{}: runtime resolution_sources must contain 1..=2 values",
+                        "{}: runtime resolution_sources must contain 1..=3 values",
                         descriptor.agent_id
                     ));
                 }
@@ -800,18 +805,24 @@ mod tests {
         assert_eq!(openclaw.local_connector_ids, ["openclaw-v1"]);
         assert!(matches!(
             openclaw.version_probe.runtime,
-            Some(ProbeRuntime::EnvShebang { .. })
+            Some(ProbeRuntime::NodePackage { .. })
         ));
-        // gemini-cli (descriptors()[3]) is also an `env node` script and needs Node runtime version detection.
+        // Cover both Unix `env node` and the Windows npm shim for Gemini CLI.
         assert!(matches!(
             registry.descriptors()[3].version_probe.runtime,
-            Some(ProbeRuntime::EnvShebang { .. })
+            Some(ProbeRuntime::NodePackage { .. })
         ));
         assert!(registry
             .descriptors()
             .iter()
-            .filter(|descriptor| !matches!(descriptor.agent_id.as_str(), "openclaw" | "gemini-cli"))
-            .all(|descriptor| descriptor.version_probe.runtime.is_none()));
+            .filter(|descriptor| matches!(
+                descriptor.agent_id.as_str(),
+                "claude-code" | "codex" | "gemini-cli" | "opencode" | "openclaw"
+            ))
+            .all(|descriptor| matches!(
+                descriptor.version_probe.runtime,
+                Some(ProbeRuntime::NodePackage { .. })
+            )));
         assert!(registry
             .descriptors()
             .iter()
@@ -859,7 +870,38 @@ mod tests {
                     .get(&Platform::Linux)
                     .is_some_and(|paths| !paths.is_empty())
             });
-            assert!(has_linux_config, "{} has no Linux config path", descriptor.agent_id);
+            assert!(
+                has_linux_config,
+                "{} has no Linux config path",
+                descriptor.agent_id
+            );
+        }
+    }
+
+    #[test]
+    fn every_supported_agent_has_windows_install_and_config_locations() {
+        use super::super::types::Platform;
+        let registry = AgentRegistry::builtin().unwrap();
+        for descriptor in registry.descriptors() {
+            assert!(
+                descriptor
+                    .known_install_locations
+                    .get(&Platform::Windows)
+                    .is_some_and(|paths| !paths.is_empty()),
+                "{} has no Windows install locations",
+                descriptor.agent_id
+            );
+            let has_windows_config = descriptor.config_locations.iter().any(|location| {
+                location
+                    .platform_defaults
+                    .get(&Platform::Windows)
+                    .is_some_and(|paths| !paths.is_empty())
+            });
+            assert!(
+                has_windows_config,
+                "{} has no Windows config path",
+                descriptor.agent_id
+            );
         }
     }
 

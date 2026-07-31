@@ -6,6 +6,7 @@ members = [
     "crates/metrics",
     "crates/plugin-api",
     "crates/plugin-runtime",
+    "crates/private-fs",
     "crates/protocol",
     "crates/release",
     "crates/router-core",
@@ -28,7 +29,7 @@ exclude = [
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/ballast-ai/token-station"
-rust-version = "1.85"
+rust-version = "1.95"
 # Path dependencies without versions cannot pass `cargo publish`; this merely
 # states that fact so cargo-deny can allow workspace-internal dependencies. When
 # conformance becomes an independent release artifact under architecture section

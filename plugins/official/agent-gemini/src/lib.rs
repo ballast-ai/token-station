@@ -137,10 +137,12 @@ fn parse_messages(body: &Value) -> Result<Vec<Message>, String> {
         .and_then(Value::as_array)
         .ok_or_else(|| invalid("Gemini request declares no contents array"))?;
     let mut messages = Vec::new();
+    let mut pending_calls: Vec<(String, String, bool)> = Vec::new();
+    let mut generated_call_id = 0_u64;
     if let Some(system) = parse_system(body)? {
         messages.push(system);
     }
-    for (content_index, item) in contents.iter().enumerate() {
+    for item in contents {
         let role = match item.get("role").and_then(Value::as_str).unwrap_or("user") {
             "user" => Role::User,
             "model" => Role::Assistant,
@@ -153,15 +155,33 @@ fn parse_messages(body: &Value) -> Result<Vec<Message>, String> {
         let content = text_parts(&Value::Array(parts.clone()), "contents")?;
         let mut tool_calls = Vec::new();
         let mut tool_results = Vec::new();
-        for (part_index, part) in parts.iter().enumerate() {
+        for part in parts {
             if let Some(call) = part.get("functionCall") {
                 let name = call
                     .get("name")
                     .and_then(Value::as_str)
                     .ok_or_else(|| invalid("functionCall declares no name"))?;
                 let args = call.get("args").cloned().unwrap_or_else(|| json!({}));
+                let id = match call.get("id") {
+                    None | Some(Value::Null) => {
+                        let id = format!("gemini-call-{generated_call_id}");
+                        generated_call_id = generated_call_id
+                            .checked_add(1)
+                            .ok_or_else(|| invalid("too many Gemini function calls"))?;
+                        id
+                    }
+                    Some(Value::String(id)) if !id.is_empty() => id.clone(),
+                    Some(Value::String(_)) => {
+                        return Err(invalid("functionCall id must not be empty"));
+                    }
+                    Some(_) => return Err(invalid("functionCall id must be a string")),
+                };
+                if pending_calls.iter().any(|(existing, _, _)| existing == &id) {
+                    return Err(invalid("functionCall id is duplicated"));
+                }
+                pending_calls.push((id.clone(), name.to_owned(), false));
                 tool_calls.push(ToolCall {
-                    id: format!("gemini-{content_index}-{part_index}"),
+                    id,
                     name: name.to_owned(),
                     arguments: encode(&args)?,
                 });
@@ -172,11 +192,43 @@ fn parse_messages(body: &Value) -> Result<Vec<Message>, String> {
                     .and_then(Value::as_str)
                     .ok_or_else(|| invalid("functionResponse declares no name"))?;
                 let response = result.get("response").cloned().unwrap_or(Value::Null);
+                let explicit_id = match result.get("id") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(id)) if !id.is_empty() => Some(id.as_str()),
+                    Some(Value::String(_)) => {
+                        return Err(invalid("functionResponse id must not be empty"));
+                    }
+                    Some(_) => return Err(invalid("functionResponse id must be a string")),
+                };
+                let pending_index = if let Some(id) = explicit_id {
+                    pending_calls
+                        .iter()
+                        .position(|(candidate, _, answered)| candidate == id && !answered)
+                        .ok_or_else(|| {
+                            invalid("functionResponse references an unknown or completed call id")
+                        })?
+                } else {
+                    pending_calls
+                        .iter()
+                        .position(|(_, call_name, answered)| call_name == name && !answered)
+                        .ok_or_else(|| {
+                            invalid(
+                                "functionResponse has no matching unanswered functionCall by name",
+                            )
+                        })?
+                };
+                let (call_id, call_name, answered) = &mut pending_calls[pending_index];
+                if call_name != name {
+                    return Err(invalid(
+                        "functionResponse name does not match its functionCall id",
+                    ));
+                }
+                *answered = true;
                 tool_results.push(Message {
                     role: Role::Tool,
                     content: Some(Content::Text(encode(&response)?)),
                     tool_calls: Vec::new(),
-                    tool_call_id: Some(format!("gemini-{content_index}-{part_index}")),
+                    tool_call_id: Some(call_id.clone()),
                     name: Some(name.to_owned()),
                     extensions: Extensions::new(),
                 });
@@ -577,6 +629,75 @@ impl Guest for GeminiClient {
         body.insert("message".to_owned(), json!(error.message));
         body.insert("status".to_owned(), json!(status));
         encode(&json!({"error": body}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn function_responses_keep_their_explicit_call_id() {
+        let messages = parse_messages(&json!({
+            "contents": [
+                {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {
+                            "id": "call-read-1",
+                            "name": "read_file",
+                            "args": {"path": "hello.py"}
+                        }
+                    }]
+                },
+                {
+                    "role": "user",
+                    "parts": [{
+                        "functionResponse": {
+                            "id": "call-read-1",
+                            "name": "read_file",
+                            "response": {"content": "print('hello')"}
+                        }
+                    }]
+                }
+            ]
+        }))
+        .expect("Gemini tool history normalizes");
+
+        assert_eq!(messages[0].tool_calls[0].id, "call-read-1");
+        assert_eq!(messages[1].tool_call_id.as_deref(), Some("call-read-1"));
+    }
+
+    #[test]
+    fn idless_function_responses_match_the_prior_unanswered_call_by_name() {
+        let messages = parse_messages(&json!({
+            "contents": [
+                {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {
+                            "name": "read_file",
+                            "args": {"path": "hello.py"}
+                        }
+                    }]
+                },
+                {
+                    "role": "user",
+                    "parts": [{
+                        "functionResponse": {
+                            "name": "read_file",
+                            "response": {"content": "print('hello')"}
+                        }
+                    }]
+                }
+            ]
+        }))
+        .expect("Gemini idless tool history normalizes");
+
+        assert_eq!(
+            messages[1].tool_call_id.as_deref(),
+            Some(messages[0].tool_calls[0].id.as_str())
+        );
     }
 }
 

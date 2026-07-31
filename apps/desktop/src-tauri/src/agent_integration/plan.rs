@@ -14,8 +14,8 @@ use super::snapshot::SnapshotStore;
 use super::types::{
     AllowedAction, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan, ConfigPath,
     ConfirmationKind, ConnectorFileProjection, ConnectorProjection, CredentialBinding,
-    CredentialSource, DiscoveryRecord, PatchKind, PatchOperation, PlanIntent, RedactedChange,
-    SnapshotRecord,
+    CredentialSource, DiscoveryRecord, PatchKind, PatchOperation, PlanIntent, Platform,
+    RedactedChange, SnapshotRecord,
 };
 
 const PLAN_SCHEMA_VERSION: u32 = 1;
@@ -52,6 +52,18 @@ impl ConfigSource {
             original_owner: owner,
         }
     }
+}
+
+#[must_use]
+pub(crate) const fn projected_permissions_for(platform: Platform) -> Option<u32> {
+    match platform {
+        Platform::Windows => None,
+        Platform::Macos | Platform::Linux | Platform::Wsl => Some(0o600),
+    }
+}
+
+fn projected_permissions() -> Option<u32> {
+    projected_permissions_for(super::platform::current_platform())
 }
 
 /// Complete server-held plan. The only serializable projection is `view`;
@@ -186,7 +198,7 @@ pub fn build_connection_plan(
     let projected_bytes = rendered.into_bytes();
     let projected = ConfigSource::existing(
         projected_bytes.clone(),
-        Some(0o600),
+        projected_permissions(),
         source.original_owner.clone(),
     );
     let expected_after_hash = file_revision_hash(target_path, &projected)?;
@@ -249,7 +261,7 @@ pub fn build_connection_plan(
         )?;
         let projected = ConfigSource::existing(
             companion.projected_bytes.to_vec(),
-            Some(0o600),
+            projected_permissions(),
             companion.original_owner.clone(),
         );
         let target = strict_path_text(&companion.target_path)?.to_string();
@@ -470,7 +482,7 @@ pub fn attach_disconnect_companions(
         } else {
             ConfigSource::existing(
                 rendered.as_bytes().to_vec(),
-                Some(0o600),
+                projected_permissions(),
                 current.original_owner.clone(),
             )
         };
@@ -589,7 +601,7 @@ pub fn attach_restore_companions(
         } else {
             ConfigSource::existing(
                 rendered.as_bytes().to_vec(),
-                Some(0o600),
+                projected_permissions(),
                 current.original_owner.clone(),
             )
         };
@@ -751,7 +763,7 @@ fn build_owned_projection_plan(
     } else {
         ConfigSource::existing(
             projected_bytes.clone(),
-            Some(0o600),
+            projected_permissions(),
             current.original_owner.clone(),
         )
     };
@@ -1322,6 +1334,14 @@ mod tests {
         )
         .unwrap();
         assert_ne!(missing, empty);
+    }
+
+    #[test]
+    fn projected_post_write_permissions_match_each_platforms_observed_revision() {
+        assert_eq!(projected_permissions_for(Platform::Windows), None);
+        for platform in [Platform::Macos, Platform::Linux, Platform::Wsl] {
+            assert_eq!(projected_permissions_for(platform), Some(0o600));
+        }
     }
 
     #[test]

@@ -25,7 +25,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use std::time::Duration;
 
 use crate::admin::AdminContext;
-use crate::cancel::CancelToken;
+use crate::cancel::{CancelReason, CancelToken};
 use crate::gateway::{Gateway, MAX_INBOUND_BODY, Reply};
 use crate::request_context::RequestContext;
 use crate::virtual_key;
@@ -36,8 +36,8 @@ use crate::virtual_key;
 const STREAM_BACKLOG: usize = 32;
 
 /// Default overall budget and per-attempt cap for a supervised request.
-const REQUEST_DEADLINE: Duration = Duration::from_secs(600);
-const PER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
+const REQUEST_DEADLINE: Duration = Duration::from_mins(10);
+const PER_ATTEMPT_TIMEOUT: Duration = Duration::from_mins(2);
 
 struct ServerControlInner {
     drain: CancelToken,
@@ -79,7 +79,7 @@ impl ServerControl {
 
     /// Cancels every request context created under this server instance.
     pub fn cancel_in_flight(&self) {
-        self.inner.drain.cancel();
+        self.inner.drain.cancel_with(CancelReason::ServerDrain);
     }
 
     #[must_use]
@@ -418,15 +418,15 @@ fn loopback_origin(headers: &HeaderMap) -> Option<String> {
 }
 
 fn with_cors(mut response: Response, origin: Option<String>) -> Response {
-    if let Some(origin) = origin {
-        if let Ok(value) = origin.parse() {
-            let headers = response.headers_mut();
-            headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
-            headers.insert(
-                header::ACCESS_CONTROL_ALLOW_HEADERS,
-                header::HeaderValue::from_static("authorization"),
-            );
-        }
+    if let Some(origin) = origin
+        && let Ok(value) = origin.parse()
+    {
+        let headers = response.headers_mut();
+        headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            header::HeaderValue::from_static("authorization"),
+        );
     }
     response
 }
@@ -544,7 +544,9 @@ async fn admin_quota(State(state): State<AppState>, headers: HeaderMap) -> Respo
     }
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        });
     admin_reply(
         Ok(state.gateway.quota_snapshot(now_ms)),
         loopback_origin(&headers),

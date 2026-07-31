@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["msi"],
+    "windows": {
+      "allowDowngrades": false,
+      "wix": {
+        "upgradeCode": "bf3d3988-99ea-56e4-b81c-2aa4521c29c9",
+        "template": "wix/per-user-main.wxs"
+      }
+    }
+  }
+}

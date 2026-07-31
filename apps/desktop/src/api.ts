@@ -15,6 +15,8 @@ export interface ProviderView {
   catalog_revision?: number;
   catalog?: CatalogModelView[];
   has_auth: boolean;
+  credential_source?: "store" | "env" | "file" | "none";
+  credential_reference?: string;
   /** Locally hosted provider, such as Ollama. Local-only routing uses this to keep traffic on the machine. */
   local?: boolean;
   access_tier?: "free" | "paid";
@@ -164,7 +166,7 @@ export interface ReceiptFeaturesView {
 export type ReceiptDecidedByView =
   | { tier: "rule"; rule: string }
   | { tier: "hint"; kind: "step_type" | "task_type" | "preference" | "capability"; value: string }
-  | { tier: "heuristic"; score: number; threshold: number }
+  | { tier: "heuristic"; score: number; matched_band_at_least: number }
   | { tier: "default" }
   | { tier: "exact_model"; model: string }
   | { tier: "quota" };
@@ -206,7 +208,30 @@ export interface ReceiptConversionView {
   source_protocol: string;
   target_protocol: string;
   succeeded: boolean;
+  outcome?: "succeeded" | "failed" | "cancelled" | "unknown";
   error_code: ReceiptErrorCode | null;
+  reason_code?:
+    | "unsupported_tool_type"
+    | "provider_tool_unsupported"
+    | "stateful_chaining"
+    | "structured_output"
+    | "reasoning_item"
+    | "unsupported_media"
+    | "invalid_json"
+    | "invalid_protocol_shape"
+    | "adapter_failure"
+    | null;
+  reason_detail?:
+    | "local_shell"
+    | "web_search"
+    | "function_tool"
+    | "previous_response_id"
+    | "json_schema"
+    | "reasoning"
+    | "image"
+    | "request_body"
+    | "other_tool_type"
+    | null;
 }
 
 export interface ReceiptView {
@@ -214,6 +239,17 @@ export interface ReceiptView {
   started_at_ms: number;
   latency_ms: number;
   protocol: string;
+  request_method?: string | null;
+  path_kind?:
+    | "chat_completions"
+    | "responses"
+    | "messages"
+    | "gemini_generate_content"
+    | "models"
+    | "embeddings"
+    | "admin"
+    | "unknown_agent_endpoint"
+    | "unknown";
   requested_model: string;
   stream: boolean;
   status: number;
@@ -315,6 +351,8 @@ export interface SettingsView {
   plugins_dir: string;
   agent: string;
   version: string;
+  desktop_version?: string;
+  core_version?: string;
   egress_mode: "direct" | "http" | "socks5";
   egress_proxy_url: string;
   egress_no_proxy: string[];
@@ -409,7 +447,7 @@ export interface AgentDiscoveryView {
   agent_id: AgentId;
   executable_path: string;
   canonical_path: string;
-  binary_source: "homebrew" | "npm_global" | "path" | "known_path" | "env_override";
+  binary_source: "homebrew" | "npm_global" | "microsoft_store" | "path" | "known_path" | "env_override";
   modified_at_ms: number | null;
   binary_sha256: string | null;
   upgrade_command: string | null;
@@ -417,7 +455,7 @@ export interface AgentDiscoveryView {
   version_normalized: string | null;
   environment: AgentPlatform;
   evidence: Array<{
-    source: "known_path" | "path" | "env_override";
+    source: "known_path" | "package_manager" | "path" | "env_override";
     observed_path: string;
     is_path_default: boolean;
   }>;
@@ -654,10 +692,12 @@ export interface PluginsView {
 }
 
 export interface UpgradeView {
+  status?: "up_to_date" | "update_available" | "no_published_release" | "unavailable";
   current: string;
   latest_tag: string;
   html_url: string;
   newer: boolean;
+  message?: string | null;
 }
 
 export interface RecoveryState {
@@ -710,13 +750,17 @@ export const addProvider = (
   models: string[],
   api_key: string | null,
   local = false,
+  credential_source: "store" | "env" | "file" | "none" = api_key ? "store" : "none",
+  credential_reference: string | null = null,
 ) =>
-  invoke<StateView>("add_provider", {
+  invoke<StateView>("add_provider_with_credential", {
     name,
     baseUrl: base_url,
     models,
     apiKey: api_key,
     local,
+    credentialSource: credential_source,
+    credentialReference: credential_reference,
   });
 
 export const listFreeProviderPresets = () =>
@@ -768,8 +812,21 @@ export const setQuotaPlan = (
     rateLimitPerMin,
   });
 
-export const editProvider = (name: string, base_url: string, api_key: string | null) =>
-  invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });
+export const editProvider = (
+  name: string,
+  base_url: string,
+  api_key: string | null,
+  credential_source?: "store" | "env" | "file" | "none",
+  credential_reference?: string | null,
+) => credential_source
+  ? invoke<StateView>("edit_provider_with_credential", {
+    name,
+    baseUrl: base_url,
+    apiKey: api_key,
+    credentialSource: credential_source,
+    credentialReference: credential_reference ?? null,
+  })
+  : invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });
 
 export const removeProvider = (name: string) =>
   invoke<StateView>("remove_provider", { name });

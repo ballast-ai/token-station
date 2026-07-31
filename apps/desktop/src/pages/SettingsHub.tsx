@@ -205,7 +205,12 @@ function SettingsHubContent({ settings, serve, onSaved, onBack }: SettingsHubPro
         {section === "plugins" && <Plugins />}
         {section === "appearance" && <AppearancePanel />}
         {section === "language" && <LanguagePanel />}
-        {section === "about" && <About version={settings.version} />}
+        {section === "about" && (
+          <About
+            desktopVersion={settings.desktop_version ?? settings.version}
+            coreVersion={settings.core_version ?? settings.version}
+          />
+        )}
       </div>
     </div>
   );

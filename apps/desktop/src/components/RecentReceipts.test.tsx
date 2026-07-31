@@ -44,7 +44,7 @@ function receipt(index: number, overrides: Partial<ReceiptView> = {}): ReceiptVi
       upstream: "provider-final",
       model: "model-final",
       pool: "tier_mid",
-      decided_by: { tier: "heuristic", score: 30, threshold: 22 },
+      decided_by: { tier: "heuristic", score: 30, matched_band_at_least: 22 },
       fallbacks: 0,
       features,
     },

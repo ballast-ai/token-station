@@ -701,7 +701,7 @@ describe("desktop station navigation", () => {
   it("opens Add Provider as a separate page and returns to the source page after saving", async () => {
     const user = userEvent.setup();
     invokeMock.mockImplementation(async (command) => {
-      if (["get_state", "add_provider"].includes(command)) return stateFixture();
+      if (["get_state", "add_provider_with_credential"].includes(command)) return stateFixture();
       if (command === "preview_provider_endpoints") {
         return {
           chat: "https://api.openai.com/v1/chat/completions",
@@ -722,7 +722,7 @@ describe("desktop station navigation", () => {
     // The provider picker is a brand-card catalog; click by visible label instead of selecting an option.
     await user.click(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" }));
     expect(screen.getByRole("button", { name: "添加供应商" })).toBeInTheDocument();
-    await user.type(screen.getByPlaceholderText("只保存在本机"), "secret-test");
+    await user.type(screen.getByLabelText("API Key"), "secret-test");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "OpenCode" })).toBeInTheDocument();
     expect(screen.getByText("供应商已添加")).toBeInTheDocument();

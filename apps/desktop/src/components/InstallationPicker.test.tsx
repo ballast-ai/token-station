@@ -114,11 +114,16 @@ describe("InstallationPicker", () => {
       binary_sha256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
       upgrade_command: "npm install --global @anthropic-ai/claude-code@latest",
     });
+    const store = installation("C:\\Program Files\\WindowsApps\\OpenAI.Codex\\codex.exe", "0.146.0");
+    Object.assign(store.discovery, {
+      binary_source: "microsoft_store",
+      environment: "windows",
+    });
 
     render(
       <InstallationPicker
         agentName="Claude Code"
-        installations={[pathDefault, npm]}
+        installations={[pathDefault, npm, store]}
         selectedPath={pathDefault.discovery.canonical_path}
         onSelect={vi.fn()}
       />,
@@ -129,6 +134,7 @@ describe("InstallationPicker", () => {
     expect(screen.getByText("/Users/x/.npm/bin/claude")).toBeInTheDocument();
     expect(screen.getByText(/Homebrew · 当前生效/)).toBeInTheDocument();
     expect(screen.getByText(/npm 全局/)).toBeInTheDocument();
+    expect(screen.getByText(/Microsoft Store/)).toBeInTheDocument();
     expect(screen.getByText(/SHA-256 0123456789ab/)).toBeInTheDocument();
     expect(screen.getByText(/SHA-256 abcdef012345/)).toBeInTheDocument();
   });

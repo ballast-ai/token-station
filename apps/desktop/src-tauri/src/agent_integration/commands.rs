@@ -29,9 +29,7 @@ use super::plan::{
     ConfigSource, PreparedChangePlan,
 };
 use super::registry::AgentRegistry;
-use super::snapshot::{
-    FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, SnapshotStore,
-};
+use super::snapshot::{FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, SnapshotStore};
 use super::transaction::{
     Clock, ConfirmedOperation, FsAtomicConfigWriter, ParseOnlyVerifier, RecoveryStatus,
     RuntimeAdmission, SystemClock, TransactionEngine, TransactionFailure, TransactionOutcome,

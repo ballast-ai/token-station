@@ -21,7 +21,7 @@ use token_station_plugin_runtime::{
 };
 use token_station_protocol::{
     AgentRequestEnvelope, ChatResponse, ErrorCode, ErrorEnvelope, Extensions, FinishReason,
-    HeaderDigest, Principal, StreamEvent, ToolChoice,
+    HeaderDigest, Principal, ResponseFormat, StreamEvent, ToolChoice,
 };
 
 fn repo_root() -> &'static Path {
@@ -257,7 +257,7 @@ fn gemini_model_and_stream_mode_come_from_the_transport_path() {
 }
 
 #[test]
-fn responses_structured_output_is_rejected_by_the_real_wasm() {
+fn responses_structured_output_is_typed_by_the_real_wasm() {
     let plugin = AgentPlugin::load(&runtime(), responses_agent_package()).expect("loads clean");
     let request = |format: serde_json::Value| {
         envelope(
@@ -273,19 +273,42 @@ fn responses_structured_output_is_rejected_by_the_real_wasm() {
     let plain = plugin
         .normalize_inbound(&request(serde_json::json!({"type": "text"})))
         .expect("plain text remains supported");
-    assert_eq!(plain.response_format, None);
+    assert_eq!(plain.response_format, Some(ResponseFormat::Text));
 
-    for format in [
-        serde_json::json!({"type": "json_schema", "name": "answer", "schema": {"type": "object"}}),
-        serde_json::json!({"type": "json_object"}),
-        serde_json::json!({"type": "future_structured_format"}),
-    ] {
-        let error = plugin
-            .normalize_inbound(&request(format))
-            .expect_err("structured output must not be downgraded to text");
-        assert_eq!(error.code, ErrorCode::Capability);
-        assert_eq!(error.http_status, 400);
-    }
+    let json_object = plugin
+        .normalize_inbound(&request(serde_json::json!({"type": "json_object"})))
+        .expect("JSON object output remains typed");
+    assert_eq!(
+        json_object.response_format,
+        Some(ResponseFormat::JsonObject)
+    );
+
+    let json_schema = plugin
+        .normalize_inbound(&request(serde_json::json!({
+            "type": "json_schema",
+            "name": "answer",
+            "strict": true,
+            "schema": {"type": "object"}
+        })))
+        .expect("JSON Schema output remains typed");
+    assert_eq!(
+        json_schema.response_format,
+        Some(ResponseFormat::JsonSchema {
+            json_schema: serde_json::json!({
+                "name": "answer",
+                "strict": true,
+                "schema": {"type": "object"}
+            })
+        })
+    );
+
+    let unsupported = plugin
+        .normalize_inbound(&request(
+            serde_json::json!({"type": "future_structured_format"}),
+        ))
+        .expect_err("unknown structured output must not be downgraded to text");
+    assert_eq!(unsupported.code, ErrorCode::Capability);
+    assert_eq!(unsupported.http_status, 400);
 
     for format in [serde_json::json!({}), serde_json::json!("json_schema")] {
         let invalid = plugin
