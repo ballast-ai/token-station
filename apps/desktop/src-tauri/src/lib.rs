@@ -3780,19 +3780,6 @@ fn serve_stop(app: AppHandle, state: State<'_, AppStateManaged>) -> StateView {
     begin_serve_stop(app, state.inner())
 }
 
-/// Claude Code: write the env block to `~/.claude/settings.json` (embedded key; CC reads it directly, with no
-/// manual export). CC uses the Anthropic protocol; end-to-end operation also requires the agent-anthropic adapter.
-/// Determine whether the `plugins` configuration includes an inbound adapter that supports Anthropic. Inspect the `agents` list
-/// and the two adapter names in the deprecated single `agent` string. Do not inspect providers to avoid false positives. agent-anthropic
-/// Once it enters the configuration, the CC safety gate unlocks automatically.
-pub(crate) fn inbound_adapter_ready(plugins: &Value, expected: &str) -> bool {
-    let hits = |value: &Value| value.as_str() == Some(expected);
-    let in_list = plugins["agents"]
-        .as_array()
-        .is_some_and(|arr| arr.iter().any(hits));
-    in_list || hits(&plugins["agent"])
-}
-
 /// Display inbound adapters from the comma-joined agents list, falling back to the single agent value.
 fn agents_display(plugins: &Value) -> String {
     let list: Vec<&str> = plugins["agents"]
@@ -5348,27 +5335,6 @@ mod tests {
 
         assert_eq!(prepared["plugins"]["agents"], json!(desktop_agents()));
         std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn inbound_readiness_requires_exact_adapter_names() {
-        let plugins = json!({
-            "agents": [
-                "agent-anthropic-proxy",
-                "agent-openai-responses-beta",
-                "agent-openai-compatible"
-            ]
-        });
-        assert!(!inbound_adapter_ready(&plugins, "agent-anthropic"));
-        assert!(!inbound_adapter_ready(&plugins, "agent-openai-responses"));
-        assert!(!inbound_adapter_ready(&plugins, "agent-openai"));
-
-        let plugins = json!({
-            "agents": ["agent-anthropic", "agent-openai-responses", "agent-openai"]
-        });
-        assert!(inbound_adapter_ready(&plugins, "agent-anthropic"));
-        assert!(inbound_adapter_ready(&plugins, "agent-openai-responses"));
-        assert!(inbound_adapter_ready(&plugins, "agent-openai"));
     }
 
     #[test]

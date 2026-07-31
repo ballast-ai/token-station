@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App, { configSaveStatus } from "./App";
@@ -117,6 +117,7 @@ const scannedClaude: AgentView = {
   installations: [{
     managed: false,
     connected: false,
+    adapter_ready: true,
     discovery: {
       agent_id: "claude-code",
       executable_path: "/opt/claude",
@@ -263,6 +264,171 @@ describe("desktop station navigation", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("save_config");
   });
 
+  it.each([
+    [
+      "the old running revision",
+      serveFixture({
+        phase: "running",
+        app_runtime: "running",
+        listener_reachable: true,
+        running_revision: 1,
+      }),
+      null,
+    ],
+    [
+      "an apply error",
+      serveFixture({
+        phase: "running",
+        app_runtime: "running",
+        listener_reachable: true,
+        running_revision: 2,
+        error: "已保存尚未应用：gateway_init: fixture failure",
+      }),
+      "已保存尚未应用：gateway_init: fixture failure",
+    ],
+  ])("does not report configuration applied when starting returns to %s", async (_case, terminal, expectedError) => {
+    const user = userEvent.setup();
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_eventName, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    const dirty = stateFixture({ draft_revision: 2, saved_revision: 1, config_dirty: true });
+    const applying = stateFixture({
+      draft_revision: 2,
+      saved_revision: 2,
+      config_dirty: false,
+      serve: serveFixture({ phase: "starting" }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return dirty;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "serve_start") return applying;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "保存并应用" }));
+    expect(await screen.findByText("正在应用配置…")).toBeInTheDocument();
+    act(() => emitServe?.(terminal));
+
+    await waitFor(() => expect(screen.queryByText("正在应用配置…")).toBeNull());
+    expect(screen.queryByText(/配置已应用/)).toBeNull();
+    if (expectedError) {
+      expect(screen.getByText(expectedError)).toBeInTheDocument();
+    }
+  });
+
+  it("reports configuration applied only when the requested revision is running without an error", async () => {
+    const user = userEvent.setup();
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_eventName, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    const dirty = stateFixture({ draft_revision: 2, saved_revision: 1, config_dirty: true });
+    const applying = stateFixture({
+      draft_revision: 2,
+      saved_revision: 2,
+      config_dirty: false,
+      serve: serveFixture({ phase: "starting" }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return dirty;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "serve_start") return applying;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "保存并应用" }));
+    expect(await screen.findByText("正在应用配置…")).toBeInTheDocument();
+    act(() => emitServe?.(serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 2,
+    })));
+
+    expect(await screen.findByText("配置已应用 · revision 2")).toBeInTheDocument();
+  });
+
+  it("keeps waiting when a stale runtime poll arrives before the requested revision", async () => {
+    const user = userEvent.setup();
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_eventName, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    const dirty = stateFixture({ draft_revision: 2, saved_revision: 1, config_dirty: true });
+    const applying = stateFixture({
+      draft_revision: 2,
+      saved_revision: 2,
+      config_dirty: false,
+      serve: serveFixture({ phase: "starting" }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return dirty;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "serve_start") return applying;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "保存并应用" }));
+    expect(await screen.findByText("正在应用配置…")).toBeInTheDocument();
+    act(() => emitServe?.(serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 1,
+    })));
+    await waitFor(() => expect(screen.queryByText("正在应用配置…")).toBeNull());
+    expect(screen.queryByText(/配置已应用/)).toBeNull();
+
+    act(() => emitServe?.(serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 2,
+    })));
+    expect(await screen.findByText("配置已应用 · revision 2")).toBeInTheDocument();
+  });
+
+  it("does not treat an ordinary first proxy startup as a completed configuration apply", async () => {
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_eventName, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") {
+        return stateFixture({
+          saved_revision: 1,
+          serve: serveFixture({ phase: "starting" }),
+        });
+      }
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    expect(await screen.findByText("正在应用配置…")).toBeInTheDocument();
+    act(() => emitServe?.(serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 1,
+    })));
+
+    await waitFor(() => expect(screen.queryByText("正在应用配置…")).toBeNull());
+    expect(screen.queryByText(/配置已应用/)).toBeNull();
+  });
+
   it("refreshes the independent Agent runtime fact within the 500ms poll", async () => {
     const connected = stateFixture({
       serve: serveFixture({
@@ -337,6 +503,45 @@ describe("desktop station navigation", () => {
     );
     // Runtime remains ready afterward, so no additional rescan occurs.
     await waitFor(() => expect(screen.getByTestId("agent-runtime-connection")).toBeInTheDocument());
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2);
+  });
+
+  it("rescans when a new serving instance replaces the old one without a readiness gap", async () => {
+    const oldRuntime = stateFixture({
+      serve: serveFixture({
+        phase: "running",
+        app_runtime: "running",
+        listener_reachable: true,
+        running_revision: 1,
+        instance_id: "runtime-old",
+      }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return oldRuntime;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "get_runtime_state") {
+        return serveFixture({
+          phase: "running",
+          app_runtime: "running",
+          listener_reachable: true,
+          running_revision: 2,
+          instance_id: "runtime-new",
+        });
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await waitFor(() => expect(
+      invokeMock.mock.calls.filter(([command]) => command === "scan_agents"),
+    ).toHaveLength(1));
+    await waitFor(
+      () => expect(
+        invokeMock.mock.calls.filter(([command]) => command === "scan_agents"),
+      ).toHaveLength(2),
+      { timeout: 1_500 },
+    );
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2);
   });
 

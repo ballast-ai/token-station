@@ -80,8 +80,8 @@ impl RunningServer {
         &self.instance_id
     }
 
-    pub(crate) fn plugins(&self) -> &token_station_cli::config::PluginsConfig {
-        &self.app_state.admin.plugins
+    pub(crate) fn agent_adapter_ready(&self, package: &str) -> bool {
+        self.app_state.gateway.agent_adapter_ready(package)
     }
 
     pub(crate) fn is_task_alive(&self) -> bool {

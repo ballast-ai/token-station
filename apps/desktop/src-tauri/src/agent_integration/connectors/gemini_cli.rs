@@ -132,6 +132,15 @@ impl Connector for GeminiCliConnector {
         }])
     }
 
+    fn legacy_companion_format(
+        &self,
+        primary_target: &Path,
+        companion_target: &Path,
+    ) -> Option<DocumentFormat> {
+        let expected = primary_target.parent()?.join("settings.json");
+        (companion_target == expected).then_some(DocumentFormat::Json)
+    }
+
     fn disconnect_patch(&self) -> Vec<PatchOperation> {
         self.owned_paths()
             .into_iter()

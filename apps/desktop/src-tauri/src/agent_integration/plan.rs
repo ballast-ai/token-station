@@ -9,7 +9,9 @@ use super::config_codec::{
     render_document, semantic_json, ConfigDocument, DocumentFormat,
 };
 use super::connectors::{validate_patch_ownership, ConnectInput, Connector};
-use super::ownership::{compute_owned_value_macs, ownership_matches, OwnershipRecord};
+use super::ownership::{
+    compute_owned_value_macs, ownership_matches, CompanionOwnership, OwnershipRecord,
+};
 use super::snapshot::SnapshotStore;
 use super::types::{
     AllowedAction, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan, ConfigPath,
@@ -405,6 +407,23 @@ pub fn build_disconnect_plan(
     )
 }
 
+pub(super) fn companion_document_format(
+    connector: &dyn Connector,
+    ownership: &OwnershipRecord,
+    companion: &CompanionOwnership,
+) -> Result<DocumentFormat, String> {
+    companion.document_format.or_else(|| {
+        connector.legacy_companion_format(
+            Path::new(&ownership.target_config_path),
+            Path::new(&companion.target_config_path),
+        )
+    })
+    .ok_or_else(|| {
+        "旧 ownership companion 缺少可确认的显式格式合同；已停止且不会修改配置、ownership 或 snapshot"
+            .to_string()
+    })
+}
+
 /// Adds every companion file owned by a multi-file Connector to a disconnect
 /// plan. Each file is independently revision-bound and restored from its own
 /// encrypted baseline; the transaction engine commits or rolls back the set.
@@ -419,12 +438,13 @@ pub fn attach_disconnect_companions(
         return Err("companion restore 只能附加到已绑定的断开计划".to_string());
     }
     for companion in &ownership.companion_files {
+        let document_format = companion_document_format(connector, ownership, companion)?;
         let target = Path::new(&companion.target_config_path);
         validate_target_path(target)?;
         let current = read_config_source(target)?;
         let mut current_document = parse_source_bytes(
             current.existed.then_some(current.exact_bytes.as_slice()),
-            connector.format(),
+            document_format,
             connector.label(),
         )?;
         let baseline = snapshots.load(&companion.baseline_snapshot_id)?;
@@ -440,7 +460,7 @@ pub fn attach_disconnect_companions(
                 .record
                 .original_existed
                 .then_some(baseline.exact_bytes.as_slice()),
-            connector.format(),
+            document_format,
             connector.label(),
         )?;
         let current_macs =
@@ -461,10 +481,10 @@ pub fn attach_disconnect_companions(
             &companion.owned_paths,
         )?;
         let rendered = render_document(&current_document, connector.label())?;
-        let reparsed = parse_rendered(&rendered, connector.format(), connector.label())?;
+        let reparsed = parse_rendered(&rendered, document_format, connector.label())?;
         let original_semantic = semantic_json(&parse_source_bytes(
             current.existed.then_some(current.exact_bytes.as_slice()),
-            connector.format(),
+            document_format,
             connector.label(),
         )?)?;
         verify_reverse_projection(
@@ -472,7 +492,7 @@ pub fn attach_disconnect_companions(
             &original_semantic,
             &reverse_operations,
             &companion.owned_paths,
-            connector.format(),
+            document_format,
             connector.label(),
         )?;
         let projected = if !baseline.record.original_existed
@@ -501,7 +521,7 @@ pub fn attach_disconnect_companions(
         let sensitive_paths = connector.sensitive_paths();
         plan.view.projection.files.push(ConnectorFileProjection {
             target_config_path: companion.target_config_path.clone(),
-            format: format_name(connector.format()).to_string(),
+            format: format_name(document_format).to_string(),
             target_existed: current.existed,
             before_hash: before_hash.clone(),
             expected_after_hash: expected_after_hash.clone(),
@@ -519,7 +539,7 @@ pub fn attach_disconnect_companions(
             before_hash,
             expected_after_hash,
             projected_bytes: Zeroizing::new(rendered.into_bytes()),
-            format: connector.format(),
+            format: document_format,
             label: connector.label(),
             owned_paths: companion.owned_paths.clone(),
         });
@@ -540,6 +560,7 @@ pub fn attach_restore_companions(
     }
     let records = snapshots.list_agent(&ownership.agent_id)?;
     for companion in &ownership.companion_files {
+        let document_format = companion_document_format(connector, ownership, companion)?;
         let source_record = records
             .iter()
             .find(|record| {
@@ -554,7 +575,7 @@ pub fn attach_restore_companions(
         let current = read_config_source(target)?;
         let mut current_document = parse_source_bytes(
             current.existed.then_some(current.exact_bytes.as_slice()),
-            connector.format(),
+            document_format,
             connector.label(),
         )?;
         let source_document = parse_source_bytes(
@@ -562,7 +583,7 @@ pub fn attach_restore_companions(
                 .record
                 .original_existed
                 .then_some(source_snapshot.exact_bytes.as_slice()),
-            connector.format(),
+            document_format,
             connector.label(),
         )?;
         let current_macs =
@@ -580,10 +601,10 @@ pub fn attach_restore_companions(
             &companion.owned_paths,
         )?;
         let rendered = render_document(&current_document, connector.label())?;
-        let reparsed = parse_rendered(&rendered, connector.format(), connector.label())?;
+        let reparsed = parse_rendered(&rendered, document_format, connector.label())?;
         let original_semantic = semantic_json(&parse_source_bytes(
             current.existed.then_some(current.exact_bytes.as_slice()),
-            connector.format(),
+            document_format,
             connector.label(),
         )?)?;
         verify_reverse_projection(
@@ -591,7 +612,7 @@ pub fn attach_restore_companions(
             &original_semantic,
             &reverse_operations,
             &companion.owned_paths,
-            connector.format(),
+            document_format,
             connector.label(),
         )?;
         let projected = if !source_snapshot.record.original_existed
@@ -620,7 +641,7 @@ pub fn attach_restore_companions(
         let sensitive_paths = connector.sensitive_paths();
         plan.view.projection.files.push(ConnectorFileProjection {
             target_config_path: companion.target_config_path.clone(),
-            format: format_name(connector.format()).to_string(),
+            format: format_name(document_format).to_string(),
             target_existed: current.existed,
             before_hash: before_hash.clone(),
             expected_after_hash: expected_after_hash.clone(),
@@ -638,7 +659,7 @@ pub fn attach_restore_companions(
             before_hash,
             expected_after_hash,
             projected_bytes: Zeroizing::new(rendered.into_bytes()),
-            format: connector.format(),
+            format: document_format,
             label: connector.label(),
             owned_paths: companion.owned_paths.clone(),
         });

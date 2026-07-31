@@ -247,6 +247,22 @@ impl Connector for ClaudeDesktopConnector {
         Ok(projections)
     }
 
+    fn legacy_companion_format(
+        &self,
+        primary_target: &Path,
+        companion_target: &Path,
+    ) -> Option<DocumentFormat> {
+        let metadata = primary_target.parent()?.join("_meta.json");
+        if companion_target == metadata {
+            return Some(DocumentFormat::Json);
+        }
+        let deployment_modes = deployment_mode_paths(primary_target).ok()?;
+        deployment_modes
+            .iter()
+            .any(|candidate| candidate == companion_target)
+            .then_some(DocumentFormat::Json)
+    }
+
     fn disconnect_patch(&self) -> Vec<PatchOperation> {
         self.owned_paths()
             .into_iter()

@@ -84,6 +84,13 @@ pub trait Connector: Sync {
     ) -> Result<Vec<CompanionProjection>, String> {
         Ok(Vec::new())
     }
+    fn legacy_companion_format(
+        &self,
+        _primary_target: &Path,
+        _companion_target: &Path,
+    ) -> Option<DocumentFormat> {
+        None
+    }
     fn disconnect_patch(&self) -> Vec<PatchOperation>;
     fn validate_projected(
         &self,

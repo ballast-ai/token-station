@@ -25,8 +25,8 @@ use super::drift::analyze_drift;
 use super::ownership::{FileOwnershipStore, OwnershipStore};
 use super::plan::{
     attach_disconnect_companions, attach_restore_companions, build_connection_plan,
-    build_disconnect_plan, build_snapshot_restore_plan, generate_operation_id, read_config_source,
-    ConfigSource, PreparedChangePlan,
+    build_disconnect_plan, build_snapshot_restore_plan, companion_document_format,
+    generate_operation_id, read_config_source, ConfigSource, PreparedChangePlan,
 };
 use super::registry::AgentRegistry;
 use super::snapshot::{FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, SnapshotStore};
@@ -40,7 +40,7 @@ use super::types::{
     DiscoveryRecord, DriftStatus, PatchKind, PatchOperation, PlanIntent, ReasonCode,
     SnapshotRecord,
 };
-use crate::{inbound_adapter_ready, AgentIntegrationPaths, AppStateManaged};
+use crate::{AgentIntegrationPaths, AppStateManaged};
 
 const MAX_PENDING_PLANS: usize = 64;
 const MAX_SESSION_LABEL_BYTES: usize = 128;
@@ -51,6 +51,7 @@ const CONFIRMATION_TOKEN_BYTES: usize = 32;
 pub struct AgentInstallationView {
     pub discovery: DiscoveryRecord,
     pub compatibility: CompatibilityDecision,
+    pub adapter_ready: Option<bool>,
     pub managed: bool,
     pub connected: bool,
 }
@@ -584,6 +585,17 @@ impl AgentCommandState {
                     .iter()
                     .filter(|record| record.agent_id == descriptor.agent_id)
                     .map(|record| {
+                        let compatibility =
+                            evaluate_discovery(&snapshot.catalog, descriptor, record);
+                        let connector_id = compatibility.connector_id.as_deref().or_else(|| {
+                            (descriptor.local_connector_ids.len() == 1)
+                                .then(|| descriptor.local_connector_ids[0].as_str())
+                        });
+                        let adapter_ready = runtime.and_then(|runtime| {
+                            connector_id
+                                .and_then(|connector_id| runtime.input_for(connector_id).ok())
+                                .map(|input| input.adapter_ready)
+                        });
                         let managed = !self
                             .ownership
                             .list_agent_installation(&record.agent_id, &record.canonical_path)
@@ -595,11 +607,8 @@ impl AgentCommandState {
                         });
                         Ok(AgentInstallationView {
                             discovery: record.clone(),
-                            compatibility: evaluate_discovery(
-                                &snapshot.catalog,
-                                descriptor,
-                                record,
-                            ),
+                            compatibility,
+                            adapter_ready,
                             managed,
                             connected,
                         })
@@ -650,6 +659,9 @@ impl AgentCommandState {
             let Ok(input) = runtime.input_for(&owned.connector_id) else {
                 continue;
             };
+            if !input.adapter_ready {
+                continue;
+            }
             let Ok(source) = read_config_source(Path::new(&owned.target_config_path)) else {
                 continue;
             };
@@ -847,7 +859,26 @@ impl AgentCommandState {
                 "该安装实例没有可清除的接管记录",
             ));
         }
-        for ownership in owned {
+
+        // Parse every companion format before writing anything. If the connector's
+        // explicit contract cannot confirm a legacy ownership format, force
+        // disconnect must fail closed before changing the main config.
+        let companion_formats = owned
+            .iter()
+            .map(|ownership| {
+                let connector = connector_for(&ownership.connector_id)?;
+                ownership
+                    .companion_files
+                    .iter()
+                    .map(|companion| {
+                        companion_document_format(connector, ownership, companion)
+                            .map_err(AgentCommandError::internal)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, AgentCommandError>>()?;
+
+        for (ownership, companion_formats) in owned.into_iter().zip(companion_formats) {
             let connector = connector_for(&ownership.connector_id)?;
             // Primary config: use the connector disconnect_patch, which uses the same Remove operations as normal disconnect.
             force_strip_owned(
@@ -856,8 +887,11 @@ impl AgentCommandState {
                 connector.label(),
                 &connector.disconnect_patch(),
             )?;
-            // companion data, currently only claude-desktop JSON _meta: remove paths listed in owned_paths.
-            for companion in &ownership.companion_files {
+            // Companion config: parse the persisted format or a connector's
+            // explicit legacy contract, then remove owned_paths.
+            for (companion, document_format) in
+                ownership.companion_files.iter().zip(companion_formats)
+            {
                 let removals: Vec<PatchOperation> = companion
                     .owned_paths
                     .iter()
@@ -869,7 +903,7 @@ impl AgentCommandState {
                     .collect();
                 force_strip_owned(
                     Path::new(&companion.target_config_path),
-                    DocumentFormat::Json,
+                    document_format,
                     "companion 配置",
                     &removals,
                 )?;
@@ -1547,9 +1581,9 @@ pub(crate) fn runtime_from_app(
     let origin = format!("http://{}", serve.listen)
         .trim_end_matches('/')
         .to_string();
-    let plugins = match &inner.server {
-        crate::ServerLifecycle::Running { server, .. } => server.plugins(),
-        crate::ServerLifecycle::Applying { old, .. } => old.plugins(),
+    let serving = match &inner.server {
+        crate::ServerLifecycle::Running { server, .. } => server,
+        crate::ServerLifecycle::Applying { old, .. } => old,
         _ => {
             return Err(AgentCommandError::boundary(
                 "proxy_not_running",
@@ -1557,14 +1591,13 @@ pub(crate) fn runtime_from_app(
             ));
         }
     };
-    let plugins = serde_json::to_value(plugins).unwrap_or_default();
     let adapter_readiness = builtin_connectors()
         .iter()
         .map(|connector| connector.capabilities().adapter_id)
         .map(|adapter_id| {
             (
                 adapter_id.to_string(),
-                inbound_adapter_ready(&plugins, adapter_id),
+                serving.agent_adapter_ready(adapter_id),
             )
         })
         .collect();
@@ -1706,11 +1739,13 @@ pub(crate) fn apply_snapshot_restore(
 mod tests {
     use std::path::PathBuf;
 
+    use serde_json::json;
+
     use super::*;
     use crate::agent_integration::connectors::ConnectInput;
     use crate::agent_integration::plan::build_connection_plan;
     use crate::agent_integration::types::{
-        AllowedAction, BinarySource, ConfirmationKind, Diagnostic, DiscoveryEvidence,
+        AllowedAction, BinarySource, ConfigPath, ConfirmationKind, Diagnostic, DiscoveryEvidence,
         DiscoverySource, DriftScope, DriftStatus, Platform,
     };
 
@@ -1820,6 +1855,88 @@ mod tests {
             token.to_string(),
             adapter_readiness,
         )
+    }
+
+    fn running_app_with_adapters(
+        label: &str,
+        installed_agents: &[&str],
+        configured_agents: &[&str],
+    ) -> (PathBuf, AppStateManaged) {
+        let root = scratch(label);
+        let plugins_dir = root.join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        let plugin_fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("plugins-dist");
+        for package in installed_agents
+            .iter()
+            .copied()
+            .chain(["provider-openai-compatible"])
+        {
+            let source = plugin_fixtures.join(package);
+            let target = plugins_dir.join(package);
+            std::fs::create_dir_all(&target).unwrap();
+            for file in ["manifest.json", "adapter.wasm"] {
+                std::fs::copy(source.join(file), target.join(file)).unwrap();
+            }
+        }
+
+        let data_dir = root.join("data");
+        let mut draft = crate::template(&data_dir, &plugins_dir);
+        draft["server"]["listen"] = json!("127.0.0.1:0");
+        draft["server"]["auth"] = json!(false);
+        draft["data"]["metrics"] = json!(false);
+        draft["plugins"]["agents"] = json!(configured_agents);
+        draft["upstreams"]["local"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "models": [{ "model": "small" }]
+        });
+        draft["router"]["pools"] = json!({
+            "tier_low": [{ "upstream": "local", "model": "small" }]
+        });
+        draft["router"]["default_pool"] = json!("tier_low");
+
+        let config =
+            serde_json::from_value::<token_station_cli::config::ClientConfig>(draft.clone())
+                .unwrap();
+        let running = crate::serve_lifecycle::prepare_server(config)
+            .unwrap()
+            .bind()
+            .unwrap()
+            .publish(7)
+            .unwrap();
+        let mut inner = crate::AppInner::new(root.join("token-station.json"), draft, None);
+        inner.server = crate::ServerLifecycle::Running {
+            generation: 1,
+            server: running,
+            apply_error: None,
+        };
+        (root, AppStateManaged(Mutex::new(inner)))
+    }
+
+    fn running_app_with_skipped_openai_adapter(label: &str) -> (PathBuf, AppStateManaged) {
+        running_app_with_adapters(
+            label,
+            &["agent-anthropic"],
+            &["agent-anthropic", "agent-openai"],
+        )
+    }
+
+    fn stop_running_app(state: &AppStateManaged) {
+        let running = {
+            let mut inner = state.0.lock().unwrap();
+            let lifecycle = std::mem::replace(
+                &mut inner.server,
+                crate::ServerLifecycle::Stopped { generation: 2 },
+            );
+            match lifecycle {
+                crate::ServerLifecycle::Running { server, .. } => server,
+                crate::ServerLifecycle::Applying { old, .. } => old,
+                _ => panic!("fixture runtime must be serving"),
+            }
+        };
+        running.drain_and_shutdown();
     }
 
     fn install_scan(
@@ -2424,6 +2541,42 @@ mod tests {
     }
 
     #[test]
+    fn commands_views_publish_runtime_adapter_readiness() {
+        let state = state("adapter-readiness-view");
+        let target = scratch("adapter-readiness-view-target").join("settings.json");
+        let snapshot = ScanSnapshot {
+            catalog: CompatibilityCatalog::builtin(&state.registry).unwrap(),
+            source: CatalogSource::Builtin,
+            warning: None,
+            records: vec![record(&target, false)],
+        };
+        let mut adapter_readiness = builtin_connectors()
+            .iter()
+            .map(|connector| (connector.capabilities().adapter_id.to_string(), true))
+            .collect::<BTreeMap<_, _>>();
+        adapter_readiness.insert("agent-anthropic".to_string(), false);
+        let runtime = AgentProxyRuntime::new(
+            "fixture-runtime".to_string(),
+            "http://127.0.0.1:8787",
+            "vk-readiness-view".to_string(),
+            adapter_readiness,
+        );
+
+        let views = state.views(&snapshot, Some(&runtime)).unwrap();
+        let installation = &views
+            .iter()
+            .find(|view| view.metadata.agent_id == "claude-code")
+            .unwrap()
+            .installations[0];
+
+        assert_eq!(installation.adapter_ready, Some(false));
+        assert!(!installation.connected);
+        std::fs::remove_dir_all(target.parent().unwrap()).ok();
+        std::fs::remove_dir_all(&state.paths.snapshot_root).ok();
+        std::fs::remove_dir_all(&state.paths.ownership_root).ok();
+    }
+
+    #[test]
     fn commands_runtime_from_app_rejects_readonly_and_stopped_states() {
         for (label, load_error, expected_code) in [
             (
@@ -2447,6 +2600,95 @@ mod tests {
             assert_eq!(error.code, expected_code);
             std::fs::remove_dir_all(root).ok();
         }
+    }
+
+    #[test]
+    fn commands_runtime_readiness_comes_from_loaded_adapters_not_configured_names() {
+        let (root, state) = running_app_with_skipped_openai_adapter("runtime-readiness");
+
+        let runtime = runtime_from_app(&state).unwrap();
+        let loaded = runtime.input_for("claude-code-v1").unwrap().adapter_ready;
+        let skipped_input = runtime.input_for("opencode-v1").unwrap();
+        let skipped = skipped_input.adapter_ready;
+        let plan_rejection = find_connector("opencode-v1")
+            .unwrap()
+            .validate_preconditions(&skipped_input)
+            .expect_err("a skipped runtime adapter must block a connection plan");
+        stop_running_app(&state);
+        std::fs::remove_dir_all(root).ok();
+
+        assert!(
+            loaded,
+            "the successfully loaded Anthropic adapter remains ready"
+        );
+        assert!(
+            !skipped,
+            "agent-openai is configured but missing on disk, so the running Gateway skipped it"
+        );
+        assert!(plan_rejection.contains("未加载 agent-openai"));
+    }
+
+    #[test]
+    fn commands_runtime_readiness_during_apply_comes_from_the_serving_old_instance() {
+        let (root, state) = running_app_with_skipped_openai_adapter("applying-readiness");
+        {
+            let mut inner = state.0.lock().unwrap();
+            let lifecycle = std::mem::replace(
+                &mut inner.server,
+                crate::ServerLifecycle::Stopped { generation: 2 },
+            );
+            let crate::ServerLifecycle::Running { server, .. } = lifecycle else {
+                panic!("fixture runtime must be running");
+            };
+            inner.server = crate::ServerLifecycle::Applying {
+                generation: 2,
+                revision: 8,
+                old: server,
+            };
+        }
+
+        let runtime = runtime_from_app(&state).unwrap();
+        let skipped = runtime.input_for("opencode-v1").unwrap().adapter_ready;
+        stop_running_app(&state);
+        std::fs::remove_dir_all(root).ok();
+
+        assert!(
+            !skipped,
+            "an applying candidate must not replace the old instance's actual adapter readiness"
+        );
+    }
+
+    #[test]
+    fn commands_runtime_readiness_tracks_each_replacement_running_instance() {
+        let (old_root, old_state) =
+            running_app_with_skipped_openai_adapter("old-running-readiness");
+        let old_runtime = runtime_from_app(&old_state).unwrap();
+        assert!(
+            old_runtime
+                .input_for("claude-code-v1")
+                .unwrap()
+                .adapter_ready
+        );
+        assert!(!old_runtime.input_for("opencode-v1").unwrap().adapter_ready);
+
+        let (new_root, new_state) = running_app_with_adapters(
+            "new-running-readiness",
+            &["agent-openai"],
+            &["agent-anthropic", "agent-openai"],
+        );
+        let new_runtime = runtime_from_app(&new_state).unwrap();
+        assert!(
+            !new_runtime
+                .input_for("claude-code-v1")
+                .unwrap()
+                .adapter_ready
+        );
+        assert!(new_runtime.input_for("opencode-v1").unwrap().adapter_ready);
+
+        stop_running_app(&old_state);
+        stop_running_app(&new_state);
+        std::fs::remove_dir_all(old_root).ok();
+        std::fs::remove_dir_all(new_root).ok();
     }
 
     #[test]
@@ -2690,6 +2932,96 @@ mod tests {
         assert!(
             state.force_forget("claude-code", "/opt/claude").is_err(),
             "已无归属时再次强制断开应报错"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&state.paths.snapshot_root).ok();
+        std::fs::remove_dir_all(&state.paths.ownership_root).ok();
+    }
+
+    #[test]
+    fn force_forget_unknown_legacy_companion_fails_before_any_write() {
+        let state = state("force-forget-unknown-companion");
+        let root = scratch("force-forget-unknown-companion-target");
+        let target = root.join(".gemini/.env");
+        let unknown = root.join(".gemini/unknown-companion.json");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(
+            &target,
+            b"GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/agents/gemini-cli\nUNOWNED=keep\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &unknown,
+            br#"{"security":{"auth":{"selectedType":"gemini-api-key"}},"keep":true}"#,
+        )
+        .unwrap();
+
+        let primary_path = ConfigPath {
+            segments: vec!["GOOGLE_GEMINI_BASE_URL".to_string()],
+        };
+        let companion_path = ConfigPath {
+            segments: vec![
+                "security".to_string(),
+                "auth".to_string(),
+                "selectedType".to_string(),
+            ],
+        };
+        state
+            .ownership
+            .commit(
+                crate::agent_integration::ownership::OwnershipRecord {
+                    schema_version: 1,
+                    revision: 0,
+                    agent_id: "gemini-cli".to_string(),
+                    installation_path: "/opt/gemini".to_string(),
+                    target_config_path: target.to_string_lossy().into_owned(),
+                    connector_id: "gemini-cli-v1".to_string(),
+                    baseline_snapshot_id: "01".repeat(16),
+                    last_transaction_snapshot_id: "02".repeat(16),
+                    before_hash: "a".repeat(64),
+                    managed_after_hash: "b".repeat(64),
+                    owned_paths: vec![primary_path.clone()],
+                    owned_value_macs: BTreeMap::from([(primary_path.to_string(), "c".repeat(64))]),
+                    companion_files: vec![
+                        crate::agent_integration::ownership::CompanionOwnership {
+                            target_config_path: unknown.to_string_lossy().into_owned(),
+                            document_format: None,
+                            baseline_snapshot_id: "03".repeat(16),
+                            last_transaction_snapshot_id: "04".repeat(16),
+                            before_hash: "d".repeat(64),
+                            managed_after_hash: "e".repeat(64),
+                            owned_paths: vec![companion_path.clone()],
+                            owned_value_macs: BTreeMap::from([(
+                                companion_path.to_string(),
+                                "f".repeat(64),
+                            )]),
+                        },
+                    ],
+                    acquired_at_ms: 1,
+                    updated_at_ms: 1,
+                },
+                None,
+            )
+            .unwrap();
+        let target_before = std::fs::read(&target).unwrap();
+        let unknown_before = std::fs::read(&unknown).unwrap();
+
+        let error = state
+            .force_forget("gemini-cli", "/opt/gemini")
+            .expect_err("unknown legacy companion format must fail closed");
+
+        assert!(error.message.contains("companion") && error.message.contains("格式"));
+        assert_eq!(std::fs::read(&target).unwrap(), target_before);
+        assert_eq!(std::fs::read(&unknown).unwrap(), unknown_before);
+        assert_eq!(
+            state
+                .ownership
+                .list_agent_installation("gemini-cli", "/opt/gemini")
+                .unwrap()
+                .len(),
+            1,
+            "ownership must remain available for a later safe recovery"
         );
 
         std::fs::remove_dir_all(&root).ok();

@@ -978,6 +978,7 @@ impl<'a> TransactionEngine<'a> {
                 compute_owned_value_macs(document, &companion.owned_paths, &key).map(|macs| {
                     CompanionOwnership {
                         target_config_path: companion.target_path.clone(),
+                        document_format: Some(companion.format),
                         baseline_snapshot_id: snapshot.record.snapshot_id.clone(),
                         last_transaction_snapshot_id: snapshot.record.snapshot_id.clone(),
                         before_hash: companion.before_hash.clone(),
@@ -1061,6 +1062,7 @@ impl<'a> TransactionEngine<'a> {
                         }) {
                             companion.last_transaction_snapshot_id =
                                 projected.last_transaction_snapshot_id.clone();
+                            companion.document_format = projected.document_format;
                             companion.managed_after_hash = projected.managed_after_hash.clone();
                             companion.owned_value_macs = projected.owned_value_macs.clone();
                         } else {
@@ -1352,8 +1354,9 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::*;
+    use crate::agent_integration::config_codec::DocumentFormat;
     use crate::agent_integration::connectors::{
-        ClaudeCodeConnector, ClaudeDesktopConnector, ConnectInput, HermesConnector,
+        find_connector, ClaudeCodeConnector, ClaudeDesktopConnector, ConnectInput, HermesConnector,
         OpenClawConnector,
     };
     use crate::agent_integration::ownership::FileOwnershipStore;
@@ -1420,6 +1423,35 @@ mod tests {
 
         fn set_pinned(&self, snapshot_id: &str, pinned: bool) -> Result<(), String> {
             self.inner.set_pinned(snapshot_id, pinned)
+        }
+    }
+
+    struct RetargetedSnapshotStore<'a> {
+        inner: &'a dyn SnapshotStore,
+        target_config_path: String,
+    }
+
+    impl SnapshotStore for RetargetedSnapshotStore<'_> {
+        fn create(&self, _request: SnapshotRequest<'_>) -> Result<SnapshotCreateResult, String> {
+            Err("unused".to_string())
+        }
+
+        fn load(&self, snapshot_id: &str) -> Result<DecryptedSnapshot, String> {
+            let mut snapshot = self.inner.load(snapshot_id)?;
+            snapshot.record.target_config_path = self.target_config_path.clone();
+            Ok(snapshot)
+        }
+
+        fn list(
+            &self,
+            _agent_id: &str,
+            _target_config_path: &str,
+        ) -> Result<Vec<SnapshotRecord>, String> {
+            Err("unused".to_string())
+        }
+
+        fn set_pinned(&self, _snapshot_id: &str, _pinned: bool) -> Result<(), String> {
+            Err("unused".to_string())
         }
     }
 
@@ -1616,6 +1648,43 @@ mod tests {
             Some("/Applications/Claude.app/Contents/MacOS/Claude".to_string());
         decision.connector_id = Some("claude-desktop-3p-v1".to_string());
         decision
+    }
+
+    fn gemini_discovery(target: &Path) -> DiscoveryRecord {
+        let mut record = discovery(target);
+        record.agent_id = "gemini-cli".to_string();
+        record.executable_path = "/opt/gemini".to_string();
+        record.canonical_path = record.executable_path.clone();
+        record
+    }
+
+    fn gemini_verified() -> CompatibilityDecision {
+        let mut decision = verified();
+        decision.agent_id = "gemini-cli".to_string();
+        decision.installation_path = Some("/opt/gemini".to_string());
+        decision.connector_id = Some("gemini-cli-v1".to_string());
+        decision
+    }
+
+    fn prepare_gemini(target: &Path, secret: &str) -> PreparedChangePlan {
+        let connector = find_connector("gemini-cli-v1").expect("Gemini Connector is registered");
+        build_connection_plan(
+            connector,
+            &gemini_discovery(target),
+            &gemini_verified(),
+            target,
+            &read_config_source(target).unwrap(),
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/agents/gemini-cli",
+                token: Some(secret),
+                adapter_ready: true,
+            },
+            1,
+            None,
+            1_000,
+            "7a".repeat(16),
+        )
+        .unwrap()
     }
 
     fn prepare_claude_desktop(target: &Path, secret: &str) -> PreparedChangePlan {
@@ -2195,6 +2264,442 @@ mod tests {
         assert_eq!(std::fs::read(&rollback_target).unwrap(), original_profile);
         assert_eq!(std::fs::read(&rollback_meta).unwrap(), original_meta);
         std::fs::remove_dir_all(rollback_root).ok();
+    }
+
+    #[test]
+    fn gemini_new_ownership_persists_companion_format_and_disconnects_cleanly() {
+        let root = scratch("gemini-companion-format");
+        let target = root.join(".gemini/.env");
+        let settings = root.join(".gemini/settings.json");
+        let original_env = b"UNOWNED=keep\n";
+        let original_settings =
+            br#"{"security":{"auth":{"selectedType":"vertex-ai"}},"keep":true}"#;
+        write_initial(&target, original_env);
+        write_initial(&settings, original_settings);
+        let connect = prepare_gemini(&target, "vk-gemini-format");
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership_store = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership_store,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+
+        engine
+            .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
+            .unwrap();
+
+        let index: Value = serde_json::from_slice(
+            &std::fs::read(root.join("ownership/ownership-index.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            index["records"][0]["companion_files"][0]["document_format"], "json",
+            "ownership must persist the format used to parse each companion"
+        );
+
+        let ownership_key = OwnershipKey {
+            agent_id: "gemini-cli".to_string(),
+            installation_path: "/opt/gemini".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let baseline = snapshots.load(&ownership.baseline_snapshot_id).unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let connector = find_connector("gemini-cli-v1").unwrap();
+        let mut disconnect = build_disconnect_plan(
+            connector,
+            &gemini_discovery(&target),
+            &gemini_verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &ownership,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            2_000,
+            "7d".repeat(16),
+        )
+        .unwrap();
+        crate::agent_integration::plan::attach_disconnect_companions(
+            &mut disconnect,
+            connector,
+            &ownership,
+            &snapshots,
+            &keys.load().unwrap(),
+        )
+        .unwrap();
+        engine
+            .apply_disconnect(
+                &disconnect,
+                &confirmation_at(&disconnect, 2_001),
+                &admission(),
+                2_002,
+            )
+            .unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), original_env);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&settings).unwrap()).unwrap(),
+            serde_json::from_slice::<Value>(original_settings).unwrap()
+        );
+        assert!(ownership_store.load(&ownership_key).unwrap().is_none());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn legacy_gemini_snapshot_restore_uses_the_connector_companion_contract() {
+        let root = scratch("gemini-legacy-companion-restore");
+        let target = root.join(".gemini/.env");
+        let settings = root.join(".gemini/settings.json");
+        let original_env = b"UNOWNED=keep\n";
+        write_initial(&target, original_env);
+        write_initial(
+            &settings,
+            br#"{"security":{"auth":{"selectedType":"vertex-ai"}},"keep":true}"#,
+        );
+        let connect = prepare_gemini(&target, "vk-gemini-restore");
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership_store = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership_store,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        engine
+            .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
+            .unwrap();
+
+        let ownership_index_path = root.join("ownership/ownership-index.json");
+        let mut legacy_index: Value =
+            serde_json::from_slice(&std::fs::read(&ownership_index_path).unwrap()).unwrap();
+        legacy_index["records"][0]["companion_files"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("document_format");
+        std::fs::write(
+            &ownership_index_path,
+            serde_json::to_vec_pretty(&legacy_index).unwrap(),
+        )
+        .unwrap();
+
+        let mut current_settings: Value =
+            serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        current_settings["later_user_field"] = serde_json::json!({ "enabled": true });
+        std::fs::write(
+            &settings,
+            serde_json::to_vec_pretty(&current_settings).unwrap(),
+        )
+        .unwrap();
+
+        let ownership_key = OwnershipKey {
+            agent_id: "gemini-cli".to_string(),
+            installation_path: "/opt/gemini".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let baseline = snapshots.load(&ownership.baseline_snapshot_id).unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let connector = find_connector("gemini-cli-v1").unwrap();
+        let master_key = keys.load().unwrap();
+        let mut restore = build_snapshot_restore_plan(
+            connector,
+            &gemini_discovery(&target),
+            &gemini_verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &ownership,
+            &baseline.record,
+            &baseline_source,
+            &master_key,
+            1,
+            None,
+            2_000,
+            "7e".repeat(16),
+        )
+        .unwrap();
+        crate::agent_integration::plan::attach_restore_companions(
+            &mut restore,
+            connector,
+            &ownership,
+            &baseline.record,
+            &snapshots,
+            &master_key,
+        )
+        .expect("legacy Gemini settings.json restore must use the connector's JSON contract");
+        engine
+            .apply_snapshot_restore(
+                &restore,
+                &confirmation_at(&restore, 2_001),
+                &admission(),
+                2_002,
+            )
+            .unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), original_env);
+        let restored_settings: Value =
+            serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(
+            restored_settings["security"]["auth"]["selectedType"],
+            "vertex-ai"
+        );
+        assert_eq!(restored_settings["keep"], true);
+        assert_eq!(restored_settings["later_user_field"]["enabled"], true);
+        let upgraded = ownership_store.load(&ownership_key).unwrap().unwrap();
+        assert_eq!(
+            upgraded.companion_files[0].document_format,
+            Some(DocumentFormat::Json)
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn legacy_gemini_ownership_without_format_uses_the_connector_companion_contract() {
+        let root = scratch("gemini-legacy-companion-format");
+        let target = root.join(".gemini/.env");
+        let settings = root.join(".gemini/settings.json");
+        let original_env = b"UNOWNED=keep\n";
+        write_initial(&target, original_env);
+        write_initial(
+            &settings,
+            br#"{"security":{"auth":{"selectedType":"vertex-ai"}},"keep":true}"#,
+        );
+        let connect = prepare_gemini(&target, "vk-gemini-disconnect");
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership_store = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership_store,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        engine
+            .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
+            .unwrap();
+
+        let ownership_index_path = root.join("ownership/ownership-index.json");
+        let mut legacy_index: Value =
+            serde_json::from_slice(&std::fs::read(&ownership_index_path).unwrap()).unwrap();
+        legacy_index["records"][0]["companion_files"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("document_format");
+        std::fs::write(
+            &ownership_index_path,
+            serde_json::to_vec_pretty(&legacy_index).unwrap(),
+        )
+        .unwrap();
+
+        let mut current_settings: Value =
+            serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        current_settings["later_user_field"] = serde_json::json!({ "enabled": true });
+        std::fs::write(
+            &settings,
+            serde_json::to_vec_pretty(&current_settings).unwrap(),
+        )
+        .unwrap();
+
+        let ownership_key = OwnershipKey {
+            agent_id: "gemini-cli".to_string(),
+            installation_path: "/opt/gemini".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let baseline = snapshots.load(&ownership.baseline_snapshot_id).unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let connector = find_connector("gemini-cli-v1").unwrap();
+        let mut disconnect = build_disconnect_plan(
+            connector,
+            &gemini_discovery(&target),
+            &gemini_verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &ownership,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            2_000,
+            "7b".repeat(16),
+        )
+        .unwrap();
+        crate::agent_integration::plan::attach_disconnect_companions(
+            &mut disconnect,
+            connector,
+            &ownership,
+            &snapshots,
+            &keys.load().unwrap(),
+        )
+        .expect("Gemini settings.json must be parsed with its JSON companion format");
+        engine
+            .apply_disconnect(
+                &disconnect,
+                &confirmation_at(&disconnect, 2_001),
+                &admission(),
+                2_002,
+            )
+            .unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), original_env);
+        let restored_settings: Value =
+            serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(
+            restored_settings["security"]["auth"]["selectedType"],
+            "vertex-ai"
+        );
+        assert_eq!(restored_settings["keep"], true);
+        assert_eq!(restored_settings["later_user_field"]["enabled"], true);
+        assert!(ownership_store.load(&ownership_key).unwrap().is_none());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unknown_legacy_gemini_companion_fails_closed_without_changing_persistent_state() {
+        let root = scratch("gemini-unknown-legacy-companion");
+        let target = root.join(".gemini/.env");
+        let settings = root.join(".gemini/settings.json");
+        let unknown = root.join(".gemini/unknown-companion.json");
+        write_initial(&target, b"UNOWNED=keep\n");
+        write_initial(
+            &settings,
+            br#"{"security":{"auth":{"selectedType":"vertex-ai"}},"keep":true}"#,
+        );
+        let connect = prepare_gemini(&target, "vk-gemini-unknown");
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership_store = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership_store,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        engine
+            .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
+            .unwrap();
+        write_initial(&unknown, &std::fs::read(&settings).unwrap());
+
+        let ownership_index_path = root.join("ownership/ownership-index.json");
+        let mut legacy_index: Value =
+            serde_json::from_slice(&std::fs::read(&ownership_index_path).unwrap()).unwrap();
+        let legacy_companion = legacy_index["records"][0]["companion_files"][0]
+            .as_object_mut()
+            .unwrap();
+        legacy_companion.remove("document_format");
+        legacy_companion.insert(
+            "target_config_path".to_string(),
+            Value::String(unknown.to_string_lossy().into_owned()),
+        );
+        std::fs::write(
+            &ownership_index_path,
+            serde_json::to_vec_pretty(&legacy_index).unwrap(),
+        )
+        .unwrap();
+
+        let ownership_key = OwnershipKey {
+            agent_id: "gemini-cli".to_string(),
+            installation_path: "/opt/gemini".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let baseline = snapshots.load(&ownership.baseline_snapshot_id).unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let connector = find_connector("gemini-cli-v1").unwrap();
+        let mut disconnect = build_disconnect_plan(
+            connector,
+            &gemini_discovery(&target),
+            &gemini_verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &ownership,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            2_000,
+            "7c".repeat(16),
+        )
+        .unwrap();
+        let retargeted_snapshots = RetargetedSnapshotStore {
+            inner: &snapshots,
+            target_config_path: unknown.to_string_lossy().into_owned(),
+        };
+        let target_before = std::fs::read(&target).unwrap();
+        let unknown_before = std::fs::read(&unknown).unwrap();
+        let ownership_before = std::fs::read(&ownership_index_path).unwrap();
+        let snapshot_index_path = snapshots.root().join("index.json");
+        let snapshot_index_before = std::fs::read(&snapshot_index_path).unwrap();
+        let companion_snapshot_id = &ownership.companion_files[0].baseline_snapshot_id;
+        let companion_envelope_path = snapshots
+            .root()
+            .join(format!("{companion_snapshot_id}.snapshot.json"));
+        let companion_envelope_before = std::fs::read(&companion_envelope_path).unwrap();
+
+        let error = crate::agent_integration::plan::attach_disconnect_companions(
+            &mut disconnect,
+            connector,
+            &ownership,
+            &retargeted_snapshots,
+            &keys.load().unwrap(),
+        )
+        .expect_err("an undeclared legacy companion must fail closed");
+
+        assert_eq!(std::fs::read(&target).unwrap(), target_before);
+        assert_eq!(std::fs::read(&unknown).unwrap(), unknown_before);
+        assert_eq!(
+            std::fs::read(&ownership_index_path).unwrap(),
+            ownership_before
+        );
+        assert_eq!(
+            std::fs::read(&snapshot_index_path).unwrap(),
+            snapshot_index_before
+        );
+        assert_eq!(
+            std::fs::read(&companion_envelope_path).unwrap(),
+            companion_envelope_before
+        );
+        assert!(
+            error.contains("companion") && error.contains("格式"),
+            "the error must identify the missing explicit companion format contract: {error}"
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
