@@ -33,6 +33,15 @@ if grep -Fq "$source_root" "$strings_file"; then
   exit 1
 fi
 
+# Dependency panic/location strings otherwise embed the builder's cargo home
+# (e.g. /Users/<name>/.cargo/...), which carries the username — a personal-info
+# leak. The build must remap CARGO_HOME (see scripts/build-desktop.sh).
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+if [[ -n "$cargo_home" ]] && grep -Fq "$cargo_home" "$strings_file"; then
+  echo "desktop executable leaks the cargo home path: $cargo_home" >&2
+  exit 1
+fi
+
 for plugin in \
   agent-openai \
   agent-anthropic \
