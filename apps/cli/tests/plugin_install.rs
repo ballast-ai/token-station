@@ -67,6 +67,7 @@ fn config(tag: &str) -> ClientConfig {
     serde_json::from_value(config).expect("test config parses")
 }
 
+#[cfg(unix)]
 fn cloned_source(tag: &str) -> PathBuf {
     let source = source_package();
     let dir = std::env::temp_dir().join(format!("ts-install-clone-{}-{tag}", std::process::id()));
