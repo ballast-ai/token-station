@@ -18,6 +18,14 @@ IDE / agent ──▶ 127.0.0.1:8787 ──▶ rules → hints → heuristic →
                (your key)         (your key)        (your Ollama)
 ```
 
+## Download
+
+Desktop app and CLI: **[Releases](https://github.com/ballast-ai/token-station/releases/latest)**.
+
+- **macOS (Apple Silicon)** — `token-station_1.0.0_aarch64.dmg`. This build is **not yet Apple-signed**, so on first launch macOS Gatekeeper blocks it. To open: right-click the app → **Open** → **Open**, or run once: `xattr -dr com.apple.quarantine /Applications/token-station.app`. Intel and signed builds are coming in a later patch.
+- **Linux** — desktop packages (`.deb` / `.AppImage` / `.rpm`) are coming shortly.
+- **CLI (all platforms)** — the `token-station-cli-*.tar.gz` archives are the standalone gateway with the official plugins embedded; `scripts/verify-release.sh` proves they were built from this source.
+
 ## Why this exists 
 
 Model routing usually means a cloud gateway reading your traffic. token-station

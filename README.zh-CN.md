@@ -16,6 +16,14 @@ IDE / Agent ──▶ 127.0.0.1:8787 ──▶ 规则 → hint → 启发式 →
                （你的 key）        （你的 key）       （你的 Ollama）
 ```
 
+## 下载安装
+
+桌面 app 与 CLI:**[Releases 页](https://github.com/ballast-ai/token-station/releases/latest)**。
+
+- **macOS(Apple Silicon)** —— `token-station_1.0.0_aarch64.dmg`。本版**未做 Apple 签名**,首次打开 macOS Gatekeeper 会拦。放行方式:右键点 app →「打开」→ 再点「打开」;或终端跑一次 `xattr -dr com.apple.quarantine /Applications/token-station.app`。Intel 与签名版将在后续小版本提供。
+- **Linux** —— 桌面包(`.deb` / `.AppImage` / `.rpm`)稍后补上。
+- **CLI(所有平台)** —— `token-station-cli-*.tar.gz` 是纯网关(内嵌官方插件);`scripts/verify-release.sh` 可校验其由本仓公开源码编出。
+
 ## 为什么做这个
 
 模型路由通常意味着一个能看到你流量的云端网关。token-station 押注相反的方向：
