@@ -43,11 +43,14 @@ if ! rustup target list --installed | grep -qx "$wasm_target"; then
   rustup target add "$wasm_target"
 fi
 
-# Set the path remap BEFORE building the plugins. Otherwise the plugin wasm is
-# compiled with the real source checkout path baked into its panic/location
-# strings, and `include_bytes!` (the bundled-plugins layer) then embeds that
-# path into the desktop binary — a leak the artifact audit rejects.
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$root=/build"
+# Set the path remaps BEFORE building the plugins. Otherwise the plugin wasm is
+# compiled with the real paths baked into its panic/location strings, and
+# `include_bytes!` (the bundled-plugins layer) then embeds them into the desktop
+# binary. Remap BOTH the source checkout ($root) AND the cargo registry
+# (CARGO_HOME) — dependency panic locations otherwise leak the builder's home
+# path (e.g. /Users/<name>/.cargo/...), which carries the username. Mirrors
+# scripts/build-release.sh. (std paths are already remapped by rustc to /rustc/.)
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$root=/build"
 
 mkdir -p "$stage/plugins-dist"
 for plugin in "${plugins[@]}"; do
