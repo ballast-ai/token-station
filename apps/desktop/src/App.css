@@ -5970,3 +5970,155 @@ a:focus-visible {
     gap: 8px;
   }
 }
+
+/* Agent navigation visibility: shadcn-style settings rows and switches. */
+.agent-visibility-panel .panel-head {
+  margin-bottom: 14px;
+}
+
+.agent-visibility-panel .panel-head .sub {
+  max-width: 620px;
+  margin-bottom: 0;
+}
+
+.agent-visibility-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.agent-visibility-list {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.agent-visibility-row {
+  width: 100%;
+  min-height: 52px;
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  border: 0;
+  color: var(--ink);
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.agent-visibility-row + .agent-visibility-row {
+  border-top: 1px solid var(--line);
+}
+
+.agent-visibility-row:hover {
+  background: var(--surface-2);
+}
+
+.agent-visibility-row:focus-visible {
+  z-index: 1;
+  outline: 2px solid var(--ink);
+  outline-offset: -2px;
+}
+
+.agent-visibility-icon {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+}
+
+.agent-visibility-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 120ms ease;
+}
+
+.agent-visibility-row[aria-checked="false"] .agent-visibility-name {
+  color: var(--muted);
+}
+
+.agent-visibility-switch {
+  width: 32px;
+  height: 18px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 0;
+  border-radius: 999px;
+  color: transparent;
+  background: var(--line-strong);
+  transition: background-color 140ms ease;
+}
+
+.agent-visibility-row[aria-checked="true"] .agent-visibility-switch {
+  background: var(--ink);
+}
+
+.agent-visibility-row:hover .agent-visibility-switch {
+  background: color-mix(in srgb, var(--line-strong) 82%, var(--ink));
+}
+
+.agent-visibility-row[aria-checked="true"]:hover .agent-visibility-switch {
+  background: color-mix(in srgb, var(--ink) 84%, var(--surface));
+}
+
+.agent-visibility-switch-thumb {
+  width: 14px;
+  height: 14px;
+  display: block;
+  border-radius: 50%;
+  background: var(--surface);
+  transform: translateX(0);
+  transition: transform 140ms ease;
+}
+
+.agent-visibility-row[aria-checked="true"] .agent-visibility-switch-thumb {
+  transform: translateX(14px);
+}
+
+.agent-visibility-empty {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  margin: 0;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  .agent-visibility-row,
+  .agent-visibility-empty {
+    padding-inline: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-visibility-row,
+  .agent-visibility-name,
+  .agent-visibility-switch,
+  .agent-visibility-switch-thumb {
+    transition: none;
+  }
+}

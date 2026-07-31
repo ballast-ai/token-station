@@ -32,6 +32,11 @@ import {
 } from "./api";
 import AppShell, { type AppView } from "./components/AppShell";
 import {
+  readHiddenAgentIds,
+  updateHiddenAgentIds,
+  writeHiddenAgentIds,
+} from "./components/AgentVisibilityPreferences";
+import {
   LanguageBoundary,
   useLanguage,
   type Language,
@@ -91,6 +96,8 @@ function StationApp() {
   const { language, copy } = useLanguage();
   const [state, setState] = useState<StateView | null>(null);
   const [view, setView] = useState<AppView>("home");
+  const [hiddenAgentIds, setHiddenAgentIds] = useState<Set<string>>(readHiddenAgentIds);
+  const hiddenAgentIdsRef = useRef(hiddenAgentIds);
   const [registry, setRegistry] = useState<AgentUiMetadataView[]>([]);
   const [agents, setAgents] = useState<AgentView[]>([]);
   const [scanBusy, setScanBusy] = useState(false);
@@ -132,6 +139,20 @@ function StationApp() {
       .map(({ metadata }) => metadata),
     [registry],
   );
+  const visibleRegistry = useMemo(
+    () => orderedRegistry.filter((metadata) => !hiddenAgentIds.has(metadata.agent_id)),
+    [hiddenAgentIds, orderedRegistry],
+  );
+
+  const setAgentVisible = useCallback((agentId: string, visible: boolean) => {
+    const current = hiddenAgentIdsRef.current;
+    const currentlyVisible = !current.has(agentId);
+    if (currentlyVisible === visible) return;
+    const next = updateHiddenAgentIds(current, agentId, !visible);
+    hiddenAgentIdsRef.current = next;
+    setHiddenAgentIds(next);
+    writeHiddenAgentIds(next);
+  }, []);
 
   const rescanAgents = useCallback(async () => {
     const requestedGeneration = ++scanGenerationRef.current;
@@ -321,7 +342,16 @@ function StationApp() {
   };
 
   const navigateBack = () => {
-    setView(viewHistoryRef.current.pop() ?? "home");
+    const previous = viewHistoryRef.current.pop() ?? "home";
+    if (
+      previous.startsWith("agent:")
+      && hiddenAgentIds.has(previous.slice("agent:".length))
+    ) {
+      viewHistoryRef.current = [];
+      setView("home");
+    } else {
+      setView(previous);
+    }
     setError("");
   };
 
@@ -382,7 +412,7 @@ function StationApp() {
     <AppShell
       view={view}
       serve={state.serve}
-      registry={orderedRegistry}
+      registry={visibleRegistry}
       agents={agents}
       scanBusy={scanBusy}
       commandBusy={serveBusy || busy || freeProviderBusy}
@@ -502,6 +532,9 @@ function StationApp() {
         <SettingsHub
           settings={state.settings}
           serve={state.serve}
+          registry={orderedRegistry}
+          hiddenAgentIds={hiddenAgentIds}
+          onAgentVisibilityChange={setAgentVisible}
           onSaved={showState}
           onBack={navigateBack}
         />
