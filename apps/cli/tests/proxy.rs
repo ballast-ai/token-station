@@ -2440,7 +2440,11 @@ fn anthropic_forced_tool_choice_is_translated_and_reaches_the_upstream() {
         !body.contains("Canonical IR"),
         "the old IR-blaming refusal must be gone, body={body}"
     );
-    assert_eq!(mock.hits(), 1, "the forced tool_choice reached the upstream");
+    assert_eq!(
+        mock.hits(),
+        1,
+        "the forced tool_choice reached the upstream"
+    );
     std::fs::remove_file(key).ok();
 }
 
