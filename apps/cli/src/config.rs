@@ -461,7 +461,7 @@ pub struct UpstreamConfig {
     /// preserving server tools (`web_search`), `tool_choice:{type:tool}`,
     /// server-tool result history and thinking — the things the Canonical IR
     /// cannot round-trip. Only meaningful for an anthropic-messages inbound whose
-    /// upstream genuinely speaks the Anthropic wire (e.g. DeepSeek's `/anthropic`
+    /// upstream genuinely speaks the Anthropic wire (e.g. `DeepSeek`'s `/anthropic`
     /// endpoint). `base_url` must end at the version segment, e.g.
     /// `https://api.deepseek.com/anthropic/v1`, so the resolved URL is
     /// `…/anthropic/v1/messages`.

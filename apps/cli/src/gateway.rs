@@ -2459,12 +2459,11 @@ impl Gateway {
         // and thinking — instead of being lowered through the Canonical IR. The
         // decision runs on a minimal request (model only) so `normalize_inbound`,
         // which would reject server-tool history blocks, is never called here.
-        if agent.protocol == "anthropic-messages" {
-            if let Some(served) =
+        if agent.protocol == "anthropic-messages"
+            && let Some(served) =
                 self.try_anthropic_passthrough(ctx, router, headers, body, emit, record)?
-            {
-                return Ok(served);
-            }
+        {
+            return Ok(served);
         }
 
         let (request, hints, inbound_tools) =
@@ -2608,6 +2607,7 @@ impl Gateway {
 
     /// Tries the decision's targets in order; moves on only while the error
     /// says another upstream is worth trying, and only before first byte out.
+    #[allow(clippy::too_many_arguments)] // one dispatch keeps request + render context explicit
     fn dispatch(
         &self,
         ctx: &RequestContext,
@@ -3017,6 +3017,7 @@ impl Gateway {
         result
     }
 
+    #[allow(clippy::too_many_arguments)] // one response translation boundary is explicit
     fn translate_nonstream_response(
         ctx: &RequestContext,
         agent: &LoadedAgent,
@@ -3290,6 +3291,7 @@ impl Gateway {
     /// path, so egress-to-base_url-only, credential isolation and redirect refusal
     /// are preserved; the client's own auth headers can never reach the upstream.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)] // authorize, send and terminal mapping form one state machine
     fn passthrough_upstream(
         &self,
         ctx: &RequestContext,
@@ -3443,7 +3445,7 @@ impl Gateway {
     /// Relays an upstream SSE stream to the client byte-for-byte (whole frames,
     /// unmodified) — a passthrough must never re-frame the Anthropic event stream.
     /// A clean EOF is a completed stream; a socket error after the first byte is a
-    /// post-200 truncation (FailedAfterPartial → transient, does not eject).
+    /// post-200 truncation (`FailedAfterPartial` → transient, does not eject).
     fn relay_raw_sse(
         ctx: &RequestContext,
         response: UpstreamResponse,

@@ -460,12 +460,12 @@ fn start_proxy_with_agents_and_budgets(
         config["agent_budgets"] = agent_budgets;
     }
     let config: ClientConfig = serde_json::from_value(config).expect("test config parses");
-    spawn_proxy(config)
+    spawn_proxy(&config)
 }
 
 /// The shared server-spawn tail: recorders, gateway, virtual key, and a
 /// background server bound to a loopback port.
-fn spawn_proxy(config: ClientConfig) -> Proxy {
+fn spawn_proxy(config: &ClientConfig) -> Proxy {
     let data_dir = config.data.dir.clone();
     let mut sinks: Vec<Box<dyn token_station_metrics::Recorder>> = vec![Box::new(
         token_station_cli::filelog::FileLog::open(&config.data.dir).expect("log opens"),
@@ -477,7 +477,7 @@ fn spawn_proxy(config: ClientConfig) -> Proxy {
         ));
     }
     let recorder = Arc::new(token_station_cli::filelog::Recorders(sinks));
-    let gateway = Arc::new(Gateway::new(&config, recorder).expect("gateway assembles"));
+    let gateway = Arc::new(Gateway::new(config, recorder).expect("gateway assembles"));
 
     // Auth on, exactly as a real first start would set it up.
     let (virtual_key, created) =
@@ -555,7 +555,7 @@ fn start_native_anthropic_proxy(upstream: &MockUpstream, key_file: &Path) -> Pro
         }
     });
     let config: ClientConfig = serde_json::from_value(config).expect("native config parses");
-    spawn_proxy(config)
+    spawn_proxy(&config)
 }
 
 fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Path) -> Proxy {
