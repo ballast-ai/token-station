@@ -1257,6 +1257,9 @@ mod tests {
 
     #[test]
     fn plan_is_redacted_and_binds_instance_revision_catalog_and_expiry() {
+        #[cfg(windows)]
+        let target = Path::new(r"C:\tmp\token-station-plan\settings.json");
+        #[cfg(not(windows))]
         let target = Path::new("/tmp/token-station-plan/settings.json");
         let source_marker = "source-configuration-marker";
         let secret = "vk-sensitive-plan-secret";
@@ -1308,6 +1311,9 @@ mod tests {
 
     #[test]
     fn codex_first_connection_without_tokenstation_provider_builds_reversible_plan() {
+        #[cfg(windows)]
+        let target = Path::new(r"C:\tmp\token-station-plan\config.toml");
+        #[cfg(not(windows))]
         let target = Path::new("/tmp/token-station-plan/config.toml");
         let mut codex_discovery = discovery(target);
         codex_discovery.agent_id = "codex".to_string();
@@ -1347,6 +1353,9 @@ mod tests {
 
     #[test]
     fn plan_missing_and_empty_files_have_distinct_revisions() {
+        #[cfg(windows)]
+        let target = Path::new(r"C:\tmp\token-station-plan\config.json");
+        #[cfg(not(windows))]
         let target = Path::new("/tmp/token-station-plan/config.json");
         let missing = file_revision_hash(target, &ConfigSource::missing()).unwrap();
         let empty = file_revision_hash(
@@ -1367,6 +1376,9 @@ mod tests {
 
     #[test]
     fn plan_only_connectable_status_is_accepted_and_unsafe_states_are_rejected() {
+        #[cfg(windows)]
+        let target = Path::new(r"C:\tmp\token-station-plan\settings.json");
+        #[cfg(not(windows))]
         let target = Path::new("/tmp/token-station-plan/settings.json");
         let source = ConfigSource::missing();
         let mut unknown = verified();

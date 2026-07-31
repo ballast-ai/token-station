@@ -2025,10 +2025,12 @@ mod tests {
     #[test]
     fn claude_desktop_profile_metadata_and_deployment_modes_commit_and_recover_together() {
         let root = scratch("claude-desktop-bundle");
-        let target = root.join("Claude-3p/configLibrary/7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2.json");
-        let meta = root.join("Claude-3p/configLibrary/_meta.json");
-        let normal_config = root.join("Claude/config.json");
-        let threep_config = root.join("Claude-3p/config.json");
+        let claude_3p = root.join("Claude-3p");
+        let config_library = claude_3p.join("configLibrary");
+        let target = config_library.join("7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2.json");
+        let meta = config_library.join("_meta.json");
+        let normal_config = root.join("Claude").join("config.json");
+        let threep_config = claude_3p.join("config.json");
         let original_profile = br#"{"unknownProfile":"keep"}"#;
         let original_meta = br#"{"unknownMeta":"keep","entries":[{"id":"existing","name":"Existing"}],"appliedId":"existing"}"#;
         let original_normal_config = br#"{"unknownNormal":"keep"}"#;
@@ -2235,11 +2237,22 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
 
         let rollback_root = scratch("claude-desktop-bundle-rollback");
-        let rollback_target = rollback_root.join("7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2.json");
-        let rollback_meta = rollback_root.join("_meta.json");
+        let rollback_claude_3p = rollback_root.join("Claude-3p");
+        let rollback_library = rollback_claude_3p.join("configLibrary");
+        let rollback_target = rollback_library.join("7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2.json");
+        let rollback_meta = rollback_library.join("_meta.json");
+        let rollback_normal_config = rollback_root.join("Claude").join("config.json");
+        let rollback_threep_config = rollback_claude_3p.join("config.json");
         write_initial(&rollback_target, original_profile);
         write_initial(&rollback_meta, original_meta);
         let rollback_plan = prepare_claude_desktop(&rollback_target, "vk-claude-desktop-rollback");
+        assert!(
+            rollback_plan
+                .companions
+                .iter()
+                .all(|companion| Path::new(&companion.target_path).starts_with(&rollback_root)),
+            "rollback fixture companions must stay inside scratch"
+        );
         let rollback_keys = Arc::new(TestKeys::available());
         let rollback_snapshots =
             FileSnapshotStore::new(rollback_root.join("snapshots"), rollback_keys.clone());
@@ -2263,6 +2276,8 @@ mod tests {
         assert_eq!(failure.recovery, RecoveryStatus::Restored);
         assert_eq!(std::fs::read(&rollback_target).unwrap(), original_profile);
         assert_eq!(std::fs::read(&rollback_meta).unwrap(), original_meta);
+        assert!(!rollback_normal_config.exists());
+        assert!(!rollback_threep_config.exists());
         std::fs::remove_dir_all(rollback_root).ok();
     }
 
