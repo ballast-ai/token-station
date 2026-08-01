@@ -137,6 +137,8 @@ pub enum ProviderApi {
 }
 
 impl ProviderApi {
+    const ALL: [Self; 4] = [Self::ChatCompletions, Self::Responses, Self::Messages, Self::Models];
+
     const fn path(self) -> &'static str {
         match self {
             Self::ChatCompletions => "chat/completions",
@@ -148,9 +150,9 @@ impl ProviderApi {
 }
 
 fn normalize_api_root(path: &str) -> String {
-    ["/chat/completions", "/responses", "/messages"]
+    ProviderApi::ALL
         .into_iter()
-        .find_map(|suffix| path.strip_suffix(suffix))
+        .find_map(|api| path.strip_suffix(&format!("/{}", api.path())))
         .unwrap_or(path)
         .trim_end_matches('/')
         .to_owned()
@@ -495,6 +497,15 @@ mod tests {
                 "https://api.example.com/v1/messages"
             );
         }
+    }
+
+    #[test]
+    fn a_models_suffix_is_stripped_like_the_other_provider_apis() {
+        let endpoint = endpoint("https://api.example.com/v1/models/");
+        assert_eq!(
+            endpoint.resolve(ProviderApi::Models),
+            "https://api.example.com/v1/models"
+        );
     }
 
     #[test]
