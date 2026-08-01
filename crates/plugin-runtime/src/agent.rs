@@ -13,9 +13,10 @@ use wasmtime::component::{Component, Linker};
 
 use crate::bindings::agent::AgentAdapterV1;
 use crate::bindings::agent::token_station::adapter::common as wit_common;
+use crate::instance::{AdapterWorld, InstanceHandle, call, instantiate};
 use crate::loader::{
-    Ctx, FORBIDDEN_FOR_AGENTS, LoadError, from_json, parse_error_envelope, parse_package,
-    read_package, to_json, trap_envelope,
+    Ctx, FORBIDDEN_FOR_AGENTS, LoadError, from_json, parse_package, read_package, to_json,
+    trap_envelope,
 };
 use crate::provider::NoSecrets;
 use crate::runtime::PluginRuntime;
@@ -30,12 +31,7 @@ use crate::runtime::PluginRuntime;
 pub struct AgentPlugin {
     runtime: PluginRuntime,
     manifest: AdapterManifest,
-    main: Mutex<InstanceHandle>,
-}
-
-struct InstanceHandle {
-    store: Store<Ctx>,
-    instance: AgentAdapterV1,
+    main: Mutex<InstanceHandle<AgentAdapterV1>>,
 }
 
 /// The host-facing result of [`AgentPlugin::match_inbound`]: whether the
@@ -93,7 +89,9 @@ impl AgentPlugin {
         let mut linker: Linker<Ctx> = Linker::new(runtime.engine());
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(LoadError::NotAnAdapter)?;
 
-        let mut handle = instantiate(runtime, component, &linker).map_err(LoadError::Probe)?;
+        let ctx = agent_ctx(runtime);
+        let mut handle: InstanceHandle<AgentAdapterV1> =
+            instantiate(runtime, component, &linker, ctx).map_err(LoadError::Probe)?;
         let reported = handle.call_metadata(runtime).map_err(LoadError::Probe)?;
         if !reported_identity_matches(&reported, &manifest) {
             return Err(LoadError::IdentityMismatch {
@@ -136,7 +134,7 @@ impl AgentPlugin {
     pub fn match_inbound(&self, request_head: &Value) -> AdapterResult<MatchOutcome> {
         let head_json = to_json(request_head)?;
         let mut guard = self.main.lock().expect("a poisoned adapter stays poisoned");
-        let handle: &mut InstanceHandle = &mut guard;
+        let handle: &mut InstanceHandle<AgentAdapterV1> = &mut guard;
         handle
             .store
             .set_epoch_deadline(self.runtime.deadline_ticks());
@@ -150,51 +148,31 @@ impl AgentPlugin {
             protocol: result.protocol,
         })
     }
-
-    fn call<T>(
-        &self,
-        operation: impl FnOnce(&mut InstanceHandle) -> wasmtime::Result<Result<T, String>>,
-    ) -> AdapterResult<T> {
-        let mut handle = self.main.lock().expect("a poisoned adapter stays poisoned");
-        handle
-            .store
-            .set_epoch_deadline(self.runtime.deadline_ticks());
-
-        match operation(&mut handle) {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(error_json)) => Err(parse_error_envelope(&error_json)),
-            Err(trap) => Err(trap_envelope(&trap)),
-        }
-    }
 }
 
-fn instantiate(
-    runtime: &PluginRuntime,
-    component: &Component,
-    linker: &Linker<Ctx>,
-) -> wasmtime::Result<InstanceHandle> {
-    // An agent adapter has no secrets to declare and no signer to reach; the
-    // credential fields of `Ctx` are inert because nothing links `host`.
-    let ctx = Ctx::new(
+/// The sandbox context an agent-world instance runs under: no secrets to
+/// declare and no signer to reach, since the agent world never links `host`.
+fn agent_ctx(runtime: &PluginRuntime) -> Ctx {
+    Ctx::new(
         runtime.limits().memory_bytes,
         std::collections::BTreeSet::new(),
         Arc::new(NoSecrets),
-    );
-    let mut store = Store::new(runtime.engine(), ctx);
-    store.limiter(|ctx| &mut ctx.limits);
-    store.set_epoch_deadline(runtime.deadline_ticks());
-
-    let instance = AgentAdapterV1::instantiate(&mut store, component, linker)?;
-    Ok(InstanceHandle { store, instance })
+    )
 }
 
-impl InstanceHandle {
-    fn call_metadata(&mut self, runtime: &PluginRuntime) -> wasmtime::Result<AdapterMetadata> {
-        self.store.set_epoch_deadline(runtime.deadline_ticks());
+impl AdapterWorld for AgentAdapterV1 {
+    fn instantiate_world(
+        store: &mut Store<Ctx>,
+        component: &Component,
+        linker: &Linker<Ctx>,
+    ) -> wasmtime::Result<Self> {
+        Self::instantiate(store, component, linker)
+    }
+
+    fn call_metadata(&self, store: &mut Store<Ctx>) -> wasmtime::Result<AdapterMetadata> {
         let reported = self
-            .instance
             .token_station_adapter_agent_adapter()
-            .call_metadata(&mut self.store)?;
+            .call_metadata(store)?;
         Ok(convert_metadata(reported))
     }
 }
@@ -218,7 +196,7 @@ impl AgentAdapter for AgentPlugin {
 
     fn normalize_inbound(&self, envelope: &AgentRequestEnvelope) -> AdapterResult<ChatRequest> {
         let envelope_json = to_json(envelope)?;
-        let out = self.call(|handle| {
+        let out = call(&self.runtime, &self.main, |handle| {
             handle
                 .instance
                 .token_station_adapter_agent_adapter()
@@ -229,7 +207,7 @@ impl AgentAdapter for AgentPlugin {
 
     fn extract_agent_hint(&self, envelope: &AgentRequestEnvelope) -> AdapterResult<Vec<AgentHint>> {
         let envelope_json = to_json(envelope)?;
-        let out = self.call(|handle| {
+        let out = call(&self.runtime, &self.main, |handle| {
             handle
                 .instance
                 .token_station_adapter_agent_adapter()
@@ -241,7 +219,7 @@ impl AgentAdapter for AgentPlugin {
     fn render_response(&self, response: &ChatResponse, context: &Value) -> AdapterResult<Value> {
         let response_json = to_json(response)?;
         let context_json = to_json(context)?;
-        let out = self.call(|handle| {
+        let out = call(&self.runtime, &self.main, |handle| {
             handle
                 .instance
                 .token_station_adapter_agent_adapter()
@@ -257,7 +235,7 @@ impl AgentAdapter for AgentPlugin {
     ) -> AdapterResult<Value> {
         let event_json = to_json(event)?;
         let context_json = to_json(context)?;
-        let out = self.call(|handle| {
+        let out = call(&self.runtime, &self.main, |handle| {
             handle
                 .instance
                 .token_station_adapter_agent_adapter()
@@ -269,7 +247,7 @@ impl AgentAdapter for AgentPlugin {
     fn map_inbound_error(&self, error: &ErrorEnvelope, context: &Value) -> AdapterResult<Value> {
         let error_json = to_json(error)?;
         let context_json = to_json(context)?;
-        let out = self.call(|handle| {
+        let out = call(&self.runtime, &self.main, |handle| {
             handle
                 .instance
                 .token_station_adapter_agent_adapter()
