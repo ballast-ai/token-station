@@ -16,6 +16,7 @@ use wasmtime::component::{Component, Linker};
 use crate::bindings::provider::ProviderAdapterV1;
 use crate::bindings::provider::token_station::adapter::common as wit_common;
 use crate::bindings::provider::token_station::adapter::host as wit_host;
+use crate::instance::{AdapterWorld, InstanceHandle, call, instantiate};
 use crate::loader::{
     Ctx, LoadError, from_json, parse_error_envelope, parse_package, read_package, to_json,
     trap_envelope,
@@ -76,13 +77,7 @@ pub struct ProviderPlugin {
     signer: Arc<dyn SecretSigner + Sync>,
     /// The instance regular calls go through. Streams get their own; see
     /// [`ProviderPlugin::stream_parser`].
-    main: Mutex<InstanceHandle>,
-}
-
-/// One instantiated component and its store.
-struct InstanceHandle {
-    store: Store<Ctx>,
-    instance: ProviderAdapterV1,
+    main: Mutex<InstanceHandle<ProviderAdapterV1>>,
 }
 
 impl ProviderPlugin {
@@ -132,8 +127,9 @@ impl ProviderPlugin {
         let linker = Arc::new(linker);
 
         // Gate 3: instantiate and check identity.
-        let mut handle = instantiate(runtime, &component, &linker, &manifest, &signer)
-            .map_err(LoadError::Probe)?;
+        let ctx = provider_ctx(runtime, &manifest, &signer);
+        let mut handle: InstanceHandle<ProviderAdapterV1> =
+            instantiate(runtime, &component, &linker, ctx).map_err(LoadError::Probe)?;
         let reported = handle.call_metadata(runtime).map_err(LoadError::Probe)?;
         if !reported_identity_matches(&reported, &manifest) {
             return Err(LoadError::IdentityMismatch {
@@ -157,57 +153,35 @@ impl ProviderPlugin {
     pub fn manifest(&self) -> &AdapterManifest {
         &self.manifest
     }
-
-    /// Runs one guest call with a fresh deadline, mapping a trap to the
-    /// adapter-shaped error the trait promises.
-    fn call<T>(
-        &self,
-        operation: impl FnOnce(&mut InstanceHandle) -> wasmtime::Result<Result<T, String>>,
-    ) -> AdapterResult<T> {
-        let mut handle = self.main.lock().expect("a poisoned adapter stays poisoned");
-        handle
-            .store
-            .set_epoch_deadline(self.runtime.deadline_ticks());
-
-        match operation(&mut handle) {
-            Ok(Ok(value)) => Ok(value),
-            // The adapter answered with its own ErrorEnvelope, as JSON.
-            Ok(Err(error_json)) => Err(parse_error_envelope(&error_json)),
-            // The adapter trapped: deadline, memory, panic. All the same to
-            // the caller — the adapter did not answer.
-            Err(trap) => Err(trap_envelope(&trap)),
-        }
-    }
 }
 
-/// Builds one instance with its own locked-down store.
-fn instantiate(
+/// Builds the sandbox context an instance of this world runs under: real
+/// declared secrets and a real signer, unlike the agent world's [`NoSecrets`].
+fn provider_ctx(
     runtime: &PluginRuntime,
-    component: &Component,
-    linker: &Linker<Ctx>,
     manifest: &AdapterManifest,
     signer: &Arc<dyn SecretSigner + Sync>,
-) -> wasmtime::Result<InstanceHandle> {
-    let ctx = Ctx::new(
+) -> Ctx {
+    Ctx::new(
         runtime.limits().memory_bytes,
         manifest.permissions.secrets.iter().cloned().collect(),
         Arc::clone(signer),
-    );
-    let mut store = Store::new(runtime.engine(), ctx);
-    store.limiter(|ctx| &mut ctx.limits);
-    store.set_epoch_deadline(runtime.deadline_ticks());
-
-    let instance = ProviderAdapterV1::instantiate(&mut store, component, linker)?;
-    Ok(InstanceHandle { store, instance })
+    )
 }
 
-impl InstanceHandle {
-    fn call_metadata(&mut self, runtime: &PluginRuntime) -> wasmtime::Result<AdapterMetadata> {
-        self.store.set_epoch_deadline(runtime.deadline_ticks());
+impl AdapterWorld for ProviderAdapterV1 {
+    fn instantiate_world(
+        store: &mut Store<Ctx>,
+        component: &Component,
+        linker: &Linker<Ctx>,
+    ) -> wasmtime::Result<Self> {
+        Self::instantiate(store, component, linker)
+    }
+
+    fn call_metadata(&self, store: &mut Store<Ctx>) -> wasmtime::Result<AdapterMetadata> {
         let reported = self
-            .instance
             .token_station_adapter_provider_adapter()
-            .call_metadata(&mut self.store)?;
+            .call_metadata(store)?;
         Ok(convert_metadata(reported))
     }
 }
@@ -232,7 +206,7 @@ impl ProviderAdapter for ProviderPlugin {
 
     fn model_capabilities(&self, config: &ProviderConfig) -> AdapterResult<Vec<ModelCapability>> {
         let config_json = to_json(config)?;
-        let out = self.call(|handle| {
+        let out = call(&self.runtime, &self.main, |handle| {
             handle
                 .instance
                 .token_station_adapter_provider_adapter()
@@ -248,7 +222,7 @@ impl ProviderAdapter for ProviderPlugin {
     ) -> AdapterResult<HttpRequestDescriptor> {
         let request_json = to_json(request)?;
         let config_json = to_json(config)?;
-        let out = self.call(|handle| {
+        let out = call(&self.runtime, &self.main, |handle| {
             handle
                 .instance
                 .token_station_adapter_provider_adapter()
@@ -259,7 +233,7 @@ impl ProviderAdapter for ProviderPlugin {
 
     fn parse_response(&self, parts: &HttpResponseParts) -> AdapterResult<ChatResponse> {
         let parts_json = to_json(parts)?;
-        let out = self.call(|handle| {
+        let out = call(&self.runtime, &self.main, |handle| {
             handle
                 .instance
                 .token_station_adapter_provider_adapter()
@@ -270,7 +244,7 @@ impl ProviderAdapter for ProviderPlugin {
 
     fn map_provider_error(&self, parts: &HttpResponseParts) -> AdapterResult<ErrorEnvelope> {
         let parts_json = to_json(parts)?;
-        let out = self.call(|handle| {
+        let out = call(&self.runtime, &self.main, |handle| {
             handle
                 .instance
                 .token_station_adapter_provider_adapter()
@@ -292,13 +266,8 @@ impl ProviderAdapter for ProviderPlugin {
                 ),
             });
         };
-        match instantiate(
-            &self.runtime,
-            &self.component,
-            &self.linker,
-            &self.manifest,
-            &self.signer,
-        ) {
+        let ctx = provider_ctx(&self.runtime, &self.manifest, &self.signer);
+        match instantiate::<ProviderAdapterV1>(&self.runtime, &self.component, &self.linker, ctx) {
             Ok(handle) => Box::new(WasmStreamParser {
                 runtime: self.runtime.clone(),
                 handle,
@@ -322,7 +291,7 @@ impl fmt::Debug for ProviderPlugin {
 /// One provider stream, backed by its own component instance.
 struct WasmStreamParser {
     runtime: PluginRuntime,
-    handle: InstanceHandle,
+    handle: InstanceHandle<ProviderAdapterV1>,
     _permit: crate::runtime::StreamPermit,
 }
 

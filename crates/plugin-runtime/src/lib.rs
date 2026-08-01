@@ -42,11 +42,12 @@
 
 mod agent;
 mod bindings;
+mod instance;
 mod loader;
 mod provider;
 mod runtime;
 
 pub use agent::{AgentPlugin, MatchOutcome};
-pub use loader::LoadError;
+pub use loader::{LoadError, UnreadableReason};
 pub use provider::{NoSecrets, ProviderPlugin, SecretSigner};
 pub use runtime::{PluginRuntime, RuntimeLimits};

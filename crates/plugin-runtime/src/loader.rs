@@ -87,6 +87,30 @@ impl WasiView for Ctx {
     }
 }
 
+/// Why a file `read_package` needed could not be read, kept typed rather than
+/// pre-formatted: a caller wanting to treat "missing" and "too large"
+/// differently (retry one, not the other) needs the distinction to survive
+/// past construction, not just show up in the `Display` text.
+#[derive(Debug)]
+pub enum UnreadableReason {
+    /// Opening, stat-ing, or reading the file failed at the OS level.
+    Io(std::io::Error),
+    /// The file is larger than the gate's limit for its kind.
+    TooLarge { limit: u64 },
+    /// `manifest.json`'s bytes are not valid UTF-8.
+    NotUtf8(std::string::FromUtf8Error),
+}
+
+impl fmt::Display for UnreadableReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "{error}"),
+            Self::TooLarge { limit } => write!(f, "file exceeds the {limit} byte limit"),
+            Self::NotUtf8(error) => write!(f, "{error}"),
+        }
+    }
+}
+
 /// Why a plugin package was refused at load.
 ///
 /// Ordered like the gates: a package that fails early is reported for the
@@ -95,7 +119,10 @@ impl WasiView for Ctx {
 pub enum LoadError {
     /// The package directory, `manifest.json` or `adapter.wasm` could not be
     /// read.
-    Unreadable { path: PathBuf, detail: String },
+    Unreadable {
+        path: PathBuf,
+        reason: UnreadableReason,
+    },
     /// `manifest.json` is not a manifest.
     ManifestSyntax(serde_json::Error),
     /// The manifest gate refused it.
@@ -119,8 +146,8 @@ pub enum LoadError {
 impl fmt::Display for LoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unreadable { path, detail } => {
-                write!(f, "cannot read `{}`: {detail}", path.display())
+            Self::Unreadable { path, reason } => {
+                write!(f, "cannot read `{}`: {reason}", path.display())
             }
             Self::ManifestSyntax(detail) => write!(f, "manifest.json is not a manifest: {detail}"),
             Self::Manifest(error) => write!(f, "manifest refused: {error}"),
@@ -161,24 +188,24 @@ pub(crate) fn read_package(
 ) -> Result<(AdapterManifest, Component), LoadError> {
     let manifest_path = dir.join("manifest.json");
     let manifest_bytes =
-        read_file_limited(&manifest_path, MAX_MANIFEST_BYTES).map_err(|error| {
+        read_file_limited(&manifest_path, MAX_MANIFEST_BYTES).map_err(|reason| {
             LoadError::Unreadable {
                 path: manifest_path.clone(),
-                detail: error,
+                reason,
             }
         })?;
     let manifest_source =
         String::from_utf8(manifest_bytes).map_err(|error| LoadError::Unreadable {
             path: manifest_path,
-            detail: error.to_string(),
+            reason: UnreadableReason::NotUtf8(error),
         })?;
     let manifest = gate_manifest(&manifest_source, expected_kind)?;
 
     let wasm_path = dir.join("adapter.wasm");
-    let wasm = read_file_limited(&wasm_path, MAX_COMPONENT_BYTES).map_err(|error| {
+    let wasm = read_file_limited(&wasm_path, MAX_COMPONENT_BYTES).map_err(|reason| {
         LoadError::Unreadable {
             path: wasm_path,
-            detail: error,
+            reason,
         }
     })?;
     let component = gate_component(runtime, &wasm, extra_forbidden)?;
@@ -186,18 +213,18 @@ pub(crate) fn read_package(
     Ok((manifest, component))
 }
 
-fn read_file_limited(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
-    let file = fs::File::open(path).map_err(|error| error.to_string())?;
-    let metadata = file.metadata().map_err(|error| error.to_string())?;
+fn read_file_limited(path: &Path, limit: u64) -> Result<Vec<u8>, UnreadableReason> {
+    let file = fs::File::open(path).map_err(UnreadableReason::Io)?;
+    let metadata = file.metadata().map_err(UnreadableReason::Io)?;
     if metadata.len() > limit {
-        return Err(format!("file exceeds the {limit} byte limit"));
+        return Err(UnreadableReason::TooLarge { limit });
     }
     let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
     file.take(limit + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
+        .map_err(UnreadableReason::Io)?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
-        return Err(format!("file exceeds the {limit} byte limit"));
+        return Err(UnreadableReason::TooLarge { limit });
     }
     Ok(bytes)
 }
@@ -314,6 +341,8 @@ pub(crate) fn from_json<T: for<'de> serde::Deserialize<'de>>(
 
 #[cfg(test)]
 mod tests {
+    use super::{UnreadableReason, read_file_limited};
+
     #[test]
     fn adapter_json_output_is_bounded_before_parsing() {
         let oversized = serde_json::to_string(&"x".repeat(16 * 1024 * 1024 + 1))
@@ -321,5 +350,27 @@ mod tests {
         let error = super::from_json::<String>(&oversized)
             .expect_err("a guest may not force an unbounded host allocation");
         assert!(error.message.contains("limit"), "{}", error.message);
+    }
+
+    /// A caller that wants to retry a missing file but not an oversized one
+    /// needs these to stay distinguishable variants, not two strings that
+    /// happen to read differently.
+    #[test]
+    fn a_missing_file_and_an_oversized_file_are_distinguishable_reasons() {
+        let missing = read_file_limited(std::path::Path::new("/does/not/exist"), 1024)
+            .expect_err("no such path");
+        assert!(matches!(missing, UnreadableReason::Io(_)), "{missing:?}");
+
+        let path = std::env::temp_dir().join(format!(
+            "token-station-loader-test-oversized-{}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, vec![0u8; 16]).expect("write test file");
+        let oversized = read_file_limited(&path, 8).expect_err("file is larger than the limit");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            matches!(oversized, UnreadableReason::TooLarge { limit: 8 }),
+            "{oversized:?}"
+        );
     }
 }

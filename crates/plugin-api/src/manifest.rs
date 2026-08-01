@@ -162,27 +162,6 @@ pub struct AdapterManifest {
 }
 
 impl AdapterManifest {
-    #[must_use]
-    pub fn new(
-        metadata: AdapterMetadata,
-        capabilities: BTreeSet<Capability>,
-        permissions: AdapterPermissions,
-        conformance: ConformanceSpec,
-    ) -> Self {
-        Self {
-            name: metadata.name,
-            version: metadata.version,
-            kind: metadata.kind,
-            api_version: metadata.api_version,
-            agent_protocols: Vec::new(),
-            agent_tools: Vec::new(),
-            providers: Vec::new(),
-            capabilities,
-            permissions,
-            conformance,
-        }
-    }
-
     /// The identity a loaded adapter must report back from `metadata()`.
     #[must_use]
     pub fn metadata(&self) -> AdapterMetadata {
