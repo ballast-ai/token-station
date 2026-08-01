@@ -74,4 +74,29 @@ for (const forbidden of [
   );
 }
 
+const pathComponent = wix.match(
+  /<Component Id="Path"[\s\S]*?<\/Component>/,
+)?.[0];
+assert.ok(pathComponent, "WiX template must define the main executable component");
+assert.equal(
+  /<File Id="Path"[^>]*KeyPath="yes"/.test(pathComponent),
+  false,
+  "a file under the per-user profile cannot be the component KeyPath",
+);
+assert.match(
+  pathComponent,
+  /<RegistryValue Root="HKCU"[\s\S]*?Name="Path Component"[\s\S]*?KeyPath="yes"/,
+  "the per-user main executable component must use an HKCU registry KeyPath",
+);
+
+const registryEntries = wix.match(
+  /<Component Id="RegistryEntries"[\s\S]*?<\/Component>/,
+)?.[0];
+assert.ok(registryEntries, "WiX template must define registry entries");
+assert.match(
+  registryEntries,
+  /<RemoveFolder[^>]*Directory="ProgramsFolder"[^>]*On="uninstall"/,
+  "the per-user Programs directory must have an uninstall RemoveFile-table entry",
+);
+
 console.log("Windows release configuration: PASS");
