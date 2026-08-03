@@ -279,7 +279,10 @@ describe("desktop station navigation", () => {
       expect(nav.getByRole("button", { name })).toBeInTheDocument();
     }
     expect(nav.queryByRole("button", { name: "日志" })).toBeNull();
-    expect(screen.getByTestId("revision-chain")).toHaveAccessibleName("已保存 revision 0；待应用；未运行");
+    const revisionChain = screen.getByTestId("revision-chain");
+    expect(revisionChain).toHaveAccessibleName("已保存 revision 0；待应用；未运行");
+    expect(screen.getByLabelText("系统摘要")).not.toContainElement(revisionChain);
+    expect(screen.getByRole("region", { name: "当前路由快照" })).toContainElement(revisionChain);
     expect(await screen.findByText(/成功率 91\.7% · P95 320ms/)).toBeInTheDocument();
     expect(getStatsMock).toHaveBeenCalledWith("24h", null);
   });
@@ -325,7 +328,10 @@ describe("desktop station navigation", () => {
 
     await openAgents(user);
     const agentNavigation = screen.getByRole("navigation", { name: "Agent 列表" });
-    expect(within(agentNavigation).getByRole("button", { name: "Claude Code" })).toHaveAttribute("aria-current", "page");
+    const claudeCodeButton = within(agentNavigation).getByRole("button", { name: "Claude Code" });
+    expect(claudeCodeButton).toHaveAttribute("aria-current", "page");
+    expect(claudeCodeButton.querySelector("svg")).toBeInTheDocument();
+    expect(claudeCodeButton.querySelector('[style*="background"]')).toBeNull();
     expect(screen.getByRole("heading", { name: "Claude Code", level: 2 })).toBeInTheDocument();
 
     await user.click(within(agentNavigation).getByRole("button", { name: "Codex" }));

@@ -103,7 +103,6 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             <span><Activity />{copy("Proxy status", "代理状态")}</span>
             <CardTitle><Badge variant={runtimeHealthy ? "default" : "secondary"}><i className={runtimeHealthy ? "healthy" : ""} />{runtimeHealthy ? copy("Running", "运行中") : copy("Stopped", "未运行")}</Badge></CardTitle>
             <dl><div><dt>Revision</dt><dd>{state.saved_revision}</dd></div><div><dt>{copy("Listen", "监听")}</dt><dd>{state.serve.listen}</dd></div></dl>
-            <RevisionChain state={state} />
           </CardHeader>
         </Card>
         <Card size="sm" className="overview-request-card">
@@ -119,8 +118,8 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
       </section>
 
       <section className="overview-main-grid">
-        <Card>
-          <CardHeader><CardTitle>{copy("Current routing snapshot", "当前路由快照")}</CardTitle><Badge variant="secondary">rev {state.saved_revision}</Badge></CardHeader>
+        <Card role="region" aria-label={copy("Current routing snapshot", "当前路由快照")}>
+          <CardHeader><CardTitle>{copy("Current routing snapshot", "当前路由快照")}</CardTitle><RevisionChain state={state} /></CardHeader>
           <CardContent className="overview-route-list">
             {(["high", "mid", "low"] as TierSlot[]).map((slot) => {
               const tier = state.tiers[slot];
