@@ -128,7 +128,10 @@ describe("UsageRequestLog", () => {
     );
     await screen.findByText("请求日志");
 
-    await user.selectOptions(screen.getByRole("combobox", { name: "请求状态" }), "error");
+    const statusFilter = screen.getByRole("combobox", { name: "请求状态" });
+    expect(statusFilter.tagName).toBe("BUTTON");
+    await user.click(statusFilter);
+    await user.click(await screen.findByRole("option", { name: "失败" }));
     await waitFor(() => expect(getRequestReceipts).toHaveBeenLastCalledWith({
       since: "7d",
       agentId: "codex",

@@ -1,6 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { getEgress, SettingsView, StateView, setSettings, type EgressView } from "../api";
 import { LanguageBoundary, useLanguage } from "../components/LanguageProvider";
+import { Button } from "../components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Input } from "../components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select";
+import { Switch } from "../components/ui/switch";
 
 function settingsFailure(caught: unknown): { field: string; message: string } {
   if (caught && typeof caught === "object") {
@@ -78,23 +89,22 @@ function SettingsContent({
   };
 
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <h2>{t("general.title")}</h2>
+    <Card className="settings-card general-settings-card">
+      <CardHeader className="panel-head">
+        <CardTitle><h2>{t("general.title")}</h2></CardTitle>
         <p className="sub">{t("general.description")}</p>
-      </div>
+      </CardHeader>
+      <CardContent className="settings-card-content">
 
       {err && <div className="banner err" role="alert">{err}</div>}
       {ok && <div className="banner ok">{ok}</div>}
 
-      <div className="setting-row">
-        <label className="switch">
-          <input type="checkbox" checked={auth} onChange={(e) => setAuth(e.target.checked)} />
-          <span>
+      <div className="setting-row setting-toggle-row">
+        <span id="settings-auth-label" className="setting-toggle-copy">
             <b>{t("general.auth")}</b>(server.auth)
             <em>{t("general.authDescription")}</em>
-          </span>
-        </label>
+        </span>
+        <Switch aria-labelledby="settings-auth-label" checked={auth} onCheckedChange={setAuth} />
       </div>
 
       <div className="setting-row egress-settings">
@@ -104,17 +114,22 @@ function SettingsContent({
         </div>
         <label>
           {t("general.egressMode")}
-          <select aria-label={t("general.egressMode")} value={egressMode} onChange={(event) => setEgressMode(event.target.value as typeof egressMode)}>
-            <option value="direct">{t("general.direct")}</option>
-            <option value="http">HTTP CONNECT</option>
-            <option value="socks5">SOCKS5</option>
-          </select>
+          <Select value={egressMode} onValueChange={(value) => setEgressMode(value as typeof egressMode)}>
+            <SelectTrigger aria-label={t("general.egressMode")}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="direct">{t("general.direct")}</SelectItem>
+              <SelectItem value="http">HTTP CONNECT</SelectItem>
+              <SelectItem value="socks5">SOCKS5</SelectItem>
+            </SelectContent>
+          </Select>
         </label>
         {egressMode !== "direct" && (
           <>
             <label>
               {t("general.proxyUrl")}
-              <input
+              <Input
                 ref={proxyUrlRef}
                 aria-label={t("general.proxyUrl")}
                 aria-invalid={errorField === "egress_proxy_url"}
@@ -133,9 +148,9 @@ function SettingsContent({
                 <small id="egress-proxy-url-error" className="error-text">{err}</small>
               )}
             </label>
-            <label>{t("general.noProxy")}<input aria-label={t("general.noProxy")} value={noProxy} onChange={(event) => setNoProxy(event.target.value)} placeholder="localhost, *.corp.internal" /></label>
-            <label>{t("general.proxyUsername")}<input aria-label={t("general.proxyUsername")} value={proxyUsername} onChange={(event) => setProxyUsername(event.target.value)} /></label>
-            <label>{t("general.authSlot")}<input aria-label={t("general.authSlotLabel")} value={proxySlot} onChange={(event) => setProxySlot(event.target.value)} placeholder="corporate_proxy_password" /></label>
+            <label>{t("general.noProxy")}<Input aria-label={t("general.noProxy")} value={noProxy} onChange={(event) => setNoProxy(event.target.value)} placeholder="localhost, *.corp.internal" /></label>
+            <label>{t("general.proxyUsername")}<Input aria-label={t("general.proxyUsername")} value={proxyUsername} onChange={(event) => setProxyUsername(event.target.value)} /></label>
+            <label>{t("general.authSlot")}<Input aria-label={t("general.authSlotLabel")} value={proxySlot} onChange={(event) => setProxySlot(event.target.value)} placeholder="corporate_proxy_password" /></label>
             {proxySlot && <div className="inline-note mono">{t("general.credentialCommand", { slot: proxySlot })}</div>}
           </>
         )}
@@ -160,20 +175,18 @@ function SettingsContent({
         )}
       </div>
 
-      <div className="setting-row">
-        <label className="switch">
-          <input type="checkbox" checked={metrics} onChange={(e) => setMetrics(e.target.checked)} />
-          <span>
+      <div className="setting-row setting-toggle-row">
+        <span id="settings-metrics-label" className="setting-toggle-copy">
             <b>{t("general.metrics")}</b>(data.metrics)
             <em>{t("general.metricsDescription")}</em>
-          </span>
-        </label>
+        </span>
+        <Switch aria-labelledby="settings-metrics-label" checked={metrics} onCheckedChange={setMetrics} />
       </div>
 
       <div className="panel-foot">
-        <button className="btn primary" disabled={!dirty} onClick={save}>
+        <Button disabled={!dirty} onClick={save}>
           {t("general.save")}
-        </button>
+        </Button>
         {serveRunning && dirty && <span className="foot-hint">{t("general.restartHint")}</span>}
       </div>
 
@@ -189,7 +202,8 @@ function SettingsContent({
         <div className="kv-k">{t("general.coreVersion")}</div>
         <div className="kv-v mono">{settings.version}</div>
       </div>
-    </section>
+      </CardContent>
+    </Card>
   );
 }
 

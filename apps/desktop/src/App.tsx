@@ -41,17 +41,21 @@ import {
   useLanguage,
   type Language,
 } from "./components/LanguageProvider";
+import { ThemeBoundary } from "./components/ThemeProvider";
 import AddProviderPage, {
   type FreeCatalogFilters,
   type ProviderCatalogMode,
   type RegularCatalogFilters,
 } from "./pages/AddProviderPage";
+import AgentsPage from "./pages/AgentsPage";
 import AgentRoutePage from "./pages/AgentRoutePage";
 import FreeProviderConfigPage from "./pages/FreeProviderConfigPage";
 import HomePage from "./pages/HomePage";
+import OverviewPage from "./pages/OverviewPage";
+import ProvidersPage from "./pages/ProvidersPage";
 import QuotaUsagePage from "./pages/QuotaUsagePage";
 import SettingsHub from "./pages/SettingsHub";
-import Stats from "./pages/Stats";
+import UsageWorkspace from "./pages/UsageWorkspace";
 import "./App.css";
 
 function errorText(error: unknown): string {
@@ -95,7 +99,7 @@ export function configSaveStatus(state: StateView, language: Language = "en"): s
 function StationApp() {
   const { language, copy } = useLanguage();
   const [state, setState] = useState<StateView | null>(null);
-  const [view, setView] = useState<AppView>("home");
+  const [view, setView] = useState<AppView>("overview");
   const [hiddenAgentIds, setHiddenAgentIds] = useState<Set<string>>(readHiddenAgentIds);
   const hiddenAgentIdsRef = useRef(hiddenAgentIds);
   const [registry, setRegistry] = useState<AgentUiMetadataView[]>([]);
@@ -383,13 +387,13 @@ function StationApp() {
   };
 
   const navigateBack = () => {
-    const previous = viewHistoryRef.current.pop() ?? "home";
+    const previous = viewHistoryRef.current.pop() ?? "overview";
     if (
       previous.startsWith("agent:")
       && hiddenAgentIds.has(previous.slice("agent:".length))
     ) {
       viewHistoryRef.current = [];
-      setView("home");
+      setView("overview");
     } else {
       setView(previous);
     }
@@ -428,9 +432,10 @@ function StationApp() {
   }
 
   const agentId = view.startsWith("agent:") ? view.slice("agent:".length) : null;
-  const metadata = agentId ? orderedRegistry.find((item) => item.agent_id === agentId) : undefined;
-  const agent = agentId ? agents.find((item) => item.metadata.agent_id === agentId) : undefined;
-  const route = agentId ? (state.agent_routes?.[agentId] ?? emptyAgentRoute(state)) : undefined;
+  const selectedAgentId = agentId ?? (view === "agents" ? visibleRegistry[0]?.agent_id : undefined);
+  const metadata = selectedAgentId ? orderedRegistry.find((item) => item.agent_id === selectedAgentId) : undefined;
+  const agent = selectedAgentId ? agents.find((item) => item.metadata.agent_id === selectedAgentId) : undefined;
+  const route = selectedAgentId ? (state.agent_routes?.[selectedAgentId] ?? emptyAgentRoute(state)) : undefined;
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
   const saveStatus = configSaveStatus(state, language);
 
@@ -457,8 +462,6 @@ function StationApp() {
       agents={agents}
       scanBusy={scanBusy}
       commandBusy={serveBusy || busy || freeProviderBusy}
-      routingMode={agentId && route ? route.routing_mode : state.routing_mode}
-      onSetRoutingMode={(mode) => void run(() => setRoutingMode(mode, agentId ?? undefined))}
       onNavigate={navigate}
       onRescan={() => void rescanAgents()}
       onToggleServe={() => void toggleServe()}
@@ -472,19 +475,26 @@ function StationApp() {
       {error && <div className="banner err global-banner">{error}</div>}
       {state.serve.error && <div className="banner err global-banner">{state.serve.error}</div>}
 
+      {view === "overview" && (
+        <OverviewPage
+          state={state}
+          registry={visibleRegistry}
+          agents={agents}
+          onNavigate={navigate}
+        />
+      )}
+
       {view === "home" && (
         <HomePage
           providers={state.providers}
-          deletedProviders={state.deleted_providers ?? []}
-          providerRecoveryError={state.provider_recovery_error ?? null}
           tiers={state.tiers}
           profiles={state.profiles ?? []}
           routingMode={state.routing_mode}
+          onSetRoutingMode={(mode) => void run(() => setRoutingMode(mode))}
           quotaAccounts={state.quota_accounts ?? []}
           onSaveQuota={saveQuota}
           onSaveQuotaPlan={saveQuotaPlan}
           onViewQuotaUsage={() => navigate("quota-usage")}
-          serveRunning={runtimeHealthy}
           busy={busy}
           applying={state.serve.phase === "starting"}
           configError={state.config_error}
@@ -520,11 +530,61 @@ function StationApp() {
                 )
               : copy("All Agents now follow Home", "全部 Agent 已恢复跟随主页"),
           )}
-          onRemoveProvider={(name) => void run(
+        />
+      )}
+
+      {(view === "agents" || agentId) && (
+        <AgentsPage
+          registry={visibleRegistry}
+          agents={agents}
+          selectedAgentId={selectedAgentId}
+          scanBusy={scanBusy}
+          onRescan={() => void rescanAgents()}
+          onOpenAgent={(id) => navigate(`agent:${id}`)}
+        >
+          {metadata && route && (
+            <AgentRoutePage
+              key={metadata.agent_id}
+              metadata={metadata}
+              agent={agent}
+              route={route}
+              profiles={state.profiles ?? []}
+              providers={state.providers}
+              quotaAccounts={state.quota_accounts ?? []}
+              serveRunning={runtimeHealthy}
+              applying={state.serve.phase === "starting"}
+              onStateChange={showState}
+              onRescan={rescanAgents}
+              onSaveQuota={saveQuota}
+              onSaveQuotaPlan={saveQuotaPlan}
+              onViewQuotaUsage={() => navigate("quota-usage")}
+              onSetRoutingMode={(mode) => void run(() => setRoutingMode(mode, metadata.agent_id))}
+              embedded
+            />
+          )}
+          {!metadata && (
+            <section className="panel agent-master-empty">
+              <div className="panel-head">
+                <h2>{copy("No Agent selected", "未选择 Agent")}</h2>
+                <p className="sub">{copy("Choose a visible Agent to manage its connection and route.", "请选择一个可见 Agent 管理接入和路由。")}</p>
+              </div>
+            </section>
+          )}
+        </AgentsPage>
+      )}
+
+      {view === "providers" && (
+        <ProvidersPage
+          providers={state.providers}
+          deletedProviders={state.deleted_providers ?? []}
+          recoveryError={state.provider_recovery_error ?? null}
+          serveRunning={runtimeHealthy}
+          busy={busy}
+          onRemove={(name) => void run(
             () => removeProvider(name),
             copy("Provider deleted", "供应商已删除"),
           )}
-          onRestoreProvider={(name) => void run(
+          onRestore={(name) => void run(
             () => restoreProvider(name),
             copy("Provider restored from the recycle bin", "供应商已从回收站恢复"),
           )}
@@ -532,40 +592,12 @@ function StationApp() {
         />
       )}
 
-      {metadata && route && (
-        <AgentRoutePage
-          // Key by agent_id and remount when the Agent changes. Per-Agent transient state, such as first-connection cards
-          // notices and selected installations do not leak to another Agent page.
-          key={metadata.agent_id}
-          metadata={metadata}
-          agent={agent}
-          route={route}
-          profiles={state.profiles ?? []}
-          providers={state.providers}
-          quotaAccounts={state.quota_accounts ?? []}
-          serveRunning={runtimeHealthy}
-          applying={state.serve.phase === "starting"}
-          onStateChange={showState}
-          onRescan={rescanAgents}
-          onSaveQuota={saveQuota}
-          onSaveQuotaPlan={saveQuotaPlan}
-          onViewQuotaUsage={() => navigate("quota-usage")}
+      {(view === "usage" || view === "logs") && (
+        <UsageWorkspace
+          section={view === "logs" ? "logs" : "overview"}
+          onSectionChange={(section) => navigate(section === "logs" ? "logs" : "usage")}
         />
       )}
-
-      {agentId && !metadata && (
-        <section className="panel">
-          <div className="panel-head">
-            <h2>{copy("Unknown Agent", "未知 Agent")}</h2>
-            <p className="sub">{copy(
-              "This Agent is not in the current Registry support list.",
-              "该 Agent 不在当前 Registry 的受支持列表中。",
-            )}</p>
-          </div>
-        </section>
-      )}
-
-      {view === "usage" && <Stats onBack={navigateBack} />}
       {view === "quota-usage" && (
         <QuotaUsagePage providers={state.providers} onBack={navigateBack} />
       )}
@@ -577,7 +609,6 @@ function StationApp() {
           hiddenAgentIds={hiddenAgentIds}
           onAgentVisibilityChange={setAgentVisible}
           onSaved={showState}
-          onBack={navigateBack}
         />
       )}
       {view === "add-provider" && (
@@ -634,7 +665,9 @@ function StationApp() {
 export default function App() {
   return (
     <LanguageBoundary>
-      <StationApp />
+      <ThemeBoundary>
+        <StationApp />
+      </ThemeBoundary>
     </LanguageBoundary>
   );
 }

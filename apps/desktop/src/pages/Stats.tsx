@@ -13,7 +13,6 @@ import {
 import PricingEditor from "../components/PricingEditor";
 import PageBackButton from "../components/PageBackButton";
 import CompactCombobox from "../components/CompactCombobox";
-import UsageRequestLog from "../components/UsageRequestLog";
 import UsageTrendChart, { type UsageTrendRange } from "../components/UsageTrendChart";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 
@@ -160,7 +159,7 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
   );
 }
 
-export default function Stats({ onBack }: { onBack?: () => void }) {
+export default function Stats({ onBack, embedded = false }: { onBack?: () => void; embedded?: boolean }) {
   const { language, copy } = useLocalizedCopy();
   const sinceOptions = [
     { value: "24h", label: copy("Last 24 hours", "近 24 小时") },
@@ -187,7 +186,6 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [receiptRefreshKey, setReceiptRefreshKey] = useState(0);
   const requestGeneration = useRef(0);
   const dashboardInFlight = useRef(false);
   const dashboardQueued = useRef(false);
@@ -284,7 +282,6 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
       } else if (modelFilter && !nextModels.includes(modelFilter)) {
         setModelFilter("");
       }
-      setReceiptRefreshKey((value) => value + 1);
     } catch (error) {
       if (dashboardMounted.current && generation === requestGeneration.current) setErr(String(error));
     } finally {
@@ -391,8 +388,8 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
   const visibleModels = useMemo(() => models, [models]);
 
   return (
-    <section className="usage-page">
-      <header className="usage-page-head">
+    <section className={`usage-page ${embedded ? "usage-page-embedded" : ""}`}>
+      {!embedded && <header className="usage-page-head">
         <div>
           {onBack && <PageBackButton onClick={onBack} />}
           <span className="usage-eyebrow">LOCAL RECEIPT LEDGER</span>
@@ -402,7 +399,7 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
             "查看 AI 模型的消耗、成本与稳定性。只聚合本地请求元数据，不含 prompt 或 response 内容。",
           )}</p>
         </div>
-      </header>
+      </header>}
 
       <div className="usage-toolbar" aria-label={copy("Usage filters", "用量筛选")}>
         <div className="usage-filter-field">
@@ -598,13 +595,6 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
             </div>
           </section>
 
-          <UsageRequestLog
-            since={since}
-            agentId={agentFilter}
-            upstream={upstreamFilter}
-            model={modelFilter}
-            refreshKey={receiptRefreshKey}
-          />
         </>
       )}
 

@@ -43,8 +43,13 @@ import {
   Zhipu,
 } from "@lobehub/icons";
 
-/** Each lobehub icon has a colored `.Avatar` variant with a brand-color rounded block and logo. */
-type BrandIcon = { Avatar: ComponentType<{ size: number }> };
+type BrandGlyph = ComponentType<{ size: number }>;
+
+/** Base lobehub icons render directly; most brands also expose `.Color`, and all expose `.Avatar`. */
+type BrandIcon = BrandGlyph & {
+  Avatar: BrandGlyph;
+  Color?: BrandGlyph;
+};
 
 // Map provider preset IDs to brand icons. Regional and plan suffixes share a brand.
 const PROVIDER_ICONS: Record<string, BrandIcon> = {
@@ -147,11 +152,24 @@ export function ProviderIcon({ id, label, size = 28 }: { id: string; label: stri
   return <Fallback text={label.slice(0, 1).toUpperCase()} size={size} />;
 }
 
-/** Agent brand logo. Prefer bundled bitmaps, then @lobehub, then a `fallback` text block. */
+/** Agent brand logo using the full mark instead of a black avatar that shrinks it into a corner. */
 export function AgentIcon({ id, fallback, size = 24 }: { id: string; fallback: string; size?: number }) {
   const image = AGENT_IMAGES[id];
-  if (image) return <BrandImage src={image} fallback={fallback} size={size} />;
   const Icon = AGENT_ICONS[id];
-  if (Icon) return <Icon.Avatar size={size} />;
-  return <Fallback text={fallback} size={size} />;
+  const Glyph = Icon ? (Icon.Color ?? Icon) : null;
+  return (
+    <span
+      className="agent-brand-glyph"
+      data-agent-brand={id}
+      style={{ width: size, height: size }}
+    >
+      {image ? (
+        <BrandImage src={image} fallback={fallback} size={size} />
+      ) : Glyph ? (
+        <Glyph size={size} />
+      ) : (
+        <Fallback text={fallback} size={size} />
+      )}
+    </span>
+  );
 }

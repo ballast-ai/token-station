@@ -7,6 +7,13 @@ import {
 } from "../api";
 import { ReceiptDetails } from "./RecentReceipts";
 import { useLocalizedCopy } from "./LanguageProvider";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "./ui/select";
 
 const PAGE_SIZE = 20;
 
@@ -156,18 +163,26 @@ export default function UsageRequestLog({
           )}</p>
         </div>
         <div className="usage-log-tools">
-          <label>
+          <div className="usage-log-filter">
             <span>{copy("Status", "状态")}</span>
-            <select
-              aria-label={copy("Request status", "请求状态")}
-              value={status}
-              onChange={(event) => setStatus(event.target.value as typeof status)}
+            <Select
+              value={status || "all"}
+              onValueChange={(next) => setStatus(next === "all" ? "" : (next as typeof status))}
             >
-              <option value="">{copy("All statuses", "全部状态")}</option>
-              <option value="success">{copy("Success", "成功")}</option>
-              <option value="error">{copy("Error", "失败")}</option>
-            </select>
-          </label>
+              <SelectTrigger
+                className="usage-log-status-select"
+                size="sm"
+                aria-label={copy("Request status", "请求状态")}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                <SelectItem value="all">{copy("All statuses", "全部状态")}</SelectItem>
+                <SelectItem value="success">{copy("Success", "成功")}</SelectItem>
+                <SelectItem value="error">{copy("Error", "失败")}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
           <strong>{range}</strong>
         </div>
       </header>

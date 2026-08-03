@@ -22,6 +22,7 @@ import {
 import TierRouteEditor from "../components/TierRouteEditor";
 import InstallationPicker from "../components/InstallationPicker";
 import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
+import RoutingModeSelector from "../components/RoutingModeSelector";
 import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 
@@ -44,6 +45,8 @@ interface AgentRoutePageProps {
     unit: "tokens" | "requests",
   ) => void;
   onViewQuotaUsage: () => void;
+  onSetRoutingMode?: (mode: "tiered" | "quota_first") => void;
+  embedded?: boolean;
 }
 
 /** Per-Agent key recording that connection changes were shown; localStorage makes it appear only once. */
@@ -166,6 +169,8 @@ export default function AgentRoutePage({
   onSaveQuota,
   onSaveQuotaPlan,
   onViewQuotaUsage,
+  onSetRoutingMode = () => {},
+  embedded = false,
 }: AgentRoutePageProps) {
   const { copy } = useLocalizedCopy();
   const [selectedPath, setSelectedPath] = useState("");
@@ -315,7 +320,7 @@ export default function AgentRoutePage({
   };
 
   return (
-    <div className="page-stack agent-route-page">
+    <div className={`page-stack agent-route-page ${embedded ? "agent-route-embedded" : ""}`}>
       <header className="agent-route-hero panel">
         <div className="agent-identity">
           <span className="agent-large-mark" aria-hidden="true">
@@ -327,7 +332,7 @@ export default function AgentRoutePage({
           </span>
           <div>
             <span className="eyebrow">AGENT ROUTE</span>
-            <h1>{metadata.display_name}</h1>
+            {embedded ? <h2>{metadata.display_name}</h2> : <h1>{metadata.display_name}</h1>}
           </div>
         </div>
         <div className="agent-connect-box">
@@ -423,6 +428,13 @@ export default function AgentRoutePage({
       )}</div>}
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner err">{error}</div>}
+
+      <RoutingModeSelector
+        value={route.routing_mode}
+        disabled={busy}
+        agent
+        onValueChange={onSetRoutingMode}
+      />
 
       {route.routing_mode === "quota_first" ? (
         <QuotaPriorityPanel

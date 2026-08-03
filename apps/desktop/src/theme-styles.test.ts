@@ -1,10 +1,7 @@
-// @ts-expect-error Vitest runs this regression test in Node; the browser app intentionally omits Node types.
 import { readFileSync } from "node:fs";
-// @ts-expect-error Vitest runs this regression test in Node; the browser app intentionally omits Node types.
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-// @ts-expect-error process is a Node.js global in the Vitest runtime.
 const appCss = readFileSync(resolve(process.cwd(), "src/App.css"), "utf8");
 
 describe("retained page theme styles", () => {

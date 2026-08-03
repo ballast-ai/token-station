@@ -76,6 +76,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 
+export function ThemeBoundary({ children }: { children: ReactNode }) {
+  const value = useContext(ThemeContext);
+  if (value) return children;
+  return <ThemeProvider>{children}</ThemeProvider>;
+}
+
 export function useTheme(): ThemeContextValue {
   const value = useContext(ThemeContext);
   if (!value) throw new Error("useTheme must be used within ThemeProvider");
