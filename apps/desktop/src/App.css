@@ -3813,18 +3813,18 @@ pre.block {
   align-items: center;
   gap: 12px;
 }
-.usage-log-tools label {
+.usage-log-filter {
   display: flex;
   align-items: center;
   gap: 6px;
   color: var(--muted);
   font-size: 9.5px;
 }
-.usage-log-tools select {
-  min-height: 28px;
-  padding: 0 25px 0 8px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
+
+.usage-log-tools [data-slot="select-trigger"].usage-log-status-select {
+  min-width: 116px;
+  height: 28px;
+  border-color: var(--line-strong);
   color: var(--ink);
   background: var(--surface-2);
   font-size: 10px;
@@ -5362,18 +5362,25 @@ pre.block {
   font: 9.5px "IBM Plex Mono", monospace;
 }
 
-.overview-cost {
+.overview-cost-value {
+  color: var(--success);
+  font-weight: 700;
+  letter-spacing: -.025em;
+}
+
+.overview-request-count {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: var(--success);
+  color: var(--ink);
   font-size: 12px;
   font-weight: 600;
 }
 
-.overview-cost svg {
+.overview-request-count svg {
   width: 14px;
   height: 14px;
+  color: var(--signal);
 }
 
 .overview-main-grid {
