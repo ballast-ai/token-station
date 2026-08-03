@@ -90,11 +90,6 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             "代理运行状态、当前路由、请求与成本，一屏看清。",
           )}</p>
         </div>
-        <div className="overview-heading-actions">
-          <Button size="sm" onClick={() => onNavigate("providers")}>
-            <Boxes />{copy("Manage providers", "管理供应商")}
-          </Button>
-        </div>
       </header>
 
       <section className="overview-metrics" aria-label={copy("System summary", "系统摘要")}>
@@ -107,9 +102,9 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
         </Card>
         <Card size="sm" className="overview-request-card">
           <CardHeader>
-            <span><Clock3 />{copy("Requests today", "今日请求")}</span>
-            <CardTitle>{stats?.total.requests ?? "—"}</CardTitle>
-            <strong className="overview-cost"><WalletCards />{requestCost ?? (stats ? copy("Cost unpriced", "成本未定价") : "—")}</strong>
+            <span><WalletCards />{copy("Cost today", "今日成本")}</span>
+            <CardTitle className="overview-cost-value">{requestCost ?? (stats ? copy("Cost unpriced", "成本未定价") : "—")}</CardTitle>
+            <strong className="overview-request-count"><Clock3 />{stats ? copy(`${stats.total.requests} requests`, `${stats.total.requests} 次请求`) : "—"}</strong>
             <p>{statsSummary} · {copy("rolling 24h", "近 24 小时口径")}</p>
           </CardHeader>
         </Card>
@@ -135,7 +130,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
           </CardContent>
         </Card>
         <Card>
-          <CardHeader><CardTitle>{copy("Next actions", "下一步处理")}</CardTitle></CardHeader>
+          <CardHeader><CardTitle>{copy("Shortcuts", "快捷键")}</CardTitle></CardHeader>
           <CardContent className="overview-actions-list">
             <button type="button" onClick={() => onNavigate("agents")}><Bot /><span><strong>{copy("Review Agent connections", "检查 Agent 接入")}</strong><small>{copy(`${pendingAgents} detected Agents are not managed`, `${pendingAgents} 个已检测 Agent 尚未接管`)}</small></span></button>
             <button type="button" onClick={() => onNavigate("usage")}><Clock3 /><span><strong>{copy("Review local usage", "查看本地用量")}</strong><small>{copy("Requests, reliability, tokens, and cost", "请求、成功率、Token 与成本")}</small></span></button>

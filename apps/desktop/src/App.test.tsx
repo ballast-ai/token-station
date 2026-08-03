@@ -287,7 +287,7 @@ describe("desktop station navigation", () => {
     expect(getStatsMock).toHaveBeenCalledWith("24h", null);
   });
 
-  it("shows request cost on Overview without duplicating the Agent rescan action", async () => {
+  it("makes cost the primary Overview metric and keeps only shortcut navigation", async () => {
     getStatsMock.mockResolvedValueOnce({
       ...statsFixture,
       total: {
@@ -300,8 +300,14 @@ describe("desktop station navigation", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("今日请求")).toBeInTheDocument();
-    expect(await screen.findByText("$2.34")).toBeInTheDocument();
+    const systemSummary = await screen.findByRole("region", { name: "系统摘要" });
+    const costLabel = await within(systemSummary).findByText("今日成本");
+    const costCard = costLabel.closest('[data-slot="card"]');
+    expect(costCard).toHaveTextContent("今日成本$2.3412 次请求");
+    expect(within(systemSummary).queryByText("今日请求")).toBeNull();
+    expect(screen.getByText("快捷键")).toBeInTheDocument();
+    expect(screen.queryByText("下一步处理")).toBeNull();
+    expect(screen.queryByRole("button", { name: "管理供应商" })).toBeNull();
     expect(screen.queryByRole("button", { name: "重新扫描 Agent" })).toBeNull();
     expect(screen.getByRole("button", { name: /启动代理.*127\.0\.0\.1:8787/ })).toBeInTheDocument();
   });
