@@ -9,6 +9,7 @@ import TierRouteEditor from "../components/TierRouteEditor";
 import TierKeywords from "../components/TierKeywords";
 import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import { useLocalizedCopy } from "../components/LanguageProvider";
+import RoutingModeSelector from "../components/RoutingModeSelector";
 
 interface HomePageProps {
   providers: ProviderView[];
@@ -16,6 +17,7 @@ interface HomePageProps {
   keywords: Record<TierSlot, string[]>;
   profiles: string[];
   routingMode: "tiered" | "quota_first";
+  onSetRoutingMode: (mode: "tiered" | "quota_first") => void;
   quotaAccounts: QuotaAccount[];
   onSaveQuota: (accounts: QuotaAccount[]) => void;
   onSaveQuotaPlan: (
@@ -47,6 +49,7 @@ export default function HomePage({
   keywords,
   profiles,
   routingMode,
+  onSetRoutingMode,
   quotaAccounts,
   onSaveQuota,
   onSaveQuotaPlan,
@@ -111,6 +114,12 @@ export default function HomePage({
           )}</p>
         </div>
       </header>
+
+      <RoutingModeSelector
+        value={routingMode}
+        disabled={busy}
+        onValueChange={onSetRoutingMode}
+      />
 
       {routingMode === "quota_first" ? (
         <QuotaPriorityPanel

@@ -270,20 +270,21 @@ it("renders a supported virtual Agent entirely from registry metadata", async ()
 });
 
 describe("desktop station navigation", () => {
-  it("opens on Overview and exposes the seven primary desktop destinations", async () => {
+  it("opens on Overview and exposes the six primary desktop destinations", async () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "系统概览" })).toBeInTheDocument();
     const nav = within(screen.getByLabelText("主导航"));
-    for (const name of ["概览", "路由", "Agent", "供应商", "用量", "日志", "设置"]) {
+    for (const name of ["概览", "路由", "Agent", "供应商", "用量", "设置"]) {
       expect(nav.getByRole("button", { name })).toBeInTheDocument();
     }
+    expect(nav.queryByRole("button", { name: "日志" })).toBeNull();
     expect(screen.getByTestId("revision-chain")).toHaveAccessibleName("已保存 revision 0；待应用；未运行");
     expect(await screen.findByText("成功率 91.7% · P95 320ms")).toBeInTheDocument();
     expect(getStatsMock).toHaveBeenCalledWith("24h", null);
   });
 
-  it("opens routing, Agent, provider, and request-log workspaces from primary navigation", async () => {
+  it("opens request logs as a secondary view inside Usage", async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -291,12 +292,55 @@ describe("desktop station navigation", () => {
     await openAgents(user);
     await user.click(navigation().getByRole("button", { name: "供应商" }));
     expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
-    await user.click(navigation().getByRole("button", { name: "日志" }));
+    await user.click(navigation().getByRole("button", { name: "用量" }));
+    const usageNavigation = await screen.findByRole("tablist", { name: "用量视图" });
+    await user.click(within(usageNavigation).getByRole("tab", { name: "请求日志" }));
     expect(await screen.findByRole("heading", { name: "请求日志", level: 1 })).toBeInTheDocument();
     expect(await screen.findByText("当前筛选范围没有请求日志。")).toBeInTheDocument();
+    expect(navigation().getByRole("button", { name: "用量" })).toHaveAttribute("aria-current", "page");
   });
 
-  it("keeps the real global routing-mode switch in the redesigned shell", async () => {
+  it("keeps the Agent list visible while editing the selected Agent on the right", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await openAgents(user);
+    const agentNavigation = screen.getByRole("navigation", { name: "Agent 列表" });
+    expect(within(agentNavigation).getByRole("button", { name: "Claude Code" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("heading", { name: "Claude Code", level: 2 })).toBeInTheDocument();
+
+    await user.click(within(agentNavigation).getByRole("button", { name: "Codex" }));
+    expect(await screen.findByRole("heading", { name: "Codex", level: 2 })).toBeInTheDocument();
+    expect(within(agentNavigation).getByRole("button", { name: "Codex" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("changes the selected Agent routing strategy from the detail workspace", async () => {
+    const user = userEvent.setup();
+    const initial = stateFixture();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return initial;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "set_routing_mode") return {
+        ...initial,
+        agent_routes: {
+          ...initial.agent_routes,
+          "claude-code": { ...initial.agent_routes["claude-code"], routing_mode: "quota_first" },
+        },
+      };
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await openAgents(user);
+    const strategyTabs = screen.getByRole("tablist", { name: "Agent 路由策略" });
+    await user.click(within(strategyTabs).getByRole("tab", { name: "额度优先" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("set_routing_mode", { mode: "quota_first", agentId: "claude-code" });
+    expect(within(strategyTabs).getByRole("tab", { name: "额度优先" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("puts the real global routing-mode switch below the routing title", async () => {
     const user = userEvent.setup();
     const initial = stateFixture();
     invokeMock.mockImplementation(async (command) => {
@@ -308,11 +352,13 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
+    expect(screen.queryByRole("tablist", { name: "路由模式" })).toBeNull();
     await openRouting(user);
-    await user.click(screen.getByRole("button", { name: "额度优先" }));
+    const modeTabs = screen.getByRole("tablist", { name: "路由模式" });
+    await user.click(within(modeTabs).getByRole("tab", { name: "额度优先" }));
 
     expect(invokeMock).toHaveBeenCalledWith("set_routing_mode", { mode: "quota_first", agentId: null });
-    expect(screen.getByRole("button", { name: "额度优先" })).toHaveAttribute("aria-pressed", "true");
+    expect(within(modeTabs).getByRole("tab", { name: "额度优先" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("maps the four revision relationships to stable save copy", () => {

@@ -5,13 +5,13 @@ import { useLocalizedCopy } from "../components/LanguageProvider";
 import { Button } from "../components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 
-export default function RequestLogsPage() {
+export default function RequestLogsPage({ embedded = false }: { embedded?: boolean }) {
   const { copy } = useLocalizedCopy();
   const [since, setSince] = useState("24h");
   const [refreshKey, setRefreshKey] = useState(0);
   return (
-    <div className="page-stack request-logs-page">
-      <header className="overview-heading">
+    <div className={`page-stack request-logs-page ${embedded ? "request-logs-embedded" : ""}`}>
+      {!embedded && <header className="overview-heading">
         <div>
           <span className="page-eyebrow">LOCAL RECEIPTS</span>
           <h1>{copy("Request logs", "请求日志")}</h1>
@@ -29,7 +29,7 @@ export default function RequestLogsPage() {
           </Select>
           <Button variant="outline" size="sm" onClick={() => setRefreshKey((value) => value + 1)}><RefreshCw />{copy("Refresh", "刷新")}</Button>
         </div>
-      </header>
+      </header>}
       <UsageRequestLog since={since} agentId="" upstream="" model="" refreshKey={refreshKey} />
     </div>
   );
