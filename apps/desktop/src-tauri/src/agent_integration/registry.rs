@@ -771,6 +771,7 @@ mod tests {
                 "gemini-cli",
                 "opencode",
                 "openclaw",
+                "workbuddy",
                 "nous-hermes-agent",
             ]
         );
@@ -780,9 +781,10 @@ mod tests {
             .into_iter()
             .map(|metadata| (metadata.agent_id, metadata.display_name))
             .collect();
-        assert_eq!(labels.len(), 7);
+        assert_eq!(labels.len(), 8);
         assert_eq!(labels[0].1, "Claude Code");
-        assert_eq!(labels[6].1, "Hermes Agent");
+        assert_eq!(labels[6].1, "WorkBuddy");
+        assert_eq!(labels[7].1, "Hermes Agent");
 
         let gemini = &registry.descriptors()[3];
         assert_eq!(gemini.agent_id, "gemini-cli");
@@ -791,7 +793,7 @@ mod tests {
             registry.ui_metadata()[3].connector_capabilities[0].config_format,
             "dotenv"
         );
-        let hermes = &registry.descriptors()[6];
+        let hermes = &registry.descriptors()[7];
         assert_eq!(hermes.admission, AdmissionStatus::Supported);
         assert_eq!(hermes.local_connector_ids, ["hermes-v1"]);
         assert_eq!(hermes.version_probe.argv, ["--help"]);
@@ -826,6 +828,11 @@ mod tests {
         assert!(registry
             .descriptors()
             .iter()
+            .find(|descriptor| descriptor.agent_id == "workbuddy")
+            .is_some_and(|descriptor| descriptor.version_probe.runtime.is_none()));
+        assert!(registry
+            .descriptors()
+            .iter()
             .all(|descriptor| !descriptor.version_probe.retry_on_timeout));
         assert_eq!(
             registry.descriptors()[0].known_install_locations
@@ -852,8 +859,9 @@ mod tests {
         use super::super::types::Platform;
         let registry = AgentRegistry::builtin().unwrap();
         for descriptor in registry.descriptors() {
-            // Claude Desktop ships only on macOS/Windows — no Linux build.
-            if descriptor.agent_id == "claude-desktop" {
+            // Claude Desktop and the verified WorkBuddy 5.3.8 integration do not
+            // claim a Linux installation until that product path is tested.
+            if matches!(descriptor.agent_id.as_str(), "claude-desktop" | "workbuddy") {
                 continue;
             }
             assert!(

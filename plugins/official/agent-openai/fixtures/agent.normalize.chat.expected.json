@@ -21,7 +21,10 @@
     }
   ],
   "sampling": {
-    "temperature": 0.2
+    "temperature": 0.2,
+    "max_output_tokens": 4096
   },
-  "stream": true
+  "stream": true,
+  "parallel_tool_calls": false,
+  "reasoning_effort": "high"
 }

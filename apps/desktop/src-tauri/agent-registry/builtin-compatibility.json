@@ -23,6 +23,10 @@
       "blocked": []
     },
     {
+      "agent_id": "workbuddy",
+      "blocked": []
+    },
+    {
       "agent_id": "opencode",
       "blocked": []
     }

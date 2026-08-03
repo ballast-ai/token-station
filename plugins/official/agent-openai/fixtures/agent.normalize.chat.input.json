@@ -1,6 +1,6 @@
 {
   "protocol": "openai-chat-completions",
-  "agent_tool": "claude-code",
+  "agent_tool": "workbuddy",
   "headers": {
     "names": [
       "authorization",
@@ -25,6 +25,9 @@
     ],
     "stream": true,
     "temperature": 0.2,
+    "max_completion_tokens": 4096,
+    "reasoning_effort": "high",
+    "parallel_tool_calls": false,
     "tools": [
       {
         "type": "function",
