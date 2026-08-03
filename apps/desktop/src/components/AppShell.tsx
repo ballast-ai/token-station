@@ -119,18 +119,20 @@ export default function AppShell({
         </nav>
 
         <div className="station-header-actions">
-          <button
+          <Button
             className={`station-runtime-pill ${runtimeHealthy ? "healthy" : ""}`}
+            variant={runtimeHealthy ? "secondary" : "default"}
+            size="lg"
             type="button"
             disabled={commandBusy || serve.phase === "stopping"}
             onClick={onToggleServe}
-            aria-label={`${serveLabel} · ${taskRunning ? t("serve.stop") : t("serve.start")}`}
+            aria-label={`${serveLabel} · ${serve.listen} · ${taskRunning ? t("serve.stop") : t("serve.start")}`}
             title={`${serveLabel} · ${serve.listen}`}
           >
             <Activity aria-hidden="true" />
-            <span>{serveLabel}</span>
+            <span className="station-runtime-copy"><strong>{serveLabel}</strong><small>{serve.listen}</small></span>
             {serve.running_revision != null && <code>rev {serve.running_revision}</code>}
-          </button>
+          </Button>
           <Button
             variant="ghost"
             size="icon-sm"
@@ -142,14 +144,14 @@ export default function AppShell({
             {resolvedTheme === "dark" ? <Sun /> : <Moon />}
           </Button>
           {!needsBack && (
-            <Button size="sm" type="button" disabled={commandBusy} onClick={() => onNavigate("add-provider")}>
+            <Button variant="outline" size="sm" type="button" disabled={commandBusy} onClick={() => onNavigate("add-provider")}>
               <Plus />{t("nav.addProvider")}
             </Button>
           )}
         </div>
       </header>
 
-      <main className="station-content station-content-topnav">{children}</main>
+      <main className={`station-content station-content-topnav${activePrimary === "agents" ? " station-content-agent" : ""}`}>{children}</main>
 
       <span className="station-agent-summary" data-testid="agent-runtime-connection" aria-live="polite">
         {copy(

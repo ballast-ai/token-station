@@ -87,7 +87,9 @@ export default function AgentsPage({
                       aria-current={selected ? "page" : undefined}
                       onClick={() => onOpenAgent(metadata.agent_id)}
                     >
-                      <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={30} />
+                      <span className="agent-master-icon" aria-hidden="true">
+                        <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={40} />
+                      </span>
                       <span><strong>{metadata.display_name}</strong><small>{metadata.agent_id}</small></span>
                       <Badge variant={agent?.status === "CONNECTED" ? "default" : "outline"}>{navStatusCopy(agent?.status, copy)}</Badge>
                     </Button>
