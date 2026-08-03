@@ -25,8 +25,6 @@ interface AppShellProps {
   agents: AgentView[];
   scanBusy: boolean;
   commandBusy: boolean;
-  routingMode: "tiered" | "quota_first";
-  onSetRoutingMode: (mode: "tiered" | "quota_first") => void;
   onNavigate: (view: AppView) => void;
   onRescan: () => void;
   onToggleServe: () => void;
@@ -39,12 +37,12 @@ const PRIMARY_NAV: Array<{ view: AppView; en: string; zh: string }> = [
   { view: "agents", en: "Agents", zh: "Agent" },
   { view: "providers", en: "Providers", zh: "供应商" },
   { view: "usage", en: "Usage", zh: "用量" },
-  { view: "logs", en: "Logs", zh: "日志" },
   { view: "settings", en: "Settings", zh: "设置" },
 ];
 
 function primaryView(view: AppView): AppView {
   if (view.startsWith("agent:")) return "agents";
+  if (view === "logs") return "usage";
   if (view === "quota-usage") return "usage";
   if (view === "add-provider" || view.startsWith("free-provider:")) return "providers";
   return view;
@@ -57,8 +55,6 @@ export default function AppShell({
   agents,
   scanBusy,
   commandBusy,
-  routingMode,
-  onSetRoutingMode,
   onNavigate,
   onToggleServe,
   children,
@@ -123,30 +119,6 @@ export default function AppShell({
         </nav>
 
         <div className="station-header-actions">
-          {(activePrimary === "home" || activePrimary === "agents") && (
-            <div className="station-routing-mode" role="group" aria-label={copy("Routing mode", "路由模式")}>
-              <Button
-                variant="ghost"
-                size="sm"
-                type="button"
-                aria-pressed={routingMode === "tiered"}
-                disabled={commandBusy}
-                onClick={() => onSetRoutingMode("tiered")}
-              >
-                {copy("Smart tiers", "智能分档")}
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                type="button"
-                aria-pressed={routingMode === "quota_first"}
-                disabled={commandBusy}
-                onClick={() => onSetRoutingMode("quota_first")}
-              >
-                {copy("Quota first", "额度优先")}
-              </Button>
-            </div>
-          )}
           <button
             className={`station-runtime-pill ${runtimeHealthy ? "healthy" : ""}`}
             type="button"

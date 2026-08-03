@@ -17,6 +17,17 @@ if (!HTMLElement.prototype.setPointerCapture) {
 if (!HTMLElement.prototype.releasePointerCapture) {
   HTMLElement.prototype.releasePointerCapture = () => {};
 }
+if (!("ResizeObserver" in globalThis)) {
+  class ResizeObserverMock implements ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  Object.defineProperty(globalThis, "ResizeObserver", {
+    configurable: true,
+    value: ResizeObserverMock,
+  });
+}
 
 // Existing component-level suites exercise the explicitly selected Chinese UI.
 // App and LanguageProvider default-language suites clear this preference themselves.

@@ -54,9 +54,8 @@ import HomePage from "./pages/HomePage";
 import OverviewPage from "./pages/OverviewPage";
 import ProvidersPage from "./pages/ProvidersPage";
 import QuotaUsagePage from "./pages/QuotaUsagePage";
-import RequestLogsPage from "./pages/RequestLogsPage";
 import SettingsHub from "./pages/SettingsHub";
-import Stats from "./pages/Stats";
+import UsageWorkspace from "./pages/UsageWorkspace";
 import "./App.css";
 
 function errorText(error: unknown): string {
@@ -433,9 +432,10 @@ function StationApp() {
   }
 
   const agentId = view.startsWith("agent:") ? view.slice("agent:".length) : null;
-  const metadata = agentId ? orderedRegistry.find((item) => item.agent_id === agentId) : undefined;
-  const agent = agentId ? agents.find((item) => item.metadata.agent_id === agentId) : undefined;
-  const route = agentId ? (state.agent_routes?.[agentId] ?? emptyAgentRoute(state)) : undefined;
+  const selectedAgentId = agentId ?? (view === "agents" ? visibleRegistry[0]?.agent_id : undefined);
+  const metadata = selectedAgentId ? orderedRegistry.find((item) => item.agent_id === selectedAgentId) : undefined;
+  const agent = selectedAgentId ? agents.find((item) => item.metadata.agent_id === selectedAgentId) : undefined;
+  const route = selectedAgentId ? (state.agent_routes?.[selectedAgentId] ?? emptyAgentRoute(state)) : undefined;
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
   const saveStatus = configSaveStatus(state, language);
 
@@ -462,8 +462,6 @@ function StationApp() {
       agents={agents}
       scanBusy={scanBusy}
       commandBusy={serveBusy || busy || freeProviderBusy}
-      routingMode={agentId && route ? route.routing_mode : state.routing_mode}
-      onSetRoutingMode={(mode) => void run(() => setRoutingMode(mode, agentId ?? undefined))}
       onNavigate={navigate}
       onRescan={() => void rescanAgents()}
       onToggleServe={() => void toggleServe()}
@@ -494,6 +492,7 @@ function StationApp() {
           tiers={state.tiers}
           profiles={state.profiles ?? []}
           routingMode={state.routing_mode}
+          onSetRoutingMode={(mode) => void run(() => setRoutingMode(mode))}
           quotaAccounts={state.quota_accounts ?? []}
           onSaveQuota={saveQuota}
           onSaveQuotaPlan={saveQuotaPlan}
@@ -536,14 +535,44 @@ function StationApp() {
         />
       )}
 
-      {view === "agents" && (
+      {(view === "agents" || agentId) && (
         <AgentsPage
           registry={visibleRegistry}
           agents={agents}
+          selectedAgentId={selectedAgentId}
           scanBusy={scanBusy}
           onRescan={() => void rescanAgents()}
           onOpenAgent={(id) => navigate(`agent:${id}`)}
-        />
+        >
+          {metadata && route && (
+            <AgentRoutePage
+              key={metadata.agent_id}
+              metadata={metadata}
+              agent={agent}
+              route={route}
+              profiles={state.profiles ?? []}
+              providers={state.providers}
+              quotaAccounts={state.quota_accounts ?? []}
+              serveRunning={runtimeHealthy}
+              applying={state.serve.phase === "starting"}
+              onStateChange={showState}
+              onRescan={rescanAgents}
+              onSaveQuota={saveQuota}
+              onSaveQuotaPlan={saveQuotaPlan}
+              onViewQuotaUsage={() => navigate("quota-usage")}
+              onSetRoutingMode={(mode) => void run(() => setRoutingMode(mode, metadata.agent_id))}
+              embedded
+            />
+          )}
+          {!metadata && (
+            <section className="panel agent-master-empty">
+              <div className="panel-head">
+                <h2>{copy("No Agent selected", "未选择 Agent")}</h2>
+                <p className="sub">{copy("Choose a visible Agent to manage its connection and route.", "请选择一个可见 Agent 管理接入和路由。")}</p>
+              </div>
+            </section>
+          )}
+        </AgentsPage>
       )}
 
       {view === "providers" && (
@@ -565,41 +594,12 @@ function StationApp() {
         />
       )}
 
-      {metadata && route && (
-        <AgentRoutePage
-          // Key by agent_id and remount when the Agent changes. Per-Agent transient state, such as first-connection cards
-          // notices and selected installations do not leak to another Agent page.
-          key={metadata.agent_id}
-          metadata={metadata}
-          agent={agent}
-          route={route}
-          profiles={state.profiles ?? []}
-          providers={state.providers}
-          quotaAccounts={state.quota_accounts ?? []}
-          serveRunning={runtimeHealthy}
-          applying={state.serve.phase === "starting"}
-          onStateChange={showState}
-          onRescan={rescanAgents}
-          onSaveQuota={saveQuota}
-          onSaveQuotaPlan={saveQuotaPlan}
-          onViewQuotaUsage={() => navigate("quota-usage")}
+      {(view === "usage" || view === "logs") && (
+        <UsageWorkspace
+          section={view === "logs" ? "logs" : "overview"}
+          onSectionChange={(section) => navigate(section === "logs" ? "logs" : "usage")}
         />
       )}
-
-      {agentId && !metadata && (
-        <section className="panel">
-          <div className="panel-head">
-            <h2>{copy("Unknown Agent", "未知 Agent")}</h2>
-            <p className="sub">{copy(
-              "This Agent is not in the current Registry support list.",
-              "该 Agent 不在当前 Registry 的受支持列表中。",
-            )}</p>
-          </div>
-        </section>
-      )}
-
-      {view === "usage" && <Stats onBack={navigateBack} />}
-      {view === "logs" && <RequestLogsPage />}
       {view === "quota-usage" && (
         <QuotaUsagePage providers={state.providers} onBack={navigateBack} />
       )}
