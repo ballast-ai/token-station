@@ -183,6 +183,7 @@ impl Guest for OpenAiClient {
                     "generic-openai-sdk".to_owned(),
                     "cursor".to_owned(),
                     "continue".to_owned(),
+                    "workbuddy".to_owned(),
                 ],
             },
         ]
@@ -254,6 +255,14 @@ impl Guest for OpenAiClient {
             })
             .collect();
 
+        let mut extensions = Extensions::new();
+        if let Some(effort) = body.get("reasoning_effort").and_then(Value::as_str) {
+            extensions.insert("reasoning_effort".to_owned(), json!(effort));
+        }
+        if let Some(parallel) = body.get("parallel_tool_calls").and_then(Value::as_bool) {
+            extensions.insert("parallel_tool_calls".to_owned(), json!(parallel));
+        }
+
         to_output(&ChatRequest {
             model,
             messages,
@@ -267,6 +276,7 @@ impl Guest for OpenAiClient {
                 top_p: body["top_p"].as_f64(),
                 max_output_tokens: body["max_tokens"]
                     .as_u64()
+                    .or_else(|| body["max_completion_tokens"].as_u64())
                     .and_then(|value| u32::try_from(value).ok()),
                 stop: body["stop"]
                     .as_array()
@@ -276,7 +286,7 @@ impl Guest for OpenAiClient {
                     .collect(),
             },
             stream: body["stream"].as_bool().unwrap_or(false),
-            extensions: Extensions::new(),
+            extensions,
         })
     }
 

@@ -880,12 +880,24 @@ impl AgentCommandState {
 
         for (ownership, companion_formats) in owned.into_iter().zip(companion_formats) {
             let connector = connector_for(&ownership.connector_id)?;
-            // Primary config: use the connector disconnect_patch, which uses the same Remove operations as normal disconnect.
-            force_strip_owned(
-                Path::new(&ownership.target_config_path),
+            let target = Path::new(&ownership.target_config_path);
+            let source = read_config_source(target).map_err(AgentCommandError::internal)?;
+            let document = parse_source_bytes(
+                source.existed.then_some(source.exact_bytes.as_slice()),
                 connector.format(),
                 connector.label(),
-                &connector.disconnect_patch(),
+            )
+            .map_err(AgentCommandError::internal)?;
+            let disconnect = connector
+                .disconnect_patch_for_document(&document)
+                .map_err(AgentCommandError::internal)?;
+            // Primary config: normal connectors use fixed Remove operations. WorkBuddy filters dynamically by model ID.
+            // Do not remove other models that the user added after connection during forced disconnect.
+            force_strip_owned(
+                target,
+                connector.format(),
+                connector.label(),
+                &disconnect,
             )?;
             // Companion config: parse the persisted format or a connector's
             // explicit legacy contract, then remove owned_paths.
@@ -2052,7 +2064,7 @@ mod tests {
     fn commands_installation_path_is_only_an_exact_scan_lookup_key() {
         let state = state("lookup");
         let registry_metadata = state.registry_metadata();
-        assert_eq!(registry_metadata.len(), 7);
+        assert_eq!(registry_metadata.len(), 8);
         assert_eq!(registry_metadata[0].agent_id, "claude-code");
         let target = scratch("lookup-target").join("settings.json");
         let registry = AgentRegistry::builtin().unwrap();
@@ -2086,7 +2098,7 @@ mod tests {
             records: Vec::new(),
         };
         let views = state.views(&empty, None).unwrap();
-        assert_eq!(views.len(), 7);
+        assert_eq!(views.len(), 8);
         assert!(views.iter().all(|view| {
             view.status == CompatibilityStatus::NotDetected && view.installations.is_empty()
         }));
@@ -2464,6 +2476,10 @@ mod tests {
             ("opencode-v1", "http://127.0.0.1:8787/agents/opencode/v1"),
             ("openclaw-v1", "http://127.0.0.1:8787/agents/openclaw/v1"),
             (
+                "workbuddy-v1",
+                "http://127.0.0.1:8787/agents/workbuddy/v1",
+            ),
+            (
                 "hermes-v1",
                 "http://127.0.0.1:8787/agents/nous-hermes-agent/v1",
             ),
@@ -2751,7 +2767,7 @@ mod tests {
         assert_eq!(error.code, "read_only_preflight_failed");
 
         let scanned = state.scan().unwrap();
-        assert_eq!(scanned.len(), 7);
+        assert_eq!(scanned.len(), 8);
         assert!(state.session.lock().unwrap().scan.is_some());
     }
 

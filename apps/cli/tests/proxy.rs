@@ -1525,7 +1525,7 @@ fn agent_namespaces_select_custom_or_inherited_routers_and_strip_paths() {
         "model": "auto",
         "messages": [{ "role": "user", "content": "hi" }]
     });
-    for agent_id in ["opencode", "openclaw", "nous-hermes-agent"] {
+    for agent_id in ["opencode", "openclaw", "nous-hermes-agent", "workbuddy"] {
         let (status, _) = post_scoped(
             &proxy,
             &format!("/agents/{agent_id}/v1/chat/completions"),
@@ -1550,7 +1550,7 @@ fn agent_namespaces_select_custom_or_inherited_routers_and_strip_paths() {
     assert_eq!(status, 200);
 
     assert_eq!(custom.hits(), 1, "only Codex uses its custom route");
-    assert_eq!(home.hits(), 5, "home plus four inherited Agent requests");
+    assert_eq!(home.hits(), 6, "home plus five inherited Agent requests");
     assert!(
         custom
             .seen()
