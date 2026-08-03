@@ -82,7 +82,11 @@ function Invoke-InstalledSelfTest([string] $Label) {
     }
 }
 
-function Get-MsiProperty([string] $Msi, [string] $Name) {
+function Invoke-MsiScalarQuery(
+    [string] $Msi,
+    [string] $Query,
+    [string] $Label
+) {
     $installer = New-Object -ComObject WindowsInstaller.Installer
     $database = $installer.GetType().InvokeMember(
         "OpenDatabase",
@@ -91,26 +95,56 @@ function Get-MsiProperty([string] $Msi, [string] $Name) {
         $installer,
         @($Msi, 0)
     )
-    $query = "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='$Name'"
+    if ($null -eq $database) {
+        throw "$Label could not open MSI database: $Msi"
+    }
     $view = $database.GetType().InvokeMember(
         "OpenView",
         "InvokeMethod",
         $null,
         $database,
-        @($query)
+        @($Query)
     )
-    $view.GetType().InvokeMember("Execute", "InvokeMethod", $null, $view, $null)
-    $record = $view.GetType().InvokeMember("Fetch", "InvokeMethod", $null, $view, $null)
-    if ($null -eq $record) {
-        return $null
+    if ($null -eq $view) {
+        throw "$Label could not open MSI query view"
     }
-    return $record.GetType().InvokeMember(
-        "StringData",
-        "GetProperty",
-        $null,
-        $record,
-        1
-    )
+    try {
+        $view.GetType().InvokeMember(
+            "Execute", "InvokeMethod", $null, $view, $null
+        ) | Out-Null
+        $record = $view.GetType().InvokeMember(
+            "Fetch", "InvokeMethod", $null, $view, $null
+        )
+        if ($null -eq $record) {
+            throw "$Label query returned no rows"
+        }
+        $value = $record.GetType().InvokeMember(
+            "StringData",
+            "GetProperty",
+            $null,
+            $record,
+            1
+        )
+        if ([string]::IsNullOrWhiteSpace([string] $value)) {
+            throw "$Label query returned an empty value"
+        }
+        return [string] $value
+    } finally {
+        $view.GetType().InvokeMember(
+            "Close", "InvokeMethod", $null, $view, $null
+        ) | Out-Null
+    }
+}
+
+function Get-MsiProperty([string] $Msi, [string] $Name) {
+    $escapedName = $Name.Replace("'", "''")
+    $query = "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='$escapedName'"
+    return Invoke-MsiScalarQuery $Msi $query "MSI property $Name"
+}
+
+function Get-MsiUpgradeCode([string] $Msi) {
+    $query = "SELECT ``UpgradeCode`` FROM ``Upgrade``"
+    return Invoke-MsiScalarQuery $Msi $query "MSI UpgradeCode"
 }
 
 function Get-InstalledVersion([string] $UpgradeCode) {
@@ -133,7 +167,7 @@ $older = Resolve-ExistingFile $OlderMsi "older MSI"
 $newer = Resolve-ExistingFile $NewerMsi "newer MSI"
 $installDir = Join-Path $env:LOCALAPPDATA "Programs\$ProductName"
 $executable = Join-Path $installDir $ExecutableName
-$upgradeCode = Get-MsiProperty $newer "UpgradeCode"
+$upgradeCode = Get-MsiUpgradeCode $newer
 $olderVersion = Get-MsiProperty $older "ProductVersion"
 $newerVersion = Get-MsiProperty $newer "ProductVersion"
 
