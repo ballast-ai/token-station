@@ -2,25 +2,22 @@ import { useState } from "react";
 import {
   type ProviderView,
   type QuotaAccount,
-  type StateView,
   type TierSlot,
   type TierView,
 } from "../api";
 import TierRouteEditor from "../components/TierRouteEditor";
 import TierKeywords from "../components/TierKeywords";
-import ProviderList from "../components/ProviderList";
-import RecentReceipts from "../components/RecentReceipts";
 import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import { useLocalizedCopy } from "../components/LanguageProvider";
+import RoutingModeSelector from "../components/RoutingModeSelector";
 
 interface HomePageProps {
   providers: ProviderView[];
-  deletedProviders: string[];
-  providerRecoveryError: string | null;
   tiers: Record<TierSlot, TierView>;
   keywords: Record<TierSlot, string[]>;
   profiles: string[];
   routingMode: "tiered" | "quota_first";
+  onSetRoutingMode: (mode: "tiered" | "quota_first") => void;
   quotaAccounts: QuotaAccount[];
   onSaveQuota: (accounts: QuotaAccount[]) => void;
   onSaveQuotaPlan: (
@@ -30,7 +27,6 @@ interface HomePageProps {
     unit: "tokens" | "requests",
   ) => void;
   onViewQuotaUsage: () => void;
-  serveRunning: boolean;
   busy: boolean;
   applying: boolean;
   configError: string | null;
@@ -45,24 +41,19 @@ interface HomePageProps {
   onRemoveKeyword: (slot: TierSlot, keyword: string) => void;
   onSave: () => void;
   onApplyAll: () => void;
-  onRemoveProvider: (name: string) => void;
-  onRestoreProvider: (name: string) => void;
-  onStateChange: (state: StateView, message: string) => void;
 }
 
 export default function HomePage({
   providers,
-  deletedProviders,
-  providerRecoveryError,
   tiers,
   keywords,
   profiles,
   routingMode,
+  onSetRoutingMode,
   quotaAccounts,
   onSaveQuota,
   onSaveQuotaPlan,
   onViewQuotaUsage,
-  serveRunning,
   busy,
   applying,
   configError,
@@ -77,9 +68,6 @@ export default function HomePage({
   onRemoveKeyword,
   onSave,
   onApplyAll,
-  onRemoveProvider,
-  onRestoreProvider,
-  onStateChange,
 }: HomePageProps) {
   const { copy } = useLocalizedCopy();
   const tierConfigured: Record<TierSlot, boolean> = {
@@ -119,13 +107,19 @@ export default function HomePage({
     <div className="page-stack home-page">
       <header className="page-title-row">
         <div>
-          <h1>{copy("Home routing", "主页路由")}</h1>
+          <h1>{copy("Global routing", "全局路由")}</h1>
           <p>{copy(
             "These three tiers are the default for every Agent. Individual routes only override their Agent.",
             "这套三档配置是所有 Agent 的默认值。独立路由只覆盖对应 Agent。",
           )}</p>
         </div>
       </header>
+
+      <RoutingModeSelector
+        value={routingMode}
+        disabled={busy}
+        onValueChange={onSetRoutingMode}
+      />
 
       {routingMode === "quota_first" ? (
         <QuotaPriorityPanel
@@ -323,18 +317,6 @@ export default function HomePage({
       </>
       )}
 
-      <RecentReceipts />
-
-      <ProviderList
-        providers={providers}
-        deletedProviders={deletedProviders}
-        recoveryError={providerRecoveryError}
-        serveRunning={serveRunning}
-        busy={busy}
-        onRemove={onRemoveProvider}
-        onRestore={onRestoreProvider}
-        onStateChange={onStateChange}
-      />
     </div>
   );
 }

@@ -3,6 +3,32 @@ import { cleanup } from "@testing-library/react";
 import { afterEach, beforeEach } from "vitest";
 import { AGENT_VISIBILITY_STORAGE_KEY } from "../components/AgentVisibilityPreferences";
 
+// Radix primitives use browser layout and pointer-capture APIs that jsdom does
+// not implement. Keep the public interaction tests browser-shaped.
+if (!HTMLElement.prototype.scrollIntoView) {
+  HTMLElement.prototype.scrollIntoView = () => {};
+}
+if (!HTMLElement.prototype.hasPointerCapture) {
+  HTMLElement.prototype.hasPointerCapture = () => false;
+}
+if (!HTMLElement.prototype.setPointerCapture) {
+  HTMLElement.prototype.setPointerCapture = () => {};
+}
+if (!HTMLElement.prototype.releasePointerCapture) {
+  HTMLElement.prototype.releasePointerCapture = () => {};
+}
+if (!("ResizeObserver" in globalThis)) {
+  class ResizeObserverMock implements ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  Object.defineProperty(globalThis, "ResizeObserver", {
+    configurable: true,
+    value: ResizeObserverMock,
+  });
+}
+
 // Existing component-level suites exercise the explicitly selected Chinese UI.
 // App and LanguageProvider default-language suites clear this preference themselves.
 beforeEach(() => {

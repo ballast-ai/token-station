@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { RouterTableView, getRouterTable } from "../api";
 import { LanguageBoundary, useLanguage } from "../components/LanguageProvider";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 
 /// 四层路由表可视化。层序 = 内核 route 的短路顺序:
 /// 1 规则(硬匹配) → 2 提示(agent Hint) → 3 启发式分档 → 4 默认兜底。
@@ -15,18 +16,19 @@ function RouterTableContent() {
       .catch((e) => setErr(String(e)));
   }, []);
 
-  if (err) return <section className="panel"><div className="banner err">{err}</div></section>;
-  if (!rt) return <section className="panel"><div className="empty">{t("router.loading")}</div></section>;
+  if (err) return <Card className="settings-card"><CardContent><div className="banner err">{err}</div></CardContent></Card>;
+  if (!rt) return <Card className="settings-card"><CardContent><div className="empty">{t("router.loading")}</div></CardContent></Card>;
 
   const model = (u: string | null, m: string | null) =>
     u ? `${u} · ${m ?? "?"}` : t("router.unconfigured");
 
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <h2>{t("router.title")}</h2>
+    <Card className="settings-card">
+      <CardHeader className="panel-head">
+        <CardTitle><h2>{t("router.title")}</h2></CardTitle>
         <p className="sub">{t("router.description")}</p>
-      </div>
+      </CardHeader>
+      <CardContent className="settings-card-content">
 
       {/* 第 1 层:规则 */}
       <div className="layer">
@@ -99,7 +101,8 @@ function RouterTableContent() {
           <div className="kv-v mono">{rt.assumed_context_window || "—"}</div>
         </div>
       </div>
-    </section>
+      </CardContent>
+    </Card>
   );
 }
 
