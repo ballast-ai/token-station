@@ -17,15 +17,11 @@ import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Switch } from "../components/ui/switch";
 import About from "./About";
-import Plugins from "./Plugins";
-import RouterTable from "./RouterTable";
 import Settings from "./Settings";
 
 type SettingsSection =
   | "general"
   | "agent-visibility"
-  | "router"
-  | "plugins"
   | "appearance"
   | "language"
   | "about";
@@ -41,8 +37,6 @@ const SECTIONS: Array<{
     label: "settings.agentVisibility",
     description: "settings.agentVisibilityHint",
   },
-  { id: "router", label: "settings.router", description: "settings.routerHint" },
-  { id: "plugins", label: "settings.plugins", description: "settings.pluginsHint" },
   { id: "appearance", label: "settings.appearance", description: "settings.appearanceHint" },
   { id: "language", label: "settings.language", description: "settings.languageHint" },
   { id: "about", label: "settings.about", description: "settings.aboutHint" },
@@ -317,8 +311,6 @@ function SettingsHubContent({
             onVisibilityChange={onAgentVisibilityChange}
           />
         )}
-        {section === "router" && <RouterTable />}
-        {section === "plugins" && <Plugins />}
         {section === "appearance" && <AppearancePanel />}
         {section === "language" && <LanguagePanel />}
         {section === "about" && (

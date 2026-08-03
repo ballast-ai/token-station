@@ -4970,17 +4970,17 @@ pre.block {
 }
 
 .station-runtime-pill[data-slot="button"] {
-  height: 46px;
-  max-width: 235px;
+  height: 38px;
+  max-width: 205px;
   display: inline-flex;
   align-items: center;
-  gap: 9px;
-  padding: 0 14px;
+  gap: 7px;
+  padding: 0 10px;
   overflow: hidden;
-  border-radius: 10px;
-  font-size: 13px;
+  border-radius: 8px;
+  font-size: 12px;
   white-space: nowrap;
-  box-shadow: 0 6px 18px color-mix(in srgb, var(--signal) 18%, transparent);
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--signal) 14%, transparent);
 }
 
 .station-runtime-pill[data-slot="button"].healthy {
@@ -4991,8 +4991,8 @@ pre.block {
 }
 
 .station-runtime-pill svg {
-  width: 18px !important;
-  height: 18px !important;
+  width: 16px !important;
+  height: 16px !important;
   flex: 0 0 auto;
 }
 
@@ -5011,21 +5011,21 @@ pre.block {
 }
 
 .station-runtime-copy strong {
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.1;
   font-weight: 700;
 }
 
 .station-runtime-copy small {
-  font: 9.5px/1.1 "IBM Plex Mono", monospace;
+  font: 8.5px/1.1 "IBM Plex Mono", monospace;
   opacity: .78;
 }
 
 .station-runtime-pill code {
-  padding-left: 8px;
+  padding-left: 6px;
   border-left: 1px solid color-mix(in srgb, currentColor 20%, transparent);
   font-family: "IBM Plex Mono", monospace;
-  font-size: 9.5px;
+  font-size: 8.5px;
 }
 
 .station-content.station-content-topnav {
@@ -5594,8 +5594,8 @@ pre.block {
   width: 360px;
   height: 54px;
   padding: 4px;
-  border: 1px solid var(--line);
-  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  background: color-mix(in srgb, var(--surface-2) 82%, var(--ink) 2%);
 }
 
 .routing-mode-tabs [data-slot="tabs-trigger"] {
@@ -5603,7 +5603,18 @@ pre.block {
   justify-content: flex-start;
   gap: 9px;
   padding-inline: 12px;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  background: var(--surface);
   text-align: left;
+}
+
+.routing-mode-tabs [data-slot="tabs-trigger"][data-state="active"],
+.routing-mode-tabs [data-slot="tabs-trigger"][data-active] {
+  border-color: color-mix(in srgb, var(--signal) 58%, var(--line));
+  color: var(--ink);
+  background: color-mix(in srgb, var(--signal) 9%, var(--surface));
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--signal) 16%, transparent);
 }
 
 .routing-mode-tabs [data-slot="tabs-trigger"] > span {
@@ -5612,12 +5623,13 @@ pre.block {
 }
 
 .routing-mode-tabs [data-slot="tabs-trigger"] strong {
+  color: var(--ink);
   font-size: 11.5px;
   line-height: 1.2;
 }
 
 .routing-mode-tabs [data-slot="tabs-trigger"] small {
-  color: var(--muted);
+  color: color-mix(in srgb, var(--muted) 88%, var(--ink));
   font-size: 8.5px;
   font-weight: 400;
 }
@@ -5727,6 +5739,7 @@ pre.block {
   flex: 0 0 42px !important;
   display: grid !important;
   place-items: center;
+  position: relative;
   overflow: visible !important;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -5734,22 +5747,33 @@ pre.block {
   background: var(--surface-2);
 }
 
-.agent-master-item .agent-master-icon > svg,
-.agent-master-item .agent-master-icon > img {
-  width: 40px !important;
-  height: 40px !important;
-  max-width: none;
+.agent-brand-glyph {
+  display: inline-grid;
+  place-items: center;
+  line-height: 0;
+  vertical-align: middle;
 }
 
-.agent-master-item .agent-master-icon > svg {
-  width: 30px !important;
-  height: 30px !important;
+.agent-master-item .agent-master-icon > .agent-brand-glyph {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 34px !important;
+  height: 34px !important;
+  transform: translate(-50%, -50%);
 }
 
-.agent-master-item .agent-master-icon > span {
-  width: 38px !important;
-  height: 38px !important;
-  max-width: none;
+.agent-master-item .agent-brand-glyph > svg {
+  display: block;
+  width: 32px !important;
+  height: 32px !important;
+}
+
+.agent-master-item .agent-brand-glyph > img,
+.agent-master-item .agent-brand-glyph > .brand-fallback {
+  display: block;
+  width: 34px !important;
+  height: 34px !important;
 }
 
 .agent-master-item[data-slot="button"][aria-current="page"] {
