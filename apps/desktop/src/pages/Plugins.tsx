@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { PluginsView, getPlugins } from "../api";
 import { LanguageBoundary, useLanguage } from "../components/LanguageProvider";
+import { Button } from "../components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 
 /// 插件页:发现的插件目录 + 与 CLI `plugin list` 同源的等宽清单。
 function PluginsContent() {
@@ -17,11 +19,12 @@ function PluginsContent() {
   useEffect(load, []);
 
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <h2>{t("plugins.title")}</h2>
+    <Card className="settings-card">
+      <CardHeader className="panel-head">
+        <CardTitle><h2>{t("plugins.title")}</h2></CardTitle>
         <p className="sub">{t("plugins.description")}</p>
-      </div>
+      </CardHeader>
+      <CardContent className="settings-card-content">
 
       {err && <div className="banner err">{err}</div>}
 
@@ -52,14 +55,15 @@ function PluginsContent() {
           </div>
 
           <div className="panel-foot">
-            <button className="btn" onClick={load}>
+            <Button variant="outline" onClick={load}>
               {t("plugins.refresh")}
-            </button>
+            </Button>
             <span className="foot-hint">{t("plugins.installHint")}</span>
           </div>
         </>
       )}
-    </section>
+      </CardContent>
+    </Card>
   );
 }
 

@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { UpgradeView, checkUpgrade } from "../api";
 import { LanguageBoundary, useLanguage } from "../components/LanguageProvider";
+import { Button } from "../components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 
 /// 关于/更新页。只做匿名版本检查(内核唯一合法外联),不自替换二进制。
 function AboutContent({
@@ -36,11 +38,12 @@ function AboutContent({
   };
 
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <h2>{t("about.title")}</h2>
+    <Card className="settings-card">
+      <CardHeader className="panel-head">
+        <CardTitle><h2>{t("about.title")}</h2></CardTitle>
         <p className="sub">{t("about.description")}</p>
-      </div>
+      </CardHeader>
+      <CardContent className="settings-card-content">
 
       <div className="kv-grid">
         <div className="kv-k">Desktop version</div>
@@ -63,20 +66,21 @@ function AboutContent({
           {uv.html_url && (
             <span className="inline-url">
               <span className="mono">{uv.html_url}</span>
-              <button className="btn tiny" onClick={() => copy(uv.html_url)}>
+              <Button variant="outline" size="sm" onClick={() => copy(uv.html_url)}>
                 {copied ? t("about.copied") : t("about.copyLink")}
-              </button>
+              </Button>
             </span>
           )}
         </div>
       )}
 
       <div className="panel-foot">
-        <button className="btn primary" disabled={busy} onClick={check}>
+        <Button disabled={busy} onClick={check}>
           {busy ? t("about.checking") : t("about.check")}
-        </button>
+        </Button>
       </div>
-    </section>
+      </CardContent>
+    </Card>
   );
 }
 

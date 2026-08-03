@@ -13,7 +13,6 @@ import {
 import PricingEditor from "../components/PricingEditor";
 import PageBackButton from "../components/PageBackButton";
 import CompactCombobox from "../components/CompactCombobox";
-import UsageRequestLog from "../components/UsageRequestLog";
 import UsageTrendChart, { type UsageTrendRange } from "../components/UsageTrendChart";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 
@@ -187,7 +186,6 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [receiptRefreshKey, setReceiptRefreshKey] = useState(0);
   const requestGeneration = useRef(0);
   const dashboardInFlight = useRef(false);
   const dashboardQueued = useRef(false);
@@ -284,7 +282,6 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
       } else if (modelFilter && !nextModels.includes(modelFilter)) {
         setModelFilter("");
       }
-      setReceiptRefreshKey((value) => value + 1);
     } catch (error) {
       if (dashboardMounted.current && generation === requestGeneration.current) setErr(String(error));
     } finally {
@@ -598,13 +595,6 @@ export default function Stats({ onBack }: { onBack?: () => void }) {
             </div>
           </section>
 
-          <UsageRequestLog
-            since={since}
-            agentId={agentFilter}
-            upstream={upstreamFilter}
-            model={modelFilter}
-            refreshKey={receiptRefreshKey}
-          />
         </>
       )}
 

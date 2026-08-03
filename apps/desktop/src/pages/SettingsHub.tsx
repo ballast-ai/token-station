@@ -12,8 +12,10 @@ import {
   type Language,
   type TranslationKey,
 } from "../components/LanguageProvider";
-import PageBackButton from "../components/PageBackButton";
 import { useTheme, type Theme } from "../components/ThemeProvider";
+import { Button } from "../components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Switch } from "../components/ui/switch";
 import About from "./About";
 import Plugins from "./Plugins";
 import RouterTable from "./RouterTable";
@@ -72,29 +74,29 @@ function VirtualKeyCard({ serve }: { serve: ServeView }) {
   };
 
   return (
-    <section className="panel key-settings-card">
-      <div className="panel-head split-heading">
+    <Card className="settings-card key-settings-card">
+      <CardHeader className="panel-head split-heading">
         <div>
           <span className="eyebrow">{t("key.eyebrow")}</span>
-          <h2>{t("key.title")}</h2>
+          <CardTitle><h2>{t("key.title")}</h2></CardTitle>
           <p className="sub">{t("key.description")}</p>
         </div>
         <span className={`status-chip ${runtimeHealthy && key ? "success" : ""}`}>
           {runtimeHealthy && key ? t("key.generated") : t("key.proxyStopped")}
         </span>
-      </div>
-      <div className="secret-row">
+      </CardHeader>
+      <CardContent className="secret-row">
         <code aria-label={t("key.ariaLabel")}>
           {key ? (revealed ? key : "ts-••••••••••••••••••••••••") : t("key.startToGenerate")}
         </code>
-        <button className="btn tiny" type="button" disabled={!key} onClick={revealed ? () => setRevealed(false) : reveal}>
+        <Button variant="outline" size="sm" type="button" disabled={!key} onClick={revealed ? () => setRevealed(false) : reveal}>
           {revealed ? t("key.hide") : t("key.show")}
-        </button>
-        <button className="btn tiny" type="button" disabled={!key} onClick={() => void copy()}>
+        </Button>
+        <Button variant="outline" size="sm" type="button" disabled={!key} onClick={() => void copy()}>
           {copied ? t("key.copied") : t("key.copy")}
-        </button>
-      </div>
-    </section>
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -113,17 +115,18 @@ function AppearancePanel() {
     },
   ];
   return (
-    <section className="panel appearance-panel">
-      <div className="panel-head">
+    <Card className="settings-card appearance-panel">
+      <CardHeader className="panel-head">
         <span className="eyebrow">{t("appearance.eyebrow")}</span>
-        <h2>{t("appearance.title")}</h2>
+        <CardTitle><h2>{t("appearance.title")}</h2></CardTitle>
         <p className="sub">{t("appearance.description")}</p>
-      </div>
-      <div className="theme-options" role="radiogroup" aria-label={t("appearance.groupLabel")}>
+      </CardHeader>
+      <CardContent className="theme-options" role="radiogroup" aria-label={t("appearance.groupLabel")}>
         {choices.map((choice) => (
-          <button
+          <Button
             key={choice.value}
             className={`theme-option ${theme === choice.value ? "selected" : ""}`}
+            variant="ghost"
             type="button"
             role="radio"
             aria-checked={theme === choice.value}
@@ -132,10 +135,10 @@ function AppearancePanel() {
             <span className={`theme-preview ${choice.value}`} aria-hidden="true"><i /><i /></span>
             <strong>{choice.label}</strong>
             <small>{choice.hint}</small>
-          </button>
+          </Button>
         ))}
-      </div>
-    </section>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -155,9 +158,9 @@ function AgentVisibilityPanel({
   );
 
   return (
-    <section className="agent-visibility-panel">
-      <div className="panel-head">
-        <h2>{t("agentVisibility.title")}</h2>
+    <Card className="settings-card agent-visibility-panel">
+      <CardHeader className="panel-head">
+        <CardTitle><h2>{t("agentVisibility.title")}</h2></CardTitle>
         <p className="sub">{t("agentVisibility.description")}</p>
         <span
           className="agent-visibility-status"
@@ -170,10 +173,10 @@ function AgentVisibilityPanel({
             total: registry.length,
           })}
         </span>
-      </div>
+      </CardHeader>
 
       {registry.length > 0 ? (
-        <div
+        <CardContent
           className="agent-visibility-list"
           role="group"
           aria-label={t("agentVisibility.groupLabel")}
@@ -181,13 +184,9 @@ function AgentVisibilityPanel({
           {registry.map((metadata) => {
             const visible = !hiddenAgentIds.has(metadata.agent_id);
             return (
-              <button
+              <div
                 key={metadata.agent_id}
                 className="agent-visibility-row"
-                type="button"
-                role="switch"
-                aria-checked={visible}
-                onClick={() => onVisibilityChange(metadata.agent_id, !visible)}
               >
                 <span className="agent-visibility-icon" aria-hidden="true">
                   <AgentIcon
@@ -199,20 +198,19 @@ function AgentVisibilityPanel({
                 <span className="agent-visibility-name">
                   {metadata.display_name}
                 </span>
-                <span
-                  className="agent-visibility-switch"
-                  aria-hidden="true"
-                >
-                  <span className="agent-visibility-switch-thumb" />
-                </span>
-              </button>
+                <Switch
+                  aria-label={metadata.display_name}
+                  checked={visible}
+                  onCheckedChange={(checked) => onVisibilityChange(metadata.agent_id, checked)}
+                />
+              </div>
             );
           })}
-        </div>
+        </CardContent>
       ) : (
         <p className="agent-visibility-empty">{t("agentVisibility.empty")}</p>
       )}
-    </section>
+    </Card>
   );
 }
 
@@ -229,17 +227,18 @@ const LANGUAGE_OPTIONS: Array<{
 function LanguagePanel() {
   const { language, setLanguage, t } = useLanguage();
   return (
-    <section className="panel language-panel">
-      <div className="panel-head">
+    <Card className="settings-card language-panel">
+      <CardHeader className="panel-head">
         <span className="eyebrow">{t("language.eyebrow")}</span>
-        <h2>{t("language.title")}</h2>
+        <CardTitle><h2>{t("language.title")}</h2></CardTitle>
         <p className="sub">{t("language.description")}</p>
-      </div>
-      <div className="language-options" role="radiogroup" aria-label={t("language.groupLabel")}>
+      </CardHeader>
+      <CardContent className="language-options" role="radiogroup" aria-label={t("language.groupLabel")}>
         {LANGUAGE_OPTIONS.map((option) => (
-          <button
+          <Button
             key={option.value}
             className={`language-option ${language === option.value ? "selected" : ""}`}
+            variant="ghost"
             type="button"
             role="radio"
             aria-checked={language === option.value}
@@ -251,10 +250,10 @@ function LanguagePanel() {
               <small>{t(option.hint)}</small>
             </span>
             <i className="language-selected-dot" aria-hidden="true" />
-          </button>
+          </Button>
         ))}
-      </div>
-    </section>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -265,7 +264,6 @@ interface SettingsHubProps {
   hiddenAgentIds: ReadonlySet<string>;
   onAgentVisibilityChange: (agentId: string, visible: boolean) => void;
   onSaved: (state: StateView) => void;
-  onBack?: () => void;
 }
 
 function SettingsHubContent({
@@ -275,31 +273,36 @@ function SettingsHubContent({
   hiddenAgentIds,
   onAgentVisibilityChange,
   onSaved,
-  onBack,
 }: SettingsHubProps) {
   const [section, setSection] = useState<SettingsSection>("general");
   const { t } = useLanguage();
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   return (
-    <div className="settings-layout">
-      <aside className="settings-nav" aria-label={t("settings.navLabel")}>
-        <div className="settings-nav-title">
-          {onBack && <PageBackButton onClick={onBack} />}
-          <span className="eyebrow">{t("settings.controlRoom")}</span>
+    <div className="page-stack settings-page">
+      <header className="overview-heading settings-heading">
+        <div>
+          <span className="page-eyebrow">{t("settings.controlRoom")}</span>
           <h1>{t("settings.title")}</h1>
+          <p>{t("settings.generalHint")}</p>
         </div>
+      </header>
+      <nav className="settings-subnav" aria-label={t("settings.navLabel")}>
         {SECTIONS.map((item) => (
-          <button
+          <Button
             key={item.id}
-            className={section === item.id ? "active" : ""}
+            className="settings-subnav-item"
+            variant={section === item.id ? "secondary" : "ghost"}
             type="button"
+            aria-current={section === item.id ? "page" : undefined}
             onClick={() => setSection(item.id)}
           >
-            <strong>{t(item.label)}</strong>
-            <small>{t(item.description)}</small>
-          </button>
+            <span>
+              <strong>{t(item.label)}</strong>
+              <small>{t(item.description)}</small>
+            </span>
+          </Button>
         ))}
-      </aside>
+      </nav>
       <div className="settings-content">
         {section === "general" && (
           <>

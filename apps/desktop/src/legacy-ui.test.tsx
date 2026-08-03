@@ -267,6 +267,14 @@ describe("legacy desktop read-only pages", () => {
 });
 
 describe("settings and update actions", () => {
+  it("exposes general settings through consistent switch and select controls", () => {
+    render(<Settings settings={settings} serveRunning={false} onSaved={vi.fn()} />);
+
+    expect(screen.getByRole("switch", { name: /虚拟 Key 鉴权/ })).toBeChecked();
+    expect(screen.getByRole("switch", { name: /本地指标/ })).toBeChecked();
+    expect(screen.getByRole("combobox", { name: "出口模式" })).toBeInTheDocument();
+  });
+
   it("renders resolved egress routes in a dedicated full-width list", async () => {
     vi.mocked(getEgress).mockResolvedValue({
       mode: "direct",
@@ -306,8 +314,7 @@ describe("settings and update actions", () => {
     const onSaved = vi.fn();
     const user = userEvent.setup();
     render(<Settings settings={settings} serveRunning onSaved={onSaved} />);
-    const checks = screen.getAllByRole("checkbox");
-    await user.click(checks[0]);
+    await user.click(screen.getByRole("switch", { name: /虚拟 Key 鉴权/ }));
     expect(screen.getByText(/需重启代理/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(setSettings).toHaveBeenCalledWith(false, true, {
@@ -325,7 +332,8 @@ describe("settings and update actions", () => {
     vi.mocked(setSettings).mockResolvedValue(state);
     const user = userEvent.setup();
     render(<Settings settings={settings} serveRunning={false} onSaved={vi.fn()} />);
-    await user.selectOptions(screen.getByLabelText("出口模式"), "http");
+    await user.click(screen.getByRole("combobox", { name: "出口模式" }));
+    await user.click(await screen.findByRole("option", { name: "HTTP CONNECT" }));
     await user.type(screen.getByLabelText("代理 URL"), "http://proxy.internal:8080");
     await user.type(screen.getByLabelText("no_proxy"), "localhost, *.corp.internal");
     await user.type(screen.getByLabelText("代理用户名"), "x");
@@ -344,7 +352,7 @@ describe("settings and update actions", () => {
     vi.mocked(setSettings).mockRejectedValue(new Error("settings denied"));
     const user = userEvent.setup();
     render(<Settings settings={settings} serveRunning={false} onSaved={vi.fn()} />);
-    await user.click(screen.getAllByRole("checkbox")[1]);
+    await user.click(screen.getByRole("switch", { name: /本地指标/ }));
     await user.click(screen.getByRole("button", { name: "保存" }));
     expect(await screen.findByText(/settings denied/)).toBeInTheDocument();
   });
@@ -357,7 +365,8 @@ describe("settings and update actions", () => {
     });
     const user = userEvent.setup();
     render(<Settings settings={settings} serveRunning={false} onSaved={vi.fn()} />);
-    await user.selectOptions(screen.getByLabelText("出口模式"), "http");
+    await user.click(screen.getByRole("combobox", { name: "出口模式" }));
+    await user.click(await screen.findByRole("option", { name: "HTTP CONNECT" }));
     const proxyUrl = screen.getByLabelText("代理 URL");
     await user.type(proxyUrl, "ftp://invalid.example");
     await user.click(screen.getByRole("button", { name: "保存" }));
