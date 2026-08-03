@@ -52,7 +52,7 @@ WorkBuddy 会把 OpenAI Chat Completions 的 HTTP 400 折叠成“自定义模�
 真正的 vision capability 原因。当且仅当请求来自
 `/agents/workbuddy/v1/chat/completions`、入站消息包含 `image_url`，且路由因没有支持
 图片的候选模型而在请求上游前失败时，Token Station 向 WorkBuddy 返回一条正常的
-assistant 消息：“当前 Token Station 路由不支持图片。请切换到支持图片的模型后重试。”
+assistant 消息：“当前模型不支持图片。请切换到支持图片的模型后重试。”
 
 `stream: false` 使用标准 `chat.completion` JSON；`stream: true` 使用标准
 `chat.completion.chunk` SSE，最后发送 `[DONE]`。外部 HTTP 状态为 200，但请求收据仍记录

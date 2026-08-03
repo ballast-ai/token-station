@@ -243,7 +243,7 @@ fn input_contains_unsupported_media(value: &Value) -> bool {
 }
 
 const WORKBUDDY_NO_VISION_NOTICE: &str =
-    "当前 Token Station 路由不支持图片。请切换到支持图片的模型后重试。";
+    "当前模型不支持图片。请切换到支持图片的模型后重试。";
 
 fn workbuddy_image_request(agent_id: Option<&str>, body: &[u8]) -> Option<bool> {
     if agent_id != Some("workbuddy") {
