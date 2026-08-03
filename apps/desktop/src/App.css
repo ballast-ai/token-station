@@ -5067,12 +5067,12 @@ pre.block {
 }
 
 .overview-heading {
-  min-height: 62px;
+  min-height: 46px;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 24px;
-  margin-bottom: 16px;
+  gap: 20px;
+  margin-bottom: 0;
 }
 
 .page-eyebrow {
@@ -5080,27 +5080,27 @@ pre.block {
   margin-bottom: 2px;
   color: var(--muted);
   font-family: "IBM Plex Mono", monospace;
-  font-size: 9px;
+  font-size: 8.5px;
   font-weight: 500;
   letter-spacing: 0.13em;
 }
 
 .overview-heading h1 {
   margin: 0;
-  font-size: 28px;
+  font-size: 22px;
   line-height: 1.22;
   font-weight: 650;
   letter-spacing: -0.025em;
 }
 
 .overview-heading p {
-  margin: 4px 0 0;
+  margin: 2px 0 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 11.5px;
 }
 
 .overview-heading-actions {
-  min-height: 62px;
+  min-height: 46px;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -5255,12 +5255,12 @@ pre.block {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 10px;
 }
 
 .overview-metrics > [data-slot="card"] {
   min-width: 0;
-  min-height: 154px;
+  min-height: 132px;
   border-top: 2px solid var(--line);
 }
 
@@ -5269,8 +5269,8 @@ pre.block {
 }
 
 .overview-metrics [data-slot="card-header"] {
-  gap: 7px;
-  padding: 16px;
+  gap: 5px;
+  padding: 14px;
 }
 
 .overview-metrics [data-slot="card-header"] > span {
@@ -5289,8 +5289,8 @@ pre.block {
 }
 
 .overview-metrics [data-slot="card-title"] {
-  margin-top: 5px;
-  font-size: 30px;
+  margin-top: 2px;
+  font-size: 26px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -5310,13 +5310,13 @@ pre.block {
 }
 
 .overview-status-card [data-slot="card-title"] {
-  min-height: 36px;
+  min-height: 32px;
   display: flex;
   align-items: center;
 }
 
 .overview-status-card [data-slot="badge"] {
-  min-height: 29px;
+  min-height: 27px;
   gap: 7px;
   padding-inline: 10px;
   font-size: 12px;
@@ -5362,22 +5362,6 @@ pre.block {
   font: 9.5px "IBM Plex Mono", monospace;
 }
 
-.overview-status-card .revision-chain {
-  width: 100%;
-  gap: 4px;
-  margin-top: 1px;
-}
-
-.overview-status-card .revision-step {
-  min-width: 0;
-  flex: 1;
-}
-
-.overview-status-card .revision-chain > svg {
-  width: 9px;
-  height: 9px;
-}
-
 .overview-cost {
   display: flex;
   align-items: center;
@@ -5395,11 +5379,11 @@ pre.block {
 .overview-main-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
-  gap: 10px;
+  gap: 12px;
 }
 
 .overview-main-grid > [data-slot="card"] {
-  min-height: 192px;
+  min-height: 224px;
 }
 
 .overview-main-grid [data-slot="card-header"] {
@@ -5411,7 +5395,28 @@ pre.block {
 }
 
 .overview-main-grid [data-slot="card-title"] {
-  font-size: 12.5px;
+  font-size: 14px;
+}
+
+.overview-main-grid .revision-chain {
+  gap: 4px;
+}
+
+.overview-main-grid .revision-step {
+  min-width: 50px;
+}
+
+.overview-main-grid .revision-step small {
+  font-size: 8px;
+}
+
+.overview-main-grid .revision-step strong {
+  font-size: 9.5px;
+}
+
+.overview-main-grid .revision-chain > svg {
+  width: 9px;
+  height: 9px;
 }
 
 .overview-route-list {
@@ -5420,7 +5425,7 @@ pre.block {
 }
 
 .overview-route-list > div {
-  min-height: 31px;
+  min-height: 36px;
   display: grid;
   grid-template-columns: 52px minmax(0, 1fr) 86px;
   align-items: center;
@@ -5429,7 +5434,7 @@ pre.block {
 
 .overview-route-list > div strong {
   overflow: hidden;
-  font-size: 10.5px;
+  font-size: 11.5px;
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5453,7 +5458,7 @@ pre.block {
 }
 
 .overview-actions-list > button {
-  min-height: 45px;
+  min-height: 52px;
   display: grid;
   grid-template-columns: 26px minmax(0, 1fr);
   align-items: center;
@@ -5487,14 +5492,14 @@ pre.block {
 }
 
 .overview-actions-list strong {
-  font-size: 10.5px;
+  font-size: 11.5px;
   font-weight: 500;
 }
 
 .overview-actions-list small {
   overflow: hidden;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -5723,13 +5728,27 @@ pre.block {
   display: grid !important;
   place-items: center;
   overflow: visible !important;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  background: var(--surface-2);
 }
 
 .agent-master-item .agent-master-icon > svg,
-.agent-master-item .agent-master-icon > img,
-.agent-master-item .agent-master-icon > span {
+.agent-master-item .agent-master-icon > img {
   width: 40px !important;
   height: 40px !important;
+  max-width: none;
+}
+
+.agent-master-item .agent-master-icon > svg {
+  width: 30px !important;
+  height: 30px !important;
+}
+
+.agent-master-item .agent-master-icon > span {
+  width: 38px !important;
+  height: 38px !important;
   max-width: none;
 }
 
@@ -6577,16 +6596,16 @@ a:focus-visible {
 
 .page-title-row {
   align-items: flex-start;
-  padding: 3px 0 8px;
+  padding: 0;
 }
 
 .page-title-row h1,
 .agent-route-hero h1,
 .settings-nav-title h1,
 .usage-page-head h1 {
-  margin: 6px 0 7px;
+  margin: 2px 0 4px;
   font-family: "Geist Sans", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 28px;
+  font-size: 22px;
   font-weight: 700;
   line-height: 1.15;
   letter-spacing: -0.04em;
@@ -6595,8 +6614,8 @@ a:focus-visible {
 .page-title-row p,
 .usage-page-head p {
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.55;
+  font-size: 11.5px;
+  line-height: 1.45;
 }
 
 .eyebrow,
@@ -7354,7 +7373,7 @@ samp {
   width: 100%;
   max-width: 1120px;
   margin-inline: auto;
-  padding: 20px 28px 36px;
+  padding: 14px 28px 32px;
 }
 
 .providers-page > .provider-panel {
@@ -7511,7 +7530,7 @@ samp {
   width: 100%;
   max-width: none;
   margin: 0;
-  padding: 20px 28px 36px;
+  padding: 14px 28px 32px;
 }
 
 .settings-heading {

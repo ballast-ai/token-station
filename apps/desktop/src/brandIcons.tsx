@@ -43,8 +43,13 @@ import {
   Zhipu,
 } from "@lobehub/icons";
 
-/** lobehub 每个图标都带一个彩色 `.Avatar` 变体(品牌色圆角块 + logo)。 */
-type BrandIcon = { Avatar: ComponentType<{ size: number }> };
+type BrandGlyph = ComponentType<{ size: number }>;
+
+/** lobehub 图标本体可直接渲染;多数品牌另带 `.Color`,全部品牌都带 `.Avatar`。 */
+type BrandIcon = BrandGlyph & {
+  Avatar: BrandGlyph;
+  Color?: BrandGlyph;
+};
 
 // 供应商预设 id → 品牌图标。带地区/Plan 后缀的归到同一品牌。
 const PROVIDER_ICONS: Record<string, BrandIcon> = {
@@ -147,11 +152,14 @@ export function ProviderIcon({ id, label, size = 28 }: { id: string; label: stri
   return <Fallback text={label.slice(0, 1).toUpperCase()} size={size} />;
 }
 
-/** Agent 品牌 logo;优先自带位图,再 @lobehub,最后 `fallback` 文本块兜底。 */
+/** Agent 品牌 logo;使用完整品牌图形而非黑底 Avatar,避免标记被缩成角落小点。 */
 export function AgentIcon({ id, fallback, size = 24 }: { id: string; fallback: string; size?: number }) {
   const image = AGENT_IMAGES[id];
   if (image) return <BrandImage src={image} fallback={fallback} size={size} />;
   const Icon = AGENT_ICONS[id];
-  if (Icon) return <Icon.Avatar size={size} />;
+  if (Icon) {
+    const Glyph = Icon.Color ?? Icon;
+    return <Glyph size={size} />;
+  }
   return <Fallback text={fallback} size={size} />;
 }
