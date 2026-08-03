@@ -22,6 +22,7 @@ function tool、工具结果、图片输入和思考强度必须沿用现有 Ope
 3. `agent-openai` 声明支持 WorkBuddy，并保留 `reasoning_effort`、
    `parallel_tool_calls` 与 `max_completion_tokens` 的可表达语义。
 4. 增加公开行为测试、连接器往返测试和真实 WorkBuddy CLI 验收。
+5. 从本机 WorkBuddy App 提取官方图标，替换 Agent 侧栏和详情页的 `WB` 占位图标。
 
 本次不接管腾讯官方账号、积分、内置 Auto 模型或 WorkBuddy MCP。也不修改 WorkBuddy
 程序包，不拦截 `copilot.tencent.com` 流量，不承诺所有上游模型都支持图片或思考模式。
@@ -47,11 +48,24 @@ WorkBuddy 模型列表出现 “Token Station”，模型参数为 `tokenstation
 合法 JSON、`models` 或 `availableModels` 不是数组、已有同 ID 模型，或 ownership 记录与
 当前文件不一致。失败时不得显示“已接入”。
 
+WorkBuddy 会把 OpenAI Chat Completions 的 HTTP 400 折叠成“自定义模型错误”，用户看不到
+真正的 vision capability 原因。当且仅当请求来自
+`/agents/workbuddy/v1/chat/completions`、入站消息包含 `image_url`，且路由因没有支持
+图片的候选模型而在请求上游前失败时，Token Station 向 WorkBuddy 返回一条正常的
+assistant 消息：“当前 Token Station 路由不支持图片。请切换到支持图片的模型后重试。”
+
+`stream: false` 使用标准 `chat.completion` JSON；`stream: true` 使用标准
+`chat.completion.chunk` SSE，最后发送 `[DONE]`。外部 HTTP 状态为 200，但请求收据仍记录
+底层 `capability` 失败、400 状态和 `attempts=0`，避免把兼容提示算成一次成功的
+模型调用。该分支不得读取、描述或保存图片，不得删掉图片后把剩余文本发给
+不支持图片的上游，也不得覆盖认证、限流、结构化输出、工具或音频能力错误。
+
 ## 响应式、键盘与可访问性
 
-WorkBuddy 复用现有 AgentRoutePage，不新增独立布局。侧栏图标使用 `WB` 回退标记，保留
-现有键盘焦点、按钮标签、窄屏布局和状态文字。名称和错误信息必须可由辅助技术读取，不能只靠
-颜色表达接入状态。
+WorkBuddy 复用现有 AgentRoutePage，不新增独立布局。侧栏和详情页使用从已安装
+WorkBuddy App 提取的官方图标，资源加载失败时仍回退到 `WB`。图标保持 1:1 比例，在
+22 px 侧栏和 50 px 详情页尺寸下不裁切。现有键盘焦点、按钮标签、窄屏布局和状态
+文字保持不变。图标为装饰图，Agent 名称和错误信息仍由文本向辅助技术提供。
 
 ## 测试边界与验收标准
 
@@ -64,6 +78,12 @@ WorkBuddy 复用现有 AgentRoutePage，不新增独立布局。侧栏图标使�
 5. `reasoning_effort`、`parallel_tool_calls` 和 `max_completion_tokens` 不在入站层静默丢失。
 6. WorkBuddy 自带 CodeBuddy CLI 使用隔离配置完成一次真实工具调用；代理集成测试同时确认
    `/agents/workbuddy/v1/chat/completions` 会选择 WorkBuddy 命名空间并剥离成标准上游路径。
+7. WorkBuddy 图片请求遇到 vision capability 失败时，非流式和流式请求均收到
+   正常 assistant 提示，上游请求数为 0，收据保留 `capability` 与 `attempts=0`。
+8. 同样的图片请求发给 OpenCode 或 Hermes 时仍返回 HTTP 400；WorkBuddy 的其他
+   capability 失败也不进入该兼容分支。
+9. WorkBuddy 官方图标在侧栏和详情页可见，图片资源失败仍有 `WB` 回退，不影响导航名称
+   与焦点操作。
 
 结构化输出仍沿用当前 fail-closed 边界；若 WorkBuddy 发送尚未批准的
 `response_format=json_schema/json_object`，Token Station 返回 capability 错误，不伪装成
@@ -94,3 +114,10 @@ WorkBuddy 复用现有 AgentRoutePage，不新增独立布局。侧栏图标使�
   替换和启动均成功；真实 App 显示 WorkBuddy 为“可接入”。真实 CodeBuddy CLI 使用隔离
   `models.json` 完成流式文本和 `Read` 工具两轮调用，第二轮请求包含工具结果，最终返回
   `WORKBUDDY_TOOL_E2E_OK`。验收没有创建或修改用户的 `~/.workbuddy/models.json`。
+- WorkBuddy 图片失败兼容与官方图标：已完成。代理回归测试覆盖非流式、流式、
+  其他 Agent 仍返回 400、上游零请求和收据保真；Rust workspace、桌面 Rust 与前端测试全部
+  通过。图标从 `/Applications/WorkBuddy.app/Contents/Resources/icon.icns` 提取，保留透明通道，
+  64 px 和 22 px 人工检查均可辨识。新 App 已构建、审计、签名、安装并启动；真实界面确认
+  侧栏和详情页均显示官方图标。运行中网关的真实流式请求返回 HTTP 200、
+  `text/event-stream` 与 `[DONE]`；对应收据为 `status=400`、`error_code=capability`、
+  `attempts=0`、`upstream=null`。
