@@ -148,19 +148,41 @@ function Get-MsiUpgradeCode([string] $Msi) {
 }
 
 function Get-InstalledVersion([string] $UpgradeCode) {
-    $roots = @(
-        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
-        "HKCU:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    $products = $installer.GetType().InvokeMember(
+        "RelatedProducts",
+        "GetProperty",
+        $null,
+        $installer,
+        @($UpgradeCode)
     )
-    foreach ($root in $roots) {
-        $match = Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
-            Where-Object { $_.PSChildName -and $_.DisplayName -eq $ProductName } |
-            Select-Object -First 1
-        if ($null -ne $match) {
-            return [string] $match.DisplayVersion
-        }
+    $productCount = if ($null -eq $products) {
+        0
+    } else {
+        [int] $products.GetType().InvokeMember(
+            "Count", "GetProperty", $null, $products, $null
+        )
     }
-    throw "installed product was not registered under HKCU (UpgradeCode=$UpgradeCode)"
+    if ($productCount -eq 0) {
+        throw "no installed product is registered for UpgradeCode=$UpgradeCode"
+    }
+    if ($productCount -ne 1) {
+        throw "expected one installed product for UpgradeCode=$UpgradeCode, found $productCount"
+    }
+    $productCode = [string] $products.GetType().InvokeMember(
+        "Item", "GetProperty", $null, $products, @(0)
+    )
+    $version = $installer.GetType().InvokeMember(
+        "ProductInfo",
+        "GetProperty",
+        $null,
+        $installer,
+        @($productCode, "VersionString")
+    )
+    if ([string]::IsNullOrWhiteSpace([string] $version)) {
+        throw "installed product $productCode has no VersionString"
+    }
+    return [string] $version
 }
 
 $older = Resolve-ExistingFile $OlderMsi "older MSI"
@@ -192,7 +214,6 @@ Invoke-Msi @("/x", $older, "/qn", "/norestart") "pre-clean older" | Out-Null
 try {
     $exit = Invoke-Msi @(
         "/i", $older, "/qn", "/norestart",
-        "ALLUSERS=2", "MSIINSTALLPERUSER=1",
         "/l*v", $olderLog
     ) "install older"
     if ($exit -ne 0) {
@@ -216,7 +237,6 @@ try {
 
     $exit = Invoke-Msi @(
         "/i", $newer, "/qn", "/norestart",
-        "ALLUSERS=2", "MSIINSTALLPERUSER=1",
         "/l*v", $upgradeLog
     ) "upgrade"
     if ($exit -ne 0) {
@@ -229,7 +249,6 @@ try {
 
     $exit = Invoke-Msi @(
         "/i", $older, "/qn", "/norestart",
-        "ALLUSERS=2", "MSIINSTALLPERUSER=1",
         "/l*v", $downgradeLog
     ) "downgrade"
     if ($exit -eq 0) {
