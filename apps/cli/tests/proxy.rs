@@ -3067,7 +3067,7 @@ fn workbuddy_images_get_a_normal_assistant_notice_when_vision_is_unavailable() {
     );
     assert_eq!(
         response["choices"][0]["message"]["content"],
-        json!("当前 Token Station 路由不支持图片。请切换到支持图片的模型后重试。")
+        json!("当前模型不支持图片。请切换到支持图片的模型后重试。")
     );
 
     let streaming = json!({
@@ -3097,7 +3097,7 @@ fn workbuddy_images_get_a_normal_assistant_notice_when_vision_is_unavailable() {
         Some("text/event-stream")
     );
     let body = response.into_body().read_to_string().expect("stream reads");
-    assert!(body.contains("当前 Token Station 路由不支持图片"), "{body}");
+    assert!(body.contains("当前模型不支持图片"), "{body}");
     assert!(body.trim_end().ends_with("data: [DONE]"), "{body}");
 
     assert_eq!(home.hits(), 0);
