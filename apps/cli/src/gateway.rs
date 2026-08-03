@@ -242,6 +242,41 @@ fn input_contains_unsupported_media(value: &Value) -> bool {
     }
 }
 
+const WORKBUDDY_NO_VISION_NOTICE: &str =
+    "当前 Token Station 路由不支持图片。请切换到支持图片的模型后重试。";
+
+fn workbuddy_image_request(agent_id: Option<&str>, body: &[u8]) -> Option<bool> {
+    if agent_id != Some("workbuddy") {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let has_image = value
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| {
+                        parts.iter().any(|part| {
+                            part.get("type").and_then(Value::as_str) == Some("image_url")
+                        })
+                    })
+            })
+        });
+    has_image.then(|| {
+        value
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    })
+}
+
+fn is_missing_vision_refusal(refusal: &ErrorEnvelope) -> bool {
+    refusal.code == ErrorCode::Capability && refusal.message.contains("supports vision")
+}
+
 /// An outbound HTTP agent with an explicit, fail-closed egress policy (P1-6):
 ///
 /// - **No redirects.** Following a 3xx could carry the `Authorization` header to
@@ -2210,8 +2245,14 @@ impl Gateway {
                     // the client can still receive; no upstream health verdict.
                     record.status = refusal.http_status;
                     record.error_code = Some(refusal.code);
-                    let rendered = Self::render_error(agent, &refusal);
-                    emit(Reply::BeginJson(rendered));
+                    if let Some(stream) = workbuddy_image_request(agent_id, body)
+                        && is_missing_vision_refusal(&refusal)
+                    {
+                        Self::emit_workbuddy_no_vision_notice(stream, emit);
+                    } else {
+                        let rendered = Self::render_error(agent, &refusal);
+                        emit(Reply::BeginJson(rendered));
+                    }
                 }
             }
         } else {
@@ -3977,6 +4018,72 @@ impl Gateway {
         JsonReply {
             status: envelope.http_status,
             body,
+        }
+    }
+
+    fn emit_workbuddy_no_vision_notice(stream: bool, emit: &mut dyn FnMut(Reply) -> bool) {
+        let id = "chatcmpl-token-station-workbuddy-vision";
+        let created = unix_millis() / 1_000;
+        if !stream {
+            emit(Reply::BeginJson(JsonReply {
+                status: 200,
+                body: json!({
+                    "id": id,
+                    "object": "chat.completion",
+                    "created": created,
+                    "model": "tokenstation-auto",
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": WORKBUDDY_NO_VISION_NOTICE
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0
+                    }
+                })
+                .to_string(),
+            }));
+            return;
+        }
+
+        if !emit(Reply::BeginStream) {
+            return;
+        }
+        let content = json!({
+            "id": id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": "tokenstation-auto",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": WORKBUDDY_NO_VISION_NOTICE
+                },
+                "finish_reason": Value::Null
+            }]
+        });
+        if !emit(Reply::Chunk(format!("data: {content}\n\n"))) {
+            return;
+        }
+        let done = json!({
+            "id": id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": "tokenstation-auto",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        });
+        if emit(Reply::Chunk(format!("data: {done}\n\n"))) {
+            emit(Reply::Chunk("data: [DONE]\n\n".to_owned()));
         }
     }
 

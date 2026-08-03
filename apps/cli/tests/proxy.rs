@@ -3034,6 +3034,86 @@ fn opencode_and_hermes_images_are_refused_before_a_non_vision_upstream() {
 }
 
 #[test]
+fn workbuddy_images_get_a_normal_assistant_notice_when_vision_is_unavailable() {
+    let home = MockUpstream::start(Vec::new());
+    let custom = MockUpstream::start(Vec::new());
+    let key = key_file("workbuddy-vision-unsupported", "sk-test-key-abc");
+    let proxy = start_scoped_proxy(&home, &custom, &key);
+    let token = proxy.virtual_key.clone();
+    let request = json!({
+        "model": "auto",
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "Read this image." },
+                { "type": "image_url", "image_url": { "url": "https://example.test/cat.png" } }
+            ]
+        }]
+    });
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/workbuddy/v1/chat/completions",
+        &request,
+        &token,
+        false,
+    );
+    assert_eq!(status, 200, "{body}");
+    let response: Value = serde_json::from_str(&body).expect("compatibility notice is JSON");
+    assert_eq!(response["object"], json!("chat.completion"));
+    assert_eq!(
+        response["choices"][0]["message"]["role"],
+        json!("assistant")
+    );
+    assert_eq!(
+        response["choices"][0]["message"]["content"],
+        json!("当前 Token Station 路由不支持图片。请切换到支持图片的模型后重试。")
+    );
+
+    let streaming = json!({
+        "model": "auto",
+        "stream": true,
+        "messages": request["messages"].clone()
+    });
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    let response = agent
+        .post(format!(
+            "{}/agents/workbuddy/v1/chat/completions",
+            proxy.url
+        ))
+        .header("authorization", &format!("Bearer {token}"))
+        .send(&streaming.to_string())
+        .expect("the scoped proxy answers");
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+    let body = response.into_body().read_to_string().expect("stream reads");
+    assert!(body.contains("当前 Token Station 路由不支持图片"), "{body}");
+    assert!(body.trim_end().ends_with("data: [DONE]"), "{body}");
+
+    assert_eq!(home.hits(), 0);
+    assert_eq!(custom.hits(), 0);
+    settle();
+    let log = std::fs::read_to_string(proxy.data_dir.join("requests.log")).expect("log exists");
+    let receipt: Value = serde_json::from_str(log.lines().last().expect("a receipt exists"))
+        .expect("receipt is JSON");
+    assert_eq!(receipt["status"], json!(400));
+    assert_eq!(receipt["error_code"], json!("capability"));
+    assert_eq!(receipt["attempts"], json!(0));
+    assert_eq!(receipt["agent_id"], json!("workbuddy"));
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn audio_and_embeddings_are_refused_before_the_upstream() {
     let mock = MockUpstream::start(Vec::new());
     let key = key_file("capability", "sk-test-key-abc");

@@ -1843,6 +1843,7 @@ body {
 /* 无品牌 logo 时的首字母/缩写兜底块 */
 .brand-fallback { display: inline-grid; place-items: center; border-radius: 7px; background: var(--surface-2); color: var(--muted); font-size: 11px; font-weight: 700; line-height: 1; }
 .brand-image { border-radius: 50%; object-fit: cover; background: #fff; border: 1px solid var(--line); }
+.brand-image.brand-image-app { border: 0; border-radius: 22%; object-fit: contain; background: transparent; }
 /* 侧栏 Agent 有 logo(svg)时去掉外框,让品牌彩色块干净显示 */
 .rail-glyph:has(svg) { border: none; background: transparent; }
 
