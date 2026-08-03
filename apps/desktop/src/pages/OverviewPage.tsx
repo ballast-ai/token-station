@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Activity, AlertTriangle, Bot, Boxes, Clock3, Route } from "lucide-react";
+import { Activity, Bot, Boxes, Clock3, Route, WalletCards } from "lucide-react";
 import { getStats } from "../api";
 import type { AgentUiMetadataView, AgentView, StateView, StatsView, TierSlot } from "../api";
 import RevisionChain from "../components/RevisionChain";
@@ -7,15 +7,12 @@ import { useLocalizedCopy } from "../components/LanguageProvider";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
-import { Separator } from "../components/ui/separator";
 
 interface OverviewPageProps {
   state: StateView;
   registry: AgentUiMetadataView[];
   agents: AgentView[];
   onNavigate: (view: "home" | "agents" | "providers" | "usage" | "logs") => void;
-  onRescan: () => void;
-  scanBusy: boolean;
 }
 
 const TIER_COPY: Record<TierSlot, { en: string; zh: string }> = {
@@ -37,7 +34,17 @@ function formatLatency(ms: number) {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
 }
 
-export default function OverviewPage({ state, registry, agents, onNavigate, onRescan, scanBusy }: OverviewPageProps) {
+function formatCost(costMicros: number | null) {
+  if (costMicros == null) return null;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: costMicros < 10_000 ? 4 : 2,
+  }).format(costMicros / 1_000_000);
+}
+
+export default function OverviewPage({ state, registry, agents, onNavigate }: OverviewPageProps) {
   const { copy } = useLocalizedCopy();
   const [stats, setStats] = useState<StatsView | null>(null);
   const [statsUnavailable, setStatsUnavailable] = useState(false);
@@ -60,6 +67,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate, onRe
   }, []);
 
   const successRate = stats ? formatSuccessRate(stats) : null;
+  const requestCost = stats ? formatCost(stats.total.cost_micros) : null;
   const statsSummary = statsUnavailable
     ? copy("Statistics are temporarily unavailable", "统计暂不可用")
     : stats == null
@@ -75,47 +83,39 @@ export default function OverviewPage({ state, registry, agents, onNavigate, onRe
     <div className="page-stack overview-page">
       <header className="overview-heading">
         <div>
-          <span className="page-eyebrow">CONTROL PLANE</span>
-          <h1>{copy("System overview", "系统概览")}</h1>
+          <span className="page-eyebrow">RUNTIME STATUS</span>
+          <h1>{copy("Overview", "概览")}</h1>
           <p>{copy(
-            "Runtime, routing revision, and the next actions that need attention.",
-            "代理运行状态、路由版本和需要处理的异常，一屏掌握。",
+            "Proxy status, current routing, requests, and cost at a glance.",
+            "代理运行状态、当前路由、请求与成本，一屏看清。",
           )}</p>
         </div>
         <div className="overview-heading-actions">
-          <Button variant="outline" size="sm" onClick={onRescan} disabled={scanBusy}>
-            <Bot />{scanBusy ? copy("Scanning…", "扫描中…") : copy("Rescan Agents", "重新扫描 Agent")}
-          </Button>
           <Button size="sm" onClick={() => onNavigate("providers")}>
             <Boxes />{copy("Manage providers", "管理供应商")}
           </Button>
         </div>
       </header>
 
-      <Card className="overview-runtime-card">
-        <CardContent className="overview-runtime-content">
-          <div className="overview-runtime-identity">
-            <span><Activity /></span>
-            <div>
-              <small>{copy("Local proxy", "本地代理")}</small>
-              <strong><i className={runtimeHealthy ? "healthy" : ""} />{runtimeHealthy ? copy("Running normally", "运行正常") : copy("Not running", "未运行")}</strong>
-            </div>
-          </div>
-          <Separator orientation="vertical" />
-          <RevisionChain state={state} />
-          <Separator orientation="vertical" />
-          <dl>
-            <div><dt>{copy("Listen", "监听地址")}</dt><dd>{state.serve.listen}</dd></div>
-            <div><dt>{copy("Agent runtime", "Agent 连接")}</dt><dd>{state.serve.agent_connected ? copy("Connected", "已连接") : copy("Disconnected", "未连接")}</dd></div>
-          </dl>
-        </CardContent>
-      </Card>
-
       <section className="overview-metrics" aria-label={copy("System summary", "系统摘要")}>
+        <Card size="sm" className="overview-status-card">
+          <CardHeader>
+            <span><Activity />{copy("Proxy status", "代理状态")}</span>
+            <CardTitle><Badge variant={runtimeHealthy ? "default" : "secondary"}><i className={runtimeHealthy ? "healthy" : ""} />{runtimeHealthy ? copy("Running", "运行中") : copy("Stopped", "未运行")}</Badge></CardTitle>
+            <dl><div><dt>Revision</dt><dd>{state.saved_revision}</dd></div><div><dt>{copy("Listen", "监听")}</dt><dd>{state.serve.listen}</dd></div></dl>
+            <RevisionChain state={state} />
+          </CardHeader>
+        </Card>
+        <Card size="sm" className="overview-request-card">
+          <CardHeader>
+            <span><Clock3 />{copy("Requests today", "今日请求")}</span>
+            <CardTitle>{stats?.total.requests ?? "—"}</CardTitle>
+            <strong className="overview-cost"><WalletCards />{requestCost ?? (stats ? copy("Cost unpriced", "成本未定价") : "—")}</strong>
+            <p>{statsSummary} · {copy("rolling 24h", "近 24 小时口径")}</p>
+          </CardHeader>
+        </Card>
         <Card size="sm"><CardHeader><span><Bot />{copy("Managed Agents", "已接管 Agent")}</span><CardTitle>{connectedAgents} <small>/ {registry.length}</small></CardTitle><p>{copy(`${pendingAgents} detected and pending`, `${pendingAgents} 个已检测待接入`)}</p></CardHeader></Card>
-        <Card size="sm"><CardHeader><span><Boxes />{copy("Providers", "供应商")}</span><CardTitle>{state.providers.length}</CardTitle><p>{copy("Configured upstreams", "已配置上游")}</p></CardHeader></Card>
-        <Card size="sm"><CardHeader><span><Clock3 />{copy("Requests · 24h", "近 24 小时请求")}</span><CardTitle>{stats?.total.requests ?? "—"}</CardTitle><p>{statsSummary}</p></CardHeader></Card>
-        <Card size="sm" className={pendingAgents > 0 ? "attention" : ""}><CardHeader><span><AlertTriangle />{copy("Needs attention", "待处理")}</span><CardTitle>{pendingAgents}</CardTitle><p>{copy("Detected Agents not managed", "已检测但未接管的 Agent")}</p></CardHeader></Card>
+        <Card size="sm" className={state.quota_accounts.length > 0 ? "attention" : ""}><CardHeader><span><Boxes />{copy("Providers", "供应商")}</span><CardTitle>{state.providers.length}</CardTitle><p>{copy(`${state.quota_accounts.length} quota accounts configured`, `${state.quota_accounts.length} 个额度账户已配置`)}</p></CardHeader></Card>
       </section>
 
       <section className="overview-main-grid">

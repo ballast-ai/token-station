@@ -481,8 +481,6 @@ function StationApp() {
           registry={visibleRegistry}
           agents={agents}
           onNavigate={navigate}
-          onRescan={() => void rescanAgents()}
-          scanBusy={scanBusy}
         />
       )}
 
