@@ -41,15 +41,20 @@ import {
   useLanguage,
   type Language,
 } from "./components/LanguageProvider";
+import { ThemeBoundary } from "./components/ThemeProvider";
 import AddProviderPage, {
   type FreeCatalogFilters,
   type ProviderCatalogMode,
   type RegularCatalogFilters,
 } from "./pages/AddProviderPage";
+import AgentsPage from "./pages/AgentsPage";
 import AgentRoutePage from "./pages/AgentRoutePage";
 import FreeProviderConfigPage from "./pages/FreeProviderConfigPage";
 import HomePage from "./pages/HomePage";
+import OverviewPage from "./pages/OverviewPage";
+import ProvidersPage from "./pages/ProvidersPage";
 import QuotaUsagePage from "./pages/QuotaUsagePage";
+import RequestLogsPage from "./pages/RequestLogsPage";
 import SettingsHub from "./pages/SettingsHub";
 import Stats from "./pages/Stats";
 import "./App.css";
@@ -95,7 +100,7 @@ export function configSaveStatus(state: StateView, language: Language = "en"): s
 function StationApp() {
   const { language, copy } = useLanguage();
   const [state, setState] = useState<StateView | null>(null);
-  const [view, setView] = useState<AppView>("home");
+  const [view, setView] = useState<AppView>("overview");
   const [hiddenAgentIds, setHiddenAgentIds] = useState<Set<string>>(readHiddenAgentIds);
   const hiddenAgentIdsRef = useRef(hiddenAgentIds);
   const [registry, setRegistry] = useState<AgentUiMetadataView[]>([]);
@@ -383,13 +388,13 @@ function StationApp() {
   };
 
   const navigateBack = () => {
-    const previous = viewHistoryRef.current.pop() ?? "home";
+    const previous = viewHistoryRef.current.pop() ?? "overview";
     if (
       previous.startsWith("agent:")
       && hiddenAgentIds.has(previous.slice("agent:".length))
     ) {
       viewHistoryRef.current = [];
-      setView("home");
+      setView("overview");
     } else {
       setView(previous);
     }
@@ -472,11 +477,20 @@ function StationApp() {
       {error && <div className="banner err global-banner">{error}</div>}
       {state.serve.error && <div className="banner err global-banner">{state.serve.error}</div>}
 
+      {view === "overview" && (
+        <OverviewPage
+          state={state}
+          registry={visibleRegistry}
+          agents={agents}
+          onNavigate={navigate}
+          onRescan={() => void rescanAgents()}
+          scanBusy={scanBusy}
+        />
+      )}
+
       {view === "home" && (
         <HomePage
           providers={state.providers}
-          deletedProviders={state.deleted_providers ?? []}
-          providerRecoveryError={state.provider_recovery_error ?? null}
           tiers={state.tiers}
           profiles={state.profiles ?? []}
           routingMode={state.routing_mode}
@@ -484,7 +498,6 @@ function StationApp() {
           onSaveQuota={saveQuota}
           onSaveQuotaPlan={saveQuotaPlan}
           onViewQuotaUsage={() => navigate("quota-usage")}
-          serveRunning={runtimeHealthy}
           busy={busy}
           applying={state.serve.phase === "starting"}
           configError={state.config_error}
@@ -520,11 +533,31 @@ function StationApp() {
                 )
               : copy("All Agents now follow Home", "全部 Agent 已恢复跟随主页"),
           )}
-          onRemoveProvider={(name) => void run(
+        />
+      )}
+
+      {view === "agents" && (
+        <AgentsPage
+          registry={visibleRegistry}
+          agents={agents}
+          scanBusy={scanBusy}
+          onRescan={() => void rescanAgents()}
+          onOpenAgent={(id) => navigate(`agent:${id}`)}
+        />
+      )}
+
+      {view === "providers" && (
+        <ProvidersPage
+          providers={state.providers}
+          deletedProviders={state.deleted_providers ?? []}
+          recoveryError={state.provider_recovery_error ?? null}
+          serveRunning={runtimeHealthy}
+          busy={busy}
+          onRemove={(name) => void run(
             () => removeProvider(name),
             copy("Provider deleted", "供应商已删除"),
           )}
-          onRestoreProvider={(name) => void run(
+          onRestore={(name) => void run(
             () => restoreProvider(name),
             copy("Provider restored from the recycle bin", "供应商已从回收站恢复"),
           )}
@@ -566,6 +599,7 @@ function StationApp() {
       )}
 
       {view === "usage" && <Stats onBack={navigateBack} />}
+      {view === "logs" && <RequestLogsPage />}
       {view === "quota-usage" && (
         <QuotaUsagePage providers={state.providers} onBack={navigateBack} />
       )}
@@ -577,7 +611,6 @@ function StationApp() {
           hiddenAgentIds={hiddenAgentIds}
           onAgentVisibilityChange={setAgentVisible}
           onSaved={showState}
-          onBack={navigateBack}
         />
       )}
       {view === "add-provider" && (
@@ -634,7 +667,9 @@ function StationApp() {
 export default function App() {
   return (
     <LanguageBoundary>
-      <StationApp />
+      <ThemeBoundary>
+        <StationApp />
+      </ThemeBoundary>
     </LanguageBoundary>
   );
 }

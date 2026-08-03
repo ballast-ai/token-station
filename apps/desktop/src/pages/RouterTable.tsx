@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { RouterTableView, getRouterTable } from "../api";
 import { LanguageBoundary, useLanguage } from "../components/LanguageProvider";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 
 /// Visualizes the four routing layers in the core's short-circuit order:
 /// 1 rules (hard matches) -> 2 agent hints -> 3 heuristic tiers -> 4 default fallback.
@@ -15,18 +16,19 @@ function RouterTableContent() {
       .catch((e) => setErr(String(e)));
   }, []);
 
-  if (err) return <section className="panel"><div className="banner err">{err}</div></section>;
-  if (!rt) return <section className="panel"><div className="empty">{t("router.loading")}</div></section>;
+  if (err) return <Card className="settings-card"><CardContent><div className="banner err">{err}</div></CardContent></Card>;
+  if (!rt) return <Card className="settings-card"><CardContent><div className="empty">{t("router.loading")}</div></CardContent></Card>;
 
   const model = (u: string | null, m: string | null) =>
     u ? `${u} · ${m ?? "?"}` : t("router.unconfigured");
 
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <h2>{t("router.title")}</h2>
+    <Card className="settings-card">
+      <CardHeader className="panel-head">
+        <CardTitle><h2>{t("router.title")}</h2></CardTitle>
         <p className="sub">{t("router.description")}</p>
-      </div>
+      </CardHeader>
+      <CardContent className="settings-card-content">
 
       {/* Layer 1: rules */}
       <div className="layer">
@@ -99,7 +101,8 @@ function RouterTableContent() {
           <div className="kv-v mono">{rt.assumed_context_window || "—"}</div>
         </div>
       </div>
-    </section>
+      </CardContent>
+    </Card>
   );
 }
 
