@@ -48,17 +48,10 @@ WorkBuddy 模型列表出现 “Token Station”，模型参数为 `tokenstation
 合法 JSON、`models` 或 `availableModels` 不是数组、已有同 ID 模型，或 ownership 记录与
 当前文件不一致。失败时不得显示“已接入”。
 
-WorkBuddy 会把 OpenAI Chat Completions 的 HTTP 400 折叠成“自定义模型错误”，用户看不到
-真正的 vision capability 原因。当且仅当请求来自
-`/agents/workbuddy/v1/chat/completions`、入站消息包含 `image_url`，且路由因没有支持
-图片的候选模型而在请求上游前失败时，Token Station 向 WorkBuddy 返回一条正常的
-assistant 消息：“当前模型不支持图片。请在 Token Station 切换到支持图片的模型后重试。”
-
-`stream: false` 使用标准 `chat.completion` JSON；`stream: true` 使用标准
-`chat.completion.chunk` SSE，最后发送 `[DONE]`。外部 HTTP 状态为 200，但请求收据仍记录
-底层 `capability` 失败、400 状态和 `attempts=0`，避免把兼容提示算成一次成功的
-模型调用。该分支不得读取、描述或保存图片，不得删掉图片后把剩余文本发给
-不支持图片的上游，也不得覆盖认证、限流、结构化输出、工具或音频能力错误。
+WorkBuddy 会把 OpenAI Chat Completions 的 HTTP 400 折叠成“自定义模型错误”。原先的
+WorkBuddy 专用 assistant 提示已被《全 Agent 图片与视觉附件降级设计》取代：无视觉候选时，
+Token Station 在 Canonical IR 中把图片块替换为中英文本地化占位，然后让真正模型继续
+处理剩余文字、文件路径和工具调用。该行为对所有 Agent 一致，不再伪造 WorkBuddy 专用成功响应。
 
 ## 响应式、键盘与可访问性
 
@@ -114,10 +107,7 @@ WorkBuddy App 提取的官方图标，资源加载失败时仍回退到 `WB`。�
   替换和启动均成功；真实 App 显示 WorkBuddy 为“可接入”。真实 CodeBuddy CLI 使用隔离
   `models.json` 完成流式文本和 `Read` 工具两轮调用，第二轮请求包含工具结果，最终返回
   `WORKBUDDY_TOOL_E2E_OK`。验收没有创建或修改用户的 `~/.workbuddy/models.json`。
-- WorkBuddy 图片失败兼容与官方图标：已完成。代理回归测试覆盖非流式、流式、
-  其他 Agent 仍返回 400、上游零请求和收据保真；Rust workspace、桌面 Rust 与前端测试全部
-  通过。图标从 `/Applications/WorkBuddy.app/Contents/Resources/icon.icns` 提取，保留透明通道，
-  64 px 和 22 px 人工检查均可辨识。新 App 已构建、审计、签名、安装并启动；真实界面确认
-  侧栏和详情页均显示官方图标。运行中网关的真实流式请求返回 HTTP 200、
-  `text/event-stream` 与 `[DONE]`；对应收据为 `status=400`、`error_code=capability`、
-  `attempts=0`、`upstream=null`。
+- WorkBuddy 图片兼容与官方图标：已完成。官方图标仍在侧栏和详情页显示。原先的
+  WorkBuddy 专用假 assistant 响应已被《全 Agent 图片与视觉附件降级设计》取代。真实运行中
+  网关收到“历史图片 + 当前中文文本”后，把图片替换成中文占位并命中真正上游，返回
+  HTTP 200；Receipt 为 `attempts=1`、`has_images=false`，不再记录为无上游的 capability 假成功。

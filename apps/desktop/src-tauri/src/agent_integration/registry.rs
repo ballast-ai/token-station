@@ -829,7 +829,10 @@ mod tests {
             .descriptors()
             .iter()
             .find(|descriptor| descriptor.agent_id == "workbuddy")
-            .is_some_and(|descriptor| descriptor.version_probe.runtime.is_none()));
+            .is_some_and(|descriptor| matches!(
+                descriptor.version_probe.runtime,
+                Some(ProbeRuntime::EnvShebang { .. })
+            )));
         assert!(registry
             .descriptors()
             .iter()
@@ -891,6 +894,11 @@ mod tests {
         use super::super::types::Platform;
         let registry = AgentRegistry::builtin().unwrap();
         for descriptor in registry.descriptors() {
+            // WorkBuddy is intentionally macOS-only until its Windows install and
+            // config paths have been verified against a real installation.
+            if descriptor.agent_id == "workbuddy" {
+                continue;
+            }
             assert!(
                 descriptor
                     .known_install_locations

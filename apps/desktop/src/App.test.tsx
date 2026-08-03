@@ -754,12 +754,13 @@ describe("desktop station navigation", () => {
     for (const name of agentDisplayNames) {
       expect(screen.getByRole("switch", { name, checked: true })).toBeInTheDocument();
     }
-    expect(screen.getByRole("status")).toHaveTextContent("7 / 7 已显示");
+    expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length} / ${agentIds.length} 已显示`);
 
     await user.click(screen.getByRole("switch", { name: "Codex", checked: true }));
 
     expect(screen.getByRole("switch", { name: "Codex", checked: false })).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("6 / 7 已显示");
+    expect(navigation().queryByRole("button", { name: "Codex" })).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length - 1} / ${agentIds.length} 已显示`);
     expect(window.localStorage.getItem(AGENT_VISIBILITY_STORAGE_KEY)).toBe(
       JSON.stringify(["codex"]),
     );
@@ -777,7 +778,8 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("switch", { name: "Codex", checked: false }));
 
     expect(screen.getByRole("switch", { name: "Codex", checked: true })).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("7 / 7 已显示");
+    expect(navigation().getByRole("button", { name: "Codex" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length} / ${agentIds.length} 已显示`);
     expect(window.localStorage.getItem(AGENT_VISIBILITY_STORAGE_KEY)).toBe(
       JSON.stringify([]),
     );
@@ -946,11 +948,12 @@ describe("desktop station navigation", () => {
     expect(navigation().getByRole("button", { name: "概览" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "用量" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("0 / 7 已显示");
+    expect(screen.getByRole("status")).toHaveTextContent(`0 / ${agentIds.length} 已显示`);
     expect(screen.getByRole("switch", { name: "Claude Code", checked: false })).toBeInTheDocument();
 
     await user.click(screen.getByRole("switch", { name: "Claude Code", checked: false }));
-    expect(screen.getByRole("status")).toHaveTextContent("1 / 7 已显示");
+    expect(navigation().getByRole("button", { name: "Claude Code" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(`1 / ${agentIds.length} 已显示`);
   });
 
   it("silently ignores a backend scan already in progress", async () => {
@@ -1102,7 +1105,7 @@ describe("desktop station navigation", () => {
     expect(screen.getByText(
       "Choose which Agents appear in the sidebar.",
     )).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("7 / 7 visible");
+    expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length} / ${agentIds.length} visible`);
     expect(screen.getByRole("group", { name: "Agent visibility options" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Codex", checked: true })).toBeInTheDocument();
     await user.click(navigation().getByRole("button", { name: "Providers" }));
@@ -1132,7 +1135,7 @@ describe("desktop station navigation", () => {
     expect(screen.getByText(
       "选择显示在左侧导航中的 Agent。",
     )).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("7 / 7 已显示");
+    expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length} / ${agentIds.length} 已显示`);
     expect(screen.getByRole("group", { name: "Agent 显示选项" })).toBeInTheDocument();
     await user.click(navigation().getByRole("button", { name: "概览" }));
     expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
