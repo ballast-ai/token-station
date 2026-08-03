@@ -17,11 +17,13 @@ const wixPath = resolve(
   root,
   "apps/desktop/src-tauri/wix/per-user-main.wxs",
 );
+const lifecyclePath = resolve(root, "scripts/test-windows-msi.ps1");
 
-const [baseSource, windowsSource, wix] = await Promise.all([
+const [baseSource, windowsSource, wix, lifecycle] = await Promise.all([
   readFile(baseConfigPath, "utf8"),
   readFile(windowsConfigPath, "utf8"),
   readFile(wixPath, "utf8"),
+  readFile(lifecyclePath, "utf8"),
 ]);
 const base = JSON.parse(baseSource);
 const windows = JSON.parse(windowsSource);
@@ -97,6 +99,25 @@ assert.match(
   registryEntries,
   /<RemoveFolder[^>]*Directory="ProgramsFolder"[^>]*On="uninstall"/,
   "the per-user Programs directory must have an uninstall RemoveFile-table entry",
+);
+
+assert.match(
+  lifecycle,
+  /function Get-MsiUpgradeCode/,
+  "the MSI lifecycle must query UpgradeCode through a dedicated helper",
+);
+assert.ok(
+  lifecycle.includes('"SELECT ``UpgradeCode`` FROM ``Upgrade``"'),
+  "the MSI lifecycle must read UpgradeCode from the Upgrade table",
+);
+assert.ok(
+  lifecycle.includes("query returned no rows"),
+  "MSI metadata queries must report missing rows before dereferencing null",
+);
+assert.equal(
+  lifecycle.includes('Get-MsiProperty $newer "UpgradeCode"'),
+  false,
+  "UpgradeCode is not a Property-table value",
 );
 
 console.log("Windows release configuration: PASS");
