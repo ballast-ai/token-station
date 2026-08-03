@@ -32,6 +32,11 @@ import {
 } from "./api";
 import AppShell, { type AppView } from "./components/AppShell";
 import {
+  readHiddenAgentIds,
+  updateHiddenAgentIds,
+  writeHiddenAgentIds,
+} from "./components/AgentVisibilityPreferences";
+import {
   LanguageBoundary,
   useLanguage,
   type Language,
@@ -91,6 +96,8 @@ function StationApp() {
   const { language, copy } = useLanguage();
   const [state, setState] = useState<StateView | null>(null);
   const [view, setView] = useState<AppView>("home");
+  const [hiddenAgentIds, setHiddenAgentIds] = useState<Set<string>>(readHiddenAgentIds);
+  const hiddenAgentIdsRef = useRef(hiddenAgentIds);
   const [registry, setRegistry] = useState<AgentUiMetadataView[]>([]);
   const [agents, setAgents] = useState<AgentView[]>([]);
   const [scanBusy, setScanBusy] = useState(false);
@@ -118,8 +125,11 @@ function StationApp() {
   const scanGenerationRef = useRef(0);
   const pendingServeRef = useRef<ServeView | null>(null);
   const viewHistoryRef = useRef<AppView[]>([]);
-  const prevPhaseRef = useRef<string | null>(null);
-  const runtimeReadyRef = useRef<boolean | null>(null);
+  const pendingApplyRevisionRef = useRef<number | null>(null);
+  const runtimeObservationRef = useRef<{
+    ready: boolean;
+    instanceId: string | null;
+  } | null>(null);
 
   const orderedRegistry = useMemo(
     () => registry
@@ -132,6 +142,20 @@ function StationApp() {
       .map(({ metadata }) => metadata),
     [registry],
   );
+  const visibleRegistry = useMemo(
+    () => orderedRegistry.filter((metadata) => !hiddenAgentIds.has(metadata.agent_id)),
+    [hiddenAgentIds, orderedRegistry],
+  );
+
+  const setAgentVisible = useCallback((agentId: string, visible: boolean) => {
+    const current = hiddenAgentIdsRef.current;
+    const currentlyVisible = !current.has(agentId);
+    if (currentlyVisible === visible) return;
+    const next = updateHiddenAgentIds(current, agentId, !visible);
+    hiddenAgentIdsRef.current = next;
+    setHiddenAgentIds(next);
+    writeHiddenAgentIds(next);
+  }, []);
 
   const rescanAgents = useCallback(async () => {
     const requestedGeneration = ++scanGenerationRef.current;
@@ -221,18 +245,23 @@ function StationApp() {
     if (state) setAdminEndpoint(state.serve);
   }, [state]);
 
-  // Runtime state drives the Save and apply banner, not a one-time success message. Apply is asynchronous.
-  // Setting Applying immediately when serveStart returns breaks alignment with the real lifecycle. See UX feedback.
-  // When runtime state changes from starting (=Applying) to running, this version is active. Replace it with
-  // Automatically hide the brief Applied notice.
+  // Record a target revision only for an explicit Save and Apply. A normal
+  // initial transition from starting to running is not a successful config apply.
   useEffect(() => {
     const phase = state?.serve.phase;
-    const previous = prevPhaseRef.current;
-    prevPhaseRef.current = phase ?? null;
-    if (previous === "starting" && phase === "running" && state) {
+    if (!state) return undefined;
+    const targetRevision = pendingApplyRevisionRef.current;
+    if (targetRevision == null || phase === "starting") return undefined;
+
+    if (
+      phase === "running"
+      && state.serve.running_revision === targetRevision
+      && state.serve.error === null
+    ) {
+      pendingApplyRevisionRef.current = null;
       setMessage(copy(
-        `Configuration applied · revision ${state.saved_revision}`,
-        `配置已应用 · revision ${state.saved_revision}`,
+        `Configuration applied · revision ${targetRevision}`,
+        `配置已应用 · revision ${targetRevision}`,
       ));
       const timer = window.setTimeout(
         () => setMessage((current) => (
@@ -244,8 +273,13 @@ function StationApp() {
       );
       return () => window.clearTimeout(timer);
     }
+    // The phase is also running after fallback to the old instance. The error is the authoritative failure signal. A late old
+    // A running_revision without an error can result from a 500 ms polling race. Keep the target and continue waiting.
+    if (state.serve.error !== null || phase !== "running") {
+      pendingApplyRevisionRef.current = null;
+    }
     return undefined;
-  }, [state?.serve.phase]);
+  }, [state?.serve.error, state?.serve.phase, state?.serve.running_revision]);
 
   // Rescan when runtime state changes from not ready to ready. The first app scan can occur before the gateway starts,
   // That scan_agents call got runtime=None, so all installations had connected=false. Managed
@@ -254,14 +288,32 @@ function StationApp() {
   useEffect(() => {
     if (!state) return;
     const ready = state.serve.app_runtime === "running" && Boolean(state.serve.listener_reachable);
-    const wasReady = runtimeReadyRef.current;
-    runtimeReadyRef.current = ready;
+    const observation = {
+      ready,
+      instanceId: state.serve.instance_id,
+    };
+    const previous = runtimeObservationRef.current;
+    runtimeObservationRef.current = observation;
     // The first observation (null) is not a transition to ready. If already ready, the initial load() scan includes runtime.
-    // Scan only on an actual not-ready (false) to ready (true) transition. This fixes the startup race.
-    if (wasReady === false && ready) {
+    // Scan when state changes from not ready to ready, or when the serving instance changes while ready. The latter ensures
+    // After Applying(old) -> Running(new), Agent adapter readiness must not remain on the old instance.
+    const becameReady = previous?.ready === false && ready;
+    const servingInstanceChanged = Boolean(
+      previous?.ready
+        && ready
+        && previous.instanceId
+        && observation.instanceId
+        && previous.instanceId !== observation.instanceId,
+    );
+    if (becameReady || servingInstanceChanged) {
       void rescanAgents();
     }
-  }, [state?.serve.app_runtime, state?.serve.listener_reachable, rescanAgents]);
+  }, [
+    state?.serve.app_runtime,
+    state?.serve.instance_id,
+    state?.serve.listener_reachable,
+    rescanAgents,
+  ]);
 
   const showState = (next: StateView, nextMessage?: string) => {
     setState(next);
@@ -269,16 +321,25 @@ function StationApp() {
     if (nextMessage) setMessage(nextMessage);
   };
 
-  const run = async (action: () => Promise<StateView>, ok?: string): Promise<boolean> => {
+  const run = async (
+    action: () => Promise<StateView>,
+    ok?: string,
+    recordApplyTarget = false,
+  ): Promise<boolean> => {
     if (busyRef.current) return false;
     busyRef.current = true;
     setBusy(true);
     setError("");
     setMessage("");
     try {
-      showState(await action(), ok);
+      const next = await action();
+      if (recordApplyTarget) {
+        pendingApplyRevisionRef.current = next.saved_revision;
+      }
+      showState(next, ok);
       return true;
     } catch (caught) {
+      if (recordApplyTarget) pendingApplyRevisionRef.current = null;
       setError(errorText(caught));
       return false;
     } finally {
@@ -289,6 +350,7 @@ function StationApp() {
 
   const toggleServe = async () => {
     if (!state || serveBusy) return;
+    pendingApplyRevisionRef.current = null;
     setServeBusy(true);
     setError("");
     setMessage("");
@@ -321,7 +383,16 @@ function StationApp() {
   };
 
   const navigateBack = () => {
-    setView(viewHistoryRef.current.pop() ?? "home");
+    const previous = viewHistoryRef.current.pop() ?? "home";
+    if (
+      previous.startsWith("agent:")
+      && hiddenAgentIds.has(previous.slice("agent:".length))
+    ) {
+      viewHistoryRef.current = [];
+      setView("home");
+    } else {
+      setView(previous);
+    }
     setError("");
   };
 
@@ -368,7 +439,7 @@ function StationApp() {
     void run(async () => {
       await setQuotaAccounts(accounts);
       return serveStart();
-    });
+    }, undefined, true);
 
   // Store provider quota plans in the draft for local estimates; the next Save and Apply activates them.
   const saveQuotaPlan = (
@@ -382,7 +453,7 @@ function StationApp() {
     <AppShell
       view={view}
       serve={state.serve}
-      registry={orderedRegistry}
+      registry={visibleRegistry}
       agents={agents}
       scanBusy={scanBusy}
       commandBusy={serveBusy || busy || freeProviderBusy}
@@ -399,7 +470,7 @@ function StationApp() {
       )}
       {message && state.serve.phase !== "starting" && <div className="banner ok global-banner">{message}</div>}
       {error && <div className="banner err global-banner">{error}</div>}
-      {state.serve.phase === "error" && state.serve.error && <div className="banner err global-banner">{state.serve.error}</div>}
+      {state.serve.error && <div className="banner err global-banner">{state.serve.error}</div>}
 
       {view === "home" && (
         <HomePage
@@ -439,7 +510,7 @@ function StationApp() {
           )}
           onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
           onRemoveKeyword={(slot, keyword) => void run(() => removeKeyword(slot, keyword))}
-          onSave={() => void run(serveStart)}
+          onSave={() => void run(serveStart, undefined, true)}
           onApplyAll={() => void run(
             applyHomeRouteToAllAgents,
             runtimeHealthy
@@ -502,6 +573,9 @@ function StationApp() {
         <SettingsHub
           settings={state.settings}
           serve={state.serve}
+          registry={orderedRegistry}
+          hiddenAgentIds={hiddenAgentIds}
+          onAgentVisibilityChange={setAgentVisible}
           onSaved={showState}
           onBack={navigateBack}
         />

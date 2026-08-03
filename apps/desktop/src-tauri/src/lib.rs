@@ -286,6 +286,198 @@ fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value 
     })
 }
 
+const BUNDLED_PLUGIN_IDS: [&str; 5] = [
+    "agent-openai",
+    "agent-anthropic",
+    "agent-openai-responses",
+    "agent-gemini",
+    "provider-openai-compatible",
+];
+
+#[derive(Serialize)]
+struct InstalledPluginSelfTest {
+    id: String,
+    version: String,
+    kind: String,
+    source: &'static str,
+    protocols: Vec<String>,
+    agent_tools: Vec<String>,
+    providers: Vec<String>,
+    capabilities: Vec<String>,
+    loadable: bool,
+}
+
+fn self_test_scratch_dir() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    std::env::temp_dir().join(format!(
+        "token-station-installed-self-test-{}-{nonce}",
+        std::process::id()
+    ))
+}
+
+fn collect_installed_self_test() -> Result<Value, String> {
+    let scratch = self_test_scratch_dir();
+    let data_dir = scratch.join("data");
+    let permission_probe = data_dir.join("permission-probe");
+    let missing_plugins = scratch.join("intentionally-missing-plugins");
+    let result = (|| {
+        token_station_private_fs::ensure_private_dir(&data_dir)
+            .map_err(|error| format!("private data directory: {error}"))?;
+        token_station_private_fs::verify_private_dir(&data_dir)
+            .map_err(|error| format!("private data directory verification: {error}"))?;
+        token_station_private_fs::write_atomic_private(&permission_probe, b"permission-probe")
+            .map_err(|error| format!("private file: {error}"))?;
+        token_station_private_fs::verify_private_file(&permission_probe)
+            .map_err(|error| format!("private file verification: {error}"))?;
+
+        let mut draft = template(&data_dir, &missing_plugins);
+        draft["upstreams"]["installed_self_test"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "http://127.0.0.1:1/v1",
+            "models": [{
+                "model": "installed-self-test",
+                "tool": true,
+                "vision": false,
+                "json_schema": true,
+                "tool_state": "declared",
+                "vision_state": "unsupported",
+                "json_schema_state": "declared",
+                "context_window": 8192
+            }]
+        });
+        draft["router"]["pools"]["installed_self_test"] = json!([{
+            "upstream": "installed_self_test",
+            "model": "installed-self-test"
+        }]);
+        draft["router"]["default_pool"] = json!("installed_self_test");
+        let config: ClientConfig = serde_json::from_value(draft)
+            .map_err(|error| format!("self-test configuration: {error}"))?;
+        config
+            .validate()
+            .map_err(|error| format!("self-test configuration: {error}"))?;
+
+        let registry = PluginRegistry::for_config(&config)
+            .map_err(|error| format!("builtin plugin registry: {error}"))?;
+        let mut plugins = Vec::with_capacity(BUNDLED_PLUGIN_IDS.len());
+        for id in BUNDLED_PLUGIN_IDS {
+            let package = registry
+                .package(id)
+                .ok_or_else(|| format!("builtin plugin `{id}` is missing"))?;
+            if !matches!(
+                package.source,
+                token_station_cli::plugins::PackageSource::Builtin { .. }
+            ) {
+                return Err(format!(
+                    "plugin `{id}` did not come from the signed builtin tier"
+                ));
+            }
+            let manifest = &package.manifest;
+            let kind = serde_json::to_value(manifest.kind)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".to_owned());
+            let capabilities = manifest
+                .capabilities
+                .iter()
+                .filter_map(|capability| {
+                    serde_json::to_value(capability)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                })
+                .collect();
+            plugins.push(InstalledPluginSelfTest {
+                id: manifest.name.clone(),
+                version: manifest.version.clone(),
+                kind,
+                source: "builtin",
+                protocols: manifest.agent_protocols.clone(),
+                agent_tools: manifest.agent_tools.clone(),
+                providers: manifest.providers.clone(),
+                capabilities,
+                loadable: true,
+            });
+        }
+        if registry.provider_binding("openai-compatible").is_none() {
+            return Err("builtin provider dialect `openai-compatible` is not bound".to_owned());
+        }
+
+        let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder))
+            .map_err(|error| format!("gateway plugin load: {error}"))?;
+        if !gateway.skipped_agents().is_empty() {
+            let skipped = gateway
+                .skipped_agents()
+                .iter()
+                .map(|(package, error)| format!("{package}: {error}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!(
+                "one or more builtin agent plugins failed to load: {skipped}"
+            ));
+        }
+
+        Ok(json!({
+            "passed": true,
+            "bundle": {
+                "id": "com.tokenstation.desktop",
+                "desktop_version": env!("CARGO_PKG_VERSION"),
+                "core_version": upgrade::CURRENT_VERSION,
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH
+            },
+            "storage": {
+                "isolated": true,
+                "data_directory_private": true,
+                "private_file_verified": true,
+                "credential_read": false
+            },
+            "plugins": plugins,
+            "gateway": {
+                "loadable": true,
+                "skipped_agents": [],
+                "catalog_size": gateway.catalog_size(),
+                "provider_dialects": registry.provider_dialects()
+            }
+        }))
+    })();
+    std::fs::remove_dir_all(&scratch).ok();
+    result
+}
+
+/// Runs the final desktop executable's read-only, credential-free artifact
+/// self-test and writes a private JSON report for release automation.
+///
+/// # Errors
+///
+/// Returns a closed failure reason when storage protection, builtin plugin
+/// identity, WASM loading, or the complete gateway composition fails. The
+/// report is still written with `passed: false` whenever the output path itself
+/// is writable.
+pub fn run_installed_self_test(output: &std::path::Path) -> Result<(), String> {
+    let collected = collect_installed_self_test();
+    let report = match &collected {
+        Ok(report) => report.clone(),
+        Err(error) => json!({
+            "passed": false,
+            "bundle": {
+                "id": "com.tokenstation.desktop",
+                "desktop_version": env!("CARGO_PKG_VERSION"),
+                "core_version": upgrade::CURRENT_VERSION,
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH
+            },
+            "error": error
+        }),
+    };
+    let mut rendered = serde_json::to_vec_pretty(&report)
+        .map_err(|error| format!("self-test report serialization: {error}"))?;
+    rendered.push(b'\n');
+    token_station_private_fs::write_atomic_private(output, &rendered)
+        .map_err(|error| format!("self-test report `{}`: {error}", output.display()))?;
+    collected.map(|_| ())
+}
+
 fn seed_builtin_pricing(draft: &mut Value) -> Result<bool, String> {
     let current: PriceTable = draft
         .get("pricing")
@@ -454,6 +646,8 @@ struct ProviderView {
     catalog_revision: u64,
     catalog: Vec<model_catalog::CatalogModelView>,
     has_auth: bool,
+    credential_source: String,
+    credential_reference: String,
     /// This upstream runs on the local machine; `local_only` routing keeps to it.
     local: bool,
     access_tier: String,
@@ -615,7 +809,10 @@ struct SettingsView {
     data_dir: String,
     plugins_dir: String,
     agent: String,
+    /// Backward-compatible alias for the desktop package version.
     version: String,
+    desktop_version: String,
+    core_version: String,
     egress_mode: String,
     egress_proxy_url: String,
     egress_no_proxy: Vec<String>,
@@ -736,10 +933,31 @@ struct PluginsView {
 /// Update-check view. Perform only an anonymous version check through core `upgrade::check`; do not replace the binary.
 #[derive(Serialize)]
 struct UpgradeView {
+    status: String,
     current: String,
     latest_tag: String,
     html_url: String,
     newer: bool,
+    message: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SettingsCommandError {
+    field: String,
+    reason_code: String,
+    message: String,
+}
+
+fn settings_error(
+    field: impl Into<String>,
+    reason_code: impl Into<String>,
+    message: impl Into<String>,
+) -> SettingsCommandError {
+    SettingsCommandError {
+        field: field.into(),
+        reason_code: reason_code.into(),
+        message: message.into(),
+    }
 }
 
 // ---- helpers ------------------------------------------------------------------
@@ -827,8 +1045,13 @@ impl AppInner {
             let previous = secrets::store_get(&data_dir, upstream, "provider_api_key").ok();
             if let Err(error) = secrets::store_set(&data_dir, upstream, "provider_api_key", value) {
                 for (applied, old_value) in applied_keys.iter().rev() {
-                    restore_provider_key(&data_dir, applied, "provider_api_key", old_value.as_deref())
-                        .ok();
+                    restore_provider_key(
+                        &data_dir,
+                        applied,
+                        "provider_api_key",
+                        old_value.as_deref(),
+                    )
+                    .ok();
                 }
                 return Err(error);
             }
@@ -837,9 +1060,12 @@ impl AppInner {
         if let Err(error) = config.save(&self.config_path) {
             let mut rollback_errors = Vec::new();
             for (upstream, previous) in applied_keys.iter().rev() {
-                if let Err(rollback_error) =
-                    restore_provider_key(&data_dir, upstream, "provider_api_key", previous.as_deref())
-                {
+                if let Err(rollback_error) = restore_provider_key(
+                    &data_dir,
+                    upstream,
+                    "provider_api_key",
+                    previous.as_deref(),
+                ) {
                     rollback_errors.push(rollback_error);
                 }
             }
@@ -920,6 +1146,21 @@ impl AppInner {
                     catalog_revision,
                     catalog,
                     has_auth: up.get("auth").map(|a| !a.is_null()).unwrap_or(false),
+                    credential_source: if up["auth"]["store"].as_bool() == Some(true) {
+                        "store"
+                    } else if up["auth"]["env"].is_string() {
+                        "env"
+                    } else if up["auth"]["file"].is_string() {
+                        "file"
+                    } else {
+                        "none"
+                    }
+                    .to_owned(),
+                    credential_reference: up["auth"]["env"]
+                        .as_str()
+                        .or_else(|| up["auth"]["file"].as_str())
+                        .unwrap_or_default()
+                        .to_owned(),
                     local: up.get("local").and_then(Value::as_bool).unwrap_or(false),
                     access_tier: up
                         .get("access_tier")
@@ -1409,7 +1650,9 @@ impl AppInner {
             data_dir: d["data"]["dir"].as_str().unwrap_or_default().to_string(),
             plugins_dir: d["plugins"]["dir"].as_str().unwrap_or_default().to_string(),
             agent: agents_display(&d["plugins"]),
-            version: upgrade::CURRENT_VERSION.to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            desktop_version: env!("CARGO_PKG_VERSION").to_string(),
+            core_version: upgrade::CURRENT_VERSION.to_string(),
             egress_mode: d["egress"]["mode"].as_str().unwrap_or("direct").to_string(),
             egress_proxy_url: d["egress"]["proxy_url"]
                 .as_str()
@@ -1766,6 +2009,37 @@ fn ensure_generic_provider_mutation_allowed(inner: &AppInner, name: &str) -> Res
     Ok(())
 }
 
+fn provider_auth_value(source: &str, reference: Option<&str>) -> Result<Option<Value>, String> {
+    let reference = reference.map(str::trim).filter(|value| !value.is_empty());
+    match source {
+        "none" => Ok(None),
+        "store" => Ok(Some(json!({ "slot": "provider_api_key", "store": true }))),
+        "env" => {
+            let name = reference.ok_or("环境变量凭据需要填写变量名")?;
+            if name.len() > 128
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                || name.as_bytes().first().is_some_and(u8::is_ascii_digit)
+            {
+                return Err("环境变量名只能包含字母、数字和下划线，且不能以数字开头".to_owned());
+            }
+            Ok(Some(json!({ "slot": "provider_api_key", "env": name })))
+        }
+        "file" => {
+            let path = std::path::Path::new(reference.ok_or("文件凭据需要填写绝对路径")?);
+            if !path.is_absolute() {
+                return Err("文件凭据必须使用绝对路径".to_owned());
+            }
+            Ok(Some(json!({
+                "slot": "provider_api_key",
+                "file": path.to_string_lossy()
+            })))
+        }
+        other => Err(format!("未知凭据来源 `{other}`")),
+    }
+}
+
 fn is_free_provider_value(provider: &Value) -> bool {
     provider["access_tier"].as_str() == Some("free")
 }
@@ -1958,6 +2232,49 @@ fn add_provider(
     api_key: Option<String>,
     local: bool,
 ) -> Result<StateView, String> {
+    let source = if api_key.as_deref().is_some_and(|key| !key.trim().is_empty()) {
+        "store"
+    } else {
+        "none"
+    };
+    add_provider_impl(state, name, base_url, models, api_key, local, source, None)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn add_provider_with_credential(
+    state: State<'_, AppStateManaged>,
+    name: String,
+    base_url: String,
+    models: Vec<String>,
+    api_key: Option<String>,
+    local: bool,
+    credential_source: String,
+    credential_reference: Option<String>,
+) -> Result<StateView, String> {
+    add_provider_impl(
+        state,
+        name,
+        base_url,
+        models,
+        api_key,
+        local,
+        credential_source.trim(),
+        credential_reference.as_deref(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_provider_impl(
+    state: State<'_, AppStateManaged>,
+    name: String,
+    base_url: String,
+    models: Vec<String>,
+    api_key: Option<String>,
+    local: bool,
+    credential_source: &str,
+    credential_reference: Option<&str>,
+) -> Result<StateView, String> {
     if name.trim().is_empty() {
         return Err("供应商名不能为空".into());
     }
@@ -2021,8 +2338,15 @@ fn add_provider(
         .map(str::trim)
         .filter(|key| !key.is_empty())
         .map(str::to_owned);
-    if api_key.is_some() {
-        up["auth"] = json!({ "slot": "provider_api_key", "store": true });
+    let auth = provider_auth_value(credential_source, credential_reference)?;
+    if credential_source == "store" && api_key.is_none() {
+        return Err("本地凭据存储需要填写 API Key".to_owned());
+    }
+    if credential_source != "store" && api_key.is_some() {
+        return Err("env/file 凭据只保存引用，不能同时提交 API Key 明文".to_owned());
+    }
+    if let Some(auth) = auth {
+        up["auth"] = auth;
     }
 
     inner.draft["upstreams"][&name] = up;
@@ -2033,8 +2357,13 @@ fn add_provider(
             .remove(&name);
         return Err(error);
     }
-    if let Some(key) = api_key {
-        if let Err(key_error) = secrets::store_set(&inner.data_dir(), &name, "provider_api_key", &key) {
+    if credential_source == "store" {
+        let Some(key) = api_key else {
+            unreachable!("store source was validated above");
+        };
+        if let Err(key_error) =
+            secrets::store_set(&inner.data_dir(), &name, "provider_api_key", &key)
+        {
             inner.draft["upstreams"]
                 .as_object_mut()
                 .expect("upstreams is an object")
@@ -2254,6 +2583,36 @@ fn edit_provider(
     base_url: String,
     api_key: Option<String>,
 ) -> Result<StateView, String> {
+    edit_provider_impl(state, name, base_url, api_key, None, None)
+}
+
+#[tauri::command]
+fn edit_provider_with_credential(
+    state: State<'_, AppStateManaged>,
+    name: String,
+    base_url: String,
+    api_key: Option<String>,
+    credential_source: String,
+    credential_reference: Option<String>,
+) -> Result<StateView, String> {
+    edit_provider_impl(
+        state,
+        name,
+        base_url,
+        api_key,
+        Some(credential_source.trim()),
+        credential_reference.as_deref(),
+    )
+}
+
+fn edit_provider_impl(
+    state: State<'_, AppStateManaged>,
+    name: String,
+    base_url: String,
+    api_key: Option<String>,
+    credential_source: Option<&str>,
+    credential_reference: Option<&str>,
+) -> Result<StateView, String> {
     let name = name.trim().to_owned();
     let base_url = ProviderEndpoint::try_new(base_url.trim())
         .map_err(|error| format!("Base URL 不合法：{error}"))?
@@ -2270,8 +2629,15 @@ fn edit_provider(
         .map(str::trim)
         .filter(|key| !key.is_empty())
         .map(str::to_owned);
-    let identity_changed =
-        previous["base_url"].as_str() != Some(base_url.as_str()) || api_key.is_some();
+    let auth = credential_source
+        .map(|source| provider_auth_value(source, credential_reference))
+        .transpose()?;
+    if credential_source.is_some_and(|source| source != "store") && api_key.is_some() {
+        return Err("env/file 凭据只保存引用，不能同时提交 API Key 明文".to_owned());
+    }
+    let identity_changed = previous["base_url"].as_str() != Some(base_url.as_str())
+        || api_key.is_some()
+        || auth.is_some();
     if identity_changed {
         // A URL or credential change may select a different Provider account.
         // Invalidate first: losing derived cache on a later rollback is safe;
@@ -2279,7 +2645,17 @@ fn edit_provider(
         model_catalog::remove_provider(&inner.data_dir(), &name)?;
     }
     inner.draft["upstreams"][&name]["base_url"] = json!(base_url);
-    if api_key.is_some() {
+    if let Some(auth) = auth {
+        match auth {
+            Some(value) => inner.draft["upstreams"][&name]["auth"] = value,
+            None => {
+                inner.draft["upstreams"][&name]
+                    .as_object_mut()
+                    .expect("upstream is an object")
+                    .remove("auth");
+            }
+        }
+    } else if api_key.is_some() {
         inner.draft["upstreams"][&name]["auth"] =
             json!({ "slot": "provider_api_key", "store": true });
     }
@@ -2288,7 +2664,9 @@ fn edit_provider(
         return Err(error);
     }
     if let Some(key) = api_key {
-        if let Err(key_error) = secrets::store_set(&inner.data_dir(), &name, "provider_api_key", &key) {
+        if let Err(key_error) =
+            secrets::store_set(&inner.data_dir(), &name, "provider_api_key", &key)
+        {
             inner.draft["upstreams"][&name] = previous;
             return match inner.observe_draft() {
                 Ok(()) => Err(key_error),
@@ -3402,19 +3780,6 @@ fn serve_stop(app: AppHandle, state: State<'_, AppStateManaged>) -> StateView {
     begin_serve_stop(app, state.inner())
 }
 
-/// Claude Code: write the env block to `~/.claude/settings.json` (embedded key; CC reads it directly, with no
-/// manual export). CC uses the Anthropic protocol; end-to-end operation also requires the agent-anthropic adapter.
-/// Determine whether the `plugins` configuration includes an inbound adapter that supports Anthropic. Inspect the `agents` list
-/// and the two adapter names in the deprecated single `agent` string. Do not inspect providers to avoid false positives. agent-anthropic
-/// Once it enters the configuration, the CC safety gate unlocks automatically.
-pub(crate) fn inbound_adapter_ready(plugins: &Value, expected: &str) -> bool {
-    let hits = |value: &Value| value.as_str() == Some(expected);
-    let in_list = plugins["agents"]
-        .as_array()
-        .is_some_and(|arr| arr.iter().any(hits));
-    in_list || hits(&plugins["agent"])
-}
-
 /// Display inbound adapters from the comma-joined agents list, falling back to the single agent value.
 fn agents_display(plugins: &Value) -> String {
     let list: Vec<&str> = plugins["agents"]
@@ -3429,6 +3794,23 @@ fn agents_display(plugins: &Value) -> String {
 }
 
 // ---- Subpage commands (#5) -------------------------------------------------
+
+fn classify_settings_error(message: String) -> SettingsCommandError {
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("proxy")
+        || normalized.contains("egress")
+        || normalized.contains("socks")
+        || normalized.contains("url")
+    {
+        settings_error(
+            "egress_proxy_url",
+            "invalid_proxy_url",
+            "代理地址无效；HTTP 代理请使用 http:// 或 https://，SOCKS5 请使用 socks5:// 或 socks5h://",
+        )
+    } else {
+        settings_error("settings", "validation_failed", message)
+    }
+}
 
 /// Settings page: toggle server.auth and data.metrics. If the draft can materialize, write it to disk, matching config set behavior;
 /// Otherwise, change only the draft until a complete save. Note: these changes do not affect a running serve; restart the proxy.
@@ -3446,30 +3828,42 @@ fn set_settings(
     egress_no_proxy: Vec<String>,
     egress_auth_username: String,
     egress_auth_slot: String,
-) -> Result<StateView, String> {
+) -> Result<StateView, SettingsCommandError> {
     let mut inner = state.0.lock().unwrap();
-    inner.ensure_editable()?;
-    inner.draft["server"]["auth"] = json!(auth);
-    inner.draft["data"]["metrics"] = json!(metrics);
-    inner.draft["egress"] = if egress_mode == "direct" {
-        json!({ "mode": "direct" })
-    } else {
-        let mut egress = json!({
-            "mode": egress_mode,
-            "proxy_url": egress_proxy_url,
-            "no_proxy": egress_no_proxy,
-        });
-        if !egress_auth_username.is_empty() || !egress_auth_slot.is_empty() {
-            egress["auth"] = json!({
-                "username": egress_auth_username,
-                "credential": { "slot": egress_auth_slot, "store": true }
+    inner
+        .ensure_editable()
+        .map_err(|message| settings_error("settings", "read_only", message))?;
+    let previous_draft = inner.draft.clone();
+    let previous_config_state = inner.config_state.clone();
+    let edit_result = inner.edit_validated_draft(|candidate| {
+        candidate.draft["server"]["auth"] = json!(auth);
+        candidate.draft["data"]["metrics"] = json!(metrics);
+        candidate.draft["egress"] = if egress_mode == "direct" {
+            json!({ "mode": "direct" })
+        } else {
+            let mut egress = json!({
+                "mode": egress_mode,
+                "proxy_url": egress_proxy_url,
+                "no_proxy": egress_no_proxy,
             });
-        }
-        egress
-    };
-    inner.observe_draft()?;
-    if inner.materialize().is_ok() {
-        inner.save_draft()?;
+            if !egress_auth_username.is_empty() || !egress_auth_slot.is_empty() {
+                egress["auth"] = json!({
+                    "username": egress_auth_username,
+                    "credential": { "slot": egress_auth_slot, "store": true }
+                });
+            }
+            egress
+        };
+        candidate.materialize()?.validate()?;
+        Ok(())
+    });
+    if let Err(message) = edit_result {
+        return Err(classify_settings_error(message));
+    }
+    if let Err(message) = inner.save_draft() {
+        inner.draft = previous_draft;
+        inner.config_state = previous_config_state;
+        return Err(settings_error("settings", "save_failed", message));
     }
     Ok(inner.snapshot())
 }
@@ -3940,15 +4334,45 @@ fn get_plugins(state: State<'_, AppStateManaged>) -> Result<PluginsView, String>
 /// About/Updates page: anonymous version check, the core’s only permitted outbound connection. Compare versions and provide a release-page link only,
 /// Does not replace its own binary. Desktop apps update through their own channels; this only reports whether a newer version exists.
 #[tauri::command]
-fn check_upgrade() -> Result<UpgradeView, String> {
-    let release = upgrade::check(upgrade::DEFAULT_ENDPOINT)?;
-    let newer = upgrade::is_newer(upgrade::CURRENT_VERSION, &release.tag_name);
-    Ok(UpgradeView {
-        current: upgrade::CURRENT_VERSION.to_string(),
-        latest_tag: release.tag_name,
-        html_url: release.html_url,
-        newer,
-    })
+fn check_upgrade() -> UpgradeView {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    match upgrade::check_latest(upgrade::DEFAULT_ENDPOINT) {
+        Ok(upgrade::CheckResult::Published(release)) => {
+            let newer = upgrade::is_newer(&current, &release.tag_name);
+            UpgradeView {
+                status: if newer {
+                    "update_available"
+                } else {
+                    "up_to_date"
+                }
+                .to_owned(),
+                current,
+                latest_tag: release.tag_name,
+                html_url: release.html_url,
+                newer,
+                message: None,
+            }
+        }
+        Ok(upgrade::CheckResult::NoPublishedRelease) => UpgradeView {
+            status: "no_published_release".to_owned(),
+            current,
+            latest_tag: String::new(),
+            html_url: String::new(),
+            newer: false,
+            message: Some("当前还没有可用的正式发布版本".to_owned()),
+        },
+        Err(error) => {
+            eprintln!("update check unavailable: {error}");
+            UpgradeView {
+                status: "unavailable".to_owned(),
+                current,
+                latest_tag: String::new(),
+                html_url: String::new(),
+                newer: false,
+                message: Some("暂时无法检查更新，请稍后重试".to_owned()),
+            }
+        }
+    }
 }
 
 /// Minimal recovery control plane. These commands depend only on application
@@ -4064,12 +4488,14 @@ pub fn run() {
             list_free_provider_presets,
             add_free_provider,
             add_provider,
+            add_provider_with_credential,
             set_local_routing,
             set_routing_mode,
             set_quota_accounts,
             set_quota_plan,
             get_quota_snapshot,
             edit_provider,
+            edit_provider_with_credential,
             discover_provider_models,
             test_provider,
             set_provider_model_vision,
@@ -4680,31 +5106,16 @@ mod tests {
     #[test]
     fn desktop_bundled_plugins_load_without_an_external_plugin_directory() {
         let root = scratch_home("bundled-plugins");
-        let missing_plugins = root.join("intentionally-missing-plugins");
-        let plugins: PluginsConfig = serde_json::from_value(
-            template(&root.join("data"), &missing_plugins)["plugins"].clone(),
+        let output = root.join("installed-self-test.json");
+        run_installed_self_test(&output).expect("the installed-artifact self-test passes");
+        let report: Value = serde_json::from_slice(
+            &std::fs::read(&output).expect("the self-test report was written"),
         )
-        .unwrap();
-        let receipts = Receipts::load(&root.join("data")).unwrap();
-        let registry = PluginRegistry::discover(&plugins, &receipts).unwrap();
-
-        for package in [
-            "agent-openai",
-            "agent-anthropic",
-            "agent-openai-responses",
-            "agent-gemini",
-            "provider-openai-compatible",
-        ] {
-            let package = registry
-                .package(package)
-                .expect("official package is builtin");
-            assert!(matches!(
-                package.source,
-                token_station_cli::plugins::PackageSource::Builtin { .. }
-            ));
-        }
-        assert!(registry.provider_binding("openai-compatible").is_some());
-        assert!(!missing_plugins.exists());
+        .expect("the self-test report is JSON");
+        assert_eq!(report["passed"], json!(true));
+        assert_eq!(report["plugins"].as_array().map(Vec::len), Some(5));
+        assert_eq!(report["storage"]["credential_read"], json!(false));
+        assert_eq!(report["gateway"]["loadable"], json!(true));
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -4924,27 +5335,6 @@ mod tests {
 
         assert_eq!(prepared["plugins"]["agents"], json!(desktop_agents()));
         std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn inbound_readiness_requires_exact_adapter_names() {
-        let plugins = json!({
-            "agents": [
-                "agent-anthropic-proxy",
-                "agent-openai-responses-beta",
-                "agent-openai-compatible"
-            ]
-        });
-        assert!(!inbound_adapter_ready(&plugins, "agent-anthropic"));
-        assert!(!inbound_adapter_ready(&plugins, "agent-openai-responses"));
-        assert!(!inbound_adapter_ready(&plugins, "agent-openai"));
-
-        let plugins = json!({
-            "agents": ["agent-anthropic", "agent-openai-responses", "agent-openai"]
-        });
-        assert!(inbound_adapter_ready(&plugins, "agent-anthropic"));
-        assert!(inbound_adapter_ready(&plugins, "agent-openai-responses"));
-        assert!(inbound_adapter_ready(&plugins, "agent-openai"));
     }
 
     #[test]
@@ -6271,6 +6661,181 @@ mod tests {
     }
 
     #[test]
+    fn invalid_proxy_settings_are_transactional_and_field_scoped() {
+        let root = scratch_home("settings-transaction");
+        let config_path = root.join("token-station.json");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            config_path.clone(),
+            template_for_test(&root),
+            None,
+        )))));
+        add_provider(
+            app.state(),
+            "local".to_owned(),
+            "http://127.0.0.1:11434/v1".to_owned(),
+            vec!["local-model".to_owned()],
+            None,
+            true,
+        )
+        .expect("baseline provider is valid");
+        set_tier(
+            app.state(),
+            "low".to_owned(),
+            Some("local".to_owned()),
+            Some("local-model".to_owned()),
+        )
+        .expect("baseline route is valid");
+        let before = save_config(app.state()).expect("baseline config saves");
+        let before_disk = std::fs::read(&config_path).expect("baseline config is on disk");
+
+        let error = match set_settings(
+            app.state(),
+            false,
+            false,
+            "http".to_owned(),
+            "ftp://invalid.example".to_owned(),
+            vec!["localhost".to_owned()],
+            String::new(),
+            String::new(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("an unsupported proxy scheme is rejected"),
+        };
+
+        assert_eq!(error.field, "egress_proxy_url", "{}", error.message);
+        assert_eq!(error.reason_code, "invalid_proxy_url");
+        let after = get_state(app.state());
+        assert_eq!(after.draft_revision, before.draft_revision);
+        assert_eq!(after.saved_revision, before.saved_revision);
+        assert_eq!(after.settings.auth, before.settings.auth);
+        assert_eq!(after.settings.metrics, before.settings.metrics);
+        assert_eq!(
+            std::fs::read(&config_path).expect("saved config remains readable"),
+            before_disk,
+            "a rejected settings edit must not mutate the authoritative file"
+        );
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn provider_credentials_default_to_store_and_advanced_sources_save_only_references() {
+        let root = scratch_home("credential-sources");
+        let config_path = root.join("token-station.json");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            config_path.clone(),
+            template_for_test(&root),
+            None,
+        )))));
+
+        let env_view = add_provider_with_credential(
+            app.state(),
+            "deepseek_env".to_owned(),
+            "https://api.deepseek.com/v1".to_owned(),
+            vec!["deepseek-chat".to_owned()],
+            None,
+            false,
+            "env".to_owned(),
+            Some("DEEPSEEK_API_KEY".to_owned()),
+        )
+        .expect("an environment credential reference is accepted");
+        let env_provider = env_view
+            .providers
+            .iter()
+            .find(|provider| provider.name == "deepseek_env")
+            .expect("environment provider is visible");
+        assert_eq!(env_provider.credential_source, "env");
+        assert_eq!(env_provider.credential_reference, "DEEPSEEK_API_KEY");
+
+        let credential_file = root.join("credentials").join("deepseek.key");
+        let file_view = add_provider_with_credential(
+            app.state(),
+            "deepseek_file".to_owned(),
+            "https://api.deepseek.com/v1".to_owned(),
+            vec!["deepseek-reasoner".to_owned()],
+            None,
+            false,
+            "file".to_owned(),
+            Some(credential_file.to_string_lossy().into_owned()),
+        )
+        .expect("an absolute credential file reference is accepted");
+        let file_provider = file_view
+            .providers
+            .iter()
+            .find(|provider| provider.name == "deepseek_file")
+            .expect("file provider is visible");
+        assert_eq!(file_provider.credential_source, "file");
+        assert_eq!(
+            file_provider.credential_reference,
+            credential_file.to_string_lossy()
+        );
+
+        let plaintext_error = match add_provider_with_credential(
+            app.state(),
+            "forbidden_plaintext".to_owned(),
+            "https://api.example.com/v1".to_owned(),
+            vec!["model".to_owned()],
+            Some("must-not-be-saved".to_owned()),
+            false,
+            "env".to_owned(),
+            Some("EXAMPLE_API_KEY".to_owned()),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("env/file sources cannot accept plaintext API keys"),
+        };
+        assert!(plaintext_error.contains("不能同时提交 API Key 明文"));
+        let invalid_env = match add_provider_with_credential(
+            app.state(),
+            "bad_env".to_owned(),
+            "https://api.example.com/v1".to_owned(),
+            vec!["model".to_owned()],
+            None,
+            false,
+            "env".to_owned(),
+            Some("1INVALID".to_owned()),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid environment names are rejected"),
+        };
+        assert!(invalid_env.contains("不能以数字开头"));
+        let invalid_file = match add_provider_with_credential(
+            app.state(),
+            "bad_file".to_owned(),
+            "https://api.example.com/v1".to_owned(),
+            vec!["model".to_owned()],
+            None,
+            false,
+            "file".to_owned(),
+            Some("relative.key".to_owned()),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("relative credential files are rejected"),
+        };
+        assert!(invalid_file.contains("绝对路径"));
+
+        set_tier(
+            app.state(),
+            "low".to_owned(),
+            Some("deepseek_env".to_owned()),
+            Some("deepseek-chat".to_owned()),
+        )
+        .expect("credential test has a valid route");
+        save_config(app.state()).expect("credential references save");
+        let saved = std::fs::read_to_string(config_path).expect("saved config is readable");
+        assert!(saved.contains("DEEPSEEK_API_KEY"));
+        assert!(saved.contains(&credential_file.to_string_lossy().replace('\\', "\\\\")));
+        assert!(!saved.contains("must-not-be-saved"));
+        assert!(!root
+            .join("token-station-data")
+            .join(secrets::SECRETS_FILE)
+            .exists());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views() {
         let root = scratch_home("command-lifecycle");
         let mut draft = gateway_template_for_test(&root);
@@ -6778,7 +7343,9 @@ mod tests {
         let view = get_state(app.state());
         assert_eq!(view.routing_mode, "tiered");
         assert!(
-            view.agent_routes.values().all(|r| r.routing_mode == "tiered"),
+            view.agent_routes
+                .values()
+                .all(|r| r.routing_mode == "tiered"),
             "every Agent inherits the tiered home default"
         );
 
@@ -6787,7 +7354,9 @@ mod tests {
         let view = set_routing_mode(app.state(), "quota_first".to_owned(), None).unwrap();
         assert_eq!(view.routing_mode, "quota_first");
         assert!(
-            view.agent_routes.values().all(|r| r.routing_mode == "quota_first"),
+            view.agent_routes
+                .values()
+                .all(|r| r.routing_mode == "quota_first"),
             "un-overridden Agents follow the new Home default"
         );
 
@@ -6829,17 +7398,22 @@ mod tests {
         );
 
         // Switching the pinned Agent to quota-first writes the explicit value.
-        let view =
-            set_routing_mode(app.state(), "quota_first".to_owned(), Some("codex".to_owned()))
-                .unwrap();
+        let view = set_routing_mode(
+            app.state(),
+            "quota_first".to_owned(),
+            Some("codex".to_owned()),
+        )
+        .unwrap();
         assert_eq!(view.agent_routes["codex"].routing_mode, "quota_first");
         assert_eq!(view.routing_mode, "tiered", "Home stays tiered");
 
         // Unknown Agent is rejected.
-        assert!(
-            set_routing_mode(app.state(), "quota_first".to_owned(), Some("nope".to_owned()))
-                .is_err()
-        );
+        assert!(set_routing_mode(
+            app.state(),
+            "quota_first".to_owned(),
+            Some("nope".to_owned())
+        )
+        .is_err());
 
         std::fs::remove_dir_all(root).ok();
     }
@@ -6910,9 +7484,7 @@ mod tests {
 
         // An account referencing a model the provider never declared is rejected,
         // and the previously saved list is left intact.
-        assert!(
-            set_quota_accounts(app.state(), vec![arg("deepseek", "ghost-model")]).is_err()
-        );
+        assert!(set_quota_accounts(app.state(), vec![arg("deepseek", "ghost-model")]).is_err());
         assert_eq!(get_state(app.state()).quota_accounts.len(), 2);
 
         // Clearing removes the key entirely (tiered configs stay minimal).
@@ -6979,20 +7551,24 @@ mod tests {
         }
 
         // Unknown provider and unknown unit are rejected.
-        assert!(
-            set_quota_plan(app.state(), "nope".to_owned(), 1, 1, "tokens".to_owned(), None).is_err()
-        );
-        assert!(
-            set_quota_plan(
-                app.state(),
-                "deepseek".to_owned(),
-                1,
-                1,
-                "credits".to_owned(),
-                None
-            )
-            .is_err()
-        );
+        assert!(set_quota_plan(
+            app.state(),
+            "nope".to_owned(),
+            1,
+            1,
+            "tokens".to_owned(),
+            None
+        )
+        .is_err());
+        assert!(set_quota_plan(
+            app.state(),
+            "deepseek".to_owned(),
+            1,
+            1,
+            "credits".to_owned(),
+            None
+        )
+        .is_err());
 
         // A zero limit clears the plan entirely.
         let cleared = set_quota_plan(
@@ -7004,19 +7580,19 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(
-            cleared
-                .providers
-                .iter()
-                .find(|p| p.name == "deepseek")
-                .unwrap()
-                .quota_plan
-                .is_none()
-        );
+        assert!(cleared
+            .providers
+            .iter()
+            .find(|p| p.name == "deepseek")
+            .unwrap()
+            .quota_plan
+            .is_none());
         {
             let state = app.state::<AppStateManaged>();
             let inner = state.0.lock().unwrap();
-            assert!(inner.draft["upstreams"]["deepseek"].get("quota_plan").is_none());
+            assert!(inner.draft["upstreams"]["deepseek"]
+                .get("quota_plan")
+                .is_none());
         }
 
         std::fs::remove_dir_all(root).ok();

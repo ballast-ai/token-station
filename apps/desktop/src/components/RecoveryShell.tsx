@@ -138,8 +138,10 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
         {error && <div className="banner err">{error}</div>}
         {message && <div className="banner ok mono">{message}</div>}
         {upgrade && (
-          <div className={`banner ${upgrade.newer ? "warn" : "ok"}`}>
-            {upgrade.newer
+          <div className={`banner ${upgrade.status === "unavailable" ? "err" : upgrade.newer ? "warn" : "ok"}`}>
+            {upgrade.status === "no_published_release" || upgrade.status === "unavailable"
+              ? upgrade.message
+              : upgrade.newer
               ? copy(`Version ${upgrade.latest_tag} is available`, `发现新版本 ${upgrade.latest_tag}`)
               : copy(`Version ${upgrade.current} is up to date`, `当前已是最新版本 ${upgrade.current}`)}
             {upgrade.html_url && <span className="mono"> · {upgrade.html_url}</span>}

@@ -1,0 +1,130 @@
+{
+  "model": "auto",
+  "messages": [
+    {
+      "role": "system",
+      "content": "Be concise.",
+      "responses_transient_instructions": true
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Read the marker."
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "https://example.test/marker.png",
+            "detail": "low"
+          }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Reading the marker."
+        }
+      ],
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "name": "read_marker",
+          "arguments": "{\"path\":\"marker.txt\"}"
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "M4_OK",
+      "tool_call_id": "call_1"
+    }
+  ],
+  "tools": [
+    {
+      "name": "read_marker",
+      "description": "Read one marker",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "__token_station_responses_local_shell",
+      "description": "Execute one argv command in the Codex client's local shell.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "exec"
+              },
+              "command": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "user": {
+                "type": "string"
+              },
+              "working_directory": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "command"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "sampling": {
+    "temperature": 0.2,
+    "top_p": 0.9,
+    "max_output_tokens": 256
+  },
+  "stream": true,
+  "tool_choice": "auto",
+  "parallel_tool_calls": true,
+  "responses_tool_strict": {
+    "read_marker": false
+  },
+  "responses_disabled_provider_tools": [
+    {
+      "type": "web_search",
+      "external_web_access": false
+    }
+  ]
+}

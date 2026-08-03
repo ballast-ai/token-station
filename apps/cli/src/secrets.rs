@@ -8,7 +8,7 @@
 //!
 //! The store is plaintext-on-disk (0600), like the tools this integrates with
 //! (e.g. cc-switch's `auth.json`). It is written atomically with a private
-//! mode via [`crate::private_fs`]. Nothing here logs a value, and errors name
+//! mode via the shared private-filesystem helper. Nothing here logs a value, and errors name
 //! the slot and the source, never what was read.
 
 use std::collections::BTreeMap;
@@ -121,19 +121,22 @@ impl SecretStore {
     pub fn from_config(config: &ClientConfig, data_dir: &Path) -> Self {
         let mut sources = BTreeMap::new();
         for (upstream, entry) in &config.upstreams {
-            if let Some(auth) = &entry.auth {
-                if let Some(source) = source_of(auth) {
-                    sources.insert((upstream.clone(), auth.slot.clone()), source);
-                }
+            if let Some(auth) = &entry.auth
+                && let Some(source) = source_of(auth)
+            {
+                sources.insert((upstream.clone(), auth.slot.clone()), source);
             }
         }
-        if let Some(egress_auth) = &config.egress.auth {
-            if let Some(source) = source_of(&egress_auth.credential) {
-                sources.insert(
-                    (EGRESS_SECRET_OWNER.to_string(), egress_auth.credential.slot.clone()),
-                    source,
-                );
-            }
+        if let Some(egress_auth) = &config.egress.auth
+            && let Some(source) = source_of(&egress_auth.credential)
+        {
+            sources.insert(
+                (
+                    EGRESS_SECRET_OWNER.to_string(),
+                    egress_auth.credential.slot.clone(),
+                ),
+                source,
+            );
         }
         Self {
             sources,
@@ -145,13 +148,16 @@ impl SecretStore {
     #[must_use]
     pub fn from_egress_config(egress: &EgressConfig, data_dir: &Path) -> Self {
         let mut sources = BTreeMap::new();
-        if let Some(egress_auth) = &egress.auth {
-            if let Some(source) = source_of(&egress_auth.credential) {
-                sources.insert(
-                    (EGRESS_SECRET_OWNER.to_string(), egress_auth.credential.slot.clone()),
-                    source,
-                );
-            }
+        if let Some(egress_auth) = &egress.auth
+            && let Some(source) = source_of(&egress_auth.credential)
+        {
+            sources.insert(
+                (
+                    EGRESS_SECRET_OWNER.to_string(),
+                    egress_auth.credential.slot.clone(),
+                ),
+                source,
+            );
         }
         Self {
             sources,
@@ -247,7 +253,9 @@ mod tests {
     fn a_file_backed_secret_is_read_and_trimmed() {
         let (store, path) = store_with_file("sk-test-abc\n");
         assert_eq!(
-            store.resolve("openai_personal", "provider_api_key").as_deref(),
+            store
+                .resolve("openai_personal", "provider_api_key")
+                .as_deref(),
             Ok("sk-test-abc")
         );
         fs::remove_file(path).ok();
@@ -277,11 +285,12 @@ mod tests {
             serde_json::from_str(crate::EXAMPLE_CONFIG).expect("example parses");
         config["upstreams"]["openai_personal"]["auth"] =
             serde_json::json!({ "slot": "provider_api_key", "store": true });
-        let config: ClientConfig =
-            serde_json::from_value(config).expect("store auth parses");
+        let config: ClientConfig = serde_json::from_value(config).expect("store auth parses");
         let store = SecretStore::from_config(&config, &dir);
         assert_eq!(
-            store.resolve("openai_personal", "provider_api_key").as_deref(),
+            store
+                .resolve("openai_personal", "provider_api_key")
+                .as_deref(),
             Ok("sk-test-abc")
         );
 
@@ -297,8 +306,7 @@ mod tests {
             serde_json::from_str(crate::EXAMPLE_CONFIG).expect("example parses");
         config["upstreams"]["openai_personal"]["auth"] =
             serde_json::json!({ "slot": "provider_api_key", "store": true });
-        let config: ClientConfig =
-            serde_json::from_value(config).expect("store auth parses");
+        let config: ClientConfig = serde_json::from_value(config).expect("store auth parses");
         let store = SecretStore::from_config(&config, &dir);
 
         let missing = store

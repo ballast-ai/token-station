@@ -18,6 +18,20 @@ fn repo_root() -> &'static Path {
         .expect("apps/cli sits two levels below the root")
 }
 
+fn cargo_path_dependency(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    let quoted = serde_json::to_string(path.as_ref()).expect("filesystem path is serializable");
+    format!("{{ path = {quoted} }}")
+}
+
+#[test]
+fn windows_checkout_paths_are_escaped_as_valid_toml_basic_strings() {
+    assert_eq!(
+        cargo_path_dependency(Path::new(r"D:\tokenstation\crates\protocol")),
+        r#"{ path = "D:\\tokenstation\\crates\\protocol" }"#
+    );
+}
+
 #[test]
 fn scaffold_build_test_install_serves_the_new_dialect() {
     let scratch = std::env::temp_dir().join(format!("ts-devchain-{}", std::process::id()));
@@ -35,16 +49,24 @@ fn scaffold_build_test_install_serves_the_new_dialect() {
     let cargo_toml = std::fs::read_to_string(project.join("Cargo.toml")).expect("written");
     let pinned = cargo_toml.replace(
         r#"{ git = "https://github.com/ballast-ai/token-station.git" }"#,
-        &format!(
-            r#"{{ path = "{}" }}"#,
-            repo_root().join("crates/protocol").display()
-        ),
+        &cargo_path_dependency(&repo_root().join("crates/protocol")),
     );
     assert_ne!(
         pinned, cargo_toml,
         "the git dependency line must exist to be pinned"
     );
     std::fs::write(project.join("Cargo.toml"), pinned).expect("temp dir writable");
+
+    // This behavior test is not allowed to turn a transient registry outage
+    // into a product failure. CI explicitly fetches the official provider's
+    // locked dependency set first; the generated project then resolves and
+    // builds from that cache with networking disabled.
+    std::fs::create_dir_all(project.join(".cargo")).expect("cargo config dir writable");
+    std::fs::write(
+        project.join(".cargo/config.toml"),
+        "[net]\noffline = true\n",
+    )
+    .expect("offline cargo config writable");
 
     // plugin build → plugin test
     scaffold::build_package(&project).expect("the scaffold compiles");

@@ -123,6 +123,12 @@ export default function ProviderModelManager({
   ));
   const [editBaseUrl, setEditBaseUrl] = useState(provider.base_url);
   const [editKey, setEditKey] = useState("");
+  const [credentialSource, setCredentialSource] = useState<"store" | "env" | "file" | "none">(
+    provider.credential_source ?? (provider.has_auth ? "store" : "none"),
+  );
+  const [credentialReference, setCredentialReference] = useState(
+    provider.credential_reference ?? "",
+  );
   const [editing, setEditing] = useState(false);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
   const capabilities = useMemo(() => {
@@ -196,7 +202,15 @@ export default function ProviderModelManager({
     setEditing(true);
     setError("");
     try {
-      onSaved(await editProvider(provider.name, editBaseUrl, editKey.trim() || null));
+      onSaved(await editProvider(
+        provider.name,
+        editBaseUrl,
+        credentialSource === "store" ? editKey.trim() || null : null,
+        credentialSource,
+        credentialSource === "env" || credentialSource === "file"
+          ? credentialReference.trim()
+          : null,
+      ));
       setEditKey("");
     } catch (caught) {
       setError(String(caught));
@@ -297,7 +311,37 @@ export default function ProviderModelManager({
       </div>
       <div className="provider-edit-fields">
         <input className="input mono" aria-label={copy("Edit base URL", "编辑 Base URL")} value={editBaseUrl} disabled={operationDisabled} onChange={(event) => setEditBaseUrl(event.target.value)} />
-        <input className="input mono" aria-label={copy("Update API key", "更新 API Key")} type="password" value={editKey} disabled={operationDisabled} placeholder={copy("Leave blank to keep the current key", "留空则保留现有 Key")} onChange={(event) => setEditKey(event.target.value)} />
+        <select
+          className="input"
+          aria-label={copy("Edit credential source", "编辑凭据来源")}
+          value={credentialSource}
+          disabled={operationDisabled}
+          onChange={(event) => {
+            setCredentialSource(event.target.value as typeof credentialSource);
+            setEditKey("");
+            setCredentialReference("");
+          }}
+        >
+          <option value="store">{copy("Local store (default)", "本地存储（默认）")}</option>
+          <option value="env">{copy("Environment variable", "环境变量")}</option>
+          <option value="file">{copy("Credential file", "凭据文件")}</option>
+          <option value="none">{copy("No authentication", "无鉴权")}</option>
+        </select>
+        {credentialSource === "store" && (
+          <input className="input mono" aria-label={copy("Update API key", "更新 API Key")} type="password" value={editKey} disabled={operationDisabled} placeholder={copy("Leave blank to keep the current key", "留空则保留现有 Key")} onChange={(event) => setEditKey(event.target.value)} />
+        )}
+        {(credentialSource === "env" || credentialSource === "file") && (
+          <input
+            className="input mono"
+            aria-label={credentialSource === "env"
+              ? copy("Environment variable name", "环境变量名")
+              : copy("Absolute credential file path", "凭据文件绝对路径")}
+            value={credentialReference}
+            disabled={operationDisabled}
+            placeholder={credentialSource === "env" ? "DEEPSEEK_API_KEY" : "/absolute/path/provider.key"}
+            onChange={(event) => setCredentialReference(event.target.value)}
+          />
+        )}
         <button className="btn tiny" type="button" disabled={operationDisabled || !endpointPreview} onClick={() => void saveProviderDetails()}>
           {editing ? copy("Saving…", "保存中…") : copy("Save details", "保存基本信息")}
         </button>

@@ -50,7 +50,7 @@ impl Connector for OpenCodeConnector {
     }
 
     fn config_path(&self, home: &Path) -> PathBuf {
-        home.join(".config/opencode/opencode.json")
+        home.join(".config").join("opencode").join("opencode.json")
     }
 
     fn create_dir_error(&self) -> &'static str {

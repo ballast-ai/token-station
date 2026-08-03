@@ -14,13 +14,25 @@
       "known_install_locations": {
         "macos": ["${HOME}/.local/bin/claude"],
         "linux": ["${HOME}/.local/bin/claude"],
+        "windows": ["${APPDATA}/npm/claude.cmd", "${USERPROFILE}/.local/bin/claude.exe"],
         "wsl": ["${HOME}/.local/bin/claude"]
       },
       "version_probe": {
         "argv": ["--version"],
         "timeout_ms": 2000,
         "max_output_bytes": 65536,
-        "output_matcher": "SEMVER_ANYWHERE"
+        "output_matcher": "SEMVER_ANYWHERE",
+        "runtime": {
+          "kind": "node_package",
+          "interpreter_candidates": ["node", "node.exe"],
+          "resolution_sources": ["observed_entry_sibling", "path", "known_install_locations"],
+          "known_install_locations": {
+            "macos": ["/opt/homebrew/bin/node", "/usr/local/bin/node"],
+            "linux": ["/usr/local/bin/node", "/usr/bin/node"],
+            "windows": ["C:/Program Files/nodejs/node.exe", "${LOCALAPPDATA}/Programs/nodejs/node.exe"],
+            "wsl": ["/usr/local/bin/node", "/usr/bin/node"]
+          }
+        }
       },
       "config_locations": [
         {
@@ -54,7 +66,7 @@
       "ui_order": 15,
       "nav_mark": "CD",
       "admission": "supported",
-      "executable_candidates": ["Claude", "Claude.exe"],
+      "executable_candidates": ["Claude.exe"],
       "known_install_locations": {
         "macos": ["/Applications/Claude.app/Contents/MacOS/Claude"],
         "windows": ["${LOCALAPPDATA}/AnthropicClaude/Claude.exe"]
@@ -100,6 +112,7 @@
           "/usr/local/bin/codex",
           "/usr/bin/codex"
         ],
+        "windows": ["${APPDATA}/npm/codex.cmd", "${USERPROFILE}/.local/bin/codex.exe"],
         "wsl": [
           "${HOME}/.local/bin/codex",
           "${HOME}/.cargo/bin/codex",
@@ -111,7 +124,18 @@
         "argv": ["--version"],
         "timeout_ms": 2000,
         "max_output_bytes": 65536,
-        "output_matcher": "SEMVER_ANYWHERE"
+        "output_matcher": "SEMVER_ANYWHERE",
+        "runtime": {
+          "kind": "node_package",
+          "interpreter_candidates": ["node", "node.exe"],
+          "resolution_sources": ["observed_entry_sibling", "path", "known_install_locations"],
+          "known_install_locations": {
+            "macos": ["/opt/homebrew/bin/node", "/usr/local/bin/node"],
+            "linux": ["/usr/local/bin/node", "/usr/bin/node"],
+            "windows": ["C:/Program Files/nodejs/node.exe", "${LOCALAPPDATA}/Programs/nodejs/node.exe"],
+            "wsl": ["/usr/local/bin/node", "/usr/bin/node"]
+          }
+        }
       },
       "config_locations": [
         {
@@ -158,12 +182,13 @@
         "max_output_bytes": 65536,
         "output_matcher": "SEMVER_ANYWHERE",
         "runtime": {
-          "kind": "env_shebang",
-          "interpreter_candidates": ["node"],
-          "resolution_sources": ["observed_entry_sibling", "known_install_locations"],
+          "kind": "node_package",
+          "interpreter_candidates": ["node", "node.exe"],
+          "resolution_sources": ["observed_entry_sibling", "path", "known_install_locations"],
           "known_install_locations": {
             "macos": ["${HOME}/.local/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"],
             "linux": ["${HOME}/.local/bin/node", "/usr/local/bin/node", "/usr/bin/node"],
+            "windows": ["C:/Program Files/nodejs/node.exe", "${LOCALAPPDATA}/Programs/nodejs/node.exe"],
             "wsl": ["${HOME}/.local/bin/node", "/usr/local/bin/node", "/usr/bin/node"]
           }
         }
@@ -200,6 +225,7 @@
       "known_install_locations": {
         "macos": ["${HOME}/.local/bin/hermes"],
         "linux": ["${HOME}/.local/bin/hermes"],
+        "windows": ["${USERPROFILE}/.local/bin/hermes.exe", "${APPDATA}/Python/Scripts/hermes.exe"],
         "wsl": ["${HOME}/.local/bin/hermes"]
       },
       "version_probe": {
@@ -244,6 +270,7 @@
       "known_install_locations": {
         "macos": ["${HOME}/.local/bin/openclaw"],
         "linux": ["${HOME}/.local/bin/openclaw"],
+        "windows": ["${APPDATA}/npm/openclaw.cmd", "${USERPROFILE}/.local/bin/openclaw.exe"],
         "wsl": ["${HOME}/.local/bin/openclaw"]
       },
       "version_probe": {
@@ -252,12 +279,13 @@
         "max_output_bytes": 65536,
         "output_matcher": "SEMVER_ANYWHERE",
         "runtime": {
-          "kind": "env_shebang",
-          "interpreter_candidates": ["node"],
-          "resolution_sources": ["observed_entry_sibling", "known_install_locations"],
+          "kind": "node_package",
+          "interpreter_candidates": ["node", "node.exe"],
+          "resolution_sources": ["observed_entry_sibling", "path", "known_install_locations"],
           "known_install_locations": {
             "macos": ["${HOME}/.local/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"],
             "linux": ["${HOME}/.local/bin/node", "/usr/local/bin/node", "/usr/bin/node"],
+            "windows": ["C:/Program Files/nodejs/node.exe", "${LOCALAPPDATA}/Programs/nodejs/node.exe"],
             "wsl": ["${HOME}/.local/bin/node", "/usr/local/bin/node", "/usr/bin/node"]
           }
         }
@@ -323,6 +351,7 @@
           "/usr/local/bin/opencode",
           "/usr/bin/opencode"
         ],
+        "windows": ["${USERPROFILE}/.opencode/bin/opencode.exe", "${APPDATA}/npm/opencode.cmd"],
         "wsl": [
           "${HOME}/.local/bin/opencode",
           "${HOME}/.opencode/bin/opencode",
@@ -334,7 +363,18 @@
         "argv": ["--version"],
         "timeout_ms": 2000,
         "max_output_bytes": 65536,
-        "output_matcher": "SEMVER_ANYWHERE"
+        "output_matcher": "SEMVER_ANYWHERE",
+        "runtime": {
+          "kind": "node_package",
+          "interpreter_candidates": ["node", "node.exe"],
+          "resolution_sources": ["observed_entry_sibling", "path", "known_install_locations"],
+          "known_install_locations": {
+            "macos": ["/opt/homebrew/bin/node", "/usr/local/bin/node"],
+            "linux": ["/usr/local/bin/node", "/usr/bin/node"],
+            "windows": ["C:/Program Files/nodejs/node.exe", "${LOCALAPPDATA}/Programs/nodejs/node.exe"],
+            "wsl": ["/usr/local/bin/node", "/usr/bin/node"]
+          }
+        }
       },
       "config_locations": [
         {
@@ -355,7 +395,7 @@
           "platform_defaults": {
             "macos": ["${XDG_CONFIG_HOME}/opencode/opencode.json", "${HOME}/.config/opencode/opencode.json"],
             "linux": ["${XDG_CONFIG_HOME}/opencode/opencode.json", "${HOME}/.config/opencode/opencode.json"],
-            "windows": ["${LOCALAPPDATA}/opencode/opencode.json"],
+            "windows": ["${XDG_CONFIG_HOME}/opencode/opencode.json", "${USERPROFILE}/.config/opencode/opencode.json"],
             "wsl": ["${XDG_CONFIG_HOME}/opencode/opencode.json", "${HOME}/.config/opencode/opencode.json"]
           },
           "format": "json"

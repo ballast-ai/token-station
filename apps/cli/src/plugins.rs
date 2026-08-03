@@ -791,10 +791,10 @@ pub fn info(config: &ClientConfig, name: &str) -> Result<String, String> {
         }
     }
     let _ = writeln!(out, "suite: {}", manifest.conformance.required_suite);
-    if let PackageSource::Dir(dir) = &package.source {
-        if let Ok(sha256) = sha256_file(&dir.join("adapter.wasm")) {
-            let _ = writeln!(out, "adapter.wasm sha256: {sha256}");
-        }
+    if let PackageSource::Dir(dir) = &package.source
+        && let Ok(sha256) = sha256_file(&dir.join("adapter.wasm"))
+    {
+        let _ = writeln!(out, "adapter.wasm sha256: {sha256}");
     }
     Ok(out)
 }
@@ -844,6 +844,21 @@ struct StagingGuard {
     armed: bool,
 }
 
+fn private_dir_builder() -> fs::DirBuilder {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder
+    }
+    #[cfg(not(unix))]
+    {
+        fs::DirBuilder::new()
+    }
+}
+
 impl StagingGuard {
     fn create(plugin_root: &Path) -> Result<Self, String> {
         for _ in 0..16 {
@@ -857,12 +872,7 @@ impl StagingGuard {
                     output
                 });
             let path = plugin_root.join(format!(".install-{suffix}.tmp"));
-            let mut builder = fs::DirBuilder::new();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
+            let builder = private_dir_builder();
             match builder.create(&path) {
                 Ok(()) => return Ok(Self { path, armed: true }),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -947,12 +957,7 @@ fn copy_dir(from: &Path, to: &Path, depth: usize, budget: &mut CopyBudget) -> Re
         ));
     }
 
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
+    let builder = private_dir_builder();
     builder
         .create(to)
         .map_err(|error| format!("{}: {error}", to.display()))?;

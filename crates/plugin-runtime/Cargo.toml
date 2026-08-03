@@ -4,9 +4,8 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-# Above the workspace floor because of the wasmtime 46 MSRV. Do not raise the floor because third parties must
-# Low-dependency crates such as protocol, plugin-api, and conformance do not depend on wasmtime.
-rust-version = "1.94"
+# Match the workspace declaration; the lockfile and Windows build gate require at least 1.95.
+rust-version = "1.95"
 publish.workspace = true
 
 [dependencies]

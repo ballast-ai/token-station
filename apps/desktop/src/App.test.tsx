@@ -1,10 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App, { configSaveStatus } from "./App";
 import type { AgentRouteView, AgentUiMetadataView, AgentView, ServeView, StateView } from "./api";
+import { AGENT_VISIBILITY_STORAGE_KEY } from "./components/AgentVisibilityPreferences";
 import { LANGUAGE_STORAGE_KEY } from "./components/LanguageProvider";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -12,7 +13,6 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
 
-const agentIds = ["claude-code", "codex", "opencode", "openclaw", "nous-hermes-agent"];
 const emptyRoute: AgentRouteView = {
   mode: "inherit",
   tiers: {
@@ -27,12 +27,24 @@ const emptyRoute: AgentRouteView = {
 
 const registryFixture: AgentUiMetadataView[] = [
   { agent_id: "claude-code", legacy_kind: "cc", display_name: "Claude Code", icon_key: "claude", admission: "supported", ui_order: 10, nav_mark: "C" },
+  { agent_id: "claude-desktop", legacy_kind: null, display_name: "Claude Desktop", icon_key: "claude-desktop", admission: "supported", ui_order: 15, nav_mark: "CD" },
   { agent_id: "codex", legacy_kind: "codex", display_name: "Codex", icon_key: "codex", admission: "supported", ui_order: 20, nav_mark: "X" },
-  { agent_id: "opencode", legacy_kind: "opencode", display_name: "OpenCode", icon_key: "opencode", admission: "supported", ui_order: 30, nav_mark: "O" },
-  { agent_id: "openclaw", legacy_kind: null, display_name: "OpenClaw", icon_key: "openclaw", admission: "supported", ui_order: 40, nav_mark: "OC" },
-  { agent_id: "nous-hermes-agent", legacy_kind: null, display_name: "Hermes Agent", icon_key: "hermes", admission: "supported", ui_order: 50, nav_mark: "H" },
+  { agent_id: "gemini-cli", legacy_kind: null, display_name: "Gemini CLI", icon_key: "gemini", admission: "supported", ui_order: 30, nav_mark: "G" },
+  { agent_id: "opencode", legacy_kind: "opencode", display_name: "OpenCode", icon_key: "opencode", admission: "supported", ui_order: 40, nav_mark: "O" },
+  { agent_id: "openclaw", legacy_kind: null, display_name: "OpenClaw", icon_key: "openclaw", admission: "supported", ui_order: 50, nav_mark: "OC" },
+  { agent_id: "nous-hermes-agent", legacy_kind: null, display_name: "Hermes Agent", icon_key: "hermes", admission: "supported", ui_order: 60, nav_mark: "H" },
   { agent_id: "future-agent", legacy_kind: null, display_name: "Future Agent", icon_key: "future", admission: "discovery_only" },
 ];
+const supportedRegistryFixture = registryFixture.filter(
+  (metadata) => metadata.admission === "supported",
+);
+const agentIds = supportedRegistryFixture.map((metadata) => metadata.agent_id);
+const agentDisplayNames = supportedRegistryFixture.map(
+  (metadata) => metadata.display_name,
+);
+const agentNavigationNames = agentDisplayNames.map(
+  (displayName) => displayName.replace(" Agent", ""),
+);
 
 const registryWithVirtualSupportedAgent: AgentUiMetadataView[] = [
   ...registryFixture,
@@ -105,6 +117,7 @@ const scannedClaude: AgentView = {
   installations: [{
     managed: false,
     connected: false,
+    adapter_ready: true,
     discovery: {
       agent_id: "claude-code",
       executable_path: "/opt/claude",
@@ -178,8 +191,15 @@ function navigation() {
   return within(screen.getByLabelText("主导航"));
 }
 
+async function openAgentVisibility(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("button", { name: "设置" }));
+  await user.click(screen.getByRole("button", { name: /Agent 显示/ }));
+  await screen.findByRole("heading", { name: "Agent 显示" });
+}
+
 beforeEach(() => {
   window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "zh-CN");
+  window.localStorage.removeItem(AGENT_VISIBILITY_STORAGE_KEY);
   listenMock.mockReset();
   listenMock.mockResolvedValue(vi.fn());
   const initial = stateFixture();
@@ -242,6 +262,171 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("button", { name: "保存并应用" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("serve_start"));
     expect(invokeMock).not.toHaveBeenCalledWith("save_config");
+  });
+
+  it.each([
+    [
+      "the old running revision",
+      serveFixture({
+        phase: "running",
+        app_runtime: "running",
+        listener_reachable: true,
+        running_revision: 1,
+      }),
+      null,
+    ],
+    [
+      "an apply error",
+      serveFixture({
+        phase: "running",
+        app_runtime: "running",
+        listener_reachable: true,
+        running_revision: 2,
+        error: "已保存尚未应用：gateway_init: fixture failure",
+      }),
+      "已保存尚未应用：gateway_init: fixture failure",
+    ],
+  ])("does not report configuration applied when starting returns to %s", async (_case, terminal, expectedError) => {
+    const user = userEvent.setup();
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_eventName, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    const dirty = stateFixture({ draft_revision: 2, saved_revision: 1, config_dirty: true });
+    const applying = stateFixture({
+      draft_revision: 2,
+      saved_revision: 2,
+      config_dirty: false,
+      serve: serveFixture({ phase: "starting" }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return dirty;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "serve_start") return applying;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "保存并应用" }));
+    expect(await screen.findByText("正在应用配置…")).toBeInTheDocument();
+    act(() => emitServe?.(terminal));
+
+    await waitFor(() => expect(screen.queryByText("正在应用配置…")).toBeNull());
+    expect(screen.queryByText(/配置已应用/)).toBeNull();
+    if (expectedError) {
+      expect(screen.getByText(expectedError)).toBeInTheDocument();
+    }
+  });
+
+  it("reports configuration applied only when the requested revision is running without an error", async () => {
+    const user = userEvent.setup();
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_eventName, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    const dirty = stateFixture({ draft_revision: 2, saved_revision: 1, config_dirty: true });
+    const applying = stateFixture({
+      draft_revision: 2,
+      saved_revision: 2,
+      config_dirty: false,
+      serve: serveFixture({ phase: "starting" }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return dirty;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "serve_start") return applying;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "保存并应用" }));
+    expect(await screen.findByText("正在应用配置…")).toBeInTheDocument();
+    act(() => emitServe?.(serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 2,
+    })));
+
+    expect(await screen.findByText("配置已应用 · revision 2")).toBeInTheDocument();
+  });
+
+  it("keeps waiting when a stale runtime poll arrives before the requested revision", async () => {
+    const user = userEvent.setup();
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_eventName, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    const dirty = stateFixture({ draft_revision: 2, saved_revision: 1, config_dirty: true });
+    const applying = stateFixture({
+      draft_revision: 2,
+      saved_revision: 2,
+      config_dirty: false,
+      serve: serveFixture({ phase: "starting" }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return dirty;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "serve_start") return applying;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "保存并应用" }));
+    expect(await screen.findByText("正在应用配置…")).toBeInTheDocument();
+    act(() => emitServe?.(serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 1,
+    })));
+    await waitFor(() => expect(screen.queryByText("正在应用配置…")).toBeNull());
+    expect(screen.queryByText(/配置已应用/)).toBeNull();
+
+    act(() => emitServe?.(serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 2,
+    })));
+    expect(await screen.findByText("配置已应用 · revision 2")).toBeInTheDocument();
+  });
+
+  it("does not treat an ordinary first proxy startup as a completed configuration apply", async () => {
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_eventName, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") {
+        return stateFixture({
+          saved_revision: 1,
+          serve: serveFixture({ phase: "starting" }),
+        });
+      }
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    expect(await screen.findByText("正在应用配置…")).toBeInTheDocument();
+    act(() => emitServe?.(serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 1,
+    })));
+
+    await waitFor(() => expect(screen.queryByText("正在应用配置…")).toBeNull());
+    expect(screen.queryByText(/配置已应用/)).toBeNull();
   });
 
   it("refreshes the independent Agent runtime fact within the 500ms poll", async () => {
@@ -321,14 +506,58 @@ describe("desktop station navigation", () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2);
   });
 
-  it("shows exactly five fixed Agents, no Gemini, and scans only on load or explicit rescan", async () => {
+  it("rescans when a new serving instance replaces the old one without a readiness gap", async () => {
+    const oldRuntime = stateFixture({
+      serve: serveFixture({
+        phase: "running",
+        app_runtime: "running",
+        listener_reachable: true,
+        running_revision: 1,
+        instance_id: "runtime-old",
+      }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return oldRuntime;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "get_runtime_state") {
+        return serveFixture({
+          phase: "running",
+          app_runtime: "running",
+          listener_reachable: true,
+          running_revision: 2,
+          instance_id: "runtime-new",
+        });
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await waitFor(() => expect(
+      invokeMock.mock.calls.filter(([command]) => command === "scan_agents"),
+    ).toHaveLength(1));
+    await waitFor(
+      () => expect(
+        invokeMock.mock.calls.filter(([command]) => command === "scan_agents"),
+      ).toHaveLength(2),
+      { timeout: 1_500 },
+    );
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2);
+  });
+
+  it("renders every supported Registry Agent in ui_order, filters discovery-only entries, and scans only on load or explicit rescan", async () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByRole("heading", { name: "主页路由" });
-    for (const name of ["Claude Code", "Codex", "OpenCode", "OpenClaw", "Hermes"]) {
-      expect(navigation().getByRole("button", { name })).toBeInTheDocument();
+
+    const orderedButtons = agentNavigationNames.map((name) =>
+      navigation().getByRole("button", { name }));
+    for (let index = 0; index < orderedButtons.length - 1; index += 1) {
+      expect(
+        orderedButtons[index].compareDocumentPosition(orderedButtons[index + 1])
+        & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
     }
-    expect(navigation().queryByRole("button", { name: /Gemini/i })).toBeNull();
     expect(navigation().queryByRole("button", { name: /Future/i })).toBeNull();
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1));
 
@@ -338,6 +567,226 @@ describe("desktop station navigation", () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
     await user.click(navigation().getByRole("button", { name: "重新扫描" }));
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2));
+  });
+
+  it("lets the user hide and restore a sidebar Agent from Settings without rescanning", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("heading", { name: "主页路由" });
+    await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1));
+
+    await openAgentVisibility(user);
+
+    expect(screen.queryByText("AGENT NAVIGATION")).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Agent 显示选项" })).toBeInTheDocument();
+    for (const name of agentDisplayNames) {
+      expect(screen.getByRole("switch", { name, checked: true })).toBeInTheDocument();
+    }
+    expect(screen.getByRole("status")).toHaveTextContent("7 / 7 已显示");
+
+    await user.click(screen.getByRole("switch", { name: "Codex", checked: true }));
+
+    expect(screen.getByRole("switch", { name: "Codex", checked: false })).toBeInTheDocument();
+    expect(navigation().queryByRole("button", { name: "Codex" })).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("6 / 7 已显示");
+    expect(window.localStorage.getItem(AGENT_VISIBILITY_STORAGE_KEY)).toBe(
+      JSON.stringify(["codex"]),
+    );
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([command]) => [
+      "set_settings",
+      "serve_start",
+      "serve_stop",
+      "set_agent_route_mode",
+      "plan_agent_connection",
+      "plan_agent_disconnect",
+      "apply_agent_plan",
+    ].includes(String(command)))).toHaveLength(0);
+
+    await user.click(screen.getByRole("switch", { name: "Codex", checked: false }));
+
+    expect(screen.getByRole("switch", { name: "Codex", checked: true })).toBeInTheDocument();
+    expect(navigation().getByRole("button", { name: "Codex" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("7 / 7 已显示");
+    expect(window.localStorage.getItem(AGENT_VISIBILITY_STORAGE_KEY)).toBe(
+      JSON.stringify([]),
+    );
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
+  });
+
+  it("restores hidden Agent preferences after remount while newly registered Agents remain visible", async () => {
+    const user = userEvent.setup();
+    const first = render(<App />);
+    await openAgentVisibility(user);
+    await user.click(screen.getByRole("switch", { name: "Codex", checked: true }));
+    expect(window.localStorage.getItem(AGENT_VISIBILITY_STORAGE_KEY)).toBe(
+      JSON.stringify(["codex"]),
+    );
+    first.unmount();
+
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryWithVirtualSupportedAgent;
+      if (command === "scan_agents") return [];
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+    render(<App />);
+
+    const nav = within(await screen.findByLabelText("主导航"));
+    expect(nav.queryByRole("button", { name: "Codex" })).toBeNull();
+    expect(nav.getByRole("button", { name: "Virtual" })).toBeInTheDocument();
+    expect(window.localStorage.getItem(AGENT_VISIBILITY_STORAGE_KEY)).toBe(
+      JSON.stringify(["codex"]),
+    );
+  });
+
+  it("applies the stored preference before the first navigation render", async () => {
+    window.localStorage.setItem(
+      AGENT_VISIBILITY_STORAGE_KEY,
+      JSON.stringify(["codex"]),
+    );
+    const container = document.createElement("div");
+    document.body.append(container);
+    let codexWasAdded = false;
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (!(node instanceof Element)) continue;
+          const buttons = node.matches("button")
+            ? [node]
+            : [...node.querySelectorAll("button")];
+          if (buttons.some((button) => button.textContent?.trim() === "Codex")) {
+            codexWasAdded = true;
+          }
+        }
+      }
+    });
+    observer.observe(container, { childList: true, subtree: true });
+
+    render(<App />, { container });
+
+    const nav = within(await screen.findByLabelText("主导航"));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("scan_agents"));
+    observer.disconnect();
+    expect(nav.queryByRole("button", { name: "Codex" })).toBeNull();
+    expect(nav.getByRole("button", { name: "Claude Code" })).toBeInTheDocument();
+    expect(codexWasAdded).toBe(false);
+  });
+
+  it("falls back to showing every supported Agent when the stored preference is invalid", async () => {
+    window.localStorage.setItem(AGENT_VISIBILITY_STORAGE_KEY, "{not-json");
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "主页路由" });
+    for (const name of agentNavigationNames) {
+      expect(navigation().getByRole("button", { name })).toBeInTheDocument();
+    }
+    expect(navigation().queryByRole("button", { name: /Future/i })).toBeNull();
+  });
+
+  it("does not overwrite an existing preference when the initial storage read fails", async () => {
+    window.localStorage.setItem(
+      AGENT_VISIBILITY_STORAGE_KEY,
+      JSON.stringify(["codex"]),
+    );
+    const originalGetItem = Storage.prototype.getItem;
+    const setItemSpy = vi.spyOn(Storage.prototype, "setItem");
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (
+      this: Storage,
+      key: string,
+    ) {
+      if (key === AGENT_VISIBILITY_STORAGE_KEY) throw new Error("storage denied");
+      return originalGetItem.call(this, key);
+    });
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "主页路由" });
+    expect(navigation().getByRole("button", { name: "Codex" })).toBeInTheDocument();
+    expect(setItemSpy).not.toHaveBeenCalledWith(
+      AGENT_VISIBILITY_STORAGE_KEY,
+      expect.any(String),
+    );
+    expect(originalGetItem.call(
+      window.localStorage,
+      AGENT_VISIBILITY_STORAGE_KEY,
+    )).toBe(JSON.stringify(["codex"]));
+  });
+
+  it("keeps the current-session visibility change when preference persistence fails", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await openAgentVisibility(user);
+    vi.spyOn(Storage.prototype, "setItem").mockImplementationOnce(() => {
+      throw new Error("storage denied");
+    });
+
+    await user.click(screen.getByRole("switch", { name: "Codex", checked: true }));
+
+    expect(screen.getByRole("switch", { name: "Codex", checked: false })).toBeInTheDocument();
+    expect(navigation().queryByRole("button", { name: "Codex" })).toBeNull();
+  });
+
+  it("returns Home instead of reopening an Agent hidden from the Settings history", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click((await screen.findByLabelText("主导航"))
+      .querySelector<HTMLButtonElement>('button[title^="Codex"]')!);
+    expect(await screen.findByRole("heading", { name: "Codex" })).toBeInTheDocument();
+
+    await openAgentVisibility(user);
+    await user.click(screen.getByRole("switch", { name: "Codex", checked: true }));
+    await user.click(screen.getByRole("button", { name: /返回/ }));
+
+    expect(await screen.findByRole("heading", { name: "主页路由" })).toBeInTheDocument();
+    expect(navigation().queryByRole("button", { name: "Codex" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Codex" })).toBeNull();
+  });
+
+  it("supports toggling Agent visibility with the Space key", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await openAgentVisibility(user);
+
+    const codexToggle = screen.getByRole("switch", { name: "Codex", checked: true });
+    codexToggle.focus();
+    expect(codexToggle).toHaveFocus();
+    await user.keyboard("[Space]");
+
+    expect(screen.getByRole("switch", { name: "Codex", checked: false })).toHaveFocus();
+    expect(navigation().queryByRole("button", { name: "Codex" })).toBeNull();
+    await user.keyboard("[Enter]");
+
+    expect(screen.getByRole("switch", { name: "Codex", checked: true })).toHaveFocus();
+    expect(navigation().getByRole("button", { name: "Codex" })).toBeInTheDocument();
+    expect(window.localStorage.getItem(AGENT_VISIBILITY_STORAGE_KEY)).toBe(
+      JSON.stringify([]),
+    );
+  });
+
+  it("keeps core navigation and the recovery controls available when every Agent is hidden", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await openAgentVisibility(user);
+
+    for (const name of agentDisplayNames) {
+      await user.click(screen.getByRole("switch", { name, checked: true }));
+    }
+
+    for (const name of agentNavigationNames) {
+      expect(navigation().queryByRole("button", { name })).toBeNull();
+    }
+    expect(navigation().getByRole("button", { name: "主页" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "用量" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("0 / 7 已显示");
+    expect(screen.getByRole("switch", { name: "Claude Code", checked: false })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("switch", { name: "Claude Code", checked: false }));
+    expect(navigation().getByRole("button", { name: "Claude Code" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("1 / 7 已显示");
   });
 
   it("silently ignores a backend scan already in progress", async () => {
@@ -474,6 +923,14 @@ describe("desktop station navigation", () => {
     expect(await screen.findByRole("heading", { name: "Usage" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Settings" }));
     expect(await screen.findByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Agent visibility/ }));
+    expect(await screen.findByRole("heading", { name: "Agent visibility" })).toBeInTheDocument();
+    expect(screen.getByText(
+      "Choose which Agents appear in the sidebar.",
+    )).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("7 / 7 visible");
+    expect(screen.getByRole("group", { name: "Agent visibility options" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Codex", checked: true })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Home" }));
     await user.click(screen.getByRole("button", { name: "Add provider" }));
     expect(await screen.findByRole("heading", { name: "Add provider" })).toBeInTheDocument();
@@ -496,6 +953,13 @@ describe("desktop station navigation", () => {
     expect(screen.getByRole("heading", { name: "设置", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /简体中文/ })).toHaveAttribute("aria-checked", "true");
+    await user.click(screen.getByRole("button", { name: /Agent 显示/ }));
+    expect(await screen.findByRole("heading", { name: "Agent 显示" })).toBeInTheDocument();
+    expect(screen.getByText(
+      "选择显示在左侧导航中的 Agent。",
+    )).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("7 / 7 已显示");
+    expect(screen.getByRole("group", { name: "Agent 显示选项" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /返回/ }));
     expect(await screen.findByRole("heading", { name: "主页路由" })).toBeInTheDocument();
     expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("zh-CN");
@@ -701,7 +1165,7 @@ describe("desktop station navigation", () => {
   it("opens Add Provider as a separate page and returns to the source page after saving", async () => {
     const user = userEvent.setup();
     invokeMock.mockImplementation(async (command) => {
-      if (["get_state", "add_provider"].includes(command)) return stateFixture();
+      if (["get_state", "add_provider_with_credential"].includes(command)) return stateFixture();
       if (command === "preview_provider_endpoints") {
         return {
           chat: "https://api.openai.com/v1/chat/completions",
@@ -722,7 +1186,7 @@ describe("desktop station navigation", () => {
     // The provider picker is a brand-card catalog; click by visible label instead of selecting an option.
     await user.click(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" }));
     expect(screen.getByRole("button", { name: "添加供应商" })).toBeInTheDocument();
-    await user.type(screen.getByPlaceholderText("只保存在本机"), "secret-test");
+    await user.type(screen.getByLabelText("API Key"), "secret-test");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "OpenCode" })).toBeInTheDocument();
     expect(screen.getByText("供应商已添加")).toBeInTheDocument();

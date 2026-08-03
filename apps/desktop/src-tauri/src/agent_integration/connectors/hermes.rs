@@ -54,7 +54,7 @@ impl Connector for HermesConnector {
     }
 
     fn config_path(&self, home: &Path) -> PathBuf {
-        home.join(".hermes/config.yaml")
+        home.join(".hermes").join("config.yaml")
     }
 
     fn create_dir_error(&self) -> &'static str {

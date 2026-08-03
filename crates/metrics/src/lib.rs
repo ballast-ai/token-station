@@ -18,6 +18,9 @@
 //!   it before it lands here: a configured model name (or `auto`) is kept, and
 //!   any other caller string collapses to a fixed-width `unlisted:<hash>` token,
 //!   so this field can never carry free-form caller text.
+//! - [`RequestRecord::request_method`] and [`RequestRecord::path_kind`] are
+//!   transport metadata from closed host vocabularies. An arbitrary raw URL
+//!   path is never retained.
 //! - Token usage is [`Usage`] — the canonical vocabulary. There is
 //!   deliberately no parallel usage type here: an earlier `TokenUsage`
 //!   placeholder was removed the day this schema was decided.
@@ -49,7 +52,88 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 ///   (quota-first routing).
 /// - v7: adds the quota-decision snapshot columns (why a quota-first route
 ///   picked its account: reset/headroom/pressured/exhausted).
-pub const SCHEMA_VERSION: u32 = 7;
+/// - v8: adds content-free transport diagnostics and closed conversion
+///   outcome/reason fields.
+pub const SCHEMA_VERSION: u32 = 8;
+
+/// The content-free transport path classification recorded for diagnostics.
+/// Raw, caller-controlled URL paths never enter the receipt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestPathKind {
+    ChatCompletions,
+    Responses,
+    Messages,
+    GeminiGenerateContent,
+    Models,
+    Embeddings,
+    Admin,
+    UnknownAgentEndpoint,
+    #[default]
+    Unknown,
+}
+
+impl RequestPathKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "responses",
+            Self::Messages => "messages",
+            Self::GeminiGenerateContent => "gemini_generate_content",
+            Self::Models => "models",
+            Self::Embeddings => "embeddings",
+            Self::Admin => "admin",
+            Self::UnknownAgentEndpoint => "unknown_agent_endpoint",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Persisted copy of the router decision vocabulary. It deliberately gives the
+/// matched heuristic band's lower bound a name distinct from the heuristic
+/// configuration's top-level threshold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "tier", rename_all = "snake_case")]
+pub enum RecordedDecidedBy {
+    Rule {
+        rule: String,
+    },
+    Hint {
+        kind: token_station_protocol::HintKind,
+        value: String,
+    },
+    Heuristic {
+        score: u32,
+        matched_band_at_least: u32,
+    },
+    Default,
+    ExactModel {
+        model: String,
+    },
+    Quota,
+}
+
+impl From<&DecidedBy> for RecordedDecidedBy {
+    fn from(value: &DecidedBy) -> Self {
+        match value {
+            DecidedBy::Rule { rule } => Self::Rule { rule: rule.clone() },
+            DecidedBy::Hint { kind, value } => Self::Hint {
+                kind: *kind,
+                value: value.clone(),
+            },
+            DecidedBy::Heuristic { score, threshold } => Self::Heuristic {
+                score: *score,
+                matched_band_at_least: *threshold,
+            },
+            DecidedBy::Default => Self::Default,
+            DecidedBy::ExactModel { model } => Self::ExactModel {
+                model: model.clone(),
+            },
+            DecidedBy::Quota => Self::Quota,
+        }
+    }
+}
 
 /// Where the recorded cost came from. The local price table may only produce
 /// [`Self::Estimated`]; [`Self::Actual`] is reserved for future bill
@@ -82,7 +166,7 @@ pub struct DecisionRecord {
     pub upstream: String,
     pub model: String,
     pub pool: String,
-    pub decided_by: DecidedBy,
+    pub decided_by: RecordedDecidedBy,
     pub fallbacks: u32,
     pub features: RequestFeatures,
     /// Why quota-first routing picked this account (its window/rate picture at
@@ -112,7 +196,7 @@ impl From<&Decision> for DecisionRecord {
             upstream: decision.chosen.upstream.as_str().to_owned(),
             model: decision.chosen.model.clone(),
             pool: decision.pool.clone(),
-            decided_by: decision.decided_by.clone(),
+            decided_by: RecordedDecidedBy::from(&decision.decided_by),
             fallbacks: u32::try_from(decision.fallbacks.len()).unwrap_or(u32::MAX),
             features: decision.features,
             quota: None,
@@ -150,6 +234,95 @@ pub enum ConversionStage {
     StreamTranslate,
 }
 
+/// A conversion can be interrupted by the caller without the adapter having
+/// failed. Keeping this separate from `succeeded` preserves old readers while
+/// preventing cancellation from being diagnosed as a protocol defect.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversionOutcome {
+    Succeeded,
+    Failed,
+    Cancelled,
+    #[default]
+    Unknown,
+}
+
+impl ConversionOutcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Closed, content-free reasons for adapter conversion failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversionReasonCode {
+    UnsupportedToolType,
+    ProviderToolUnsupported,
+    StatefulChaining,
+    StructuredOutput,
+    ReasoningItem,
+    UnsupportedMedia,
+    InvalidJson,
+    InvalidProtocolShape,
+    AdapterFailure,
+}
+
+impl ConversionReasonCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnsupportedToolType => "unsupported_tool_type",
+            Self::ProviderToolUnsupported => "provider_tool_unsupported",
+            Self::StatefulChaining => "stateful_chaining",
+            Self::StructuredOutput => "structured_output",
+            Self::ReasoningItem => "reasoning_item",
+            Self::UnsupportedMedia => "unsupported_media",
+            Self::InvalidJson => "invalid_json",
+            Self::InvalidProtocolShape => "invalid_protocol_shape",
+            Self::AdapterFailure => "adapter_failure",
+        }
+    }
+}
+
+/// Optional closed detail for the protocol shape named by a conversion reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversionReasonDetail {
+    LocalShell,
+    WebSearch,
+    FunctionTool,
+    PreviousResponseId,
+    JsonSchema,
+    Reasoning,
+    Image,
+    RequestBody,
+    OtherToolType,
+}
+
+impl ConversionReasonDetail {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalShell => "local_shell",
+            Self::WebSearch => "web_search",
+            Self::FunctionTool => "function_tool",
+            Self::PreviousResponseId => "previous_response_id",
+            Self::JsonSchema => "json_schema",
+            Self::Reasoning => "reasoning",
+            Self::Image => "image",
+            Self::RequestBody => "request_body",
+            Self::OtherToolType => "other_tool_type",
+        }
+    }
+}
+
 impl ConversionStage {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -172,9 +345,17 @@ pub struct ConversionRecord {
     pub stage: ConversionStage,
     pub source_protocol: String,
     pub target_protocol: String,
+    /// Legacy convenience bit retained for existing clients. New clients
+    /// should use `outcome`, which distinguishes failure from cancellation.
     pub succeeded: bool,
+    #[serde(default)]
+    pub outcome: ConversionOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<ErrorCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<ConversionReasonCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_detail: Option<ConversionReasonDetail>,
 }
 
 /// Everything one request leaves behind. One per request, exactly.
@@ -194,6 +375,12 @@ pub struct RequestRecord {
     /// standalone CLI serve has no revision ledger and leaves this absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running_revision: Option<u64>,
+    /// Upper-case method from the host's closed HTTP method vocabulary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_method: Option<String>,
+    /// Content-free host classification; never the arbitrary raw request path.
+    #[serde(default)]
+    pub path_kind: RequestPathKind,
     /// Unix milliseconds, from the host clock, at request arrival.
     pub started_at_ms: u64,
     pub latency_ms: u64,
@@ -253,6 +440,8 @@ impl RequestRecord {
             request_id: String::new(),
             agent_id: None,
             running_revision: None,
+            request_method: None,
+            path_kind: RequestPathKind::Unknown,
             started_at_ms,
             latency_ms: 0,
             protocol: protocol.into(),
@@ -286,6 +475,10 @@ pub struct ReceiptView {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub running_revision: Option<u64>,
+    #[serde(default)]
+    pub request_method: Option<String>,
+    #[serde(default)]
+    pub path_kind: RequestPathKind,
     pub requested_model: String,
     pub stream: bool,
     pub status: u16,
@@ -322,7 +515,7 @@ pub struct RoutingRecord {
     pub upstream: String,
     pub model: String,
     pub pool: String,
-    pub decided_by: DecidedBy,
+    pub decided_by: RecordedDecidedBy,
     pub fallbacks: u32,
     pub features: RequestFeatures,
 }
@@ -333,7 +526,7 @@ impl From<&Decision> for RoutingRecord {
             upstream: decision.chosen.upstream.as_str().to_owned(),
             model: decision.chosen.model.clone(),
             pool: decision.pool.clone(),
-            decided_by: decision.decided_by.clone(),
+            decided_by: RecordedDecidedBy::from(&decision.decided_by),
             fallbacks: u32::try_from(decision.fallbacks.len()).unwrap_or(u32::MAX),
             features: decision.features,
         }

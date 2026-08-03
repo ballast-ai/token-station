@@ -9,13 +9,15 @@ use super::config_codec::{
     render_document, semantic_json, ConfigDocument, DocumentFormat,
 };
 use super::connectors::{validate_patch_ownership, ConnectInput, Connector};
-use super::ownership::{compute_owned_value_macs, ownership_matches, OwnershipRecord};
+use super::ownership::{
+    compute_owned_value_macs, ownership_matches, CompanionOwnership, OwnershipRecord,
+};
 use super::snapshot::SnapshotStore;
 use super::types::{
     AllowedAction, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan, ConfigPath,
     ConfirmationKind, ConnectorFileProjection, ConnectorProjection, CredentialBinding,
-    CredentialSource, DiscoveryRecord, PatchKind, PatchOperation, PlanIntent, RedactedChange,
-    SnapshotRecord,
+    CredentialSource, DiscoveryRecord, PatchKind, PatchOperation, PlanIntent, Platform,
+    RedactedChange, SnapshotRecord,
 };
 
 const PLAN_SCHEMA_VERSION: u32 = 1;
@@ -52,6 +54,18 @@ impl ConfigSource {
             original_owner: owner,
         }
     }
+}
+
+#[must_use]
+pub(crate) const fn projected_permissions_for(platform: Platform) -> Option<u32> {
+    match platform {
+        Platform::Windows => None,
+        Platform::Macos | Platform::Linux | Platform::Wsl => Some(0o600),
+    }
+}
+
+fn projected_permissions() -> Option<u32> {
+    projected_permissions_for(super::platform::current_platform())
 }
 
 /// Complete server-held plan. The only serializable projection is `view`;
@@ -186,7 +200,7 @@ pub fn build_connection_plan(
     let projected_bytes = rendered.into_bytes();
     let projected = ConfigSource::existing(
         projected_bytes.clone(),
-        Some(0o600),
+        projected_permissions(),
         source.original_owner.clone(),
     );
     let expected_after_hash = file_revision_hash(target_path, &projected)?;
@@ -249,7 +263,7 @@ pub fn build_connection_plan(
         )?;
         let projected = ConfigSource::existing(
             companion.projected_bytes.to_vec(),
-            Some(0o600),
+            projected_permissions(),
             companion.original_owner.clone(),
         );
         let target = strict_path_text(&companion.target_path)?.to_string();
@@ -393,6 +407,23 @@ pub fn build_disconnect_plan(
     )
 }
 
+pub(super) fn companion_document_format(
+    connector: &dyn Connector,
+    ownership: &OwnershipRecord,
+    companion: &CompanionOwnership,
+) -> Result<DocumentFormat, String> {
+    companion.document_format.or_else(|| {
+        connector.legacy_companion_format(
+            Path::new(&ownership.target_config_path),
+            Path::new(&companion.target_config_path),
+        )
+    })
+    .ok_or_else(|| {
+        "旧 ownership companion 缺少可确认的显式格式合同；已停止且不会修改配置、ownership 或 snapshot"
+            .to_string()
+    })
+}
+
 /// Adds every companion file owned by a multi-file Connector to a disconnect
 /// plan. Each file is independently revision-bound and restored from its own
 /// encrypted baseline; the transaction engine commits or rolls back the set.
@@ -407,12 +438,13 @@ pub fn attach_disconnect_companions(
         return Err("companion restore 只能附加到已绑定的断开计划".to_string());
     }
     for companion in &ownership.companion_files {
+        let document_format = companion_document_format(connector, ownership, companion)?;
         let target = Path::new(&companion.target_config_path);
         validate_target_path(target)?;
         let current = read_config_source(target)?;
         let mut current_document = parse_source_bytes(
             current.existed.then_some(current.exact_bytes.as_slice()),
-            connector.format(),
+            document_format,
             connector.label(),
         )?;
         let baseline = snapshots.load(&companion.baseline_snapshot_id)?;
@@ -428,7 +460,7 @@ pub fn attach_disconnect_companions(
                 .record
                 .original_existed
                 .then_some(baseline.exact_bytes.as_slice()),
-            connector.format(),
+            document_format,
             connector.label(),
         )?;
         let current_macs =
@@ -449,10 +481,10 @@ pub fn attach_disconnect_companions(
             &companion.owned_paths,
         )?;
         let rendered = render_document(&current_document, connector.label())?;
-        let reparsed = parse_rendered(&rendered, connector.format(), connector.label())?;
+        let reparsed = parse_rendered(&rendered, document_format, connector.label())?;
         let original_semantic = semantic_json(&parse_source_bytes(
             current.existed.then_some(current.exact_bytes.as_slice()),
-            connector.format(),
+            document_format,
             connector.label(),
         )?)?;
         verify_reverse_projection(
@@ -460,7 +492,7 @@ pub fn attach_disconnect_companions(
             &original_semantic,
             &reverse_operations,
             &companion.owned_paths,
-            connector.format(),
+            document_format,
             connector.label(),
         )?;
         let projected = if !baseline.record.original_existed
@@ -470,7 +502,7 @@ pub fn attach_disconnect_companions(
         } else {
             ConfigSource::existing(
                 rendered.as_bytes().to_vec(),
-                Some(0o600),
+                projected_permissions(),
                 current.original_owner.clone(),
             )
         };
@@ -489,7 +521,7 @@ pub fn attach_disconnect_companions(
         let sensitive_paths = connector.sensitive_paths();
         plan.view.projection.files.push(ConnectorFileProjection {
             target_config_path: companion.target_config_path.clone(),
-            format: format_name(connector.format()).to_string(),
+            format: format_name(document_format).to_string(),
             target_existed: current.existed,
             before_hash: before_hash.clone(),
             expected_after_hash: expected_after_hash.clone(),
@@ -507,7 +539,7 @@ pub fn attach_disconnect_companions(
             before_hash,
             expected_after_hash,
             projected_bytes: Zeroizing::new(rendered.into_bytes()),
-            format: connector.format(),
+            format: document_format,
             label: connector.label(),
             owned_paths: companion.owned_paths.clone(),
         });
@@ -528,6 +560,7 @@ pub fn attach_restore_companions(
     }
     let records = snapshots.list_agent(&ownership.agent_id)?;
     for companion in &ownership.companion_files {
+        let document_format = companion_document_format(connector, ownership, companion)?;
         let source_record = records
             .iter()
             .find(|record| {
@@ -542,7 +575,7 @@ pub fn attach_restore_companions(
         let current = read_config_source(target)?;
         let mut current_document = parse_source_bytes(
             current.existed.then_some(current.exact_bytes.as_slice()),
-            connector.format(),
+            document_format,
             connector.label(),
         )?;
         let source_document = parse_source_bytes(
@@ -550,7 +583,7 @@ pub fn attach_restore_companions(
                 .record
                 .original_existed
                 .then_some(source_snapshot.exact_bytes.as_slice()),
-            connector.format(),
+            document_format,
             connector.label(),
         )?;
         let current_macs =
@@ -568,10 +601,10 @@ pub fn attach_restore_companions(
             &companion.owned_paths,
         )?;
         let rendered = render_document(&current_document, connector.label())?;
-        let reparsed = parse_rendered(&rendered, connector.format(), connector.label())?;
+        let reparsed = parse_rendered(&rendered, document_format, connector.label())?;
         let original_semantic = semantic_json(&parse_source_bytes(
             current.existed.then_some(current.exact_bytes.as_slice()),
-            connector.format(),
+            document_format,
             connector.label(),
         )?)?;
         verify_reverse_projection(
@@ -579,7 +612,7 @@ pub fn attach_restore_companions(
             &original_semantic,
             &reverse_operations,
             &companion.owned_paths,
-            connector.format(),
+            document_format,
             connector.label(),
         )?;
         let projected = if !source_snapshot.record.original_existed
@@ -589,7 +622,7 @@ pub fn attach_restore_companions(
         } else {
             ConfigSource::existing(
                 rendered.as_bytes().to_vec(),
-                Some(0o600),
+                projected_permissions(),
                 current.original_owner.clone(),
             )
         };
@@ -608,7 +641,7 @@ pub fn attach_restore_companions(
         let sensitive_paths = connector.sensitive_paths();
         plan.view.projection.files.push(ConnectorFileProjection {
             target_config_path: companion.target_config_path.clone(),
-            format: format_name(connector.format()).to_string(),
+            format: format_name(document_format).to_string(),
             target_existed: current.existed,
             before_hash: before_hash.clone(),
             expected_after_hash: expected_after_hash.clone(),
@@ -626,7 +659,7 @@ pub fn attach_restore_companions(
             before_hash,
             expected_after_hash,
             projected_bytes: Zeroizing::new(rendered.into_bytes()),
-            format: connector.format(),
+            format: document_format,
             label: connector.label(),
             owned_paths: companion.owned_paths.clone(),
         });
@@ -751,7 +784,7 @@ fn build_owned_projection_plan(
     } else {
         ConfigSource::existing(
             projected_bytes.clone(),
-            Some(0o600),
+            projected_permissions(),
             current.original_owner.clone(),
         )
     };
@@ -1224,6 +1257,9 @@ mod tests {
 
     #[test]
     fn plan_is_redacted_and_binds_instance_revision_catalog_and_expiry() {
+        #[cfg(windows)]
+        let target = Path::new(r"C:\tmp\token-station-plan\settings.json");
+        #[cfg(not(windows))]
         let target = Path::new("/tmp/token-station-plan/settings.json");
         let source_marker = "source-configuration-marker";
         let secret = "vk-sensitive-plan-secret";
@@ -1275,6 +1311,9 @@ mod tests {
 
     #[test]
     fn codex_first_connection_without_tokenstation_provider_builds_reversible_plan() {
+        #[cfg(windows)]
+        let target = Path::new(r"C:\tmp\token-station-plan\config.toml");
+        #[cfg(not(windows))]
         let target = Path::new("/tmp/token-station-plan/config.toml");
         let mut codex_discovery = discovery(target);
         codex_discovery.agent_id = "codex".to_string();
@@ -1314,6 +1353,9 @@ mod tests {
 
     #[test]
     fn plan_missing_and_empty_files_have_distinct_revisions() {
+        #[cfg(windows)]
+        let target = Path::new(r"C:\tmp\token-station-plan\config.json");
+        #[cfg(not(windows))]
         let target = Path::new("/tmp/token-station-plan/config.json");
         let missing = file_revision_hash(target, &ConfigSource::missing()).unwrap();
         let empty = file_revision_hash(
@@ -1325,7 +1367,18 @@ mod tests {
     }
 
     #[test]
+    fn projected_post_write_permissions_match_each_platforms_observed_revision() {
+        assert_eq!(projected_permissions_for(Platform::Windows), None);
+        for platform in [Platform::Macos, Platform::Linux, Platform::Wsl] {
+            assert_eq!(projected_permissions_for(platform), Some(0o600));
+        }
+    }
+
+    #[test]
     fn plan_only_connectable_status_is_accepted_and_unsafe_states_are_rejected() {
+        #[cfg(windows)]
+        let target = Path::new(r"C:\tmp\token-station-plan\settings.json");
+        #[cfg(not(windows))]
         let target = Path::new("/tmp/token-station-plan/settings.json");
         let source = ConfigSource::missing();
         let mut unknown = verified();

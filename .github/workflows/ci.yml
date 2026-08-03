@@ -43,7 +43,11 @@ jobs:
             plugins/official/agent-gemini
             plugins/official/provider-openai-compatible
             crates/plugin-runtime/tests/guests/test-provider
-      - run: cargo fmt --check
+      - name: Fetch the locked scaffold dependency set
+        run: >-
+          cargo fetch --locked --target wasm32-wasip2
+          --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
+      - run: scripts/check-rust-format.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       # The local gate always runs doc -D warnings. Without it in CI, the rule is only a convention.
@@ -104,6 +108,23 @@ jobs:
       - run: cargo doc --manifest-path apps/desktop/src-tauri/Cargo.toml --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    name: Rust 1.95 minimum-version check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: msrv-1.95
+      - run: cargo check --workspace --all-targets
 
   frontend:
     runs-on: ubuntu-latest
@@ -235,6 +256,119 @@ jobs:
         run: >-
           cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
           transaction_snapshot_and_pre_replace_failures_leave_target_untouched
+
+  windows-rust:
+    name: Windows full Rust and desktop gates
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            .
+            apps/desktop/src-tauri
+            plugins/official/agent-anthropic
+            plugins/official/agent-openai
+            plugins/official/agent-openai-responses
+            plugins/official/agent-gemini
+            plugins/official/provider-openai-compatible
+      - run: npm --prefix apps/desktop ci
+      - run: node scripts/check-windows-release-config.mjs
+      - name: Fetch the locked scaffold dependency set
+        run: >-
+          cargo fetch --locked --target wasm32-wasip2
+          --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - name: Prepare official plugins for desktop gateway tests
+        shell: bash
+        run: scripts/prepare-desktop-test-plugins.sh
+      - run: >-
+          cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml
+          --all-targets -- -D warnings
+      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+  windows-msi:
+    name: Windows x64 MSI real lifecycle
+    needs: windows-rust
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2,x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            apps/desktop/src-tauri
+            plugins/official/agent-anthropic
+            plugins/official/agent-openai
+            plugins/official/agent-openai-responses
+            plugins/official/agent-gemini
+            plugins/official/provider-openai-compatible
+      - run: npm --prefix apps/desktop ci
+      - run: node scripts/check-windows-release-config.mjs
+      - name: Build older MSI
+        shell: bash
+        run: >-
+          scripts/build-desktop.sh --local
+          --target x86_64-pc-windows-msvc --test-version 250.1.0
+      - name: Preserve older MSI
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi" |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if ($null -eq $msi) { throw "older MSI was not produced" }
+          Copy-Item -LiteralPath $msi.FullName -Destination "$env:RUNNER_TEMP\token-station-older.msi"
+      - name: Build newer MSI
+        shell: bash
+        run: >-
+          scripts/build-desktop.sh --local
+          --target x86_64-pc-windows-msvc --test-version 250.2.0
+      - name: Preserve newer MSI
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi" |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if ($null -eq $msi) { throw "newer MSI was not produced" }
+          Copy-Item -LiteralPath $msi.FullName -Destination "$env:RUNNER_TEMP\token-station-newer.msi"
+      - name: Install, start, upgrade, block downgrade, and uninstall
+        shell: pwsh
+        run: |
+          scripts/test-windows-msi.ps1 `
+            -OlderMsi "$env:RUNNER_TEMP\token-station-older.msi" `
+            -NewerMsi "$env:RUNNER_TEMP\token-station-newer.msi" `
+            -LogDirectory "$env:RUNNER_TEMP\token-station-msi-logs"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: token-station-windows-msi-lifecycle-logs
+          path: |
+            ${{ runner.temp }}/token-station-msi-logs/*.log
+            ${{ runner.temp }}/token-station-msi-logs/*-self-test.json
+          if-no-files-found: warn
 
   desktop-security:
     runs-on: ubuntu-latest

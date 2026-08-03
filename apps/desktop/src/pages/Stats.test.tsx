@@ -9,7 +9,7 @@ import {
   removeAgentBudget,
   setAgentBudget,
 } from "../api";
-import Stats from "./Stats";
+import Stats, { formatBudgetAmount } from "./Stats";
 
 vi.mock("../components/PricingEditor", () => ({ default: () => null }));
 
@@ -125,6 +125,13 @@ beforeEach(() => {
 });
 
 describe("usage dashboard and display-only Agent budgets", () => {
+  it("keeps meaningful decimals for small non-zero budget amounts", () => {
+    expect(formatBudgetAmount(1)).toBe("0.000001");
+    expect(formatBudgetAmount(1_000)).toBe("0.001");
+    expect(formatBudgetAmount(10_000)).toBe("0.01");
+    expect(formatBudgetAmount(0)).toBe("0.00");
+  });
+
   it("applies Agent, upstream, and model filters to the whole dashboard", async () => {
     const user = userEvent.setup();
     render(<Stats />);

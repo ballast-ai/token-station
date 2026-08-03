@@ -30,15 +30,16 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use token_station_conformance::{AgentAdapter, ProviderAdapter};
 use token_station_metrics::{
-    AttemptRecord, ConversionRecord, ConversionStage, CostKind, DecisionRecord, Recorder,
+    AttemptRecord, ConversionOutcome, ConversionReasonCode, ConversionReasonDetail,
+    ConversionRecord, ConversionStage, CostKind, DecisionRecord, Recorder, RequestPathKind,
     RequestRecord, RoutingRecord,
 };
 use token_station_plugin_runtime::{AgentPlugin, NoSecrets, PluginRuntime, ProviderPlugin};
 use token_station_protocol::{
     AgentRequestEnvelope, Auth, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
     ErrorEnvelope, HeaderDigest, HttpMethod, HttpRequestDescriptor, HttpResponseParts, Message,
-    ModelCapability, Principal, ProviderApi, ProviderConfig, ResponseFormat, SafeHeaders, SecretRef,
-    StreamChunk, StreamEvent, StreamOutcome, ToolDef,
+    ModelCapability, Principal, ProviderApi, ProviderConfig, ResponseFormat, SafeHeaders,
+    SecretRef, StreamChunk, StreamEvent, StreamOutcome, ToolDef,
 };
 use token_station_router_core::{
     Candidate, Decision, HealthPolicy, HealthTracker, Router, RouterConfig, RoutingMode,
@@ -46,7 +47,7 @@ use token_station_router_core::{
 };
 
 use crate::admission::Admission;
-use crate::cancel::CancelToken;
+use crate::cancel::{CancelReason, CancelToken};
 use crate::request_context::RequestContext;
 use crate::sse::SseFrameDecoder;
 
@@ -64,12 +65,12 @@ const QUOTA_POLL_TIMEOUT_SECS: u64 = 10;
 /// slowly and the endpoints are rate-limited, so a few minutes is plenty.
 pub const QUOTA_POLL_INTERVAL_SECS: u64 = 300;
 const MAX_UPSTREAM_BODY: u64 = 32 * 1024 * 1024;
-const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(120);
+const UPSTREAM_TIMEOUT: Duration = Duration::from_mins(2);
 const CANCEL_READ_POLL: Duration = Duration::from_millis(100);
 
 /// Default overall budget for one request when the caller supplies no context.
 /// Long enough for slow generations, finite enough to bound an abandoned one.
-const REQUEST_DEADLINE: Duration = Duration::from_secs(600);
+const REQUEST_DEADLINE: Duration = Duration::from_mins(10);
 /// A hard ceiling on upstream attempts per request, independent of how many
 /// candidates a decision carries: twenty all-503 upstreams must not become
 /// twenty attempts. The request deadline (from [`RequestContext`]) bounds the
@@ -87,6 +88,9 @@ const STREAM_READ: usize = 8 * 1024;
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_REQUEST_FALLBACK: AtomicU64 = AtomicU64::new(1);
 const CANONICAL_CHAT_PROTOCOL: &str = "token-station-chat";
+const CONTINUATION_KEY_EXTENSION: &str = "token_station_private_continuation_key";
+const CONTINUATION_SCOPE_EXTENSION: &str = "token_station_continuation_scope";
+const TOOL_NAMESPACES_EXTENSION: &str = "responses_tool_namespaces";
 
 /// One logical request's fallback limits. Count, wall-clock and per-attempt
 /// timeout are always active. Cost is optional until the router has a trusted
@@ -492,6 +496,40 @@ fn begin_record(
     record
 }
 
+fn request_method_kind(method: &str) -> String {
+    match method {
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS" | "HEAD" => method.to_owned(),
+        _ => "OTHER".to_owned(),
+    }
+}
+
+fn request_path_kind(path: &str, adapter_claimed: bool) -> RequestPathKind {
+    if path == "/v1/chat/completions" {
+        RequestPathKind::ChatCompletions
+    } else if path == "/v1/responses" {
+        RequestPathKind::Responses
+    } else if path == "/v1/messages" {
+        RequestPathKind::Messages
+    } else if path == "/v1/models" {
+        RequestPathKind::Models
+    } else if is_embeddings_path(path) {
+        RequestPathKind::Embeddings
+    } else if path.starts_with("/admin/") {
+        RequestPathKind::Admin
+    } else if path.contains(":generateContent") || path.contains(":streamGenerateContent") {
+        RequestPathKind::GeminiGenerateContent
+    } else if adapter_claimed {
+        RequestPathKind::Unknown
+    } else {
+        RequestPathKind::UnknownAgentEndpoint
+    }
+}
+
+fn tag_transport(record: &mut RequestRecord, method: &str, path: &str, adapter_claimed: bool) {
+    record.request_method = Some(request_method_kind(method));
+    record.path_kind = request_path_kind(path, adapter_claimed);
+}
+
 fn record_conversion(
     record: &mut RequestRecord,
     stage: ConversionStage,
@@ -506,7 +544,17 @@ fn record_conversion(
         source_protocol: source_protocol.into(),
         target_protocol: target_protocol.into(),
         succeeded,
+        outcome: if succeeded {
+            ConversionOutcome::Succeeded
+        } else {
+            ConversionOutcome::Failed
+        },
         error_code,
+        reason_code: error_code.map(|code| match code {
+            ErrorCode::InvalidRequest => ConversionReasonCode::InvalidProtocolShape,
+            _ => ConversionReasonCode::AdapterFailure,
+        }),
+        reason_detail: None,
     });
 }
 
@@ -521,6 +569,83 @@ fn passthrough_error_code(status: u16) -> ErrorCode {
         429 => ErrorCode::RateLimit,
         server if server >= 500 => ErrorCode::UpstreamUnavailable,
         _ => ErrorCode::InvalidRequest,
+    }
+}
+
+fn record_conversion_cancelled(
+    record: &mut RequestRecord,
+    stage: ConversionStage,
+    source_protocol: impl Into<String>,
+    target_protocol: impl Into<String>,
+) {
+    record.conversion_reports.push(ConversionRecord {
+        ordinal: u32::try_from(record.conversion_reports.len() + 1).unwrap_or(u32::MAX),
+        stage,
+        source_protocol: source_protocol.into(),
+        target_protocol: target_protocol.into(),
+        succeeded: false,
+        outcome: ConversionOutcome::Cancelled,
+        error_code: None,
+        reason_code: None,
+        reason_detail: None,
+    });
+}
+
+fn annotate_conversion_failure(record: &mut RequestRecord, error: &ErrorEnvelope) {
+    let message = error.message.to_ascii_lowercase();
+    let (reason_code, reason_detail) = if message.contains("previous_response_id")
+        || message.contains("stateful response chaining")
+    {
+        (
+            ConversionReasonCode::StatefulChaining,
+            Some(ConversionReasonDetail::PreviousResponseId),
+        )
+    } else if message.contains("local_shell") {
+        (
+            ConversionReasonCode::UnsupportedToolType,
+            Some(ConversionReasonDetail::LocalShell),
+        )
+    } else if message.contains("web_search") {
+        (
+            ConversionReasonCode::ProviderToolUnsupported,
+            Some(ConversionReasonDetail::WebSearch),
+        )
+    } else if message.contains("tool type") {
+        (
+            ConversionReasonCode::UnsupportedToolType,
+            Some(ConversionReasonDetail::OtherToolType),
+        )
+    } else if message.contains("json_schema")
+        || message.contains("text.format")
+        || message.contains("structured output")
+    {
+        (
+            ConversionReasonCode::StructuredOutput,
+            Some(ConversionReasonDetail::JsonSchema),
+        )
+    } else if message.contains("reasoning") {
+        (
+            ConversionReasonCode::ReasoningItem,
+            Some(ConversionReasonDetail::Reasoning),
+        )
+    } else if message.contains("image") || message.contains("unsupported media") {
+        (
+            ConversionReasonCode::UnsupportedMedia,
+            Some(ConversionReasonDetail::Image),
+        )
+    } else if message.contains("body is not json") {
+        (
+            ConversionReasonCode::InvalidJson,
+            Some(ConversionReasonDetail::RequestBody),
+        )
+    } else if error.code == ErrorCode::InvalidRequest {
+        (ConversionReasonCode::InvalidProtocolShape, None)
+    } else {
+        (ConversionReasonCode::AdapterFailure, None)
+    };
+    if let Some(conversion) = record.conversion_reports.last_mut() {
+        conversion.reason_code = Some(reason_code);
+        conversion.reason_detail = reason_detail;
     }
 }
 
@@ -575,7 +700,9 @@ fn record_route_decision(record: &mut RequestRecord, decision: &Decision) {
 fn unix_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// First text found in a message, across the plain-text and multi-part shapes.
@@ -632,6 +759,7 @@ enum AttemptTerminal {
 /// One loaded inbound adapter and the protocol its manifest declares. The
 /// gateway holds several and asks each `match_inbound` which claims a request.
 struct LoadedAgent {
+    package: String,
     plugin: AgentPlugin,
     protocol: String,
 }
@@ -1000,7 +1128,11 @@ impl Gateway {
             .first()
             .cloned()
             .ok_or_else(|| "declares no protocol".to_owned())?;
-        Ok(LoadedAgent { plugin, protocol })
+        Ok(LoadedAgent {
+            package: package.to_owned(),
+            plugin,
+            protocol,
+        })
     }
 
     fn load_agents(
@@ -1222,9 +1354,11 @@ impl Gateway {
         router: Option<RouterConfig>,
     ) -> Result<(), String> {
         let built = match router {
-            Some(config) => Some(Arc::new(
-                Router::new(config).map_err(|error| format!("Agent `{agent_id}` route: {error}"))?,
-            )),
+            Some(config) => {
+                Some(Arc::new(Router::new(config).map_err(|error| {
+                    format!("Agent `{agent_id}` route: {error}")
+                })?))
+            }
             None => None,
         };
         let mut routers = self.agent_routers.write().expect("agent_routers lock");
@@ -1249,6 +1383,14 @@ impl Gateway {
     #[must_use]
     pub fn skipped_agents(&self) -> &[(String, String)] {
         &self.skipped_agents
+    }
+
+    /// Whether this running Gateway actually loaded the configured inbound
+    /// adapter package. This intentionally reports the immutable runtime
+    /// composition rather than repeating configuration intent.
+    #[must_use]
+    pub fn agent_adapter_ready(&self, package: &str) -> bool {
+        self.agents.iter().any(|agent| agent.package == package)
     }
 
     /// Value-free explanation of the actual running egress resolution for
@@ -1351,10 +1493,11 @@ impl Gateway {
                 continue;
             };
             if let Some(window) = crate::quota_fetch::parse_openrouter_key(&body) {
-                self.quota
-                    .lock()
-                    .expect("quota lock")
-                    .note_authoritative(name.as_str(), now_ms, vec![window]);
+                self.quota.lock().expect("quota lock").note_authoritative(
+                    name.as_str(),
+                    now_ms,
+                    vec![window],
+                );
             }
         }
     }
@@ -1884,20 +2027,20 @@ impl Gateway {
         // `PaymentRequired` (402, out of funds) counts too. Cross-mode but inert
         // in tiered mode, where quota state is never read. Locked separately from
         // health above to keep the two mutexes strictly un-nested.
-        if let Err(envelope) = outcome {
-            if matches!(
+        if let Err(envelope) = outcome
+            && matches!(
                 envelope.code,
                 ErrorCode::RateLimit | ErrorCode::PaymentRequired
-            ) {
-                let cooldown = envelope
-                    .retry_after_ms
-                    .unwrap_or(crate::quota_tracker::DEFAULT_QUOTA_COOLDOWN_MS);
-                self.quota.lock().expect("quota lock").note_rate_limited(
-                    upstream.as_str(),
-                    unix_millis(),
-                    cooldown,
-                );
-            }
+            )
+        {
+            let cooldown = envelope
+                .retry_after_ms
+                .unwrap_or(crate::quota_tracker::DEFAULT_QUOTA_COOLDOWN_MS);
+            self.quota.lock().expect("quota lock").note_rate_limited(
+                upstream.as_str(),
+                unix_millis(),
+                cooldown,
+            );
         }
     }
 
@@ -1961,6 +2104,7 @@ impl Gateway {
                 .unwrap_or_else(|| Arc::clone(&self.home_router)),
             Some(agent_id) => {
                 let mut record = begin_record(started_at_ms, String::new(), None, running_revision);
+                tag_transport(&mut record, method, path, false);
                 let refusal = ErrorEnvelope::new(
                     ErrorCode::InvalidRequest,
                     404,
@@ -1992,6 +2136,7 @@ impl Gateway {
         if is_embeddings_path(path) {
             let refusal = unsupported_media_refusal();
             let mut record = begin_record(started_at_ms, String::new(), agent_id, running_revision);
+            tag_transport(&mut record, method, path, false);
             record.status = refusal.http_status;
             record.error_code = Some(refusal.code);
             emit(Reply::BeginJson(JsonReply {
@@ -2014,11 +2159,27 @@ impl Gateway {
         // the whole exchange. Over a ceiling we refuse with 429 rather than pile
         // another request onto the upstreams.
         let Some(global_permit) = self.admission.enter_global() else {
-            self.refuse_concurrency(started_at_ms, agent_id, running_revision, &clock, emit);
+            self.refuse_concurrency(
+                started_at_ms,
+                agent_id,
+                running_revision,
+                method,
+                path,
+                &clock,
+                emit,
+            );
             return;
         };
         let Some(agent_permit) = self.admission.enter_agent(agent_id.unwrap_or("")) else {
-            self.refuse_concurrency(started_at_ms, agent_id, running_revision, &clock, emit);
+            self.refuse_concurrency(
+                started_at_ms,
+                agent_id,
+                running_revision,
+                method,
+                path,
+                &clock,
+                emit,
+            );
             return;
         };
         let _permits = (global_permit, agent_permit);
@@ -2029,6 +2190,7 @@ impl Gateway {
         let selected = self.select_agent(method, path, headers);
         let protocol = selected.map_or_else(String::new, |agent| agent.protocol.clone());
         let mut record = begin_record(started_at_ms, protocol, agent_id, running_revision);
+        tag_transport(&mut record, method, path, selected.is_some());
 
         if let Some(agent) = selected {
             match self.chat_inner(
@@ -2080,11 +2242,14 @@ impl Gateway {
     /// The response for a request turned away at a concurrency ceiling: a 429,
     /// recorded like any other terminal outcome so the refusal is visible in
     /// metrics rather than silent.
+    #[allow(clippy::too_many_arguments)]
     fn refuse_concurrency(
         &self,
         started_at_ms: u64,
         agent_id: Option<&str>,
         running_revision: Option<u64>,
+        method: &str,
+        path: &str,
         clock: &std::time::Instant,
         emit: &mut dyn FnMut(Reply) -> bool,
     ) {
@@ -2094,6 +2259,7 @@ impl Gateway {
             "concurrency limit reached; retry shortly",
         );
         let mut record = begin_record(started_at_ms, String::new(), agent_id, running_revision);
+        tag_transport(&mut record, method, path, false);
         record.status = refusal.http_status;
         record.error_code = Some(refusal.code);
         emit(Reply::BeginJson(JsonReply {
@@ -2140,6 +2306,7 @@ impl Gateway {
         None
     }
 
+    #[allow(clippy::too_many_lines)]
     fn normalize_request(
         agent: &LoadedAgent,
         method: &str,
@@ -2147,14 +2314,7 @@ impl Gateway {
         headers: &[(String, String)],
         body: &[u8],
         record: &mut RequestRecord,
-    ) -> Result<
-        (
-            ChatRequest,
-            Vec<token_station_protocol::AgentHint>,
-            Value,
-        ),
-        ErrorEnvelope,
-    > {
+    ) -> Result<(ChatRequest, Vec<token_station_protocol::AgentHint>, Value), ErrorEnvelope> {
         let inbound_protocol = record.protocol.clone();
         if body.len() > MAX_INBOUND_BODY {
             let error = ErrorEnvelope::new(
@@ -2170,6 +2330,7 @@ impl Gateway {
                 false,
                 Some(error.code),
             );
+            annotate_conversion_failure(record, &error);
             return Err(error);
         }
         let body: Value = match serde_json::from_slice(body) {
@@ -2188,6 +2349,7 @@ impl Gateway {
                     false,
                     Some(error.code),
                 );
+                annotate_conversion_failure(record, &error);
                 return Err(error);
             }
         };
@@ -2201,6 +2363,7 @@ impl Gateway {
                 false,
                 Some(error.code),
             );
+            annotate_conversion_failure(record, &error);
             return Err(error);
         }
 
@@ -2210,6 +2373,17 @@ impl Gateway {
         let mut extensions = token_station_protocol::Extensions::new();
         extensions.insert("transport_method".to_owned(), json!(method));
         extensions.insert("transport_path".to_owned(), json!(path));
+        extensions.insert(
+            CONTINUATION_SCOPE_EXTENSION.to_owned(),
+            json!(format!(
+                "{}:local",
+                record.agent_id.as_deref().unwrap_or("home")
+            )),
+        );
+        extensions.insert(
+            CONTINUATION_KEY_EXTENSION.to_owned(),
+            json!(record.request_id),
+        );
         let envelope = AgentRequestEnvelope {
             protocol: agent.protocol.clone(),
             agent_tool: match agent.protocol.as_str() {
@@ -2250,6 +2424,7 @@ impl Gateway {
                     false,
                     Some(error.code),
                 );
+                annotate_conversion_failure(record, &error);
                 return Err(error);
             }
         };
@@ -2259,11 +2434,7 @@ impl Gateway {
         // namespace) that `normalize_inbound` flattened into plain functions.
         // The gateway only transports this blob; all Codex semantics live in the
         // agent plugin, which rebuilds its restore map from it at render time.
-        let inbound_tools = envelope
-            .body
-            .get("tools")
-            .cloned()
-            .unwrap_or(Value::Null);
+        let inbound_tools = envelope.body.get("tools").cloned().unwrap_or(Value::Null);
         Ok((request, hints, inbound_tools))
     }
 
@@ -2288,12 +2459,11 @@ impl Gateway {
         // and thinking — instead of being lowered through the Canonical IR. The
         // decision runs on a minimal request (model only) so `normalize_inbound`,
         // which would reject server-tool history blocks, is never called here.
-        if agent.protocol == "anthropic-messages" {
-            if let Some(served) =
+        if agent.protocol == "anthropic-messages"
+            && let Some(served) =
                 self.try_anthropic_passthrough(ctx, router, headers, body, emit, record)?
-            {
-                return Ok(served);
-            }
+        {
+            return Ok(served);
         }
 
         let (request, hints, inbound_tools) =
@@ -2349,22 +2519,17 @@ impl Gateway {
         record_route_decision(record, &decision);
         // In quota mode, record why this account was chosen — its window/rate
         // picture at decision time — for the receipt ("why this account").
-        if quota_mode {
-            if let Some(candidate) = candidates.iter().find(|c| c.target == decision.chosen) {
-                if let Some(recorded) = record.decision.as_mut() {
-                    recorded.quota = Some(token_station_metrics::QuotaDecisionSnapshot {
-                        reset_ms: candidate.quota.reset.as_ref().map(|r| r.ms_until_reset),
-                        remaining_permille: candidate
-                            .quota
-                            .reset
-                            .as_ref()
-                            .map(|r| r.remaining_permille),
-                        headroom_permille: candidate.quota.rate_headroom_permille,
-                        pressured: candidate.quota.rate_pressured,
-                        exhausted: candidate.quota.exhausted,
-                    });
-                }
-            }
+        if quota_mode
+            && let Some(candidate) = candidates.iter().find(|c| c.target == decision.chosen)
+            && let Some(recorded) = record.decision.as_mut()
+        {
+            recorded.quota = Some(token_station_metrics::QuotaDecisionSnapshot {
+                reset_ms: candidate.quota.reset.as_ref().map(|r| r.ms_until_reset),
+                remaining_permille: candidate.quota.reset.as_ref().map(|r| r.remaining_permille),
+                headroom_permille: candidate.quota.rate_headroom_permille,
+                pressured: candidate.quota.rate_pressured,
+                exhausted: candidate.quota.exhausted,
+            });
         }
 
         // In quota mode, take an in-flight lease on the chosen account before
@@ -2377,7 +2542,15 @@ impl Gateway {
                 .grant(decision.chosen.upstream.as_str(), now_ms)
         });
 
-        let result = self.dispatch(ctx, agent, &request, &inbound_tools, &decision, emit, record);
+        let result = self.dispatch(
+            ctx,
+            agent,
+            &request,
+            &inbound_tools,
+            &decision,
+            emit,
+            record,
+        );
 
         if let Some(now_ms) = quota_now_ms {
             self.settle_quota(&session, lease.as_ref(), now_ms, record, &result);
@@ -2434,6 +2607,7 @@ impl Gateway {
 
     /// Tries the decision's targets in order; moves on only while the error
     /// says another upstream is worth trying, and only before first byte out.
+    #[allow(clippy::too_many_arguments)] // one dispatch keeps request + render context explicit
     fn dispatch(
         &self,
         ctx: &RequestContext,
@@ -2454,6 +2628,9 @@ impl Gateway {
             // A client that already hung up (or a fired drain) gets no further
             // upstreams tried on its behalf.
             if ctx.is_cancelled() {
+                if let Some(error) = Self::lifecycle_cancellation(ctx) {
+                    return Err(error);
+                }
                 Self::emit_cancelled(emit);
                 return Ok((target.clone(), StreamOutcome::ClientCancelled));
             }
@@ -2517,6 +2694,12 @@ impl Gateway {
                 // the fallback sweep can eject a bad upstream mid-flight.
                 Ok(outcome) => return Ok((target.clone(), outcome)),
                 Err(error) => {
+                    if matches!(
+                        ctx.cancel_reason(),
+                        Some(CancelReason::ServerDrain | CancelReason::Deadline)
+                    ) {
+                        return Err(error);
+                    }
                     self.observe(&target.upstream, &target.model, Err(&error));
                     let retriable = error.code.is_retriable_elsewhere();
                     eprintln!("upstream {target} failed ({:?})", error.code);
@@ -2555,12 +2738,12 @@ impl Gateway {
         // Price the exchange once, here, and pin the table version onto the
         // record so a later price change never re-values it. An unpriced model
         // leaves cost unknown (None), never a claimed-free zero.
-        if let Some(usage) = record.usage {
-            if let Some((cost, version)) = self.pricing.price(model, &usage) {
-                record.cost_kind = CostKind::Estimated;
-                record.cost_micros = Some(cost);
-                record.price_version = Some(version);
-            }
+        if let Some(usage) = record.usage
+            && let Some((cost, version)) = self.pricing.price(model, &usage)
+        {
+            record.cost_kind = CostKind::Estimated;
+            record.cost_micros = Some(cost);
+            record.price_version = Some(version);
         }
         match outcome {
             StreamOutcome::Complete => {
@@ -2599,6 +2782,7 @@ impl Gateway {
             StreamOutcome::ClientCancelled => {
                 // A cancel is not the upstream's failure: no health penalty.
                 record.status = 499;
+                record.error_code = None;
             }
         }
     }
@@ -2655,14 +2839,15 @@ impl Gateway {
         let provider_protocol = upstream.config.provider.as_str();
         let parts = match response.into_parts() {
             Err(_) if ctx.is_cancelled() => {
-                record_conversion(
+                record_conversion_cancelled(
                     record,
                     ConversionStage::ProviderResponse,
                     provider_protocol,
                     CANONICAL_CHAT_PROTOCOL,
-                    false,
-                    None,
                 );
+                if let Some(error) = Self::lifecycle_cancellation(ctx) {
+                    return Err(AttemptTerminal::Error(error));
+                }
                 Self::emit_cancelled(emit);
                 return Err(AttemptTerminal::Outcome(StreamOutcome::ClientCancelled));
             }
@@ -2680,14 +2865,15 @@ impl Gateway {
             Ok(parts) => parts,
         };
         if ctx.is_cancelled() {
-            record_conversion(
+            record_conversion_cancelled(
                 record,
                 ConversionStage::ProviderResponse,
                 provider_protocol,
                 CANONICAL_CHAT_PROTOCOL,
-                false,
-                None,
             );
+            if let Some(error) = Self::lifecycle_cancellation(ctx) {
+                return Err(AttemptTerminal::Error(error));
+            }
             Self::emit_cancelled(emit);
             return Err(AttemptTerminal::Outcome(StreamOutcome::ClientCancelled));
         }
@@ -2720,10 +2906,12 @@ impl Gateway {
         Ok(error)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn translate_stream_response(
         ctx: &RequestContext,
         agent: &LoadedAgent,
         upstream: &Upstream,
+        request: &ChatRequest,
         response: UpstreamResponse,
         inbound_tools: &Value,
         target: &UpstreamModel,
@@ -2731,13 +2919,19 @@ impl Gateway {
         record: &mut RequestRecord,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         let sequence = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
-        let render_context = json!({
+        let mut render_context = json!({
             "protocol": record.protocol,
             "stream_id": format!("stream-{sequence}"),
             "response_id": format!("msg_token_station_{sequence}"),
             "model": target.model,
             "inbound_tools": inbound_tools,
         });
+        if let Some(key) = request.extensions.get(CONTINUATION_KEY_EXTENSION) {
+            render_context[CONTINUATION_KEY_EXTENSION] = key.clone();
+        }
+        if let Some(namespaces) = request.extensions.get(TOOL_NAMESPACES_EXTENSION) {
+            render_context[TOOL_NAMESPACES_EXTENSION] = namespaces.clone();
+        }
         let result = Self::relay_stream(
             ctx,
             agent,
@@ -2747,34 +2941,88 @@ impl Gateway {
             emit,
             record,
         );
-        let (succeeded, error_code) = match &result {
-            Ok(StreamOutcome::Complete) => (true, None),
-            Ok(_) => (false, record.error_code),
-            Err(error) => (false, Some(error.code)),
-        };
-        record_conversion(
-            record,
-            ConversionStage::ProviderResponse,
-            upstream.config.provider.as_str(),
-            CANONICAL_CHAT_PROTOCOL,
-            succeeded,
-            error_code,
-        );
-        record_conversion(
-            record,
-            ConversionStage::StreamTranslate,
-            CANONICAL_CHAT_PROTOCOL,
-            agent.protocol.as_str(),
-            succeeded,
-            error_code,
-        );
+        match &result {
+            Ok(StreamOutcome::ClientCancelled) => {
+                record_conversion_cancelled(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    upstream.config.provider.as_str(),
+                    CANONICAL_CHAT_PROTOCOL,
+                );
+                record_conversion_cancelled(
+                    record,
+                    ConversionStage::StreamTranslate,
+                    CANONICAL_CHAT_PROTOCOL,
+                    agent.protocol.as_str(),
+                );
+            }
+            Ok(StreamOutcome::Complete) => {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    upstream.config.provider.as_str(),
+                    CANONICAL_CHAT_PROTOCOL,
+                    true,
+                    None,
+                );
+                record_conversion(
+                    record,
+                    ConversionStage::StreamTranslate,
+                    CANONICAL_CHAT_PROTOCOL,
+                    agent.protocol.as_str(),
+                    true,
+                    None,
+                );
+            }
+            Ok(_) => {
+                let error_code = record.error_code;
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    upstream.config.provider.as_str(),
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    error_code,
+                );
+                record_conversion(
+                    record,
+                    ConversionStage::StreamTranslate,
+                    CANONICAL_CHAT_PROTOCOL,
+                    agent.protocol.as_str(),
+                    false,
+                    error_code,
+                );
+            }
+            Err(error) => {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    upstream.config.provider.as_str(),
+                    CANONICAL_CHAT_PROTOCOL,
+                    false,
+                    Some(error.code),
+                );
+                annotate_conversion_failure(record, error);
+                record_conversion(
+                    record,
+                    ConversionStage::StreamTranslate,
+                    CANONICAL_CHAT_PROTOCOL,
+                    agent.protocol.as_str(),
+                    false,
+                    Some(error.code),
+                );
+                annotate_conversion_failure(record, error);
+            }
+        }
         result
     }
 
+    #[allow(clippy::too_many_arguments)] // one response translation boundary is explicit
     fn translate_nonstream_response(
         ctx: &RequestContext,
         agent: &LoadedAgent,
         upstream: &Upstream,
+        request: &ChatRequest,
         response: UpstreamResponse,
         inbound_tools: &Value,
         emit: &mut dyn FnMut(Reply) -> bool,
@@ -2807,12 +3055,18 @@ impl Gateway {
             None,
         );
         record.usage = Some(chat_response.usage);
-        let render_context = json!({
+        let mut render_context = json!({
             "protocol": record.protocol,
             "response_id": chat_response.id,
             "model": chat_response.model,
             "inbound_tools": inbound_tools,
         });
+        if let Some(key) = request.extensions.get(CONTINUATION_KEY_EXTENSION) {
+            render_context[CONTINUATION_KEY_EXTENSION] = key.clone();
+        }
+        if let Some(namespaces) = request.extensions.get(TOOL_NAMESPACES_EXTENSION) {
+            render_context[TOOL_NAMESPACES_EXTENSION] = namespaces.clone();
+        }
         let rendered = agent
             .plugin
             .render_response(&chat_response, &render_context)
@@ -2876,14 +3130,15 @@ impl Gateway {
         let response = match self.send(ctx, attempt_timeout, &descriptor, target.upstream.as_str())
         {
             Err(_) if ctx.is_cancelled() => {
-                record_conversion(
+                record_conversion_cancelled(
                     record,
                     ConversionStage::ProviderResponse,
                     upstream.config.provider.as_str(),
                     CANONICAL_CHAT_PROTOCOL,
-                    false,
-                    None,
                 );
+                if let Some(error) = Self::lifecycle_cancellation(ctx) {
+                    return Err(error);
+                }
                 Self::emit_cancelled(emit);
                 return Ok(StreamOutcome::ClientCancelled);
             }
@@ -2927,10 +3182,11 @@ impl Gateway {
         // already warm whenever the user is in quota mode. Never touches the body.
         let windows = crate::quota_headers::parse_quota_windows(&response.headers, unix_millis());
         if !windows.is_empty() {
-            self.quota
-                .lock()
-                .expect("quota lock")
-                .note_authoritative(target.upstream.as_str(), unix_millis(), windows);
+            self.quota.lock().expect("quota lock").note_authoritative(
+                target.upstream.as_str(),
+                unix_millis(),
+                windows,
+            );
         }
 
         if request.stream {
@@ -2938,6 +3194,7 @@ impl Gateway {
                 ctx,
                 agent,
                 upstream,
+                &request,
                 response,
                 inbound_tools,
                 target,
@@ -2949,6 +3206,7 @@ impl Gateway {
                 ctx,
                 agent,
                 upstream,
+                &request,
                 response,
                 inbound_tools,
                 emit,
@@ -3033,6 +3291,7 @@ impl Gateway {
     /// path, so egress-to-base_url-only, credential isolation and redirect refusal
     /// are preserved; the client's own auth headers can never reach the upstream.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)] // authorize, send and terminal mapping form one state machine
     fn passthrough_upstream(
         &self,
         ctx: &RequestContext,
@@ -3045,13 +3304,16 @@ impl Gateway {
         record: &mut RequestRecord,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         const ANTHROPIC: &str = "anthropic-messages";
-        let upstream = self.upstreams.get(target.upstream.as_str()).ok_or_else(|| {
-            ErrorEnvelope::new(
-                ErrorCode::Internal,
-                500,
-                format!("upstream `{}` vanished from configuration", target.upstream),
-            )
-        })?;
+        let upstream = self
+            .upstreams
+            .get(target.upstream.as_str())
+            .ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorCode::Internal,
+                    500,
+                    format!("upstream `{}` vanished from configuration", target.upstream),
+                )
+            })?;
 
         // Verbatim body, except the caller's model is remapped to the routed one.
         let mut forwarded = body.clone();
@@ -3091,25 +3353,25 @@ impl Gateway {
             None,
         );
 
-        let response =
-            match self.send(ctx, attempt_timeout, &descriptor, target.upstream.as_str()) {
-                Err(_) if ctx.is_cancelled() => {
-                    Self::emit_cancelled(emit);
-                    return Ok(StreamOutcome::ClientCancelled);
-                }
-                Err(error) => {
-                    record_conversion(
-                        record,
-                        ConversionStage::ProviderResponse,
-                        ANTHROPIC,
-                        ANTHROPIC,
-                        false,
-                        Some(error.code),
-                    );
-                    return Err(error);
-                }
-                Ok(response) => response,
-            };
+        let response = match self.send(ctx, attempt_timeout, &descriptor, target.upstream.as_str())
+        {
+            Err(_) if ctx.is_cancelled() => {
+                Self::emit_cancelled(emit);
+                return Ok(StreamOutcome::ClientCancelled);
+            }
+            Err(error) => {
+                record_conversion(
+                    record,
+                    ConversionStage::ProviderResponse,
+                    ANTHROPIC,
+                    ANTHROPIC,
+                    false,
+                    Some(error.code),
+                );
+                return Err(error);
+            }
+            Ok(response) => response,
+        };
 
         if let Err(error) = EgressPolicy::reject_redirect(response.status) {
             record_conversion(
@@ -3126,10 +3388,11 @@ impl Gateway {
         // L2 authoritative quota: harvest remaining/reset headers, never the body.
         let windows = crate::quota_headers::parse_quota_windows(&response.headers, unix_millis());
         if !windows.is_empty() {
-            self.quota
-                .lock()
-                .expect("quota lock")
-                .note_authoritative(target.upstream.as_str(), unix_millis(), windows);
+            self.quota.lock().expect("quota lock").note_authoritative(
+                target.upstream.as_str(),
+                unix_millis(),
+                windows,
+            );
         }
 
         // Upstream error: return its status + body VERBATIM (Claude Code depends
@@ -3182,7 +3445,7 @@ impl Gateway {
     /// Relays an upstream SSE stream to the client byte-for-byte (whole frames,
     /// unmodified) — a passthrough must never re-frame the Anthropic event stream.
     /// A clean EOF is a completed stream; a socket error after the first byte is a
-    /// post-200 truncation (FailedAfterPartial → transient, does not eject).
+    /// post-200 truncation (`FailedAfterPartial` → transient, does not eject).
     fn relay_raw_sse(
         ctx: &RequestContext,
         response: UpstreamResponse,
@@ -3409,6 +3672,16 @@ impl Gateway {
 
         loop {
             if ctx.is_cancelled() {
+                if let Some(envelope) = Self::lifecycle_cancellation(ctx) {
+                    return Self::terminate_stream(
+                        agent,
+                        render_context,
+                        emit,
+                        record,
+                        envelope,
+                        committed,
+                    );
+                }
                 Self::clear_stream_state(agent, render_context);
                 if !committed {
                     Self::emit_cancelled(emit);
@@ -3508,6 +3781,16 @@ impl Gateway {
                 Ok(read) => read,
                 Err(_) => {
                     if ctx.is_cancelled() {
+                        if let Some(envelope) = Self::lifecycle_cancellation(ctx) {
+                            return Self::terminate_stream(
+                                agent,
+                                render_context,
+                                emit,
+                                record,
+                                envelope,
+                                committed,
+                            );
+                        }
                         Self::clear_stream_state(agent, render_context);
                         if !committed {
                             Self::emit_cancelled(emit);
@@ -3646,6 +3929,22 @@ impl Gateway {
         Ok(StreamOutcome::FailedAfterPartial)
     }
 
+    fn lifecycle_cancellation(ctx: &RequestContext) -> Option<ErrorEnvelope> {
+        match ctx.cancel_reason() {
+            Some(CancelReason::ServerDrain) => Some(ErrorEnvelope::new(
+                ErrorCode::UpstreamUnavailable,
+                503,
+                "Token Station is restarting; retry this request",
+            )),
+            Some(CancelReason::Deadline) => Some(ErrorEnvelope::new(
+                ErrorCode::Timeout,
+                504,
+                "request deadline exceeded",
+            )),
+            Some(CancelReason::ClientDisconnect) | None => None,
+        }
+    }
+
     /// Complete the still-uncommitted HTTP exchange when a drain/deadline
     /// cancels it. Without this reply the server would mistake the intentional
     /// cancellation for a worker crash and manufacture a 500 response.
@@ -3779,7 +4078,7 @@ mod attempt_budget_tests {
     fn budget(max_attempts: u32, max_cost: Option<u64>) -> AttemptBudget {
         AttemptBudget {
             max_attempts,
-            max_elapsed: Duration::from_secs(60),
+            max_elapsed: Duration::from_mins(1),
             per_attempt_timeout: Duration::from_secs(10),
             max_cost,
             started: Instant::now(),
@@ -4137,7 +4436,15 @@ mod free_fallback_tests {
 
 #[cfg(test)]
 mod request_receipt_tests {
-    use super::{begin_record, record_actual_attempt_target, record_route_decision};
+    use super::{
+        annotate_conversion_failure, begin_record, record_actual_attempt_target, record_conversion,
+        record_conversion_cancelled, record_route_decision, tag_transport,
+    };
+    use token_station_metrics::{
+        ConversionOutcome, ConversionReasonCode, ConversionReasonDetail, ConversionStage,
+        RequestPathKind,
+    };
+    use token_station_protocol::{ErrorCode, ErrorEnvelope};
     use token_station_router_core::{
         DecidedBy, Decision, RequestFeatures, UpstreamModel, UpstreamRef,
     };
@@ -4167,6 +4474,55 @@ mod request_receipt_tests {
         assert_ne!(first.request_id, second.request_id);
         assert_eq!(first.agent_id.as_deref(), Some("codex"));
         assert_eq!(first.running_revision, Some(42));
+    }
+
+    #[test]
+    fn transport_and_conversion_diagnostics_are_closed_and_content_free() {
+        let mut record = begin_record(1, "openai-responses", Some("codex"), None);
+        tag_transport(
+            &mut record,
+            "POST",
+            "/not-a-real-endpoint/secret-caller-text",
+            false,
+        );
+        assert_eq!(record.request_method.as_deref(), Some("POST"));
+        assert_eq!(record.path_kind, RequestPathKind::UnknownAgentEndpoint);
+        let serialized = serde_json::to_string(&record).unwrap();
+        assert!(!serialized.contains("secret-caller-text"));
+
+        let error = ErrorEnvelope::new(
+            ErrorCode::Capability,
+            400,
+            "unsupported Responses tool type local_shell",
+        );
+        record_conversion(
+            &mut record,
+            ConversionStage::InboundNormalize,
+            "openai-responses",
+            "token-station-chat",
+            false,
+            Some(error.code),
+        );
+        annotate_conversion_failure(&mut record, &error);
+        let conversion = record.conversion_reports.last().unwrap();
+        assert_eq!(
+            conversion.reason_code,
+            Some(ConversionReasonCode::UnsupportedToolType)
+        );
+        assert_eq!(
+            conversion.reason_detail,
+            Some(ConversionReasonDetail::LocalShell)
+        );
+
+        record_conversion_cancelled(
+            &mut record,
+            ConversionStage::StreamTranslate,
+            "token-station-chat",
+            "openai-responses",
+        );
+        let cancelled = record.conversion_reports.last().unwrap();
+        assert_eq!(cancelled.outcome, ConversionOutcome::Cancelled);
+        assert_eq!(cancelled.error_code, None);
     }
 
     #[test]
