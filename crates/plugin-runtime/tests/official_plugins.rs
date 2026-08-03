@@ -21,7 +21,7 @@ use token_station_plugin_runtime::{
 };
 use token_station_protocol::{
     AgentRequestEnvelope, ChatResponse, ErrorCode, ErrorEnvelope, Extensions, FinishReason,
-    HeaderDigest, Principal, StreamEvent, ToolChoice,
+    HeaderDigest, Principal, ResponseFormat, StreamEvent, ToolChoice,
 };
 
 fn repo_root() -> &'static Path {
@@ -257,7 +257,7 @@ fn gemini_model_and_stream_mode_come_from_the_transport_path() {
 }
 
 #[test]
-fn responses_structured_output_is_rejected_by_the_real_wasm() {
+fn responses_structured_output_is_typed_by_the_real_wasm() {
     let plugin = AgentPlugin::load(&runtime(), responses_agent_package()).expect("loads clean");
     let request = |format: serde_json::Value| {
         envelope(
@@ -273,19 +273,42 @@ fn responses_structured_output_is_rejected_by_the_real_wasm() {
     let plain = plugin
         .normalize_inbound(&request(serde_json::json!({"type": "text"})))
         .expect("plain text remains supported");
-    assert_eq!(plain.response_format, None);
+    assert_eq!(plain.response_format, Some(ResponseFormat::Text));
 
-    for format in [
-        serde_json::json!({"type": "json_schema", "name": "answer", "schema": {"type": "object"}}),
-        serde_json::json!({"type": "json_object"}),
-        serde_json::json!({"type": "future_structured_format"}),
-    ] {
-        let error = plugin
-            .normalize_inbound(&request(format))
-            .expect_err("structured output must not be downgraded to text");
-        assert_eq!(error.code, ErrorCode::Capability);
-        assert_eq!(error.http_status, 400);
-    }
+    let json_object = plugin
+        .normalize_inbound(&request(serde_json::json!({"type": "json_object"})))
+        .expect("JSON object output remains typed");
+    assert_eq!(
+        json_object.response_format,
+        Some(ResponseFormat::JsonObject)
+    );
+
+    let json_schema = plugin
+        .normalize_inbound(&request(serde_json::json!({
+            "type": "json_schema",
+            "name": "answer",
+            "strict": true,
+            "schema": {"type": "object"}
+        })))
+        .expect("JSON Schema output remains typed");
+    assert_eq!(
+        json_schema.response_format,
+        Some(ResponseFormat::JsonSchema {
+            json_schema: serde_json::json!({
+                "name": "answer",
+                "strict": true,
+                "schema": {"type": "object"}
+            })
+        })
+    );
+
+    let unsupported = plugin
+        .normalize_inbound(&request(
+            serde_json::json!({"type": "future_structured_format"}),
+        ))
+        .expect_err("unknown structured output must not be downgraded to text");
+    assert_eq!(unsupported.code, ErrorCode::Capability);
+    assert_eq!(unsupported.http_status, 400);
 
     for format in [serde_json::json!({}), serde_json::json!("json_schema")] {
         let invalid = plugin
@@ -337,12 +360,22 @@ fn responses_builtin_tools_are_translated_to_functions() {
             {"type": "local_shell"}
         ])))
         .expect("built-in tools are translated, not dropped or refused");
-    assert_eq!(names(&mixed), vec!["read_marker", "container__nested", "local_shell"]);
+    assert_eq!(
+        names(&mixed),
+        vec![
+            "read_marker",
+            "container__nested",
+            "__token_station_responses_local_shell",
+        ]
+    );
 
     // Hosted / custom / tool_search each become a callable function tool.
     for (tools, expected) in [
         (serde_json::json!([{"type": "web_search"}]), "web_search"),
-        (serde_json::json!([{"type": "custom", "name": "grep"}]), "grep"),
+        (
+            serde_json::json!([{"type": "custom", "name": "grep"}]),
+            "grep",
+        ),
         (serde_json::json!([{"type": "tool_search"}]), "tool_search"),
     ] {
         let req = plugin
@@ -398,7 +431,10 @@ fn responses_custom_tool_round_trips() {
     );
     // The original tool definition is embedded in the description so a grammar /
     // format survives the schema-less function path.
-    let description = normalized.tools[0].description.as_deref().unwrap_or_default();
+    let description = normalized.tools[0]
+        .description
+        .as_deref()
+        .unwrap_or_default();
     assert!(description.contains("Original tool definition:"));
     assert!(description.contains("\"name\":\"code_exec\""));
 
@@ -468,7 +504,10 @@ fn responses_custom_tool_round_trips() {
     // Without the custom tool in context the same call stays a function_call —
     // a map miss must never invent a custom_tool_call.
     let plain = plugin
-        .render_response(&response, &json!({"response_id": "resp-1", "model": "auto"}))
+        .render_response(
+            &response,
+            &json!({"response_id": "resp-1", "model": "auto"}),
+        )
         .expect("renders");
     assert_eq!(plain["output"][0]["type"], json!("function_call"));
 }
@@ -553,12 +592,13 @@ fn responses_stream_restores_custom_and_namespace_tool_calls() {
             {"type": "namespace", "name": "container", "tools": [{"type": "function", "name": "nested"}]}
         ]
     });
-    let tool = |index, id: Option<&str>, name: Option<&str>, args: &str| StreamEvent::ToolCallDelta {
-        index,
-        id: id.map(str::to_owned),
-        name: name.map(str::to_owned),
-        arguments_delta: args.to_owned(),
-    };
+    let tool =
+        |index, id: Option<&str>, name: Option<&str>, args: &str| StreamEvent::ToolCallDelta {
+            index,
+            id: id.map(str::to_owned),
+            name: name.map(str::to_owned),
+            arguments_delta: args.to_owned(),
+        };
 
     // Custom tool: announced as a custom_tool_call with a ctc_ id, and its
     // arguments must NOT stream on the function_call family.
@@ -586,7 +626,10 @@ fn responses_stream_restores_custom_and_namespace_tool_calls() {
     // Namespace child: a function_call with the bare child name + namespace.
     let ns = response_sse_events(
         &plugin
-            .render_stream_event(&tool(1, Some("nn"), Some("container__nested"), "{}"), &context)
+            .render_stream_event(
+                &tool(1, Some("nn"), Some("container__nested"), "{}"),
+                &context,
+            )
             .expect("namespace tool starts"),
     );
     let ns_item = ns
@@ -611,9 +654,10 @@ fn responses_stream_restores_custom_and_namespace_tool_calls() {
             .expect("stream completes"),
     );
     assert!(
-        done.iter().any(|event| event["type"]
-            == "response.custom_tool_call_input.done"
-            && event["input"] == json!("print(1)")),
+        done.iter().any(
+            |event| event["type"] == "response.custom_tool_call_input.done"
+                && event["input"] == json!("print(1)")
+        ),
         "the custom tool's input is delivered at done"
     );
     let custom_done = done
@@ -785,11 +829,26 @@ fn anthropic_vendor_tools_are_translated_to_function_tools() {
     assert_eq!(custom.tools[0].name, "grep");
 
     for (tools, expected) in [
-        (serde_json::json!([{"type": "web_search_20250305", "name": "web_search"}]), "web_search"),
-        (serde_json::json!([{"type": "code_execution_20250522", "name": "code_execution"}]), "code_execution"),
-        (serde_json::json!([{"type": "bash_20250124", "name": "bash"}]), "bash"),
-        (serde_json::json!([{"type": "computer_20250124", "name": "computer"}]), "computer"),
-        (serde_json::json!([{"type": "memory_20250818", "name": "memory"}]), "memory"),
+        (
+            serde_json::json!([{"type": "web_search_20250305", "name": "web_search"}]),
+            "web_search",
+        ),
+        (
+            serde_json::json!([{"type": "code_execution_20250522", "name": "code_execution"}]),
+            "code_execution",
+        ),
+        (
+            serde_json::json!([{"type": "bash_20250124", "name": "bash"}]),
+            "bash",
+        ),
+        (
+            serde_json::json!([{"type": "computer_20250124", "name": "computer"}]),
+            "computer",
+        ),
+        (
+            serde_json::json!([{"type": "memory_20250818", "name": "memory"}]),
+            "memory",
+        ),
     ] {
         let req = plugin
             .normalize_inbound(&request(tools))
@@ -812,8 +871,7 @@ fn anthropic_tool_choice_is_translated_not_refused() {
     // "tool" -> Auto (honest degrade on the translate path), "auto" -> Auto, and
     // a genuinely unknown type is a clean capability error naming the real
     // constraint (the chat provider), never the IR.
-    let plugin =
-        AgentPlugin::load(&runtime(), anthropic_agent_package()).expect("loads clean");
+    let plugin = AgentPlugin::load(&runtime(), anthropic_agent_package()).expect("loads clean");
     let request = |choice: serde_json::Value| {
         envelope(
             "anthropic-messages",

@@ -64,8 +64,8 @@ fn deployment_mode_paths(primary_target: &Path) -> Result<[PathBuf; 2], String> 
         .and_then(Path::parent)
         .ok_or_else(|| "Claude Desktop profile 路径缺少 Application Support 父目录".to_string())?;
     Ok([
-        app_support.join("Claude/config.json"),
-        app_support.join("Claude-3p/config.json"),
+        app_support.join("Claude").join("config.json"),
+        app_support.join("Claude-3p").join("config.json"),
     ])
 }
 
@@ -99,12 +99,18 @@ fn profile_path(home: &Path) -> PathBuf {
     // other platform it is inert (the agent is never discovered to reach here).
     #[cfg(target_os = "windows")]
     {
-        home.join("AppData/Local/Claude-3p/configLibrary")
+        home.join("AppData")
+            .join("Local")
+            .join("Claude-3p")
+            .join("configLibrary")
             .join(format!("{PROFILE_ID}.json"))
     }
     #[cfg(not(target_os = "windows"))]
     {
-        home.join("Library/Application Support/Claude-3p/configLibrary")
+        home.join("Library")
+            .join("Application Support")
+            .join("Claude-3p")
+            .join("configLibrary")
             .join(format!("{PROFILE_ID}.json"))
     }
 }
@@ -239,6 +245,22 @@ impl Connector for ClaudeDesktopConnector {
             )?);
         }
         Ok(projections)
+    }
+
+    fn legacy_companion_format(
+        &self,
+        primary_target: &Path,
+        companion_target: &Path,
+    ) -> Option<DocumentFormat> {
+        let metadata = primary_target.parent()?.join("_meta.json");
+        if companion_target == metadata {
+            return Some(DocumentFormat::Json);
+        }
+        let deployment_modes = deployment_mode_paths(primary_target).ok()?;
+        deployment_modes
+            .iter()
+            .any(|candidate| candidate == companion_target)
+            .then_some(DocumentFormat::Json)
     }
 
     fn disconnect_patch(&self) -> Vec<PatchOperation> {

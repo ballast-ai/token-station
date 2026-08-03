@@ -2,6 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
 import type { FreeProviderPresetView } from "../api";
 import AddProviderPage, {
   type FreeCatalogFilters,
@@ -18,6 +19,7 @@ vi.mock("@tauri-apps/api/core", () => ({
         messages: "https://api.minimaxi.com/v1/messages",
       };
     }
+    if (command === "add_provider_with_credential") return {};
     throw new Error(`unexpected IPC command: ${command}`);
   }),
 }));
@@ -204,6 +206,27 @@ describe("AddProviderPage", () => {
     expect(await screen.findByText("https://api.minimaxi.com/v1/chat/completions")).toBeInTheDocument();
     expect(screen.getByText("https://api.minimaxi.com/v1/responses")).toBeInTheDocument();
     expect(screen.getByText("https://api.minimaxi.com/v1/messages")).toBeInTheDocument();
+  });
+
+  it("uses local store by default and submits env credentials as references only", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage();
+    await pickPreset(user, "DeepSeek");
+
+    expect(screen.getByLabelText("API Key")).toBeInTheDocument();
+    await user.click(screen.getByText("高级凭据来源"));
+    await user.selectOptions(screen.getByLabelText("凭据来源"), "env");
+    expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("环境变量名"), "DEEPSEEK_API_KEY");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("add_provider_with_credential", expect.objectContaining({
+      name: "deepseek",
+      apiKey: null,
+      credentialSource: "env",
+      credentialReference: "DEEPSEEK_API_KEY",
+    }));
   });
 
   it("offers official and self-hosted presets as cards and omits non-default aggregators", () => {

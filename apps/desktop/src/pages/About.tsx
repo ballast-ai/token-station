@@ -3,7 +3,13 @@ import { UpgradeView, checkUpgrade } from "../api";
 import { LanguageBoundary, useLanguage } from "../components/LanguageProvider";
 
 /// 关于/更新页。只做匿名版本检查(内核唯一合法外联),不自替换二进制。
-function AboutContent({ version }: { version: string }) {
+function AboutContent({
+  desktopVersion,
+  coreVersion,
+}: {
+  desktopVersion: string;
+  coreVersion: string;
+}) {
   const { t } = useLanguage();
   const [uv, setUv] = useState<UpgradeView | null>(null);
   const [busy, setBusy] = useState(false);
@@ -37,15 +43,19 @@ function AboutContent({ version }: { version: string }) {
       </div>
 
       <div className="kv-grid">
-        <div className="kv-k">{t("about.currentVersion")}</div>
-        <div className="kv-v mono">{version}</div>
+        <div className="kv-k">Desktop version</div>
+        <div className="kv-v mono">{desktopVersion}</div>
+        <div className="kv-k">Core version</div>
+        <div className="kv-v mono">{coreVersion}</div>
       </div>
 
       {err && <div className="banner err">{err}</div>}
 
       {uv && (
-        <div className={`banner ${uv.newer ? "warn" : "ok"}`}>
-          {uv.newer ? (
+        <div className={`banner ${uv.status === "unavailable" ? "err" : uv.newer ? "warn" : "ok"}`}>
+          {uv.status === "no_published_release" || uv.status === "unavailable" ? (
+            <>{uv.message}</>
+          ) : uv.newer ? (
             <>{t("about.newVersion", { latest: uv.latest_tag, current: uv.current })}</>
           ) : (
             <>{t("about.latest", { current: uv.current, latest: uv.latest_tag })}</>

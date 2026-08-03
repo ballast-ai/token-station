@@ -59,7 +59,7 @@ impl Connector for ClaudeCodeConnector {
     }
 
     fn config_path(&self, home: &Path) -> PathBuf {
-        home.join(".claude/settings.json")
+        home.join(".claude").join("settings.json")
     }
 
     fn create_dir_error(&self) -> &'static str {

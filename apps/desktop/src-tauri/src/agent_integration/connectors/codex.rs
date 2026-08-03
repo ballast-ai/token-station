@@ -50,7 +50,7 @@ impl Connector for CodexConnector {
     }
 
     fn config_path(&self, home: &Path) -> PathBuf {
-        home.join(".codex/config.toml")
+        home.join(".codex").join("config.toml")
     }
 
     fn create_dir_error(&self) -> &'static str {

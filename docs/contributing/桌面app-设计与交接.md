@@ -181,10 +181,10 @@ GUI 改动同样受内核四条红线约束（见 [架构总览.md](架构总览
 ```bash
 cd apps/desktop
 npm install
-npm run tauri dev        # 起 vite + 编译 Tauri 后端 + 开窗口
+npm run tauri:dev        # 构建并内嵌官方插件，再起 vite + Tauri + 窗口
 ```
 
-- 前端改动 HMR 即时生效;**后端（src-tauri）改动 tauri dev 会自动重编重启**。
+- 前端改动 HMR 即时生效;**后端（src-tauri）改动 Tauri dev 会自动重编重启**。
 - 配置文件 `token-station.json` 锚在仓库根（`repo_root()`,`tauri dev` 的 CWD 不稳,
   故用 `CARGO_MANIFEST_DIR` 往上三级)。插件目录 `plugins-dist/`、数据目录
   `token-station-data/` 同样锚绝对路径,serve 在任何 CWD 都找得到。

@@ -388,7 +388,7 @@ pub fn hex(bytes: &[u8]) -> String {
 /// paste may be a secret).
 pub fn unhex(text: &str) -> Result<Vec<u8>, String> {
     // `% 2` rather than `is_multiple_of`: the latter postdates the 1.85 MSRV.
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err("hex input has odd length".to_owned());
     }
     (0..text.len())

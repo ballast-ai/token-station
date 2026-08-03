@@ -57,6 +57,7 @@ export default function InstallationPicker({
   const sourceLabels: Record<AgentInstallationView["discovery"]["binary_source"], string> = {
     homebrew: "Homebrew",
     npm_global: copy("npm global", "npm 全局"),
+    microsoft_store: "Microsoft Store",
     path: "PATH",
     known_path: copy("Known location", "已知目录"),
     env_override: copy("Environment override", "环境变量"),

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: scripts/build-desktop.sh <--local|--production> [--target <target-triple>]" >&2
+  echo "usage: scripts/build-desktop.sh <--local|--production> [--target <target-triple>] [--test-version <version>]" >&2
   exit 2
 }
 
@@ -15,6 +15,7 @@ case "$mode" in
 esac
 
 target=""
+test_version=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target)
@@ -22,9 +23,25 @@ while [[ $# -gt 0 ]]; do
       target=$2
       shift 2
       ;;
+    --test-version)
+      [[ $# -ge 2 ]] || usage
+      test_version=$2
+      shift 2
+      ;;
     *) usage ;;
   esac
 done
+
+if [[ -n "$test_version" ]]; then
+  [[ "$mode" == "local" ]] || {
+    echo "--test-version is restricted to local installer behavior tests" >&2
+    exit 2
+  }
+  [[ "$test_version" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,5}(\.[0-9]{1,5})?$ ]] || {
+    echo "--test-version must be a valid numeric MSI version" >&2
+    exit 2
+  }
+fi
 
 readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly wasm_target="wasm32-wasip2"
@@ -60,16 +77,27 @@ for plugin in "${plugins[@]}"; do
   cp "$source/manifest.json" "$stage/plugins-dist/$plugin/manifest.json"
   cp "$source/target/$wasm_target/release/${plugin//-/_}.wasm" \
     "$stage/plugins-dist/$plugin/adapter.wasm"
+  if [[ -d "$source/fixtures" ]]; then
+    cp -R "$source/fixtures" "$stage/plugins-dist/$plugin/fixtures"
+  fi
 done
 
 export TOKEN_STATION_PLUGINS_DIST="$stage/plugins-dist"
 
 cargo test --locked \
   --manifest-path "$root/apps/desktop/src-tauri/Cargo.toml" \
+  --target-dir "$stage/desktop-gate" \
   --features bundled-plugins \
   desktop_bundled_plugins_load_without_an_external_plugin_directory
 
 tauri_args=(build --ci --features bundled-plugins)
+if [[ -n "$test_version" ]]; then
+  test_version_config="$stage/test-version.json"
+  printf '%s\n' "{\"version\":\"$test_version\"}" >"$test_version_config"
+  tauri_args+=(--config "$test_version_config")
+  # Installer lifecycle builds need the underlying candle/light diagnostics.
+  tauri_args+=(-v -v)
+fi
 bundle_root="$root/apps/desktop/src-tauri/target/release/bundle"
 binary_path="$root/apps/desktop/src-tauri/target/release/token-station-desktop"
 if [[ -n "$target" ]]; then

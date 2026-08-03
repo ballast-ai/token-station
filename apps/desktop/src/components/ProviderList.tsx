@@ -95,7 +95,12 @@ export default function ProviderList({
               </div>
               <div className="provider-side">
                 <span className={`auth ${provider.has_auth ? "yes" : "no"}`}>
-                  {provider.has_auth ? copy("Key ready", "Key 已就绪") : copy("No authentication", "无鉴权")}
+                  {provider.has_auth
+                    ? copy(
+                      `Credential: ${provider.credential_source ?? "store"}`,
+                      `凭据：${provider.credential_source ?? "store"}`,
+                    )
+                    : copy("No authentication", "无鉴权")}
                 </span>
                 <button
                   className="btn tiny"

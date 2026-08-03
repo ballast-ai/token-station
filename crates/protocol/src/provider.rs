@@ -137,7 +137,12 @@ pub enum ProviderApi {
 }
 
 impl ProviderApi {
-    const ALL: [Self; 4] = [Self::ChatCompletions, Self::Responses, Self::Messages, Self::Models];
+    const ALL: [Self; 4] = [
+        Self::ChatCompletions,
+        Self::Responses,
+        Self::Messages,
+        Self::Models,
+    ];
 
     const fn path(self) -> &'static str {
         match self {

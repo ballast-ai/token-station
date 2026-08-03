@@ -5,7 +5,7 @@ use json_five::rt::parser::{
     KeyValuePairContext,
 };
 use serde::de::{Error as DeError, MapAccess, SeqAccess, Visitor};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use toml_edit::{value as toml_value, Document, Item, Table, TableLike};
 use yaml_edit::Document as YamlEditDocument;
@@ -33,7 +33,8 @@ pub struct LosslessDotenvDocument {
     rendered: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DocumentFormat {
     Json,
     Json5,

@@ -56,6 +56,7 @@ for plugin in agent-openai agent-anthropic agent-openai-responses agent-gemini p
   cp "plugins/official/${plugin}/manifest.json" "$STAGE/plugins-dist/${plugin}/"
   cp "plugins/official/${plugin}/target/wasm32-wasip2/release/${plugin//-/_}.wasm" \
      "$STAGE/plugins-dist/${plugin}/adapter.wasm"
+  cp -R "plugins/official/${plugin}/fixtures" "$STAGE/plugins-dist/${plugin}/fixtures"
 done
 
 echo "building token-station-cli ${VERSION} for ${TARGET} (rust ${RELEASE_TOOLCHAIN})" >&2

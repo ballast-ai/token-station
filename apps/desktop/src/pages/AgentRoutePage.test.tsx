@@ -25,6 +25,7 @@ function installation(path: string, version: string): AgentInstallationView {
   return {
     managed: false,
     connected: false,
+    adapter_ready: true,
     discovery: {
       agent_id: "claude-code",
       executable_path: path,
@@ -203,6 +204,74 @@ describe("AgentRoutePage multi-install admission", () => {
       "opencode",
       "/opt/homebrew/bin/opencode",
     ));
+    expect(planAgentConnection).not.toHaveBeenCalled();
+  });
+
+  it("disables a new connection when the running Gateway skipped the required adapter", async () => {
+    const skipped = installation("/opt/homebrew/bin/claude", "2.1.211");
+    skipped.adapter_ready = false;
+    skipped.discovery.is_path_default = true;
+    skipped.discovery.conflict_group = null;
+    skipped.discovery.diagnostics = [];
+    skipped.compatibility = {
+      agent_id: "claude-code",
+      installation_path: skipped.discovery.canonical_path,
+      status: "DETECTED_VERIFIED",
+      reason_code: "DEFAULT_ADMISSION",
+      message: "已发现兼容安装",
+      matched_catalog_version: "builtin",
+      connector_id: "claude-code-v1",
+      allowed_actions: ["preview_connect"],
+    };
+    const agent: AgentView = {
+      metadata: {
+        agent_id: "claude-code",
+        legacy_kind: "cc",
+        display_name: "Claude Code",
+        icon_key: "claude",
+        admission: "supported",
+        ui_order: 10,
+        nav_mark: "C",
+      },
+      installations: [skipped],
+      status: "DETECTED_VERIFIED",
+      catalog_sequence: 1,
+      catalog_expires_at_ms: null,
+      catalog_source: "builtin",
+      catalog_warning: null,
+    };
+
+    render(
+      <AgentRoutePage
+        metadata={agent.metadata}
+        agent={agent}
+        route={{
+          mode: "inherit",
+          tiers: {
+            high: { upstream: null, model: null },
+            mid: { upstream: null, model: null },
+            low: { upstream: null, model: null },
+          },
+          config_error: null,
+          profile: null,
+          routing_mode: "tiered",
+        }}
+        providers={[]}
+        profiles={[]}
+        quotaAccounts={[]}
+        serveRunning
+        applying={false}
+        onStateChange={vi.fn()}
+        onRescan={vi.fn()}
+        onSaveQuota={vi.fn()}
+        onSaveQuotaPlan={vi.fn()}
+        onViewQuotaUsage={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("适配器未就绪")).toBeInTheDocument();
+    expect(screen.getByText(/Agent 配置未被修改/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "一键接入" })).toBeDisabled();
     expect(planAgentConnection).not.toHaveBeenCalled();
   });
 });

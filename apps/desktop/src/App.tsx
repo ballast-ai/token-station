@@ -32,6 +32,11 @@ import {
 } from "./api";
 import AppShell, { type AppView } from "./components/AppShell";
 import {
+  readHiddenAgentIds,
+  updateHiddenAgentIds,
+  writeHiddenAgentIds,
+} from "./components/AgentVisibilityPreferences";
+import {
   LanguageBoundary,
   useLanguage,
   type Language,
@@ -91,6 +96,8 @@ function StationApp() {
   const { language, copy } = useLanguage();
   const [state, setState] = useState<StateView | null>(null);
   const [view, setView] = useState<AppView>("home");
+  const [hiddenAgentIds, setHiddenAgentIds] = useState<Set<string>>(readHiddenAgentIds);
+  const hiddenAgentIdsRef = useRef(hiddenAgentIds);
   const [registry, setRegistry] = useState<AgentUiMetadataView[]>([]);
   const [agents, setAgents] = useState<AgentView[]>([]);
   const [scanBusy, setScanBusy] = useState(false);
@@ -118,8 +125,11 @@ function StationApp() {
   const scanGenerationRef = useRef(0);
   const pendingServeRef = useRef<ServeView | null>(null);
   const viewHistoryRef = useRef<AppView[]>([]);
-  const prevPhaseRef = useRef<string | null>(null);
-  const runtimeReadyRef = useRef<boolean | null>(null);
+  const pendingApplyRevisionRef = useRef<number | null>(null);
+  const runtimeObservationRef = useRef<{
+    ready: boolean;
+    instanceId: string | null;
+  } | null>(null);
 
   const orderedRegistry = useMemo(
     () => registry
@@ -132,6 +142,20 @@ function StationApp() {
       .map(({ metadata }) => metadata),
     [registry],
   );
+  const visibleRegistry = useMemo(
+    () => orderedRegistry.filter((metadata) => !hiddenAgentIds.has(metadata.agent_id)),
+    [hiddenAgentIds, orderedRegistry],
+  );
+
+  const setAgentVisible = useCallback((agentId: string, visible: boolean) => {
+    const current = hiddenAgentIdsRef.current;
+    const currentlyVisible = !current.has(agentId);
+    if (currentlyVisible === visible) return;
+    const next = updateHiddenAgentIds(current, agentId, !visible);
+    hiddenAgentIdsRef.current = next;
+    setHiddenAgentIds(next);
+    writeHiddenAgentIds(next);
+  }, []);
 
   const rescanAgents = useCallback(async () => {
     const requestedGeneration = ++scanGenerationRef.current;
@@ -221,18 +245,23 @@ function StationApp() {
     if (state) setAdminEndpoint(state.serve);
   }, [state]);
 
-  // 「保存并应用」的横幅由运行态驱动,而非一次性成功消息:apply 是异步的,
-  // serveStart 一返回就贴死「正在应用」会和真实生命周期脱节(见 UX 反馈)。
-  // 当运行态从 starting(=Applying)落到 running,说明这一版真正生效了,替换成
-  // 短暂的「已应用」提示后自动消失。
+  // 只有显式「保存并应用」记录目标 revision；普通首次启动即使经历
+  // starting -> running，也不是一次配置应用成功。
   useEffect(() => {
     const phase = state?.serve.phase;
-    const previous = prevPhaseRef.current;
-    prevPhaseRef.current = phase ?? null;
-    if (previous === "starting" && phase === "running" && state) {
+    if (!state) return undefined;
+    const targetRevision = pendingApplyRevisionRef.current;
+    if (targetRevision == null || phase === "starting") return undefined;
+
+    if (
+      phase === "running"
+      && state.serve.running_revision === targetRevision
+      && state.serve.error === null
+    ) {
+      pendingApplyRevisionRef.current = null;
       setMessage(copy(
-        `Configuration applied · revision ${state.saved_revision}`,
-        `配置已应用 · revision ${state.saved_revision}`,
+        `Configuration applied · revision ${targetRevision}`,
+        `配置已应用 · revision ${targetRevision}`,
       ));
       const timer = window.setTimeout(
         () => setMessage((current) => (
@@ -244,8 +273,13 @@ function StationApp() {
       );
       return () => window.clearTimeout(timer);
     }
+    // 失败回退到旧实例时 phase 也是 running；error 是权威失败信号。迟到的旧
+    // running_revision 且无 error 可能只是 500ms 轮询乱序，保留目标继续等待。
+    if (state.serve.error !== null || phase !== "running") {
+      pendingApplyRevisionRef.current = null;
+    }
     return undefined;
-  }, [state?.serve.phase]);
+  }, [state?.serve.error, state?.serve.phase, state?.serve.running_revision]);
 
   // 运行态从「未就绪」变「就绪」时自动重扫一次。开 app 的首扫可能早于网关起来,
   // 那次 scan_agents 拿到 runtime=None → 所有安装 connected=false → 已接管的
@@ -254,14 +288,32 @@ function StationApp() {
   useEffect(() => {
     if (!state) return;
     const ready = state.serve.app_runtime === "running" && Boolean(state.serve.listener_reachable);
-    const wasReady = runtimeReadyRef.current;
-    runtimeReadyRef.current = ready;
+    const observation = {
+      ready,
+      instanceId: state.serve.instance_id,
+    };
+    const previous = runtimeObservationRef.current;
+    runtimeObservationRef.current = observation;
     // 首次观测(null)不算「变就绪」——那一刻若已就绪,load() 的首扫已带上 runtime;
-    // 只在真正的 未就绪(false)→就绪(true) 跃迁时补扫,才是启动竞态的修复点。
-    if (wasReady === false && ready) {
+    // 真正的 未就绪→就绪，或仍就绪但 serving instance 已切换时补扫。后者确保
+    // Applying.old → Running(new) 后 Agent adapter readiness 不会停留在旧实例。
+    const becameReady = previous?.ready === false && ready;
+    const servingInstanceChanged = Boolean(
+      previous?.ready
+        && ready
+        && previous.instanceId
+        && observation.instanceId
+        && previous.instanceId !== observation.instanceId,
+    );
+    if (becameReady || servingInstanceChanged) {
       void rescanAgents();
     }
-  }, [state?.serve.app_runtime, state?.serve.listener_reachable, rescanAgents]);
+  }, [
+    state?.serve.app_runtime,
+    state?.serve.instance_id,
+    state?.serve.listener_reachable,
+    rescanAgents,
+  ]);
 
   const showState = (next: StateView, nextMessage?: string) => {
     setState(next);
@@ -269,16 +321,25 @@ function StationApp() {
     if (nextMessage) setMessage(nextMessage);
   };
 
-  const run = async (action: () => Promise<StateView>, ok?: string): Promise<boolean> => {
+  const run = async (
+    action: () => Promise<StateView>,
+    ok?: string,
+    recordApplyTarget = false,
+  ): Promise<boolean> => {
     if (busyRef.current) return false;
     busyRef.current = true;
     setBusy(true);
     setError("");
     setMessage("");
     try {
-      showState(await action(), ok);
+      const next = await action();
+      if (recordApplyTarget) {
+        pendingApplyRevisionRef.current = next.saved_revision;
+      }
+      showState(next, ok);
       return true;
     } catch (caught) {
+      if (recordApplyTarget) pendingApplyRevisionRef.current = null;
       setError(errorText(caught));
       return false;
     } finally {
@@ -289,6 +350,7 @@ function StationApp() {
 
   const toggleServe = async () => {
     if (!state || serveBusy) return;
+    pendingApplyRevisionRef.current = null;
     setServeBusy(true);
     setError("");
     setMessage("");
@@ -321,7 +383,16 @@ function StationApp() {
   };
 
   const navigateBack = () => {
-    setView(viewHistoryRef.current.pop() ?? "home");
+    const previous = viewHistoryRef.current.pop() ?? "home";
+    if (
+      previous.startsWith("agent:")
+      && hiddenAgentIds.has(previous.slice("agent:".length))
+    ) {
+      viewHistoryRef.current = [];
+      setView("home");
+    } else {
+      setView(previous);
+    }
     setError("");
   };
 
@@ -368,7 +439,7 @@ function StationApp() {
     void run(async () => {
       await setQuotaAccounts(accounts);
       return serveStart();
-    });
+    }, undefined, true);
 
   // 声明供应商额度计划(供本地估算):写进草稿,随下次「保存并应用」生效。
   const saveQuotaPlan = (
@@ -382,7 +453,7 @@ function StationApp() {
     <AppShell
       view={view}
       serve={state.serve}
-      registry={orderedRegistry}
+      registry={visibleRegistry}
       agents={agents}
       scanBusy={scanBusy}
       commandBusy={serveBusy || busy || freeProviderBusy}
@@ -399,7 +470,7 @@ function StationApp() {
       )}
       {message && state.serve.phase !== "starting" && <div className="banner ok global-banner">{message}</div>}
       {error && <div className="banner err global-banner">{error}</div>}
-      {state.serve.phase === "error" && state.serve.error && <div className="banner err global-banner">{state.serve.error}</div>}
+      {state.serve.error && <div className="banner err global-banner">{state.serve.error}</div>}
 
       {view === "home" && (
         <HomePage
@@ -439,7 +510,7 @@ function StationApp() {
           )}
           onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
           onRemoveKeyword={(slot, keyword) => void run(() => removeKeyword(slot, keyword))}
-          onSave={() => void run(serveStart)}
+          onSave={() => void run(serveStart, undefined, true)}
           onApplyAll={() => void run(
             applyHomeRouteToAllAgents,
             runtimeHealthy
@@ -502,6 +573,9 @@ function StationApp() {
         <SettingsHub
           settings={state.settings}
           serve={state.serve}
+          registry={orderedRegistry}
+          hiddenAgentIds={hiddenAgentIds}
+          onAgentVisibilityChange={setAgentVisible}
           onSaved={showState}
           onBack={navigateBack}
         />

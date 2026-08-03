@@ -20,10 +20,8 @@ use serde::{Deserialize, Serialize};
 use token_station_protocol::Usage;
 use token_station_router_core::{QuotaState, ResetWindow, UpstreamModel};
 
-use crate::quota_ledger::{
-    AccountLedger, RATE_PRESSURE_PERMILLE, SlidingWindow, WindowSnapshot,
-};
 use crate::quota_lease::{DEFAULT_LEASE_MS, InflightLeases, LeaseId, apply_inflight_penalty};
+use crate::quota_ledger::{AccountLedger, RATE_PRESSURE_PERMILLE, SlidingWindow, WindowSnapshot};
 
 /// How long a provider-reported (authoritative) quota reading is trusted before
 /// it goes stale and the local ledger estimate takes over again. Providers stamp
@@ -248,7 +246,10 @@ impl QuotaTracker {
     #[must_use]
     pub fn quota_state(&self, upstream: &str, now_ms: u64) -> QuotaState {
         let (mut state, rate_limit) = match self.accounts.get(upstream) {
-            Some(account) => (account.ledger.quota_state(now_ms), account.rate_limit_per_min),
+            Some(account) => (
+                account.ledger.quota_state(now_ms),
+                account.rate_limit_per_min,
+            ),
             None => (QuotaState::non_windowed(), None),
         };
         // A fresh provider reading wins over the local estimate for the windowed
@@ -318,8 +319,7 @@ impl QuotaTracker {
         upstreams
             .iter()
             .map(|upstream| {
-                let (windows, source) = if let Some(w) =
-                    self.fresh_authoritative(upstream, now_ms)
+                let (windows, source) = if let Some(w) = self.fresh_authoritative(upstream, now_ms)
                 {
                     (w.to_vec(), QuotaSource::Authoritative)
                 } else if let Some(account) = self.accounts.get(upstream) {
@@ -617,7 +617,11 @@ mod tests {
         // A big-token exchange still counts as a single request.
         t.record("msgs", 0, &usage(5000, 5000));
         assert_eq!(
-            t.quota_state("msgs", 0).reset.as_ref().unwrap().remaining_permille,
+            t.quota_state("msgs", 0)
+                .reset
+                .as_ref()
+                .unwrap()
+                .remaining_permille,
             900
         );
     }
