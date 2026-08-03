@@ -3067,7 +3067,7 @@ fn workbuddy_images_get_a_normal_assistant_notice_when_vision_is_unavailable() {
     );
     assert_eq!(
         response["choices"][0]["message"]["content"],
-        json!("当前模型不支持图片。请切换到支持图片的模型后重试。")
+        json!("当前模型不支持图片。请在 Token Station 切换到支持图片的模型后重试。")
     );
 
     let streaming = json!({
