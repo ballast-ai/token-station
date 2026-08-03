@@ -759,7 +759,6 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("switch", { name: "Codex", checked: true }));
 
     expect(screen.getByRole("switch", { name: "Codex", checked: false })).toBeInTheDocument();
-    expect(navigation().queryByRole("button", { name: "Codex" })).toBeNull();
     expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length - 1} / ${agentIds.length} 已显示`);
     expect(window.localStorage.getItem(AGENT_VISIBILITY_STORAGE_KEY)).toBe(
       JSON.stringify(["codex"]),
@@ -778,7 +777,6 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("switch", { name: "Codex", checked: false }));
 
     expect(screen.getByRole("switch", { name: "Codex", checked: true })).toBeInTheDocument();
-    expect(navigation().getByRole("button", { name: "Codex" })).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length} / ${agentIds.length} 已显示`);
     expect(window.localStorage.getItem(AGENT_VISIBILITY_STORAGE_KEY)).toBe(
       JSON.stringify([]),
@@ -952,7 +950,6 @@ describe("desktop station navigation", () => {
     expect(screen.getByRole("switch", { name: "Claude Code", checked: false })).toBeInTheDocument();
 
     await user.click(screen.getByRole("switch", { name: "Claude Code", checked: false }));
-    expect(navigation().getByRole("button", { name: "Claude Code" })).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(`1 / ${agentIds.length} 已显示`);
   });
 

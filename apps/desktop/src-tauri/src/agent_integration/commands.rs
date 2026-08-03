@@ -893,12 +893,7 @@ impl AgentCommandState {
                 .map_err(AgentCommandError::internal)?;
             // 主配置:普通连接器仍使用固定 Remove；WorkBuddy 会按模型 ID 动态过滤，
             // 避免强制断开时顺手删除用户后来添加的其它模型。
-            force_strip_owned(
-                target,
-                connector.format(),
-                connector.label(),
-                &disconnect,
-            )?;
+            force_strip_owned(target, connector.format(), connector.label(), &disconnect)?;
             // companion:用持久化格式或 Connector 的旧记录显式合同解析，再按
             // owned_paths 删除。
             for (companion, document_format) in
@@ -2475,10 +2470,7 @@ mod tests {
             ("gemini-cli-v1", "http://127.0.0.1:8787/agents/gemini-cli"),
             ("opencode-v1", "http://127.0.0.1:8787/agents/opencode/v1"),
             ("openclaw-v1", "http://127.0.0.1:8787/agents/openclaw/v1"),
-            (
-                "workbuddy-v1",
-                "http://127.0.0.1:8787/agents/workbuddy/v1",
-            ),
+            ("workbuddy-v1", "http://127.0.0.1:8787/agents/workbuddy/v1"),
             (
                 "hermes-v1",
                 "http://127.0.0.1:8787/agents/nous-hermes-agent/v1",
