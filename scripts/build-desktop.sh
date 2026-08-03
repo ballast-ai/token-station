@@ -110,6 +110,10 @@ case "$(uname -s)" in
   Darwin)
     if [[ "$mode" == "local" ]]; then
       export APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
+      # Local installation consumes the signed .app directly. Building a DMG
+      # adds Finder/volume state to the developer loop and can fail even after
+      # the application itself is valid, so reserve installers for production.
+      tauri_args+=(--bundles app)
     else
       : "${APPLE_SIGNING_IDENTITY:?production macOS build needs APPLE_SIGNING_IDENTITY}"
       if [[ -n "${APPLE_API_ISSUER:-}" || -n "${APPLE_API_KEY:-}" || -n "${APPLE_API_KEY_PATH:-}" ]]; then

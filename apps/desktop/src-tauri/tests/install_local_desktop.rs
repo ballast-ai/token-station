@@ -24,3 +24,19 @@ fn local_desktop_installer_is_transactional_and_checks_launch_health() {
         String::from_utf8_lossy(&output.stderr),
     );
 }
+
+#[test]
+fn local_desktop_build_only_requests_the_app_bundle() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let project_root = manifest_dir
+        .ancestors()
+        .nth(3)
+        .expect("desktop manifest must be nested under the project root");
+    let build_script = std::fs::read_to_string(project_root.join("scripts/build-desktop.sh"))
+        .expect("desktop build script must be readable");
+
+    assert!(
+        build_script.contains("tauri_args+=(--bundles app)"),
+        "local desktop installation must not depend on release-only DMG packaging"
+    );
+}

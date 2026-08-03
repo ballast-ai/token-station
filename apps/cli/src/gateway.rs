@@ -36,14 +36,14 @@ use token_station_metrics::{
 };
 use token_station_plugin_runtime::{AgentPlugin, NoSecrets, PluginRuntime, ProviderPlugin};
 use token_station_protocol::{
-    AgentRequestEnvelope, Auth, ChatRequest, ChatResponse, Content, ContentPart, ErrorCode,
-    ErrorEnvelope, HeaderDigest, HttpMethod, HttpRequestDescriptor, HttpResponseParts, Message,
-    ModelCapability, Principal, ProviderApi, ProviderConfig, ResponseFormat, SafeHeaders,
+    AgentRequestEnvelope, Auth, CapabilityState, ChatRequest, ChatResponse, Content, ContentPart,
+    ErrorCode, ErrorEnvelope, HeaderDigest, HttpMethod, HttpRequestDescriptor, HttpResponseParts,
+    Message, ModelCapability, Principal, ProviderApi, ProviderConfig, ResponseFormat, SafeHeaders,
     SecretRef, StreamChunk, StreamEvent, StreamOutcome, ToolDef,
 };
 use token_station_router_core::{
-    Candidate, Decision, HealthPolicy, HealthTracker, Router, RouterConfig, RoutingMode,
-    UpstreamModel, UpstreamRef,
+    Candidate, Decision, HealthPolicy, HealthTracker, NoRoute, Router, RouterConfig, RoutingMode,
+    UnmetRequirement, UpstreamModel, UpstreamRef,
 };
 
 use crate::admission::Admission;
@@ -242,39 +242,196 @@ fn input_contains_unsupported_media(value: &Value) -> bool {
     }
 }
 
-const WORKBUDDY_NO_VISION_NOTICE: &str =
-    "当前模型不支持图片。请在 Token Station 切换到支持图片的模型后重试。";
+const MEDIA_FALLBACK_EN: &str = "[Image omitted: the current model does not support visual input.]";
+const MEDIA_FALLBACK_ZH: &str = "[图片已省略：当前模型不支持视觉输入。]";
 
-fn workbuddy_image_request(agent_id: Option<&str>, body: &[u8]) -> Option<bool> {
-    if agent_id != Some("workbuddy") {
-        return None;
-    }
-    let value: Value = serde_json::from_slice(body).ok()?;
-    let has_image = value
-        .get("messages")
-        .and_then(Value::as_array)
-        .is_some_and(|messages| {
-            messages.iter().any(|message| {
-                message
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .is_some_and(|parts| {
-                        parts.iter().any(|part| {
-                            part.get("type").and_then(Value::as_str) == Some("image_url")
-                        })
-                    })
-            })
-        });
-    has_image.then(|| {
-        value
-            .get("stream")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+fn contains_han(text: &str) -> bool {
+    text.chars().any(|character| {
+        matches!(
+            character,
+            '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}'
+        )
     })
 }
 
-fn is_missing_vision_refusal(refusal: &ErrorEnvelope) -> bool {
-    refusal.code == ErrorCode::Capability && refusal.message.contains("supports vision")
+fn content_text(content: &Content) -> impl Iterator<Item = &str> {
+    let direct = match content {
+        Content::Text(text) => Some(text.as_str()),
+        Content::Parts(_) => None,
+    };
+    let parts = match content {
+        Content::Parts(parts) => Some(parts.iter().filter_map(|part| match part {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })),
+        Content::Text(_) => None,
+    };
+    direct.into_iter().chain(parts.into_iter().flatten())
+}
+
+fn localized_media_marker(request: &ChatRequest) -> &'static str {
+    let latest_user_content = request
+        .messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == token_station_protocol::Role::User)
+        .filter_map(|message| message.content.as_ref())
+        .find(|content| content_text(content).any(|text| !text.trim().is_empty()));
+    if latest_user_content.is_some_and(|content| content_text(content).any(contains_han)) {
+        MEDIA_FALLBACK_ZH
+    } else {
+        MEDIA_FALLBACK_EN
+    }
+}
+
+fn replace_canonical_images(request: &mut ChatRequest) -> usize {
+    let marker = localized_media_marker(request).to_owned();
+    request
+        .messages
+        .iter_mut()
+        .filter_map(|message| message.content.as_mut())
+        .map(|content| match content {
+            Content::Text(_) => 0,
+            Content::Parts(parts) => {
+                let mut replaced = 0;
+                for part in parts {
+                    if matches!(part, ContentPart::ImageUrl { .. }) {
+                        *part = ContentPart::Text {
+                            text: marker.clone(),
+                        };
+                        replaced += 1;
+                    }
+                }
+                replaced
+            }
+        })
+        .sum()
+}
+
+fn is_vision_no_route(error: &NoRoute) -> bool {
+    matches!(
+        error,
+        NoRoute::Unsatisfiable {
+            reason: UnmetRequirement::Vision,
+            ..
+        }
+    )
+}
+
+fn route_error(no_route: &NoRoute) -> ErrorEnvelope {
+    let code = no_route.error_code();
+    let status = if code == ErrorCode::Capability {
+        400
+    } else {
+        503
+    };
+    ErrorEnvelope::new(code, status, no_route.to_string())
+}
+
+fn is_unsupported_media_error(error: &ErrorEnvelope) -> bool {
+    if !matches!(error.http_status, 400 | 415 | 422 | 501) {
+        return false;
+    }
+    let message = error
+        .provider_message
+        .as_deref()
+        .unwrap_or(&error.message)
+        .to_ascii_lowercase();
+    if message.contains("only support text") || message.contains("only supports text") {
+        return true;
+    }
+    let mentions_media = [
+        "image",
+        "vision",
+        "multimodal",
+        "multi-modal",
+        "modality",
+        "modalities",
+        "media",
+        "attachment",
+    ]
+    .iter()
+    .any(|hint| message.contains(hint));
+    let rejects_media = [
+        "unsupported",
+        "not supported",
+        "does not support",
+        "doesn't support",
+        "do not support",
+        "don't support",
+        "text only",
+        "text-only",
+        "invalid content type",
+        "invalid message content",
+        "unknown variant",
+        "unknown content type",
+        "unrecognized content type",
+        "cannot process",
+        "cannot handle",
+        "can't process",
+        "can't handle",
+        "unable to process",
+    ]
+    .iter()
+    .any(|hint| message.contains(hint));
+    mentions_media && rejects_media
+}
+
+fn raw_user_content_prefers_chinese(content: &Value) -> Option<bool> {
+    match content {
+        Value::String(text) if !text.trim().is_empty() => Some(contains_han(text)),
+        Value::Array(parts) => {
+            let texts: Vec<&str> = parts
+                .iter()
+                .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .filter(|text| !text.trim().is_empty())
+                .collect();
+            (!texts.is_empty()).then(|| texts.into_iter().any(contains_han))
+        }
+        _ => None,
+    }
+}
+
+fn raw_request_prefers_chinese(body: &Value) -> bool {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .rev()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .find_map(|message| message.get("content").and_then(raw_user_content_prefers_chinese))
+        .unwrap_or(false)
+}
+
+fn replace_anthropic_images(body: &mut Value) -> usize {
+    let marker = if raw_request_prefers_chinese(body) {
+        MEDIA_FALLBACK_ZH
+    } else {
+        MEDIA_FALLBACK_EN
+    };
+    body.get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message.get_mut("content").and_then(Value::as_array_mut))
+        .map(|parts| {
+            let mut replaced = 0;
+            for part in parts {
+                if part.get("type").and_then(Value::as_str) == Some("image") {
+                    let cache_control = part.get("cache_control").cloned();
+                    *part = json!({ "type": "text", "text": marker });
+                    if let (Some(cache_control), Some(object)) =
+                        (cache_control, part.as_object_mut())
+                    {
+                        object.insert("cache_control".to_owned(), cache_control);
+                    }
+                    replaced += 1;
+                }
+            }
+            replaced
+        })
+        .sum()
 }
 
 /// An outbound HTTP agent with an explicit, fail-closed egress policy (P1-6):
@@ -2245,14 +2402,8 @@ impl Gateway {
                     // the client can still receive; no upstream health verdict.
                     record.status = refusal.http_status;
                     record.error_code = Some(refusal.code);
-                    if let Some(stream) = workbuddy_image_request(agent_id, body)
-                        && is_missing_vision_refusal(&refusal)
-                    {
-                        Self::emit_workbuddy_no_vision_notice(stream, emit);
-                    } else {
-                        let rendered = Self::render_error(agent, &refusal);
-                        emit(Reply::BeginJson(rendered));
-                    }
+                    let rendered = Self::render_error(agent, &refusal);
+                    emit(Reply::BeginJson(rendered));
                 }
             }
         } else {
@@ -2507,7 +2658,7 @@ impl Gateway {
             return Ok(served);
         }
 
-        let (request, hints, inbound_tools) =
+        let (mut request, hints, inbound_tools) =
             Self::normalize_request(agent, method, path, headers, body, record)?;
         // Privacy boundary: the persisted requested model is a configured name
         // or a hashed `unlisted:` token — never the caller's raw string.
@@ -2526,26 +2677,33 @@ impl Gateway {
         let quota_mode = quota_now_ms.is_some();
 
         let candidates = self.candidates(std::time::Instant::now(), quota_now_ms);
-        let mut decision = if quota_mode {
-            let last = self
-                .quota
-                .lock()
-                .expect("quota lock")
-                .last_account(&session)
-                .cloned();
-            router.route_quota_first(&request, &candidates, last.as_ref())
-        } else {
-            router.route(&request, &hints, &candidates)
-        }
-        .map_err(|no_route| {
-            let code = no_route.error_code();
-            let status = if code == ErrorCode::Capability {
-                400
+        let route = |request: &ChatRequest| {
+            if quota_mode {
+                let last = self
+                    .quota
+                    .lock()
+                    .expect("quota lock")
+                    .last_account(&session)
+                    .cloned();
+                router.route_quota_first(request, &candidates, last.as_ref())
             } else {
-                503
-            };
-            ErrorEnvelope::new(code, status, no_route.to_string())
-        })?;
+                router.route(request, &hints, &candidates)
+            }
+        };
+        let mut decision = match route(&request) {
+            Ok(decision) => decision,
+            Err(no_route) if is_vision_no_route(&no_route) => {
+                let replaced = replace_canonical_images(&mut request);
+                if replaced == 0 {
+                    return Err(route_error(&no_route));
+                }
+                eprintln!(
+                    "media fallback -> replaced {replaced} image block(s) before text-only routing"
+                );
+                route(&request).map_err(|error| route_error(&error))?
+            }
+            Err(no_route) => return Err(route_error(&no_route)),
+        };
         // Free-provider fallback filtering is a tiered-mode feature; quota-mode
         // fallbacks are the quota-ranked accounts and must not be pruned by it.
         if !quota_mode {
@@ -2661,6 +2819,7 @@ impl Gateway {
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
         let mut last_error = None;
         let mut budget = AttemptBudget::for_request(ctx);
+        let mut media_retried = false;
 
         let mut targets = std::iter::once(&decision.chosen)
             .chain(&decision.fallbacks)
@@ -2734,12 +2893,61 @@ impl Gateway {
                 // exchange ended. Per-attempt failures below still trip health so
                 // the fallback sweep can eject a bad upstream mid-flight.
                 Ok(outcome) => return Ok((target.clone(), outcome)),
-                Err(error) => {
+                Err(mut error) => {
                     if matches!(
                         ctx.cancel_reason(),
                         Some(CancelReason::ServerDrain | CancelReason::Deadline)
                     ) {
                         return Err(error);
+                    }
+                    if !media_retried && is_unsupported_media_error(&error) {
+                        let mut fallback_request = request.clone();
+                        let replaced = replace_canonical_images(&mut fallback_request);
+                        if replaced > 0 && budget.try_begin(None) {
+                            media_retried = true;
+                            record.attempts = budget.attempts;
+                            record_actual_attempt_target(record, decision, target);
+                            eprintln!(
+                                "media fallback -> upstream rejected visual input; retrying {target} with {replaced} image block(s) replaced"
+                            );
+                            let retry_clock = Instant::now();
+                            let mut retry_status = None;
+                            let retry = self.try_upstream(
+                                ctx,
+                                budget.per_attempt_timeout,
+                                agent,
+                                &fallback_request,
+                                inbound_tools,
+                                target,
+                                emit,
+                                record,
+                                &mut retry_status,
+                            );
+                            let retry_latency = u64::try_from(retry_clock.elapsed().as_millis())
+                                .unwrap_or(u64::MAX);
+                            record.attempt_records.push(match &retry {
+                                Ok(outcome) => attempt_receipt(
+                                    target,
+                                    budget.attempts,
+                                    retry_latency,
+                                    retry_status,
+                                    Ok(*outcome),
+                                    record,
+                                ),
+                                Err(retry_error) => attempt_receipt(
+                                    target,
+                                    budget.attempts,
+                                    retry_latency,
+                                    retry_status,
+                                    Err(retry_error),
+                                    record,
+                                ),
+                            });
+                            match retry {
+                                Ok(outcome) => return Ok((target.clone(), outcome)),
+                                Err(retry_error) => error = retry_error,
+                            }
+                        }
                     }
                     self.observe(&target.upstream, &target.model, Err(&error));
                     let retriable = error.code.is_retriable_elsewhere();
@@ -3276,10 +3484,14 @@ impl Gateway {
         if body.len() > MAX_INBOUND_BODY {
             return Ok(None);
         }
-        let Ok(body_value) = serde_json::from_slice::<Value>(body) else {
+        let Ok(mut body_value) = serde_json::from_slice::<Value>(body) else {
             return Ok(None);
         };
-        let Some(model) = body_value.get("model").and_then(Value::as_str) else {
+        let Some(model) = body_value
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
             return Ok(None);
         };
         let stream = body_value
@@ -3290,7 +3502,7 @@ impl Gateway {
         // Route a minimal request (model only) to learn which upstream would
         // serve it; passthrough is a tiered, non-quota decision. A routing
         // failure falls through so the normal path surfaces the real error.
-        let mut mini = ChatRequest::new(model, Vec::new());
+        let mut mini = ChatRequest::new(&model, Vec::new());
         mini.stream = stream;
         let candidates = self.candidates(std::time::Instant::now(), None);
         let Ok(decision) = router.route(&mini, &[], &candidates) else {
@@ -3302,13 +3514,27 @@ impl Gateway {
         if upstream.dialect != ApiDialect::AnthropicNative {
             return Ok(None);
         }
+        let vision_state = candidates
+            .iter()
+            .find(|candidate| candidate.target == decision.chosen)
+            .map_or(CapabilityState::Unknown, |candidate| {
+                candidate.capability.vision_state()
+            });
+        if vision_state == CapabilityState::Unsupported {
+            let replaced = replace_anthropic_images(&mut body_value);
+            if replaced > 0 {
+                eprintln!(
+                    "media fallback -> replaced {replaced} Anthropic image block(s) before native passthrough"
+                );
+            }
+        }
 
         // Committed to the passthrough path.
         let configured = self
             .catalog
             .iter()
             .any(|(target, _)| target.model == decision.chosen.model);
-        record.requested_model = canonical_requested_model(model, configured);
+        record.requested_model = canonical_requested_model(&model, configured);
         record.stream = stream;
         record_route_decision(record, &decision);
 
@@ -4018,72 +4244,6 @@ impl Gateway {
         JsonReply {
             status: envelope.http_status,
             body,
-        }
-    }
-
-    fn emit_workbuddy_no_vision_notice(stream: bool, emit: &mut dyn FnMut(Reply) -> bool) {
-        let id = "chatcmpl-token-station-workbuddy-vision";
-        let created = unix_millis() / 1_000;
-        if !stream {
-            emit(Reply::BeginJson(JsonReply {
-                status: 200,
-                body: json!({
-                    "id": id,
-                    "object": "chat.completion",
-                    "created": created,
-                    "model": "tokenstation-auto",
-                    "choices": [{
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": WORKBUDDY_NO_VISION_NOTICE
-                        },
-                        "finish_reason": "stop"
-                    }],
-                    "usage": {
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "total_tokens": 0
-                    }
-                })
-                .to_string(),
-            }));
-            return;
-        }
-
-        if !emit(Reply::BeginStream) {
-            return;
-        }
-        let content = json!({
-            "id": id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": "tokenstation-auto",
-            "choices": [{
-                "index": 0,
-                "delta": {
-                    "role": "assistant",
-                    "content": WORKBUDDY_NO_VISION_NOTICE
-                },
-                "finish_reason": Value::Null
-            }]
-        });
-        if !emit(Reply::Chunk(format!("data: {content}\n\n"))) {
-            return;
-        }
-        let done = json!({
-            "id": id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": "tokenstation-auto",
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": "stop"
-            }]
-        });
-        if emit(Reply::Chunk(format!("data: {done}\n\n"))) {
-            emit(Reply::Chunk("data: [DONE]\n\n".to_owned()));
         }
     }
 
