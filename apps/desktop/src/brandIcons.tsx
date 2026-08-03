@@ -155,11 +155,21 @@ export function ProviderIcon({ id, label, size = 28 }: { id: string; label: stri
 /** Agent 品牌 logo;使用完整品牌图形而非黑底 Avatar,避免标记被缩成角落小点。 */
 export function AgentIcon({ id, fallback, size = 24 }: { id: string; fallback: string; size?: number }) {
   const image = AGENT_IMAGES[id];
-  if (image) return <BrandImage src={image} fallback={fallback} size={size} />;
   const Icon = AGENT_ICONS[id];
-  if (Icon) {
-    const Glyph = Icon.Color ?? Icon;
-    return <Glyph size={size} />;
-  }
-  return <Fallback text={fallback} size={size} />;
+  const Glyph = Icon ? (Icon.Color ?? Icon) : null;
+  return (
+    <span
+      className="agent-brand-glyph"
+      data-agent-brand={id}
+      style={{ width: size, height: size }}
+    >
+      {image ? (
+        <BrandImage src={image} fallback={fallback} size={size} />
+      ) : Glyph ? (
+        <Glyph size={size} />
+      ) : (
+        <Fallback text={fallback} size={size} />
+      )}
+    </span>
+  );
 }

@@ -330,7 +330,9 @@ describe("desktop station navigation", () => {
     const agentNavigation = screen.getByRole("navigation", { name: "Agent 列表" });
     const claudeCodeButton = within(agentNavigation).getByRole("button", { name: "Claude Code" });
     expect(claudeCodeButton).toHaveAttribute("aria-current", "page");
-    expect(claudeCodeButton.querySelector("svg")).toBeInTheDocument();
+    const centeredBrand = claudeCodeButton.querySelector('[data-agent-brand="claude-code"]');
+    expect(centeredBrand).toBeInTheDocument();
+    expect(centeredBrand?.querySelector("svg")).toBeInTheDocument();
     expect(claudeCodeButton.querySelector('[style*="background"]')).toBeNull();
     expect(screen.getByRole("heading", { name: "Claude Code", level: 2 })).toBeInTheDocument();
 
@@ -1037,7 +1039,7 @@ describe("desktop station navigation", () => {
     expect(screen.queryByText("9.9.9")).toBeNull();
   });
 
-  it("keeps usage independent and puts router, plugins and about inside Settings", async () => {
+  it("keeps usage independent and exposes only user-facing categories inside Settings", async () => {
     const user = userEvent.setup();
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
@@ -1056,8 +1058,11 @@ describe("desktop station navigation", () => {
     expect(await screen.findByRole("heading", { name: "设置", level: 1 })).toBeInTheDocument();
     const settingsNavigation = screen.getByRole("navigation", { name: "设置分类" });
     expect(within(settingsNavigation).getByRole("button", { name: /通用/ })).toHaveAttribute("aria-current", "page");
-    expect(within(settingsNavigation).getByRole("button", { name: /路由表/ })).toBeInTheDocument();
-    expect(within(settingsNavigation).getByRole("button", { name: /插件/ })).toBeInTheDocument();
+    expect(within(settingsNavigation).queryByRole("button", { name: /路由表/ })).toBeNull();
+    expect(within(settingsNavigation).queryByRole("button", { name: /插件/ })).toBeNull();
+    expect(within(settingsNavigation).getByRole("button", { name: /Agent 显示/ })).toBeInTheDocument();
+    expect(within(settingsNavigation).getByRole("button", { name: /外观/ })).toBeInTheDocument();
+    expect(within(settingsNavigation).getByRole("button", { name: /语言/ })).toBeInTheDocument();
     expect(within(settingsNavigation).getByRole("button", { name: /关于/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /返回/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /用量/ })).not.toBeNull();
