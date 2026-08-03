@@ -338,12 +338,11 @@ mod tests {
         assert_eq!(connected["models"][1]["id"], json!("tokenstation-auto"));
         assert_eq!(connected["unknown"]["keep"], json!(true));
 
-        let disconnect = connector
-            .disconnect_patch_for_document(&document)
-            .unwrap();
+        let disconnect = connector.disconnect_patch_for_document(&document).unwrap();
         validate_patch_ownership(&disconnect, &connector.owned_paths()).unwrap();
         apply_patch(&mut document, &disconnect).unwrap();
-        let disconnected = crate::agent_integration::config_codec::semantic_json(&document).unwrap();
+        let disconnected =
+            crate::agent_integration::config_codec::semantic_json(&document).unwrap();
         assert_eq!(disconnected["models"].as_array().unwrap().len(), 1);
         assert_eq!(disconnected["models"][0]["id"], json!("user-model"));
         assert_eq!(disconnected["availableModels"], json!(["user-model"]));
@@ -359,7 +358,10 @@ mod tests {
             connector.label(),
         )
         .unwrap();
-        assert!(connector.validate_source(&conflict).unwrap_err().contains("已存在模型"));
+        assert!(connector
+            .validate_source(&conflict)
+            .unwrap_err()
+            .contains("已存在模型"));
 
         let malformed = parse_source_bytes(
             Some(br#"{"models":{},"availableModels":[]}"#),
@@ -367,7 +369,10 @@ mod tests {
             connector.label(),
         )
         .unwrap();
-        assert!(connector.validate_source(&malformed).unwrap_err().contains("必须是数组"));
+        assert!(connector
+            .validate_source(&malformed)
+            .unwrap_err()
+            .contains("必须是数组"));
     }
 
     #[test]

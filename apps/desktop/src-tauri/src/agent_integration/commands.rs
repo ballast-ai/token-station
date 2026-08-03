@@ -893,12 +893,7 @@ impl AgentCommandState {
                 .map_err(AgentCommandError::internal)?;
             // Primary config: normal connectors use fixed Remove operations. WorkBuddy filters dynamically by model ID.
             // Do not remove other models that the user added after connection during forced disconnect.
-            force_strip_owned(
-                target,
-                connector.format(),
-                connector.label(),
-                &disconnect,
-            )?;
+            force_strip_owned(target, connector.format(), connector.label(), &disconnect)?;
             // Companion config: parse the persisted format or a connector's
             // explicit legacy contract, then remove owned_paths.
             for (companion, document_format) in
@@ -2475,10 +2470,7 @@ mod tests {
             ("gemini-cli-v1", "http://127.0.0.1:8787/agents/gemini-cli"),
             ("opencode-v1", "http://127.0.0.1:8787/agents/opencode/v1"),
             ("openclaw-v1", "http://127.0.0.1:8787/agents/openclaw/v1"),
-            (
-                "workbuddy-v1",
-                "http://127.0.0.1:8787/agents/workbuddy/v1",
-            ),
+            ("workbuddy-v1", "http://127.0.0.1:8787/agents/workbuddy/v1"),
             (
                 "hermes-v1",
                 "http://127.0.0.1:8787/agents/nous-hermes-agent/v1",

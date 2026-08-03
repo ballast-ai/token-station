@@ -400,7 +400,11 @@ fn raw_request_prefers_chinese(body: &Value) -> bool {
         .flatten()
         .rev()
         .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-        .find_map(|message| message.get("content").and_then(raw_user_content_prefers_chinese))
+        .find_map(|message| {
+            message
+                .get("content")
+                .and_then(raw_user_content_prefers_chinese)
+        })
         .unwrap_or(false)
 }
 
@@ -879,6 +883,34 @@ fn attempt_receipt(
             stream_outcome: Some(StreamOutcome::FailedBeforeOutput),
             fallback_allowed: error.code.is_retriable_elsewhere(),
         },
+    }
+}
+
+fn attempt_receipt_for_result(
+    target: &UpstreamModel,
+    ordinal: u32,
+    latency_ms: u64,
+    upstream_http_status: Option<u16>,
+    result: &Result<StreamOutcome, ErrorEnvelope>,
+    record: &RequestRecord,
+) -> AttemptRecord {
+    match result {
+        Ok(outcome) => attempt_receipt(
+            target,
+            ordinal,
+            latency_ms,
+            upstream_http_status,
+            Ok(*outcome),
+            record,
+        ),
+        Err(error) => attempt_receipt(
+            target,
+            ordinal,
+            latency_ms,
+            upstream_http_status,
+            Err(error),
+            record,
+        ),
     }
 }
 
@@ -2804,6 +2836,65 @@ impl Gateway {
         }
     }
 
+    /// Retries one upstream after replacing visual blocks when that upstream
+    /// explicitly rejects media. `None` means no retry was applicable or the
+    /// request had no remaining attempt budget.
+    #[allow(clippy::too_many_arguments)] // retry needs the same render context as `try_upstream`
+    fn retry_without_media(
+        &self,
+        ctx: &RequestContext,
+        agent: &LoadedAgent,
+        request: &ChatRequest,
+        inbound_tools: &Value,
+        decision: &Decision,
+        target: &UpstreamModel,
+        emit: &mut dyn FnMut(Reply) -> bool,
+        record: &mut RequestRecord,
+        budget: &mut AttemptBudget,
+        media_retried: &mut bool,
+        error: &ErrorEnvelope,
+    ) -> Option<Result<StreamOutcome, ErrorEnvelope>> {
+        if *media_retried || !is_unsupported_media_error(error) {
+            return None;
+        }
+        let mut fallback_request = request.clone();
+        let replaced = replace_canonical_images(&mut fallback_request);
+        if replaced == 0 || !budget.try_begin(None) {
+            return None;
+        }
+
+        *media_retried = true;
+        record.attempts = budget.attempts;
+        record_actual_attempt_target(record, decision, target);
+        eprintln!(
+            "media fallback -> upstream rejected visual input; retrying {target} with {replaced} image block(s) replaced"
+        );
+        let retry_clock = Instant::now();
+        let mut retry_status = None;
+        let retry = self.try_upstream(
+            ctx,
+            budget.per_attempt_timeout,
+            agent,
+            &fallback_request,
+            inbound_tools,
+            target,
+            emit,
+            record,
+            &mut retry_status,
+        );
+        let retry_latency = u64::try_from(retry_clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let attempt = attempt_receipt_for_result(
+            target,
+            budget.attempts,
+            retry_latency,
+            retry_status,
+            &retry,
+            record,
+        );
+        record.attempt_records.push(attempt);
+        Some(retry)
+    }
+
     /// Tries the decision's targets in order; moves on only while the error
     /// says another upstream is worth trying, and only before first byte out.
     #[allow(clippy::too_many_arguments)] // one dispatch keeps request + render context explicit
@@ -2868,24 +2959,14 @@ impl Gateway {
                 &mut upstream_http_status,
             );
             let latency_ms = u64::try_from(attempt_clock.elapsed().as_millis()).unwrap_or(u64::MAX);
-            let attempt = match &result {
-                Ok(outcome) => attempt_receipt(
-                    target,
-                    budget.attempts,
-                    latency_ms,
-                    upstream_http_status,
-                    Ok(*outcome),
-                    record,
-                ),
-                Err(error) => attempt_receipt(
-                    target,
-                    budget.attempts,
-                    latency_ms,
-                    upstream_http_status,
-                    Err(error),
-                    record,
-                ),
-            };
+            let attempt = attempt_receipt_for_result(
+                target,
+                budget.attempts,
+                latency_ms,
+                upstream_http_status,
+                &result,
+                record,
+            );
             record.attempt_records.push(attempt);
             match result {
                 // The terminal health verdict and status are decided exactly
@@ -2900,53 +2981,22 @@ impl Gateway {
                     ) {
                         return Err(error);
                     }
-                    if !media_retried && is_unsupported_media_error(&error) {
-                        let mut fallback_request = request.clone();
-                        let replaced = replace_canonical_images(&mut fallback_request);
-                        if replaced > 0 && budget.try_begin(None) {
-                            media_retried = true;
-                            record.attempts = budget.attempts;
-                            record_actual_attempt_target(record, decision, target);
-                            eprintln!(
-                                "media fallback -> upstream rejected visual input; retrying {target} with {replaced} image block(s) replaced"
-                            );
-                            let retry_clock = Instant::now();
-                            let mut retry_status = None;
-                            let retry = self.try_upstream(
-                                ctx,
-                                budget.per_attempt_timeout,
-                                agent,
-                                &fallback_request,
-                                inbound_tools,
-                                target,
-                                emit,
-                                record,
-                                &mut retry_status,
-                            );
-                            let retry_latency = u64::try_from(retry_clock.elapsed().as_millis())
-                                .unwrap_or(u64::MAX);
-                            record.attempt_records.push(match &retry {
-                                Ok(outcome) => attempt_receipt(
-                                    target,
-                                    budget.attempts,
-                                    retry_latency,
-                                    retry_status,
-                                    Ok(*outcome),
-                                    record,
-                                ),
-                                Err(retry_error) => attempt_receipt(
-                                    target,
-                                    budget.attempts,
-                                    retry_latency,
-                                    retry_status,
-                                    Err(retry_error),
-                                    record,
-                                ),
-                            });
-                            match retry {
-                                Ok(outcome) => return Ok((target.clone(), outcome)),
-                                Err(retry_error) => error = retry_error,
-                            }
+                    if let Some(retry) = self.retry_without_media(
+                        ctx,
+                        agent,
+                        request,
+                        inbound_tools,
+                        decision,
+                        target,
+                        emit,
+                        record,
+                        &mut budget,
+                        &mut media_retried,
+                        &error,
+                    ) {
+                        match retry {
+                            Ok(outcome) => return Ok((target.clone(), outcome)),
+                            Err(retry_error) => error = retry_error,
                         }
                     }
                     self.observe(&target.upstream, &target.model, Err(&error));

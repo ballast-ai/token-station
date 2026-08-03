@@ -3047,7 +3047,10 @@ fn every_openai_chat_agent_degrades_images_before_a_non_vision_upstream() {
             false,
         );
         assert_eq!(status, 200, "{agent_id}: {body}");
-        assert!(body.contains("I can continue with the text."), "{agent_id}: {body}");
+        assert!(
+            body.contains("I can continue with the text."),
+            "{agent_id}: {body}"
+        );
     }
 
     assert_eq!(home.hits(), 3);
@@ -3227,7 +3230,10 @@ fn an_upstream_media_refusal_retries_once_with_localized_markers() {
     assert!(body.contains("Continued after fallback."), "{body}");
     assert_eq!(mock.hits(), 2);
     let seen = mock.seen();
-    assert_eq!(seen[0].body["messages"][0]["content"][1]["type"], "image_url");
+    assert_eq!(
+        seen[0].body["messages"][0]["content"][1]["type"],
+        "image_url"
+    );
     assert_eq!(
         seen[1].body["messages"][0]["content"],
         json!(
