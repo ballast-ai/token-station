@@ -84,6 +84,8 @@ export interface ProviderEndpointPreview {
   chat: string;
   responses: string;
   messages: string;
+  /** Backend-determined loopback eligibility; only true endpoints can be marked as local models. */
+  loopback: boolean;
 }
 
 export interface ProviderRemovalPreview {
