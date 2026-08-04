@@ -508,6 +508,10 @@ pub fn current_platform() -> Platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the two macOS real-filesystem cases use `fs`, and both are cfg-excluded
+    // on a Windows host, so the import is gated the same way to avoid an unused
+    // import warning on Windows.
+    #[cfg(not(target_os = "windows"))]
     use std::fs;
 
     fn environment(platform: Platform) -> ScanEnvironment {
@@ -602,6 +606,12 @@ mod tests {
         );
     }
 
+    // This case creates a real directory, treats it as HOME, and then simulates a
+    // macOS scan. macOS absolute-path validation requires a leading `/`, but a
+    // Windows host's temp_dir is `C:\…`, so a `/`-rooted real directory cannot be
+    // created there. `macos_npm_prefix` also only runs on the macOS platform, so
+    // exercising it on a Windows host adds no coverage — run on non-Windows only.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn macos_node_agents_include_the_safe_npm_prefix_from_user_config() {
         let root = std::env::temp_dir().join(format!(
@@ -667,6 +677,11 @@ mod tests {
         }
     }
 
+    // Same as above: it builds a macOS-style HOME on the real filesystem and
+    // simulates the macOS platform. A Windows host's temp_dir is not a `/`-rooted
+    // path, and `macos_python_user_candidates` only runs on macOS, so run on
+    // non-Windows only.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn macos_hermes_checks_bounded_python_user_bins_without_path() {
         let root = std::env::temp_dir().join(format!(
