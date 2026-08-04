@@ -21,9 +21,26 @@ function normalizedVersion(installation: AgentInstallationView) {
   return version.startsWith("v") ? version : `v${version}`;
 }
 
-export function installationLabels(installations: AgentInstallationView[]) {
+interface WorkBuddyVariantLabels {
+  china: string;
+  global: string;
+}
+
+function workbuddyVariant(path: string, labels?: WorkBuddyVariantLabels) {
+  if (!labels) return null;
+  const normalized = path.replace(/\\/g, "/");
+  if (normalized.includes("/WorkBuddy AI.app/")) return labels.global;
+  if (normalized.includes("/WorkBuddy.app/")) return labels.china;
+  return null;
+}
+
+export function installationLabels(
+  installations: AgentInstallationView[],
+  workbuddyLabels?: WorkBuddyVariantLabels,
+) {
   const baseLabels = installations.map((installation) => {
-    const name = executableName(installation.discovery.canonical_path);
+    const name = workbuddyVariant(installation.discovery.canonical_path, workbuddyLabels)
+      ?? executableName(installation.discovery.canonical_path);
     const version = normalizedVersion(installation);
     return version ? `${name} · ${version}` : name;
   });
@@ -53,7 +70,13 @@ export default function InstallationPicker({
   const { language, copy } = useLocalizedCopy();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const options = useMemo(() => installationLabels(installations), [installations]);
+  const options = useMemo(
+    () => installationLabels(installations, {
+      china: copy("WorkBuddy China", "WorkBuddy 中国版"),
+      global: copy("WorkBuddy Global", "WorkBuddy 海外版"),
+    }),
+    [copy, installations],
+  );
   const sourceLabels: Record<AgentInstallationView["discovery"]["binary_source"], string> = {
     homebrew: "Homebrew",
     npm_global: copy("npm global", "npm 全局"),
