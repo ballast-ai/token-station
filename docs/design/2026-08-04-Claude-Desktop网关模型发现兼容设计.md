@@ -1,7 +1,7 @@
 # Claude Desktop 网关模型发现兼容设计
 
 日期：2026-08-04  
-状态：已实现，模型发现通过真实 App 验收
+状态：第二轮已实现；用户确认连接恢复，本轮未独立重做 Claude Desktop Code 界面复验
 
 ## 1. 问题
 
@@ -17,8 +17,9 @@ Claude Desktop 1.24012.11 已通过 3P Gateway 配置连接到
 
 ## 2. 目标、范围与非目标
 
-目标是让已接入 Token Station 的 Claude Desktop 能发现一个可用模型，并用现有 Agent 路由完成推理。
-本次只修改 Claude Desktop 命名空间下的模型发现响应和对应测试。
+目标是让已接入 Token Station 的 Claude Desktop 能发现并实际选择一个可用模型，再用现有 Agent 路由
+完成推理。本次修改 Claude Desktop 命名空间下的模型发现响应、Connector 写入的 Cowork egress 主机
+列表和对应测试。
 
 不修改全局 `/v1/models`，不影响 OpenCode、Codex、WorkBuddy 等其他 Agent，也不把真实上游模型
 伪装成 Claude Sonnet、Opus 或 Haiku。此次不修改 Claude Desktop 的配置文件结构、凭据或应用选择。
@@ -40,7 +41,7 @@ Claude Desktop 请求其专用模型目录时，Token Station 返回单个虚拟
   "object": "list",
   "data": [
     {
-      "id": "auto",
+      "id": "claude-sonnet-4-6",
       "object": "model",
       "owned_by": "token-station",
       "display_name": "Token Station Auto",
@@ -51,9 +52,14 @@ Claude Desktop 请求其专用模型目录时，Token Station 返回单个虚拟
 }
 ```
 
-`anthropic_family_tier` 只用于通过 Claude Desktop 的网关目录校验，不表示实际选择了 Anthropic
-Sonnet。真实上游仍由 Token Station 当前路由和能力条件决定。若网关不可达、虚拟 Key 错误或路由无
-候选，继续使用现有 401、404 或结构化推理错误，不把这些故障改写成“没有模型”。
+`claude-sonnet-4-6` 是 Claude Desktop Code 模型选择器能够识别的兼容别名，显示名仍为
+`Token Station Auto`。它不表示实际选择了 Anthropic Sonnet；Token Station 默认不启用精确模型绑定，
+真实上游仍由当前 Agent 路由和能力条件决定。若网关不可达、虚拟 Key 错误或路由无候选，继续使用
+现有 401、404 或结构化推理错误，不把这些故障改写成“没有模型”。
+
+Connector 写入 `coworkEgressAllowedHosts` 时只保留 Claude Desktop 接受的 `127.0.0.1` 和
+`localhost`。此前写入的裸 IPv6 地址 `::1` 会被 Claude 判为无效 hostname，并在首页持续显示
+“Invalid network egress settings”；本轮移除该项，不增加任何外网白名单。
 
 ## 5. 响应式、键盘和可访问性
 
@@ -62,7 +68,7 @@ Sonnet。真实上游仍由 Token Station 当前路由和能力条件决定。�
 
 ## 6. 公开测试边界与验收标准
 
-1. 带正确虚拟 Key 请求 `/agents/claude-desktop/v1/models?limit=1000`，返回 200 和上述虚拟模型。
+1. 带正确虚拟 Key 请求 `/agents/claude-desktop/v1/models?limit=1000`，返回 200 和上述兼容别名。
 2. Claude Desktop 目录不泄漏真实上游模型名。
 3. 全局 `/v1/models` 与 `/agents/opencode/v1/models` 仍返回配置中的真实模型。
 4. 错误虚拟 Key 仍返回 401；未知 Agent 命名空间仍返回 404。
@@ -71,6 +77,8 @@ Sonnet。真实上游仍由 Token Station 当前路由和能力条件决定。�
 6. Rust 定向测试、CLI 全量测试和静态检查通过。
 7. 执行 `scripts/install-local-desktop.sh` 更新本机 App，并在真实 Claude Desktop Setup 中重新检查；
    不再出现 “Gateway returned no usable models”。
+8. Claude Desktop Code 模式模型选择器不再停在 “Models are still loading”，可以真正发送请求。
+9. Connector 新生成的 `coworkEgressAllowedHosts` 不含 Claude 判为无效的 `::1`，且仍只允许回环主机。
 
 ## 7. 实现落点、遗留项与发布要求
 
@@ -84,7 +92,7 @@ Sonnet。真实上游仍由 Token Station 当前路由和能力条件决定。�
 
 ## 8. 当前验收状态
 
-已完成：
+第一轮已完成：
 
 1. 新增回归先观察到 Claude Desktop 专用目录错误返回两个真实上游模型，随后实现专用 `auto` 目录，
    回归转绿。
@@ -105,3 +113,11 @@ Sonnet。真实上游仍由 Token Station 当前路由和能力条件决定。�
 2026-07-31 18:00:42，且只含 `deepseek/provider_api_key`，因此这不是本次安装造成的凭据丢失，也不属于
 模型发现兼容缺陷。要完成真实推理，用户需要为 `wec` 重新输入密钥，或明确把 Claude Desktop 路由
 切换到已有凭据的供应商；本轮不擅自复制凭据或改变供应商。
+
+第二轮真实 App 验收发现第一轮仍不完整：Claude 主进程日志显示
+`Model discovery: 1 found ... picker = 0 (empty)`，Code 模式点击发送提示 `Models are still loading`。
+同时 Connector 写入的 `::1` 被 Claude 首页判为无效 egress hostname。第二轮将模型 ID 改为 Claude
+选择器识别的兼容别名，并移除无效的 `::1`。相关 Connector 和事务回归已通过，
+最新桌面 App 也已重新安装。用户随后确认连接恢复；本轮的独立真实请求验证覆盖了
+Claude Code 的 Anthropic 入站和上游推理，没有再操作 Claude Desktop Code 模型选择界面，因此不把
+这一项写成独立实测结论。
