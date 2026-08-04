@@ -238,6 +238,7 @@ fn verified_workbuddy_bundle(app: &Path) -> bool {
     workbuddy_signing_identity_is_allowed(&output.stderr)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn workbuddy_signing_identity_is_allowed(bytes: &[u8]) -> bool {
     let metadata = String::from_utf8_lossy(bytes);
     let identifier = metadata
