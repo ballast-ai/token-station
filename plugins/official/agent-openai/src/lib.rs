@@ -154,6 +154,75 @@ fn validate_response_format(body: &Value) -> Result<(), String> {
     }
 }
 
+/// Cursor Agent has been observed sending a Responses-shaped body to the
+/// `/chat/completions` URL. Keep this conversion scoped to the Cursor agent
+/// identity so ordinary OpenAI-compatible clients remain strict.
+fn normalize_cursor_body(body: &Value) -> Result<Value, String> {
+    let Some(object) = body.as_object() else {
+        return Err(invalid("request body must be an object"));
+    };
+    if object.get("messages").is_some() {
+        return Ok(body.clone());
+    }
+    let Some(input) = object.get("input").and_then(Value::as_array) else {
+        return Ok(body.clone());
+    };
+    let mut normalized = object.clone();
+    let mut messages = Vec::new();
+    for item in input {
+        let role = item
+            .get("role")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                item.get("type")
+                    .and_then(Value::as_str)
+                    .filter(|kind| *kind == "message")
+                    .map(|_| "user")
+            })
+            .ok_or_else(|| invalid("Cursor input item declares no message role"))?;
+        let content = item.get("content").cloned().unwrap_or(Value::Null);
+        let content = match content {
+            Value::Array(parts) => {
+                let text = parts
+                    .iter()
+                    .filter_map(|part| {
+                        part.get("text")
+                            .and_then(Value::as_str)
+                            .or_else(|| part.get("input_text").and_then(Value::as_str))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                Value::String(text)
+            }
+            other => other,
+        };
+        messages.push(json!({"role": role, "content": content}));
+    }
+    normalized.remove("input");
+    normalized.remove("previous_response_id");
+    normalized.remove("store");
+    normalized.remove("include");
+    normalized.remove("truncation");
+    normalized.insert("messages".to_owned(), Value::Array(messages));
+    if let Some(Value::Array(tools)) = normalized.get_mut("tools") {
+        for tool in tools {
+            if tool.get("type").and_then(Value::as_str) == Some("function")
+                && tool.get("function").is_none()
+            {
+                let mut function = tool.clone();
+                if let Some(object) = function.as_object_mut() {
+                    object.remove("type");
+                    let mut wrapped = serde_json::Map::new();
+                    wrapped.insert("type".to_owned(), json!("function"));
+                    wrapped.insert("function".to_owned(), Value::Object(object.clone()));
+                    *tool = Value::Object(wrapped);
+                }
+            }
+        }
+    }
+    Ok(Value::Object(normalized))
+}
+
 impl Guest for OpenAiClient {
     fn metadata() -> AdapterMetadata {
         AdapterMetadata {
@@ -205,8 +274,12 @@ impl Guest for OpenAiClient {
 
     fn normalize_inbound(envelope: String) -> Result<String, String> {
         let envelope: AgentRequestEnvelope = parse_input(&envelope)?;
-        let body = &envelope.body;
-        validate_response_format(body)?;
+        let body = if envelope.agent_tool.as_deref() == Some("cursor") {
+            normalize_cursor_body(&envelope.body)?
+        } else {
+            envelope.body.clone()
+        };
+        validate_response_format(&body)?;
 
         let model = body["model"]
             .as_str()
@@ -467,6 +540,36 @@ mod tests {
             signature: None,
         }]);
         assert_eq!(content_to_json(Some(&reasoning_only)), Value::Null);
+    }
+
+    #[test]
+    fn cursor_responses_shape_is_lowered_to_chat_messages_and_function_tools() {
+        let body = json!({
+            "model": "tokenstation-auto",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "read marker"}]
+            }],
+            "tools": [{
+                "type": "function",
+                "name": "read_file",
+                "description": "Read a file",
+                "parameters": {"type": "object"}
+            }],
+            "previous_response_id": "resp_old",
+            "store": true
+        });
+        let normalized = normalize_cursor_body(&body).expect("Cursor body lowers");
+        assert_eq!(normalized["messages"][0]["role"], json!("user"));
+        assert_eq!(normalized["messages"][0]["content"], json!("read marker"));
+        assert_eq!(
+            normalized["tools"][0]["function"]["name"],
+            json!("read_file")
+        );
+        assert!(normalized.get("input").is_none());
+        assert!(normalized.get("previous_response_id").is_none());
+        assert!(normalized.get("store").is_none());
     }
 }
 
