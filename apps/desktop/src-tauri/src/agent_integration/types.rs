@@ -88,6 +88,8 @@ pub enum VersionOutputMatcher {
 pub struct ConfigLocation {
     pub env_override: Option<EnvOverride>,
     pub platform_defaults: BTreeMap<Platform, Vec<String>>,
+    #[serde(default)]
+    pub installation_path_defaults: BTreeMap<Platform, Vec<String>>,
     pub format: ConfigFormat,
 }
 

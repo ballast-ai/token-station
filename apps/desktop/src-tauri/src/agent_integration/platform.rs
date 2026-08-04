@@ -367,10 +367,35 @@ fn path_executable_names(name: &str, platform: Platform) -> Vec<String> {
 pub(crate) fn config_candidates(
     descriptor: &AgentDescriptor,
     environment: &ScanEnvironment,
+    installation_path: &std::path::Path,
 ) -> ConfigResolution {
     let mut candidates = Vec::new();
     let mut invalid_environment_names = Vec::new();
+    let scoped_match = descriptor.config_locations.iter().any(|location| {
+        location
+            .installation_path_defaults
+            .get(&environment.platform)
+            .is_some_and(|templates| {
+                templates.iter().any(|template| {
+                    expand_template(template, environment)
+                        .is_some_and(|path| path == installation_path)
+                })
+            })
+    });
     for location in &descriptor.config_locations {
+        let scoped = !location.installation_path_defaults.is_empty();
+        let matches_installation = location
+            .installation_path_defaults
+            .get(&environment.platform)
+            .is_some_and(|templates| {
+                templates.iter().any(|template| {
+                    expand_template(template, environment)
+                        .is_some_and(|path| path == installation_path)
+                })
+            });
+        if (scoped_match && !matches_installation) || (!scoped_match && scoped) {
+            continue;
+        }
         if let Some(override_) = &location.env_override {
             if let Some(value) = environment.variables.get(&override_.name) {
                 if is_absolute_for(environment.platform, value) {
