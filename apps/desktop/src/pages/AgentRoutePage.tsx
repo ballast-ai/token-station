@@ -103,7 +103,17 @@ function statusCopy(
         : copy(
             "The running Gateway did not load the required inbound adapter. No Agent configuration was changed.",
             "当前 Gateway 未加载所需入站适配器，暂不可接入；Agent 配置未被修改。",
-          ),
+      ),
+    };
+  }
+  if (installation?.compatibility.reason_code === "READ_ONLY_PREFLIGHT_FAILED") {
+    return {
+      tone: "danger",
+      label: copy("Management state unavailable", "接管状态不可用"),
+      detail: copy(
+        "The Agent remains visible in read-only mode, but Token Station cannot verify its management records. Connect and recovery actions are disabled.",
+        "Agent 仍可只读显示，但 Token Station 无法验证接管记录，接入和恢复操作已禁用。",
+      ),
     };
   }
   if (installation?.connected) {
@@ -119,7 +129,7 @@ function statusCopy(
       label: copy("Ready", "可接入"),
       detail: copy(
         "Cursor settings will be backed up and configured automatically.",
-        "运行中的 Cursor 不会被强制关闭。你可以手动填写 TS API，或退出 Cursor 后再点一键接入。",
+        "运行中的 Cursor 不会被强制关闭。请退出 Cursor 后再点一键接入。",
       ),
     };
   }
@@ -208,6 +218,7 @@ export default function AgentRoutePage({
   const canConnect = Boolean(
     installation
       && installation.adapter_ready !== false
+      && installation.compatibility.reason_code !== "READ_ONLY_PREFLIGHT_FAILED"
       && (metadata.agent_id === "cursor"
         || ["DETECTED_VERIFIED", "CONNECTED"].includes(installation.compatibility.status)
         || isExactMultiInstallSelection(agent, installation)),

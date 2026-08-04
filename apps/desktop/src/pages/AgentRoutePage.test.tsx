@@ -274,4 +274,80 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(screen.getByRole("button", { name: "一键接入" })).toBeDisabled();
     expect(planAgentConnection).not.toHaveBeenCalled();
   });
+
+  it("keeps Cursor visible but disables writes when ownership state is unavailable", async () => {
+    const cursor = installation(
+      "/Applications/Cursor.app/Contents/MacOS/Cursor",
+      "unknown",
+    );
+    cursor.adapter_ready = null;
+    cursor.discovery.agent_id = "cursor";
+    cursor.discovery.is_path_default = true;
+    cursor.discovery.conflict_group = null;
+    cursor.discovery.version_raw = null;
+    cursor.discovery.version_normalized = null;
+    cursor.discovery.diagnostics = [{
+      reason_code: "READ_ONLY_PREFLIGHT_FAILED",
+      message: "ownership unavailable",
+    }];
+    cursor.compatibility = {
+      agent_id: "cursor",
+      installation_path: cursor.discovery.canonical_path,
+      status: "DETECTED_UNKNOWN",
+      reason_code: "READ_ONLY_PREFLIGHT_FAILED",
+      message: "只读配置预检未通过，当前安装不能接入",
+      matched_catalog_version: "builtin",
+      connector_id: null,
+      allowed_actions: ["view_details", "rescan", "export_diagnostics"],
+    };
+    const agent: AgentView = {
+      metadata: {
+        agent_id: "cursor",
+        legacy_kind: null,
+        display_name: "Cursor",
+        icon_key: "cursor",
+        admission: "discovery_only",
+        ui_order: 45,
+        nav_mark: "C",
+      },
+      installations: [cursor],
+      status: "DETECTED_UNKNOWN",
+      catalog_sequence: 1,
+      catalog_expires_at_ms: null,
+      catalog_source: "builtin",
+      catalog_warning: null,
+    };
+
+    render(
+      <AgentRoutePage
+        metadata={agent.metadata}
+        agent={agent}
+        route={{
+          mode: "inherit",
+          tiers: {
+            high: { upstream: null, model: null },
+            mid: { upstream: null, model: null },
+            low: { upstream: null, model: null },
+          },
+          config_error: null,
+          profile: null,
+          routing_mode: "tiered",
+        }}
+        providers={[]}
+        profiles={[]}
+        quotaAccounts={[]}
+        serveRunning
+        applying={false}
+        onStateChange={vi.fn()}
+        onRescan={vi.fn()}
+        onSaveQuota={vi.fn()}
+        onSaveQuotaPlan={vi.fn()}
+        onViewQuotaUsage={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("接管状态不可用")).toBeInTheDocument();
+    expect(screen.getByText(/Agent 仍可只读显示/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "一键接入" })).toBeDisabled();
+  });
 });

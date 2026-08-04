@@ -101,6 +101,9 @@ fn run_probe_once(
     probe: &VersionProbe,
     environment: &ScanEnvironment,
 ) -> ProbeOutcome {
+    if matches!(probe.runtime, Some(ProbeRuntime::PassiveFile)) {
+        return passive_file_probe(executable, observed_entry);
+    }
     if unsupported_script_shim(executable, environment.platform)
         && !matches!(probe.runtime, Some(ProbeRuntime::NodePackage { .. }))
     {
@@ -143,6 +146,7 @@ fn run_probe_once(
         }
     };
     command.env("PATH", path);
+    configure_probe_window(&mut command, environment.platform);
 
     let mut child = match command.group_spawn() {
         Ok(child) => child,
@@ -256,6 +260,48 @@ fn run_probe_once(
     }
 }
 
+#[cfg(any(windows, test))]
+const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(any(windows, test))]
+fn probe_creation_flags(platform: Platform) -> u32 {
+    if platform == Platform::Windows {
+        WINDOWS_CREATE_NO_WINDOW
+    } else {
+        0
+    }
+}
+
+#[cfg(windows)]
+fn configure_probe_window(command: &mut Command, platform: Platform) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(probe_creation_flags(platform));
+}
+
+#[cfg(not(windows))]
+fn configure_probe_window(_command: &mut Command, _platform: Platform) {}
+
+fn passive_file_probe(executable: &Path, observed_entry: &Path) -> ProbeOutcome {
+    let executable = std::fs::canonicalize(executable);
+    let observed = std::fs::canonicalize(observed_entry);
+    let valid = executable.as_ref().is_ok_and(|path| {
+        observed.as_ref().is_ok_and(|observed| observed == path)
+            && std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+    });
+    if !valid {
+        return broken_probe(
+            ReasonCode::ExecutableNotRunnable,
+            "被动探测入口在确认前发生变化或不再是普通文件",
+        );
+    }
+    ProbeOutcome {
+        runnable: true,
+        version_raw: None,
+        version_normalized: None,
+        diagnostics: Vec::new(),
+    }
+}
+
 fn resolve_probe_command(
     executable: &Path,
     observed_entry: &Path,
@@ -276,6 +322,10 @@ fn resolve_probe_command(
             canonical_program: canonical_executable,
             arguments: probe.argv.iter().map(std::ffi::OsString::from).collect(),
         }),
+        ProbeRuntime::PassiveFile => Err(broken_probe(
+            ReasonCode::ExecutableNotRunnable,
+            "被动文件探测不能进入进程启动路径",
+        )),
         ProbeRuntime::EnvShebang {
             interpreter_candidates,
             resolution_sources,
@@ -1655,6 +1705,43 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn passive_file_probe_never_launches_the_discovered_application() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch("passive-file-probe");
+        let marker = root.join("launched");
+        let executable = root.join("Cursor");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf launched > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let context = environment(&root);
+        let probe = VersionProbe {
+            argv: Vec::new(),
+            timeout_ms: 2_000,
+            max_output_bytes: 1_024,
+            output_matcher: super::super::types::VersionOutputMatcher::SuccessOnly,
+            retry_on_timeout: false,
+            runtime: Some(ProbeRuntime::PassiveFile),
+        };
+
+        let outcome = SystemProbeRunner.run(&executable, &executable, &probe, &context);
+
+        assert!(outcome.runnable, "{:?}", outcome.diagnostics);
+        assert!(outcome.version_raw.is_none());
+        assert!(outcome.version_normalized.is_none());
+        assert!(outcome.diagnostics.is_empty());
+        assert!(
+            !marker.exists(),
+            "passive discovery launched the application"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "token-station-discovery-{name}-{}-{}",
@@ -2253,6 +2340,17 @@ mod tests {
             assert_eq!(normalize_version(raw).as_deref(), Some(expected));
         }
         assert_eq!(normalize_version("claude 9.2.1.211"), None);
+    }
+
+    #[test]
+    fn windows_probe_processes_use_the_no_window_creation_flag() {
+        assert_eq!(
+            probe_creation_flags(Platform::Windows),
+            WINDOWS_CREATE_NO_WINDOW
+        );
+        for platform in [Platform::Macos, Platform::Linux, Platform::Wsl] {
+            assert_eq!(probe_creation_flags(platform), 0);
+        }
     }
 
     #[test]

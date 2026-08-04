@@ -371,10 +371,13 @@
         "windows": ["${LOCALAPPDATA}/Programs/Cursor/Cursor.exe"]
       },
       "version_probe": {
-        "argv": ["--version"],
+        "argv": [],
         "timeout_ms": 2000,
         "max_output_bytes": 65536,
-        "output_matcher": "SEMVER_ANYWHERE"
+        "output_matcher": "SUCCESS_ONLY",
+        "runtime": {
+          "kind": "passive_file"
+        }
       },
       "config_locations": [],
       "protocol_binding": null,
