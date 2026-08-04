@@ -11,12 +11,16 @@ import AddProviderPage, {
 } from "./AddProviderPage";
 
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async (command: string) => {
+  invoke: vi.fn(async (command: string, args?: { baseUrl?: string }) => {
     if (command === "preview_provider_endpoints") {
+      const loopback = args?.baseUrl?.startsWith("http://127.0.0.1")
+        || args?.baseUrl?.startsWith("http://localhost")
+        || false;
       return {
         chat: "https://api.minimaxi.com/v1/chat/completions",
         responses: "https://api.minimaxi.com/v1/responses",
         messages: "https://api.minimaxi.com/v1/messages",
+        loopback,
       };
     }
     if (command === "add_provider_with_credential") return {};
@@ -208,6 +212,32 @@ describe("AddProviderPage", () => {
     expect(screen.getByText("https://api.minimaxi.com/v1/messages")).toBeInTheDocument();
   });
 
+  it("disables the local-model flag for the DeepSeek cloud preset", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage();
+
+    await pickPreset(user, "DeepSeek");
+
+    const local = screen.getByRole("checkbox", { name: /这是本机运行的本地模型/ });
+    expect(local).not.toBeChecked();
+    expect(local).toBeDisabled();
+    expect(await screen.findByText(/云端地址不能标记为本地模型/)).toBeInTheDocument();
+  });
+
+  it("keeps the local-model flag available for the Ollama loopback preset", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage();
+
+    await pickPreset(user, "本地 Ollama");
+
+    const local = screen.getByRole("checkbox", { name: /这是本机运行的本地模型/ });
+    expect(local).toBeChecked();
+    expect(local).toBeEnabled();
+    expect(await screen.findByText(/已检测到本机回环地址/)).toBeInTheDocument();
+  });
+
   it("uses local store by default and submits env credentials as references only", async () => {
     window.localStorage.setItem("token-station-language", "zh-CN");
     const user = userEvent.setup();
@@ -224,6 +254,7 @@ describe("AddProviderPage", () => {
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("add_provider_with_credential", expect.objectContaining({
       name: "deepseek",
       apiKey: null,
+      local: false,
       credentialSource: "env",
       credentialReference: "DEEPSEEK_API_KEY",
     }));
