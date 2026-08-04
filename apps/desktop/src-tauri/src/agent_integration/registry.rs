@@ -840,7 +840,14 @@ mod tests {
         assert_eq!(
             registry.descriptors()[0].known_install_locations
                 [&super::super::types::Platform::Macos],
-            ["${HOME}/.local/bin/claude"]
+            [
+                "${HOME}/.local/bin/claude",
+                "${HOME}/.npm-global/bin/claude",
+                "${HOME}/Library/pnpm/claude",
+                "${HOME}/.local/share/pnpm/claude",
+                "${HOME}/.bun/bin/claude",
+                "${HOME}/.volta/bin/claude",
+            ]
         );
         assert!(registry
             .descriptors()
@@ -855,6 +862,34 @@ mod tests {
         shuffled["agents"].as_array_mut().unwrap().reverse();
         let shuffled = validate(&shuffled).unwrap();
         assert_eq!(registry.descriptors(), shuffled.descriptors());
+    }
+
+    #[test]
+    fn builtin_macos_registry_covers_common_user_cli_locations() {
+        use super::super::types::Platform;
+
+        let registry = AgentRegistry::builtin().unwrap();
+        let expected = [
+            ("claude-code", "${HOME}/.npm-global/bin/claude"),
+            ("gemini-cli", "${HOME}/Library/pnpm/gemini"),
+            ("opencode", "${HOME}/.opencode/bin/opencode"),
+            ("openclaw", "${HOME}/.local/share/pnpm/openclaw"),
+            ("nous-hermes-agent", "${HOME}/.local/bin/hermes"),
+        ];
+
+        for (agent_id, path) in expected {
+            let descriptor = registry
+                .descriptors()
+                .iter()
+                .find(|descriptor| descriptor.agent_id == agent_id)
+                .unwrap();
+            assert!(
+                descriptor.known_install_locations[&Platform::Macos]
+                    .iter()
+                    .any(|candidate| candidate == path),
+                "{agent_id} is missing {path}"
+            );
+        }
     }
 
     #[test]

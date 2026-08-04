@@ -185,18 +185,29 @@ impl SecretStore {
                 .get(&store_key(upstream, slot))
                 .cloned()
                 .ok_or_else(|| {
-                    format!("secret `{slot}`: not in the local store (re-enter the key)")
+                    format!(
+                        "upstream `{upstream}` secret `{slot}`: not in the local store (re-enter the key)"
+                    )
                 }),
             Source::Env(name) => std::env::var(name)
-                .map_err(|_| format!("secret `{slot}`: environment variable `{name}` is not set")),
+                .map_err(|_| {
+                    format!(
+                        "upstream `{upstream}` secret `{slot}`: environment variable `{name}` is not set"
+                    )
+                }),
             Source::File(path) => std::fs::read_to_string(path).map_err(|error| {
-                format!("secret `{slot}`: cannot read `{}`: {error}", path.display())
+                format!(
+                    "upstream `{upstream}` secret `{slot}`: cannot read `{}`: {error}",
+                    path.display()
+                )
             }),
         }?;
 
         let value = value.trim();
         if value.is_empty() {
-            return Err(format!("secret `{slot}` resolved to an empty value"));
+            return Err(format!(
+                "upstream `{upstream}` secret `{slot}` resolved to an empty value"
+            ));
         }
         Ok(value.to_owned())
     }
@@ -313,6 +324,8 @@ mod tests {
             .resolve("openai_personal", "provider_api_key")
             .expect_err("nothing set");
         assert!(missing.contains("re-enter"), "{missing}");
+        assert!(missing.contains("openai_personal"), "{missing}");
+        assert!(missing.contains("provider_api_key"), "{missing}");
         assert!(!missing.contains("sk-"), "no value material in errors");
         fs::remove_dir_all(dir).ok();
     }

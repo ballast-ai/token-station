@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::PathBuf;
 
-use super::types::{AgentDescriptor, ConfigFormat, DiscoverySource, EnvValueKind, Platform};
+use super::types::{
+    AgentDescriptor, ConfigFormat, DiscoverySource, EnvValueKind, Platform, ProbeRuntime,
+};
 
 const ROOT_VARIABLES: &[&str] = &[
     "HOME",
@@ -125,6 +128,27 @@ pub(crate) fn executable_candidates(
         }
     }
 
+    if environment.platform == Platform::Macos
+        && matches!(
+            descriptor.version_probe.runtime.as_ref(),
+            Some(ProbeRuntime::NodePackage { .. })
+        )
+    {
+        if let Some(prefix) = macos_npm_prefix(environment) {
+            for executable in &descriptor.executable_candidates {
+                candidates.push(ExecutableCandidate {
+                    path: prefix.join("bin").join(executable),
+                    source: DiscoverySource::KnownPath,
+                    path_order: None,
+                });
+            }
+        }
+    }
+
+    if environment.platform == Platform::Macos && descriptor.agent_id == "nous-hermes-agent" {
+        candidates.extend(macos_python_user_candidates(environment, "hermes"));
+    }
+
     for (path_order, directory) in environment.path_entries.iter().enumerate() {
         for executable in &descriptor.executable_candidates {
             let names = path_executable_names(executable, environment.platform);
@@ -136,6 +160,104 @@ pub(crate) fn executable_candidates(
         }
     }
     candidates
+}
+
+const MAX_USER_CONFIG_BYTES: u64 = 65_536;
+const MAX_PYTHON_USER_VERSIONS: usize = 32;
+
+fn macos_npm_prefix(environment: &ScanEnvironment) -> Option<PathBuf> {
+    let home = environment.variables.get("HOME")?;
+    if !is_absolute_for(Platform::Macos, home) {
+        return None;
+    }
+    let mut file = std::fs::File::open(PathBuf::from(home).join(".npmrc")).ok()?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(MAX_USER_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_USER_CONFIG_BYTES {
+        return None;
+    }
+    let text = std::str::from_utf8(&bytes).ok()?;
+    let mut prefix = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(['#', ';']) {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("prefix") {
+            let value = value
+                .trim()
+                .trim_matches(|character| matches!(character, '\'' | '"'));
+            prefix = safe_absolute_user_prefix(value);
+        }
+    }
+    prefix
+}
+
+fn safe_absolute_user_prefix(value: &str) -> Option<PathBuf> {
+    if value.is_empty()
+        || value.contains(['\0', '$', '`'])
+        || value.contains("://")
+        || !is_absolute_for(Platform::Macos, value)
+    {
+        return None;
+    }
+    let path = PathBuf::from(value);
+    if path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        )
+    }) {
+        return None;
+    }
+    Some(path)
+}
+
+fn macos_python_user_candidates(
+    environment: &ScanEnvironment,
+    executable: &str,
+) -> Vec<ExecutableCandidate> {
+    let Some(home) = environment.variables.get("HOME") else {
+        return Vec::new();
+    };
+    if !is_absolute_for(Platform::Macos, home) {
+        return Vec::new();
+    }
+    let root = PathBuf::from(home).join("Library/Python");
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut versions: Vec<_> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            name.to_str()
+                .is_some_and(|name| {
+                    !name.is_empty()
+                        && name
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+                })
+                .then(|| entry.path())
+        })
+        .collect();
+    versions.sort();
+    versions.truncate(MAX_PYTHON_USER_VERSIONS);
+    versions
+        .into_iter()
+        .map(|version| ExecutableCandidate {
+            path: version.join("bin").join(executable),
+            source: DiscoverySource::KnownPath,
+            path_order: None,
+        })
+        .collect()
 }
 
 #[cfg(target_os = "windows")]
@@ -386,6 +508,7 @@ pub fn current_platform() -> Platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn environment(platform: Platform) -> ScanEnvironment {
         ScanEnvironment {
@@ -477,5 +600,106 @@ mod tests {
                 PathBuf::from("C:/Program Files/WindowsApps/pkg/resources/codex.exe"),
             ]
         );
+    }
+
+    #[test]
+    fn macos_node_agents_include_the_safe_npm_prefix_from_user_config() {
+        let root = std::env::temp_dir().join(format!(
+            "token-station-npm-prefix-platform-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(".npmrc"),
+            format!("prefix={}\n", root.join("local/npm-global").display()),
+        )
+        .unwrap();
+
+        let mut context = environment(Platform::Macos);
+        context
+            .variables
+            .insert("HOME".to_string(), root.to_string_lossy().into_owned());
+        let registry = super::super::registry::AgentRegistry::builtin().unwrap();
+        for agent_id in ["claude-code", "gemini-cli", "opencode", "openclaw"] {
+            let descriptor = registry
+                .descriptors()
+                .iter()
+                .find(|descriptor| descriptor.agent_id == agent_id)
+                .unwrap();
+            let executable = descriptor.executable_candidates[0].as_str();
+            let expected = root.join("local/npm-global/bin").join(executable);
+            assert!(
+                executable_candidates(descriptor, &context)
+                    .iter()
+                    .any(|candidate| candidate.path == expected
+                        && candidate.source == DiscoverySource::KnownPath),
+                "{agent_id} did not include {}",
+                expected.display()
+            );
+        }
+
+        fs::write(root.join(".npmrc"), "prefix=$(touch /tmp/never-run)\n").unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "openclaw")
+            .unwrap();
+        assert!(executable_candidates(descriptor, &context)
+            .iter()
+            .all(|candidate| !candidate.path.to_string_lossy().contains("never-run")));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn macos_npm_prefix_rejects_values_that_expand_or_escape() {
+        assert_eq!(
+            safe_absolute_user_prefix("/Users/tester/local/npm-global"),
+            Some(PathBuf::from("/Users/tester/local/npm-global"))
+        );
+        for value in [
+            "relative/npm-global",
+            "${HOME}/npm-global",
+            "$(touch /tmp/never-run)",
+            "https://example.invalid/npm",
+            "/Users/tester/../escape",
+        ] {
+            assert!(safe_absolute_user_prefix(value).is_none(), "{value}");
+        }
+    }
+
+    #[test]
+    fn macos_hermes_checks_bounded_python_user_bins_without_path() {
+        let root = std::env::temp_dir().join(format!(
+            "token-station-python-user-platform-{}",
+            std::process::id()
+        ));
+        for minor in 0..40 {
+            fs::create_dir_all(root.join(format!("Library/Python/3.{minor}/bin"))).unwrap();
+        }
+        fs::create_dir_all(root.join("Library/Python/not-a-version/bin")).unwrap();
+
+        let mut context = environment(Platform::Macos);
+        context
+            .variables
+            .insert("HOME".to_string(), root.to_string_lossy().into_owned());
+        let registry = super::super::registry::AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "nous-hermes-agent")
+            .unwrap();
+        let paths: Vec<_> = executable_candidates(descriptor, &context)
+            .into_iter()
+            .map(|candidate| candidate.path)
+            .collect();
+
+        let python_paths: Vec<_> = paths
+            .iter()
+            .filter(|path| path.starts_with(root.join("Library/Python")))
+            .collect();
+        assert_eq!(python_paths.len(), MAX_PYTHON_USER_VERSIONS);
+        assert!(paths.contains(&root.join("Library/Python/3.12/bin/hermes")));
+        assert!(!paths.contains(&root.join("Library/Python/not-a-version/bin/hermes")));
+        fs::remove_dir_all(root).ok();
     }
 }

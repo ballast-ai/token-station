@@ -12,7 +12,14 @@
       "admission": "supported",
       "executable_candidates": ["claude"],
       "known_install_locations": {
-        "macos": ["${HOME}/.local/bin/claude"],
+        "macos": [
+          "${HOME}/.local/bin/claude",
+          "${HOME}/.npm-global/bin/claude",
+          "${HOME}/Library/pnpm/claude",
+          "${HOME}/.local/share/pnpm/claude",
+          "${HOME}/.bun/bin/claude",
+          "${HOME}/.volta/bin/claude"
+        ],
         "linux": ["${HOME}/.local/bin/claude"],
         "windows": ["${APPDATA}/npm/claude.cmd", "${USERPROFILE}/.local/bin/claude.exe"],
         "wsl": ["${HOME}/.local/bin/claude"]
@@ -27,7 +34,7 @@
           "interpreter_candidates": ["node", "node.exe"],
           "resolution_sources": ["observed_entry_sibling", "path", "known_install_locations"],
           "known_install_locations": {
-            "macos": ["/opt/homebrew/bin/node", "/usr/local/bin/node"],
+            "macos": ["${HOME}/.local/bin/node", "${HOME}/.bun/bin/node", "${HOME}/.volta/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"],
             "linux": ["/usr/local/bin/node", "/usr/bin/node"],
             "windows": ["C:/Program Files/nodejs/node.exe", "${LOCALAPPDATA}/Programs/nodejs/node.exe"],
             "wsl": ["/usr/local/bin/node", "/usr/bin/node"]
@@ -171,7 +178,16 @@
       "admission": "supported",
       "executable_candidates": ["gemini"],
       "known_install_locations": {
-        "macos": ["${HOME}/.local/bin/gemini", "/opt/homebrew/bin/gemini", "/usr/local/bin/gemini"],
+        "macos": [
+          "${HOME}/.local/bin/gemini",
+          "${HOME}/.npm-global/bin/gemini",
+          "${HOME}/Library/pnpm/gemini",
+          "${HOME}/.local/share/pnpm/gemini",
+          "${HOME}/.bun/bin/gemini",
+          "${HOME}/.volta/bin/gemini",
+          "/opt/homebrew/bin/gemini",
+          "/usr/local/bin/gemini"
+        ],
         "linux": ["${HOME}/.local/bin/gemini", "/usr/local/bin/gemini", "/usr/bin/gemini"],
         "windows": ["${APPDATA}/npm/gemini.cmd"],
         "wsl": ["${HOME}/.local/bin/gemini", "/usr/local/bin/gemini", "/usr/bin/gemini"]
@@ -186,7 +202,7 @@
           "interpreter_candidates": ["node", "node.exe"],
           "resolution_sources": ["observed_entry_sibling", "path", "known_install_locations"],
           "known_install_locations": {
-            "macos": ["${HOME}/.local/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"],
+            "macos": ["${HOME}/.local/bin/node", "${HOME}/.bun/bin/node", "${HOME}/.volta/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"],
             "linux": ["${HOME}/.local/bin/node", "/usr/local/bin/node", "/usr/bin/node"],
             "windows": ["C:/Program Files/nodejs/node.exe", "${LOCALAPPDATA}/Programs/nodejs/node.exe"],
             "wsl": ["${HOME}/.local/bin/node", "/usr/local/bin/node", "/usr/bin/node"]
@@ -268,7 +284,14 @@
       "admission": "supported",
       "executable_candidates": ["openclaw"],
       "known_install_locations": {
-        "macos": ["${HOME}/.local/bin/openclaw"],
+        "macos": [
+          "${HOME}/.local/bin/openclaw",
+          "${HOME}/.npm-global/bin/openclaw",
+          "${HOME}/Library/pnpm/openclaw",
+          "${HOME}/.local/share/pnpm/openclaw",
+          "${HOME}/.bun/bin/openclaw",
+          "${HOME}/.volta/bin/openclaw"
+        ],
         "linux": ["${HOME}/.local/bin/openclaw"],
         "windows": ["${APPDATA}/npm/openclaw.cmd", "${USERPROFILE}/.local/bin/openclaw.exe"],
         "wsl": ["${HOME}/.local/bin/openclaw"]
@@ -283,7 +306,7 @@
           "interpreter_candidates": ["node", "node.exe"],
           "resolution_sources": ["observed_entry_sibling", "path", "known_install_locations"],
           "known_install_locations": {
-            "macos": ["${HOME}/.local/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"],
+            "macos": ["${HOME}/.local/bin/node", "${HOME}/.bun/bin/node", "${HOME}/.volta/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"],
             "linux": ["${HOME}/.local/bin/node", "/usr/local/bin/node", "/usr/bin/node"],
             "windows": ["C:/Program Files/nodejs/node.exe", "${LOCALAPPDATA}/Programs/nodejs/node.exe"],
             "wsl": ["${HOME}/.local/bin/node", "/usr/local/bin/node", "/usr/bin/node"]
@@ -391,7 +414,17 @@
       "admission": "supported",
       "executable_candidates": ["opencode"],
       "known_install_locations": {
-        "macos": ["/opt/homebrew/bin/opencode"],
+        "macos": [
+          "${HOME}/.local/bin/opencode",
+          "${HOME}/.opencode/bin/opencode",
+          "${HOME}/.npm-global/bin/opencode",
+          "${HOME}/Library/pnpm/opencode",
+          "${HOME}/.local/share/pnpm/opencode",
+          "${HOME}/.bun/bin/opencode",
+          "${HOME}/.volta/bin/opencode",
+          "/opt/homebrew/bin/opencode",
+          "/usr/local/bin/opencode"
+        ],
         "linux": [
           "${HOME}/.local/bin/opencode",
           "${HOME}/.opencode/bin/opencode",
@@ -416,7 +449,7 @@
           "interpreter_candidates": ["node", "node.exe"],
           "resolution_sources": ["observed_entry_sibling", "path", "known_install_locations"],
           "known_install_locations": {
-            "macos": ["/opt/homebrew/bin/node", "/usr/local/bin/node"],
+            "macos": ["${HOME}/.local/bin/node", "${HOME}/.bun/bin/node", "${HOME}/.volta/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"],
             "linux": ["/usr/local/bin/node", "/usr/bin/node"],
             "windows": ["C:/Program Files/nodejs/node.exe", "${LOCALAPPDATA}/Programs/nodejs/node.exe"],
             "wsl": ["/usr/local/bin/node", "/usr/bin/node"]
