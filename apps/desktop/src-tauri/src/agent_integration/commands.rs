@@ -2186,7 +2186,7 @@ mod tests {
     fn commands_installation_path_is_only_an_exact_scan_lookup_key() {
         let state = state("lookup");
         let registry_metadata = state.registry_metadata();
-        assert_eq!(registry_metadata.len(), 8);
+        assert_eq!(registry_metadata.len(), 9);
         assert_eq!(registry_metadata[0].agent_id, "claude-code");
         let target = scratch("lookup-target").join("settings.json");
         let registry = AgentRegistry::builtin().unwrap();
@@ -2220,7 +2220,7 @@ mod tests {
             records: Vec::new(),
         };
         let views = state.views(&empty, None).unwrap();
-        assert_eq!(views.len(), 8);
+        assert_eq!(views.len(), 9);
         assert!(views.iter().all(|view| {
             view.status == CompatibilityStatus::NotDetected && view.installations.is_empty()
         }));
@@ -2886,7 +2886,7 @@ mod tests {
         assert_eq!(error.code, "read_only_preflight_failed");
 
         let scanned = state.scan().unwrap();
-        assert_eq!(scanned.len(), 8);
+        assert_eq!(scanned.len(), 9);
         assert!(state.session.lock().unwrap().scan.is_some());
     }
 
