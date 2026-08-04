@@ -84,6 +84,8 @@ export interface ProviderEndpointPreview {
   chat: string;
   responses: string;
   messages: string;
+  /** 后端统一判定的回环端点资格；只有 true 才能标记为本地模型。 */
+  loopback: boolean;
 }
 
 export interface ProviderRemovalPreview {

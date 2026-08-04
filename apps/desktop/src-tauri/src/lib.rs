@@ -679,6 +679,7 @@ struct ProviderEndpointPreview {
     chat: String,
     responses: String,
     messages: String,
+    loopback: bool,
 }
 
 #[derive(Serialize)]
@@ -1992,6 +1993,7 @@ fn preview_provider_endpoints(base_url: String) -> Result<ProviderEndpointPrevie
         chat: endpoint.resolve(ProviderApi::ChatCompletions),
         responses: endpoint.resolve(ProviderApi::Responses),
         messages: endpoint.resolve(ProviderApi::Messages),
+        loopback: endpoint.is_loopback(),
     })
 }
 
@@ -6657,7 +6659,11 @@ mod tests {
             assert_eq!(preview.chat, "https://api.example.com/v1/chat/completions");
             assert_eq!(preview.responses, "https://api.example.com/v1/responses");
             assert_eq!(preview.messages, "https://api.example.com/v1/messages");
+            assert!(!preview.loopback);
         }
+
+        let local = preview_provider_endpoints("http://127.0.0.1:11434/v1".to_owned()).unwrap();
+        assert!(local.loopback);
     }
 
     #[test]
