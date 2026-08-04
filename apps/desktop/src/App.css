@@ -4932,7 +4932,8 @@ pre.block {
 }
 
 .station-brand-mark img.dark-mode {
-  filter: invert(1);
+  /* Invert black and cream, then restore the orange accent's original hue. */
+  filter: invert(1) hue-rotate(180deg);
 }
 
 .station-primary-nav {
