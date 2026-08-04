@@ -2,7 +2,7 @@
 
 日期：2026-08-04
 
-状态：受限 App 扫描和版本标签已完成本机验收，未推送远端
+状态：受限 App 扫描和版本标签已追加到 PR #63；补充 Linux CI 编译边界修复中
 
 ## 1. 问题、目标和范围
 
@@ -34,6 +34,7 @@ bundle id `com.workbuddy.workbuddy-ai`，并在 `product.json` 声明数据目�
 7. 动态发现的 App 必须同时满足 WorkBuddy bundle id、腾讯 Team ID、有效代码签名和固定
    `cli/bin/codebuddy` 内部路径；验证前不能执行其中的文件。
 8. 扫描深度固定为 App 根目录一层；不递归用户目录、挂载盘或 App 内容。
+9. 仅由 macOS 签名扫描调用的辅助函数不得进入非 macOS 的普通构建；Linux CI 仍保留对应单元测试编译覆盖。
 
 ## 3. 用户可见行为和失败处理
 
@@ -133,3 +134,8 @@ Clippy、前端测试与生产构建。完成后执行 `scripts/install-local-de
   `~/.workbuddy-ai/models.json`；前者修改时间保持不变，后者继续不存在。
 
 本地分支为 `codex/workbuddy-ai-variant`。没有推送远端，也没有更新 PR #63。
+
+2026-08-04 CI 修复：PR #63 的 Linux 编译启用了 `-D warnings`。WorkBuddy 签名身份辅助函数
+只由 macOS 扫描路径调用，普通 Linux 构建因此把它判定为未使用。该函数改为仅在 macOS 或测试
+构建时编译，生产 Linux 二进制不再包含 macOS 专用签名解析代码，现有跨平台单元测试仍可直接覆盖
+两个允许的签名身份和拒绝情形。
