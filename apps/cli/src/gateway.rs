@@ -2794,6 +2794,9 @@ impl Gateway {
                 "anthropic-messages" if header_digest.contains("x-claude-code-session-id") => {
                     Some("claude-code".to_owned())
                 }
+                "openai-chat-completions" if record.agent_id.as_deref() == Some("cursor") => {
+                    Some("cursor".to_owned())
+                }
                 _ => None,
             },
             headers: header_digest,
