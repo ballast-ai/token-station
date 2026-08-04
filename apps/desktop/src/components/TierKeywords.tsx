@@ -71,29 +71,20 @@ export default function TierKeywords({
         const rowDisabled = disabled || !ready;
 
         return (
-          <div className="keyword-row" key={slot}>
+          <div className="keyword-row" key={slot} role="group" aria-label={label}>
             <div className={`tier-badge ${slot}`}>
               <div className="tier-label">{label}</div>
               <div className="tier-hint">{hint}</div>
             </div>
 
             <div className="keyword-body">
-              <div className="keyword-chips">
-                {words.length === 0 && (
-                  <span className="keyword-empty">
-                    {ready
-                      ? copy(
-                          "No keywords yet. Add one to keep matching requests in this tier.",
-                          "这一档还没有关键词。添加关键词后，匹配的请求会固定到这一档。",
-                        )
-                      : copy(
-                          "Select a provider and model for this tier first.",
-                          "先在上方为该档选好供应商和模型。",
-                        )}
-                  </span>
-                )}
+              <div
+                className="keyword-chips"
+                role="list"
+                aria-label={copy(`${label} keywords`, `${label}关键词列表`)}
+              >
                 {words.map((word) => (
-                  <span className="keyword-chip" key={word}>
+                  <span className="keyword-chip" key={word} role="listitem">
                     <span className="keyword-text">{word}</span>
                     <button
                       type="button"
@@ -111,6 +102,7 @@ export default function TierKeywords({
               <div className="keyword-add">
                 <input
                   className="input"
+                  aria-label={copy(`${label} keyword`, `${label}关键词`)}
                   placeholder={ready ? placeholder : copy("This tier has no model", "该档未配置模型")}
                   value={drafts[slot]}
                   disabled={rowDisabled}
