@@ -1883,7 +1883,7 @@ mod tests {
             "Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
         );
         let overseas = root.join(
-            "Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+            "Volumes/WorkBuddy DMG/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
         );
         executable(&domestic);
         executable(&overseas);
@@ -1908,15 +1908,13 @@ mod tests {
                 overseas.to_string_lossy().into_owned(),
             ],
         );
-        descriptor.config_locations[1]
-            .installation_path_defaults
-            .insert(
-                Platform::Macos,
-                vec![overseas.to_string_lossy().into_owned()],
-            );
         let scanner = DiscoveryScanner::new(environment(&root), FixedProbe);
 
-        let records = scanner.scan_descriptor(&descriptor);
+        let records: Vec<_> = scanner
+            .scan_descriptor(&descriptor)
+            .into_iter()
+            .filter(|record| Path::new(&record.executable_path).starts_with(&root))
+            .collect();
         assert_eq!(records.len(), 2);
         assert!(records.iter().all(|record| record.agent_id == "workbuddy"));
         assert!(records.iter().all(|record| record.conflict_group.is_some()));
@@ -1940,7 +1938,11 @@ mod tests {
         let overseas_fingerprint = overseas_record.config_fingerprint.clone();
 
         std::fs::write(&overseas_config, br#"{"models":[{"id":"changed"}]}"#).unwrap();
-        let rescanned = scanner.scan_descriptor(&descriptor);
+        let rescanned: Vec<_> = scanner
+            .scan_descriptor(&descriptor)
+            .into_iter()
+            .filter(|record| Path::new(&record.executable_path).starts_with(&root))
+            .collect();
         assert_eq!(
             rescanned
                 .iter()

@@ -73,6 +73,27 @@ describe("InstallationPicker", () => {
     ]);
   });
 
+  it("labels WorkBuddy variants by their verified app bundle path", () => {
+    const labels = installationLabels(
+      [
+        installation(
+          "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+          "2.115.0",
+        ),
+        installation(
+          "/Volumes/WorkBuddy/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+          "2.106.4",
+        ),
+      ],
+      { china: "WorkBuddy 中国版", global: "WorkBuddy 海外版" },
+    );
+
+    expect(labels.map((item) => item.label)).toEqual([
+      "WorkBuddy 中国版 · v2.115.0",
+      "WorkBuddy 海外版 · v2.106.4",
+    ]);
+  });
+
   it("returns the exact visible canonical path and closes after selection", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::types::{
     AgentDescriptor, ConfigFormat, DiscoverySource, EnvValueKind, Platform, ProbeRuntime,
@@ -113,6 +113,17 @@ pub(crate) fn executable_candidates(
             }
         }));
     }
+    if descriptor.agent_id == "workbuddy" && environment.platform == Platform::Macos {
+        candidates.extend(
+            macos_workbuddy_app_candidates(environment)
+                .into_iter()
+                .map(|path| ExecutableCandidate {
+                    path,
+                    source: DiscoverySource::KnownPath,
+                    path_order: None,
+                }),
+        );
+    }
     if let Some(templates) = descriptor
         .known_install_locations
         .get(&environment.platform)
@@ -160,6 +171,115 @@ pub(crate) fn executable_candidates(
         }
     }
     candidates
+}
+
+const WORKBUDDY_CLI_RELATIVE_PATH: &str = "Contents/Resources/app.asar.unpacked/cli/bin/codebuddy";
+const MAX_APP_SCAN_ENTRIES: usize = 1_024;
+
+fn direct_app_bundles(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .take(MAX_APP_SCAN_ENTRIES)
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            (metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && path.extension().is_some_and(|extension| extension == "app"))
+            .then_some(path)
+        })
+        .collect()
+}
+
+fn bounded_macos_app_candidates(
+    applications: &Path,
+    user_applications: Option<&Path>,
+    volumes: &Path,
+    validate: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
+    let mut apps = direct_app_bundles(applications);
+    if let Some(root) = user_applications {
+        apps.extend(direct_app_bundles(root));
+    }
+    if let Ok(mounts) = std::fs::read_dir(volumes) {
+        for mount in mounts.take(MAX_APP_SCAN_ENTRIES).filter_map(Result::ok) {
+            let path = mount.path();
+            if std::fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            {
+                apps.extend(direct_app_bundles(&path));
+            }
+        }
+    }
+    apps.into_iter()
+        .filter(|app| validate(app))
+        .map(|app| app.join(WORKBUDDY_CLI_RELATIVE_PATH))
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn verified_workbuddy_bundle(app: &Path) -> bool {
+    let cli = app.join(WORKBUDDY_CLI_RELATIVE_PATH);
+    if !std::fs::symlink_metadata(&cli)
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+    {
+        return false;
+    }
+    let verified = std::process::Command::new("/usr/bin/codesign")
+        .args(["--verify", "--strict"])
+        .arg(app)
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !verified {
+        return false;
+    }
+    let Ok(output) = std::process::Command::new("/usr/bin/codesign")
+        .args(["-dv", "--verbose=2"])
+        .arg(app)
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() || output.stderr.len() > MAX_USER_CONFIG_BYTES as usize {
+        return false;
+    }
+    workbuddy_signing_identity_is_allowed(&output.stderr)
+}
+
+fn workbuddy_signing_identity_is_allowed(bytes: &[u8]) -> bool {
+    let metadata = String::from_utf8_lossy(bytes);
+    let identifier = metadata
+        .lines()
+        .find_map(|line| line.strip_prefix("Identifier="));
+    let team = metadata
+        .lines()
+        .find_map(|line| line.strip_prefix("TeamIdentifier="));
+    matches!(
+        identifier,
+        Some("com.workbuddy.workbuddy" | "com.workbuddy.workbuddy-ai")
+    ) && team == Some("FN2V63AD2J")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn verified_workbuddy_bundle(_app: &Path) -> bool {
+    false
+}
+
+fn macos_workbuddy_app_candidates(environment: &ScanEnvironment) -> Vec<PathBuf> {
+    let user_applications = environment
+        .variables
+        .get("HOME")
+        .filter(|home| is_absolute_for(Platform::Macos, home))
+        .map(|home| PathBuf::from(home).join("Applications"));
+    bounded_macos_app_candidates(
+        Path::new("/Applications"),
+        user_applications.as_deref(),
+        Path::new("/Volumes"),
+        verified_workbuddy_bundle,
+    )
 }
 
 const MAX_USER_CONFIG_BYTES: u64 = 65_536;
@@ -364,6 +484,30 @@ fn path_executable_names(name: &str, platform: Platform) -> Vec<String> {
     }
 }
 
+fn app_bundle_suffix(path: &Path) -> Option<PathBuf> {
+    let components: Vec<_> = path.components().collect();
+    let start = components.iter().position(|component| {
+        Path::new(component.as_os_str())
+            .extension()
+            .is_some_and(|extension| extension == "app")
+    })?;
+    Some(
+        components[start..]
+            .iter()
+            .fold(PathBuf::new(), |suffix, component| {
+                suffix.join(component.as_os_str())
+            }),
+    )
+}
+
+fn installation_path_matches(actual: &Path, declared: &Path) -> bool {
+    actual == declared
+        || app_bundle_suffix(actual).is_some_and(|actual_suffix| {
+            app_bundle_suffix(declared)
+                .is_some_and(|declared_suffix| actual_suffix == declared_suffix)
+        })
+}
+
 pub(crate) fn config_candidates(
     descriptor: &AgentDescriptor,
     environment: &ScanEnvironment,
@@ -378,7 +522,7 @@ pub(crate) fn config_candidates(
             .is_some_and(|templates| {
                 templates.iter().any(|template| {
                     expand_template(template, environment)
-                        .is_some_and(|path| path == installation_path)
+                        .is_some_and(|path| installation_path_matches(installation_path, &path))
                 })
             })
     });
@@ -390,7 +534,7 @@ pub(crate) fn config_candidates(
             .is_some_and(|templates| {
                 templates.iter().any(|template| {
                     expand_template(template, environment)
-                        .is_some_and(|path| path == installation_path)
+                        .is_some_and(|path| installation_path_matches(installation_path, &path))
                 })
             });
         if (scoped_match && !matches_installation) || (!scoped_match && scoped) {
@@ -608,6 +752,83 @@ mod tests {
         assert!(paths.contains(&"C:/Tools/claude.exe".to_string()));
         assert!(paths.contains(&"C:/Tools/claude.cmd".to_string()));
         assert!(!paths.contains(&"C:/Tools/claude".to_string()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workbuddy_app_scan_stays_inside_the_three_bounded_roots() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "token-station-workbuddy-app-scan-{}",
+            std::process::id()
+        ));
+        let applications = root.join("Applications");
+        let user_applications = root.join("UserApplications");
+        let volumes = root.join("Volumes");
+        let domestic = applications.join("WorkBuddy.app");
+        let global = user_applications.join("WorkBuddy AI.app");
+        let dmg = volumes.join("WorkBuddy DMG/WorkBuddy AI.app");
+        let too_deep = volumes.join("WorkBuddy DMG/nested/WorkBuddy.app");
+        let rejected = applications.join("Pretender.app");
+        for app in [&domestic, &global, &dmg, &too_deep, &rejected] {
+            fs::create_dir_all(app.join(WORKBUDDY_CLI_RELATIVE_PATH).parent().unwrap()).unwrap();
+            fs::write(app.join(WORKBUDDY_CLI_RELATIVE_PATH), b"fixture").unwrap();
+        }
+        symlink(&domestic, applications.join("WorkBuddy Alias.app")).unwrap();
+
+        let candidates = bounded_macos_app_candidates(
+            &applications,
+            Some(&user_applications),
+            &volumes,
+            |app| {
+                app.file_name()
+                    .is_some_and(|name| name == "WorkBuddy.app" || name == "WorkBuddy AI.app")
+            },
+        );
+
+        assert_eq!(candidates.len(), 3);
+        for app in [&domestic, &global, &dmg] {
+            assert!(candidates.contains(&app.join(WORKBUDDY_CLI_RELATIVE_PATH)));
+        }
+        assert!(!candidates.contains(&too_deep.join(WORKBUDDY_CLI_RELATIVE_PATH)));
+        assert!(!candidates.contains(&rejected.join(WORKBUDDY_CLI_RELATIVE_PATH)));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn workbuddy_installation_scope_follows_the_app_bundle_across_bounded_roots() {
+        let declared = Path::new(
+            "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+        );
+        let mounted = Path::new(
+            "/Volumes/WorkBuddy/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+        );
+        let domestic = Path::new(
+            "/Volumes/WorkBuddy/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+        );
+
+        assert!(installation_path_matches(mounted, declared));
+        assert!(!installation_path_matches(domestic, declared));
+        assert!(!installation_path_matches(
+            Path::new("/Volumes/WorkBuddy/WorkBuddy AI.app/Contents/MacOS/WorkBuddy AI"),
+            declared,
+        ));
+    }
+
+    #[test]
+    fn workbuddy_dynamic_scan_accepts_only_the_two_signed_product_identities() {
+        for identifier in ["com.workbuddy.workbuddy", "com.workbuddy.workbuddy-ai"] {
+            assert!(workbuddy_signing_identity_is_allowed(
+                format!("Identifier={identifier}\nTeamIdentifier=FN2V63AD2J\n").as_bytes(),
+            ));
+        }
+        assert!(!workbuddy_signing_identity_is_allowed(
+            b"Identifier=com.example.pretender\nTeamIdentifier=FN2V63AD2J\n",
+        ));
+        assert!(!workbuddy_signing_identity_is_allowed(
+            b"Identifier=com.workbuddy.workbuddy\nTeamIdentifier=OTHERTEAM\n",
+        ));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 日期：2026-08-04
 
-状态：本地实现、测试和真实 App 验收完成，未推送远端
+状态：受限 App 扫描和版本标签已完成本机验收，未推送远端
 
 ## 1. 问题、目标和范围
 
@@ -17,6 +17,9 @@ bundle id `com.workbuddy.workbuddy-ai`，并在 `product.json` 声明数据目�
 `workbuddy-v1` Connector。国内版写 `~/.workbuddy/models.json`，海外版写
 `~/.workbuddy-ai/models.json`。
 
+扫描范围包括 `/Applications`、`~/Applications` 和 `/Volumes/*/*.app`，覆盖正常安装、用户级
+安装和直接从 DMG 打开的临时 App。这里的“全扫”只指这三个有界位置，不遍历整个磁盘。
+
 本轮不增加 WorkBuddy AI 卡片、Agent ID、路由命名空间、图标或 Connector，也不修改
 模型格式、图片降级、工具调用和路由策略。
 
@@ -28,12 +31,22 @@ bundle id `com.workbuddy.workbuddy-ai`，并在 `product.json` 声明数据目�
 4. 配置目标仍由服务端扫描结果决定，前端不能提交任意文件路径。
 5. 备份、ownership、恢复和断开继续绑定安装路径与精确配置文件。
 6. 不读取或输出 models.json 中的 API Key。
+7. 动态发现的 App 必须同时满足 WorkBuddy bundle id、腾讯 Team ID、有效代码签名和固定
+   `cli/bin/codebuddy` 内部路径；验证前不能执行其中的文件。
+8. 扫描深度固定为 App 根目录一层；不递归用户目录、挂载盘或 App 内容。
 
 ## 3. 用户可见行为和失败处理
 
 只安装任一版本时，Agent 页面显示一个 WorkBuddy，并直接使用该版本对应的配置目录。
 同时安装两个版本时，仍只显示一个 WorkBuddy 卡片，卡片要求用户从两份安装中选择一份。
 选择后的一键接入、恢复和断开只操作该安装对应的 models.json。
+
+安装下拉不再只显示两个相同的 `codebuddy`。国内版显示“WorkBuddy 中国版”，海外版显示
+“WorkBuddy 海外版”，并继续保留 CLI 版本、精确路径、来源、修改时间和 SHA-256。英文界面
+对应显示 `WorkBuddy China` 和 `WorkBuddy Global`。
+
+从 `/Volumes` 发现的安装属于临时 DMG 实例。它可以被选择和测试，但挂载卷弹出后会在下次
+扫描消失；界面保留 `/Volumes/...` 精确路径，让用户能看出它尚未安装到 Applications。
 
 如果海外版 CLI 无法通过版本探测，它仍按现有规则显示为已发现但不可接入，国内版不受
 影响。配置路径条件无法匹配时使用 WorkBuddy 既有国内版默认目录，不能猜测其他目录。
@@ -50,6 +63,11 @@ bundle id `com.workbuddy.workbuddy-ai`，并在 `product.json` 声明数据目�
 4. 扫描器按每个安装实例分别解析、检查和计算配置指纹，不能把两份 models.json 的状态
    混成一个指纹。
 5. Connector 不新增分支；计划继续取该安装记录的第一个服务端配置候选。
+6. macOS 扫描器只枚举三个固定根的一层 `.app`。候选必须先通过 bundle id、Team ID 和
+   `codesign --verify --strict`，然后才把固定内部 CLI 加入既有版本探测。这里不使用耗时明显
+   更高的 `--deep`；常规校验仍检查主 Bundle 的签名与密封资源，再单独核对签名身份。
+7. 安装条件比较允许同一已验证 App bundle 在三个受限根中移动，但仍要求 App 名和内部 CLI
+   相对路径完全一致；因此海外版在 DMG 中仍绑定 `.workbuddy-ai`。
 
 ## 5. 测试和验收
 
@@ -62,10 +80,14 @@ bundle id `com.workbuddy.workbuddy-ai`，并在 `product.json` 声明数据目�
 5. 修改海外版 models.json 只改变海外版记录的配置指纹。
 6. 安装路径条件包含相对路径、遍历、未知变量或与平台不一致时 Registry 拒绝加载。
 7. 既有 WorkBuddy Connector 的保留字段、接入、恢复和断开测试继续通过。
+8. 三个根目录都能发现合法 fixture，第二层之外不会被扫描，错误 bundle id、Team ID、签名、
+   软链接或缺少内部 CLI 的候选不会进入版本探测。
+9. 安装下拉在中英文下分别显示中国版和海外版，其他 Agent 的短文件名标签保持不变。
 
 本地门禁包括 Registry、Discovery、Connector 和 Agent 页面测试，Desktop Rust 全量测试、
 Clippy、前端测试与生产构建。完成后执行 `scripts/install-local-desktop.sh`，在真实 Agent 页面
-确认只有一个 WorkBuddy 卡片，同时能看到两份安装并分别指向正确配置目录。macOS 验收不能
+确认只有一个 WorkBuddy 卡片，同时能看到 Applications 和当前挂载 DMG 中的安装，并分别
+指向正确配置目录。macOS 验收不能
 替代未来 Windows 版本的真实路径验证。
 
 ## 6. 实现和发布
@@ -92,19 +114,26 @@ Clippy、前端测试与生产构建。完成后执行 `scripts/install-local-de
 - 扫描器按安装实例分别检查配置并计算指纹，ownership、计划和恢复继续绑定精确安装与
   精确配置文件。
 - Registry 拒绝把安装条件指向未知路径或没有对应配置默认值的平台。
+- macOS 只枚举 `/Applications`、`~/Applications` 和 `/Volumes/*/*.app`；动态候选必须通过
+  固定 CLI、代码签名、两个允许的 Bundle ID 和腾讯 Team ID 校验。
+- 安装下拉按 App bundle 显示“WorkBuddy 中国版”和“WorkBuddy 海外版”，相同版本的多份
+  安装继续用序号和精确路径区分。
 
 2026-08-04 本地验收：
 
-- Desktop Rust：238 通过，1 个既有真机探测测试按标记忽略；安装器测试 2 通过，YAML
+- Desktop Rust：241 通过，1 个既有真机探测测试按标记忽略；安装器测试 2 通过，YAML
   回归测试 3 通过。
+- Desktop 前端：243 项测试通过，TypeScript 和 Vite 生产构建通过。
 - Desktop Clippy `--all-targets -- -D warnings` 通过。
 - Rust 格式和冻结 Router tree 检查通过。
 - `scripts/install-local-desktop.sh` 完成生产前端构建、Desktop 构建、artifact 审计、签名
   检查、安装和启动。
-- 真实 Agent 页面仍显示 9 张 Agent 卡片，其中只有一张 WorkBuddy。该卡片显示“多实例”，
-  安装列表同时出现海外版 `WorkBuddy AI.app` CLI v2.106.4 和国内版 `WorkBuddy.app` CLI
-  v2.115.0。
+- 真实 Agent 页面仍显示 9 张 Agent 卡片，其中只有一张 WorkBuddy。该卡片显示四个实例：
+  Applications 中的中国版 v2.115.0 和海外版 v2.106.4，以及当前挂载 DMG 中的中国版
+  v2.115.0 和海外版 v2.106.4。四项都显示中国版或海外版标签及精确路径。
+- 点击真实页面的“重新扫描”后没有启动新的 WorkBuddy GUI 或终端进程。扫描期间已有的
+  WorkBuddy 进程启动时间均早于本轮验收。
 - 本轮没有点击一键接入，没有修改 `~/.workbuddy/models.json` 或
-  `~/.workbuddy-ai/models.json`。
+  `~/.workbuddy-ai/models.json`；前者修改时间保持不变，后者继续不存在。
 
 本地分支为 `codex/workbuddy-ai-variant`。没有推送远端，也没有更新 PR #63。
