@@ -197,22 +197,11 @@ fn direct_app_bundles(root: &Path) -> Vec<PathBuf> {
 fn bounded_macos_app_candidates(
     applications: &Path,
     user_applications: Option<&Path>,
-    volumes: &Path,
     validate: impl Fn(&Path) -> bool,
 ) -> Vec<PathBuf> {
     let mut apps = direct_app_bundles(applications);
     if let Some(root) = user_applications {
         apps.extend(direct_app_bundles(root));
-    }
-    if let Ok(mounts) = std::fs::read_dir(volumes) {
-        for mount in mounts.take(MAX_APP_SCAN_ENTRIES).filter_map(Result::ok) {
-            let path = mount.path();
-            if std::fs::symlink_metadata(&path)
-                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
-            {
-                apps.extend(direct_app_bundles(&path));
-            }
-        }
     }
     apps.into_iter()
         .filter(|app| validate(app))
@@ -277,7 +266,6 @@ fn macos_workbuddy_app_candidates(environment: &ScanEnvironment) -> Vec<PathBuf>
     bounded_macos_app_candidates(
         Path::new("/Applications"),
         user_applications.as_deref(),
-        Path::new("/Volumes"),
         verified_workbuddy_bundle,
     )
 }
@@ -756,7 +744,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn workbuddy_app_scan_stays_inside_the_three_bounded_roots() {
+    fn workbuddy_app_scan_stays_inside_the_two_application_roots() {
         use std::os::unix::fs::symlink;
 
         let root = std::env::temp_dir().join(format!(
@@ -765,30 +753,24 @@ mod tests {
         ));
         let applications = root.join("Applications");
         let user_applications = root.join("UserApplications");
-        let volumes = root.join("Volumes");
         let domestic = applications.join("WorkBuddy.app");
         let global = user_applications.join("WorkBuddy AI.app");
-        let dmg = volumes.join("WorkBuddy DMG/WorkBuddy AI.app");
-        let too_deep = volumes.join("WorkBuddy DMG/nested/WorkBuddy.app");
+        let too_deep = user_applications.join("nested/WorkBuddy.app");
         let rejected = applications.join("Pretender.app");
-        for app in [&domestic, &global, &dmg, &too_deep, &rejected] {
+        for app in [&domestic, &global, &too_deep, &rejected] {
             fs::create_dir_all(app.join(WORKBUDDY_CLI_RELATIVE_PATH).parent().unwrap()).unwrap();
             fs::write(app.join(WORKBUDDY_CLI_RELATIVE_PATH), b"fixture").unwrap();
         }
         symlink(&domestic, applications.join("WorkBuddy Alias.app")).unwrap();
 
-        let candidates = bounded_macos_app_candidates(
-            &applications,
-            Some(&user_applications),
-            &volumes,
-            |app| {
+        let candidates =
+            bounded_macos_app_candidates(&applications, Some(&user_applications), |app| {
                 app.file_name()
                     .is_some_and(|name| name == "WorkBuddy.app" || name == "WorkBuddy AI.app")
-            },
-        );
+            });
 
-        assert_eq!(candidates.len(), 3);
-        for app in [&domestic, &global, &dmg] {
+        assert_eq!(candidates.len(), 2);
+        for app in [&domestic, &global] {
             assert!(candidates.contains(&app.join(WORKBUDDY_CLI_RELATIVE_PATH)));
         }
         assert!(!candidates.contains(&too_deep.join(WORKBUDDY_CLI_RELATIVE_PATH)));
@@ -797,21 +779,21 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_installation_scope_follows_the_app_bundle_across_bounded_roots() {
+    fn workbuddy_installation_scope_follows_the_app_bundle_across_application_roots() {
         let declared = Path::new(
             "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
         );
         let mounted = Path::new(
-            "/Volumes/WorkBuddy/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+            "/Users/tester/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
         );
         let domestic = Path::new(
-            "/Volumes/WorkBuddy/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+            "/Users/tester/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
         );
 
         assert!(installation_path_matches(mounted, declared));
         assert!(!installation_path_matches(domestic, declared));
         assert!(!installation_path_matches(
-            Path::new("/Volumes/WorkBuddy/WorkBuddy AI.app/Contents/MacOS/WorkBuddy AI"),
+            Path::new("/Users/tester/Applications/WorkBuddy AI.app/Contents/MacOS/WorkBuddy AI"),
             declared,
         ));
     }
