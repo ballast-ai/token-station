@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use serde_json::{Value, json};
 use token_station_conformance::{AgentAdapter, ProviderAdapter};
 use token_station_metrics::{
@@ -244,6 +245,14 @@ fn input_contains_unsupported_media(value: &Value) -> bool {
 
 const MEDIA_FALLBACK_EN: &str = "[Image omitted: the current model does not support visual input.]";
 const MEDIA_FALLBACK_ZH: &str = "[图片已省略：当前模型不支持视觉输入。]";
+const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_EXTRACTED_DOCUMENT_CHARS: usize = 120_000;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DocumentFallbackStats {
+    extracted: usize,
+    omitted: usize,
+}
 
 fn contains_han(text: &str) -> bool {
     text.chars().any(|character| {
@@ -406,6 +415,162 @@ fn raw_request_prefers_chinese(body: &Value) -> bool {
                 .and_then(raw_user_content_prefers_chinese)
         })
         .unwrap_or(false)
+}
+
+fn safe_document_label(block: &Value) -> String {
+    block
+        .get("title")
+        .or_else(|| block.get("filename"))
+        .and_then(Value::as_str)
+        .map(|value| {
+            value
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(256)
+                .collect::<String>()
+        })
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "attached.pdf".to_owned())
+}
+
+fn truncate_document_text(text: &str) -> (String, bool) {
+    let mut characters = text.chars();
+    let truncated: String = characters
+        .by_ref()
+        .take(MAX_EXTRACTED_DOCUMENT_CHARS)
+        .filter(|character| *character != '\0')
+        .collect();
+    (truncated, characters.next().is_some())
+}
+
+fn decode_pdf_source(source: &Value) -> Option<Vec<u8>> {
+    if source.get("type").and_then(Value::as_str) != Some("base64")
+        || source.get("media_type").and_then(Value::as_str) != Some("application/pdf")
+    {
+        return None;
+    }
+    let data = source.get("data").and_then(Value::as_str)?;
+    // Avoid allocating a decoded buffer that can exceed the per-document cap.
+    // Four base64 characters encode at most three bytes.
+    if data.len() > MAX_DOCUMENT_BYTES.saturating_mul(4).div_ceil(3) + 4 {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(data))
+        .ok()?;
+    (decoded.len() <= MAX_DOCUMENT_BYTES).then_some(decoded)
+}
+
+fn extracted_pdf_text(block: &Value) -> Option<(String, bool)> {
+    let source = block.get("source")?;
+    let decoded = decode_pdf_source(source)?;
+    // pdf-extract is pure Rust and reads from memory. A malformed PDF is an
+    // untrusted attachment, so a parser panic must degrade like any other parse
+    // error instead of taking down the local gateway.
+    let extracted = std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(&decoded))
+        .ok()?
+        .ok()?;
+    let extracted = extracted.trim();
+    if extracted.is_empty() || !extracted.chars().any(char::is_alphanumeric) {
+        return None;
+    }
+    let (text, truncated) = truncate_document_text(extracted);
+    Some((text, truncated))
+}
+
+fn anthropic_document_replacement(block: &Value, prefers_chinese: bool) -> (Value, bool) {
+    let label = safe_document_label(block);
+    if let Some((text, truncated)) = extracted_pdf_text(block) {
+        let truncation = if truncated {
+            if prefers_chinese {
+                "\n\n[PDF 文字超过本地安全上限，后续内容已截断。]"
+            } else {
+                "\n\n[The remaining PDF text was truncated at the local safety limit.]"
+            }
+        } else {
+            ""
+        };
+        let rendered = if prefers_chinese {
+            format!(
+                "[Token Station 已把 PDF 附件转换为文字，因为当前路由不能直接传递 document 内容块。]\n文件名：{label}\n\n{text}{truncation}"
+            )
+        } else {
+            format!(
+                "[Token Station converted the attached PDF to text because the current route cannot pass document content blocks directly.]\nFile: {label}\n\n{text}{truncation}"
+            )
+        };
+        return (json!({"type": "text", "text": rendered}), true);
+    }
+
+    let rendered = if prefers_chinese {
+        format!(
+            "[附件未读取：Token Station 无法从“{label}”提取可用文字，当前路由也不支持该 document、视觉或 OCR 输入。请明确告诉用户你没有看到附件内容。如果要继续处理附件，请切换到支持文件或视觉/OCR 的模型后重试；如果不需要附件，请在上文对话位置编辑并删除附件后重发。]"
+        )
+    } else {
+        format!(
+            "[Attachment not read: Token Station could not extract usable text from \"{label}\", and the current route does not support this document, vision, or OCR input. Tell the user clearly that you did not see the attachment. To process it, switch to a model that supports files or vision/OCR and retry. To continue without it, edit the earlier message, remove the attachment, and resend.]"
+        )
+    };
+    (json!({"type": "text", "text": rendered}), false)
+}
+
+fn replace_anthropic_documents_in_content(
+    content: &mut Value,
+    prefers_chinese: bool,
+    stats: &mut DocumentFallbackStats,
+) {
+    let Value::Array(parts) = content else {
+        return;
+    };
+    for part in parts {
+        match part.get("type").and_then(Value::as_str) {
+            Some("document") => {
+                let (replacement, extracted) =
+                    anthropic_document_replacement(part, prefers_chinese);
+                *part = replacement;
+                if extracted {
+                    stats.extracted += 1;
+                } else {
+                    stats.omitted += 1;
+                }
+            }
+            Some("tool_result") => {
+                if let Some(nested) = part.get_mut("content") {
+                    replace_anthropic_documents_in_content(nested, prefers_chinese, stats);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn replace_anthropic_documents(body: &mut Value) -> DocumentFallbackStats {
+    let prefers_chinese = raw_request_prefers_chinese(body);
+    let mut stats = DocumentFallbackStats::default();
+    for message in body
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(content) = message.get_mut("content") {
+            replace_anthropic_documents_in_content(content, prefers_chinese, &mut stats);
+        }
+    }
+    stats
+}
+
+fn prepare_anthropic_documents(body: &[u8]) -> Option<(Vec<u8>, DocumentFallbackStats)> {
+    if body.len() > MAX_INBOUND_BODY {
+        return None;
+    }
+    let mut value: Value = serde_json::from_slice(body).ok()?;
+    let stats = replace_anthropic_documents(&mut value);
+    if stats == DocumentFallbackStats::default() {
+        return None;
+    }
+    serde_json::to_vec(&value).ok().map(|body| (body, stats))
 }
 
 fn replace_anthropic_images(body: &mut Value) -> usize {
@@ -1042,6 +1207,12 @@ fn retain_free_fallbacks(decision: &mut Decision, free_upstreams: &BTreeSet<Stri
     }
 }
 
+/// Claude Desktop's gateway setup accepts non-Claude model IDs only when the
+/// catalog declares an Anthropic family tier. `auto` is intentionally a
+/// Token Station virtual model: the Agent router still selects the real
+/// upstream and model for each request.
+const CLAUDE_DESKTOP_MODELS_DOCUMENT: &str = r#"{"object":"list","data":[{"id":"claude-sonnet-4-6","object":"model","owned_by":"token-station","display_name":"Token Station Auto","anthropic_family_tier":"sonnet","is_family_default":true}]}"#;
+
 /// The assembled data plane.
 pub struct Gateway {
     /// Inbound adapters in match-priority order. Each request is dispatched to
@@ -1545,10 +1716,18 @@ impl Gateway {
         })
     }
 
-    /// `GET /v1/models`.
+    /// The model catalog visible to one host-validated Agent namespace.
+    ///
+    /// `None` is the unscoped home catalog. Claude Desktop receives a single
+    /// virtual model it can discover without mistaking an upstream model for a
+    /// Claude model. Unknown namespaces fail closed instead of inheriting Home.
     #[must_use]
-    pub fn models(&self) -> &str {
-        &self.models_document
+    pub fn models_for(&self, agent_id: Option<&str>) -> Option<&str> {
+        match agent_id {
+            Some(agent_id) if !self.supported_agent_ids.contains(agent_id) => None,
+            Some("claude-desktop") => Some(CLAUDE_DESKTOP_MODELS_DOCUMENT),
+            None | Some(_) => Some(&self.models_document),
+        }
     }
 
     /// Upper bound for blocking request workers. The async server acquires a
@@ -2690,8 +2869,25 @@ impl Gateway {
             return Ok(served);
         }
 
+        // The translated Canonical-IR path cannot preserve Anthropic document
+        // blocks. Extract text-bearing PDFs locally before the WASM adapter sees
+        // them, and replace every other document with an honest localized marker.
+        // Native Anthropic routes returned above and still receive the original
+        // structured document verbatim.
+        let prepared_body = (agent.protocol == "anthropic-messages")
+            .then(|| prepare_anthropic_documents(body))
+            .flatten();
+        let normalized_body = prepared_body
+            .as_ref()
+            .map_or(body, |(prepared, _)| prepared.as_slice());
+        if let Some((_, stats)) = &prepared_body {
+            eprintln!(
+                "document fallback -> extracted {} PDF document(s), omitted {} unsupported document(s)",
+                stats.extracted, stats.omitted
+            );
+        }
         let (mut request, hints, inbound_tools) =
-            Self::normalize_request(agent, method, path, headers, body, record)?;
+            Self::normalize_request(agent, method, path, headers, normalized_body, record)?;
         // Privacy boundary: the persisted requested model is a configured name
         // or a hashed `unlisted:` token — never the caller's raw string.
         let configured = self
@@ -3575,6 +3771,13 @@ impl Gateway {
             if replaced > 0 {
                 eprintln!(
                     "media fallback -> replaced {replaced} Anthropic image block(s) before native passthrough"
+                );
+            }
+            let documents = replace_anthropic_documents(&mut body_value);
+            if documents != DocumentFallbackStats::default() {
+                eprintln!(
+                    "document fallback -> extracted {} PDF document(s), omitted {} unsupported document(s) before native passthrough",
+                    documents.extracted, documents.omitted
                 );
             }
         }

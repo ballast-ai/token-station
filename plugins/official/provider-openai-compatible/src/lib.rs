@@ -146,8 +146,22 @@ fn index_of(value: &Value) -> u32 {
     u32::try_from(value.as_u64().unwrap_or(0)).unwrap_or(0)
 }
 
-/// A `Message` in the OpenAI request dialect.
-fn message_to_openai(message: &Message) -> Result<Value, String> {
+fn anthropic_reasoning_history(message: &Message) -> Option<String> {
+    let blocks = message
+        .extensions
+        .get("anthropic_thinking_blocks")?
+        .as_array()?;
+    let thinking = blocks
+        .iter()
+        .filter_map(|entry| entry.pointer("/block/thinking").and_then(Value::as_str))
+        .collect::<String>();
+    (!thinking.is_empty()).then_some(thinking)
+}
+
+fn message_to_openai_for_model(
+    message: &Message,
+    requires_reasoning_content: bool,
+) -> Result<Value, String> {
     let mut out = Map::new();
     out.insert("role".to_owned(), json!(message.role));
     if let Some(content) = &message.content {
@@ -204,6 +218,28 @@ fn message_to_openai(message: &Message) -> Result<Value, String> {
         }
     }
     if !message.tool_calls.is_empty() {
+        // OpenAI permits assistant tool-call messages with `content: null`.
+        // Some compatible providers, including DeepSeek, reject the same
+        // message when the key is absent entirely. Canonical `None` means no
+        // assistant text here, so writing null is lossless and keeps strict
+        // Chat Completions implementations on the valid tool-history path.
+        if message.role == Role::Assistant && !out.contains_key("content") {
+            out.insert("content".to_owned(), Value::Null);
+        }
+        if message.role == Role::Assistant
+            && requires_reasoning_content
+            && !out.contains_key("reasoning_content")
+        {
+            // DeepSeek thinking-mode tool continuations require this private
+            // field on the historical assistant tool call. Restore genuine
+            // Anthropic thinking when it survived the inbound adapter; an empty
+            // placeholder is the documented no-thinking history shape accepted
+            // by DeepSeek and does not invent a chain of thought.
+            out.insert(
+                "reasoning_content".to_owned(),
+                json!(anthropic_reasoning_history(message).unwrap_or_default()),
+            );
+        }
         let calls: Vec<Value> = message
             .tool_calls
             .iter()
@@ -229,13 +265,17 @@ fn message_to_openai(message: &Message) -> Result<Value, String> {
 fn body_of(request: &ChatRequest) -> Result<Value, String> {
     let mut body = Map::new();
     body.insert("model".to_owned(), json!(request.model));
+    let requires_reasoning_content = request
+        .model
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("deepseek"));
     body.insert(
         "messages".to_owned(),
         Value::Array(
             request
                 .messages
                 .iter()
-                .map(message_to_openai)
+                .map(|message| message_to_openai_for_model(message, requires_reasoning_content))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
     );
@@ -711,7 +751,8 @@ mod tests {
             extensions: Extensions::new(),
         };
 
-        let wire = message_to_openai(&message).expect("assistant parts are representable");
+        let wire = message_to_openai_for_model(&message, false)
+            .expect("assistant parts are representable");
         assert_eq!(wire["content"], json!("Hello, world"));
         assert_eq!(wire["reasoning_content"], json!("inspect"));
     }
@@ -737,7 +778,8 @@ mod tests {
             extensions: Extensions::new(),
         };
 
-        let wire = message_to_openai(&message).expect("multimodal user parts are representable");
+        let wire = message_to_openai_for_model(&message, false)
+            .expect("multimodal user parts are representable");
         assert_eq!(
             wire["content"][0],
             json!({"type":"text","text":"What is this?"})
@@ -749,6 +791,30 @@ mod tests {
                 "image_url":{"url":"data:image/png;base64,AA==","detail":"low"}
             })
         );
+    }
+
+    #[test]
+    fn deepseek_tool_history_includes_the_required_reasoning_placeholder() {
+        let mut request = ChatRequest::new(
+            "deepseek-v4-flash",
+            vec![Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "toolu_1".to_owned(),
+                    name: "Read".to_owned(),
+                    arguments: r#"{"file_path":"report.pdf"}"#.to_owned(),
+                }],
+                tool_call_id: None,
+                name: None,
+                extensions: Extensions::new(),
+            }],
+        );
+        request.stream = false;
+
+        let wire = body_of(&request).expect("DeepSeek tool history is representable");
+        assert_eq!(wire["messages"][0]["content"], Value::Null);
+        assert_eq!(wire["messages"][0]["reasoning_content"], json!(""));
     }
 }
 

@@ -20,6 +20,8 @@ use token_station_cli::config::ClientConfig;
 use token_station_cli::gateway::{FeatureLayer, Gateway, Reply, StageStatus};
 use token_station_cli::server;
 
+const TEST_TEXT_PDF_BASE64: &str = "JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA0IDAgUiA+PiA+PiAvQ29udGVudHMgNSAwIFIgPj4KZW5kb2JqCjQgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhID4+CmVuZG9iago1IDAgb2JqCjw8IC9MZW5ndGggNTMgPj4Kc3RyZWFtCkJUIC9GMSAxMiBUZiA3MiA3MjAgVGQgKFRPS0VOX1NUQVRJT05fUERGX1RFWFQpIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKeHJlZgowIDYKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDE1IDAwMDAwIG4gCjAwMDAwMDAwNjQgMDAwMDAgbiAKMDAwMDAwMDEyMSAwMDAwMCBuIAowMDAwMDAwMjQ3IDAwMDAwIG4gCjAwMDAwMDAzMTcgMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA2IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgo0MjAKJSVFT0YK";
+
 // -- plugin packages -------------------------------------------------------------
 
 fn repo_root() -> &'static Path {
@@ -1584,9 +1586,19 @@ fn agent_namespaces_select_custom_or_inherited_routers_and_strip_paths() {
         true,
     );
     assert_eq!(status, 200);
+    let mut claude_desktop_messages = messages.clone();
+    claude_desktop_messages["model"] = json!("claude-sonnet-4-6");
+    let (status, _) = post_scoped(
+        &proxy,
+        "/agents/claude-desktop/v1/messages",
+        &claude_desktop_messages,
+        &token,
+        true,
+    );
+    assert_eq!(status, 200);
 
     assert_eq!(custom.hits(), 1, "only Codex uses its custom route");
-    assert_eq!(home.hits(), 6, "home plus five inherited Agent requests");
+    assert_eq!(home.hits(), 7, "home plus six inherited Agent requests");
     assert!(
         custom
             .seen()
@@ -1598,6 +1610,57 @@ fn agent_namespaces_select_custom_or_inherited_routers_and_strip_paths() {
             .iter()
             .all(|seen| seen.body["model"] == "home-model")
     );
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn claude_desktop_discovers_only_the_token_station_compatibility_alias() {
+    let answer = json!({
+        "id": "chatcmpl-unused",
+        "model": "home-model",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "unused" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    });
+    let home = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let custom = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("claude-desktop-models", "sk-test-key-abc");
+    let proxy = start_scoped_proxy(&home, &custom, &key);
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+
+    let response = agent
+        .get(format!(
+            "{}/agents/claude-desktop/v1/models?limit=1000",
+            proxy.url
+        ))
+        .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+        .call()
+        .expect("Claude Desktop model discovery answers");
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = serde_json::from_str(
+        &response
+            .into_body()
+            .read_to_string()
+            .expect("model catalog body reads"),
+    )
+    .expect("model catalog is JSON");
+
+    assert_eq!(body["object"], json!("list"));
+    assert_eq!(body["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(body["data"][0]["id"], json!("claude-sonnet-4-6"));
+    assert_eq!(body["data"][0]["display_name"], json!("Token Station Auto"));
+    assert_eq!(body["data"][0]["anthropic_family_tier"], json!("sonnet"));
+    assert_eq!(body["data"][0]["is_family_default"], json!(true));
+    assert_eq!(home.hits(), 0, "model discovery stays local");
+    assert_eq!(custom.hits(), 0, "model discovery stays local");
 
     std::fs::remove_file(key).ok();
 }
@@ -1630,6 +1693,37 @@ fn scoped_models_auth_and_unknown_namespaces_fail_closed() {
         .call()
         .expect("namespaced models answers");
     assert_eq!(models.status().as_u16(), 200);
+    let models: Value = serde_json::from_str(
+        &models
+            .into_body()
+            .read_to_string()
+            .expect("OpenCode models body reads"),
+    )
+    .expect("OpenCode models body is JSON");
+    let ids = models["data"]
+        .as_array()
+        .expect("models data is an array")
+        .iter()
+        .map(|model| model["id"].as_str().expect("model id"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        ids,
+        std::collections::BTreeSet::from(["agent-model", "home-model"])
+    );
+
+    let wrong_key = agent
+        .get(format!("{}/agents/claude-desktop/v1/models", proxy.url))
+        .header("authorization", "Bearer wrong-local-key")
+        .call()
+        .expect("wrong-key model discovery answers");
+    assert_eq!(wrong_key.status().as_u16(), 401);
+
+    let unknown_models = agent
+        .get(format!("{}/agents/future/v1/models", proxy.url))
+        .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+        .call()
+        .expect("unknown model namespace answers");
+    assert_eq!(unknown_models.status().as_u16(), 404);
 
     let responses = json!({ "model": "auto", "input": "hi", "stream": false });
     let (status, body) = post_scoped(
@@ -2506,9 +2600,135 @@ fn anthropic_forced_tool_choice_is_translated_and_reaches_the_upstream() {
 }
 
 #[test]
+fn anthropic_pdf_tool_result_is_extracted_before_chat_translation() {
+    const TWO_PAGE_PDF_BASE64: &str = TEST_TEXT_PDF_BASE64;
+    let upstream_answer = json!({
+        "id": "chatcmpl-pdf",
+        "model": "home-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "PDF_OK"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 40, "completion_tokens": 2}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("anthropic-pdf-tool-result", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, body) = post_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 256,
+            "messages": [
+                {"role": "user", "content": "请检查这个 PDF"},
+                {"role": "assistant", "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_read_pdf",
+                    "name": "Read",
+                    "input": {"file_path": "/private/report.pdf"}
+                }]},
+                {"role": "user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_read_pdf",
+                    "content": [{
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": TWO_PAGE_PDF_BASE64
+                        },
+                        "title": "report.pdf"
+                    }]
+                }]}
+            ]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(status, 200, "PDF request should reach the upstream: {body}");
+    assert_eq!(mock.hits(), 1);
+    let seen = mock.seen();
+    assert!(
+        seen[0].body["messages"][1]
+            .as_object()
+            .is_some_and(|message| message.contains_key("content")),
+        "strict OpenAI-compatible providers require content:null beside assistant tool_calls"
+    );
+    assert_eq!(seen[0].body["messages"][1]["content"], Value::Null);
+    let forwarded = seen[0].body.to_string();
+    assert!(forwarded.contains("Token Station 已把 PDF 附件转换为文字"));
+    assert!(forwarded.contains("report.pdf"));
+    assert!(forwarded.contains("TOKEN_STATION_PDF_TEXT"));
+    assert!(
+        !forwarded.contains(TWO_PAGE_PDF_BASE64),
+        "the PDF base64 must never be flattened into upstream text"
+    );
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn anthropic_unreadable_documents_become_honest_localized_text() {
+    let upstream_answer = json!({
+        "id": "chatcmpl-unreadable-document",
+        "model": "home-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "I did not read the attachments."},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 40, "completion_tokens": 8}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("anthropic-unreadable-documents", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, body) = post_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "Read these attachments."},
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": "bm90LWEtcGRm"
+                    },
+                    "title": "broken.pdf"
+                },
+                {
+                    "type": "document",
+                    "source": {"type": "url", "url": "https://private.invalid/file.pdf"},
+                    "title": "remote.pdf"
+                }
+            ]}]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(
+        status, 200,
+        "unreadable documents should not abort chat: {body}"
+    );
+    assert_eq!(mock.hits(), 1);
+    let forwarded = mock.seen()[0].body.to_string();
+    assert!(forwarded.contains("Attachment not read"));
+    assert!(forwarded.contains("broken.pdf"));
+    assert!(forwarded.contains("remote.pdf"));
+    assert!(forwarded.contains("edit the earlier message, remove the attachment, and resend"));
+    assert!(!forwarded.contains("bm90LWEtcGRm"));
+    assert!(!forwarded.contains("private.invalid"));
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn anthropic_native_passthrough_only_replaces_images_for_a_text_only_model() {
     // Native passthrough keeps server tools and forced tool choice verbatim, but
-    // its confirmed text-only target still receives the localized image marker.
+    // its confirmed text-only target receives localized image and PDF fallback.
     let upstream_answer = json!({
         "id": "msg_native_1",
         "type": "message",
@@ -2528,6 +2748,7 @@ fn anthropic_native_passthrough_only_replaces_images_for_a_text_only_model() {
             "max_tokens": 64,
             "messages": [{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}},
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": TEST_TEXT_PDF_BASE64}, "title": "native.pdf"},
                 {"type": "text", "text": "搜索这张图相关的资料"}
             ]}],
             "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
@@ -2561,6 +2782,13 @@ fn anthropic_native_passthrough_only_replaces_images_for_a_text_only_model() {
     );
     assert_eq!(
         forwarded.body["messages"][0]["content"][1],
+        json!({
+            "type": "text",
+            "text": "[Token Station 已把 PDF 附件转换为文字，因为当前路由不能直接传递 document 内容块。]\n文件名：native.pdf\n\nTOKEN_STATION_PDF_TEXT"
+        })
+    );
+    assert_eq!(
+        forwarded.body["messages"][0]["content"][2],
         json!({"type": "text", "text": "搜索这张图相关的资料"})
     );
     // Only the model was remapped to the routed upstream model.
