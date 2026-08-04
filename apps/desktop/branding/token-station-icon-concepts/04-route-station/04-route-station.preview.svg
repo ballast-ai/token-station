@@ -1,0 +1,8 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs><clipPath id="routestation-clip"><rect width="1024" height="1024" rx="224"/></clipPath></defs>
+<g clip-path="url(#routestation-clip)"><rect width="1024" height="1024" fill="#F4F2EC"/>
+<path d="M86 330 C300 330 382 420 500 492 C622 566 720 650 938 650 L938 716 C694 716 580 620 466 550 C354 482 286 396 86 396 Z" fill="#282B30"/>
+<path d="M86 650 C300 650 382 560 500 488 C622 414 720 330 938 330 L938 396 C694 396 580 492 466 562 C354 630 286 716 86 716 Z" fill="#F4A62A"/>
+<path d="M334 306 Q334 244 396 244 H628 Q690 244 690 306 V766 H604 V470 Q604 416 550 416 H474 Q420 416 420 470 V766 H334 Z" fill="#15171B"/>
+<circle cx="108" cy="683" r="34" fill="#4E73F8"/></g>
+</svg>

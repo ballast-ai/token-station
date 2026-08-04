@@ -1,0 +1,48 @@
+{
+  "name": "switch-fan",
+  "source_reference": "User brief: white-background branching icon where inputs and outputs are reordered in different directions",
+  "brief": "Warm-white field with four broad railway-like route ribbons crossing and changing order. One amber path travels from the lowest input to the highest output; a blue entry cap marks the request origin.",
+  "semantic_review": {
+    "status": "exact-enough",
+    "identity_risk": "low",
+    "basis": "original low-risk geometric routing concept",
+    "route": "semantic-svg",
+    "notes": "The route fan is intentionally exposed and architectural, not a node-link diagram."
+  },
+  "source_analysis": {
+    "fidelity_target": "preserve four thick reordered routes and a single selected lower-left to upper-right path",
+    "identity_risk": "low",
+    "route": "semantic-svg",
+    "must_preserve": ["four broad paths", "visible order change", "amber selected route", "large quiet margins"],
+    "must_not_add": ["nodes at every junction, arrows, letters, numbers, railway sleepers, shadows, gradients, or thin strokes"],
+    "components": [
+      {"id": "route-bed", "layer": "route bed", "format": "svg", "spec_constraints": ["charcoal filled ribbons", "rounded visual rhythm"]},
+      {"id": "active-route", "layer": "active route", "format": "svg", "spec_constraints": ["one continuous amber filled ribbon"]},
+      {"id": "entry-cap", "layer": "entry cap", "format": "svg", "spec_constraints": ["one cobalt circle"]}
+    ],
+    "acceptance_checks": ["the selected route clearly changes vertical order", "the mark remains legible at 32px", "no SVG material warnings"]
+  },
+  "fill": {"solid": "extended-srgb:0.95686,0.94902,0.92549,1.00000"},
+  "layers": [
+    {
+      "name": "background",
+      "svg": "<rect width=\"1024\" height=\"1024\" fill=\"#F4F2EC\"/>",
+      "composer": {"include": false}
+    },
+    {
+      "name": "route bed",
+      "svg": "<path d=\"M92 270 C300 270 344 350 478 438 C612 526 684 664 932 664 L932 720 C656 720 570 574 448 494 C326 414 286 326 92 326 Z M92 402 C294 402 354 442 466 490 C590 544 690 550 932 550 L932 606 C674 606 564 596 442 544 C338 500 286 458 92 458 Z M92 534 C286 534 338 500 442 456 C564 404 674 394 932 394 L932 450 C690 450 590 456 466 510 C354 558 294 590 92 590 Z\" fill=\"#24272C\"/>",
+      "composer": {"format": "svg", "reason": "flat reordered route ribbons"}
+    },
+    {
+      "name": "active route",
+      "svg": "<path d=\"M92 666 C286 666 326 578 448 498 C570 418 656 272 932 272 L932 328 C684 328 612 466 478 554 C344 642 300 722 92 722 Z\" fill=\"#F4A62A\"/>",
+      "composer": {"format": "svg", "reason": "single flat active route crossing the switch fan"}
+    },
+    {
+      "name": "entry cap",
+      "svg": "<circle cx=\"104\" cy=\"694\" r=\"34\" fill=\"#4E73F8\"/>",
+      "composer": {"format": "svg", "reason": "simple flat entry signal"}
+    }
+  ]
+}

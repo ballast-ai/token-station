@@ -1,0 +1,54 @@
+{
+  "name": "gantry-yard",
+  "source_reference": "User brief: white-background icon combining a railway junction yard with a large station gantry that hides route reassignment",
+  "brief": "Warm-white field. Four tracks enter from the left, are reorganized beneath a large near-black station gantry, and leave toward different heights on the right. One amber route and one blue entry signal show active routing without labels.",
+  "semantic_review": {
+    "status": "exact-enough",
+    "identity_risk": "low",
+    "basis": "original low-risk concept drawn directly from the Token Station routing metaphor",
+    "route": "semantic-svg",
+    "notes": "The central gantry is the dominant silhouette; track crossings remain subordinate and partially hidden."
+  },
+  "source_analysis": {
+    "fidelity_target": "preserve the large station gantry, multiple reordered tracks, and one selected route",
+    "identity_risk": "low",
+    "route": "semantic-svg",
+    "must_preserve": ["warm-white field", "dominant central gantry", "tracks enter and leave at different heights", "one amber selected route"],
+    "must_not_add": ["text, numbers, arrows, train, sleepers, map labels, nodes, shadows, gradients, or platform frame"],
+    "components": [
+      {"id": "yard-tracks", "layer": "yard tracks", "format": "svg", "spec_constraints": ["filled ribbons only", "no strokes", "large enough at 32px"]},
+      {"id": "selected-route", "layer": "selected route", "format": "svg", "spec_constraints": ["one amber filled ribbon", "partly hidden by the gantry"]},
+      {"id": "station-gantry", "layer": "station gantry", "format": "svg", "spec_constraints": ["one near-black architectural silhouette", "large central arch"]},
+      {"id": "entry-signal", "layer": "entry signal", "format": "svg", "spec_constraints": ["one small cobalt circle"]}
+    ],
+    "acceptance_checks": ["reads as tracks passing through a station structure", "does not read as USB or a node graph", "no SVG material warnings"]
+  },
+  "fill": {"solid": "extended-srgb:0.95686,0.94902,0.92549,1.00000"},
+  "layers": [
+    {
+      "name": "background",
+      "svg": "<rect width=\"1024\" height=\"1024\" fill=\"#F4F2EC\"/>",
+      "composer": {"include": false}
+    },
+    {
+      "name": "yard tracks",
+      "svg": "<path d=\"M72 236 L430 360 L430 414 L72 290 Z M72 382 L430 438 L430 492 L72 436 Z M72 528 L430 516 L430 570 L72 582 Z M72 674 L430 594 L430 648 L72 728 Z M594 360 L952 214 L952 270 L594 414 Z M594 438 L952 368 L952 422 L594 492 Z M594 516 L952 522 L952 576 L594 570 Z M594 594 L952 676 L952 732 L594 648 Z\" fill=\"#2A2D32\"/>",
+      "composer": {"format": "svg", "reason": "multiple flat track ribbons should remain editable"}
+    },
+    {
+      "name": "selected route",
+      "svg": "<path d=\"M72 674 L430 438 L430 498 L72 734 Z M594 438 L952 214 L952 278 L594 502 Z\" fill=\"#F4A62A\"/>",
+      "composer": {"format": "svg", "reason": "flat active route accent"}
+    },
+    {
+      "name": "station gantry",
+      "svg": "<path d=\"M292 286 Q292 226 352 226 H672 Q732 226 732 286 V760 H628 V444 Q628 400 584 400 H440 Q396 400 396 444 V760 H292 Z\" fill=\"#15171B\"/>",
+      "composer": {"format": "svg", "reason": "one clean station-gantry silhouette"}
+    },
+    {
+      "name": "entry signal",
+      "svg": "<circle cx=\"100\" cy=\"700\" r=\"34\" fill=\"#4E73F8\"/>",
+      "composer": {"format": "svg", "reason": "simple flat entry signal"}
+    }
+  ]
+}

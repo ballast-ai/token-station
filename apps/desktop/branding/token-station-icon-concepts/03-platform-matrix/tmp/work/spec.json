@@ -1,0 +1,54 @@
+{
+  "name": "platform-matrix",
+  "source_reference": "User brief: white-background station whose large central structure performs 1-to-b, 2-to-a style route reassignment",
+  "brief": "Warm-white field. A large near-black station block sits between four incoming and four outgoing platform lanes. Colored endpoint pairs appear at different vertical positions on each side, implying deterministic reassignment inside the station.",
+  "semantic_review": {
+    "status": "exact-enough",
+    "identity_risk": "low",
+    "basis": "original low-risk station-matrix concept",
+    "route": "semantic-svg",
+    "notes": "The hidden permutation is communicated through displaced paired endpoints rather than visible spaghetti crossings."
+  },
+  "source_analysis": {
+    "fidelity_target": "preserve one dominant station block, four platform channels, and paired endpoints in different vertical order",
+    "identity_risk": "low",
+    "route": "semantic-svg",
+    "must_preserve": ["dominant central station block", "four clear platform lanes", "paired signals change order across the station"],
+    "must_not_add": ["text, numbers, grid labels, circuit pins, shadows, gradients, or small mechanical detail"],
+    "components": [
+      {"id": "platform-lines", "layer": "platform lines", "format": "svg", "spec_constraints": ["four warm-white filled channels", "thick enough at 32px"]},
+      {"id": "station-block", "layer": "station block", "format": "svg", "spec_constraints": ["one near-black rounded block"]},
+      {"id": "central-concourse", "layer": "central concourse", "format": "svg", "spec_constraints": ["one vertical near-black rounded spine", "visibly binds all platform levels"]},
+      {"id": "signal-pairs", "layer": "signal pairs", "format": "svg", "spec_constraints": ["two cobalt circles and two amber rounded squares at reordered positions"]}
+    ],
+    "acceptance_checks": ["reads as a station or matrix switch rather than a microchip", "paired endpoints imply reordered destinations", "no SVG material warnings"]
+  },
+  "fill": {"solid": "extended-srgb:0.95686,0.94902,0.92549,1.00000"},
+  "layers": [
+    {
+      "name": "background",
+      "svg": "<rect width=\"1024\" height=\"1024\" fill=\"#F4F2EC\"/>",
+      "composer": {"include": false}
+    },
+    {
+      "name": "station block",
+      "svg": "<rect x=\"238\" y=\"238\" width=\"548\" height=\"548\" rx=\"104\" fill=\"#15171B\"/>",
+      "composer": {"format": "svg", "reason": "one clean central station structure"}
+    },
+    {
+      "name": "platform lines",
+      "svg": "<path d=\"M84 334 H940 V394 H84 Z M84 438 H940 V498 H84 Z M84 542 H940 V602 H84 Z M84 646 H940 V706 H84 Z\" fill=\"#F4F2EC\"/>",
+      "composer": {"format": "svg", "reason": "four flat platform channels as opaque overlays"}
+    },
+    {
+      "name": "central concourse",
+      "svg": "<rect x=\"458\" y=\"190\" width=\"108\" height=\"644\" rx=\"54\" fill=\"#15171B\"/>",
+      "composer": {"format": "svg", "reason": "one clean vertical station spine binds the platform levels"}
+    },
+    {
+      "name": "signal pairs",
+      "svg": "<circle cx=\"148\" cy=\"364\" r=\"27\" fill=\"#4E73F8\"/><circle cx=\"876\" cy=\"572\" r=\"27\" fill=\"#4E73F8\"/><rect x=\"121\" y=\"545\" width=\"54\" height=\"54\" rx=\"16\" fill=\"#F4A62A\"/><rect x=\"849\" y=\"337\" width=\"54\" height=\"54\" rx=\"16\" fill=\"#F4A62A\"/>",
+      "composer": {"format": "svg", "reason": "paired signals make route reassignment visible without labels"}
+    }
+  ]
+}

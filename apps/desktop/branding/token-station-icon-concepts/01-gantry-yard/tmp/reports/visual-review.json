@@ -1,0 +1,6 @@
+{
+  "decision": "complete-candidate",
+  "reviewer": "main-agent visual review",
+  "evidence": ["01-gantry-yard.preview.png", "tmp/work/preview-64.png", "tmp/work/preview-32.png"],
+  "notes": "The central gantry remains dominant at small sizes and the amber path clearly enters low and exits high. The tradeoff is visual density: this is the most literal station candidate and the least minimal candidate."
+}

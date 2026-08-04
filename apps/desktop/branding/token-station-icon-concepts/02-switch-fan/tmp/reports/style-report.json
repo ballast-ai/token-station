@@ -1,0 +1,115 @@
+{
+  "mode": "icon-spec-authoring",
+  "layout": "delivery",
+  "spec": "/Users/rainlu/local/token-station-develop/apps/desktop/branding/token-station-icon-concepts/02-switch-fan/tmp/work/spec.json",
+  "work_spec": "tmp/work/spec.json",
+  "name": "SwitchFan",
+  "canvas": 1024,
+  "target_platforms": [],
+  "deliverable_type": null,
+  "source_reference": "User brief: white-background branching icon where inputs and outputs are reordered in different directions",
+  "brief": "Warm-white field with four broad railway-like route ribbons crossing and changing order. One amber path travels from the lowest input to the highest output; a blue entry cap marks the request origin.",
+  "renderer": "@resvg/resvg-js",
+  "generated_files": [
+    "02-switch-fan.preview.svg",
+    "02-switch-fan.preview.png",
+    "02-switch-fan.svg",
+    "02-switch-fan.png",
+    "layers/01-background.svg",
+    "layers/02-route-bed.svg",
+    "layers/03-active-route.svg",
+    "layers/04-entry-cap.svg",
+    "tmp/README.md",
+    "tmp/reports/style-report.json",
+    "tmp/reports/package-verification.json",
+    "tmp/reports/reference-diff.png",
+    "tmp/reports/reference-overlay.png",
+    "tmp/reports/reference-side-by-side.png",
+    "tmp/reports/visual-review.json"
+  ],
+  "generated_directories": [
+    "tmp/reports",
+    "layers",
+    "tmp"
+  ],
+  "preview_svg": "02-switch-fan.preview.svg",
+  "preview_png": "02-switch-fan.preview.png",
+  "app_svg": "02-switch-fan.svg",
+  "app_png": "02-switch-fan.png",
+  "layers": [
+    "layers/01-background.svg",
+    "layers/02-route-bed.svg",
+    "layers/03-active-route.svg",
+    "layers/04-entry-cap.svg"
+  ],
+  "apple_adapter": null,
+  "preview_background_layers": [
+    {
+      "layer": "background",
+      "source_layer": "layers/01-background.svg",
+      "role": "preview-only-simple-fill"
+    }
+  ],
+  "icon_composer_layer_decisions": [],
+  "background_mode": "spec",
+  "semantic_review": {
+    "status": "exact-enough",
+    "identity_risk": "low",
+    "basis": "original low-risk geometric routing concept",
+    "route": "semantic-svg",
+    "notes": "The route fan is intentionally exposed and architectural, not a node-link diagram."
+  },
+  "source_analysis": {
+    "fidelity_target": "preserve four thick reordered routes and a single selected lower-left to upper-right path",
+    "identity_risk": "low",
+    "route": "semantic-svg",
+    "must_preserve": [
+      "four broad paths",
+      "visible order change",
+      "amber selected route",
+      "large quiet margins"
+    ],
+    "must_not_add": [
+      "nodes at every junction, arrows, letters, numbers, railway sleepers, shadows, gradients, or thin strokes"
+    ],
+    "components": [
+      {
+        "id": "route-bed",
+        "layer": "route bed",
+        "format": "svg",
+        "spec_constraints": [
+          "charcoal filled ribbons",
+          "rounded visual rhythm"
+        ]
+      },
+      {
+        "id": "active-route",
+        "layer": "active route",
+        "format": "svg",
+        "spec_constraints": [
+          "one continuous amber filled ribbon"
+        ]
+      },
+      {
+        "id": "entry-cap",
+        "layer": "entry cap",
+        "format": "svg",
+        "spec_constraints": [
+          "one cobalt circle"
+        ]
+      }
+    ],
+    "acceptance_checks": [
+      "the selected route clearly changes vertical order",
+      "the mark remains legible at 32px",
+      "no SVG material warnings"
+    ]
+  },
+  "warnings": [],
+  "claims": [
+    "spec-driven reusable cross-platform icon source package",
+    "semantic source layers retained",
+    "rounded preview PNG rendered by @resvg/resvg-js",
+    "unrounded app/source canvas outputs retained separately from preview masking"
+  ]
+}

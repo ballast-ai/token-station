@@ -1,0 +1,132 @@
+{
+  "mode": "icon-spec-authoring",
+  "layout": "delivery",
+  "spec": "/Users/rainlu/local/token-station-develop/apps/desktop/branding/token-station-icon/tmp/work/spec.json",
+  "work_spec": "tmp/work/spec.json",
+  "name": "TokenStationIcon",
+  "canvas": 1024,
+  "target_platforms": [],
+  "deliverable_type": null,
+  "source_reference": "Token Station product semantics, current project icon, user-supplied small agent-icon style reference, and generated concept exploration",
+  "brief": "A restrained local AI routing-station mark: a blue token enters a warm-white station tile through a dark diagonal channel and leaves as an amber routed token. Flat near-black stage, no text or third-party marks.",
+  "renderer": "@resvg/resvg-js",
+  "generated_files": [
+    "token-station-icon.preview.svg",
+    "token-station-icon.preview.png",
+    "token-station-icon.svg",
+    "token-station-icon.png",
+    "layers/01-background.svg",
+    "layers/02-station-tile.svg",
+    "layers/03-handoff-channel.svg",
+    "layers/04-entry-accent.svg",
+    "layers/05-route-accent.svg",
+    "tmp/README.md",
+    "tmp/reports/style-report.json",
+    "tmp/reports/package-verification.json",
+    "tmp/reports/reference-diff.png",
+    "tmp/reports/reference-overlay.png",
+    "tmp/reports/reference-side-by-side.png",
+    "tmp/reports/visual-review.json"
+  ],
+  "generated_directories": [
+    "tmp/reports",
+    "layers",
+    "tmp"
+  ],
+  "preview_svg": "token-station-icon.preview.svg",
+  "preview_png": "token-station-icon.preview.png",
+  "app_svg": "token-station-icon.svg",
+  "app_png": "token-station-icon.png",
+  "layers": [
+    "layers/01-background.svg",
+    "layers/02-station-tile.svg",
+    "layers/03-handoff-channel.svg",
+    "layers/04-entry-accent.svg",
+    "layers/05-route-accent.svg"
+  ],
+  "apple_adapter": null,
+  "preview_background_layers": [
+    {
+      "layer": "background",
+      "source_layer": "layers/01-background.svg",
+      "role": "preview-only-simple-fill"
+    }
+  ],
+  "icon_composer_layer_decisions": [],
+  "background_mode": "spec",
+  "semantic_review": {
+    "status": "exact-enough",
+    "identity_risk": "low",
+    "basis": "original task-specific mark with no external brand identity",
+    "route": "semantic-svg",
+    "notes": "Preserve the compact rounded-diamond station tile and diagonal handoff channel; do not drift into a letter, chain link, Gemini-like sparkle, sync mark, or node network."
+  },
+  "source_analysis": {
+    "fidelity_target": "preserve the original Token Station switch-track metaphor, strong small-size silhouette, and two restrained brand accents",
+    "identity_risk": "low",
+    "route": "semantic-svg",
+    "must_preserve": [
+      "one warm-white rounded-diamond station tile",
+      "one broad near-black diagonal handoff channel rendered as an opaque overlay",
+      "one cobalt circular entry token and one amber rounded-square routed token",
+      "large quiet negative space around the centered mark",
+      "clear silhouette at 64px and 32px"
+    ],
+    "must_not_add": [
+      "text, letters, terminal prompt, model logo, shield, arrows, Wi-Fi rings, sync circle, chain link, sparkle, or node network",
+      "bevel, glow, shadow, highlight, texture, frame, or PNG foreground fallback"
+    ],
+    "components": [
+      {
+        "id": "station-tile",
+        "layer": "station tile",
+        "format": "svg",
+        "spec_constraints": [
+          "one clean rotated rounded-square SVG primitive",
+          "soft corners and balanced diagonal mass",
+          "no stroke or material helper geometry"
+        ]
+      },
+      {
+        "id": "handoff-channel",
+        "layer": "handoff channel",
+        "format": "svg",
+        "spec_constraints": [
+          "one broad opaque background-colored rounded rectangle",
+          "diagonal lower-left to upper-right",
+          "no mask, clipPath, or transparency"
+        ]
+      },
+      {
+        "id": "entry-accent",
+        "layer": "entry accent",
+        "format": "svg",
+        "spec_constraints": [
+          "one simple cobalt circle",
+          "supporting scale"
+        ]
+      },
+      {
+        "id": "route-accent",
+        "layer": "route accent",
+        "format": "svg",
+        "spec_constraints": [
+          "one simple amber rounded-square token",
+          "supporting scale"
+        ]
+      }
+    ],
+    "acceptance_checks": [
+      "the mark remains distinct from a letter, chain link, or sparkle at 32px",
+      "all foreground components are clean SVG assets",
+      "package verification has no svg_material_warnings or package warnings"
+    ]
+  },
+  "warnings": [],
+  "claims": [
+    "spec-driven reusable cross-platform icon source package",
+    "semantic source layers retained",
+    "rounded preview PNG rendered by @resvg/resvg-js",
+    "unrounded app/source canvas outputs retained separately from preview masking"
+  ]
+}

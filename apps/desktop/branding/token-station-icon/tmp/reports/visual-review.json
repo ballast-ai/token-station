@@ -1,0 +1,14 @@
+{
+  "decision": "accepted",
+  "reviewer": "main-agent visual review",
+  "evidence": [
+    "token-station-icon.preview.png at 1024px",
+    "tmp/work/preview-64.png",
+    "tmp/work/preview-32.png",
+    "layers/02-station-tile.svg",
+    "layers/03-handoff-channel.svg",
+    "layers/04-entry-accent.svg",
+    "layers/05-route-accent.svg"
+  ],
+  "notes": "Low-risk original concept. At 64px and 32px the warm-white station halves, diagonal handoff channel, cobalt circular entry token, and amber rounded-square routed token remain distinct. The flat SVG redraw removes the generated concept's glow and gradients, preserves generous negative space, and does not read as USB, Git branch, sync arrows, a letter, or a third-party AI mark."
+}

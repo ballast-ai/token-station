@@ -1,0 +1,6 @@
+{
+  "decision": "complete-candidate",
+  "reviewer": "main-agent visual review",
+  "evidence": ["04-route-station.preview.png", "tmp/work/preview-64.png", "tmp/work/preview-32.png"],
+  "notes": "At 64px and 32px the central gantry remains dominant while the amber route visibly enters low, passes through the station opening, and exits high. The secondary charcoal route leaves in the opposite direction, so the mark reads as a compact routing transfer station rather than an isolated branch or matrix chip."
+}

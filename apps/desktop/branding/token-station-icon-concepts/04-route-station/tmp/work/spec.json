@@ -1,0 +1,67 @@
+{
+  "name": "route-station",
+  "source_reference": "User feedback: the mark must read as a routing transfer station while remaining minimal",
+  "brief": "Warm-white field. Two broad routes enter from the left, cross and exchange vertical order beneath one dominant near-black station gantry, then leave on the right. One amber route is active and one cobalt dot marks its input.",
+  "semantic_review": {
+    "status": "exact-enough",
+    "identity_risk": "low",
+    "basis": "original low-risk concept combining the strongest routing and station cues from the prior SVG exploration",
+    "route": "semantic-svg",
+    "notes": "Limit the icon to two reordered routes and one architectural gantry so the transfer-station metaphor survives at 32px without visual clutter."
+  },
+  "source_analysis": {
+    "fidelity_target": "preserve two reordered routes passing through one dominant station gantry",
+    "identity_risk": "low",
+    "route": "semantic-svg",
+    "must_preserve": [
+      "two routes enter and exit at different vertical positions",
+      "one amber active route travels from low-left to high-right",
+      "one large central gantry visibly covers the routing area",
+      "strong silhouette at 32px"
+    ],
+    "must_not_add": [
+      "third or fourth route",
+      "text, numbers, arrows, nodes, train, sleepers, circuit pins, shadow, gradient, glow, or platform frame"
+    ],
+    "components": [
+      {"id": "secondary-route", "layer": "secondary route", "format": "svg", "spec_constraints": ["one broad charcoal filled ribbon", "upper-left to lower-right"]},
+      {"id": "active-route", "layer": "active route", "format": "svg", "spec_constraints": ["one broad amber filled ribbon", "lower-left to upper-right"]},
+      {"id": "station-gantry", "layer": "station gantry", "format": "svg", "spec_constraints": ["one compact near-black arch silhouette", "central opening reveals the route exchange"]},
+      {"id": "entry-signal", "layer": "entry signal", "format": "svg", "spec_constraints": ["one small cobalt circle"]}
+    ],
+    "acceptance_checks": [
+      "reads as routes passing through a station rather than a standalone X",
+      "does not read as USB, share, microchip, or node graph",
+      "route ordering and station silhouette remain visible at 32px",
+      "no SVG material warnings"
+    ]
+  },
+  "fill": {"solid": "extended-srgb:0.95686,0.94902,0.92549,1.00000"},
+  "layers": [
+    {
+      "name": "background",
+      "svg": "<rect width=\"1024\" height=\"1024\" fill=\"#F4F2EC\"/>",
+      "composer": {"include": false}
+    },
+    {
+      "name": "secondary route",
+      "svg": "<path d=\"M86 330 C300 330 382 420 500 492 C622 566 720 650 938 650 L938 716 C694 716 580 620 466 550 C354 482 286 396 86 396 Z\" fill=\"#282B30\"/>",
+      "composer": {"format": "svg", "reason": "one clean secondary route ribbon"}
+    },
+    {
+      "name": "active route",
+      "svg": "<path d=\"M86 650 C300 650 382 560 500 488 C622 414 720 330 938 330 L938 396 C694 396 580 492 466 562 C354 630 286 716 86 716 Z\" fill=\"#F4A62A\"/>",
+      "composer": {"format": "svg", "reason": "one clean active route ribbon"}
+    },
+    {
+      "name": "station gantry",
+      "svg": "<path d=\"M334 306 Q334 244 396 244 H628 Q690 244 690 306 V766 H604 V470 Q604 416 550 416 H474 Q420 416 420 470 V766 H334 Z\" fill=\"#15171B\"/>",
+      "composer": {"format": "svg", "reason": "one compact architectural station silhouette"}
+    },
+    {
+      "name": "entry signal",
+      "svg": "<circle cx=\"108\" cy=\"683\" r=\"34\" fill=\"#4E73F8\"/>",
+      "composer": {"format": "svg", "reason": "simple flat request-entry signal"}
+    }
+  ]
+}
