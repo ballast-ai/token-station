@@ -770,6 +770,7 @@ mod tests {
                 "codex",
                 "gemini-cli",
                 "opencode",
+                "cursor",
                 "openclaw",
                 "workbuddy",
                 "nous-hermes-agent",
@@ -781,10 +782,10 @@ mod tests {
             .into_iter()
             .map(|metadata| (metadata.agent_id, metadata.display_name))
             .collect();
-        assert_eq!(labels.len(), 8);
+        assert_eq!(labels.len(), 9);
         assert_eq!(labels[0].1, "Claude Code");
-        assert_eq!(labels[6].1, "WorkBuddy");
-        assert_eq!(labels[7].1, "Hermes Agent");
+        assert_eq!(labels[7].1, "WorkBuddy");
+        assert_eq!(labels[8].1, "Hermes Agent");
 
         let gemini = &registry.descriptors()[3];
         assert_eq!(gemini.agent_id, "gemini-cli");
@@ -793,7 +794,7 @@ mod tests {
             registry.ui_metadata()[3].connector_capabilities[0].config_format,
             "dotenv"
         );
-        let hermes = &registry.descriptors()[7];
+        let hermes = &registry.descriptors()[8];
         assert_eq!(hermes.admission, AdmissionStatus::Supported);
         assert_eq!(hermes.local_connector_ids, ["hermes-v1"]);
         assert_eq!(hermes.version_probe.argv, ["--help"]);
@@ -802,7 +803,7 @@ mod tests {
             super::super::types::VersionOutputMatcher::SuccessOnly
         );
         assert!(!hermes.version_probe.retry_on_timeout);
-        let openclaw = &registry.descriptors()[5];
+        let openclaw = &registry.descriptors()[6];
         assert_eq!(openclaw.admission, AdmissionStatus::Supported);
         assert_eq!(openclaw.local_connector_ids, ["openclaw-v1"]);
         assert!(matches!(
@@ -899,7 +900,7 @@ mod tests {
         for descriptor in registry.descriptors() {
             // Claude Desktop and the verified WorkBuddy 5.3.8 integration do not
             // claim a Linux installation until that product path is tested.
-            if matches!(descriptor.agent_id.as_str(), "claude-desktop" | "workbuddy") {
+            if matches!(descriptor.agent_id.as_str(), "claude-desktop" | "workbuddy" | "cursor") {
                 continue;
             }
             assert!(
@@ -931,7 +932,7 @@ mod tests {
         for descriptor in registry.descriptors() {
             // WorkBuddy is intentionally macOS-only until its Windows install and
             // config paths have been verified against a real installation.
-            if descriptor.agent_id == "workbuddy" {
+            if matches!(descriptor.agent_id.as_str(), "workbuddy" | "cursor") {
                 continue;
             }
             assert!(
