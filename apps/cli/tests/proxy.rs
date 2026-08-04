@@ -1604,7 +1604,7 @@ fn agent_namespaces_select_custom_or_inherited_routers_and_strip_paths() {
     assert_eq!(status, 200);
 
     assert_eq!(custom.hits(), 1, "only Codex uses its custom route");
-    assert_eq!(home.hits(), 7, "home plus six inherited Agent requests");
+    assert_eq!(home.hits(), 8, "home plus seven inherited Agent requests");
     assert!(
         custom
             .seen()
