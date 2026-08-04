@@ -311,14 +311,20 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if !admitted(&state, &headers) {
         return unauthorized("/v1/models");
     }
-    models_response(&state)
+    models_response(&state, None)
 }
 
-fn models_response(state: &AppState) -> Response {
+fn models_response(state: &AppState, agent_id: Option<&str>) -> Response {
+    let Some(document) = state.gateway.models_for(agent_id) else {
+        return invalid_namespace(&format!(
+            "unknown Agent namespace `{}`",
+            agent_id.expect("only a scoped model request can be unknown")
+        ));
+    };
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(state.gateway.models().to_owned()))
+        .body(Body::from(document.to_owned()))
         .expect("a literal response builds")
 }
 
@@ -566,7 +572,7 @@ async fn chat(State(state): State<AppState>, request: Request<Body>) -> Response
         return unauthorized(scoped.canonical_path);
     }
     if method == Method::GET && scoped.canonical_path == "/v1/models" {
-        return models_response(&state);
+        return models_response(&state, scoped.agent_id);
     }
     let Ok(worker_permit) = Arc::clone(&state.worker_slots).try_acquire_owned() else {
         return concurrency_refusal(scoped.canonical_path);

@@ -2076,7 +2076,7 @@ mod tests {
         assert_eq!(profile["disableDeploymentModeChooser"], true);
         assert_eq!(
             profile["coworkEgressAllowedHosts"],
-            serde_json::json!(["127.0.0.1", "::1", "localhost"])
+            serde_json::json!(["127.0.0.1", "localhost"])
         );
         assert_eq!(metadata["unknownMeta"], "keep");
         assert_eq!(normal["unknownNormal"], "keep");
