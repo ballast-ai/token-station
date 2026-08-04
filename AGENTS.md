@@ -49,3 +49,9 @@ scripts/install-local-desktop.sh
 5. 任一步失败都必须如实报告；构建失败时必须保留当前已安装 App。
 
 纯文档、注释或测试数据改动不要求重装 App，除非用户明确要求。
+
+## macOS DMG 打包前必读
+
+任何人或 Agent 准备创建、修改、上传或发布 macOS DMG 前，必须完整阅读并遵守
+[`docs/release/macOS-DMG安装提示与打包要求.md`](docs/release/macOS-DMG安装提示与打包要求.md)。
+该文档是发布要求，不代表当前任务已经获准执行打包。
