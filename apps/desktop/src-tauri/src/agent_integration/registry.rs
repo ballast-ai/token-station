@@ -900,7 +900,10 @@ mod tests {
         for descriptor in registry.descriptors() {
             // Claude Desktop and the verified WorkBuddy 5.3.8 integration do not
             // claim a Linux installation until that product path is tested.
-            if matches!(descriptor.agent_id.as_str(), "claude-desktop" | "workbuddy" | "cursor") {
+            if matches!(
+                descriptor.agent_id.as_str(),
+                "claude-desktop" | "workbuddy" | "cursor"
+            ) {
                 continue;
             }
             assert!(
