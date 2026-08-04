@@ -1,0 +1,10 @@
+service:
+  name: token-station
+  enabled: true
+  ports:
+    http: 8787
+    metrics: 9090
+features:
+  - cursor
+  - workbuddy
+  - streaming

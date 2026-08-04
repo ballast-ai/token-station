@@ -1,0 +1,8 @@
+{
+  "users": [
+    {"id": 1, "name": "Ada", "role": "admin"},
+    {"id": 2, "name": "Lin", "role": "editor"},
+    {"id": 3, "name": "Mika", "role": "viewer"}
+  ],
+  "nested": {"enabled": true, "limits": [5, 10, 20]}
+}
