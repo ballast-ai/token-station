@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use ring::hmac;
+use rusqlite::Connection;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::{State, WebviewWindow};
@@ -322,6 +323,25 @@ impl AgentProxyRuntime {
 
     pub(crate) fn instance_id(&self) -> &str {
         &self.instance_id
+    }
+
+    pub(crate) fn virtual_key(&self) -> &str {
+        self.virtual_key.as_str()
+    }
+
+    pub(crate) fn gateway_origin(&self) -> Result<String, AgentCommandError> {
+        let base = self
+            .connector_base_urls
+            .values()
+            .next()
+            .ok_or_else(|| AgentCommandError::boundary("proxy_not_running", "代理地址不可用"))?;
+        let marker = "/agents/";
+        let origin = base
+            .split_once(marker)
+            .map(|(origin, _)| origin)
+            .unwrap_or(base)
+            .to_string();
+        Ok(origin)
     }
 
     fn fingerprint(&self) -> [u8; 32] {
@@ -1632,6 +1652,101 @@ pub(crate) fn scan_agents(
 ) -> Result<Vec<AgentView>, AgentCommandError> {
     let runtime = runtime_from_app(app_state.inner()).ok();
     state.scan_with_runtime(runtime.as_ref())
+}
+
+/// Cursor keeps BYOK settings in its globalStorage SQLite database rather than
+/// a user-owned JSON file. This command mirrors the community-proven layout,
+/// but refuses to touch the database while Cursor is running and saves a full
+/// backup before changing either credential or base URL.
+#[tauri::command(async)]
+pub(crate) fn configure_cursor_provider(
+    app_state: State<'_, AppStateManaged>,
+    paths: State<'_, AgentIntegrationPaths>,
+) -> Result<String, AgentCommandError> {
+    let runtime = runtime_from_app(&app_state)?;
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        AgentCommandError::boundary("home_unavailable", "无法确定当前用户目录")
+    })?;
+    let db_path = PathBuf::from(home)
+        .join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
+    if !db_path.is_file() {
+        return Err(AgentCommandError::boundary(
+            "cursor_database_missing",
+            "找不到 Cursor 本机配置数据库",
+        ));
+    }
+    let running = std::process::Command::new("pgrep")
+        .args(["-f", "/Applications/Cursor.app/Contents/MacOS/Cursor"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if running {
+        return Err(AgentCommandError::boundary(
+            "cursor_running",
+            "请先完全退出 Cursor，再执行一键接入",
+        ));
+    }
+    let backup_dir = paths.snapshot_root.join("cursor");
+    std::fs::create_dir_all(&backup_dir)
+        .map_err(|error| AgentCommandError::internal(error.to_string()))?;
+    let backup = backup_dir.join(format!("state.vscdb.{}.bak", SystemClock.now_ms()));
+    std::fs::copy(&db_path, &backup)
+        .map_err(|error| AgentCommandError::internal(error.to_string()))?;
+    let base_url = format!("{}/agents/cursor/v1", runtime.gateway_origin()?);
+    let token = runtime.virtual_key().to_string();
+    let key_name = "src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser";
+    let secret_name = "secret://cursorAuth/openAIKey";
+    let connection = Connection::open(&db_path)
+        .map_err(|error| AgentCommandError::internal(error.to_string()))?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| AgentCommandError::internal(error.to_string()))?;
+    let result = (|| -> Result<(), rusqlite::Error> {
+        let raw: String = transaction.query_row(
+            "SELECT value FROM ItemTable WHERE key = ?1",
+            [key_name],
+            |row| row.get(0),
+        )?;
+        let mut value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                "Cursor applicationUser JSON 无法解析",
+            )))
+        })?;
+        value["openAIBaseUrl"] = serde_json::Value::String(base_url.clone());
+        let encoded = serde_json::to_string(&value).map_err(|error| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+        })?;
+        transaction.execute(
+            "UPDATE ItemTable SET value = ?1 WHERE key = ?2",
+            rusqlite::params![encoded, key_name],
+        )?;
+        transaction.execute(
+            "INSERT INTO ItemTable(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            rusqlite::params![secret_name, token],
+        )?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => transaction
+            .commit()
+            .map_err(|error| AgentCommandError::internal(error.to_string()))?,
+        Err(error) => {
+            let _ = std::fs::copy(&backup, &db_path);
+            return Err(AgentCommandError::internal(error.to_string()));
+        }
+    }
+    let verified: String = Connection::open(&db_path)
+        .and_then(|conn| conn.query_row("SELECT value FROM ItemTable WHERE key = ?1", [key_name], |row| row.get(0)))
+        .map_err(|error| AgentCommandError::internal(error.to_string()))?;
+    if !serde_json::from_str::<serde_json::Value>(&verified)
+        .ok()
+        .and_then(|value| value.get("openAIBaseUrl").and_then(serde_json::Value::as_str).map(|value| value == base_url))
+        .unwrap_or(false)
+    {
+        let _ = std::fs::copy(&backup, &db_path);
+        return Err(AgentCommandError::internal("Cursor 配置回读验证失败".to_string()));
+    }
+    Ok(format!("Cursor 已接入 Token Station，原配置已备份到 {}", backup.display()))
 }
 
 #[tauri::command(async)]
