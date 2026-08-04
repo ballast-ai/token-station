@@ -603,6 +603,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn macos_node_agents_include_the_safe_npm_prefix_from_user_config() {
         let root = std::env::temp_dir().join(format!(
             "token-station-npm-prefix-platform-{}",
@@ -668,6 +669,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn macos_hermes_checks_bounded_python_user_bins_without_path() {
         let root = std::env::temp_dir().join(format!(
             "token-station-python-user-platform-{}",
