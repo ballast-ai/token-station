@@ -1655,9 +1655,8 @@ pub(crate) fn scan_agents(
 }
 
 /// Cursor keeps BYOK settings in its globalStorage SQLite database rather than
-/// a user-owned JSON file. This command mirrors the community-proven layout,
-/// but refuses to touch the database while Cursor is running and saves a full
-/// backup before changing either credential or base URL.
+/// a user-owned JSON file. Never close a running Cursor process here: the user
+/// can either enter the TS API in Cursor settings or quit it and retry.
 #[tauri::command(async)]
 pub(crate) fn configure_cursor_provider(
     app_state: State<'_, AppStateManaged>,
@@ -1683,7 +1682,7 @@ pub(crate) fn configure_cursor_provider(
     if running {
         return Err(AgentCommandError::boundary(
             "cursor_running",
-            "请先完全退出 Cursor，再执行一键接入",
+            "Cursor 正在运行。请在 Cursor 设置中手动填写 TS API，或手动退出 Cursor 后再点一键接入。",
         ));
     }
     let backup_dir = paths.snapshot_root.join("cursor");

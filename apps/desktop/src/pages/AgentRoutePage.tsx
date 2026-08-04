@@ -119,7 +119,7 @@ function statusCopy(
       label: copy("Ready", "可接入"),
       detail: copy(
         "Cursor settings will be backed up and configured automatically.",
-        "将自动备份并写入 Cursor 配置，不需要手动填写。",
+        "运行中的 Cursor 不会被强制关闭。你可以手动填写 TS API，或退出 Cursor 后再点一键接入。",
       ),
     };
   }
@@ -223,7 +223,13 @@ export default function AgentRoutePage({
       onStateChange(await action());
       if (message) setNotice(message);
     } catch (caught) {
-      setError(errorText(caught));
+      const message = errorText(caught);
+      setError(message.includes("cursor_running")
+        ? copy(
+          "Cursor is still running. Enter the TS API in Cursor settings, or quit Cursor yourself and click Connect again. Token Station will not close it for you.",
+          "Cursor 仍在运行。你可以在 Cursor 设置中填写 TS API，或者自己退出 Cursor 后再点一次一键接入。Token Station 不会强制关闭它。",
+        )
+        : message);
     } finally {
       setBusy(false);
     }
@@ -265,7 +271,13 @@ export default function AgentRoutePage({
         : copy("Agent connected.", "Agent 已接入"));
       await onRescan();
     } catch (caught) {
-      setError(errorText(caught));
+      const message = errorText(caught);
+      setError(message.includes("cursor_running")
+        ? copy(
+          "Cursor is still running. Enter the TS API in Cursor settings, or quit Cursor yourself and click Connect again. Token Station will not close it for you.",
+          "Cursor 仍在运行。你可以在 Cursor 设置中填写 TS API，或者自己退出 Cursor 后再点一次一键接入。Token Station 不会强制关闭它。",
+        )
+        : message);
     } finally {
       setBusy(false);
     }
