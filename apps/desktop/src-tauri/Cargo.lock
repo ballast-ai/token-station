@@ -4938,6 +4938,7 @@ dependencies = [
  "libc",
  "regex",
  "ring",
+ "rusqlite",
  "semver",
  "serde",
  "serde_json",

@@ -45,7 +45,8 @@ use token_station_router_core::UpstreamRef;
 use agent_integration::commands::{
     apply_agent_plan, apply_snapshot_restore, force_forget_agent, get_agent_drift,
     list_agent_registry, list_agent_snapshots, plan_agent_connection, plan_agent_disconnect,
-    plan_snapshot_restore, runtime_from_app, scan_agents, AgentCommandState,
+    plan_snapshot_restore, runtime_from_app, scan_agents, configure_cursor_provider,
+    AgentCommandState,
 };
 use agent_integration::registry::AgentRegistry;
 use agent_integration::types::AdmissionStatus;
@@ -4520,6 +4521,7 @@ pub fn run() {
             list_agent_registry,
             scan_agents,
             plan_agent_connection,
+            configure_cursor_provider,
             apply_agent_plan,
             plan_agent_disconnect,
             force_forget_agent,

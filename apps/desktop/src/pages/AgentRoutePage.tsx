@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   applyAgentPlan,
+  configureCursorProvider,
   forceForgetAgent,
   mountAgentProfile,
   planAgentConnection,
@@ -68,6 +69,7 @@ function errorText(error: unknown) {
 }
 
 function statusCopy(
+  metadata: AgentUiMetadataView,
   agent: AgentView | undefined,
   installation: AgentInstallationView | undefined,
   copy: (english: string, simplifiedChinese: string) => string,
@@ -109,6 +111,16 @@ function statusCopy(
       tone: "success",
       label: copy("Connected", "已接入"),
       detail: copy("Requests are routed through Token Station.", "请求已通过 Token Station。"),
+    };
+  }
+  if (metadata.agent_id === "cursor" && installation) {
+    return {
+      tone: "ready",
+      label: copy("Ready", "可接入"),
+      detail: copy(
+        "Cursor settings will be backed up and configured automatically.",
+        "将自动备份并写入 Cursor 配置，不需要手动填写。",
+      ),
     };
   }
   if (installation?.managed) {
@@ -191,12 +203,13 @@ export default function AgentRoutePage({
     [agent, selectedPath],
   );
 
-  const status = statusCopy(agent, installation, copy);
+  const status = statusCopy(metadata, agent, installation, copy);
   const managed = installation?.managed ?? false;
   const canConnect = Boolean(
     installation
       && installation.adapter_ready !== false
-      && (["DETECTED_VERIFIED", "CONNECTED"].includes(installation.compatibility.status)
+      && (metadata.agent_id === "cursor"
+        || ["DETECTED_VERIFIED", "CONNECTED"].includes(installation.compatibility.status)
         || isExactMultiInstallSelection(agent, installation)),
   );
   const canOperate = managed ? Boolean(installation) : serveRunning && canConnect;
@@ -224,6 +237,12 @@ export default function AgentRoutePage({
     setError("");
     setNotice("");
     try {
+      if (metadata.agent_id === "cursor" && !managed) {
+        const message = await configureCursorProvider();
+        setNotice(message);
+        await onRescan();
+        return;
+      }
       const plan = managed
         ? await planAgentDisconnect(metadata.agent_id, installation.discovery.canonical_path)
         : await planAgentConnection(
