@@ -10,6 +10,7 @@ import {
   ClaudeCode,
   Codex,
   Cohere,
+  Cursor,
   DeepInfra,
   DeepSeek,
   Fireworks,
@@ -111,6 +112,7 @@ const AGENT_ICONS: Record<string, BrandIcon> = {
   codex: Codex,
   opencode: OpenCode,
   openclaw: OpenClaw,
+  cursor: Cursor,
 };
 
 // Agent id → 自带位图 logo(放在 public/ 下,按 URL 引用)。@lobehub 没有的品牌

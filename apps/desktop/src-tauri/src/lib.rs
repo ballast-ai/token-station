@@ -1946,7 +1946,12 @@ fn supported_agent_ids() -> Vec<String> {
         .expect("built-in Agent Registry must be valid")
         .descriptors()
         .iter()
-        .filter(|descriptor| descriptor.admission == AdmissionStatus::Supported)
+        .filter(|descriptor| {
+            descriptor.admission == AdmissionStatus::Supported
+                // Cursor has a verified protocol route and a dedicated SQLite
+                // configurator, but intentionally has no generic local Connector.
+                || descriptor.agent_id == "cursor"
+        })
         .map(|descriptor| descriptor.agent_id.clone())
         .collect()
 }
