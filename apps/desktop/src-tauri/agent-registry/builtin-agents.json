@@ -358,6 +358,31 @@
     },
     {
       "schema_version": 1,
+      "agent_id": "cursor",
+      "legacy_kind": null,
+      "display_name": "Cursor",
+      "icon_key": "cursor",
+      "ui_order": 45,
+      "nav_mark": "C",
+      "admission": "discovery_only",
+      "executable_candidates": ["cursor"],
+      "known_install_locations": {
+        "macos": ["/Applications/Cursor.app/Contents/MacOS/Cursor"],
+        "windows": ["${LOCALAPPDATA}/Programs/Cursor/Cursor.exe"]
+      },
+      "version_probe": {
+        "argv": ["--version"],
+        "timeout_ms": 2000,
+        "max_output_bytes": 65536,
+        "output_matcher": "SEMVER_ANYWHERE"
+      },
+      "config_locations": [],
+      "protocol_binding": null,
+      "local_connector_ids": [],
+      "discovery_fingerprint_rules": ["json-shape-v1"]
+    },
+    {
+      "schema_version": 1,
       "agent_id": "workbuddy",
       "legacy_kind": null,
       "display_name": "WorkBuddy",
