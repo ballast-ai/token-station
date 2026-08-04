@@ -4752,7 +4752,7 @@ dependencies = [
 
 [[package]]
 name = "token-station-desktop"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "command-group",
  "getrandom 0.4.3",
