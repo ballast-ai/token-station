@@ -115,8 +115,10 @@ const AGENT_ICONS: Record<string, BrandIcon> = {
 
 // Agent ID to bundled bitmap logo. Store it in public/ and reference it by URL. This covers brands missing from @lobehub.
 // (such as Hermes) uses it. If the file is missing, <BrandImage> falls back to an initial block and does not show a blank page.
-const AGENT_IMAGES: Record<string, string> = {
-  "nous-hermes-agent": "/agents/hermes.png",
+type AgentImage = { src: string; shape?: "app" };
+const AGENT_IMAGES: Record<string, AgentImage> = {
+  "nous-hermes-agent": { src: "/agents/hermes.png" },
+  workbuddy: { src: "/agents/workbuddy.png", shape: "app" },
 };
 
 /** Initial or abbreviation tile for items without a brand logo. */
@@ -129,12 +131,22 @@ function Fallback({ text, size }: { text: string; size: number }) {
 }
 
 /** Bundled bitmap logo that falls back to an initial tile if loading fails. */
-function BrandImage({ src, fallback, size }: { src: string; fallback: string; size: number }) {
+function BrandImage({
+  src,
+  fallback,
+  size,
+  shape,
+}: {
+  src: string;
+  fallback: string;
+  size: number;
+  shape?: "app";
+}) {
   const [failed, setFailed] = useState(false);
   if (failed) return <Fallback text={fallback} size={size} />;
   return (
     <img
-      className="brand-image"
+      className={`brand-image ${shape === "app" ? "brand-image-app" : ""}`}
       src={src}
       alt=""
       width={size}
@@ -164,7 +176,7 @@ export function AgentIcon({ id, fallback, size = 24 }: { id: string; fallback: s
       style={{ width: size, height: size }}
     >
       {image ? (
-        <BrandImage src={image} fallback={fallback} size={size} />
+        <BrandImage src={image.src} fallback={fallback} size={size} shape={image.shape} />
       ) : Glyph ? (
         <Glyph size={size} />
       ) : (

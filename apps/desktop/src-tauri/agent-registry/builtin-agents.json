@@ -335,6 +335,53 @@
     },
     {
       "schema_version": 1,
+      "agent_id": "workbuddy",
+      "legacy_kind": null,
+      "display_name": "WorkBuddy",
+      "icon_key": "workbuddy",
+      "ui_order": 55,
+      "nav_mark": "WB",
+      "admission": "supported",
+      "executable_candidates": ["codebuddy"],
+      "known_install_locations": {
+        "macos": ["/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"]
+      },
+      "version_probe": {
+        "argv": ["--version"],
+        "timeout_ms": 2000,
+        "max_output_bytes": 65536,
+        "output_matcher": "SEMVER_ANYWHERE",
+        "runtime": {
+          "kind": "env_shebang",
+          "interpreter_candidates": ["node"],
+          "resolution_sources": ["known_install_locations"],
+          "known_install_locations": {
+            "macos": [
+              "${HOME}/.workbuddy/binaries/node/versions/22.22.2/bin/node",
+              "/opt/homebrew/bin/node",
+              "/usr/local/bin/node"
+            ]
+          }
+        }
+      },
+      "config_locations": [
+        {
+          "env_override": null,
+          "platform_defaults": {
+            "macos": ["${HOME}/.workbuddy/models.json"]
+          },
+          "format": "json"
+        }
+      ],
+      "protocol_binding": {
+        "adapter_id": "agent-openai",
+        "base_url_shape": "origin_v1"
+      },
+      "local_connector_ids": ["workbuddy-v1"],
+      "discovery_fingerprint_rules": ["json-shape-v1"]
+    },
+    {
+      "schema_version": 1,
       "agent_id": "opencode",
       "legacy_kind": "opencode",
       "display_name": "OpenCode",

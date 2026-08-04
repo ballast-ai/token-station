@@ -1525,7 +1525,7 @@ fn agent_namespaces_select_custom_or_inherited_routers_and_strip_paths() {
         "model": "auto",
         "messages": [{ "role": "user", "content": "hi" }]
     });
-    for agent_id in ["opencode", "openclaw", "nous-hermes-agent"] {
+    for agent_id in ["opencode", "openclaw", "nous-hermes-agent", "workbuddy"] {
         let (status, _) = post_scoped(
             &proxy,
             &format!("/agents/{agent_id}/v1/chat/completions"),
@@ -1550,7 +1550,7 @@ fn agent_namespaces_select_custom_or_inherited_routers_and_strip_paths() {
     assert_eq!(status, 200);
 
     assert_eq!(custom.hits(), 1, "only Codex uses its custom route");
-    assert_eq!(home.hits(), 5, "home plus four inherited Agent requests");
+    assert_eq!(home.hits(), 6, "home plus five inherited Agent requests");
     assert!(
         custom
             .seen()
@@ -2449,11 +2449,9 @@ fn anthropic_forced_tool_choice_is_translated_and_reaches_the_upstream() {
 }
 
 #[test]
-fn anthropic_native_passthrough_forwards_verbatim_and_injects_the_upstream_key() {
-    // An anthropic-native upstream forwards the caller's Messages body verbatim —
-    // the web_search server tool and tool_choice:{type:tool} the Canonical IR
-    // would drop or refuse reach the upstream intact — while the host injects the
-    // upstream credential and never forwards the client's own token.
+fn anthropic_native_passthrough_only_replaces_images_for_a_text_only_model() {
+    // Native passthrough keeps server tools and forced tool choice verbatim, but
+    // its confirmed text-only target still receives the localized image marker.
     let upstream_answer = json!({
         "id": "msg_native_1",
         "type": "message",
@@ -2471,7 +2469,10 @@ fn anthropic_native_passthrough_forwards_verbatim_and_injects_the_upstream_key()
         &json!({
             "model": "auto",
             "max_tokens": 64,
-            "messages": [{"role": "user", "content": "search the web for joyai"}],
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc"}},
+                {"type": "text", "text": "搜索这张图相关的资料"}
+            ]}],
             "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
             "tool_choice": {"type": "tool", "name": "web_search"}
         }),
@@ -2497,6 +2498,14 @@ fn anthropic_native_passthrough_forwards_verbatim_and_injects_the_upstream_key()
         json!("web_search_20250305")
     );
     assert_eq!(forwarded.body["tool_choice"]["type"], json!("tool"));
+    assert_eq!(
+        forwarded.body["messages"][0]["content"][0],
+        json!({"type": "text", "text": "[图片已省略：当前模型不支持视觉输入。]"})
+    );
+    assert_eq!(
+        forwarded.body["messages"][0]["content"][1],
+        json!({"type": "text", "text": "搜索这张图相关的资料"})
+    );
     // Only the model was remapped to the routed upstream model.
     assert_eq!(forwarded.body["model"], json!("deepseek-chat"));
     // The upstream saw the injected upstream key; the client's own virtual key
@@ -2998,8 +3007,22 @@ fn opencode_and_hermes_images_reach_a_vision_capable_upstream() {
 }
 
 #[test]
-fn opencode_and_hermes_images_are_refused_before_a_non_vision_upstream() {
-    let home = MockUpstream::start(Vec::new());
+fn every_openai_chat_agent_degrades_images_before_a_non_vision_upstream() {
+    let answer = json!({
+        "id": "chatcmpl-media-fallback",
+        "model": "home-model",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "I can continue with the text." },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 12, "completion_tokens": 6 }
+    });
+    let home = MockUpstream::start(vec![
+        vec![http_json(200, &answer.to_string())],
+        vec![http_json(200, &answer.to_string())],
+        vec![http_json(200, &answer.to_string())],
+    ]);
     let custom = MockUpstream::start(Vec::new());
     let key = key_file("vision-agents-unsupported", "sk-test-key-abc");
     let proxy = start_scoped_proxy(&home, &custom, &key);
@@ -3015,7 +3038,7 @@ fn opencode_and_hermes_images_are_refused_before_a_non_vision_upstream() {
         }]
     });
 
-    for agent_id in ["opencode", "nous-hermes-agent"] {
+    for agent_id in ["workbuddy", "opencode", "nous-hermes-agent"] {
         let (status, body) = post_scoped(
             &proxy,
             &format!("/agents/{agent_id}/v1/chat/completions"),
@@ -3023,13 +3046,205 @@ fn opencode_and_hermes_images_are_refused_before_a_non_vision_upstream() {
             &token,
             false,
         );
-        assert_eq!(status, 400, "{agent_id}: {body}");
-        assert!(body.contains("capability"), "{agent_id}: {body}");
-        assert!(body.contains("supports vision"), "{agent_id}: {body}");
+        assert_eq!(status, 200, "{agent_id}: {body}");
+        assert!(
+            body.contains("I can continue with the text."),
+            "{agent_id}: {body}"
+        );
     }
 
-    assert_eq!(home.hits(), 0);
+    assert_eq!(home.hits(), 3);
     assert_eq!(custom.hits(), 0);
+    for request in home.seen() {
+        assert_eq!(
+            request.body["messages"][0]["content"],
+            json!("[Image omitted: the current model does not support visual input.]")
+        );
+    }
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn media_fallback_localizes_from_the_latest_user_text_and_records_a_real_attempt() {
+    let answer = json!({
+        "id": "chatcmpl-localized-fallback",
+        "model": "home-model",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "我会根据剩余文字继续。" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 18, "completion_tokens": 8 }
+    });
+    let home = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let custom = MockUpstream::start(Vec::new());
+    let key = key_file("workbuddy-vision-unsupported", "sk-test-key-abc");
+    let proxy = start_scoped_proxy(&home, &custom, &key);
+    let token = proxy.virtual_key.clone();
+    let request = json!({
+        "model": "auto",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+                { "type": "image_url", "image_url": { "url": "https://example.test/cat.png" } }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [{ "type": "text", "text": "请继续查看这份报告。" }]
+          }
+        ]
+    });
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/workbuddy/v1/chat/completions",
+        &request,
+        &token,
+        false,
+    );
+    assert_eq!(status, 200, "{body}");
+    let response: Value = serde_json::from_str(&body).expect("model response is JSON");
+    assert_eq!(response["object"], json!("chat.completion"));
+    assert_eq!(
+        response["choices"][0]["message"]["role"],
+        json!("assistant")
+    );
+    assert_eq!(
+        response["choices"][0]["message"]["content"],
+        json!("我会根据剩余文字继续。")
+    );
+    assert_eq!(home.hits(), 1);
+    assert_eq!(custom.hits(), 0);
+    let seen = home.seen();
+    assert_eq!(
+        seen[0].body["messages"][0]["content"],
+        json!("[图片已省略：当前模型不支持视觉输入。]")
+    );
+    assert_eq!(
+        seen[0].body["messages"][1]["content"],
+        json!("请继续查看这份报告。")
+    );
+    settle();
+    let log = std::fs::read_to_string(proxy.data_dir.join("requests.log")).expect("log exists");
+    let receipt: Value = serde_json::from_str(log.lines().last().expect("a receipt exists"))
+        .expect("receipt is JSON");
+    assert_eq!(receipt["status"], json!(200));
+    assert_eq!(receipt["error_code"], Value::Null);
+    assert_eq!(receipt["attempts"], json!(1));
+    assert_eq!(receipt["agent_id"], json!("workbuddy"));
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn codex_responses_input_images_use_the_same_text_only_fallback() {
+    let answer = json!({
+        "id": "chatcmpl-responses-media-fallback",
+        "model": "agent-model",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "Continued without the image." },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 5 }
+    });
+    let home = MockUpstream::start(Vec::new());
+    let custom = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("responses-media-fallback", "sk-test-key-abc");
+    let proxy = start_scoped_proxy(&home, &custom, &key);
+    let token = proxy.virtual_key.clone();
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/codex/v1/responses",
+        &json!({
+            "model": "auto",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "Continue from the text." },
+                    { "type": "input_image", "image_url": "https://example.test/cat.png" }
+                ]
+            }],
+            "stream": false
+        }),
+        &token,
+        false,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("Continued without the image."), "{body}");
+    assert_eq!(home.hits(), 0);
+    assert_eq!(custom.hits(), 1);
+    let seen = custom.seen();
+    assert_eq!(
+        seen[0].body["messages"][0]["content"],
+        json!(
+            "Continue from the text.[Image omitted: the current model does not support visual input.]"
+        )
+    );
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn an_upstream_media_refusal_retries_once_with_localized_markers() {
+    let refusal = json!({
+        "error": { "message": "This model does not support image attachments." }
+    });
+    let answer = json!({
+        "id": "chatcmpl-reactive-media-fallback",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "Continued after fallback." },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 4 }
+    });
+    let mock = MockUpstream::start(vec![
+        vec![http_json(400, &refusal.to_string())],
+        vec![http_json(200, &answer.to_string())],
+    ]);
+    let key = key_file("reactive-media-fallback", "sk-test-key-abc");
+    let proxy = start_proxy(&mock, &key);
+
+    let (status, body) = post_chat(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "Continue without the attachment." },
+                    { "type": "image_url", "image_url": { "url": "https://example.test/cat.png" } }
+                ]
+            }]
+        }),
+        None,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("Continued after fallback."), "{body}");
+    assert_eq!(mock.hits(), 2);
+    let seen = mock.seen();
+    assert_eq!(
+        seen[0].body["messages"][0]["content"][1]["type"],
+        "image_url"
+    );
+    assert_eq!(
+        seen[1].body["messages"][0]["content"],
+        json!(
+            "Continue without the attachment.[Image omitted: the current model does not support visual input.]"
+        )
+    );
+    settle();
+    let row = last_row(&proxy.data_dir);
+    assert_eq!(row["status"], "Integer(200)");
+    assert_eq!(row["attempts"], "Integer(2)");
+
     std::fs::remove_file(key).ok();
 }
 

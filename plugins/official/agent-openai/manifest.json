@@ -10,7 +10,8 @@
     "nous-hermes-agent",
     "generic-openai-sdk",
     "cursor",
-    "continue"
+    "continue",
+    "workbuddy"
   ],
   "capabilities": ["chat", "stream", "tool_call", "agent_hint"],
   "permissions": {
