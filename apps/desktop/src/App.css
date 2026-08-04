@@ -4921,15 +4921,18 @@ pre.block {
   display: grid;
   place-items: center;
   border-radius: 6px;
-  color: #fff;
-  background: linear-gradient(135deg, var(--signal), #8e72e6);
+  overflow: hidden;
   box-shadow: 0 4px 14px color-mix(in srgb, var(--signal) 25%, transparent);
 }
 
-.station-brand-mark svg {
-  width: 16px;
-  height: 16px;
-  stroke-width: 2.3;
+.station-brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.station-brand-mark img.dark-mode {
+  filter: invert(1);
 }
 
 .station-primary-nav {
