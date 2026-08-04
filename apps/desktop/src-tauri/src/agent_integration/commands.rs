@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use ring::hmac;
-use rusqlite::Connection;
-use serde::Serialize;
+use rusqlite::{Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{State, WebviewWindow};
 use zeroize::Zeroizing;
@@ -38,7 +38,7 @@ use super::transaction::{
 };
 use super::types::{
     AgentDriftView, AgentUiMetadata, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan,
-    DiscoveryRecord, DriftStatus, PatchKind, PatchOperation, PlanIntent, ReasonCode,
+    Diagnostic, DiscoveryRecord, DriftStatus, PatchKind, PatchOperation, PlanIntent, ReasonCode,
     SnapshotRecord,
 };
 use crate::{AgentIntegrationPaths, AppStateManaged};
@@ -604,8 +604,19 @@ impl AgentCommandState {
                     .iter()
                     .filter(|record| record.agent_id == descriptor.agent_id)
                     .map(|record| {
+                        let mut record = record.clone();
+                        let ownership = self
+                            .ownership
+                            .list_agent_installation(&record.agent_id, &record.canonical_path);
+                        if ownership.is_err() {
+                            record.diagnostics.push(Diagnostic {
+                                reason_code: ReasonCode::ReadOnlyPreflightFailed,
+                                message: "Token Station 接管索引不可用；已保留只读安装发现，接入和恢复暂时禁用"
+                                    .to_string(),
+                            });
+                        }
                         let compatibility =
-                            evaluate_discovery(&snapshot.catalog, descriptor, record);
+                            evaluate_discovery(&snapshot.catalog, descriptor, &record);
                         let connector_id = compatibility.connector_id.as_deref().or_else(|| {
                             (descriptor.local_connector_ids.len() == 1)
                                 .then(|| descriptor.local_connector_ids[0].as_str())
@@ -615,17 +626,14 @@ impl AgentCommandState {
                                 .and_then(|connector_id| runtime.input_for(connector_id).ok())
                                 .map(|input| input.adapter_ready)
                         });
-                        let managed = !self
-                            .ownership
-                            .list_agent_installation(&record.agent_id, &record.canonical_path)
-                            .map_err(AgentCommandError::internal)?
-                            .is_empty();
-                        let connected = runtime.is_some_and(|runtime| {
-                            self.installation_connected(record, runtime)
+                        let ownership_available = ownership.is_ok();
+                        let managed = ownership.is_ok_and(|records| !records.is_empty());
+                        let connected = ownership_available && runtime.is_some_and(|runtime| {
+                            self.installation_connected(&record, runtime)
                                 .unwrap_or(false)
                         });
                         Ok(AgentInstallationView {
-                            discovery: record.clone(),
+                            discovery: record,
                             compatibility,
                             adapter_ready,
                             managed,
@@ -1653,94 +1661,213 @@ pub(crate) fn scan_agents(
     state.scan_with_runtime(runtime.as_ref())
 }
 
-/// Cursor keeps BYOK settings in its globalStorage SQLite database rather than
-/// a user-owned JSON file. Never close a running Cursor process here: the user
-/// can either enter the TS API in Cursor settings or quit it and retry.
-#[tauri::command(async)]
-pub(crate) fn configure_cursor_provider(
-    app_state: State<'_, AppStateManaged>,
-    paths: State<'_, AgentIntegrationPaths>,
-) -> Result<String, AgentCommandError> {
-    let runtime = runtime_from_app(&app_state)?;
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| AgentCommandError::boundary("home_unavailable", "无法确定当前用户目录"))?;
-    let db_path = PathBuf::from(home)
-        .join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
-    if !db_path.is_file() {
-        return Err(AgentCommandError::boundary(
-            "cursor_database_missing",
-            "找不到 Cursor 本机配置数据库",
-        ));
-    }
-    let running = std::process::Command::new("pgrep")
-        .args(["-f", "/Applications/Cursor.app/Contents/MacOS/Cursor"])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if running {
-        return Err(AgentCommandError::boundary(
-            "cursor_running",
-            "Cursor 正在运行。请在 Cursor 设置中手动填写 TS API，或手动退出 Cursor 后再点一键接入。",
-        ));
-    }
-    let backup_dir = paths.snapshot_root.join("cursor");
-    std::fs::create_dir_all(&backup_dir)
-        .map_err(|error| AgentCommandError::internal(error.to_string()))?;
-    let backup = backup_dir.join(format!("state.vscdb.{}.bak", SystemClock.now_ms()));
-    std::fs::copy(&db_path, &backup)
-        .map_err(|error| AgentCommandError::internal(error.to_string()))?;
-    let base_url = format!("{}/agents/cursor/v1", runtime.gateway_origin()?);
-    let token = runtime.virtual_key().to_string();
-    let key_name = "src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser";
-    let secret_name = "secret://cursorAuth/openAIKey";
-    let connection = Connection::open(&db_path)
-        .map_err(|error| AgentCommandError::internal(error.to_string()))?;
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| AgentCommandError::internal(error.to_string()))?;
-    let result = (|| -> Result<(), rusqlite::Error> {
-        let raw: String = transaction.query_row(
-            "SELECT value FROM ItemTable WHERE key = ?1",
-            [key_name],
-            |row| row.get(0),
-        )?;
-        let mut value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
-                "Cursor applicationUser JSON 无法解析",
-            )))
-        })?;
-        value["openAIBaseUrl"] = serde_json::Value::String(base_url.clone());
-        let encoded = serde_json::to_string(&value)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        transaction.execute(
-            "UPDATE ItemTable SET value = ?1 WHERE key = ?2",
-            rusqlite::params![encoded, key_name],
-        )?;
-        transaction.execute(
-            "INSERT INTO ItemTable(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            rusqlite::params![secret_name, token],
-        )?;
-        Ok(())
-    })();
-    match result {
-        Ok(()) => transaction
-            .commit()
-            .map_err(|error| AgentCommandError::internal(error.to_string()))?,
-        Err(error) => {
-            let _ = std::fs::copy(&backup, &db_path);
-            return Err(AgentCommandError::internal(error.to_string()));
+const CURSOR_APPLICATION_USER_KEY: &str =
+    "src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser";
+const CURSOR_OPENAI_KEY: &str = "secret://cursorAuth/openAIKey";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CursorSettingsBackup {
+    schema_version: u32,
+    created_at_ms: u64,
+    application_user: String,
+    encrypted_openai_key: Option<String>,
+}
+
+fn cursor_database_path_for(
+    platform: super::types::Platform,
+    variable: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
+    match platform {
+        super::types::Platform::Macos => variable("HOME")
+            .map(PathBuf::from)
+            .map(|home| {
+                home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+            })
+            .ok_or_else(|| "无法确定当前用户目录".to_string()),
+        super::types::Platform::Windows => variable("APPDATA")
+            .map(PathBuf::from)
+            .map(|app_data| app_data.join("Cursor/User/globalStorage/state.vscdb"))
+            .ok_or_else(|| "无法确定 Windows AppData 目录".to_string()),
+        super::types::Platform::Linux | super::types::Platform::Wsl => {
+            Err("Cursor 自动配置暂不支持当前平台".to_string())
         }
     }
-    let verified: String = Connection::open(&db_path)
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT value FROM ItemTable WHERE key = ?1",
-                [key_name],
-                |row| row.get(0),
-            )
-        })
-        .map_err(|error| AgentCommandError::internal(error.to_string()))?;
-    if !serde_json::from_str::<serde_json::Value>(&verified)
+}
+
+fn cursor_database_path() -> Result<PathBuf, AgentCommandError> {
+    cursor_database_path_for(super::platform::current_platform(), |name| {
+        std::env::var_os(name)
+    })
+    .map_err(|message| AgentCommandError::boundary("cursor_platform_unsupported", message))
+}
+
+#[cfg(target_os = "macos")]
+fn cursor_is_running() -> Result<bool, AgentCommandError> {
+    let status = std::process::Command::new("pgrep")
+        .args(["-f", "/Applications/Cursor.app/Contents/MacOS/Cursor"])
+        .status()
+        .map_err(|_| AgentCommandError::internal("无法检查 Cursor 运行状态".to_string()))?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(AgentCommandError::internal(
+            "Cursor 运行状态检查失败".to_string(),
+        )),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn cursor_is_running() -> Result<bool, AgentCommandError> {
+    use std::os::windows::process::CommandExt;
+
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq Cursor.exe", "/FO", "CSV", "/NH"])
+        .creation_flags(0x0800_0000)
+        .output()
+        .map_err(|_| AgentCommandError::internal("无法检查 Cursor 运行状态".to_string()))?;
+    if !output.status.success() {
+        return Err(AgentCommandError::internal(
+            "Cursor 运行状态检查失败".to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split(',').next())
+        .any(|name| name.trim_matches('"').eq_ignore_ascii_case("Cursor.exe")))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn cursor_is_running() -> Result<bool, AgentCommandError> {
+    Err(AgentCommandError::boundary(
+        "cursor_platform_unsupported",
+        "Cursor 自动配置暂不支持当前平台",
+    ))
+}
+
+fn restore_cursor_settings(
+    db_path: &Path,
+    original_application_user: &str,
+    original_openai_key: Option<&str>,
+) -> Result<(), String> {
+    let mut connection = Connection::open(db_path).map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let changed = transaction
+        .execute(
+            "UPDATE ItemTable SET value = ?1 WHERE key = ?2",
+            rusqlite::params![original_application_user, CURSOR_APPLICATION_USER_KEY],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed != 1 {
+        return Err("Cursor applicationUser 恢复目标不存在".to_string());
+    }
+    match original_openai_key {
+        Some(value) => {
+            transaction
+                .execute(
+                    "INSERT INTO ItemTable(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    rusqlite::params![CURSOR_OPENAI_KEY, value],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        None => {
+            transaction
+                .execute("DELETE FROM ItemTable WHERE key = ?1", [CURSOR_OPENAI_KEY])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+fn configure_cursor_database(
+    db_path: &Path,
+    backup_dir: &Path,
+    base_url: &str,
+    token: &str,
+    now_ms: u64,
+) -> Result<PathBuf, String> {
+    super::safe_fs::ensure_private_dir(backup_dir)
+        .map_err(|_| "无法创建 Cursor 私有备份目录".to_string())?;
+    let mut connection = Connection::open(db_path).map_err(|error| error.to_string())?;
+    let original_application_user: String = connection
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = ?1",
+            [CURSOR_APPLICATION_USER_KEY],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Cursor applicationUser 配置不存在".to_string())?;
+    let encrypted_openai_key: Option<String> = connection
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = ?1",
+            [CURSOR_OPENAI_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| "无法读取 Cursor 加密 API Key 记录".to_string())?;
+    let backup = CursorSettingsBackup {
+        schema_version: 1,
+        created_at_ms: now_ms,
+        application_user: original_application_user.clone(),
+        encrypted_openai_key: encrypted_openai_key.clone(),
+    };
+    let backup_path = backup_dir.join(format!("cursor-settings.{now_ms}.json.bak"));
+    let backup_bytes =
+        serde_json::to_vec(&backup).map_err(|_| "无法序列化 Cursor 配置备份".to_string())?;
+    super::safe_fs::write_atomic_private(&backup_path, &backup_bytes)
+        .map_err(|_| "无法写入 Cursor 私有配置备份".to_string())?;
+
+    let mut application_user: serde_json::Value = serde_json::from_str(&original_application_user)
+        .map_err(|_| "Cursor applicationUser JSON 无法解析".to_string())?;
+    let object = application_user
+        .as_object_mut()
+        .ok_or_else(|| "Cursor applicationUser 必须是 JSON object".to_string())?;
+    object.insert(
+        "openAIBaseUrl".to_string(),
+        serde_json::Value::String(base_url.to_string()),
+    );
+    let encoded = serde_json::to_string(&application_user)
+        .map_err(|_| "无法序列化 Cursor applicationUser".to_string())?;
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let changed = transaction
+        .execute(
+            "UPDATE ItemTable SET value = ?1 WHERE key = ?2",
+            rusqlite::params![encoded, CURSOR_APPLICATION_USER_KEY],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed != 1 {
+        return Err("Cursor applicationUser 写入目标不存在".to_string());
+    }
+    transaction
+        .execute(
+            "INSERT INTO ItemTable(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            rusqlite::params![CURSOR_OPENAI_KEY, token],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    drop(connection);
+
+    let verified = Connection::open(db_path).map_err(|error| error.to_string())?;
+    let updated_application_user: String = verified
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = ?1",
+            [CURSOR_APPLICATION_USER_KEY],
+            |row| row.get(0),
+        )
+        .map_err(|_| "Cursor Base URL 回读失败".to_string())?;
+    let updated_openai_key: Option<String> = verified
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = ?1",
+            [CURSOR_OPENAI_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| "Cursor 加密 API Key 回读失败".to_string())?;
+    let base_url_matches = serde_json::from_str::<serde_json::Value>(&updated_application_user)
         .ok()
         .and_then(|value| {
             value
@@ -1748,15 +1875,55 @@ pub(crate) fn configure_cursor_provider(
                 .and_then(serde_json::Value::as_str)
                 .map(|value| value == base_url)
         })
-        .unwrap_or(false)
-    {
-        let _ = std::fs::copy(&backup, &db_path);
-        return Err(AgentCommandError::internal(
-            "Cursor 配置回读验证失败".to_string(),
+        .unwrap_or(false);
+    if !base_url_matches || updated_openai_key.as_deref() != Some(token) {
+        drop(verified);
+        restore_cursor_settings(
+            db_path,
+            &original_application_user,
+            encrypted_openai_key.as_deref(),
+        )
+        .map_err(|error| format!("Cursor 配置验证失败，且恢复原设置失败：{error}"))?;
+        return Err("Cursor 配置验证失败，已恢复原设置".to_string());
+    }
+    Ok(backup_path)
+}
+
+/// Cursor keeps BYOK settings in its globalStorage SQLite database rather than
+/// a user-owned JSON file. Never close a running Cursor process here; the user
+/// quits Cursor before Token Station updates both settings in one transaction.
+#[tauri::command(async)]
+pub(crate) fn configure_cursor_provider(
+    app_state: State<'_, AppStateManaged>,
+    paths: State<'_, AgentIntegrationPaths>,
+) -> Result<String, AgentCommandError> {
+    let runtime = runtime_from_app(&app_state)?;
+    let db_path = cursor_database_path()?;
+    if !db_path.is_file() {
+        return Err(AgentCommandError::boundary(
+            "cursor_database_missing",
+            "找不到 Cursor 本机配置数据库",
         ));
     }
+    if cursor_is_running()? {
+        return Err(AgentCommandError::boundary(
+            "cursor_running",
+            "Cursor 正在运行。请手动退出 Cursor 后再点一键接入。",
+        ));
+    }
+    let backup_dir = paths.snapshot_root.join("cursor");
+    let base_url = format!("{}/agents/cursor/v1", runtime.gateway_origin()?);
+    let token = runtime.virtual_key().to_string();
+    let backup = configure_cursor_database(
+        &db_path,
+        &backup_dir,
+        &base_url,
+        &token,
+        SystemClock.now_ms(),
+    )
+    .map_err(AgentCommandError::internal)?;
     Ok(format!(
-        "Cursor 已接入 Token Station，原配置已备份到 {}",
+        "Cursor 已接入 Token Station，原设置已备份到 {}。下次启动 Cursor 时生效。",
         backup.display()
     ))
 }
@@ -2239,6 +2406,140 @@ mod tests {
         };
 
         assert_eq!(error.code, "scan_in_progress");
+    }
+
+    #[test]
+    fn cursor_database_path_uses_platform_user_data_root() {
+        let mac = cursor_database_path_for(Platform::Macos, |name| {
+            (name == "HOME").then(|| std::ffi::OsString::from("/Users/tester"))
+        })
+        .unwrap();
+        assert_eq!(
+            mac,
+            PathBuf::from(
+                "/Users/tester/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+            )
+        );
+
+        let windows = cursor_database_path_for(Platform::Windows, |name| {
+            (name == "APPDATA")
+                .then(|| std::ffi::OsString::from(r"C:\Users\tester\AppData\Roaming"))
+        })
+        .unwrap();
+        assert_eq!(
+            windows,
+            PathBuf::from(r"C:\Users\tester\AppData\Roaming")
+                .join("Cursor/User/globalStorage/state.vscdb")
+        );
+    }
+
+    #[test]
+    fn cursor_database_writes_base_url_and_key_and_keeps_a_private_backup() {
+        let root = scratch("cursor-direct-settings");
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("state.vscdb");
+        let connection = Connection::open(&db_path).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+                [],
+            )
+            .unwrap();
+        let original_application_user = r#"{"openAIBaseUrl":"https://old.example/v1","keep":true}"#;
+        let original_key = "old-key";
+        connection
+            .execute(
+                "INSERT INTO ItemTable(key, value) VALUES(?1, ?2)",
+                rusqlite::params![CURSOR_APPLICATION_USER_KEY, original_application_user],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO ItemTable(key, value) VALUES(?1, ?2)",
+                rusqlite::params![CURSOR_OPENAI_KEY, original_key],
+            )
+            .unwrap();
+        drop(connection);
+
+        let backup_path = configure_cursor_database(
+            &db_path,
+            &root.join("backups"),
+            "http://127.0.0.1:8787/agents/cursor/v1",
+            "ts-direct-key",
+            42,
+        )
+        .unwrap();
+
+        let connection = Connection::open(&db_path).unwrap();
+        let application_user: String = connection
+            .query_row(
+                "SELECT value FROM ItemTable WHERE key = ?1",
+                [CURSOR_APPLICATION_USER_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&application_user)
+                .unwrap()
+                .get("openAIBaseUrl")
+                .and_then(serde_json::Value::as_str),
+            Some("http://127.0.0.1:8787/agents/cursor/v1")
+        );
+        let key: String = connection
+            .query_row(
+                "SELECT value FROM ItemTable WHERE key = ?1",
+                [CURSOR_OPENAI_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(key, "ts-direct-key");
+
+        let backup: CursorSettingsBackup =
+            serde_json::from_slice(&std::fs::read(&backup_path).unwrap()).unwrap();
+        assert_eq!(backup.application_user, original_application_user);
+        assert_eq!(backup.encrypted_openai_key.as_deref(), Some(original_key));
+        super::super::safe_fs::verify_private_file(&backup_path).unwrap();
+    }
+
+    #[test]
+    fn commands_keep_discovery_visible_when_ownership_state_is_unreadable() {
+        let state = state("ownership-read-degrade");
+        super::super::safe_fs::ensure_private_dir(&state.paths.ownership_root).unwrap();
+        super::super::safe_fs::write_atomic_private(
+            &state.paths.ownership_root.join("ownership-index.json"),
+            b"not-json",
+        )
+        .unwrap();
+        let target = scratch("ownership-read-degrade-target").join("settings.json");
+        let snapshot = ScanSnapshot {
+            catalog: CompatibilityCatalog::builtin(&state.registry).unwrap(),
+            source: CatalogSource::Builtin,
+            warning: None,
+            records: vec![record(&target, false)],
+        };
+
+        let views = state
+            .views(&snapshot, Some(&runtime("vk-ownership-read-degrade")))
+            .expect("read-only discovery remains available");
+        let installation = &views
+            .iter()
+            .find(|view| view.metadata.agent_id == "claude-code")
+            .unwrap()
+            .installations[0];
+        assert_eq!(
+            installation.compatibility.status,
+            CompatibilityStatus::DetectedUnknown
+        );
+        assert_eq!(
+            installation.compatibility.reason_code,
+            ReasonCode::ReadOnlyPreflightFailed
+        );
+        assert!(!installation
+            .compatibility
+            .allowed_actions
+            .contains(&AllowedAction::PreviewConnect));
+        assert!(!installation.managed);
+        assert!(!installation.connected);
     }
 
     #[test]

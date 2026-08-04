@@ -5,7 +5,7 @@ use serde::Deserialize;
 use super::connectors::find_connector;
 use super::types::{
     AdmissionStatus, AgentConnectorCapabilityView, AgentDescriptor, AgentUiMetadata, ConfigFormat,
-    EnvValueKind, ProbeRuntime, RuntimeResolutionSource,
+    EnvValueKind, ProbeRuntime, RuntimeResolutionSource, VersionOutputMatcher,
 };
 
 pub const BUILTIN_REGISTRY_JSON: &str = include_str!("../../agent-registry/builtin-agents.json");
@@ -259,7 +259,15 @@ fn validate_descriptor(descriptor: &AgentDescriptor) -> Result<(), String> {
 
 fn validate_probe(descriptor: &AgentDescriptor) -> Result<(), String> {
     let probe = &descriptor.version_probe;
-    if probe.argv.is_empty() || probe.argv.len() > 8 {
+    let passive_file = matches!(probe.runtime, Some(ProbeRuntime::PassiveFile));
+    if passive_file {
+        if !probe.argv.is_empty() || probe.output_matcher != VersionOutputMatcher::SuccessOnly {
+            return Err(format!(
+                "{}: passive_file version probe requires empty argv and SUCCESS_ONLY output",
+                descriptor.agent_id
+            ));
+        }
+    } else if probe.argv.is_empty() || probe.argv.len() > 8 {
         return Err(format!(
             "{}: version_probe.argv must contain 1..=8 arguments",
             descriptor.agent_id
@@ -301,7 +309,7 @@ fn validate_probe(descriptor: &AgentDescriptor) -> Result<(), String> {
     }
     if let Some(runtime) = &probe.runtime {
         match runtime {
-            ProbeRuntime::Direct => {}
+            ProbeRuntime::Direct | ProbeRuntime::PassiveFile => {}
             ProbeRuntime::EnvShebang {
                 interpreter_candidates,
                 resolution_sources,
@@ -705,6 +713,34 @@ mod tests {
         assert!(validate(&duplicate_source)
             .unwrap_err()
             .contains("resolution_sources"));
+    }
+
+    #[test]
+    fn passive_file_probe_requires_empty_argv_and_cursor_uses_it() {
+        let mut passive = fixture();
+        passive["agents"][0]["version_probe"]["runtime"] = json!({ "kind": "passive_file" });
+        assert!(validate(&passive).unwrap_err().contains("passive_file"));
+
+        passive["agents"][0]["version_probe"]["argv"] = json!([]);
+        passive["agents"][0]["version_probe"]["output_matcher"] = json!("SUCCESS_ONLY");
+        assert!(validate(&passive).is_ok());
+
+        let cursor = AgentRegistry::builtin()
+            .unwrap()
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "cursor")
+            .unwrap()
+            .clone();
+        assert!(cursor.version_probe.argv.is_empty());
+        assert_eq!(
+            cursor.version_probe.output_matcher,
+            super::super::types::VersionOutputMatcher::SuccessOnly
+        );
+        assert!(matches!(
+            cursor.version_probe.runtime,
+            Some(ProbeRuntime::PassiveFile)
+        ));
     }
 
     #[test]
