@@ -1883,7 +1883,7 @@ mod tests {
             "Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
         );
         let overseas = root.join(
-            "Volumes/WorkBuddy DMG/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+            "UserApplications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
         );
         executable(&domestic);
         executable(&overseas);
