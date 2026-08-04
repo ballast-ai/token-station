@@ -1,0 +1,8 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs><clipPath id="platformmatrix-clip"><rect width="1024" height="1024" rx="224"/></clipPath></defs>
+<g clip-path="url(#platformmatrix-clip)"><rect width="1024" height="1024" fill="#F4F2EC"/>
+<rect x="238" y="238" width="548" height="548" rx="104" fill="#15171B"/>
+<path d="M84 334 H940 V394 H84 Z M84 438 H940 V498 H84 Z M84 542 H940 V602 H84 Z M84 646 H940 V706 H84 Z" fill="#F4F2EC"/>
+<rect x="458" y="190" width="108" height="644" rx="54" fill="#15171B"/>
+<circle cx="148" cy="364" r="27" fill="#4E73F8"/><circle cx="876" cy="572" r="27" fill="#4E73F8"/><rect x="121" y="545" width="54" height="54" rx="16" fill="#F4A62A"/><rect x="849" y="337" width="54" height="54" rx="16" fill="#F4A62A"/></g>
+</svg>

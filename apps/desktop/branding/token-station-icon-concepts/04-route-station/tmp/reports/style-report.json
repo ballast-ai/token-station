@@ -1,0 +1,129 @@
+{
+  "mode": "icon-spec-authoring",
+  "layout": "delivery",
+  "spec": "/Users/rainlu/local/token-station-develop/apps/desktop/branding/token-station-icon-concepts/04-route-station/tmp/work/spec.json",
+  "work_spec": "tmp/work/spec.json",
+  "name": "RouteStation",
+  "canvas": 1024,
+  "target_platforms": [],
+  "deliverable_type": null,
+  "source_reference": "User feedback: the mark must read as a routing transfer station while remaining minimal",
+  "brief": "Warm-white field. Two broad routes enter from the left, cross and exchange vertical order beneath one dominant near-black station gantry, then leave on the right. One amber route is active and one cobalt dot marks its input.",
+  "renderer": "@resvg/resvg-js",
+  "generated_files": [
+    "04-route-station.preview.svg",
+    "04-route-station.preview.png",
+    "04-route-station.svg",
+    "04-route-station.png",
+    "layers/01-background.svg",
+    "layers/02-secondary-route.svg",
+    "layers/03-active-route.svg",
+    "layers/04-station-gantry.svg",
+    "layers/05-entry-signal.svg",
+    "tmp/README.md",
+    "tmp/reports/style-report.json",
+    "tmp/reports/package-verification.json",
+    "tmp/reports/reference-diff.png",
+    "tmp/reports/reference-overlay.png",
+    "tmp/reports/reference-side-by-side.png",
+    "tmp/reports/visual-review.json"
+  ],
+  "generated_directories": [
+    "tmp/reports",
+    "layers",
+    "tmp"
+  ],
+  "preview_svg": "04-route-station.preview.svg",
+  "preview_png": "04-route-station.preview.png",
+  "app_svg": "04-route-station.svg",
+  "app_png": "04-route-station.png",
+  "layers": [
+    "layers/01-background.svg",
+    "layers/02-secondary-route.svg",
+    "layers/03-active-route.svg",
+    "layers/04-station-gantry.svg",
+    "layers/05-entry-signal.svg"
+  ],
+  "apple_adapter": null,
+  "preview_background_layers": [
+    {
+      "layer": "background",
+      "source_layer": "layers/01-background.svg",
+      "role": "preview-only-simple-fill"
+    }
+  ],
+  "icon_composer_layer_decisions": [],
+  "background_mode": "spec",
+  "semantic_review": {
+    "status": "exact-enough",
+    "identity_risk": "low",
+    "basis": "original low-risk concept combining the strongest routing and station cues from the prior SVG exploration",
+    "route": "semantic-svg",
+    "notes": "Limit the icon to two reordered routes and one architectural gantry so the transfer-station metaphor survives at 32px without visual clutter."
+  },
+  "source_analysis": {
+    "fidelity_target": "preserve two reordered routes passing through one dominant station gantry",
+    "identity_risk": "low",
+    "route": "semantic-svg",
+    "must_preserve": [
+      "two routes enter and exit at different vertical positions",
+      "one amber active route travels from low-left to high-right",
+      "one large central gantry visibly covers the routing area",
+      "strong silhouette at 32px"
+    ],
+    "must_not_add": [
+      "third or fourth route",
+      "text, numbers, arrows, nodes, train, sleepers, circuit pins, shadow, gradient, glow, or platform frame"
+    ],
+    "components": [
+      {
+        "id": "secondary-route",
+        "layer": "secondary route",
+        "format": "svg",
+        "spec_constraints": [
+          "one broad charcoal filled ribbon",
+          "upper-left to lower-right"
+        ]
+      },
+      {
+        "id": "active-route",
+        "layer": "active route",
+        "format": "svg",
+        "spec_constraints": [
+          "one broad amber filled ribbon",
+          "lower-left to upper-right"
+        ]
+      },
+      {
+        "id": "station-gantry",
+        "layer": "station gantry",
+        "format": "svg",
+        "spec_constraints": [
+          "one compact near-black arch silhouette",
+          "central opening reveals the route exchange"
+        ]
+      },
+      {
+        "id": "entry-signal",
+        "layer": "entry signal",
+        "format": "svg",
+        "spec_constraints": [
+          "one small cobalt circle"
+        ]
+      }
+    ],
+    "acceptance_checks": [
+      "reads as routes passing through a station rather than a standalone X",
+      "does not read as USB, share, microchip, or node graph",
+      "route ordering and station silhouette remain visible at 32px",
+      "no SVG material warnings"
+    ]
+  },
+  "warnings": [],
+  "claims": [
+    "spec-driven reusable cross-platform icon source package",
+    "semantic source layers retained",
+    "rounded preview PNG rendered by @resvg/resvg-js",
+    "unrounded app/source canvas outputs retained separately from preview masking"
+  ]
+}

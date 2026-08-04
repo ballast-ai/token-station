@@ -1,0 +1,6 @@
+{
+  "decision": "complete-candidate",
+  "reviewer": "main-agent visual review",
+  "evidence": ["03-platform-matrix.preview.png", "tmp/work/preview-64.png", "tmp/work/preview-32.png"],
+  "notes": "The reordered signal pairs remain distinct and the central concourse binds the four platform levels. The tradeoff is semantic drift toward a matrix switch or microchip rather than a literal railway station."
+}

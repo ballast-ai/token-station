@@ -1,0 +1,85 @@
+{
+  "status": "ok",
+  "out": "/Users/rainlu/local/token-station-develop/apps/desktop/branding/token-station-icon-concepts/03-platform-matrix",
+  "style_report": "tmp/reports/style-report.json",
+  "reports_dir": "tmp/reports",
+  "target_platforms": [],
+  "canvas": {
+    "width": 1024,
+    "height": 1024
+  },
+  "preview_svg": "03-platform-matrix.preview.svg",
+  "preview_png": {
+    "width": 1024,
+    "height": 1024,
+    "visible_pixels": 1006147,
+    "visible_bounds": {
+      "min_x": 0,
+      "min_y": 0,
+      "max_x": 1023,
+      "max_y": 1023
+    }
+  },
+  "app_svg": "03-platform-matrix.svg",
+  "app_png": {
+    "width": 1024,
+    "height": 1024,
+    "visible_pixels": 1048576,
+    "visible_bounds": {
+      "min_x": 0,
+      "min_y": 0,
+      "max_x": 1023,
+      "max_y": 1023
+    }
+  },
+  "generic_assets": {
+    "layers": [
+      "layers/01-background.svg",
+      "layers/02-station-block.svg",
+      "layers/03-platform-lines.svg",
+      "layers/04-central-concourse.svg",
+      "layers/05-signal-pairs.svg"
+    ]
+  },
+  "apple_adapter": null,
+  "generated_files_manifest_validation": {
+    "status": "valid",
+    "files": [
+      "03-platform-matrix.preview.svg",
+      "03-platform-matrix.preview.png",
+      "03-platform-matrix.svg",
+      "03-platform-matrix.png",
+      "layers/01-background.svg",
+      "layers/02-station-block.svg",
+      "layers/03-platform-lines.svg",
+      "layers/04-central-concourse.svg",
+      "layers/05-signal-pairs.svg",
+      "tmp/README.md",
+      "tmp/reports/style-report.json",
+      "tmp/reports/package-verification.json",
+      "tmp/reports/reference-diff.png",
+      "tmp/reports/reference-overlay.png",
+      "tmp/reports/reference-side-by-side.png",
+      "tmp/reports/visual-review.json"
+    ],
+    "problems": []
+  },
+  "visual_review": {
+    "decision": "complete-candidate",
+    "reviewer": "main-agent visual review",
+    "evidence": [
+      "03-platform-matrix.preview.png",
+      "tmp/work/preview-64.png",
+      "tmp/work/preview-32.png"
+    ],
+    "notes": "The reordered signal pairs remain distinct and the central concourse binds the four platform levels. The tradeoff is semantic drift toward a matrix switch or microchip rather than a literal railway station."
+  },
+  "outcome": {
+    "pixel_status": "not_required",
+    "route_status": "generic_assets_ready",
+    "review_required": false
+  },
+  "reference_comparison": null,
+  "warnings": [],
+  "failures": []
+}

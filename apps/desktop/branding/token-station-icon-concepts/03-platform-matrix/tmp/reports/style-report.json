@@ -1,0 +1,125 @@
+{
+  "mode": "icon-spec-authoring",
+  "layout": "delivery",
+  "spec": "/Users/rainlu/local/token-station-develop/apps/desktop/branding/token-station-icon-concepts/03-platform-matrix/tmp/work/spec.json",
+  "work_spec": "tmp/work/spec.json",
+  "name": "PlatformMatrix",
+  "canvas": 1024,
+  "target_platforms": [],
+  "deliverable_type": null,
+  "source_reference": "User brief: white-background station whose large central structure performs 1-to-b, 2-to-a style route reassignment",
+  "brief": "Warm-white field. A large near-black station block sits between four incoming and four outgoing platform lanes. Colored endpoint pairs appear at different vertical positions on each side, implying deterministic reassignment inside the station.",
+  "renderer": "@resvg/resvg-js",
+  "generated_files": [
+    "03-platform-matrix.preview.svg",
+    "03-platform-matrix.preview.png",
+    "03-platform-matrix.svg",
+    "03-platform-matrix.png",
+    "layers/01-background.svg",
+    "layers/02-station-block.svg",
+    "layers/03-platform-lines.svg",
+    "layers/04-central-concourse.svg",
+    "layers/05-signal-pairs.svg",
+    "tmp/README.md",
+    "tmp/reports/style-report.json",
+    "tmp/reports/package-verification.json",
+    "tmp/reports/reference-diff.png",
+    "tmp/reports/reference-overlay.png",
+    "tmp/reports/reference-side-by-side.png",
+    "tmp/reports/visual-review.json"
+  ],
+  "generated_directories": [
+    "tmp/reports",
+    "layers",
+    "tmp"
+  ],
+  "preview_svg": "03-platform-matrix.preview.svg",
+  "preview_png": "03-platform-matrix.preview.png",
+  "app_svg": "03-platform-matrix.svg",
+  "app_png": "03-platform-matrix.png",
+  "layers": [
+    "layers/01-background.svg",
+    "layers/02-station-block.svg",
+    "layers/03-platform-lines.svg",
+    "layers/04-central-concourse.svg",
+    "layers/05-signal-pairs.svg"
+  ],
+  "apple_adapter": null,
+  "preview_background_layers": [
+    {
+      "layer": "background",
+      "source_layer": "layers/01-background.svg",
+      "role": "preview-only-simple-fill"
+    }
+  ],
+  "icon_composer_layer_decisions": [],
+  "background_mode": "spec",
+  "semantic_review": {
+    "status": "exact-enough",
+    "identity_risk": "low",
+    "basis": "original low-risk station-matrix concept",
+    "route": "semantic-svg",
+    "notes": "The hidden permutation is communicated through displaced paired endpoints rather than visible spaghetti crossings."
+  },
+  "source_analysis": {
+    "fidelity_target": "preserve one dominant station block, four platform channels, and paired endpoints in different vertical order",
+    "identity_risk": "low",
+    "route": "semantic-svg",
+    "must_preserve": [
+      "dominant central station block",
+      "four clear platform lanes",
+      "paired signals change order across the station"
+    ],
+    "must_not_add": [
+      "text, numbers, grid labels, circuit pins, shadows, gradients, or small mechanical detail"
+    ],
+    "components": [
+      {
+        "id": "platform-lines",
+        "layer": "platform lines",
+        "format": "svg",
+        "spec_constraints": [
+          "four warm-white filled channels",
+          "thick enough at 32px"
+        ]
+      },
+      {
+        "id": "station-block",
+        "layer": "station block",
+        "format": "svg",
+        "spec_constraints": [
+          "one near-black rounded block"
+        ]
+      },
+      {
+        "id": "central-concourse",
+        "layer": "central concourse",
+        "format": "svg",
+        "spec_constraints": [
+          "one vertical near-black rounded spine",
+          "visibly binds all platform levels"
+        ]
+      },
+      {
+        "id": "signal-pairs",
+        "layer": "signal pairs",
+        "format": "svg",
+        "spec_constraints": [
+          "two cobalt circles and two amber rounded squares at reordered positions"
+        ]
+      }
+    ],
+    "acceptance_checks": [
+      "reads as a station or matrix switch rather than a microchip",
+      "paired endpoints imply reordered destinations",
+      "no SVG material warnings"
+    ]
+  },
+  "warnings": [],
+  "claims": [
+    "spec-driven reusable cross-platform icon source package",
+    "semantic source layers retained",
+    "rounded preview PNG rendered by @resvg/resvg-js",
+    "unrounded app/source canvas outputs retained separately from preview masking"
+  ]
+}

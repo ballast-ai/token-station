@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ballastai.token-station.develop-watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>exec /Users/rainlu/local/token-station-develop/scripts/watch-develop.sh --foreground</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/rainlu/local/token-station-develop</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/rainlu/local/node-v22.14.0-darwin-arm64/bin:/Users/rainlu/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>/Users/rainlu/local/token-station-develop/.git/token-station-develop-watch.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/rainlu/local/token-station-develop/.git/token-station-develop-watch.log</string>
+</dict>
+</plist>

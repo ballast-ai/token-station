@@ -1,0 +1,6 @@
+{
+  "decision": "complete-candidate",
+  "reviewer": "main-agent visual review",
+  "evidence": ["02-switch-fan.preview.png", "tmp/work/preview-64.png", "tmp/work/preview-32.png"],
+  "notes": "The route-order change remains obvious at 64px and 32px. This is the strongest pure-icon silhouette, though it communicates switching more strongly than the literal station building."
+}

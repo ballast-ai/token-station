@@ -1,0 +1,111 @@
+{
+  "name": "token-station-icon",
+  "source_reference": "Token Station product semantics, current project icon, user-supplied small agent-icon style reference, and generated concept exploration",
+  "brief": "A restrained local AI routing-station mark: a blue token enters a warm-white station tile through a dark diagonal channel and leaves as an amber routed token. Flat near-black stage, no text or third-party marks.",
+  "semantic_review": {
+    "status": "exact-enough",
+    "identity_risk": "low",
+    "basis": "original task-specific mark with no external brand identity",
+    "route": "semantic-svg",
+    "notes": "Preserve the compact rounded-diamond station tile and diagonal handoff channel; do not drift into a letter, chain link, Gemini-like sparkle, sync mark, or node network."
+  },
+  "source_analysis": {
+    "fidelity_target": "preserve the original Token Station switch-track metaphor, strong small-size silhouette, and two restrained brand accents",
+    "identity_risk": "low",
+    "route": "semantic-svg",
+    "must_preserve": [
+      "one warm-white rounded-diamond station tile",
+      "one broad near-black diagonal handoff channel rendered as an opaque overlay",
+      "one cobalt circular entry token and one amber rounded-square routed token",
+      "large quiet negative space around the centered mark",
+      "clear silhouette at 64px and 32px"
+    ],
+    "must_not_add": [
+      "text, letters, terminal prompt, model logo, shield, arrows, Wi-Fi rings, sync circle, chain link, sparkle, or node network",
+      "bevel, glow, shadow, highlight, texture, frame, or PNG foreground fallback"
+    ],
+    "components": [
+      {
+        "id": "station-tile",
+        "layer": "station tile",
+        "format": "svg",
+        "spec_constraints": [
+          "one clean rotated rounded-square SVG primitive",
+          "soft corners and balanced diagonal mass",
+          "no stroke or material helper geometry"
+        ]
+      },
+      {
+        "id": "handoff-channel",
+        "layer": "handoff channel",
+        "format": "svg",
+        "spec_constraints": [
+          "one broad opaque background-colored rounded rectangle",
+          "diagonal lower-left to upper-right",
+          "no mask, clipPath, or transparency"
+        ]
+      },
+      {
+        "id": "entry-accent",
+        "layer": "entry accent",
+        "format": "svg",
+        "spec_constraints": ["one simple cobalt circle", "supporting scale"]
+      },
+      {
+        "id": "route-accent",
+        "layer": "route accent",
+        "format": "svg",
+        "spec_constraints": ["one simple amber rounded-square token", "supporting scale"]
+      }
+    ],
+    "acceptance_checks": [
+      "the mark remains distinct from a letter, chain link, or sparkle at 32px",
+      "all foreground components are clean SVG assets",
+      "package verification has no svg_material_warnings or package warnings"
+    ]
+  },
+  "fill": {
+    "solid": "extended-srgb:0.03922,0.05490,0.09020,1.00000"
+  },
+  "layers": [
+    {
+      "name": "background",
+      "svg": "<rect width=\"1024\" height=\"1024\" fill=\"#0A0E17\"/>",
+      "composer": {
+        "include": false
+      }
+    },
+    {
+      "name": "station tile",
+      "svg": "<rect x=\"287\" y=\"287\" width=\"450\" height=\"450\" rx=\"112\" transform=\"rotate(45 512 512)\" fill=\"#F7F4EC\"/>",
+      "composer": {
+        "format": "svg",
+        "reason": "the original station tile should remain a clean editable vector"
+      }
+    },
+    {
+      "name": "handoff channel",
+      "svg": "<rect x=\"449\" y=\"188\" width=\"126\" height=\"648\" rx=\"63\" transform=\"rotate(45 512 512)\" fill=\"#0A0E17\"/>",
+      "composer": {
+        "format": "svg",
+        "reason": "an opaque overlay keeps the routing channel editable without masks or boolean holes"
+      }
+    },
+    {
+      "name": "entry accent",
+      "svg": "<circle cx=\"352\" cy=\"672\" r=\"48\" fill=\"#5B7CFA\"/>",
+      "composer": {
+        "format": "svg",
+        "reason": "simple flat entry token"
+      }
+    },
+    {
+      "name": "route accent",
+      "svg": "<rect x=\"624\" y=\"304\" width=\"96\" height=\"96\" rx=\"28\" fill=\"#FFB82E\"/>",
+      "composer": {
+        "format": "svg",
+        "reason": "simple flat routed token"
+      }
+    }
+  ]
+}

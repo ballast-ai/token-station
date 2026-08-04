@@ -1,0 +1,89 @@
+{
+  "status": "ok",
+  "out": "/Users/rainlu/local/token-station-develop/apps/desktop/branding/token-station-icon",
+  "style_report": "tmp/reports/style-report.json",
+  "reports_dir": "tmp/reports",
+  "target_platforms": [],
+  "canvas": {
+    "width": 1024,
+    "height": 1024
+  },
+  "preview_svg": "token-station-icon.preview.svg",
+  "preview_png": {
+    "width": 1024,
+    "height": 1024,
+    "visible_pixels": 1006147,
+    "visible_bounds": {
+      "min_x": 0,
+      "min_y": 0,
+      "max_x": 1023,
+      "max_y": 1023
+    }
+  },
+  "app_svg": "token-station-icon.svg",
+  "app_png": {
+    "width": 1024,
+    "height": 1024,
+    "visible_pixels": 1048576,
+    "visible_bounds": {
+      "min_x": 0,
+      "min_y": 0,
+      "max_x": 1023,
+      "max_y": 1023
+    }
+  },
+  "generic_assets": {
+    "layers": [
+      "layers/01-background.svg",
+      "layers/02-station-tile.svg",
+      "layers/03-handoff-channel.svg",
+      "layers/04-entry-accent.svg",
+      "layers/05-route-accent.svg"
+    ]
+  },
+  "apple_adapter": null,
+  "generated_files_manifest_validation": {
+    "status": "valid",
+    "files": [
+      "token-station-icon.preview.svg",
+      "token-station-icon.preview.png",
+      "token-station-icon.svg",
+      "token-station-icon.png",
+      "layers/01-background.svg",
+      "layers/02-station-tile.svg",
+      "layers/03-handoff-channel.svg",
+      "layers/04-entry-accent.svg",
+      "layers/05-route-accent.svg",
+      "tmp/README.md",
+      "tmp/reports/style-report.json",
+      "tmp/reports/package-verification.json",
+      "tmp/reports/reference-diff.png",
+      "tmp/reports/reference-overlay.png",
+      "tmp/reports/reference-side-by-side.png",
+      "tmp/reports/visual-review.json"
+    ],
+    "problems": []
+  },
+  "visual_review": {
+    "decision": "accepted",
+    "reviewer": "main-agent visual review",
+    "evidence": [
+      "token-station-icon.preview.png at 1024px",
+      "tmp/work/preview-64.png",
+      "tmp/work/preview-32.png",
+      "layers/02-station-tile.svg",
+      "layers/03-handoff-channel.svg",
+      "layers/04-entry-accent.svg",
+      "layers/05-route-accent.svg"
+    ],
+    "notes": "Low-risk original concept. At 64px and 32px the warm-white station halves, diagonal handoff channel, cobalt circular entry token, and amber rounded-square routed token remain distinct. The flat SVG redraw removes the generated concept's glow and gradients, preserves generous negative space, and does not read as USB, Git branch, sync arrows, a letter, or a third-party AI mark."
+  },
+  "outcome": {
+    "pixel_status": "not_required",
+    "route_status": "generic_assets_ready",
+    "review_required": false
+  },
+  "reference_comparison": null,
+  "warnings": [],
+  "failures": []
+}
