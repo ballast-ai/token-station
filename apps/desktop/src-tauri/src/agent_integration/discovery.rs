@@ -721,7 +721,6 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
         }
         mark_path_default(&mut installations);
 
-        let config = inspect_configs(descriptor, &self.environment);
         let conflict_group = (installations.len() > 1).then(|| {
             stable_conflict_group(
                 &descriptor.agent_id,
@@ -732,6 +731,11 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
         installations
             .into_values()
             .map(|installation| {
+                let config = inspect_configs(
+                    descriptor,
+                    &self.environment,
+                    &installation.observed_probe_path,
+                );
                 let mut diagnostics = installation.diagnostics;
                 let probe = if installation.probe_allowed {
                     self.runner.run(
@@ -1385,8 +1389,9 @@ struct ConfigInspection {
 fn inspect_configs(
     descriptor: &AgentDescriptor,
     environment: &ScanEnvironment,
+    installation_path: &Path,
 ) -> ConfigInspection {
-    let resolution = config_candidates(descriptor, environment);
+    let resolution = config_candidates(descriptor, environment, installation_path);
     let mut diagnostics: Vec<_> = resolution
         .invalid_environment_names
         .into_iter()
@@ -1866,6 +1871,91 @@ mod tests {
         assert_eq!(
             records[0].binary_sha256.as_deref(),
             Some("6f1af2dfc4d7f16dacf404b1f6c9fd4a65cfffb8edde6dcf957463a0e41fb1ed")
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_keeps_workbuddy_variants_on_one_agent_with_separate_configs() {
+        let root = scratch("workbuddy-variants");
+        let domestic = root.join(
+            "Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+        );
+        let overseas = root.join(
+            "Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+        );
+        executable(&domestic);
+        executable(&overseas);
+        let domestic_config = root.join(".workbuddy/models.json");
+        let overseas_config = root.join(".workbuddy-ai/models.json");
+        std::fs::create_dir_all(domestic_config.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(overseas_config.parent().unwrap()).unwrap();
+        std::fs::write(&domestic_config, br#"{"models":[]}"#).unwrap();
+        std::fs::write(&overseas_config, br#"{"models":[]}"#).unwrap();
+
+        let registry = AgentRegistry::builtin().unwrap();
+        let mut descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "workbuddy")
+            .unwrap()
+            .clone();
+        descriptor.known_install_locations.insert(
+            Platform::Macos,
+            vec![
+                domestic.to_string_lossy().into_owned(),
+                overseas.to_string_lossy().into_owned(),
+            ],
+        );
+        descriptor.config_locations[1]
+            .installation_path_defaults
+            .insert(
+                Platform::Macos,
+                vec![overseas.to_string_lossy().into_owned()],
+            );
+        let scanner = DiscoveryScanner::new(environment(&root), FixedProbe);
+
+        let records = scanner.scan_descriptor(&descriptor);
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|record| record.agent_id == "workbuddy"));
+        assert!(records.iter().all(|record| record.conflict_group.is_some()));
+        let domestic_record = records
+            .iter()
+            .find(|record| record.executable_path == domestic.to_string_lossy())
+            .unwrap();
+        let overseas_record = records
+            .iter()
+            .find(|record| record.executable_path == overseas.to_string_lossy())
+            .unwrap();
+        assert_eq!(
+            domestic_record.config_candidates,
+            [domestic_config.to_string_lossy().into_owned()]
+        );
+        assert_eq!(
+            overseas_record.config_candidates,
+            [overseas_config.to_string_lossy().into_owned()]
+        );
+        let domestic_fingerprint = domestic_record.config_fingerprint.clone();
+        let overseas_fingerprint = overseas_record.config_fingerprint.clone();
+
+        std::fs::write(&overseas_config, br#"{"models":[{"id":"changed"}]}"#).unwrap();
+        let rescanned = scanner.scan_descriptor(&descriptor);
+        assert_eq!(
+            rescanned
+                .iter()
+                .find(|record| record.executable_path == domestic.to_string_lossy())
+                .unwrap()
+                .config_fingerprint,
+            domestic_fingerprint
+        );
+        assert_ne!(
+            rescanned
+                .iter()
+                .find(|record| record.executable_path == overseas.to_string_lossy())
+                .unwrap()
+                .config_fingerprint,
+            overseas_fingerprint
         );
         std::fs::remove_dir_all(root).ok();
     }

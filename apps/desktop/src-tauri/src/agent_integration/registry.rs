@@ -439,6 +439,28 @@ fn validate_config_locations(descriptor: &AgentDescriptor) -> Result<(), String>
                 validate_path_template(&descriptor.agent_id, path)?;
             }
         }
+        for (platform, paths) in &location.installation_path_defaults {
+            if !location.platform_defaults.contains_key(platform) {
+                return Err(format!(
+                    "{}: installation-scoped config has no defaults for {platform:?}",
+                    descriptor.agent_id
+                ));
+            }
+            ensure_unique(&descriptor.agent_id, "config installation paths", paths)?;
+            for path in paths {
+                validate_path_template(&descriptor.agent_id, path)?;
+                if !descriptor
+                    .known_install_locations
+                    .get(platform)
+                    .is_some_and(|known| known.contains(path))
+                {
+                    return Err(format!(
+                        "{}: config installation path '{path}' is not a known installation",
+                        descriptor.agent_id
+                    ));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -870,6 +892,26 @@ mod tests {
                 descriptor.version_probe.runtime,
                 Some(ProbeRuntime::EnvShebang { .. })
             )));
+        let workbuddy = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "workbuddy")
+            .unwrap();
+        assert_eq!(
+            workbuddy.known_install_locations[&super::super::types::Platform::Macos],
+            [
+                "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+                "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+            ]
+        );
+        assert_eq!(workbuddy.config_locations.len(), 2);
+        assert_eq!(
+            workbuddy.config_locations[1].installation_path_defaults
+                [&super::super::types::Platform::Macos],
+            [
+                "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
+            ]
+        );
         assert!(registry
             .descriptors()
             .iter()
@@ -927,6 +969,35 @@ mod tests {
                 "{agent_id} is missing {path}"
             );
         }
+    }
+
+    #[test]
+    fn installation_scoped_config_must_name_a_known_installation_on_the_same_platform() {
+        let mut unknown = fixture();
+        let workbuddy = unknown["agents"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|agent| agent["agent_id"] == "workbuddy")
+            .unwrap();
+        workbuddy["config_locations"][1]["installation_path_defaults"]["macos"] =
+            json!(["/Applications/Other.app/Contents/MacOS/other"]);
+        assert!(validate(&unknown)
+            .unwrap_err()
+            .contains("is not a known installation"));
+
+        let mut wrong_platform = fixture();
+        let workbuddy = wrong_platform["agents"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|agent| agent["agent_id"] == "workbuddy")
+            .unwrap();
+        workbuddy["config_locations"][1]["installation_path_defaults"]["windows"] =
+            json!([r"C:\\Program Files\\WorkBuddy AI\\codebuddy.exe"]);
+        assert!(validate(&wrong_platform)
+            .unwrap_err()
+            .contains("has no defaults for Windows"));
     }
 
     #[test]
