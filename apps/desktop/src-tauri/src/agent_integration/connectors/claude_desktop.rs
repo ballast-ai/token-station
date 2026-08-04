@@ -20,7 +20,7 @@ const AUTH_SCHEME: &str = "inferenceGatewayAuthScheme";
 const DEPLOYMENT_MODE: &str = "deploymentMode";
 const DISABLE_DEPLOYMENT_MODE_CHOOSER: &str = "disableDeploymentModeChooser";
 const COWORK_EGRESS_ALLOWED_HOSTS: &str = "coworkEgressAllowedHosts";
-const LOOPBACK_EGRESS_HOSTS: &[&str] = &["127.0.0.1", "::1", "localhost"];
+const LOOPBACK_EGRESS_HOSTS: &[&str] = &["127.0.0.1", "localhost"];
 
 fn json_companion_projection(
     target_path: PathBuf,
