@@ -655,6 +655,42 @@ fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Pat
     }
 }
 
+fn start_proxy_with_missing_store_secret(upstream: &MockUpstream) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-missing-store-secret-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let config = json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": false },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agents": ["agent-openai-responses"],
+            "providers": { "openai-compatible": "provider-openai-compatible" }
+        },
+        "upstreams": {
+            "deepseek_release": {
+                "provider": "openai-compatible",
+                "base_url": upstream.base_url(),
+                "auth": { "slot": "provider_api_key", "store": true },
+                "models": [
+                    { "model": "deepseek-v4-pro", "tool": true, "tool_state": "verified", "context_window": 128_000 }
+                ]
+            }
+        },
+        "router": {
+            "version": 1,
+            "pools": { "main": [ { "upstream": "deepseek_release", "model": "deepseek-v4-pro" } ] },
+            "default_pool": "main"
+        }
+    });
+    let config: ClientConfig = serde_json::from_value(config).expect("missing store config parses");
+    spawn_proxy(&config)
+}
+
 /// One row out of the metrics store, as (column -> debug-rendered value).
 fn last_row(data_dir: &Path) -> std::collections::BTreeMap<String, String> {
     let db = rusqlite::Connection::open(data_dir.join("metrics.sqlite")).expect("db opens");
@@ -1619,6 +1655,27 @@ fn scoped_models_auth_and_unknown_namespaces_fail_closed() {
     assert_eq!(custom.hits(), 0);
 
     std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn codex_missing_provider_key_names_the_selected_upstream_without_leaking_a_value() {
+    let mock = MockUpstream::start(Vec::new());
+    let proxy = start_proxy_with_missing_store_secret(&mock);
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/codex/v1/responses",
+        &json!({ "model": "auto", "input": "hi", "stream": false }),
+        &proxy.virtual_key,
+        false,
+    );
+
+    assert_eq!(status, 401, "{body}");
+    assert!(body.contains("deepseek_release"), "{body}");
+    assert!(body.contains("provider_api_key"), "{body}");
+    assert!(body.contains("re-enter the key"), "{body}");
+    assert!(!body.contains("Bearer"), "{body}");
+    assert!(!body.contains("sk-"), "{body}");
+    assert_eq!(mock.hits(), 0, "missing auth must stop before the provider");
 }
 
 #[test]
