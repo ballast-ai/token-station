@@ -178,7 +178,7 @@ pub fn build_connection_plan(
     )?;
     connector.validate_source(&document)?;
     let baseline_semantic = semantic_json(&document)?;
-    let operations = connector.connect_patch(input)?;
+    let operations = connector.connect_patch_for_document(&document, input)?;
     let owned_paths = connector.owned_paths();
     validate_owned_paths(&owned_paths)?;
     validate_patch_ownership(&operations, &owned_paths)?;

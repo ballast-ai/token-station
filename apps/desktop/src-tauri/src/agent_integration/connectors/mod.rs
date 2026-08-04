@@ -13,6 +13,7 @@ pub use codex::CodexConnector;
 pub use hermes::HermesConnector;
 pub use openclaw::OpenClawConnector;
 pub use opencode::OpenCodeConnector;
+pub use workbuddy::WorkBuddyConnector;
 
 pub struct ConnectInput<'a> {
     pub base_url: &'a str,
@@ -77,6 +78,13 @@ pub trait Connector: Sync {
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String>;
     fn validate_source(&self, document: &ConfigDocument) -> Result<(), String>;
     fn connect_patch(&self, input: &ConnectInput<'_>) -> Result<Vec<PatchOperation>, String>;
+    fn connect_patch_for_document(
+        &self,
+        _document: &ConfigDocument,
+        input: &ConnectInput<'_>,
+    ) -> Result<Vec<PatchOperation>, String> {
+        self.connect_patch(input)
+    }
     fn companion_projections(
         &self,
         _primary_target: &Path,
@@ -92,6 +100,12 @@ pub trait Connector: Sync {
         None
     }
     fn disconnect_patch(&self) -> Vec<PatchOperation>;
+    fn disconnect_patch_for_document(
+        &self,
+        _document: &ConfigDocument,
+    ) -> Result<Vec<PatchOperation>, String> {
+        Ok(self.disconnect_patch())
+    }
     fn validate_projected(
         &self,
         document: &ConfigDocument,
@@ -170,6 +184,7 @@ mod tests {
         assert_eq!(HermesConnector.connector_id(), "hermes-v1");
         assert_eq!(OpenCodeConnector.connector_id(), "opencode-v1");
         assert_eq!(OpenClawConnector.connector_id(), "openclaw-v1");
+        assert_eq!(WorkBuddyConnector.connector_id(), "workbuddy-v1");
     }
 
     #[test]
@@ -189,6 +204,7 @@ mod tests {
                 "hermes-v1",
                 "openclaw-v1",
                 "opencode-v1",
+                "workbuddy-v1",
             ]
         );
         for id in ids {
@@ -291,6 +307,72 @@ mod tests {
             json!("vertex-ai")
         );
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn workbuddy_connector_preserves_unrelated_models_on_connect_and_force_disconnect() {
+        let connector = find_connector("workbuddy-v1").expect("WorkBuddy connector is registered");
+        let source = br#"{
+          "models": [{"id":"user-model","name":"Keep me","url":"http://example.test/v1/chat/completions"}],
+          "availableModels": ["user-model"],
+          "unknown": {"keep": true}
+        }"#;
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
+            token: Some("fixture-workbuddy-key"),
+            adapter_ready: true,
+        };
+        let mut document =
+            parse_source_bytes(Some(source), connector.format(), connector.label()).unwrap();
+        connector.validate_source(&document).unwrap();
+        let patch = connector
+            .connect_patch_for_document(&document, &input)
+            .unwrap();
+        validate_patch_ownership(&patch, &connector.owned_paths()).unwrap();
+        apply_patch(&mut document, &patch).unwrap();
+        connector.validate_projected(&document, &input).unwrap();
+
+        let connected = crate::agent_integration::config_codec::semantic_json(&document).unwrap();
+        assert_eq!(connected["models"].as_array().unwrap().len(), 2);
+        assert_eq!(connected["models"][0]["id"], json!("user-model"));
+        assert_eq!(connected["models"][1]["id"], json!("tokenstation-auto"));
+        assert_eq!(connected["unknown"]["keep"], json!(true));
+
+        let disconnect = connector.disconnect_patch_for_document(&document).unwrap();
+        validate_patch_ownership(&disconnect, &connector.owned_paths()).unwrap();
+        apply_patch(&mut document, &disconnect).unwrap();
+        let disconnected =
+            crate::agent_integration::config_codec::semantic_json(&document).unwrap();
+        assert_eq!(disconnected["models"].as_array().unwrap().len(), 1);
+        assert_eq!(disconnected["models"][0]["id"], json!("user-model"));
+        assert_eq!(disconnected["availableModels"], json!(["user-model"]));
+        assert_eq!(disconnected["unknown"]["keep"], json!(true));
+    }
+
+    #[test]
+    fn workbuddy_connector_rejects_conflicting_or_malformed_model_arrays() {
+        let connector = find_connector("workbuddy-v1").expect("WorkBuddy connector is registered");
+        let conflict = parse_source_bytes(
+            Some(br#"{"models":[{"id":"tokenstation-auto"}],"availableModels":[]}"#),
+            connector.format(),
+            connector.label(),
+        )
+        .unwrap();
+        assert!(connector
+            .validate_source(&conflict)
+            .unwrap_err()
+            .contains("已存在模型"));
+
+        let malformed = parse_source_bytes(
+            Some(br#"{"models":{},"availableModels":[]}"#),
+            connector.format(),
+            connector.label(),
+        )
+        .unwrap();
+        assert!(connector
+            .validate_source(&malformed)
+            .unwrap_err()
+            .contains("必须是数组"));
     }
 
     #[test]
@@ -429,12 +511,13 @@ mod tests {
             token: None,
             adapter_ready: true,
         };
-        let connectors: [&dyn Connector; 5] = [
+        let connectors: [&dyn Connector; 6] = [
             &ClaudeCodeConnector,
             &CodexConnector,
             &HermesConnector,
             &OpenClawConnector,
             &OpenCodeConnector,
+            &WorkBuddyConnector,
         ];
 
         for connector in connectors {

@@ -115,8 +115,10 @@ const AGENT_ICONS: Record<string, BrandIcon> = {
 
 // Agent id → 自带位图 logo(放在 public/ 下,按 URL 引用)。@lobehub 没有的品牌
 // (如 Hermes)用它;文件缺失时 <BrandImage> 自动回退到首字母块,不会白屏。
-const AGENT_IMAGES: Record<string, string> = {
-  "nous-hermes-agent": "/agents/hermes.png",
+type AgentImage = { src: string; shape?: "app" };
+const AGENT_IMAGES: Record<string, AgentImage> = {
+  "nous-hermes-agent": { src: "/agents/hermes.png" },
+  workbuddy: { src: "/agents/workbuddy.png", shape: "app" },
 };
 
 /** 首字母/缩写色块,用于没有品牌 logo 的对象。 */
@@ -129,12 +131,22 @@ function Fallback({ text, size }: { text: string; size: number }) {
 }
 
 /** 自带位图 logo;加载失败(文件未放置)时回退到首字母块。 */
-function BrandImage({ src, fallback, size }: { src: string; fallback: string; size: number }) {
+function BrandImage({
+  src,
+  fallback,
+  size,
+  shape,
+}: {
+  src: string;
+  fallback: string;
+  size: number;
+  shape?: "app";
+}) {
   const [failed, setFailed] = useState(false);
   if (failed) return <Fallback text={fallback} size={size} />;
   return (
     <img
-      className="brand-image"
+      className={`brand-image ${shape === "app" ? "brand-image-app" : ""}`}
       src={src}
       alt=""
       width={size}
@@ -164,7 +176,7 @@ export function AgentIcon({ id, fallback, size = 24 }: { id: string; fallback: s
       style={{ width: size, height: size }}
     >
       {image ? (
-        <BrandImage src={image} fallback={fallback} size={size} />
+        <BrandImage src={image.src} fallback={fallback} size={size} shape={image.shape} />
       ) : Glyph ? (
         <Glyph size={size} />
       ) : (

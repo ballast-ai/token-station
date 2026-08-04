@@ -38,6 +38,7 @@ const registryFixture: AgentUiMetadataView[] = [
   { agent_id: "gemini-cli", legacy_kind: null, display_name: "Gemini CLI", icon_key: "gemini", admission: "supported", ui_order: 30, nav_mark: "G" },
   { agent_id: "opencode", legacy_kind: "opencode", display_name: "OpenCode", icon_key: "opencode", admission: "supported", ui_order: 40, nav_mark: "O" },
   { agent_id: "openclaw", legacy_kind: null, display_name: "OpenClaw", icon_key: "openclaw", admission: "supported", ui_order: 50, nav_mark: "OC" },
+  { agent_id: "workbuddy", legacy_kind: null, display_name: "WorkBuddy", icon_key: "workbuddy", admission: "supported", ui_order: 55, nav_mark: "WB" },
   { agent_id: "nous-hermes-agent", legacy_kind: null, display_name: "Hermes Agent", icon_key: "hermes", admission: "supported", ui_order: 60, nav_mark: "H" },
   { agent_id: "future-agent", legacy_kind: null, display_name: "Future Agent", icon_key: "future", admission: "discovery_only" },
 ];
@@ -753,12 +754,12 @@ describe("desktop station navigation", () => {
     for (const name of agentDisplayNames) {
       expect(screen.getByRole("switch", { name, checked: true })).toBeInTheDocument();
     }
-    expect(screen.getByRole("status")).toHaveTextContent("7 / 7 已显示");
+    expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length} / ${agentIds.length} 已显示`);
 
     await user.click(screen.getByRole("switch", { name: "Codex", checked: true }));
 
     expect(screen.getByRole("switch", { name: "Codex", checked: false })).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("6 / 7 已显示");
+    expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length - 1} / ${agentIds.length} 已显示`);
     expect(window.localStorage.getItem(AGENT_VISIBILITY_STORAGE_KEY)).toBe(
       JSON.stringify(["codex"]),
     );
@@ -776,7 +777,7 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("switch", { name: "Codex", checked: false }));
 
     expect(screen.getByRole("switch", { name: "Codex", checked: true })).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("7 / 7 已显示");
+    expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length} / ${agentIds.length} 已显示`);
     expect(window.localStorage.getItem(AGENT_VISIBILITY_STORAGE_KEY)).toBe(
       JSON.stringify([]),
     );
@@ -945,11 +946,11 @@ describe("desktop station navigation", () => {
     expect(navigation().getByRole("button", { name: "概览" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "用量" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("0 / 7 已显示");
+    expect(screen.getByRole("status")).toHaveTextContent(`0 / ${agentIds.length} 已显示`);
     expect(screen.getByRole("switch", { name: "Claude Code", checked: false })).toBeInTheDocument();
 
     await user.click(screen.getByRole("switch", { name: "Claude Code", checked: false }));
-    expect(screen.getByRole("status")).toHaveTextContent("1 / 7 已显示");
+    expect(screen.getByRole("status")).toHaveTextContent(`1 / ${agentIds.length} 已显示`);
   });
 
   it("silently ignores a backend scan already in progress", async () => {
@@ -1101,7 +1102,7 @@ describe("desktop station navigation", () => {
     expect(screen.getByText(
       "Choose which Agents appear in the sidebar.",
     )).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("7 / 7 visible");
+    expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length} / ${agentIds.length} visible`);
     expect(screen.getByRole("group", { name: "Agent visibility options" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Codex", checked: true })).toBeInTheDocument();
     await user.click(navigation().getByRole("button", { name: "Providers" }));
@@ -1131,7 +1132,7 @@ describe("desktop station navigation", () => {
     expect(screen.getByText(
       "选择显示在左侧导航中的 Agent。",
     )).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("7 / 7 已显示");
+    expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length} / ${agentIds.length} 已显示`);
     expect(screen.getByRole("group", { name: "Agent 显示选项" })).toBeInTheDocument();
     await user.click(navigation().getByRole("button", { name: "概览" }));
     expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();

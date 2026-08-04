@@ -880,13 +880,20 @@ impl AgentCommandState {
 
         for (ownership, companion_formats) in owned.into_iter().zip(companion_formats) {
             let connector = connector_for(&ownership.connector_id)?;
-            // 主配置:用连接器的 disconnect_patch(与正常断开同一套 Remove)删掉受管字段。
-            force_strip_owned(
-                Path::new(&ownership.target_config_path),
+            let target = Path::new(&ownership.target_config_path);
+            let source = read_config_source(target).map_err(AgentCommandError::internal)?;
+            let document = parse_source_bytes(
+                source.existed.then_some(source.exact_bytes.as_slice()),
                 connector.format(),
                 connector.label(),
-                &connector.disconnect_patch(),
-            )?;
+            )
+            .map_err(AgentCommandError::internal)?;
+            let disconnect = connector
+                .disconnect_patch_for_document(&document)
+                .map_err(AgentCommandError::internal)?;
+            // 主配置:普通连接器仍使用固定 Remove；WorkBuddy 会按模型 ID 动态过滤，
+            // 避免强制断开时顺手删除用户后来添加的其它模型。
+            force_strip_owned(target, connector.format(), connector.label(), &disconnect)?;
             // companion:用持久化格式或 Connector 的旧记录显式合同解析，再按
             // owned_paths 删除。
             for (companion, document_format) in
@@ -2052,7 +2059,7 @@ mod tests {
     fn commands_installation_path_is_only_an_exact_scan_lookup_key() {
         let state = state("lookup");
         let registry_metadata = state.registry_metadata();
-        assert_eq!(registry_metadata.len(), 7);
+        assert_eq!(registry_metadata.len(), 8);
         assert_eq!(registry_metadata[0].agent_id, "claude-code");
         let target = scratch("lookup-target").join("settings.json");
         let registry = AgentRegistry::builtin().unwrap();
@@ -2086,7 +2093,7 @@ mod tests {
             records: Vec::new(),
         };
         let views = state.views(&empty, None).unwrap();
-        assert_eq!(views.len(), 7);
+        assert_eq!(views.len(), 8);
         assert!(views.iter().all(|view| {
             view.status == CompatibilityStatus::NotDetected && view.installations.is_empty()
         }));
@@ -2463,6 +2470,7 @@ mod tests {
             ("gemini-cli-v1", "http://127.0.0.1:8787/agents/gemini-cli"),
             ("opencode-v1", "http://127.0.0.1:8787/agents/opencode/v1"),
             ("openclaw-v1", "http://127.0.0.1:8787/agents/openclaw/v1"),
+            ("workbuddy-v1", "http://127.0.0.1:8787/agents/workbuddy/v1"),
             (
                 "hermes-v1",
                 "http://127.0.0.1:8787/agents/nous-hermes-agent/v1",
@@ -2751,7 +2759,7 @@ mod tests {
         assert_eq!(error.code, "read_only_preflight_failed");
 
         let scanned = state.scan().unwrap();
-        assert_eq!(scanned.len(), 7);
+        assert_eq!(scanned.len(), 8);
         assert!(state.session.lock().unwrap().scan.is_some());
     }
 
