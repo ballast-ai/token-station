@@ -330,11 +330,10 @@ impl AgentProxyRuntime {
     }
 
     pub(crate) fn gateway_origin(&self) -> Result<String, AgentCommandError> {
-        let base = self
-            .connector_base_urls
-            .values()
-            .next()
-            .ok_or_else(|| AgentCommandError::boundary("proxy_not_running", "代理地址不可用"))?;
+        let base =
+            self.connector_base_urls.values().next().ok_or_else(|| {
+                AgentCommandError::boundary("proxy_not_running", "代理地址不可用")
+            })?;
         let marker = "/agents/";
         let origin = base
             .split_once(marker)
@@ -1663,9 +1662,8 @@ pub(crate) fn configure_cursor_provider(
     paths: State<'_, AgentIntegrationPaths>,
 ) -> Result<String, AgentCommandError> {
     let runtime = runtime_from_app(&app_state)?;
-    let home = std::env::var_os("HOME").ok_or_else(|| {
-        AgentCommandError::boundary("home_unavailable", "无法确定当前用户目录")
-    })?;
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| AgentCommandError::boundary("home_unavailable", "无法确定当前用户目录"))?;
     let db_path = PathBuf::from(home)
         .join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
     if !db_path.is_file() {
@@ -1712,9 +1710,8 @@ pub(crate) fn configure_cursor_provider(
             )))
         })?;
         value["openAIBaseUrl"] = serde_json::Value::String(base_url.clone());
-        let encoded = serde_json::to_string(&value).map_err(|error| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(error))
-        })?;
+        let encoded = serde_json::to_string(&value)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         transaction.execute(
             "UPDATE ItemTable SET value = ?1 WHERE key = ?2",
             rusqlite::params![encoded, key_name],
@@ -1735,17 +1732,33 @@ pub(crate) fn configure_cursor_provider(
         }
     }
     let verified: String = Connection::open(&db_path)
-        .and_then(|conn| conn.query_row("SELECT value FROM ItemTable WHERE key = ?1", [key_name], |row| row.get(0)))
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT value FROM ItemTable WHERE key = ?1",
+                [key_name],
+                |row| row.get(0),
+            )
+        })
         .map_err(|error| AgentCommandError::internal(error.to_string()))?;
     if !serde_json::from_str::<serde_json::Value>(&verified)
         .ok()
-        .and_then(|value| value.get("openAIBaseUrl").and_then(serde_json::Value::as_str).map(|value| value == base_url))
+        .and_then(|value| {
+            value
+                .get("openAIBaseUrl")
+                .and_then(serde_json::Value::as_str)
+                .map(|value| value == base_url)
+        })
         .unwrap_or(false)
     {
         let _ = std::fs::copy(&backup, &db_path);
-        return Err(AgentCommandError::internal("Cursor 配置回读验证失败".to_string()));
+        return Err(AgentCommandError::internal(
+            "Cursor 配置回读验证失败".to_string(),
+        ));
     }
-    Ok(format!("Cursor 已接入 Token Station，原配置已备份到 {}", backup.display()))
+    Ok(format!(
+        "Cursor 已接入 Token Station，原配置已备份到 {}",
+        backup.display()
+    ))
 }
 
 #[tauri::command(async)]
