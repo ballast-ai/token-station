@@ -1548,9 +1548,17 @@ fn agent_namespaces_select_custom_or_inherited_routers_and_strip_paths() {
         true,
     );
     assert_eq!(status, 200);
+    let (status, _) = post_scoped(
+        &proxy,
+        "/agents/claude-desktop/v1/messages",
+        &messages,
+        &token,
+        true,
+    );
+    assert_eq!(status, 200);
 
     assert_eq!(custom.hits(), 1, "only Codex uses its custom route");
-    assert_eq!(home.hits(), 6, "home plus five inherited Agent requests");
+    assert_eq!(home.hits(), 7, "home plus six inherited Agent requests");
     assert!(
         custom
             .seen()
@@ -1562,6 +1570,57 @@ fn agent_namespaces_select_custom_or_inherited_routers_and_strip_paths() {
             .iter()
             .all(|seen| seen.body["model"] == "home-model")
     );
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn claude_desktop_discovers_only_the_token_station_auto_model() {
+    let answer = json!({
+        "id": "chatcmpl-unused",
+        "model": "home-model",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "unused" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    });
+    let home = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let custom = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("claude-desktop-models", "sk-test-key-abc");
+    let proxy = start_scoped_proxy(&home, &custom, &key);
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+
+    let response = agent
+        .get(format!(
+            "{}/agents/claude-desktop/v1/models?limit=1000",
+            proxy.url
+        ))
+        .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+        .call()
+        .expect("Claude Desktop model discovery answers");
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = serde_json::from_str(
+        &response
+            .into_body()
+            .read_to_string()
+            .expect("model catalog body reads"),
+    )
+    .expect("model catalog is JSON");
+
+    assert_eq!(body["object"], json!("list"));
+    assert_eq!(body["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(body["data"][0]["id"], json!("auto"));
+    assert_eq!(body["data"][0]["display_name"], json!("Token Station Auto"));
+    assert_eq!(body["data"][0]["anthropic_family_tier"], json!("sonnet"));
+    assert_eq!(body["data"][0]["is_family_default"], json!(true));
+    assert_eq!(home.hits(), 0, "model discovery stays local");
+    assert_eq!(custom.hits(), 0, "model discovery stays local");
 
     std::fs::remove_file(key).ok();
 }
@@ -1594,6 +1653,37 @@ fn scoped_models_auth_and_unknown_namespaces_fail_closed() {
         .call()
         .expect("namespaced models answers");
     assert_eq!(models.status().as_u16(), 200);
+    let models: Value = serde_json::from_str(
+        &models
+            .into_body()
+            .read_to_string()
+            .expect("OpenCode models body reads"),
+    )
+    .expect("OpenCode models body is JSON");
+    let ids = models["data"]
+        .as_array()
+        .expect("models data is an array")
+        .iter()
+        .map(|model| model["id"].as_str().expect("model id"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        ids,
+        std::collections::BTreeSet::from(["agent-model", "home-model"])
+    );
+
+    let wrong_key = agent
+        .get(format!("{}/agents/claude-desktop/v1/models", proxy.url))
+        .header("authorization", "Bearer wrong-local-key")
+        .call()
+        .expect("wrong-key model discovery answers");
+    assert_eq!(wrong_key.status().as_u16(), 401);
+
+    let unknown_models = agent
+        .get(format!("{}/agents/future/v1/models", proxy.url))
+        .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+        .call()
+        .expect("unknown model namespace answers");
+    assert_eq!(unknown_models.status().as_u16(), 404);
 
     let responses = json!({ "model": "auto", "input": "hi", "stream": false });
     let (status, body) = post_scoped(

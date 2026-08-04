@@ -1042,6 +1042,12 @@ fn retain_free_fallbacks(decision: &mut Decision, free_upstreams: &BTreeSet<Stri
     }
 }
 
+/// Claude Desktop's gateway setup accepts non-Claude model IDs only when the
+/// catalog declares an Anthropic family tier. `auto` is intentionally a
+/// Token Station virtual model: the Agent router still selects the real
+/// upstream and model for each request.
+const CLAUDE_DESKTOP_MODELS_DOCUMENT: &str = r#"{"object":"list","data":[{"id":"auto","object":"model","owned_by":"token-station","display_name":"Token Station Auto","anthropic_family_tier":"sonnet","is_family_default":true}]}"#;
+
 /// The assembled data plane.
 pub struct Gateway {
     /// Inbound adapters in match-priority order. Each request is dispatched to
@@ -1545,10 +1551,18 @@ impl Gateway {
         })
     }
 
-    /// `GET /v1/models`.
+    /// The model catalog visible to one host-validated Agent namespace.
+    ///
+    /// `None` is the unscoped home catalog. Claude Desktop receives a single
+    /// virtual model it can discover without mistaking an upstream model for a
+    /// Claude model. Unknown namespaces fail closed instead of inheriting Home.
     #[must_use]
-    pub fn models(&self) -> &str {
-        &self.models_document
+    pub fn models_for(&self, agent_id: Option<&str>) -> Option<&str> {
+        match agent_id {
+            Some(agent_id) if !self.supported_agent_ids.contains(agent_id) => None,
+            Some("claude-desktop") => Some(CLAUDE_DESKTOP_MODELS_DOCUMENT),
+            None | Some(_) => Some(&self.models_document),
+        }
     }
 
     /// Upper bound for blocking request workers. The async server acquires a
