@@ -170,6 +170,8 @@ export default function AddProviderPage({
       setEndpointError("");
       return;
     }
+    setEndpointPreview(null);
+    setEndpointError("");
     let active = true;
     void previewProviderEndpoints(baseUrl)
       .then((preview) => {
@@ -186,6 +188,10 @@ export default function AddProviderPage({
       active = false;
     };
   }, [url]);
+
+  useEffect(() => {
+    if (endpointPreview && !endpointPreview.loopback) setLocal(false);
+  }, [endpointPreview]);
 
   const catalogStatus: CatalogStatus = discovering
     ? { label: copy("Loading…", "正在获取…"), tone: "loading" }
@@ -335,7 +341,7 @@ export default function AddProviderPage({
         url.trim(),
         picked,
         needsKey && credentialSource === "store" ? key : null,
-        local,
+        local && endpointPreview.loopback,
         needsKey ? credentialSource : "none",
         needsKey && credentialSource !== "store" ? credentialReference.trim() : null,
       );
@@ -719,7 +725,8 @@ export default function AddProviderPage({
               <input
                 type="checkbox"
                 checked={local}
-                disabled={disabled}
+                disabled={disabled || !endpointPreview?.loopback}
+                aria-describedby="provider-local-eligibility"
                 onChange={(event) => setLocal(event.target.checked)}
               />
               <span>{copy(
@@ -727,6 +734,26 @@ export default function AddProviderPage({
                 "这是本机运行的本地模型（Ollama / LM Studio 等），可被“只走本地”路由锁定，请求不出本机。",
               )}</span>
             </label>
+            <p
+              id="provider-local-eligibility"
+              className="inline-note form-span"
+              aria-live="polite"
+            >
+              {!endpointPreview
+                ? copy(
+                    "Resolve the base URL before marking this provider as local.",
+                    "Base URL 解析完成后才能判断是否为本地模型。",
+                  )
+                : endpointPreview.loopback
+                  ? copy(
+                      "A loopback endpoint was detected. This provider can be marked as local.",
+                      "已检测到本机回环地址，可以标记为本地模型。",
+                    )
+                  : copy(
+                      "Cloud endpoints cannot be marked as local. Only localhost or 127.0.0.1 endpoints qualify.",
+                      "云端地址不能标记为本地模型；只有 localhost 或 127.0.0.1 等回环地址可以使用此选项。",
+                    )}
+            </p>
           </div>
         </div>
 

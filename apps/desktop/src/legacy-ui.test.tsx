@@ -119,6 +119,7 @@ beforeEach(() => {
     chat: "https://api.example/v1/chat/completions",
     responses: "https://api.example/v1/responses",
     messages: "https://api.example/v1/messages",
+    loopback: false,
   });
   vi.mocked(getStats).mockResolvedValue({
     total: {
