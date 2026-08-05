@@ -422,6 +422,9 @@ fn json5_value_as_serde(value: &JSONValue) -> Result<Value, String> {
 }
 
 fn json_value_at<'a>(root: &'a Value, path: &ConfigPath) -> Option<&'a Value> {
+    if root.is_array() && path.segments == ["models"] {
+        return Some(root);
+    }
     let mut current = root;
     for segment in &path.segments {
         current = current.as_object()?.get(segment)?;
@@ -469,6 +472,36 @@ fn project_toml_path(
 }
 
 fn apply_json_operation(root: &mut Value, operation: &PatchOperation) -> Result<(), String> {
+    // WorkBuddy's native models.json is a top-level array. The connector uses
+    // the logical `models` path so ownership checks remain scoped to it while
+    // the serialized document stays in its native shape.
+    if root.is_array() && operation.path.segments == ["models"] {
+        match operation.operation {
+            PatchKind::Add | PatchKind::Replace => {
+                let value = operation
+                    .value
+                    .clone()
+                    .ok_or_else(|| format!("配置路径 '{}' 缺少写入值", operation.path))?;
+                if !value.is_array() {
+                    return Err(format!("配置路径 '{}' 只允许数组", operation.path));
+                }
+                *root = value;
+            }
+            PatchKind::Remove => *root = Value::Array(Vec::new()),
+            PatchKind::Test => {
+                if root != operation.value.as_ref().unwrap_or(&Value::Null) {
+                    return Err(format!("配置路径 '{}' 的前置值已变化", operation.path));
+                }
+            }
+        }
+        return Ok(());
+    }
+    // `availableModels` is an object-schema companion field. It has no
+    // serialized counterpart in the native array schema, so projection must
+    // leave the array untouched.
+    if root.is_array() && operation.path.segments == ["availableModels"] {
+        return Ok(());
+    }
     let (last, parents) = split_path(&operation.path)?;
     let mut cursor = root;
     match operation.operation {
@@ -1088,7 +1121,7 @@ pub fn parse_rendered(
                     error.column()
                 )
             })?;
-            if value.is_object() {
+            if value.is_object() || value.is_array() {
                 Ok(ConfigDocument::Json(value))
             } else {
                 Err(format!("写入前复验 {label} 顶层不是对象"))
@@ -1730,11 +1763,7 @@ mod tests {
         .unwrap_err()
         .contains("格式不一致"));
         assert!(parse_source_bytes(Some(&[0xff]), DocumentFormat::Json, "fixture").is_err());
-        for (source, format) in [
-            ("[]", DocumentFormat::Json),
-            ("[]", DocumentFormat::Json5),
-            ("- item\n", DocumentFormat::Yaml),
-        ] {
+        for (source, format) in [("[]", DocumentFormat::Json5), ("- item\n", DocumentFormat::Yaml)] {
             assert!(parse_rendered(source, format, "fixture").is_err());
         }
         assert_eq!(semantic_json(&toml).unwrap()["root"], 1);
