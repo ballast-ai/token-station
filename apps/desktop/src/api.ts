@@ -973,6 +973,9 @@ export const planAgentConnection = (
   ...(options ? options : {}),
 });
 
+export const configureCursorProvider = () =>
+  invoke<string>("configure_cursor_provider");
+
 export const applyAgentPlan = (
   operationId: string,
   confirmationToken: string,

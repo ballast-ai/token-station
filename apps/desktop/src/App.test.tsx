@@ -37,13 +37,14 @@ const registryFixture: AgentUiMetadataView[] = [
   { agent_id: "codex", legacy_kind: "codex", display_name: "Codex", icon_key: "codex", admission: "supported", ui_order: 20, nav_mark: "X" },
   { agent_id: "gemini-cli", legacy_kind: null, display_name: "Gemini CLI", icon_key: "gemini", admission: "supported", ui_order: 30, nav_mark: "G" },
   { agent_id: "opencode", legacy_kind: "opencode", display_name: "OpenCode", icon_key: "opencode", admission: "supported", ui_order: 40, nav_mark: "O" },
+  { agent_id: "cursor", legacy_kind: null, display_name: "Cursor", icon_key: "cursor", admission: "discovery_only", ui_order: 45, nav_mark: "C" },
   { agent_id: "openclaw", legacy_kind: null, display_name: "OpenClaw", icon_key: "openclaw", admission: "supported", ui_order: 50, nav_mark: "OC" },
   { agent_id: "workbuddy", legacy_kind: null, display_name: "WorkBuddy", icon_key: "workbuddy", admission: "supported", ui_order: 55, nav_mark: "WB" },
   { agent_id: "nous-hermes-agent", legacy_kind: null, display_name: "Hermes Agent", icon_key: "hermes", admission: "supported", ui_order: 60, nav_mark: "H" },
   { agent_id: "future-agent", legacy_kind: null, display_name: "Future Agent", icon_key: "future", admission: "discovery_only" },
 ];
 const supportedRegistryFixture = registryFixture.filter(
-  (metadata) => metadata.admission === "supported",
+  (metadata) => metadata.admission === "supported" || metadata.agent_id === "cursor",
 );
 const agentIds = supportedRegistryFixture.map((metadata) => metadata.agent_id);
 const agentDisplayNames = supportedRegistryFixture.map(
@@ -717,7 +718,7 @@ describe("desktop station navigation", () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2);
   });
 
-  it("renders every supported Registry Agent in ui_order, filters discovery-only entries, and scans only on load or explicit rescan", async () => {
+  it("renders supported Agents and the manually configured Cursor entry in ui_order", async () => {
     const user = userEvent.setup();
     render(<App />);
     await openAgents(user);
@@ -730,6 +731,7 @@ describe("desktop station navigation", () => {
         & Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy();
     }
+    expect(screen.getByRole("button", { name: "Cursor" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Future/i })).toBeNull();
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1));
 

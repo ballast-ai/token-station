@@ -43,9 +43,9 @@ use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, Prov
 use token_station_router_core::UpstreamRef;
 
 use agent_integration::commands::{
-    apply_agent_plan, apply_snapshot_restore, force_forget_agent, get_agent_drift,
-    list_agent_registry, list_agent_snapshots, plan_agent_connection, plan_agent_disconnect,
-    plan_snapshot_restore, runtime_from_app, scan_agents, AgentCommandState,
+    apply_agent_plan, apply_snapshot_restore, configure_cursor_provider, force_forget_agent,
+    get_agent_drift, list_agent_registry, list_agent_snapshots, plan_agent_connection,
+    plan_agent_disconnect, plan_snapshot_restore, runtime_from_app, scan_agents, AgentCommandState,
 };
 use agent_integration::registry::AgentRegistry;
 use agent_integration::types::AdmissionStatus;
@@ -1946,7 +1946,12 @@ fn supported_agent_ids() -> Vec<String> {
         .expect("built-in Agent Registry must be valid")
         .descriptors()
         .iter()
-        .filter(|descriptor| descriptor.admission == AdmissionStatus::Supported)
+        .filter(|descriptor| {
+            descriptor.admission == AdmissionStatus::Supported
+                // Cursor has a verified protocol route and a dedicated SQLite
+                // configurator, but intentionally has no generic local Connector.
+                || descriptor.agent_id == "cursor"
+        })
         .map(|descriptor| descriptor.agent_id.clone())
         .collect()
 }
@@ -4522,6 +4527,7 @@ pub fn run() {
             list_agent_registry,
             scan_agents,
             plan_agent_connection,
+            configure_cursor_provider,
             apply_agent_plan,
             plan_agent_disconnect,
             force_forget_agent,

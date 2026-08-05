@@ -358,6 +358,34 @@
     },
     {
       "schema_version": 1,
+      "agent_id": "cursor",
+      "legacy_kind": null,
+      "display_name": "Cursor",
+      "icon_key": "cursor",
+      "ui_order": 45,
+      "nav_mark": "C",
+      "admission": "discovery_only",
+      "executable_candidates": ["cursor"],
+      "known_install_locations": {
+        "macos": ["/Applications/Cursor.app/Contents/MacOS/Cursor"],
+        "windows": ["${LOCALAPPDATA}/Programs/Cursor/Cursor.exe"]
+      },
+      "version_probe": {
+        "argv": [],
+        "timeout_ms": 2000,
+        "max_output_bytes": 65536,
+        "output_matcher": "SUCCESS_ONLY",
+        "runtime": {
+          "kind": "passive_file"
+        }
+      },
+      "config_locations": [],
+      "protocol_binding": null,
+      "local_connector_ids": [],
+      "discovery_fingerprint_rules": ["json-shape-v1"]
+    },
+    {
+      "schema_version": 1,
       "agent_id": "workbuddy",
       "legacy_kind": null,
       "display_name": "WorkBuddy",
@@ -367,7 +395,10 @@
       "admission": "supported",
       "executable_candidates": ["codebuddy"],
       "known_install_locations": {
-        "macos": ["/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"]
+        "macos": [
+          "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+          "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
+        ]
       },
       "version_probe": {
         "argv": ["--version"],
@@ -392,6 +423,19 @@
           "env_override": null,
           "platform_defaults": {
             "macos": ["${HOME}/.workbuddy/models.json"]
+          },
+          "installation_path_defaults": {},
+          "format": "json"
+        },
+        {
+          "env_override": null,
+          "platform_defaults": {
+            "macos": ["${HOME}/.workbuddy-ai/models.json"]
+          },
+          "installation_path_defaults": {
+            "macos": [
+              "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
+            ]
           },
           "format": "json"
         }

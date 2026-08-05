@@ -23,6 +23,10 @@
       "blocked": []
     },
     {
+      "agent_id": "cursor",
+      "blocked": []
+    },
+    {
       "agent_id": "workbuddy",
       "blocked": []
     },

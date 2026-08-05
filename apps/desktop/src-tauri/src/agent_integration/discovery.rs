@@ -101,6 +101,9 @@ fn run_probe_once(
     probe: &VersionProbe,
     environment: &ScanEnvironment,
 ) -> ProbeOutcome {
+    if matches!(probe.runtime, Some(ProbeRuntime::PassiveFile)) {
+        return passive_file_probe(executable, observed_entry);
+    }
     if unsupported_script_shim(executable, environment.platform)
         && !matches!(probe.runtime, Some(ProbeRuntime::NodePackage { .. }))
     {
@@ -143,6 +146,7 @@ fn run_probe_once(
         }
     };
     command.env("PATH", path);
+    configure_probe_window(&mut command, environment.platform);
 
     let mut child = match command.group_spawn() {
         Ok(child) => child,
@@ -256,6 +260,48 @@ fn run_probe_once(
     }
 }
 
+#[cfg(any(windows, test))]
+const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(any(windows, test))]
+fn probe_creation_flags(platform: Platform) -> u32 {
+    if platform == Platform::Windows {
+        WINDOWS_CREATE_NO_WINDOW
+    } else {
+        0
+    }
+}
+
+#[cfg(windows)]
+fn configure_probe_window(command: &mut Command, platform: Platform) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(probe_creation_flags(platform));
+}
+
+#[cfg(not(windows))]
+fn configure_probe_window(_command: &mut Command, _platform: Platform) {}
+
+fn passive_file_probe(executable: &Path, observed_entry: &Path) -> ProbeOutcome {
+    let executable = std::fs::canonicalize(executable);
+    let observed = std::fs::canonicalize(observed_entry);
+    let valid = executable.as_ref().is_ok_and(|path| {
+        observed.as_ref().is_ok_and(|observed| observed == path)
+            && std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+    });
+    if !valid {
+        return broken_probe(
+            ReasonCode::ExecutableNotRunnable,
+            "被动探测入口在确认前发生变化或不再是普通文件",
+        );
+    }
+    ProbeOutcome {
+        runnable: true,
+        version_raw: None,
+        version_normalized: None,
+        diagnostics: Vec::new(),
+    }
+}
+
 fn resolve_probe_command(
     executable: &Path,
     observed_entry: &Path,
@@ -276,6 +322,10 @@ fn resolve_probe_command(
             canonical_program: canonical_executable,
             arguments: probe.argv.iter().map(std::ffi::OsString::from).collect(),
         }),
+        ProbeRuntime::PassiveFile => Err(broken_probe(
+            ReasonCode::ExecutableNotRunnable,
+            "被动文件探测不能进入进程启动路径",
+        )),
         ProbeRuntime::EnvShebang {
             interpreter_candidates,
             resolution_sources,
@@ -671,7 +721,6 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
         }
         mark_path_default(&mut installations);
 
-        let config = inspect_configs(descriptor, &self.environment);
         let conflict_group = (installations.len() > 1).then(|| {
             stable_conflict_group(
                 &descriptor.agent_id,
@@ -682,6 +731,11 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
         installations
             .into_values()
             .map(|installation| {
+                let config = inspect_configs(
+                    descriptor,
+                    &self.environment,
+                    &installation.observed_probe_path,
+                );
                 let mut diagnostics = installation.diagnostics;
                 let probe = if installation.probe_allowed {
                     self.runner.run(
@@ -1335,8 +1389,9 @@ struct ConfigInspection {
 fn inspect_configs(
     descriptor: &AgentDescriptor,
     environment: &ScanEnvironment,
+    installation_path: &Path,
 ) -> ConfigInspection {
-    let resolution = config_candidates(descriptor, environment);
+    let resolution = config_candidates(descriptor, environment, installation_path);
     let mut diagnostics: Vec<_> = resolution
         .invalid_environment_names
         .into_iter()
@@ -1655,6 +1710,43 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn passive_file_probe_never_launches_the_discovered_application() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch("passive-file-probe");
+        let marker = root.join("launched");
+        let executable = root.join("Cursor");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf launched > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let context = environment(&root);
+        let probe = VersionProbe {
+            argv: Vec::new(),
+            timeout_ms: 2_000,
+            max_output_bytes: 1_024,
+            output_matcher: super::super::types::VersionOutputMatcher::SuccessOnly,
+            retry_on_timeout: false,
+            runtime: Some(ProbeRuntime::PassiveFile),
+        };
+
+        let outcome = SystemProbeRunner.run(&executable, &executable, &probe, &context);
+
+        assert!(outcome.runnable, "{:?}", outcome.diagnostics);
+        assert!(outcome.version_raw.is_none());
+        assert!(outcome.version_normalized.is_none());
+        assert!(outcome.diagnostics.is_empty());
+        assert!(
+            !marker.exists(),
+            "passive discovery launched the application"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "token-station-discovery-{name}-{}-{}",
@@ -1779,6 +1871,93 @@ mod tests {
         assert_eq!(
             records[0].binary_sha256.as_deref(),
             Some("6f1af2dfc4d7f16dacf404b1f6c9fd4a65cfffb8edde6dcf957463a0e41fb1ed")
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_keeps_workbuddy_variants_on_one_agent_with_separate_configs() {
+        let root = scratch("workbuddy-variants");
+        let domestic = root.join(
+            "Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+        );
+        let overseas = root.join(
+            "UserApplications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+        );
+        executable(&domestic);
+        executable(&overseas);
+        let domestic_config = root.join(".workbuddy/models.json");
+        let overseas_config = root.join(".workbuddy-ai/models.json");
+        std::fs::create_dir_all(domestic_config.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(overseas_config.parent().unwrap()).unwrap();
+        std::fs::write(&domestic_config, br#"{"models":[]}"#).unwrap();
+        std::fs::write(&overseas_config, br#"{"models":[]}"#).unwrap();
+
+        let registry = AgentRegistry::builtin().unwrap();
+        let mut descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "workbuddy")
+            .unwrap()
+            .clone();
+        descriptor.known_install_locations.insert(
+            Platform::Macos,
+            vec![
+                domestic.to_string_lossy().into_owned(),
+                overseas.to_string_lossy().into_owned(),
+            ],
+        );
+        let scanner = DiscoveryScanner::new(environment(&root), FixedProbe);
+
+        let records: Vec<_> = scanner
+            .scan_descriptor(&descriptor)
+            .into_iter()
+            .filter(|record| Path::new(&record.executable_path).starts_with(&root))
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|record| record.agent_id == "workbuddy"));
+        assert!(records.iter().all(|record| record.conflict_group.is_some()));
+        let domestic_record = records
+            .iter()
+            .find(|record| record.executable_path == domestic.to_string_lossy())
+            .unwrap();
+        let overseas_record = records
+            .iter()
+            .find(|record| record.executable_path == overseas.to_string_lossy())
+            .unwrap();
+        assert_eq!(
+            domestic_record.config_candidates,
+            [domestic_config.to_string_lossy().into_owned()]
+        );
+        assert_eq!(
+            overseas_record.config_candidates,
+            [overseas_config.to_string_lossy().into_owned()]
+        );
+        let domestic_fingerprint = domestic_record.config_fingerprint.clone();
+        let overseas_fingerprint = overseas_record.config_fingerprint.clone();
+
+        std::fs::write(&overseas_config, br#"{"models":[{"id":"changed"}]}"#).unwrap();
+        let rescanned: Vec<_> = scanner
+            .scan_descriptor(&descriptor)
+            .into_iter()
+            .filter(|record| Path::new(&record.executable_path).starts_with(&root))
+            .collect();
+        assert_eq!(
+            rescanned
+                .iter()
+                .find(|record| record.executable_path == domestic.to_string_lossy())
+                .unwrap()
+                .config_fingerprint,
+            domestic_fingerprint
+        );
+        assert_ne!(
+            rescanned
+                .iter()
+                .find(|record| record.executable_path == overseas.to_string_lossy())
+                .unwrap()
+                .config_fingerprint,
+            overseas_fingerprint
         );
         std::fs::remove_dir_all(root).ok();
     }
@@ -2253,6 +2432,17 @@ mod tests {
             assert_eq!(normalize_version(raw).as_deref(), Some(expected));
         }
         assert_eq!(normalize_version("claude 9.2.1.211"), None);
+    }
+
+    #[test]
+    fn windows_probe_processes_use_the_no_window_creation_flag() {
+        assert_eq!(
+            probe_creation_flags(Platform::Windows),
+            WINDOWS_CREATE_NO_WINDOW
+        );
+        for platform in [Platform::Macos, Platform::Linux, Platform::Wsl] {
+            assert_eq!(probe_creation_flags(platform), 0);
+        }
     }
 
     #[test]

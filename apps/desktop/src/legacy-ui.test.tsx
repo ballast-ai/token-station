@@ -420,6 +420,48 @@ describe("settings and update actions", () => {
 });
 
 describe("model selection and provider model management", () => {
+  it("keeps model positions stable when selection changes", async () => {
+    const user = userEvent.setup();
+    const onToggle = vi.fn();
+    const { rerender } = render(
+      <ModelPicker
+        models={["deepseek-r1", "gemma4:latest", "qwen3:4b-fast"]}
+        selected={[]}
+        status={{ label: "缓存", tone: "cache" }}
+        onToggle={onToggle}
+        onAdd={vi.fn()}
+        onRefresh={vi.fn()}
+        refreshing={false}
+      />,
+    );
+
+    const getModelOrder = () => Array.from(document.querySelectorAll(".model-chip")).map((item) => item.textContent);
+    expect(getModelOrder()).toEqual([
+      "+deepseek-r1",
+      "+gemma4:latest",
+      "+qwen3:4b-fast",
+    ]);
+
+    await user.click(screen.getByRole("button", { name: /gemma4:latest/ }));
+    expect(onToggle).toHaveBeenCalledWith("gemma4:latest");
+    rerender(
+      <ModelPicker
+        models={["deepseek-r1", "gemma4:latest", "qwen3:4b-fast"]}
+        selected={["gemma4:latest"]}
+        status={{ label: "缓存", tone: "cache" }}
+        onToggle={onToggle}
+        onAdd={vi.fn()}
+        onRefresh={vi.fn()}
+        refreshing={false}
+      />,
+    );
+    expect(getModelOrder()).toEqual([
+      "+deepseek-r1",
+      "✓gemma4:latest",
+      "+qwen3:4b-fast",
+    ]);
+  });
+
   it("searches, toggles, refreshes, and adds a custom model by Enter", async () => {
     const models = Array.from({ length: 13 }, (_, index) => `model-${index}`);
     const onToggle = vi.fn();

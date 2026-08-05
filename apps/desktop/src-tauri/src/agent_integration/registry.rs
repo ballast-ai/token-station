@@ -5,7 +5,7 @@ use serde::Deserialize;
 use super::connectors::find_connector;
 use super::types::{
     AdmissionStatus, AgentConnectorCapabilityView, AgentDescriptor, AgentUiMetadata, ConfigFormat,
-    EnvValueKind, ProbeRuntime, RuntimeResolutionSource,
+    EnvValueKind, ProbeRuntime, RuntimeResolutionSource, VersionOutputMatcher,
 };
 
 pub const BUILTIN_REGISTRY_JSON: &str = include_str!("../../agent-registry/builtin-agents.json");
@@ -259,7 +259,15 @@ fn validate_descriptor(descriptor: &AgentDescriptor) -> Result<(), String> {
 
 fn validate_probe(descriptor: &AgentDescriptor) -> Result<(), String> {
     let probe = &descriptor.version_probe;
-    if probe.argv.is_empty() || probe.argv.len() > 8 {
+    let passive_file = matches!(probe.runtime, Some(ProbeRuntime::PassiveFile));
+    if passive_file {
+        if !probe.argv.is_empty() || probe.output_matcher != VersionOutputMatcher::SuccessOnly {
+            return Err(format!(
+                "{}: passive_file version probe requires empty argv and SUCCESS_ONLY output",
+                descriptor.agent_id
+            ));
+        }
+    } else if probe.argv.is_empty() || probe.argv.len() > 8 {
         return Err(format!(
             "{}: version_probe.argv must contain 1..=8 arguments",
             descriptor.agent_id
@@ -301,7 +309,7 @@ fn validate_probe(descriptor: &AgentDescriptor) -> Result<(), String> {
     }
     if let Some(runtime) = &probe.runtime {
         match runtime {
-            ProbeRuntime::Direct => {}
+            ProbeRuntime::Direct | ProbeRuntime::PassiveFile => {}
             ProbeRuntime::EnvShebang {
                 interpreter_candidates,
                 resolution_sources,
@@ -429,6 +437,28 @@ fn validate_config_locations(descriptor: &AgentDescriptor) -> Result<(), String>
             ensure_unique(&descriptor.agent_id, "config paths", paths)?;
             for path in paths {
                 validate_path_template(&descriptor.agent_id, path)?;
+            }
+        }
+        for (platform, paths) in &location.installation_path_defaults {
+            if !location.platform_defaults.contains_key(platform) {
+                return Err(format!(
+                    "{}: installation-scoped config has no defaults for {platform:?}",
+                    descriptor.agent_id
+                ));
+            }
+            ensure_unique(&descriptor.agent_id, "config installation paths", paths)?;
+            for path in paths {
+                validate_path_template(&descriptor.agent_id, path)?;
+                if !descriptor
+                    .known_install_locations
+                    .get(platform)
+                    .is_some_and(|known| known.contains(path))
+                {
+                    return Err(format!(
+                        "{}: config installation path '{path}' is not a known installation",
+                        descriptor.agent_id
+                    ));
+                }
             }
         }
     }
@@ -708,6 +738,34 @@ mod tests {
     }
 
     #[test]
+    fn passive_file_probe_requires_empty_argv_and_cursor_uses_it() {
+        let mut passive = fixture();
+        passive["agents"][0]["version_probe"]["runtime"] = json!({ "kind": "passive_file" });
+        assert!(validate(&passive).unwrap_err().contains("passive_file"));
+
+        passive["agents"][0]["version_probe"]["argv"] = json!([]);
+        passive["agents"][0]["version_probe"]["output_matcher"] = json!("SUCCESS_ONLY");
+        assert!(validate(&passive).is_ok());
+
+        let cursor = AgentRegistry::builtin()
+            .unwrap()
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "cursor")
+            .unwrap()
+            .clone();
+        assert!(cursor.version_probe.argv.is_empty());
+        assert_eq!(
+            cursor.version_probe.output_matcher,
+            super::super::types::VersionOutputMatcher::SuccessOnly
+        );
+        assert!(matches!(
+            cursor.version_probe.runtime,
+            Some(ProbeRuntime::PassiveFile)
+        ));
+    }
+
+    #[test]
     fn path_templates_reject_traversal_and_unknown_variables() {
         let mut traversal = fixture();
         traversal["agents"][0]["known_install_locations"]["macos"] =
@@ -770,6 +828,7 @@ mod tests {
                 "codex",
                 "gemini-cli",
                 "opencode",
+                "cursor",
                 "openclaw",
                 "workbuddy",
                 "nous-hermes-agent",
@@ -781,10 +840,10 @@ mod tests {
             .into_iter()
             .map(|metadata| (metadata.agent_id, metadata.display_name))
             .collect();
-        assert_eq!(labels.len(), 8);
+        assert_eq!(labels.len(), 9);
         assert_eq!(labels[0].1, "Claude Code");
-        assert_eq!(labels[6].1, "WorkBuddy");
-        assert_eq!(labels[7].1, "Hermes Agent");
+        assert_eq!(labels[7].1, "WorkBuddy");
+        assert_eq!(labels[8].1, "Hermes Agent");
 
         let gemini = &registry.descriptors()[3];
         assert_eq!(gemini.agent_id, "gemini-cli");
@@ -793,7 +852,7 @@ mod tests {
             registry.ui_metadata()[3].connector_capabilities[0].config_format,
             "dotenv"
         );
-        let hermes = &registry.descriptors()[7];
+        let hermes = &registry.descriptors()[8];
         assert_eq!(hermes.admission, AdmissionStatus::Supported);
         assert_eq!(hermes.local_connector_ids, ["hermes-v1"]);
         assert_eq!(hermes.version_probe.argv, ["--help"]);
@@ -802,7 +861,7 @@ mod tests {
             super::super::types::VersionOutputMatcher::SuccessOnly
         );
         assert!(!hermes.version_probe.retry_on_timeout);
-        let openclaw = &registry.descriptors()[5];
+        let openclaw = &registry.descriptors()[6];
         assert_eq!(openclaw.admission, AdmissionStatus::Supported);
         assert_eq!(openclaw.local_connector_ids, ["openclaw-v1"]);
         assert!(matches!(
@@ -833,6 +892,26 @@ mod tests {
                 descriptor.version_probe.runtime,
                 Some(ProbeRuntime::EnvShebang { .. })
             )));
+        let workbuddy = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "workbuddy")
+            .unwrap();
+        assert_eq!(
+            workbuddy.known_install_locations[&super::super::types::Platform::Macos],
+            [
+                "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+                "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy",
+            ]
+        );
+        assert_eq!(workbuddy.config_locations.len(), 2);
+        assert_eq!(
+            workbuddy.config_locations[1].installation_path_defaults
+                [&super::super::types::Platform::Macos],
+            [
+                "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
+            ]
+        );
         assert!(registry
             .descriptors()
             .iter()
@@ -893,13 +972,45 @@ mod tests {
     }
 
     #[test]
+    fn installation_scoped_config_must_name_a_known_installation_on_the_same_platform() {
+        let mut unknown = fixture();
+        let workbuddy = unknown["agents"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|agent| agent["agent_id"] == "workbuddy")
+            .unwrap();
+        workbuddy["config_locations"][1]["installation_path_defaults"]["macos"] =
+            json!(["/Applications/Other.app/Contents/MacOS/other"]);
+        assert!(validate(&unknown)
+            .unwrap_err()
+            .contains("is not a known installation"));
+
+        let mut wrong_platform = fixture();
+        let workbuddy = wrong_platform["agents"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|agent| agent["agent_id"] == "workbuddy")
+            .unwrap();
+        workbuddy["config_locations"][1]["installation_path_defaults"]["windows"] =
+            json!([r"C:\\Program Files\\WorkBuddy AI\\codebuddy.exe"]);
+        assert!(validate(&wrong_platform)
+            .unwrap_err()
+            .contains("has no defaults for Windows"));
+    }
+
+    #[test]
     fn every_cross_platform_agent_has_linux_install_and_config_locations() {
         use super::super::types::Platform;
         let registry = AgentRegistry::builtin().unwrap();
         for descriptor in registry.descriptors() {
             // Claude Desktop and the verified WorkBuddy 5.3.8 integration do not
             // claim a Linux installation until that product path is tested.
-            if matches!(descriptor.agent_id.as_str(), "claude-desktop" | "workbuddy") {
+            if matches!(
+                descriptor.agent_id.as_str(),
+                "claude-desktop" | "workbuddy" | "cursor"
+            ) {
                 continue;
             }
             assert!(
@@ -931,7 +1042,7 @@ mod tests {
         for descriptor in registry.descriptors() {
             // WorkBuddy is intentionally macOS-only until its Windows install and
             // config paths have been verified against a real installation.
-            if descriptor.agent_id == "workbuddy" {
+            if matches!(descriptor.agent_id.as_str(), "workbuddy" | "cursor") {
                 continue;
             }
             assert!(

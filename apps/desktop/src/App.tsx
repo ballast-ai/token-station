@@ -138,7 +138,12 @@ function StationApp() {
   const orderedRegistry = useMemo(
     () => registry
       .map((metadata, index) => ({ metadata, index }))
-      .filter(({ metadata }) => metadata.admission === "supported")
+      // Cursor has a working OpenAI-compatible Agent route, but its private
+      // settings file is not stable enough for an automatic connector. Keep it
+      // visible so the user can open the route and configure Cursor manually.
+      .filter(({ metadata }) =>
+        metadata.admission === "supported" || metadata.agent_id === "cursor",
+      )
       .sort((left, right) =>
         (left.metadata.ui_order ?? Number.MAX_SAFE_INTEGER)
           - (right.metadata.ui_order ?? Number.MAX_SAFE_INTEGER)

@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::config_codec::{semantic_json, ConfigDocument, DocumentFormat};
-use super::safe_fs::{ensure_private_dir, verify_private_file, write_atomic_private};
+#[cfg(not(windows))]
+use super::safe_fs::verify_private_file;
+use super::safe_fs::{ensure_private_dir, write_atomic_private};
 use super::types::ConfigPath;
 
 const OWNERSHIP_SCHEMA_VERSION: u32 = 1;
@@ -199,6 +201,10 @@ impl FileOwnershipStore {
         let path = self.root.join(INDEX_FILE);
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) => {
+                #[cfg(windows)]
+                super::safe_fs::harden_private_file(&path)
+                    .map_err(|_| "ownership 索引权限或类型无效".to_string())?;
+                #[cfg(not(windows))]
                 verify_private_file(&path)
                     .map_err(|_| "ownership 索引权限或类型无效".to_string())?;
                 if metadata.len() > MAX_INDEX_BYTES {
@@ -537,6 +543,25 @@ mod tests {
                 .contains(expected));
             std::fs::remove_dir_all(root).ok();
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ownership_store_hardens_a_legacy_regular_index_before_reading() {
+        let root = scratch();
+        std::fs::create_dir_all(&root).unwrap();
+        let index = root.join(INDEX_FILE);
+        std::fs::write(&index, br#"{"schema_version":1,"records":[]}"#).unwrap();
+        assert!(super::super::safe_fs::verify_private_file(&index).is_err());
+
+        let store = FileOwnershipStore::new(root.clone());
+        assert!(store
+            .list_agent_installation("claude-code", "C:\\tools\\claude.exe")
+            .unwrap()
+            .is_empty());
+        super::super::safe_fs::verify_private_file(&index)
+            .expect("legacy ownership ACL is hardened");
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

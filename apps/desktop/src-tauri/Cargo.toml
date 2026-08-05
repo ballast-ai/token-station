@@ -41,6 +41,7 @@ sha2 = "=0.10.9"
 command-group = { version = "=5.0.1", default-features = false }
 getrandom = "=0.4.3"
 ring = "=0.17.14"
+rusqlite = "=0.40.1"
 zeroize = "=1.9.0"
 
 # The kernel, reused as a library — routing / gateway / config / metrics /

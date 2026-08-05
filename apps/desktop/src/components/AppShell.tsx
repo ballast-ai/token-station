@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Activity, Moon, Plus, Route, Sun } from "lucide-react";
+import { Activity, Moon, Plus, Sun } from "lucide-react";
 import type { AgentUiMetadataView, AgentView, ServeView } from "../api";
 import { useLanguage } from "./LanguageProvider";
 import { useTheme } from "./ThemeProvider";
@@ -89,7 +89,14 @@ export default function AppShell({
           onClick={() => onNavigate("overview")}
           aria-label={copy("Token Station Overview", "Token Station 概览")}
         >
-          <span className="station-brand-mark" aria-hidden="true"><Route /></span>
+          <span className="station-brand-mark" aria-hidden="true">
+            <img
+              data-testid="station-brand-icon"
+              className={resolvedTheme === "dark" ? "dark-mode" : undefined}
+              src="/icon.png"
+              alt=""
+            />
+          </span>
           <span>Token Station</span>
         </button>
 
