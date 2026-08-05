@@ -376,6 +376,41 @@ mod tests {
     }
 
     #[test]
+    fn workbuddy_connector_supports_native_top_level_model_array() {
+        let connector = find_connector("workbuddy-v1").expect("WorkBuddy connector is registered");
+        let source = br#"[
+          {"id":"user-model","name":"Keep me","url":"http://example.test/v1/chat/completions"}
+        ]"#;
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
+            token: Some("fixture-workbuddy-key"),
+            adapter_ready: true,
+        };
+        let mut document =
+            parse_source_bytes(Some(source), connector.format(), connector.label()).unwrap();
+        let patch = connector
+            .connect_patch_for_document(&document, &input)
+            .unwrap();
+        validate_patch_ownership(&patch, &connector.owned_paths()).unwrap();
+        apply_patch(&mut document, &patch).unwrap();
+        connector.validate_projected(&document, &input).unwrap();
+        let connected = crate::agent_integration::config_codec::semantic_json(&document).unwrap();
+        assert_eq!(connected.as_array().unwrap().len(), 2);
+        assert_eq!(connected[0]["id"], json!("user-model"));
+        assert_eq!(connected[1]["id"], json!("tokenstation-auto"));
+
+        let disconnect = connector.disconnect_patch_for_document(&document).unwrap();
+        validate_patch_ownership(&disconnect, &connector.owned_paths()).unwrap();
+        apply_patch(&mut document, &disconnect).unwrap();
+        let disconnected =
+            crate::agent_integration::config_codec::semantic_json(&document).unwrap();
+        assert_eq!(
+            disconnected,
+            json!([{"id":"user-model","name":"Keep me","url":"http://example.test/v1/chat/completions"}])
+        );
+    }
+
+    #[test]
     fn opencode_connection_advertises_image_attachments_for_the_auto_route() {
         let connector = find_connector("opencode-v1").unwrap();
         let input = ConnectInput {
