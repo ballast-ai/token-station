@@ -1763,7 +1763,10 @@ mod tests {
         .unwrap_err()
         .contains("格式不一致"));
         assert!(parse_source_bytes(Some(&[0xff]), DocumentFormat::Json, "fixture").is_err());
-        for (source, format) in [("[]", DocumentFormat::Json5), ("- item\n", DocumentFormat::Yaml)] {
+        for (source, format) in [
+            ("[]", DocumentFormat::Json5),
+            ("- item\n", DocumentFormat::Yaml),
+        ] {
             assert!(parse_rendered(source, format, "fixture").is_err());
         }
         assert_eq!(semantic_json(&toml).unwrap()["root"], 1);
