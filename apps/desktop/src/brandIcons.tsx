@@ -10,6 +10,7 @@ import {
   ClaudeCode,
   Codex,
   Cohere,
+  Cursor,
   DeepInfra,
   DeepSeek,
   Fireworks,
@@ -111,6 +112,7 @@ const AGENT_ICONS: Record<string, BrandIcon> = {
   codex: Codex,
   opencode: OpenCode,
   openclaw: OpenClaw,
+  cursor: Cursor,
 };
 
 // Agent ID to bundled bitmap logo. Store it in public/ and reference it by URL. This covers brands missing from @lobehub.

@@ -1,0 +1,3 @@
+第一行：中文和 English
+第二行：emoji 🚀 ✅
+第三行：quotes "double" 'single' \\ slash / tab	end

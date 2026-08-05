@@ -37,12 +37,8 @@ export default function ModelPicker({
   const visible = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
     return [...new Set(models)]
-      .filter((model) => !normalizedQuery || model.toLocaleLowerCase().includes(normalizedQuery))
-      .sort((left, right) => {
-        const selectedOrder = Number(selectedSet.has(right)) - Number(selectedSet.has(left));
-        return selectedOrder || left.localeCompare(right);
-      });
-  }, [models, query, selectedSet]);
+      .filter((model) => !normalizedQuery || model.toLocaleLowerCase().includes(normalizedQuery));
+  }, [models, query]);
 
   const addCustom = () => {
     const model = customModel.trim();

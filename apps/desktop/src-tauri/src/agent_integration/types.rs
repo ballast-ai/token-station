@@ -55,6 +55,7 @@ pub struct VersionProbe {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProbeRuntime {
     Direct,
+    PassiveFile,
     EnvShebang {
         interpreter_candidates: Vec<String>,
         resolution_sources: Vec<RuntimeResolutionSource>,
@@ -87,6 +88,8 @@ pub enum VersionOutputMatcher {
 pub struct ConfigLocation {
     pub env_override: Option<EnvOverride>,
     pub platform_defaults: BTreeMap<Platform, Vec<String>>,
+    #[serde(default)]
+    pub installation_path_defaults: BTreeMap<Platform, Vec<String>>,
     pub format: ConfigFormat,
 }
 
