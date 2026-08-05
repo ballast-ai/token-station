@@ -987,7 +987,11 @@ export const applyAgentPlan = (
 export const planAgentDisconnect = (agentId: AgentId, installationPath: string) =>
   invoke<ConfigPlanView>("plan_agent_disconnect", { agentId, installationPath });
 
-/** Forced-disconnect fallback: if a lost key prevents snapshot decryption and recovery fails, remove managed fields and clear ownership. */
+/**
+ * Restore official configuration and disconnect: remove TS-managed fields by ownership record and return the Agent to its official default configuration.
+ * Then clear ownership. This does not depend on encrypted snapshots or the primary key. It is deterministic and always succeeds. This is Restore official configuration and disconnect.
+ * The primary-button path replaces exact snapshot restore and the separate Force disconnect fallback.
+ */
 export const forceForgetAgent = (agentId: AgentId, installationPath: string) =>
   invoke<void>("force_forget_agent", { agentId, installationPath });
 

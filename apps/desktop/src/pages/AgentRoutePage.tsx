@@ -5,7 +5,6 @@ import {
   forceForgetAgent,
   mountAgentProfile,
   planAgentConnection,
-  planAgentDisconnect,
   saveAgentRoutes,
   restartAgentRoute,
   setAgentRouteMode,
@@ -246,7 +245,7 @@ export default function AgentRoutePage({
     }
   };
 
-  // Connect and restore: apply immediately after planning. Do not wait for separate confirmation because it only adds delay. After connection,
+  // Connect immediately after planning without a redundant confirmation wait.
   // The post-connection diff card still appears once for transparency.
   const applyConnection = async () => {
     if (!installation || !canOperate || busy) return;
@@ -254,32 +253,26 @@ export default function AgentRoutePage({
     setError("");
     setNotice("");
     try {
-      if (metadata.agent_id === "cursor" && !managed) {
+      if (metadata.agent_id === "cursor") {
         const message = await configureCursorProvider();
         setNotice(message);
         await onRescan();
         return;
       }
-      const plan = managed
-        ? await planAgentDisconnect(metadata.agent_id, installation.discovery.canonical_path)
-        : await planAgentConnection(
-          metadata.agent_id,
-          installation.discovery.canonical_path,
-          installation.discovery.version_normalized
-            ? { expectedVersion: installation.discovery.version_normalized as string }
-            : undefined,
-        );
+      const plan = await planAgentConnection(
+        metadata.agent_id,
+        installation.discovery.canonical_path,
+        installation.discovery.version_normalized
+          ? { expectedVersion: installation.discovery.version_normalized as string }
+          : undefined,
+      );
       await applyAgentPlan(plan.operation_id, plan.confirmation_token);
-      const restored = plan.intent !== "connect";
-      if (!restored
-        && !localStorage.getItem(diffShownKey(metadata.agent_id))
+      if (!localStorage.getItem(diffShownKey(metadata.agent_id))
         && (plan.changes?.length || plan.human_diff)) {
         localStorage.setItem(diffShownKey(metadata.agent_id), String(Date.now()));
         setConnectDiff(plan);
       }
-      setNotice(restored
-        ? copy("The Agent configuration from before connection has been restored.", "已恢复接入前的 Agent 配置")
-        : copy("Agent connected.", "Agent 已接入"));
+      setNotice(copy("Agent connected.", "Agent 已接入"));
       await onRescan();
     } catch (caught) {
       const message = errorText(caught);
@@ -294,7 +287,9 @@ export default function AgentRoutePage({
     }
   };
 
-  const forceForget = async () => {
+  // Restore official configuration and disconnect. Remove TS-managed fields by ownership so the Agent returns to official defaults,
+  // Then clear the ownership record. This needs no encrypted snapshot or primary key and always succeeds. It replaces Force disconnect.
+  const restoreOfficial = async () => {
     if (!installation || busy) return;
     setBusy(true);
     setError("");
@@ -302,8 +297,8 @@ export default function AgentRoutePage({
     try {
       await forceForgetAgent(metadata.agent_id, installation.discovery.canonical_path);
       setNotice(copy(
-        "Force disconnected: managed fields and the management record were removed.",
-        "已强制断开：受管字段已移除，接管记录已清除。",
+        "Restored the official configuration and disconnected.",
+        "已恢复官方配置并断开。",
       ));
       await onRescan();
     } catch (caught) {
@@ -340,6 +335,15 @@ export default function AgentRoutePage({
     serveRunning
       ? copy("Custom routing saved and restarted for this Agent", "独立路由已保存并对此 Agent 生效")
       : copy("Custom routing saved", "独立路由已保存"),
+  );
+
+  // In Follow Home mode, apply the current home tiers to this Agent immediately.
+  // Restarting an inherited route clears the Agent-specific route and hot-applies the home configuration.
+  const applyHomeRoute = () => runState(
+    () => restartAgentRoute(metadata.agent_id),
+    serveRunning
+      ? copy("Home routing applied to this Agent", "已将主页路由应用到此 Agent")
+      : copy("Home routing saved · applies when the proxy starts", "已保存 · 启动代理后生效"),
   );
 
   const restoreHome = async () => {
@@ -391,28 +395,20 @@ export default function AgentRoutePage({
             className={`btn agent-primary-action ${managed ? "" : "primary"}`}
             type="button"
             disabled={busy || !canOperate}
-            onClick={() => void applyConnection()}
+            onClick={() => void (managed ? restoreOfficial() : applyConnection())}
+            title={managed
+              ? copy(
+                "Strip the fields Token Station injected and return the Agent to its official default configuration, then clear the management record.",
+                "剥掉 Token Station 注入的字段，让 Agent 回到官方默认配置，并清除接管记录。",
+              )
+              : undefined}
           >
             {busy
               ? copy("Working…", "处理中…")
               : managed
-                ? copy("Restore original Agent configuration", "恢复 Agent 原始配置")
+                ? copy("Restore official configuration & disconnect", "恢复官方配置并断开")
                 : copy("Connect", "一键接入")}
           </button>
-          {managed && (
-            <button
-              className="btn tiny agent-force-forget"
-              type="button"
-              disabled={busy}
-              onClick={() => void forceForget()}
-              title={copy(
-                "Use only if normal restoration fails because a key or snapshot is unavailable. This removes injected fields and the management record, but cannot restore overwritten values exactly.",
-                "正常「恢复原始配置」因密钥或快照不可用而失败时使用：直接移除注入字段并清除接管记录，无法精确还原被覆盖的原值。",
-              )}
-            >
-              {copy("Force disconnect", "强制断开")}
-            </button>
-          )}
         </div>
       </header>
 
@@ -540,10 +536,24 @@ export default function AgentRoutePage({
               `该 Agent 使用策略组「${route.profile}」。在主页管理策略组，保存并应用后生效。`,
             )}</span>
           ) : (
-            <span className="inherit-note">{copy(
-              "This Agent automatically uses the latest three-tier configuration from Home.",
-              "主页路由更新后，此 Agent 会自动使用最新三档配置。",
-            )}</span>
+            <>
+              <span className="inherit-note">{copy(
+                "This Agent automatically uses the latest three-tier configuration from Home.",
+                "主页路由更新后，此 Agent 会自动使用最新三档配置。",
+              )}</span>
+              <button
+                className="btn primary"
+                type="button"
+                disabled={busy}
+                onClick={() => void applyHomeRoute()}
+                title={copy(
+                  "Apply the current Home three-tier routing to this Agent now.",
+                  "立即将主页当前三档路由应用到此 Agent。",
+                )}
+              >
+                {busy ? copy("Working…", "处理中…") : copy("Apply", "应用")}
+              </button>
+            </>
           )}
           {route.config_error && <span className="foot-hint error-text">{route.config_error}</span>}
         </footer>

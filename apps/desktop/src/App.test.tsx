@@ -1493,7 +1493,7 @@ describe("desktop station navigation", () => {
     }));
   });
 
-  it("restores the encrypted baseline directly on 恢复原始配置", async () => {
+  it("strips injected fields to the official config on 恢复官方配置并断开", async () => {
     const user = userEvent.setup();
     const connected = structuredClone(scannedClaude);
     connected.installations[0].managed = true;
@@ -1505,38 +1505,23 @@ describe("desktop station navigation", () => {
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [connected];
       if (command === "get_agent_drift") return [];
-      if (command === "plan_agent_disconnect") {
-        return {
-          ...projectionPlan("op-restore", "token-restore", "disconnect"),
-          human_diff: "~ /env/ANTHROPIC_AUTH_TOKEN: <恢复受管敏感值，内容已隐藏>",
-          changes: [{
-            operation: "replace",
-            path: { segments: ["env", "ANTHROPIC_AUTH_TOKEN"] },
-            sensitive: true,
-            summary: "<恢复受管敏感值，内容已隐藏>",
-          }],
-        };
-      }
-      if (command === "apply_agent_plan") return { operation_id: "op-restore", maintenance_warning: null };
+      if (command === "force_forget_agent") return null;
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
     render(<App />);
     await openAgent(user, "Claude Code");
-    await user.click(await screen.findByRole("button", { name: "恢复 Agent 原始配置" }));
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_disconnect", {
+    await user.click(await screen.findByRole("button", { name: "恢复官方配置并断开" }));
+    // Restoring official config uses force_forget to remove injected fields without planning or confirming encrypted snapshot restoration.
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("force_forget_agent", {
       agentId: "claude-code",
       installationPath: "/opt/claude",
     }));
-    // Apply immediately after planning without a confirmation step.
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
-      operationId: "op-restore",
-      confirmationToken: "token-restore",
-    }));
-    expect(await screen.findByText("已恢复接入前的 Agent 配置")).toBeInTheDocument();
+    expect(invokeMock).not.toHaveBeenCalledWith("plan_agent_disconnect", expect.anything());
+    expect(await screen.findByText("已恢复官方配置并断开。")).toBeInTheDocument();
 
     await openAgent(user, "OpenCode");
-    expect(screen.queryByText("已恢复接入前的 Agent 配置")).not.toBeInTheDocument();
+    expect(screen.queryByText("已恢复官方配置并断开。")).not.toBeInTheDocument();
   });
 
   it("selects an exact installation and plans against its path", async () => {

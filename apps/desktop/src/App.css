@@ -1347,7 +1347,6 @@ body {
   gap: 9px;
 }
 .agent-connect-box small { max-width: 150px; color: var(--muted); font-size: 10px; }
-.agent-force-forget { flex: 0 0 auto; color: var(--danger); white-space: nowrap; }
 .agent-primary-action {
   min-width: 92px;
   flex: 0 0 auto;

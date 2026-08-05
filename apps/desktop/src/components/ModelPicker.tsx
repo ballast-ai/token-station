@@ -33,17 +33,34 @@ export default function ModelPicker({
   const { copy } = useLocalizedCopy();
   const [query, setQuery] = useState("");
   const [customModel, setCustomModel] = useState("");
+  // Move models selected or added during this session to the end in operation order so users can review recent additions.
+  // This is local view state only. Remounting the component clears it and restores alphabetical order.
+  const [recent, setRecent] = useState<string[]>([]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
+
+  const promoteRecent = (model: string) =>
+    setRecent((current) => [...current.filter((item) => item !== model), model]);
+
   const visible = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
-    return [...new Set(models)]
+    // Sort alphabetically by default, then append current selections in selection order so new additions stay visible.
+    const sorted = [...new Set(models)].sort((left, right) => left.localeCompare(right));
+    const recentTail = recent.filter((model) => models.includes(model));
+    const tailSet = new Set(recentTail);
+    return [...sorted.filter((model) => !tailSet.has(model)), ...recentTail]
       .filter((model) => !normalizedQuery || model.toLocaleLowerCase().includes(normalizedQuery));
-  }, [models, query]);
+  }, [models, query, recent]);
+
+  const toggle = (model: string) => {
+    if (!selectedSet.has(model)) promoteRecent(model);
+    onToggle(model);
+  };
 
   const addCustom = () => {
     const model = customModel.trim();
     if (!model || disabled) return;
     onAdd(model);
+    promoteRecent(model);
     setCustomModel("");
   };
 
@@ -87,7 +104,7 @@ export default function ModelPicker({
             className={`model-chip ${selectedSet.has(model) ? "on" : ""}`}
             type="button"
             aria-pressed={selectedSet.has(model)}
-            onClick={() => onToggle(model)}
+            onClick={() => toggle(model)}
             disabled={disabled}
           >
             <span className="model-check">{selectedSet.has(model) ? "✓" : "+"}</span>
