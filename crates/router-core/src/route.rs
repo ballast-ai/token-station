@@ -222,7 +222,9 @@ impl Router {
                 .quota_accounts
                 .iter()
                 .filter_map(|account| {
-                    candidates.iter().find(|candidate| candidate.target == *account)
+                    candidates
+                        .iter()
+                        .find(|candidate| candidate.target == *account)
                 })
                 .collect()
         };
@@ -232,12 +234,12 @@ impl Router {
         let capable: Vec<&Candidate> = pool
             .iter()
             .copied()
-            .filter(|candidate| self.satisfies(candidate, &features).is_none())
+            .filter(|candidate| self.hard_unmet(candidate, &features).is_none())
             .collect();
         if capable.is_empty() {
             let reason = pool
                 .first()
-                .and_then(|candidate| self.satisfies(candidate, &features))
+                .and_then(|candidate| self.hard_unmet(candidate, &features))
                 .unwrap_or(UnmetRequirement::Unknown);
             return Err(NoRoute::Unsatisfiable {
                 pool: QUOTA_POOL.to_owned(),
@@ -348,12 +350,12 @@ impl Router {
         let capable: Vec<&Candidate> = named
             .iter()
             .copied()
-            .filter(|candidate| self.satisfies(candidate, &features).is_none())
+            .filter(|candidate| self.hard_unmet(candidate, &features).is_none())
             .collect();
 
         if capable.is_empty() {
             let reason = self
-                .satisfies(named[0], &features)
+                .hard_unmet(named[0], &features)
                 .unwrap_or(UnmetRequirement::Unknown);
             return Err(NoRoute::Unsatisfiable {
                 pool: request.model.clone(),
@@ -507,15 +509,15 @@ impl Router {
         let capable: Vec<&Candidate> = installed
             .iter()
             .copied()
-            .filter(|candidate| self.satisfies(candidate, features).is_none())
+            .filter(|candidate| self.hard_unmet(candidate, features).is_none())
             .collect();
 
         if capable.is_empty() {
-            // Report the first thing missing from the first installed candidate:
-            // a list of every unmet requirement across every candidate reads as
-            // noise, and the operator fixes them one at a time anyway.
+            // Report the first hard requirement missing from the first installed
+            // candidate: a list of every unmet requirement across every candidate
+            // reads as noise, and the operator fixes them one at a time anyway.
             let reason = self
-                .satisfies(installed[0], features)
+                .hard_unmet(installed[0], features)
                 .unwrap_or(UnmetRequirement::Unknown);
             return Err(NoRoute::Unsatisfiable {
                 pool: pool.to_owned(),
@@ -523,7 +525,23 @@ impl Router {
             });
         }
 
-        let in_rotation: Vec<&Candidate> = capable
+        // Context window is a *preference*, not a gate. Prefer candidates whose
+        // window covers the estimated input; only when NONE do, fall back to the
+        // whole capable set and forward anyway — never a hard refusal for length.
+        // A 400 the client cannot recover from is worse than forwarding: the
+        // upstream's real context error (or the client's own `/compact`) resolves
+        // the overflow, whereas a capability error dead-ends the session. When
+        // nothing fits we rank the largest window first so the last-resort
+        // forward truncates as little as possible.
+        let fitting: Vec<&Candidate> = capable
+            .iter()
+            .copied()
+            .filter(|candidate| self.fits_context(candidate, features))
+            .collect();
+        let over_context = fitting.is_empty();
+        let preferred: Vec<&Candidate> = if over_context { capable } else { fitting };
+
+        let in_rotation: Vec<&Candidate> = preferred
             .iter()
             .copied()
             .filter(|candidate| candidate.health != Health::Unavailable)
@@ -539,7 +557,7 @@ impl Router {
                 // signals "reach for cloud" (or refuse) rather than pinning a
                 // dead local. Multi-candidate pools are byte-identical to before:
                 // this branch fires only when rotation would otherwise be EMPTY.
-                capable
+                preferred
             } else {
                 return Err(NoRoute::Unavailable {
                     pool: pool.to_owned(),
@@ -551,8 +569,19 @@ impl Router {
 
         // Stable, so the operator's order survives inside a health class; the
         // `Health` ordering (Healthy < Degraded < Unavailable) keeps the
-        // least-bad candidate first even in the last-resort branch.
-        usable.sort_by_key(|candidate| candidate.health);
+        // least-bad candidate first even in the last-resort branch. When the
+        // request overflows every window, break the tie toward the largest
+        // window so the forwarded last resort keeps the most context.
+        if over_context {
+            usable.sort_by_key(|candidate| {
+                (
+                    candidate.health,
+                    std::cmp::Reverse(self.effective_window(candidate)),
+                )
+            });
+        } else {
+            usable.sort_by_key(|candidate| candidate.health);
+        }
 
         Ok(usable
             .into_iter()
@@ -560,9 +589,17 @@ impl Router {
             .collect())
     }
 
-    /// `None` when the candidate can serve the request; otherwise the first
-    /// thing it cannot do.
-    fn satisfies(
+    /// The hard capability gates — the things a model genuinely cannot do.
+    /// `None` when the candidate clears them all; otherwise the first it fails.
+    /// Because every candidate would fail these for the same structural reason,
+    /// an all-failing pool is [`NoRoute::Unsatisfiable`] and never retried
+    /// elsewhere. Context length is deliberately NOT here: it is a soft
+    /// preference handled in `usable_targets`, so an over-length request is
+    /// forwarded rather than refused.
+    // A predicate over a candidate; kept a method alongside the window helpers
+    // for cohesion even though the hard gates need no router state.
+    #[allow(clippy::unused_self)]
+    fn hard_unmet(
         &self,
         candidate: &Candidate,
         features: &RequestFeatures,
@@ -579,20 +616,23 @@ impl Router {
             return Some(UnmetRequirement::JsonSchema);
         }
 
-        // Zero means the adapter did not report one. Treating that as unlimited
-        // would send a 200k-token request at a model that silently truncates it.
-        let window = if capability.context_window == 0 {
+        None
+    }
+
+    /// The context window a candidate can be trusted with: what it reported, or
+    /// the configured assumption when it reported none (`context_window == 0`).
+    fn effective_window(&self, candidate: &Candidate) -> u32 {
+        if candidate.capability.context_window == 0 {
             self.config.assumed_context_window
         } else {
-            capability.context_window
-        };
-        let needed = features
-            .estimated_input_tokens
-            .saturating_add(features.requested_max_output_tokens.unwrap_or(0));
-        if needed > window {
-            return Some(UnmetRequirement::ContextWindow { needed });
+            candidate.capability.context_window
         }
+    }
 
-        None
+    /// Whether a candidate's window covers the estimated *input*. Output tokens
+    /// are excluded on purpose: clients routinely over-declare `max_tokens`, and
+    /// counting that against the window rejected requests that comfortably fit.
+    fn fits_context(&self, candidate: &Candidate, features: &RequestFeatures) -> bool {
+        features.estimated_input_tokens <= self.effective_window(candidate)
     }
 }

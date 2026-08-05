@@ -563,6 +563,76 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
             }
         }
     }
+
+    // 清理悬空引用:provider/model 删除或迁移后,agent_routes 的独立路由与 profiles
+    // 策略组里可能残留指向已不存在供应商/模型的档位(门禁补齐前产生的旧残留)。把它们
+    // 归零成「未选择」,以免 UI 一直回显早已删掉的老选项(用户反馈的"老旧选项残留")。
+    // 仅在 upstreams 为合法对象时执行,避免损坏配置时把一切误判为悬空。
+    if draft["upstreams"].is_object() {
+        let valid: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = draft
+            ["upstreams"]
+            .as_object()
+            .map(|upstreams| {
+                upstreams
+                    .iter()
+                    .map(|(name, upstream)| {
+                        let models = upstream["models"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|model| model["model"].as_str().map(str::to_owned))
+                            .collect();
+                        (name.clone(), models)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        fn prune_dangling_tier(
+            tier: &mut Value,
+            valid: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+        ) {
+            let Some(upstream) = tier["upstream"].as_str().map(str::to_owned) else {
+                return;
+            };
+            match valid.get(&upstream) {
+                // 供应商已删:整档归零成「未选择」。
+                None => {
+                    tier["upstream"] = Value::Null;
+                    tier["model"] = Value::Null;
+                }
+                // 供应商在,但选的模型已下架:只清模型,保留供应商待用户重选。
+                Some(models) => {
+                    if tier["model"]
+                        .as_str()
+                        .is_some_and(|model| !models.contains(model))
+                    {
+                        tier["model"] = Value::Null;
+                    }
+                }
+            }
+        }
+
+        if let Some(agent_routes) = draft["agent_routes"].as_object_mut() {
+            for route in agent_routes.values_mut() {
+                for slot in ["high", "mid", "low"] {
+                    if route["custom_route"][slot].is_object() {
+                        prune_dangling_tier(&mut route["custom_route"][slot], &valid);
+                    }
+                }
+            }
+        }
+        if let Some(profiles) = draft["profiles"].as_object_mut() {
+            for profile in profiles.values_mut() {
+                for slot in ["high", "mid", "low"] {
+                    if profile[slot].is_object() {
+                        prune_dangling_tier(&mut profile[slot], &valid);
+                    }
+                }
+            }
+        }
+    }
+
     draft
 }
 
@@ -2229,6 +2299,56 @@ async fn add_free_provider(
     Ok(inner.snapshot())
 }
 
+/// 从模型名里显式的尺寸标记推断上下文窗口:很多供应商把窗口直接写进 id
+/// (`moonshot-v1-128k`、`glm-5.2[1m]`、`qwen-turbo-1m`)。取所有 `<数字>k|m`
+/// 标记里最大的一个,并限定在合理区间(8k–10M),避免把版本号(`glm-4.6`)误判。
+fn context_window_from_marker(name: &str) -> Option<u64> {
+    let bytes = name.as_bytes();
+    let mut best: Option<u64> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i < bytes.len() && (bytes[i] == b'k' || bytes[i] == b'm') {
+            if let Ok(n) = name[start..i].parse::<u64>() {
+                let unit = if bytes[i] == b'm' { 1_000_000 } else { 1_000 };
+                let window = n.saturating_mul(unit);
+                if (8_000..=10_000_000).contains(&window) {
+                    best = Some(best.map_or(window, |current| current.max(window)));
+                }
+            }
+            i += 1;
+        }
+    }
+    best
+}
+
+/// A best-effort real context window for a freshly added model, so it is not
+/// stuck at a blanket default that under-reports big-context models (the user's
+/// `glm-5.2[1m]` is 1M, not 128k). An explicit size marker in the id wins;
+/// otherwise a small family table; otherwise 128k. Only a starting value — the
+/// operator can override it per model, and routing forwards over-context
+/// requests rather than refusing them, so an imperfect guess never hard-fails.
+fn known_context_window(model: &str) -> u64 {
+    let name = model.to_ascii_lowercase();
+    if let Some(window) = context_window_from_marker(&name) {
+        return window;
+    }
+    if name.contains("gemini") {
+        return 1_000_000;
+    }
+    if name.contains("claude") {
+        return 200_000;
+    }
+    128_000
+}
+
 /// 新增一个供应商(= 一个 openai-compatible 上游)。有 key 就存进系统钥匙串。
 #[tauri::command]
 fn add_provider(
@@ -2318,7 +2438,7 @@ fn add_provider_impl(
                 "tool_state": "declared",
                 "vision_state": "unknown",
                 "json_schema_state": "declared",
-                "context_window": 128000
+                "context_window": known_context_window(m)
             })
         })
         .collect();
@@ -3022,6 +3142,32 @@ fn replace_provider_models(
         ));
     }
 
+    // Strategy groups (profiles) pin a provider+model per tier; a model still used
+    // by one must not be silently removed, or the profile is left dangling.
+    let mut profile_blocked = Vec::new();
+    if let Some(profiles) = inner.draft["profiles"].as_object() {
+        for (profile_name, tiers) in profiles {
+            for slot in ["high", "mid", "low"] {
+                let target = &tiers[slot];
+                let refers_to_provider = target["upstream"].as_str() == Some(name);
+                let retained = target["model"]
+                    .as_str()
+                    .is_some_and(|model| normalized.iter().any(|candidate| candidate == model));
+                if refers_to_provider && !retained {
+                    profile_blocked.push(format!("{profile_name}/{slot}"));
+                }
+            }
+        }
+    }
+    profile_blocked.sort();
+    profile_blocked.dedup();
+    if !profile_blocked.is_empty() {
+        return Err(format!(
+            "不能移除策略组 {} 正在使用的模型，请先调整对应档位",
+            profile_blocked.join("、")
+        ));
+    }
+
     let existing: std::collections::BTreeMap<String, Value> = upstream["models"]
         .as_array()
         .into_iter()
@@ -3045,7 +3191,7 @@ fn replace_provider_models(
                     "tool_state": "declared",
                     "vision_state": "unknown",
                     "json_schema_state": "declared",
-                    "context_window": 128000
+                    "context_window": known_context_window(&model)
                 })
             })
         })
@@ -3162,6 +3308,18 @@ fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {
         for (slot, target) in tiers {
             if target.upstream.as_deref() == Some(name) {
                 references.push(format!("Agent/{agent_id}/{slot}"));
+            }
+        }
+    }
+    // Saved strategy groups (profiles) reference providers by name too; without
+    // this scan a provider used only by a profile would pass the removal gate and
+    // leave that profile pointing at a deleted upstream (the "老旧选项残留" bug).
+    if let Some(profiles) = inner.draft["profiles"].as_object() {
+        for (profile_name, tiers) in profiles {
+            for slot in ["high", "mid", "low"] {
+                if tiers[slot]["upstream"].as_str() == Some(name) {
+                    references.push(format!("策略组/{profile_name}/{slot}"));
+                }
             }
         }
     }
@@ -4768,6 +4926,68 @@ mod tests {
                 "缺 {adapter}:{agents:?}"
             );
         }
+    }
+
+    #[test]
+    fn prepare_desktop_draft_prunes_dangling_agent_route_and_profile_references() {
+        // upstreams 只剩 `live`(带模型 keep)。agent_routes 与 profiles 里残留着指向
+        // 已删供应商 `gone` 的档位,以及 `live` 上一个已下架模型 `dropped` 的档位。
+        let draft = json!({
+            "plugins": {"agents": desktop_agents()},
+            "upstreams": { "live": { "models": [{ "model": "keep" }] } },
+            "agent_routes": {
+                "opencode": {
+                    "mode": "custom",
+                    "custom_route": {
+                        "high": { "upstream": "gone", "model": "whatever" },
+                        "mid": { "upstream": "live", "model": "dropped" },
+                        "low": { "upstream": "live", "model": "keep" }
+                    }
+                }
+            },
+            "profiles": {
+                "团队默认": {
+                    "high": { "upstream": "gone", "model": "x" },
+                    "mid": { "upstream": "live", "model": "keep" },
+                    "low": { "upstream": "live", "model": "dropped" }
+                }
+            }
+        });
+
+        let out = prepare_desktop_draft(draft, std::path::Path::new("/tmp"));
+
+        let route = &out["agent_routes"]["opencode"]["custom_route"];
+        // 供应商已删 → 整档归零。
+        assert!(route["high"]["upstream"].is_null());
+        assert!(route["high"]["model"].is_null());
+        // 供应商在、模型已下架 → 只清模型,保留供应商。
+        assert_eq!(route["mid"]["upstream"], json!("live"));
+        assert!(route["mid"]["model"].is_null());
+        // 仍有效 → 原样保留。
+        assert_eq!(route["low"]["upstream"], json!("live"));
+        assert_eq!(route["low"]["model"], json!("keep"));
+
+        let profile = &out["profiles"]["团队默认"];
+        assert!(profile["high"]["upstream"].is_null());
+        assert_eq!(profile["mid"]["model"], json!("keep"));
+        assert_eq!(profile["low"]["upstream"], json!("live"));
+        assert!(profile["low"]["model"].is_null());
+    }
+
+    #[test]
+    fn known_context_window_reads_size_markers_then_family_defaults() {
+        // 模型名里的显式尺寸标记优先(供应商自己标的)。
+        assert_eq!(known_context_window("glm-5.2[1m]"), 1_000_000);
+        assert_eq!(known_context_window("moonshot-v1-128k"), 128_000);
+        assert_eq!(known_context_window("qwen-turbo-1m"), 1_000_000);
+        assert_eq!(known_context_window("gpt-4-32k"), 32_000);
+        // 无标记 → 家族默认。
+        assert_eq!(known_context_window("gemini-2.5-pro"), 1_000_000);
+        assert_eq!(known_context_window("claude-opus-4-8"), 200_000);
+        // 未知家族 / 版本号数字不误判 → 128k 兜底。
+        assert_eq!(known_context_window("deepseek-v4-pro"), 128_000);
+        assert_eq!(known_context_window("glm-4.6"), 128_000);
+        assert_eq!(known_context_window("some-obscure-model"), 128_000);
     }
 
     #[test]

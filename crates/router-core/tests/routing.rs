@@ -408,9 +408,10 @@ fn an_all_ejected_pool_degrades_to_last_resort_and_an_incapable_one_hard_fails()
 }
 
 #[test]
-fn an_unreported_context_window_is_assumed_small_rather_than_unlimited() {
+fn an_over_context_request_is_forwarded_rather_than_refused() {
     let mut candidates = candidates();
-    // A self-hosted upstream whose adapter could not enumerate its models.
+    // A self-hosted upstream whose adapter could not enumerate its models: its
+    // window is unknown (0), so it is assumed small (8192) — never unlimited.
     candidates[0].capability.context_window = 0;
 
     let long = "x".repeat(40_000); // ~10k estimated tokens, over the 8192 assumption
@@ -419,17 +420,60 @@ fn an_unreported_context_window_is_assumed_small_rather_than_unlimited() {
     config.rules.clear();
     let router = Router::new(config).expect("valid");
 
-    let refused = router
+    // Context length is a soft preference, not a gate. With nothing in the pool
+    // large enough, the request is forwarded to the last-resort candidate rather
+    // than refused: the upstream's real context error — or the client's own
+    // `/compact` — resolves the overflow, whereas a 400 dead-ends the session.
+    let decision = router
         .route(&ask(&long), &[], &candidates)
-        .expect_err("an unknown window must not be treated as unlimited");
+        .expect("an over-context request is forwarded, not refused");
 
-    assert!(matches!(
-        refused,
-        NoRoute::Unsatisfiable {
-            reason: UnmetRequirement::ContextWindow { .. },
-            ..
-        }
-    ));
+    assert_eq!(decision.pool, "cheap");
+    assert_eq!(decision.chosen, target("ollama_local", "llama3.3"));
+}
+
+#[test]
+fn context_window_prefers_a_fitting_candidate_and_falls_back_to_the_largest() {
+    // One pool, three windows: small (8k), medium (64k), large (256k).
+    let mut pools = BTreeMap::new();
+    pools.insert(
+        "cheap".to_owned(),
+        vec![
+            target("small", "m"),
+            target("medium", "m"),
+            target("large", "m"),
+        ],
+    );
+    let config = RouterConfig {
+        pools,
+        heuristic: None,
+        rules: Vec::new(),
+        hint_routes: Vec::new(),
+        ..config()
+    };
+    let router = Router::new(config).expect("valid");
+    let candidates = vec![
+        Candidate::new(target("small", "m"), capable(8_192), Health::Healthy),
+        Candidate::new(target("medium", "m"), capable(64_000), Health::Healthy),
+        Candidate::new(target("large", "m"), capable(256_000), Health::Healthy),
+    ];
+
+    // ~10k tokens fit medium and large, not small. The too-small candidate must
+    // not be chosen, and operator order keeps the first fitting one (medium).
+    let fits = router
+        .route(&ask(&"x".repeat(40_000)), &[], &candidates)
+        .expect("routable");
+    assert_eq!(fits.chosen, target("medium", "m"));
+    assert!(
+        !fits.fallbacks.contains(&target("small", "m")),
+        "a candidate too small to fit is not a fitting fallback"
+    );
+
+    // ~275k tokens exceed every window: forward to the LARGEST one, not refuse.
+    let over = router
+        .route(&ask(&"x".repeat(1_100_000)), &[], &candidates)
+        .expect("an over-context request is forwarded, not refused");
+    assert_eq!(over.chosen, target("large", "m"));
 }
 
 #[test]
@@ -719,7 +763,12 @@ fn quota_router_with_accounts(accounts: Vec<UpstreamModel>) -> Router {
 const FIVE_H_MS: u64 = 5 * 60 * 60 * 1000;
 
 fn quota_candidate(upstream: &str, quota: QuotaState) -> Candidate {
-    Candidate::new(target(upstream, "shared-model"), capable(200_000), Health::Healthy).quota(quota)
+    Candidate::new(
+        target(upstream, "shared-model"),
+        capable(200_000),
+        Health::Healthy,
+    )
+    .quota(quota)
 }
 
 #[test]
@@ -736,7 +785,10 @@ fn quota_first_serves_the_soonest_resetting_account_first() {
     assert_eq!(decision.decided_by, DecidedBy::Quota);
     assert_eq!(decision.pool, "quota");
     // The rest is the failover order: the slower-resetting account follows.
-    assert_eq!(decision.fallbacks, vec![target("plan_slow", "shared-model")]);
+    assert_eq!(
+        decision.fallbacks,
+        vec![target("plan_slow", "shared-model")]
+    );
 }
 
 #[test]
@@ -839,7 +891,10 @@ fn quota_first_skips_a_spent_allowance() {
         .route_quota_first(&ask("hi"), &accounts, None)
         .expect("routable");
     assert_eq!(decision.chosen, target("plan_left", "shared-model"));
-    assert!(decision.fallbacks.is_empty(), "the spent account is dropped, not a fallback");
+    assert!(
+        decision.fallbacks.is_empty(),
+        "the spent account is dropped, not a fallback"
+    );
 }
 
 #[test]
@@ -861,10 +916,18 @@ fn quota_first_prefers_a_windowed_account_over_pay_as_you_go() {
 #[test]
 fn quota_first_reports_unavailable_when_every_account_is_ejected() {
     let accounts = vec![
-        Candidate::new(target("a", "shared-model"), capable(200_000), Health::Unavailable)
-            .quota(QuotaState::open(FIVE_H_MS)),
-        Candidate::new(target("b", "shared-model"), capable(200_000), Health::Unavailable)
-            .quota(QuotaState::open(FIVE_H_MS)),
+        Candidate::new(
+            target("a", "shared-model"),
+            capable(200_000),
+            Health::Unavailable,
+        )
+        .quota(QuotaState::open(FIVE_H_MS)),
+        Candidate::new(
+            target("b", "shared-model"),
+            capable(200_000),
+            Health::Unavailable,
+        )
+        .quota(QuotaState::open(FIVE_H_MS)),
     ];
     let error = quota_router()
         .route_quota_first(&ask("hi"), &accounts, None)
