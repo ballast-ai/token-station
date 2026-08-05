@@ -22,7 +22,7 @@ IDE / agent ──▶ 127.0.0.1:8787 ──▶ rules → hints → heuristic →
 
 Desktop app and CLI: **[Releases](https://github.com/ballast-ai/token-station/releases/latest)**.
 
-- **macOS (Apple Silicon)** — `token-station_1.1.1_aarch64.dmg`. This build is **not yet Apple-signed**, so on first launch macOS Gatekeeper blocks it. To open: right-click the app → **Open** → **Open**, or run once: `xattr -dr com.apple.quarantine /Applications/token-station.app`. Intel and signed builds are coming in a later patch.
+- **macOS (Apple Silicon)** — `token-station_1.1.2_aarch64.dmg`. This build is **not yet Apple-signed**, so on first launch macOS Gatekeeper blocks it. To open: right-click the app → **Open** → **Open**, or run once: `xattr -dr com.apple.quarantine /Applications/token-station.app`. Intel and signed builds are coming in a later patch.
 - **Windows (x64)** — the per-user `.msi` installer. It installs into your user profile and needs **no administrator rights**; downgrades are blocked, so uninstall first if you need an older build.
 - **Linux** — desktop packages (`.deb` / `.AppImage` / `.rpm`) are coming shortly.
 - **CLI (all platforms)** — the `token-station-cli-*.tar.gz` archives are the standalone gateway with the official plugins embedded; `scripts/verify-release.sh` proves they were built from this source.
