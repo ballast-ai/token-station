@@ -53,8 +53,15 @@ fn model_value(input: &ConnectInput<'_>) -> Result<Value, String> {
     }))
 }
 
-fn arrays(document: &ConfigDocument) -> Result<(Vec<Value>, Vec<Value>), String> {
+fn arrays(document: &ConfigDocument) -> Result<(Vec<Value>, Vec<Value>, bool), String> {
     let root = semantic_json(document)?;
+    if let Value::Array(items) = root {
+        let available = items
+            .iter()
+            .filter_map(|item| item.get("id").and_then(Value::as_str).map(|id| json!(id)))
+            .collect();
+        return Ok((items, available, true));
+    }
     let models = match root.get("models") {
         None => Vec::new(),
         Some(Value::Array(items)) => items.clone(),
@@ -65,10 +72,17 @@ fn arrays(document: &ConfigDocument) -> Result<(Vec<Value>, Vec<Value>), String>
         Some(Value::Array(items)) => items.clone(),
         Some(_) => return Err("WorkBuddy models.json 的 availableModels 必须是数组".to_string()),
     };
-    Ok((models, available))
+    Ok((models, available, false))
 }
 
-fn replace_arrays(models: Vec<Value>, available: Vec<Value>) -> Vec<PatchOperation> {
+fn replace_arrays(models: Vec<Value>, available: Vec<Value>, native_array: bool) -> Vec<PatchOperation> {
+    if native_array {
+        return vec![PatchOperation {
+            operation: PatchKind::Replace,
+            path: path(MODELS_PATH),
+            value: Some(Value::Array(models)),
+        }];
+    }
     vec![
         PatchOperation {
             operation: PatchKind::Replace,
@@ -118,7 +132,7 @@ impl Connector for WorkBuddyConnector {
     }
 
     fn validate_source(&self, document: &ConfigDocument) -> Result<(), String> {
-        let (models, _) = arrays(document)?;
+        let (models, _, _) = arrays(document)?;
         if models
             .iter()
             .any(|model| model.get("id").and_then(Value::as_str) == Some(MODEL_ID))
@@ -134,6 +148,7 @@ impl Connector for WorkBuddyConnector {
         Ok(replace_arrays(
             vec![model_value(input)?],
             vec![json!(MODEL_ID)],
+            false,
         ))
     }
 
@@ -143,12 +158,12 @@ impl Connector for WorkBuddyConnector {
         input: &ConnectInput<'_>,
     ) -> Result<Vec<PatchOperation>, String> {
         self.validate_source(document)?;
-        let (mut models, mut available) = arrays(document)?;
+        let (mut models, mut available, native_array) = arrays(document)?;
         models.push(model_value(input)?);
         if !available.iter().any(|item| item.as_str() == Some(MODEL_ID)) {
             available.push(json!(MODEL_ID));
         }
-        Ok(replace_arrays(models, available))
+        Ok(replace_arrays(models, available, native_array))
     }
 
     fn disconnect_patch(&self) -> Vec<PatchOperation> {
@@ -166,7 +181,7 @@ impl Connector for WorkBuddyConnector {
         &self,
         document: &ConfigDocument,
     ) -> Result<Vec<PatchOperation>, String> {
-        let (models, available) = arrays(document)?;
+        let (models, available, native_array) = arrays(document)?;
         let models = models
             .into_iter()
             .filter(|model| model.get("id").and_then(Value::as_str) != Some(MODEL_ID))
@@ -175,7 +190,7 @@ impl Connector for WorkBuddyConnector {
             .into_iter()
             .filter(|item| item.as_str() != Some(MODEL_ID))
             .collect();
-        Ok(replace_arrays(models, available))
+        Ok(replace_arrays(models, available, native_array))
     }
 
     fn validate_projected(
@@ -183,7 +198,7 @@ impl Connector for WorkBuddyConnector {
         document: &ConfigDocument,
         input: &ConnectInput<'_>,
     ) -> Result<(), String> {
-        let (models, available) = arrays(document)?;
+        let (models, available, _) = arrays(document)?;
         let expected = model_value(input)?;
         let valid = models.iter().any(|model| model == &expected)
             && available.iter().any(|item| item.as_str() == Some(MODEL_ID));
