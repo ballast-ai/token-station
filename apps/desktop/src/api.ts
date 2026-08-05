@@ -987,7 +987,11 @@ export const applyAgentPlan = (
 export const planAgentDisconnect = (agentId: AgentId, installationPath: string) =>
   invoke<ConfigPlanView>("plan_agent_disconnect", { agentId, installationPath });
 
-/** 强制断开兜底:快照因密钥丢失不可解密、正常恢复被拒时,直接删受管字段 + 清归属。 */
+/**
+ * 恢复官方配置并断开:按归属记录剥掉 TS 注入的受管字段,让 Agent 回到官方默认配置,
+ * 再清归属。不依赖加密快照/主密钥,确定性、始终可成功——这是「恢复官方配置并断开」
+ * 主按钮走的路径(取代了旧的快照精确还原 + 独立「强制断开」兜底)。
+ */
 export const forceForgetAgent = (agentId: AgentId, installationPath: string) =>
   invoke<void>("force_forget_agent", { agentId, installationPath });
 

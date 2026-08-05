@@ -3,19 +3,19 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AgentRoutePage from "./AgentRoutePage";
 import {
+  forceForgetAgent,
   getAgentDrift,
   planAgentConnection,
-  planAgentDisconnect,
   type AgentInstallationView,
   type AgentView,
 } from "../api";
 
 vi.mock("../api", () => ({
   applyAgentPlan: vi.fn(),
+  forceForgetAgent: vi.fn(),
   getAgentDrift: vi.fn(),
   mountAgentProfile: vi.fn(),
   planAgentConnection: vi.fn(),
-  planAgentDisconnect: vi.fn(),
   saveAgentRoutes: vi.fn(),
   setAgentRouteMode: vi.fn(),
   setAgentTier: vi.fn(),
@@ -63,7 +63,7 @@ describe("AgentRoutePage multi-install admission", () => {
   beforeEach(() => {
     vi.mocked(getAgentDrift).mockReset().mockResolvedValue([]);
     vi.mocked(planAgentConnection).mockReset().mockReturnValue(new Promise(() => undefined));
-    vi.mocked(planAgentDisconnect).mockReset().mockReturnValue(new Promise(() => undefined));
+    vi.mocked(forceForgetAgent).mockReset().mockReturnValue(new Promise(() => undefined));
   });
 
   it("lets the user connect the exact Claude Code installation they selected", async () => {
@@ -198,9 +198,9 @@ describe("AgentRoutePage multi-install admission", () => {
     );
 
     expect(screen.getByText("需修复")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "恢复 Agent 原始配置" }));
+    await user.click(screen.getByRole("button", { name: "恢复官方配置并断开" }));
 
-    await waitFor(() => expect(planAgentDisconnect).toHaveBeenCalledWith(
+    await waitFor(() => expect(forceForgetAgent).toHaveBeenCalledWith(
       "opencode",
       "/opt/homebrew/bin/opencode",
     ));
