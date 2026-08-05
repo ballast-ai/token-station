@@ -40,11 +40,21 @@ export default function TierRouteEditor({
       {tierMeta.map(({ slot, label, hint }) => {
         const tier = tiers[slot];
         const provider = providers.find((candidate) => candidate.name === tier.upstream);
+        // A stored selection whose provider/model no longer exists in the shared
+        // pool is shown as invalid — not silently re-listed as if valid — so the
+        // user notices and reselects, avoiding the stale-option residue they reported. The valid
+        // choices stay in the dropdown, so reselecting is one click away.
+        const staleSuffix = copy(" (unavailable — reselect)", "（已失效·请重选）");
+        const providerMissing = Boolean(tier.upstream) && !provider;
         const selectedProviderOption: CompactComboboxOption[] = tier.upstream
           ? [{
               value: tier.upstream,
-              label: tier.upstream,
-              hint: provider?.access_tier === "free" ? copy("Free", "免费") : undefined,
+              label: providerMissing ? `${tier.upstream}${staleSuffix}` : tier.upstream,
+              hint: providerMissing
+                ? copy("Deleted", "已删除")
+                : provider?.access_tier === "free"
+                  ? copy("Free", "免费")
+                  : undefined,
             }]
           : [];
         const providerOptions: CompactComboboxOption[] = [
@@ -58,9 +68,20 @@ export default function TierRouteEditor({
               hint: candidate.access_tier === "free" ? copy("Free", "免费") : undefined,
             })),
         ];
+        const providerModels = provider?.models ?? [];
+        const modelMissing =
+          Boolean(tier.model) && !providerModels.includes(tier.model as string);
+        const selectedModelOption: CompactComboboxOption[] = modelMissing
+          ? [{
+              value: tier.model as string,
+              label: `${tier.model}${staleSuffix}`,
+              hint: copy("Removed", "已下架"),
+            }]
+          : [];
         const modelOptions: CompactComboboxOption[] = [
+          ...selectedModelOption,
           { value: "", label: copy("Not selected", "未选择") },
-          ...(provider?.models ?? []).map((model) => ({ value: model, label: model })),
+          ...providerModels.map((model) => ({ value: model, label: model })),
         ];
 
         return (

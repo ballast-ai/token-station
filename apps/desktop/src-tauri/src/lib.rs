@@ -563,6 +563,76 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
             }
         }
     }
+
+    // Remove dangling references. After provider or model deletion or migration, clean independent agent_routes and profiles
+    // Policy groups can contain stale tiers that point to missing providers or models from before the gate. Remove them
+    // Reset to no selection so the UI does not show a deleted stale option.
+    // Run only when upstreams is a valid object. This prevents damaged config from marking all references as dangling.
+    if draft["upstreams"].is_object() {
+        let valid: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = draft
+            ["upstreams"]
+            .as_object()
+            .map(|upstreams| {
+                upstreams
+                    .iter()
+                    .map(|(name, upstream)| {
+                        let models = upstream["models"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|model| model["model"].as_str().map(str::to_owned))
+                            .collect();
+                        (name.clone(), models)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        fn prune_dangling_tier(
+            tier: &mut Value,
+            valid: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+        ) {
+            let Some(upstream) = tier["upstream"].as_str().map(str::to_owned) else {
+                return;
+            };
+            match valid.get(&upstream) {
+                // The provider was removed; reset the entire tier to unselected.
+                None => {
+                    tier["upstream"] = Value::Null;
+                    tier["model"] = Value::Null;
+                }
+                // The provider remains but the model was removed; keep the provider for reselection.
+                Some(models) => {
+                    if tier["model"]
+                        .as_str()
+                        .is_some_and(|model| !models.contains(model))
+                    {
+                        tier["model"] = Value::Null;
+                    }
+                }
+            }
+        }
+
+        if let Some(agent_routes) = draft["agent_routes"].as_object_mut() {
+            for route in agent_routes.values_mut() {
+                for slot in ["high", "mid", "low"] {
+                    if route["custom_route"][slot].is_object() {
+                        prune_dangling_tier(&mut route["custom_route"][slot], &valid);
+                    }
+                }
+            }
+        }
+        if let Some(profiles) = draft["profiles"].as_object_mut() {
+            for profile in profiles.values_mut() {
+                for slot in ["high", "mid", "low"] {
+                    if profile[slot].is_object() {
+                        prune_dangling_tier(&mut profile[slot], &valid);
+                    }
+                }
+            }
+        }
+    }
+
     draft
 }
 
@@ -2229,6 +2299,56 @@ async fn add_free_provider(
     Ok(inner.snapshot())
 }
 
+/// Infer context windows from explicit size markers in model IDs such as
+/// `moonshot-v1-128k`, `glm-5.2[1m]`, and `qwen-turbo-1m`. Use the largest
+/// numeric k or m marker within 8k to 10M, avoiding version numbers like `glm-4.6`.
+fn context_window_from_marker(name: &str) -> Option<u64> {
+    let bytes = name.as_bytes();
+    let mut best: Option<u64> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i < bytes.len() && (bytes[i] == b'k' || bytes[i] == b'm') {
+            if let Ok(n) = name[start..i].parse::<u64>() {
+                let unit = if bytes[i] == b'm' { 1_000_000 } else { 1_000 };
+                let window = n.saturating_mul(unit);
+                if (8_000..=10_000_000).contains(&window) {
+                    best = Some(best.map_or(window, |current| current.max(window)));
+                }
+            }
+            i += 1;
+        }
+    }
+    best
+}
+
+/// A best-effort real context window for a freshly added model, so it is not
+/// stuck at a blanket default that under-reports big-context models (the user's
+/// `glm-5.2[1m]` is 1M, not 128k). An explicit size marker in the id wins;
+/// otherwise a small family table; otherwise 128k. Only a starting value — the
+/// operator can override it per model, and routing forwards over-context
+/// requests rather than refusing them, so an imperfect guess never hard-fails.
+fn known_context_window(model: &str) -> u64 {
+    let name = model.to_ascii_lowercase();
+    if let Some(window) = context_window_from_marker(&name) {
+        return window;
+    }
+    if name.contains("gemini") {
+        return 1_000_000;
+    }
+    if name.contains("claude") {
+        return 200_000;
+    }
+    128_000
+}
+
 /// Add an OpenAI-compatible upstream provider, storing its key in the system keychain when present.
 #[tauri::command]
 fn add_provider(
@@ -2318,7 +2438,7 @@ fn add_provider_impl(
                 "tool_state": "declared",
                 "vision_state": "unknown",
                 "json_schema_state": "declared",
-                "context_window": 128000
+                "context_window": known_context_window(m)
             })
         })
         .collect();
@@ -3022,6 +3142,32 @@ fn replace_provider_models(
         ));
     }
 
+    // Strategy groups (profiles) pin a provider+model per tier; a model still used
+    // by one must not be silently removed, or the profile is left dangling.
+    let mut profile_blocked = Vec::new();
+    if let Some(profiles) = inner.draft["profiles"].as_object() {
+        for (profile_name, tiers) in profiles {
+            for slot in ["high", "mid", "low"] {
+                let target = &tiers[slot];
+                let refers_to_provider = target["upstream"].as_str() == Some(name);
+                let retained = target["model"]
+                    .as_str()
+                    .is_some_and(|model| normalized.iter().any(|candidate| candidate == model));
+                if refers_to_provider && !retained {
+                    profile_blocked.push(format!("{profile_name}/{slot}"));
+                }
+            }
+        }
+    }
+    profile_blocked.sort();
+    profile_blocked.dedup();
+    if !profile_blocked.is_empty() {
+        return Err(format!(
+            "不能移除策略组 {} 正在使用的模型，请先调整对应档位",
+            profile_blocked.join("、")
+        ));
+    }
+
     let existing: std::collections::BTreeMap<String, Value> = upstream["models"]
         .as_array()
         .into_iter()
@@ -3045,7 +3191,7 @@ fn replace_provider_models(
                     "tool_state": "declared",
                     "vision_state": "unknown",
                     "json_schema_state": "declared",
-                    "context_window": 128000
+                    "context_window": known_context_window(&model)
                 })
             })
         })
@@ -3162,6 +3308,18 @@ fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {
         for (slot, target) in tiers {
             if target.upstream.as_deref() == Some(name) {
                 references.push(format!("Agent/{agent_id}/{slot}"));
+            }
+        }
+    }
+    // Saved strategy groups (profiles) reference providers by name too; without
+    // this scan a provider used only by a profile would pass the removal gate and
+    // leave that profile pointing at a deleted upstream, causing stale-option residue.
+    if let Some(profiles) = inner.draft["profiles"].as_object() {
+        for (profile_name, tiers) in profiles {
+            for slot in ["high", "mid", "low"] {
+                if tiers[slot]["upstream"].as_str() == Some(name) {
+                    references.push(format!("策略组/{profile_name}/{slot}"));
+                }
             }
         }
     }
@@ -4768,6 +4926,68 @@ mod tests {
                 "缺 {adapter}:{agents:?}"
             );
         }
+    }
+
+    #[test]
+    fn prepare_desktop_draft_prunes_dangling_agent_route_and_profile_references() {
+        // Only upstream `live` with model `keep` remains. agent_routes and profiles
+        // still reference removed provider `gone` and removed model `dropped`.
+        let draft = json!({
+            "plugins": {"agents": desktop_agents()},
+            "upstreams": { "live": { "models": [{ "model": "keep" }] } },
+            "agent_routes": {
+                "opencode": {
+                    "mode": "custom",
+                    "custom_route": {
+                        "high": { "upstream": "gone", "model": "whatever" },
+                        "mid": { "upstream": "live", "model": "dropped" },
+                        "low": { "upstream": "live", "model": "keep" }
+                    }
+                }
+            },
+            "profiles": {
+                "团队默认": {
+                    "high": { "upstream": "gone", "model": "x" },
+                    "mid": { "upstream": "live", "model": "keep" },
+                    "low": { "upstream": "live", "model": "dropped" }
+                }
+            }
+        });
+
+        let out = prepare_desktop_draft(draft, std::path::Path::new("/tmp"));
+
+        let route = &out["agent_routes"]["opencode"]["custom_route"];
+        // A removed provider clears the entire tier.
+        assert!(route["high"]["upstream"].is_null());
+        assert!(route["high"]["model"].is_null());
+        // A removed model clears only the model and keeps the provider.
+        assert_eq!(route["mid"]["upstream"], json!("live"));
+        assert!(route["mid"]["model"].is_null());
+        // Preserve targets that remain valid.
+        assert_eq!(route["low"]["upstream"], json!("live"));
+        assert_eq!(route["low"]["model"], json!("keep"));
+
+        let profile = &out["profiles"]["团队默认"];
+        assert!(profile["high"]["upstream"].is_null());
+        assert_eq!(profile["mid"]["model"], json!("keep"));
+        assert_eq!(profile["low"]["upstream"], json!("live"));
+        assert!(profile["low"]["model"].is_null());
+    }
+
+    #[test]
+    fn known_context_window_reads_size_markers_then_family_defaults() {
+        // Prefer explicit size markers supplied in model names.
+        assert_eq!(known_context_window("glm-5.2[1m]"), 1_000_000);
+        assert_eq!(known_context_window("moonshot-v1-128k"), 128_000);
+        assert_eq!(known_context_window("qwen-turbo-1m"), 1_000_000);
+        assert_eq!(known_context_window("gpt-4-32k"), 32_000);
+        // Fall back to the family default when no marker exists.
+        assert_eq!(known_context_window("gemini-2.5-pro"), 1_000_000);
+        assert_eq!(known_context_window("claude-opus-4-8"), 200_000);
+        // Unknown families and version numbers use the 128k fallback without false inference.
+        assert_eq!(known_context_window("deepseek-v4-pro"), 128_000);
+        assert_eq!(known_context_window("glm-4.6"), 128_000);
+        assert_eq!(known_context_window("some-obscure-model"), 128_000);
     }
 
     #[test]

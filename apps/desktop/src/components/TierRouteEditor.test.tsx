@@ -131,6 +131,25 @@ describe("TierRouteEditor", () => {
     expect(onTierChange).toHaveBeenNthCalledWith(2, "mid", "openai", null);
   });
 
+  it("flags a deleted provider or removed model as unavailable instead of showing it as valid", () => {
+    const staleTiers: Record<TierSlot, TierView> = {
+      high: { upstream: "gone-provider", model: "gone-model" }, // provider deleted from pool
+      mid: { upstream: "deepseek", model: "removed-model" }, // provider ok, model removed
+      low: { upstream: null, model: null },
+    };
+    render(
+      <TierRouteEditor tiers={staleTiers} providers={providers} onTierChange={vi.fn()} />,
+    );
+
+    // The stale selection is still shown (so the user sees what was set) but flagged.
+    const staleProvider = screen.getByLabelText("上档供应商");
+    expect(staleProvider).toHaveTextContent("gone-provider");
+    expect(staleProvider).toHaveTextContent("已失效");
+    expect(screen.getByLabelText("中档模型")).toHaveTextContent("已失效");
+    // A valid selection is untouched — no false "unavailable" flag.
+    expect(screen.getByLabelText("中档供应商")).not.toHaveTextContent("已失效");
+  });
+
   it.each([
     { disabled: true, readOnly: false },
     { disabled: false, readOnly: true },
