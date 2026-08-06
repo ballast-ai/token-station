@@ -1,10 +1,25 @@
-import { useState } from "react";
-import { UpgradeView, checkUpgrade } from "../api";
+import { useEffect, useRef, useState } from "react";
+import {
+  checkDesktopUpdate,
+  installDesktopUpdateAndRestart,
+  listenDesktopUpdateProgress,
+} from "../api";
+import type { DesktopUpdateProgress, DesktopUpdateView } from "../api";
 import { LanguageBoundary, useLanguage } from "../components/LanguageProvider";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../components/ui/alert-dialog";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 
-/// About/Updates page. Perform only an anonymous version check, the core’s only permitted outbound connection, and do not replace the binary.
+/// About and updates page. It only performs the anonymous version check allowed by the core and never replaces binaries.
 function AboutContent({
   desktopVersion,
   coreVersion,
@@ -13,21 +28,58 @@ function AboutContent({
   coreVersion: string;
 }) {
   const { t } = useLanguage();
-  const [uv, setUv] = useState<UpgradeView | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [update, setUpdate] = useState<DesktopUpdateView | null>(null);
+  const [busy, setBusy] = useState<"" | "checking" | "installing" | "restarting">("");
   const [err, setErr] = useState("");
   const [copied, setCopied] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [progress, setProgress] = useState<DesktopUpdateProgress | null>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenDesktopUpdateProgress((next) => {
+      if (!disposed) setProgress(next);
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   const check = async () => {
-    setBusy(true);
+    setBusy("checking");
     setErr("");
-    setUv(null);
+    setUpdate(null);
     try {
-      setUv(await checkUpgrade());
+      setUpdate(await checkDesktopUpdate());
     } catch (e) {
       setErr(String(e));
     } finally {
-      setBusy(false);
+      setBusy("");
+    }
+  };
+
+  const install = async () => {
+    setConfirmOpen(false);
+    setBusy("installing");
+    setErr("");
+    setProgress(null);
+    try {
+      const started = await installDesktopUpdateAndRestart();
+      if (started) {
+        setBusy("restarting");
+      } else {
+        setUpdate(await checkDesktopUpdate());
+        setBusy("");
+      }
+    } catch (e) {
+      setErr(String(e));
+      setBusy("");
     }
   };
 
@@ -54,19 +106,25 @@ function AboutContent({
 
       {err && <div className="banner err">{err}</div>}
 
-      {uv && (
-        <div className={`banner ${uv.status === "unavailable" ? "err" : uv.newer ? "warn" : "ok"}`}>
-          {uv.status === "no_published_release" || uv.status === "unavailable" ? (
-            <>{uv.message}</>
-          ) : uv.newer ? (
-            <>{t("about.newVersion", { latest: uv.latest_tag, current: uv.current })}</>
+      {update && (
+        <div
+          className={`banner ${update.status === "unavailable" ? "err" : update.status === "update_available" ? "warn" : "ok"}`}
+          aria-live="polite"
+        >
+          {update.status === "update_available" ? (
+            <>
+              <b>{t("about.updateFound", { version: update.version ?? "" })}</b>
+              {update.notes && <span>{update.notes}</span>}
+            </>
+          ) : update.status === "up_to_date" ? (
+            <>{t("about.latest", { current: update.current_version, latest: update.current_version })}</>
           ) : (
-            <>{t("about.latest", { current: uv.current, latest: uv.latest_tag })}</>
+            <>{update.message}</>
           )}
-          {uv.html_url && (
+          {update.release_url && (
             <span className="inline-url">
-              <span className="mono">{uv.html_url}</span>
-              <Button variant="outline" size="sm" onClick={() => copy(uv.html_url)}>
+              <span className="mono">{update.release_url}</span>
+              <Button variant="outline" size="sm" onClick={() => copy(update.release_url)}>
                 {copied ? t("about.copied") : t("about.copyLink")}
               </Button>
             </span>
@@ -74,11 +132,64 @@ function AboutContent({
         </div>
       )}
 
+      {busy === "installing" && progress && (
+        <div className="banner" aria-live="polite">
+          {progress.total && progress.total > 0 ? (
+            <>
+              <span>{t("about.downloaded", {
+                percent: Math.min(100, Math.floor((progress.downloaded / progress.total) * 100)),
+              })}</span>
+              <progress
+                max={100}
+                value={Math.min(100, Math.floor((progress.downloaded / progress.total) * 100))}
+                aria-label={t("about.downloadProgress")}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.min(100, Math.floor((progress.downloaded / progress.total) * 100))}
+              />
+            </>
+          ) : (
+            <span>{t("about.downloadedBytes", { downloaded: progress.downloaded })}</span>
+          )}
+        </div>
+      )}
+
       <div className="panel-foot">
-        <Button disabled={busy} onClick={check}>
-          {busy ? t("about.checking") : t("about.check")}
+        <Button
+          disabled={Boolean(busy)}
+          onClick={update?.status === "update_available" ? () => setConfirmOpen(true) : check}
+        >
+          {busy === "checking"
+            ? t("about.checking")
+            : busy === "installing"
+              ? t("about.installing")
+              : busy === "restarting"
+                ? t("about.restarting")
+                : update?.status === "update_available"
+                  ? t("about.installVersion", { version: update.version ?? "" })
+                  : t("about.check")}
         </Button>
       </div>
+
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            cancelRef.current?.focus();
+          }}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("about.confirmTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>{t("about.confirmDescription")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel ref={cancelRef}>{t("about.cancel")}</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void install()}>
+              {t("about.confirmInstall")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       </CardContent>
     </Card>
   );
