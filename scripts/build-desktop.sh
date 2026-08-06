@@ -52,6 +52,20 @@ readonly plugins=(
   agent-gemini
   provider-openai-compatible
 )
+
+if [[ "$mode" == "production" ]]; then
+  : "${TOKEN_STATION_UPDATER_PUBKEY:?production desktop build needs TOKEN_STATION_UPDATER_PUBKEY}"
+  updater_pubkey_upper="$(LC_ALL=C tr '[:lower:]' '[:upper:]' <<<"$TOKEN_STATION_UPDATER_PUBKEY")"
+  if [[ "$updater_pubkey_upper" == *"SECRET KEY"* || "$updater_pubkey_upper" == *"PRIVATE KEY"* ]]; then
+    echo "TOKEN_STATION_UPDATER_PUBKEY appears to contain private key material" >&2
+    exit 1
+  fi
+  if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -z "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
+    echo "production desktop build needs a temporary TAURI_SIGNING_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY_PATH to create updater payloads" >&2
+    exit 1
+  fi
+fi
+
 stage="$(mktemp -d "${TMPDIR:-/tmp}/token-station-desktop.XXXXXX")"
 readonly stage
 trap 'rm -rf "$stage"' EXIT
@@ -91,6 +105,11 @@ cargo test --locked \
   desktop_bundled_plugins_load_without_an_external_plugin_directory
 
 tauri_args=(build --ci --features bundled-plugins)
+if [[ "$mode" == "production" ]]; then
+  updater_artifact_config="$stage/updater-artifacts.json"
+  printf '%s\n' '{"bundle":{"createUpdaterArtifacts":true}}' >"$updater_artifact_config"
+  tauri_args+=(--config "$updater_artifact_config")
+fi
 if [[ -n "$test_version" ]]; then
   test_version_config="$stage/test-version.json"
   printf '%s\n' "{\"version\":\"$test_version\"}" >"$test_version_config"

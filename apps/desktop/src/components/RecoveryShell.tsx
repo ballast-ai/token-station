@@ -1,17 +1,28 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  checkUpgrade,
+  checkDesktopUpdate,
   exportRecoveryBundle,
   getRecoveryDiagnostics,
   getRecoveryState,
   openRecoveryFolder,
   recordFrontendDiagnostic,
+  installDesktopUpdateAndRestart,
   type DiagnosticPreview,
+  type DesktopUpdateView,
   type RecoveryState,
-  type UpgradeView,
 } from "../api";
 import { diagnosticInput } from "../diagnostics";
 import { useLocalizedCopy } from "./LanguageProvider";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "./ui/alert-dialog";
 
 interface RecoveryShellProps {
   initialState?: RecoveryState;
@@ -30,7 +41,9 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [upgrade, setUpgrade] = useState<UpgradeView | null>(null);
+  const [upgrade, setUpgrade] = useState<DesktopUpdateView | null>(null);
+  const [confirmUpdate, setConfirmUpdate] = useState(false);
+  const cancelUpdateRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -90,10 +103,26 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
     setBusy("upgrade");
     setError("");
     try {
-      setUpgrade(await checkUpgrade());
+      setUpgrade(await checkDesktopUpdate());
     } catch (caught) {
       setError(failureText(caught));
     } finally {
+      setBusy("");
+    }
+  };
+
+  const installUpdate = async () => {
+    setConfirmUpdate(false);
+    setBusy("install-update");
+    setError("");
+    try {
+      const started = await installDesktopUpdateAndRestart();
+      if (!started) {
+        setUpgrade(await checkDesktopUpdate());
+        setBusy("");
+      }
+    } catch (caught) {
+      setError(failureText(caught));
       setBusy("");
     }
   };
@@ -138,19 +167,29 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
         {error && <div className="banner err">{error}</div>}
         {message && <div className="banner ok mono">{message}</div>}
         {upgrade && (
-          <div className={`banner ${upgrade.status === "unavailable" ? "err" : upgrade.newer ? "warn" : "ok"}`}>
-            {upgrade.status === "no_published_release" || upgrade.status === "unavailable"
-              ? upgrade.message
-              : upgrade.newer
-              ? copy(`Version ${upgrade.latest_tag} is available`, `发现新版本 ${upgrade.latest_tag}`)
-              : copy(`Version ${upgrade.current} is up to date`, `当前已是最新版本 ${upgrade.current}`)}
-            {upgrade.html_url && <span className="mono"> · {upgrade.html_url}</span>}
+          <div className={`banner ${upgrade.status === "unavailable" ? "err" : upgrade.status === "update_available" ? "warn" : "ok"}`}>
+            {upgrade.status === "update_available"
+              ? copy(`Version ${upgrade.version} is available`, `发现新版本 ${upgrade.version}`)
+              : upgrade.status === "up_to_date"
+                ? copy(`Version ${upgrade.current_version} is up to date`, `当前已是最新版本 ${upgrade.current_version}`)
+                : upgrade.message}
+            {upgrade.release_url && <span className="mono"> · {upgrade.release_url}</span>}
           </div>
         )}
 
         <div className="recovery-actions">
-          <button className="btn" disabled={Boolean(busy)} onClick={() => void check()}>
-            {busy === "upgrade" ? copy("Checking…", "检查中…") : copy("Check for updates", "检查更新")}
+          <button
+            className="btn"
+            disabled={Boolean(busy)}
+            onClick={upgrade?.status === "update_available" ? () => setConfirmUpdate(true) : () => void check()}
+          >
+            {busy === "upgrade"
+              ? copy("Checking…", "检查中…")
+              : busy === "install-update"
+                ? copy("Verifying and installing…", "正在验证并安装…")
+                : upgrade?.status === "update_available"
+                  ? copy(`Download and update to ${upgrade.version}`, `下载并更新到 ${upgrade.version}`)
+                  : copy("Check for updates", "检查更新")}
           </button>
           <button
             className="btn"
@@ -169,6 +208,29 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
             {copy("Run checks again", "重新检测")}
           </button>
         </div>
+
+        <AlertDialog open={confirmUpdate} onOpenChange={setConfirmUpdate}>
+          <AlertDialogContent
+            onOpenAutoFocus={(event) => {
+              event.preventDefault();
+              cancelUpdateRef.current?.focus();
+            }}
+          >
+            <AlertDialogHeader>
+              <AlertDialogTitle>{copy("Install app update?", "安装应用更新？")}</AlertDialogTitle>
+              <AlertDialogDescription>{copy(
+                "The signed update will be downloaded and verified first. The local gateway stops only for final installation, then the app restarts.",
+                "将先下载并验证签名更新；仅在最终安装时安全停止本地网关，随后 App 自动重启。",
+              )}</AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel ref={cancelUpdateRef}>{copy("Cancel", "取消")}</AlertDialogCancel>
+              <AlertDialogAction onClick={() => void installUpdate()}>
+                {copy("Confirm update and restart", "确认更新并重启")}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
 
         <div className="recovery-export">
           <h2>{copy("Read-only export", "只读导出")}</h2>

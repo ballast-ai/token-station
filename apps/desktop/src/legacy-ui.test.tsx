@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProviderView, SettingsView, StateView } from "./api";
 import {
-  checkUpgrade,
+  checkDesktopUpdate,
   discoverProviderModels,
   getEgress,
   getState,
@@ -33,7 +33,9 @@ vi.mock("./api", async (loadOriginal) => {
   const original = await loadOriginal<typeof import("./api")>();
   return {
     ...original,
-    checkUpgrade: vi.fn(),
+    checkDesktopUpdate: vi.fn(),
+    installDesktopUpdateAndRestart: vi.fn(),
+    listenDesktopUpdateProgress: vi.fn().mockResolvedValue(() => undefined),
     discoverProviderModels: vi.fn(),
     getState: vi.fn(),
     getPlugins: vi.fn(),
@@ -92,7 +94,7 @@ const state: StateView = {
 };
 
 beforeEach(() => {
-  vi.mocked(checkUpgrade).mockReset();
+  vi.mocked(checkDesktopUpdate).mockReset();
   vi.mocked(discoverProviderModels).mockReset();
   vi.mocked(getEgress).mockReset();
   vi.mocked(getEgress).mockResolvedValue({
@@ -379,22 +381,24 @@ describe("settings and update actions", () => {
   });
 
   it("reports newer and current releases and copies a release URL", async () => {
-    vi.mocked(checkUpgrade)
-      .mockResolvedValueOnce({ current: "0.1.0", latest_tag: "v0.2.0", html_url: "https://example.invalid/release", newer: true })
-      .mockResolvedValueOnce({ current: "0.2.0", latest_tag: "v0.2.0", html_url: "", newer: false });
+    vi.mocked(checkDesktopUpdate)
+      .mockResolvedValueOnce({ status: "update_available", current_version: "0.1.0", version: "0.2.0", notes: null, pub_date: null, release_url: "https://example.invalid/release", message: null })
+      .mockResolvedValueOnce({ status: "up_to_date", current_version: "0.2.0", version: null, notes: null, pub_date: null, release_url: "", message: null });
     const user = userEvent.setup();
     const writeText = vi.spyOn(navigator.clipboard, "writeText");
-    render(<About desktopVersion="0.1.0" coreVersion="0.2.0" />);
+    const first = render(<About desktopVersion="0.1.0" coreVersion="0.2.0" />);
     await user.click(screen.getByRole("button", { name: "检查更新" }));
-    expect(await screen.findByText(/有新版本/)).toBeInTheDocument();
+    expect(await screen.findByText(/发现新版本/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "复制链接" }));
     expect(writeText).toHaveBeenCalledWith("https://example.invalid/release");
+    first.unmount();
+    render(<About desktopVersion="0.2.0" coreVersion="0.2.0" />);
     await user.click(screen.getByRole("button", { name: "检查更新" }));
     expect(await screen.findByText(/已是最新/)).toBeInTheDocument();
   });
 
   it("shows update check failures", async () => {
-    vi.mocked(checkUpgrade).mockRejectedValue(new Error("upgrade down"));
+    vi.mocked(checkDesktopUpdate).mockRejectedValue(new Error("upgrade down"));
     const user = userEvent.setup();
     render(<About desktopVersion="0.1.0" coreVersion="0.2.0" />);
     await user.click(screen.getByRole("button", { name: "检查更新" }));
@@ -402,12 +406,13 @@ describe("settings and update actions", () => {
   });
 
   it("shows an unpublished release as a normal result instead of a GitHub 404", async () => {
-    vi.mocked(checkUpgrade).mockResolvedValue({
-      status: "no_published_release",
-      current: "0.1.0",
-      latest_tag: "",
-      html_url: "",
-      newer: false,
+    vi.mocked(checkDesktopUpdate).mockResolvedValue({
+      status: "unavailable",
+      current_version: "0.1.0",
+      version: null,
+      notes: null,
+      pub_date: null,
+      release_url: "",
       message: "暂无公开发布版本",
     });
     const user = userEvent.setup();
@@ -420,7 +425,7 @@ describe("settings and update actions", () => {
 });
 
 describe("model selection and provider model management", () => {
-  it("keeps model positions stable when selection changes", async () => {
+  it("moves a newly selected model to the recent tail", async () => {
     const user = userEvent.setup();
     const onToggle = vi.fn();
     const { rerender } = render(
@@ -457,8 +462,8 @@ describe("model selection and provider model management", () => {
     );
     expect(getModelOrder()).toEqual([
       "+deepseek-r1",
-      "✓gemma4:latest",
       "+qwen3:4b-fast",
+      "✓gemma4:latest",
     ]);
   });
 
