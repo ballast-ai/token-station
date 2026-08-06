@@ -130,6 +130,8 @@
       background: #f5faf7;
     }
     .runtime-pill .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px rgba(27, 138, 90, .12); }
+    .runtime-pill.idle { border-color: var(--line); background: var(--surface-2); }
+    .runtime-pill.idle .pulse { background: #9aa4b5; box-shadow: 0 0 0 4px rgba(115, 128, 150, .1); }
     .runtime-pill strong { display: block; font-size: 11px; }
     .runtime-pill small, .mono { font-family: "IBM Plex Mono", monospace; }
     .runtime-pill small { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; }
@@ -147,6 +149,7 @@
     .metric strong { display: block; margin: 15px 0 5px; font-size: 22px; letter-spacing: -0.03em; }
     .metric p { margin: 0; color: #8a95a8; font-size: 10px; }
     .status-badge { display: inline-flex; align-items: center; gap: 7px; color: var(--success); font-size: 16px; }
+    .status-badge.idle { color: #7d8798; }
     .status-badge i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
     .main-grid { display: grid; grid-template-columns: 1.14fr .86fr; gap: 14px; }
     .panel { min-height: 206px; padding: 17px; }
@@ -248,9 +251,9 @@
       pointer-events: none;
       transition: all .36s cubic-bezier(.2,.8,.2,1);
     }
-    .spotlight.step-0 { top: 57px; right: max(162px, calc((100vw - 1124px) / 2 + 132px)); width: 180px; height: 48px; }
-    .spotlight.step-1 { top: 57px; right: max(56px, calc((100vw - 1124px) / 2 + 28px)); width: 112px; height: 48px; }
-    .spotlight.step-2 { top: 309px; right: max(56px, calc((100vw - 1124px) / 2 + 34px)); width: 38%; max-width: 405px; height: 208px; }
+    .spotlight.step-0 { top: 57px; right: max(56px, calc((100vw - 1124px) / 2 + 28px)); width: 112px; height: 48px; }
+    .spotlight.step-1 { top: 57px; left: max(265px, calc((100vw - 1124px) / 2 + 237px)); width: 60px; height: 48px; }
+    .spotlight.step-2 { top: 448px; right: max(56px, calc((100vw - 1124px) / 2 + 34px)); width: 38%; max-width: 456px; height: 56px; }
     .tour-card {
       position: fixed;
       z-index: 35;
@@ -262,12 +265,13 @@
       box-shadow: var(--shadow-dialog);
       animation: dialog-in .24s ease-out;
     }
-    .tour-card.step-0 { top: 122px; right: max(162px, calc((100vw - 1124px) / 2 + 132px)); }
-    .tour-card.step-1 { top: 122px; right: max(56px, calc((100vw - 1124px) / 2 + 28px)); }
-    .tour-card.step-2 { top: 182px; left: max(56px, calc((100vw - 1124px) / 2 + 34px)); }
+    .tour-card.step-0 { top: 122px; right: max(56px, calc((100vw - 1124px) / 2 + 28px)); }
+    .tour-card.step-1 { top: 122px; left: max(228px, calc((100vw - 1124px) / 2 + 190px)); }
+    .tour-card.step-2 { top: 282px; left: max(228px, calc((100vw - 1124px) / 2 + 190px)); }
     .tour-card::before { content: ""; position: absolute; width: 11px; height: 11px; transform: rotate(45deg); background: white; }
-    .tour-card.step-0::before, .tour-card.step-1::before { right: 38px; top: -6px; border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
-    .tour-card.step-2::before { right: -6px; top: 62px; border-right: 1px solid var(--line); border-top: 1px solid var(--line); }
+    .tour-card.step-0::before { right: 38px; top: -6px; border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
+    .tour-card.step-1::before { left: 62px; top: -6px; border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
+    .tour-card.step-2::before { right: -6px; top: 172px; border-right: 1px solid var(--line); border-top: 1px solid var(--line); }
     .tour-head { display: flex; justify-content: space-between; gap: 20px; }
     .tour-head span { color: var(--signal); font: 500 10px/1.3 "IBM Plex Mono", monospace; }
     .tour-card h2 { margin: 14px 0 8px; font-size: 19px; }
@@ -422,22 +426,22 @@
           </span>
           <span>Token Station</span>
         </div>
-        <nav class="nav"><span class="active">概览</span><span>路由</span><span>Agent</span><span>供应商</span><span>用量</span><span>设置</span></nav>
+        <nav class="nav"><span class="active">概览</span><span id="mock-route-nav">路由</span><span>Agent</span><span>供应商</span><span>用量</span><span>设置</span></nav>
         <div class="header-actions">
-          <div class="runtime-pill"><i class="pulse"></i><span><strong>代理运行中</strong><small>127.0.0.1:8787</small></span></div>
+          <div id="mock-runtime-pill" class="runtime-pill idle"><i class="pulse"></i><span><strong id="mock-runtime">代理未启动</strong><small id="mock-endpoint">等待路由配置</small></span></div>
           <button class="header-btn" type="button">＋ 添加供应商</button>
         </div>
       </header>
       <main class="dashboard">
         <header class="dashboard-heading"><div><span class="eyebrow">RUNTIME STATUS</span><h1>概览</h1><p>代理运行状态、当前路由、请求与成本，一屏看清。</p></div></header>
         <section class="metrics">
-          <article class="card metric"><span>代理状态</span><strong class="status-badge"><i></i>运行中</strong><p class="mono">revision 12 · 127.0.0.1:8787</p></article>
-          <article class="card metric"><span>今日成本</span><strong>$1.84</strong><p>成功率 99.4% · P95 1.2s</p></article>
-          <article class="card metric"><span>已接管 Agent</span><strong>3 / 5</strong><p>2 个已检测待接入</p></article>
-          <article class="card metric"><span>供应商</span><strong>4</strong><p>2 个额度账户已配置</p></article>
+          <article class="card metric"><span>代理状态</span><strong id="mock-status" class="status-badge idle"><i></i>未运行</strong><p id="mock-revision" class="mono">尚无已应用路由</p></article>
+          <article class="card metric"><span>今日成本</span><strong>$0.00</strong><p>尚无请求 · 等待完成首次配置</p></article>
+          <article class="card metric"><span>已接管 Agent</span><strong id="mock-agent-count">0 / 5</strong><p id="mock-agent-copy">2 个已检测待接入</p></article>
+          <article class="card metric"><span>供应商</span><strong id="mock-provider-count">0</strong><p id="mock-provider-copy">先添加一个供应商</p></article>
         </section>
         <section class="main-grid">
-          <article class="card panel"><h2>当前路由快照</h2><div class="route-row"><span>上档</span><strong>claude-opus-4.1</strong><code>anthropic</code></div><div class="route-row"><span>中档</span><strong>gpt-5.2</strong><code>openai</code></div><div class="route-row"><span>下档</span><strong>deepseek-chat</strong><code>deepseek</code></div></article>
+          <article class="card panel"><h2>当前路由快照</h2><div class="route-row"><span>上档</span><strong data-mock-route>尚未配置</strong><code data-mock-provider>—</code></div><div class="route-row"><span>中档</span><strong data-mock-route>尚未配置</strong><code data-mock-provider>—</code></div><div class="route-row"><span>下档</span><strong data-mock-route>尚未配置</strong><code data-mock-provider>—</code></div></article>
           <article class="card panel"><h2>下一步</h2><div class="action-row"><span class="action-icon">↗</span><div><strong>检查 Agent 接入</strong><small>2 个 Agent 尚未接管</small></div></div><div class="action-row"><span class="action-icon">⌁</span><div><strong>调整全局路由</strong><small>为不同任务选择模型</small></div></div><div class="action-row"><span class="action-icon">◎</span><div><strong>查看本地用量</strong><small>请求、Token 与成本</small></div></div></article>
         </section>
       </main>
@@ -463,24 +467,24 @@
 
     const steps = [
       {
-        title: "先启动本地代理",
-        short: "启动代理",
-        hint: "让 Agent 的请求先经过 Token Station。",
-        description: "确认右上角显示“代理运行中”。Token Station 会在本机监听并转发请求；提示词会按所选路由发送给模型供应商，App 本身不额外存储请求正文。",
-        detail: "如果代理未运行，点击右上角“启动代理”；出现绿色状态后再继续。",
-        endpoint: "127.0.0.1:8787",
-        state: "运行中",
-        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v9m-4-6a8 8 0 1 0 8 0"/></svg>',
-      },
-      {
-        title: "添加一个模型供应商",
+        title: "先添加一个模型供应商",
         short: "添加供应商",
         hint: "连接 OpenAI、Anthropic 或本地模型。",
         description: "选择模型供应商并填写凭据。密钥只保存在本机；保存前可以先运行连接测试，避免把无效配置带入路由。",
         detail: "从右上角“添加供应商”进入目录，测试通过后再保存。",
-        endpoint: "4 个供应商可用",
+        endpoint: "OpenAI · Anthropic · 本地模型",
         state: "已连接",
         icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 9h8M8 13h5"/></svg>',
+      },
+      {
+        title: "配置并启动路由",
+        short: "启动路由",
+        hint: "选择模型，然后保存并应用路由。",
+        description: "进入“路由”，为上、中、下三档选择模型，然后点击“保存并应用”。右上角显示“代理运行中”后，这条路由才真正可用。",
+        detail: "至少配置一个可用模型；保存与应用成功后再接入 Agent，避免请求无处可去。",
+        endpoint: "上档 → 中档 → 下档",
+        state: "保存并应用",
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 6h6a3 3 0 0 1 3 3v9M5 18h6a3 3 0 0 0 3-3V9m0 0h5m-2-2 2 2-2 2"/></svg>',
       },
       {
         title: "接入你的第一个 Agent",
@@ -570,6 +574,27 @@
       stateReadout.textContent = completed ? "引导已完成 · 未持久化" : open ? `步骤 ${step + 1}/3 · 引导打开` : "引导已关闭 · 可重新打开";
       reopen.hidden = open;
       experience.innerHTML = open ? (variant === "a" ? renderA() : variant === "b" ? renderB() : renderC()) : "";
+      syncMockState();
+    }
+
+    function syncMockState() {
+      const routeReady = step >= 2 || completed;
+      const providerReady = step >= 1 || completed;
+      const runtimePill = document.querySelector("#mock-runtime-pill");
+      const status = document.querySelector("#mock-status");
+      runtimePill.classList.toggle("idle", !routeReady);
+      status.classList.toggle("idle", !routeReady);
+      document.querySelector("#mock-runtime").textContent = routeReady ? "代理运行中" : "代理未启动";
+      document.querySelector("#mock-endpoint").textContent = routeReady ? "127.0.0.1:8787" : providerReady ? "等待保存并应用" : "等待路由配置";
+      status.lastChild.textContent = routeReady ? "运行中" : "未运行";
+      document.querySelector("#mock-revision").textContent = routeReady ? "revision 1 · 127.0.0.1:8787" : "尚无已应用路由";
+      document.querySelector("#mock-provider-count").textContent = providerReady ? "1" : "0";
+      document.querySelector("#mock-provider-copy").textContent = providerReady ? "1 个供应商已连接" : "先添加一个供应商";
+      document.querySelector("#mock-agent-count").textContent = completed ? "1 / 5" : "0 / 5";
+      document.querySelector("#mock-agent-copy").textContent = completed ? "已接入第一个 Agent" : "2 个已检测待接入";
+      const models = ["claude-opus-4.1", "claude-sonnet-4", "claude-haiku-3.5"];
+      document.querySelectorAll("[data-mock-route]").forEach((node, index) => { node.textContent = routeReady ? models[index] : "尚未配置"; });
+      document.querySelectorAll("[data-mock-provider]").forEach((node) => { node.textContent = routeReady ? "anthropic" : "—"; });
     }
 
     function setVariant(direction) {
