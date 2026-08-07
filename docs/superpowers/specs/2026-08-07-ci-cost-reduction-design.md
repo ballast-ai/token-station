@@ -186,3 +186,48 @@ job 的路径判定只看 `apps/desktop/` 与三个安装器脚本，`crates/pri
 5. 记录 Windows 任务在热缓存下的新耗时基线，供阶段二决策使用。
 6. 改动了 `apps/desktop/` 的 PR 上，`windows-msi` 确实被触发。
 7. 纯文档 PR 不触发任何 job。
+
+## 7. 阶段二 · 第一项：`agent-platform-targeted` 的冗余
+
+阶段一落地后的第一项后续。这一项**不依赖热缓存耗时数据**——它是覆盖冗余问题，
+不是性能问题，因此先于候选二（`windows-rust` 是否需要在 `develop` 上跑全量）处理。
+
+### 7.1 调查结论
+
+`agent-platform-targeted` 是 macOS + Windows 矩阵，跑四个指定测试。经核查，
+**四个测试全部与宿主平台无关**：
+
+| 测试 | 平台无关的依据 |
+|---|---|
+| `discovery_platform_templates_expand_without_touching_the_filesystem` | 平台以 `Platform::Macos/Linux/Windows/Wsl` 枚举作参数传入，fixture 驱动的字符串展开 |
+| `discovery_windows_path_enumerates_native_files_and_reports_shell_shims` | 同样构造 `Platform::Windows`，且主动 `replace('\\', "/")` 抹平分隔符差异 |
+| `snapshot_validation_rejects_malformed_index_envelope_and_hex` | hex / envelope 校验，纯逻辑 |
+| `transaction_snapshot_and_pre_replace_failures_leave_target_untouched` | 用 `FailBeforeReplaceWriter` 注入 `AtomicWriteStage::Permission` **模拟**失败时序，不触碰 `#[cfg(windows)]` 的真实 `apply_windows_owner_dacl` |
+
+四者均为裸 `#[test]`，无 `cfg` 守卫。作为对照，本仓确实会给平台相关测试加守卫——
+`#[cfg(unix)]` 守卫的测试有 22 个。
+
+决定性证据：这四个测试在 1× 倍率的 Linux `desktop-rust` job 中**已经全部跑过并通过**
+（运行 31163807366 的日志逐条可查）。以 10×／2× 的价格重跑一遍不产生任何额外覆盖。
+
+### 7.2 一个附带发现：它选错了测试
+
+全仓**唯一**带 `#[cfg(windows)]` 守卫、即真正只能在 Windows 上编译运行的测试是
+`ownership.rs` 的 `ownership_store_hardens_a_legacy_regular_index_before_reading`。
+它**不在** `agent-platform-targeted` 的指定清单里。也就是说这个 job 精心挑选了四个
+不需要特定平台的测试，却漏掉了唯一真正需要 Windows 的那个——后者由 `windows-rust`
+的全量 `cargo test` 覆盖。
+
+### 7.3 决定
+
+Windows 一侧整条移除：`windows-rust` 在 `develop` 上跑全量 `cargo test`，
+已覆盖上述四个测试与那个 `#[cfg(windows)]` 专属测试。
+
+macOS 一侧保留但降级为 `cargo check --all-targets`（新 job `macos-compile-check`）。
+保留的理由不是测试覆盖，而是**编译覆盖**：`#[cfg(target_os = "macos")]` 的代码
+（如 `verified_workbuddy_bundle`，要调 `/usr/bin/codesign`）需要一个 macOS 宿主
+才能被类型检查。这部分代码目前没有任何测试覆盖，删掉整个 job 会让它连编译检查
+都失去，直到发版打 tag 才暴露。`--all-targets` 让测试代码一并参与编译。
+
+**明确不做的：** 不为 `#[cfg(target_os = "macos")]` 补测试——那是产品测试范围，
+不属于 CI 成本治理。
