@@ -262,48 +262,38 @@ jobs:
           apps/desktop/src-tauri/target/desktop-agent.lcov
           apps/desktop/src-tauri/src/agent_integration 90
 
-  agent-platform-targeted:
-    name: Agent platform checks (${{ matrix.os }})
-    # macOS costs 10 times more, and Windows costs 2 times more. Platform-specific regressions appear later on the integration branch.
+  # This job does one task that Linux cannot do: compile the desktop application on a macOS host,
+  # This type-checks code behind #[cfg(target_os = "macos")], such as verified_workbuddy_bundle,
+  # It calls /usr/bin/codesign) to get type checking.
+  #
+  # It previously used a macOS and Windows matrix to run four specified tests. Review showed that all four tests
+  # The host is platform-independent. The platform is passed as a Platform::Macos/Windows enum argument,
+  # The transaction test uses FailBeforeReplaceWriter to inject AtomicWriteStage::Permission.
+  # to simulate timing without changing a real DACL. All four are plain #[test] tests without cfg guards,
+  # The desktop-rust full cargo test at 1x already covers them. Rerunning at 10x/2x cost
+  # A repeat adds no coverage. A separate windows-rust job runs all cargo tests on Windows.
+  # This includes the repository's only test guarded by #[cfg(windows)].
+  # （ownership_store_hardens_a_legacy_regular_index_before_reading），
+  # That is the operation that requires Windows, but it was absent from the old specified test list.
+  macos-compile-check:
+    name: macOS compile check
     if: github.event_name != 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - if: runner.os == 'Windows'
-        name: Exclude the workspace from Defender real-time scanning
-        shell: pwsh
-        run: |
-          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
-          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: apps/desktop/src-tauri
-      # Run only repository fixtures and in-memory key or key-decoding boundaries. Never install or upgrade an Agent.
+      # `--all-targets` also compiles test code, including macOS-only test code
+      # This check finds damage before a release tag is created.
       - run: >-
-          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-          discovery_platform_templates_expand_without_touching_the_filesystem
-      - run: >-
-          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-          discovery_windows_path_enumerates_native_files_and_reports_shell_shims
-      - run: >-
-          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-          snapshot_validation_rejects_malformed_index_envelope_and_hex
-      # Windows ACL application happens before the atomic rename.  This
-      # regression test injects its Permission failure at that boundary and
-      # proves the pre-existing agent config remains intact.
-      - if: runner.os == 'Windows'
-        run: >-
-          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-          transaction_snapshot_and_pre_replace_failures_leave_target_untouched
+          cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
+          --all-targets
 
   windows-rust:
     name: Windows full Rust and desktop gates
