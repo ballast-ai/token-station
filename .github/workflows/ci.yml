@@ -19,6 +19,30 @@ permissions:
   contents: read
 
 jobs:
+  # 判定本次变更是否触及桌面端或安装器。用 gh CLI 查 PR 变更文件，
+  # 不 checkout、不引入第三方 action——本仓对供应链依赖谨慎。
+  # 非 pull_request 事件一律置 true，由 windows-msi 自身的事件条件决定是否跑。
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      installer: ${{ steps.filter.outputs.installer }}
+    steps:
+      - id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "installer=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --paginate --jq '.[].filename' > changed-files.txt
+          if grep -qE '^(apps/desktop/|scripts/(build-desktop\.sh|test-windows-msi\.ps1|check-windows-release-config\.mjs)$)' changed-files.txt; then
+            echo "installer=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "installer=false" >> "$GITHUB_OUTPUT"
+          fi
+
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -231,6 +255,8 @@ jobs:
 
   agent-platform-targeted:
     name: Agent platform checks (${{ matrix.os }})
+    # macOS 是 10x 倍率，Windows 是 2x。平台特有回归延后到集成分支暴露。
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -266,6 +292,9 @@ jobs:
 
   windows-rust:
     name: Windows full Rust and desktop gates
+    # PR 阶段由 Linux 的 rust job 覆盖同一套 clippy/test；Windows 是 2x 倍率，
+    # 全量重跑一遍不值。合并进 develop 后再跑完整的跨平台门禁。
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -310,7 +339,16 @@ jobs:
 
   windows-msi:
     name: Windows x64 MSI real lifecycle
-    needs: windows-rust
+    needs: [changes, windows-rust]
+    # 安装器生命周期验证：连编两遍 release 桌面应用，约 41 分钟 x 2 倍率。
+    # 进 main 即意味着准备发正式版，是跑它的正确时点；develop 的日常合并不跑。
+    # 改动了桌面/安装器路径的 PR 仍会被拦截。
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.installer == 'true' &&
+      (github.ref == 'refs/heads/main' ||
+       github.event_name == 'workflow_dispatch' ||
+       github.event_name == 'pull_request')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
