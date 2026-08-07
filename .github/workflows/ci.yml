@@ -2,10 +2,18 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE'
   push:
     branches:
       - main
       - develop
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE'
   workflow_dispatch:
 
 # A new push to the same PR makes every result from the older commit obsolete.
@@ -266,6 +274,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - if: runner.os == 'Windows'
+        name: Exclude the workspace from Defender real-time scanning
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -305,6 +317,11 @@ jobs:
           node-version: 22.23.1
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
+      # Defender real-time scanning inspects many small files from Rust incremental compilation.
+      # Excluding the workspace usually makes builds 20–40% faster.
+      - name: Exclude the workspace from Defender real-time scanning
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -359,6 +376,11 @@ jobs:
           node-version: 22.23.1
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
+      # Defender real-time scanning inspects many small files from Rust incremental compilation.
+      # Excluding the workspace usually makes builds 20–40% faster.
+      - name: Exclude the workspace from Defender real-time scanning
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip2,x86_64-pc-windows-msvc
