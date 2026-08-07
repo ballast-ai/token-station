@@ -459,6 +459,32 @@ gh run view "$run" --json jobs \
 `windows-rust`、`agent-platform-targeted`、`windows-msi` 应为 skipped 或不出现。
 **不应有任何 windows-latest / macos-latest 上的计费运行。**
 
+只看 job 是否「出现过」/「completed」不够——`changes` job 可能因权限不足
+（例如缺少 `pull-requests: read`）而对 GitHub API 调用 403，此时该 job
+本身仍会以 `completed` 状态收场，只是 `conclusion` 是 `failure`，此前的
+检查方式发现不了这种情况。必须显式断言其 conclusion 为 `success`：
+
+```bash
+gh run view "$run" --json jobs \
+  --jq '.jobs[] | select(.name == "changes") | .conclusion'
+```
+
+期望：`success`。若不是，先排查 `changes` job 的日志，不要继续后续步骤。
+
+`gh run view --json jobs` 不会暴露 job 的 `outputs`，`installer` 的实际
+取值只能从日志里读。取出 `changes` job 的 databaseId 后查其日志，确认
+`installer` 具体解析成了什么：
+
+```bash
+changes_job_id=$(gh run view "$run" --json jobs \
+  --jq '.jobs[] | select(.name == "changes") | .databaseId')
+gh run view "$run" --log --job "$changes_job_id" | grep -E 'installer=(true|false)'
+```
+
+期望：能看到形如 `installer=true` 或 `installer=false` 的具体输出行，
+且其取值与本次 PR 实际改动的路径相符（未触及 `apps/desktop/` 与安装器
+脚本的 PR 应为 `false`）。
+
 记录墙钟时长，验收标准 3 要求 < 20 分钟：
 
 ```bash

@@ -164,9 +164,16 @@ job），低于 10 GB 上限。但现存的 10.43 GB 旧缓存需**手动清理�
 其二，`develop` 上的完整跨平台运行会在合并后数分钟内给出信号，
 此时回滚或追加修复的成本远低于发版后。
 
-**未缓解的残余风险：** 若某个 PR 引入的 Windows 回归恰好不在 `apps/desktop/`
-路径下（例如 `crates/` 中的路径处理代码在 Windows 上行为不同），
-将在合并后才暴露。评估认为该场景频率低，且 `develop` 的快速信号足以覆盖。
+**未缓解的残余风险：** 分层之后，PR 阶段**不再有任何 job 编译 Windows 目标**——
+`#[cfg(windows)]` 代码块在 PR 上完全得不到类型检查，这不是「某些边缘场景
+覆盖不到」的程度，而是整条 PR 流水线对 Windows 条件编译零覆盖。`changes`
+job 的路径判定只看 `apps/desktop/` 与三个安装器脚本，`crates/private-fs/Cargo.toml`
+中的 `[target.'cfg(windows)'.dependencies]` 块不在其内；一个只改动
+`crates/private-fs/`（或任何其他 crate 里的 Windows 条件编译代码）的 PR 会
+在 Linux 上全绿通过，却可能把一个硬性的 Windows 构建错误直接带进 `develop`，
+要等集成分支的完整跨平台运行才会暴露。此事实已向项目负责人说明，负责人
+在权衡后选择维持当前设计、接受这一缺口，而非额外增加一个 Windows
+`cargo check` 冒烟 job——这是经过确认的取舍，不是遗漏。
 
 ## 6. 验收标准
 
