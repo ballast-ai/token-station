@@ -19,6 +19,30 @@ permissions:
   contents: read
 
 jobs:
+  # Use the gh CLI to determine whether changes affect the desktop app or installer.
+  # Do not check out code or add third-party actions. This repository limits supply-chain dependencies.
+  # Set true for all non-pull_request events. The windows-msi event condition decides whether it runs.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      installer: ${{ steps.filter.outputs.installer }}
+    steps:
+      - id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "installer=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --paginate --jq '.[].filename' > changed-files.txt
+          if grep -qE '^(apps/desktop/|scripts/(build-desktop\.sh|test-windows-msi\.ps1|check-windows-release-config\.mjs)$)' changed-files.txt; then
+            echo "installer=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "installer=false" >> "$GITHUB_OUTPUT"
+          fi
+
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -231,6 +255,8 @@ jobs:
 
   agent-platform-targeted:
     name: Agent platform checks (${{ matrix.os }})
+    # macOS costs 10 times more, and Windows costs 2 times more. Platform-specific regressions appear later on the integration branch.
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -266,6 +292,9 @@ jobs:
 
   windows-rust:
     name: Windows full Rust and desktop gates
+    # On PRs, the Linux rust job runs the same clippy and tests. Windows costs twice as much.
+    # Do not rerun the full suite on the PR. Run the complete cross-platform gate after merge to develop.
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -310,7 +339,16 @@ jobs:
 
   windows-msi:
     name: Windows x64 MSI real lifecycle
-    needs: windows-rust
+    needs: [changes, windows-rust]
+    # Installer lifecycle validation: build the release desktop application twice, about 41 minutes times two.
+    # A merge to main means the code is ready for release, so run it there. Do not run it for routine develop merges.
+    # PRs that change desktop or installer paths are still blocked.
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.installer == 'true' &&
+      (github.ref == 'refs/heads/main' ||
+       github.event_name == 'workflow_dispatch' ||
+       github.event_name == 'pull_request')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
