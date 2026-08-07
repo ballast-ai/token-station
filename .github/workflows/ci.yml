@@ -262,48 +262,38 @@ jobs:
           apps/desktop/src-tauri/target/desktop-agent.lcov
           apps/desktop/src-tauri/src/agent_integration 90
 
-  agent-platform-targeted:
-    name: Agent platform checks (${{ matrix.os }})
-    # macOS 是 10x 倍率，Windows 是 2x。平台特有回归延后到集成分支暴露。
+  # 这个 job 只做一件 Linux 做不到的事：在 macOS 宿主上编译桌面端，
+  # 让 #[cfg(target_os = "macos")] 的代码（如 verified_workbuddy_bundle，
+  # 它要调 /usr/bin/codesign）得到类型检查。
+  #
+  # 它此前是 macOS+Windows 矩阵，跑四个指定测试。那四个测试经核查全部与
+  # 宿主平台无关——平台是以 Platform::Macos/Windows 枚举作参数传入的，
+  # transaction 那个用 FailBeforeReplaceWriter 注入 AtomicWriteStage::Permission
+  # 来模拟时序、并不触碰真实 DACL——且四个都是裸 #[test] 无 cfg 守卫，
+  # 早已由 1x 倍率的 desktop-rust 全量 cargo test 覆盖。以 10x/2x 的价格重跑
+  # 一遍不产生任何额外覆盖。Windows 一侧另有 windows-rust 跑全量 cargo test，
+  # 其中包含全仓唯一带 #[cfg(windows)] 守卫的测试
+  # （ownership_store_hardens_a_legacy_regular_index_before_reading），
+  # 那才是真正只能在 Windows 上跑的东西——它反而不在旧的指定测试清单里。
+  macos-compile-check:
+    name: macOS compile check
     if: github.event_name != 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - if: runner.os == 'Windows'
-        name: Exclude the workspace from Defender real-time scanning
-        shell: pwsh
-        run: |
-          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
-          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: apps/desktop/src-tauri
-      # 仅运行仓库 fixtures 和内存密钥/密钥解码边界；绝不安装或升级 Agent。
+      # --all-targets 让测试代码也参与编译，这样 macOS 专属的测试代码
+      # 一旦写坏也能在这里被发现，而不必等发版打 tag。
       - run: >-
-          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-          discovery_platform_templates_expand_without_touching_the_filesystem
-      - run: >-
-          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-          discovery_windows_path_enumerates_native_files_and_reports_shell_shims
-      - run: >-
-          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-          snapshot_validation_rejects_malformed_index_envelope_and_hex
-      # Windows ACL application happens before the atomic rename.  This
-      # regression test injects its Permission failure at that boundary and
-      # proves the pre-existing agent config remains intact.
-      - if: runner.os == 'Windows'
-        run: >-
-          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-          transaction_snapshot_and_pre_replace_failures_leave_target_untouched
+          cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
+          --all-targets
 
   windows-rust:
     name: Windows full Rust and desktop gates
