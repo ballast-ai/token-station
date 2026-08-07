@@ -44,8 +44,8 @@ jobs:
             echo "installer=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
-            --paginate -f per_page=100 --jq '.[].filename' > changed-files.txt
+          gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files?per_page=100" \
+            --paginate --jq '.[].filename' > changed-files.txt
           if grep -qE '^(apps/desktop/|scripts/(build-desktop\.sh|test-windows-msi\.ps1|check-windows-release-config\.mjs)$)' changed-files.txt; then
             echo "installer=true" >> "$GITHUB_OUTPUT"
           else
