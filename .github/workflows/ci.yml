@@ -2,9 +2,16 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
   push:
     branches:
       - main
+      - develop
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
   workflow_dispatch:
 
 # A new push to the same PR makes every result from the older commit obsolete.
@@ -12,12 +19,39 @@ on:
 # hosted-runner time and cache bandwidth.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
+  # Use the gh CLI to determine whether changes affect the desktop app or installer.
+  # Do not check out code or add third-party actions. This repository limits supply-chain dependencies.
+  # Set true for all non-pull_request events. The windows-msi event condition decides whether it runs.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      installer: ${{ steps.filter.outputs.installer }}
+    steps:
+      - id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "installer=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files?per_page=100" \
+            --paginate --jq '.[].filename' > changed-files.txt
+          if grep -qE '^(apps/desktop/|scripts/(build-desktop\.sh|test-windows-msi\.ps1|check-windows-release-config\.mjs)$)' changed-files.txt; then
+            echo "installer=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "installer=false" >> "$GITHUB_OUTPUT"
+          fi
+
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -35,6 +69,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: |
             .
             plugins/official/agent-anthropic
@@ -93,6 +128,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: |
             apps/desktop/src-tauri
             plugins/official/agent-anthropic
@@ -123,6 +159,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           key: msrv-1.95
       - run: cargo check --workspace --all-targets
 
@@ -162,6 +199,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: |
             .
             plugins/official/agent-anthropic
@@ -201,6 +239,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: |
             apps/desktop/src-tauri
             plugins/official/agent-anthropic
@@ -225,6 +264,8 @@ jobs:
 
   agent-platform-targeted:
     name: Agent platform checks (${{ matrix.os }})
+    # macOS costs 10 times more, and Windows costs 2 times more. Platform-specific regressions appear later on the integration branch.
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -234,10 +275,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - if: runner.os == 'Windows'
+        name: Exclude the workspace from Defender real-time scanning
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: apps/desktop/src-tauri
       # Run only repository fixtures and in-memory key or key-decoding boundaries. Never install or upgrade an Agent.
       - run: >-
@@ -259,11 +307,21 @@ jobs:
 
   windows-rust:
     name: Windows full Rust and desktop gates
+    # On PRs, the Linux rust job runs the same clippy and tests. Windows costs twice as much.
+    # Do not rerun the full suite on the PR. Run the complete cross-platform gate after merge to develop.
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # Defender real-time scanning inspects many small files from Rust incremental compilation.
+      # Excluding the workspace usually makes builds 20–40% faster.
+      - name: Exclude the workspace from Defender real-time scanning
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.1
@@ -276,6 +334,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: |
             .
             apps/desktop/src-tauri
@@ -302,12 +361,28 @@ jobs:
 
   windows-msi:
     name: Windows x64 MSI real lifecycle
-    needs: windows-rust
+    needs: [changes, windows-rust]
+    # Installer lifecycle validation: build the release desktop application twice, about 41 minutes times two.
+    # A merge to main means the code is ready for release, so run it there. Do not run it for routine develop merges.
+    # PRs that change desktop or installer paths are still blocked.
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.installer == 'true' &&
+      (github.ref == 'refs/heads/main' ||
+       github.event_name == 'workflow_dispatch' ||
+       github.event_name == 'pull_request')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # Defender real-time scanning inspects many small files from Rust incremental compilation.
+      # Excluding the workspace usually makes builds 20–40% faster.
+      - name: Exclude the workspace from Defender real-time scanning
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.1
@@ -319,6 +394,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: |
             apps/desktop/src-tauri
             plugins/official/agent-anthropic
