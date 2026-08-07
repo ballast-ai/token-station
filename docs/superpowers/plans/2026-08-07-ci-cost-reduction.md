@@ -471,19 +471,24 @@ gh run view "$run" --json jobs \
 
 期望：`success`。若不是，先排查 `changes` job 的日志，不要继续后续步骤。
 
-`gh run view --json jobs` 不会暴露 job 的 `outputs`，`installer` 的实际
-取值只能从日志里读。取出 `changes` job 的 databaseId 后查其日志，确认
-`installer` 具体解析成了什么：
+至于 `installer` 解析成了什么——**不要试图从日志里 grep 它**。
+`gh run view --json jobs` 不暴露 job 的 `outputs`，而 Actions 会把 `run:`
+脚本原文回显进日志，于是 `echo "installer=true"` 与 `echo "installer=false"`
+两行字面量在**任何一次**运行的日志里都同时存在，grep 只会两条都命中，
+分辨不出实际取值。
+
+可靠的观测方式是拿 `windows-msi` 的 job 状态当代理——它跑不跑完全由
+`installer` 决定，无需改动 workflow 即可反推：
 
 ```bash
-changes_job_id=$(gh run view "$run" --json jobs \
-  --jq '.jobs[] | select(.name == "changes") | .databaseId')
-gh run view "$run" --log --job "$changes_job_id" | grep -E 'installer=(true|false)'
+gh run view "$run" --json jobs \
+  --jq '.jobs[] | select(.name | test("MSI")) | "\(.name)\t\(.conclusion // .status)"'
 ```
 
-期望：能看到形如 `installer=true` 或 `installer=false` 的具体输出行，
-且其取值与本次 PR 实际改动的路径相符（未触及 `apps/desktop/` 与安装器
-脚本的 PR 应为 `false`）。
+期望：本 PR 未触及 `apps/desktop/` 与三个安装器脚本，`windows-msi` 应为
+`skipped`（等价于 `installer=false`）。Step 3 会用一个触碰桌面路径的提交
+反向验证 `installer=true` 的分支。两步合起来，`installer` 的两种取值
+都得到了真实验证。
 
 记录墙钟时长，验收标准 3 要求 < 20 分钟：
 
