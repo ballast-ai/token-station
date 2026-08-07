@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - develop
   workflow_dispatch:
 
 # A new push to the same PR makes every result from the older commit obsolete.
@@ -12,7 +13,7 @@ on:
 # hosted-runner time and cache bandwidth.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -35,6 +36,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: |
             .
             plugins/official/agent-anthropic
@@ -93,6 +95,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: |
             apps/desktop/src-tauri
             plugins/official/agent-anthropic
@@ -123,6 +126,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           key: msrv-1.95
       - run: cargo check --workspace --all-targets
 
@@ -162,6 +166,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: |
             .
             plugins/official/agent-anthropic
@@ -201,6 +206,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: |
             apps/desktop/src-tauri
             plugins/official/agent-anthropic
@@ -238,6 +244,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: apps/desktop/src-tauri
       # Run only repository fixtures and in-memory key or key-decoding boundaries. Never install or upgrade an Agent.
       - run: >-
@@ -276,6 +283,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: |
             .
             apps/desktop/src-tauri
@@ -319,6 +327,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: |
             apps/desktop/src-tauri
             plugins/official/agent-anthropic
