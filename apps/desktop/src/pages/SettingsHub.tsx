@@ -14,14 +14,7 @@ import {
 } from "../components/LanguageProvider";
 import { useTheme, type Theme } from "../components/ThemeProvider";
 import { Button } from "../components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "../components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Switch } from "../components/ui/switch";
 import About from "./About";
 import Settings from "./Settings";
@@ -258,28 +251,6 @@ function LanguagePanel() {
   );
 }
 
-function OnboardingCard({ onOpen }: { onOpen: () => void }) {
-  const { copy } = useLanguage();
-  return (
-    <Card className="settings-card onboarding-settings-card">
-      <CardHeader>
-        <CardTitle>{copy("Getting started", "新手引导")}</CardTitle>
-        <CardDescription>
-          {copy(
-            "Review the three steps for adding a provider, applying routing, and connecting an Agent.",
-            "重新查看添加供应商、保存应用路由和接入 Agent 的三步说明。",
-          )}
-        </CardDescription>
-      </CardHeader>
-      <CardFooter>
-        <Button variant="outline" type="button" onClick={onOpen}>
-          {copy("Review getting started guide", "重新查看新手引导")}
-        </Button>
-      </CardFooter>
-    </Card>
-  );
-}
-
 interface SettingsHubProps {
   settings: SettingsView;
   serve: ServeView;
@@ -333,7 +304,6 @@ function SettingsHubContent({
           <>
             <VirtualKeyCard serve={serve} />
             <Settings settings={settings} serveRunning={runtimeHealthy} onSaved={onSaved} />
-            <OnboardingCard onOpen={onOpenFirstRunGuide} />
           </>
         )}
         {section === "agent-visibility" && (
@@ -349,6 +319,7 @@ function SettingsHubContent({
           <About
             desktopVersion={settings.desktop_version ?? settings.version}
             coreVersion={settings.core_version ?? settings.version}
+            onOpenFirstRunGuide={onOpenFirstRunGuide}
           />
         )}
       </div>
