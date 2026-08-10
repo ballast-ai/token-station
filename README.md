@@ -23,25 +23,9 @@ AI agents use different configuration files and request protocols. LLM providers
 
 ## How it works
 
-```text
-Claude Code / Codex / Gemini CLI / other agents
-                         │
-                         ▼
-              127.0.0.1:8787 + local auth
-                         │
-                  Agent WASM adapter
-                         │
-                         ▼
-        ┌────────── Local router ──────────┐
-        │ Tiered: High / Mid / Low         │
-        │ Quota-first: reset + headroom    │
-        └──────────────────────────────────┘
-                         │
-                Provider WASM adapter
-                   ┌─────┴─────┐
-                   ▼           ▼
-             Cloud BYOK   Ollama / local
-```
+<p align="center">
+  <img src="docs/assets/token-station-architecture-en.svg" alt="Token Station request-routing architecture" width="720">
+</p>
 
 The gateway only binds to a loopback address. A request sent to a cloud provider still leaves the device and is subject to that provider's data policy. Strict local routing only admits providers verified as loopback endpoints.
 
