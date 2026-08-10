@@ -40,6 +40,11 @@ is shown as skipped. Other checks continue normally. On a published Release or a
 manual run, an MSI lifecycle failure continues to fail CI and retains its
 diagnostic artifacts.
 
+The `release: published` run is explicitly post-publication validation; it does
+not prevent the Release from becoming public. Maintainers who need a
+pre-publication MSI gate must run the same workflow manually and wait for it to
+pass before publishing.
+
 ## Accessibility and interaction
 
 This change has no application UI, keyboard, responsive-layout, or accessibility
@@ -53,16 +58,24 @@ impact. Maintainers use the existing GitHub Actions manual-run control.
 - The existing changed-path output and prerequisite jobs still gate actual MSI
   execution.
 - All non-MSI PR jobs remain unchanged.
+- `scripts/check-ci-msi-trigger-policy.mjs` verifies the committed workflow
+  trigger and job condition for pull-request, published-release, and manual
+  events.
 
 ## Implementation and release requirements
 
-The implementation changes only the `windows-msi` condition in
-`.github/workflows/ci.yml`. No local desktop installation is required because the
+The implementation changes the `windows-msi` condition and adds a
+repository-local policy check that runs in regular CI. No local desktop
+installation is required because the
 change affects hosted CI scheduling rather than application behavior. A future
-Windows release must still pass the full lifecycle through `main` or a manual run.
+Windows release must still pass the full lifecycle through a published Release
+event or a manual pre-publication run.
 
 ## Implementation status
 
-Implemented. The MSI lifecycle no longer runs for ordinary pushes or pull
-requests and remains enabled for published Releases and manually dispatched CI
-runs.
+Complete. `scripts/check-ci-msi-trigger-policy.mjs` rejects the previous
+pull-request/main condition and passes against the committed published-release
+and manual condition. The checker is part of regular CI, and the final local run
+reported `Windows MSI trigger policy: PASS`. Remote execution of the full MSI
+lifecycle remains intentionally limited to a published Release or maintainer
+manual run.

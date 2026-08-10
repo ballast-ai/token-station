@@ -23,7 +23,7 @@ Windows 与 Linux 接收同一个命令时保持无操作，现有窗口主题�
 - 图标只从编译进 App 的静态资源读取，不读取用户文件或网络资源。
 - 命令只接受 `light` 和 `dark`，其他值直接返回错误。
 - 图标切换失败不能阻止主题切换、窗口显示或 App 启动。
-- 不替换 `/Applications/token-station.app`，除非后续获得明确安装授权。
+- 本次已获得安装验收授权；只允许通过 `scripts/install-local-desktop.sh` 替换 bundle id 为 `com.tokenstation.desktop` 的 App。
 
 ## 用户可见行为与失败处理
 
@@ -31,7 +31,8 @@ Windows 与 Linux 接收同一个命令时保持无操作，现有窗口主题�
 图标。用户选择跟随系统时，系统外观变化会重新计算最终主题，并触发同一条更新链路。
 
 如果运行环境不是 Tauri，前端不调用原生命令。如果原生命令不可用或调用失败，前端忽略该
-错误并保留已经生效的页面主题，避免一个装饰性功能影响主要操作。
+错误并保留已经生效的页面主题，避免一个装饰性功能影响主要操作。原生命令只有在 AppKit
+主线程完成图片解码、设置并回读当前应用图标后才返回成功；排队成功不等于图标切换成功。
 
 ## 响应式、键盘与可访问性
 
@@ -41,19 +42,23 @@ Windows 与 Linux 接收同一个命令时保持无操作，现有窗口主题�
 
 ## 测试边界与验收标准
 
-- 公开行为测试确认最终主题为深色时发送 `dark`，切换到浅色后发送 `light`。
-- Rust 单元测试确认只接受两种主题，并确认两张嵌入图标具有 PNG 文件头。
+- 公开行为测试通过统一桌面 API 确认最终主题为深色时发送 `dark`，切换到浅色后发送 `light`；
+  原生命令失败时，页面主题仍正常生效。
+- Rust 单元测试确认只接受两种主题、两张嵌入图标具有 PNG 文件头且资源内容不同；macOS
+  命令必须等待主线程更新结果并传播解码、设置或等待失败，禁止静默返回成功。
 - 前端测试、Rust 测试和桌面构建通过。
 - 真实 App 检查项：启动 App 后分别选择浅色、深色和跟随系统，Dock 图标应与最终主题一致；
   系统外观变化后无需重启 App。
 
-自动测试只能证明主题值和原生命令链路，不能替代 macOS Dock 的肉眼检查。本 PR 不安装或
-替换 `/Applications` 中的 App；验收时直接运行构建目录里的 App，检查真实 Dock。
+自动测试只能证明主题值和原生命令链路，不能替代 macOS Dock 的肉眼检查。验收必须运行安装后的
+`/Applications/token-station.app`，检查真实 Dock。
 
 ## 实现落点、遗留项与发布要求
 
-- `ThemeProvider` 在现有主题副作用中调用 `set_dock_theme_icon`。
-- Tauri Rust 层校验主题，并通过 AppKit 的 `setApplicationIconImage` 更新 Dock 图标。
+- `ThemeProvider` 在现有主题副作用中调用统一桌面 API 的 `setDockThemeIcon`，避免运行时动态
+  导入让失败链路不可观察。
+- Tauri Rust 层校验主题，并通过 AppKit 的 `setApplicationIconImage` 更新 Dock 图标；命令
+  等待主线程回传实际结果后再完成。
 - 浅色和深色运行时资源均为 1024 x 1024，使用同一套透明圆角和图形位置。浅色资源不再
   复用会在 `setApplicationIconImage` 下显示成方框的打包 `icon.png`。
 - 深色资源来源包保存在 `apps/desktop/branding/token-station-dock-dark/`。
@@ -64,13 +69,6 @@ Windows 与 Linux 接收同一个命令时保持无操作，现有窗口主题�
 
 ## 实现状态
 
-已完成实现并合入最新 `origin/develop` 基线。
+已完成。最终前端测试 29 个文件、268 项全部通过，生产构建通过；workspace 与桌面端的格式、Clippy、测试和文档门禁全部通过。`scripts/install-local-desktop.sh` 完成构建、产物审计、安装和启动。
 
-- 图标来源包验证通过，`review_required` 为 `false`；圆角 Alpha 与当前 ICNS 完全一致。
-- `ThemeProvider` 专项测试 6/6 通过。
-- Rust Dock 图标专项测试 3/3 通过。
-- 完整前端测试 29 个文件、260 项全部通过。
-- `cargo test --workspace` 全部通过；代理测试中 1 项按设计标记为 ignored。
-- `scripts/build-desktop.sh --local` 构建、签名检查与桌面产物审计通过。
-- 按用户要求没有替换 `/Applications/token-station.app`。直接运行构建目录里的 App 后，真实
-  Dock 已确认浅色和深色图标会同步切换；两者圆角、尺寸和图形位置一致，橙色保持不变。
+真实 `/Applications/token-station.app` 验收发现并修复了原实现“页面已深色但 Dock 仍为浅色”的假绿：前端改为统一静态 API，原生命令改为等待 AppKit 主线程执行并回读结果。修复后实测深色显示深底图标、浅色显示浅底图标，再切回深色立即恢复；选择“跟随系统”时界面显示系统当前为深色，Dock 同步为深色。最后已恢复显式深色设置。系统外观变化的重新解析由 `matchMedia` 公开行为测试覆盖，未为验收修改操作系统全局外观设置。无已知遗留项。

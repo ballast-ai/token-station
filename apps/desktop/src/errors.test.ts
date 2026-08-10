@@ -13,14 +13,36 @@ describe("humanizeAppError", () => {
     );
   });
 
-  it("turns an incomplete route into an actionable message", () => {
-    const raw = "你还没有设置路由池。必须先设置至少一个路由池，才能启动 Token Station。";
+  it("turns the production no-pools error into startup guidance", () => {
+    const raw = "a router with no pools can route nothing";
 
     expect(humanizeAppError(raw, "en")).toBe(
-      "Routing is not configured yet. Select a provider and model for at least one route, then save and apply.",
+      "Routing is not configured yet. Select a provider and model for at least one route, then save before starting Token Station.",
     );
     expect(humanizeAppError(raw, "zh-CN")).toBe(
-      "路由尚未配置。请至少为一个路由选择供应商和模型，然后保存并应用。",
+      "路由尚未配置。请至少为一个路由选择供应商和模型，保存后再启动 Token Station。",
+    );
+  });
+
+  it("preserves the pool name in the production empty-pool error", () => {
+    const raw = "pool `tier_high` has no members";
+
+    expect(humanizeAppError(raw, "en")).toBe(
+      "Route pool `tier_high` is empty. Add a provider and model to this pool, then save again.",
+    );
+    expect(humanizeAppError(raw, "zh-CN")).toBe(
+      "路由池 `tier_high` 为空。请为该路由池添加供应商和模型，然后重新保存。",
+    );
+  });
+
+  it("preserves the rule and pool names in the production unknown-pool error", () => {
+    const raw = "rule `long-context` routes to pool `missing`, which does not exist";
+
+    expect(humanizeAppError(raw, "en")).toBe(
+      "Rule `long-context` points to missing route pool `missing`. Choose an existing pool for this rule, then save again.",
+    );
+    expect(humanizeAppError(raw, "zh-CN")).toBe(
+      "规则 `long-context` 指向不存在的路由池 `missing`。请为该规则选择现有路由池，然后重新保存。",
     );
   });
 

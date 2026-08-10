@@ -77,22 +77,24 @@ function costLabel(
 const resultStatus = (
   result: ModelDiscoveryView,
   copy: (english: string, simplifiedChinese: string) => string,
+  language: "en" | "zh-CN",
 ): CatalogStatus => {
+  const warning = result.warning ? humanizeAppError(result.warning, language) : result.warning;
   if (result.source === "live") {
     return {
       label: copy(`Synced ${result.models.length}`, `已同步 ${result.models.length} 个`),
       tone: "live",
-      warning: result.warning,
+      warning,
     };
   }
   if (result.source === "cache") {
     return {
       label: copy(`Using cache · ${result.models.length}`, `使用缓存 · ${result.models.length} 个`),
       tone: "cache",
-      warning: result.warning,
+      warning,
     };
   }
-  return { label: copy("Fetch failed", "获取失败"), tone: "error", warning: result.warning };
+  return { label: copy("Fetch failed", "获取失败"), tone: "error", warning };
 };
 
 export default function ProviderModelManager({
@@ -258,7 +260,7 @@ export default function ProviderModelManager({
       setModels((current) => mergeModels(current, result.models));
       setCatalog(result.catalog ?? []);
       setDiff({ added: result.added ?? [], removed: result.removed ?? [] });
-      setStatus(resultStatus(result, copy));
+      setStatus(resultStatus(result, copy, language));
       if (result.capabilities_updated) {
         onSaved(await getState());
       }

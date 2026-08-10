@@ -65,6 +65,7 @@ function statusCopy(
   agent: AgentView | undefined,
   installation: AgentInstallationView | undefined,
   copy: (english: string, simplifiedChinese: string) => string,
+  language: "en" | "zh-CN",
 ) {
   if (!agent || agent.installations.length === 0) {
     return {
@@ -146,7 +147,10 @@ function statusCopy(
     return {
       tone: "danger",
       label: copy("Unavailable", "暂不可接入"),
-      detail: installation.compatibility.message,
+      detail: humanizeAppError({
+        code: installation.compatibility.reason_code,
+        message: installation.compatibility.message,
+      }, language),
     };
   }
   return {
@@ -186,7 +190,7 @@ export default function AgentRoutePage({
   onSetRoutingMode = () => {},
   embedded = false,
 }: AgentRoutePageProps) {
-  const { copy } = useLocalizedCopy();
+  const { copy, language } = useLocalizedCopy();
   const [selectedPath, setSelectedPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -205,7 +209,7 @@ export default function AgentRoutePage({
     [agent, selectedPath],
   );
 
-  const status = statusCopy(metadata, agent, installation, copy);
+  const status = statusCopy(metadata, agent, installation, copy, language);
   const managed = installation?.managed ?? false;
   const canConnect = Boolean(
     installation

@@ -28,9 +28,10 @@ permissions:
   contents: read
 
 jobs:
-  # 判定本次变更是否触及桌面端或安装器。用 gh CLI 查 PR 变更文件，
-  # 不 checkout、不引入第三方 action——本仓对供应链依赖谨慎。
-  # 非 pull_request 事件一律置 true，由 windows-msi 自身的事件条件决定是否跑。
+  # Determine whether this change touches the desktop app or installer. Query
+  # PR files with gh without checking out code or adding another third-party
+  # action; this repository deliberately limits supply-chain dependencies.
+  # Non-PR events always return true and leave scheduling to windows-msi.
   changes:
     runs-on: ubuntu-latest
     permissions:
@@ -59,16 +60,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # keyring 的 Linux 后端（secret-service）经 D-Bus，构建期要头文件
+      # The Linux keyring backend (secret-service) needs D-Bus headers at build time.
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          # plugin-runtime 的测试把 tests/guests/* 编成真实的 WASM 组件
+          # plugin-runtime tests compile tests/guests/* into real WASM components.
           targets: wasm32-wasip2
-      # wasmtime+tokio+sqlite 全量重编 ~7 分钟；缓存能砍掉大半。五个 WASM
-      # guest 是 workspace 排除的独立 crate（测试子进程构建、各有 target），
-      # 得逐个列进来才吃得到缓存。
+      # A clean wasmtime+tokio+sqlite build takes about seven minutes; caching
+      # removes most of that cost. The five WASM guests are standalone crates
+      # excluded from the workspace and built by test subprocesses with their
+      # own target directories, so each one must be listed explicitly.
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -88,12 +90,12 @@ jobs:
       - run: scripts/check-rust-format.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-      # 本地门禁一直在跑 doc -D warnings，CI 缺了它就只是个约定。
+      # Keep the existing local rustdoc -D warnings gate enforceable in CI.
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # license 允许清单、RustSec 通告、依赖来源。配置在 deny.toml。
+  # Enforce license allowlists, RustSec advisories, and dependency sources from deny.toml.
   deny:
     runs-on: ubuntu-latest
     steps:
@@ -102,8 +104,9 @@ jobs:
         with:
           command: check
 
-  # 与 deny 的 advisories 有重叠，仍然分开跑：audit 只读 Cargo.lock，不需要
-  # 构建图，deny 的图构建坏掉时它仍在把关；两者的失败信号也各自更可读。
+  # Run audit separately despite advisory overlap with deny. It reads only
+  # Cargo.lock, remains useful if deny cannot build its graph, and reports a
+  # clearer independent failure signal.
   audit:
     runs-on: ubuntu-latest
     steps:
@@ -268,19 +271,20 @@ jobs:
           apps/desktop/src-tauri/target/desktop-agent.lcov
           apps/desktop/src-tauri/src/agent_integration 90
 
-  # 这个 job 只做一件 Linux 做不到的事：在 macOS 宿主上编译桌面端，
-  # 让 #[cfg(target_os = "macos")] 的代码（如 verified_workbuddy_bundle，
-  # 它要调 /usr/bin/codesign）得到类型检查。
+  # This job does the one thing Linux cannot: compile the desktop app on a
+  # macOS host so #[cfg(target_os = "macos")] code is type-checked, including
+  # verified_workbuddy_bundle and its /usr/bin/codesign invocation.
   #
-  # 它此前是 macOS+Windows 矩阵，跑四个指定测试。那四个测试经核查全部与
-  # 宿主平台无关——平台是以 Platform::Macos/Windows 枚举作参数传入的，
-  # transaction 那个用 FailBeforeReplaceWriter 注入 AtomicWriteStage::Permission
-  # 来模拟时序、并不触碰真实 DACL——且四个都是裸 #[test] 无 cfg 守卫，
-  # 早已由 1x 倍率的 desktop-rust 全量 cargo test 覆盖。以 10x/2x 的价格重跑
-  # 一遍不产生任何额外覆盖。Windows 一侧另有 windows-rust 跑全量 cargo test，
-  # 其中包含全仓唯一带 #[cfg(windows)] 守卫的测试
-  # （ownership_store_hardens_a_legacy_regular_index_before_reading），
-  # 那才是真正只能在 Windows 上跑的东西——它反而不在旧的指定测试清单里。
+  # This used to be a macOS+Windows matrix that ran four selected tests. All
+  # four are host-independent: Platform::Macos/Windows is passed as an enum,
+  # while the transaction test injects FailBeforeReplaceWriter at
+  # AtomicWriteStage::Permission without touching a real DACL. They are plain
+  # #[test] cases with no cfg guard and are already covered by desktop-rust's
+  # full cargo test. Repeating them at 10x/2x runner cost added no coverage.
+  # windows-rust separately runs the full suite, including the repository's
+  # only #[cfg(windows)] test,
+  # ownership_store_hardens_a_legacy_regular_index_before_reading, which is
+  # genuinely Windows-only and was absent from the old selected list.
   macos-compile-check:
     name: macOS compile check
     if: github.event_name != 'pull_request'
@@ -295,24 +299,24 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: apps/desktop/src-tauri
-      # --all-targets 让测试代码也参与编译，这样 macOS 专属的测试代码
-      # 一旦写坏也能在这里被发现，而不必等发版打 tag。
+      # --all-targets also compiles tests so broken macOS-specific test code is
+      # caught here instead of waiting for a release tag.
       - run: >-
           cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
           --all-targets
 
   windows-rust:
     name: Windows full Rust and desktop gates
-    # PR 阶段由 Linux 的 rust job 覆盖同一套 clippy/test；Windows 是 2x 倍率，
-    # 全量重跑一遍不值。合并进 develop 后再跑完整的跨平台门禁。
+    # The Linux rust job covers the same clippy/test suite for PRs. Avoid the 2x
+    # Windows rerun until a change reaches develop and needs the full platform gate.
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      # Defender 实时扫描会逐个扫 Rust 增量编译产生的大量小文件，
-      # 排除工作区后构建通常快 20-40%。
+      # Defender scans the many small Rust incremental files individually;
+      # excluding the workspace typically shortens builds by 20-40%.
       - name: Exclude the workspace from Defender real-time scanning
         shell: pwsh
         run: |
@@ -371,8 +375,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      # Defender 实时扫描会逐个扫 Rust 增量编译产生的大量小文件，
-      # 排除工作区后构建通常快 20-40%。
+      # Defender scans the many small Rust incremental files individually;
+      # excluding the workspace typically shortens builds by 20-40%.
       - name: Exclude the workspace from Defender real-time scanning
         shell: pwsh
         run: |
@@ -456,6 +460,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.20.2
+      - run: node scripts/check-ci-msi-trigger-policy.mjs
       - run: node scripts/check-rustsec-exceptions.mjs
       - run: >-
           cargo audit -D unsound

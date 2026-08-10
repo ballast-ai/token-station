@@ -63,6 +63,39 @@ interface LocalizedAppError {
   zh: string;
 }
 
+interface LocalizedAppMessage {
+  en: string;
+  zh: string;
+}
+
+function routerConfigGuidance(raw: string): LocalizedAppMessage | null {
+  const emptyPool = raw.match(/pool `([^`\r\n]{1,128})` has no members/i);
+  if (emptyPool) {
+    const pool = emptyPool[1];
+    return {
+      en: `Route pool \`${pool}\` is empty. Add a provider and model to this pool, then save again.`,
+      zh: `路由池 \`${pool}\` 为空。请为该路由池添加供应商和模型，然后重新保存。`,
+    };
+  }
+
+  const unknownPool = raw.match(
+    /([^\r\n]{1,128}?) routes to pool `([^`\r\n]{1,128})`, which does not exist/i,
+  );
+  if (unknownPool) {
+    const reference = unknownPool[1].trim();
+    const pool = unknownPool[2];
+    const rule = reference.match(/^rule `([^`\r\n]{1,128})`$/i);
+    const englishReference = rule ? `Rule \`${rule[1]}\`` : `Configuration field \`${reference}\``;
+    const chineseReference = rule ? `规则 \`${rule[1]}\`` : `配置字段 \`${reference}\``;
+    return {
+      en: `${englishReference} points to missing route pool \`${pool}\`. Choose an existing pool for this ${rule ? "rule" : "field"}, then save again.`,
+      zh: `${chineseReference} 指向不存在的路由池 \`${pool}\`。请为该${rule ? "规则" : "字段"}选择现有路由池，然后重新保存。`,
+    };
+  }
+
+  return null;
+}
+
 const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
   {
     matches: /apply_in_progress|configuration update.*(?:progress|running)|配置.*(?:正在应用|处理中)/i,
@@ -70,9 +103,9 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     zh: "另一项配置更新仍在进行。请稍等片刻，然后重试。",
   },
   {
-    matches: /没有设置路由池|no route pools?|routing.*not configured/i,
-    en: "Routing is not configured yet. Select a provider and model for at least one route, then save and apply.",
-    zh: "路由尚未配置。请至少为一个路由选择供应商和模型，然后保存并应用。",
+    matches: /a router with no pools can route nothing|没有设置路由池|no route pools?|routing.*not configured/i,
+    en: "Routing is not configured yet. Select a provider and model for at least one route, then save before starting Token Station.",
+    zh: "路由尚未配置。请至少为一个路由选择供应商和模型，保存后再启动 Token Station。",
   },
   {
     matches: /路由池.*(?:缺少|未配置)|route pool.*(?:missing|incomplete)|tier.*(?:missing|unconfigured)/i,
@@ -170,9 +203,34 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     zh: "本地数据无法安全打开。请使用自救模式检查或导出本地数据。",
   },
   {
+    matches: /model_catalog_provider_required/i,
+    en: "Enter a provider name and Base URL before loading its model catalog.",
+    zh: "请先填写供应商名称和 Base URL，再读取模型目录。",
+  },
+  {
+    matches: /model_catalog_reference_requires_save/i,
+    en: "Save the environment-variable or file credential reference before loading the model catalog.",
+    zh: "env/file 只保存凭据引用。请先保存供应商，再读取模型目录。",
+  },
+  {
+    matches: /model_catalog_api_key_required/i,
+    en: "Enter an API key before loading this provider's model catalog.",
+    zh: "请先填写 API Key，再读取该供应商的模型目录。",
+  },
+  {
     matches: /quota|usage|pricing|catalog|额度|用量|价格目录|模型目录/i,
     en: "The latest provider data is unavailable. Keep the current settings and try refreshing again later.",
     zh: "暂时无法获取最新的供应商数据。请保留当前设置，稍后再次刷新。",
+  },
+  {
+    matches: /暂无公开发布版本|no public release (?:is )?available/i,
+    en: "No public release is available yet. Check again later or open the Releases page.",
+    zh: "暂无公开发布版本。请稍后重试，或打开发布页查看。",
+  },
+  {
+    matches: /官方更新公钥|official update public key/i,
+    en: "This build cannot install updates because it does not include the official update public key. Download the app from the Releases page instead.",
+    zh: "当前构建未内置官方更新公钥，无法在 App 内安装更新。请改从发布页下载安装。",
   },
   {
     matches: /update_version_changed:/i,
@@ -185,7 +243,7 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     zh: "之前确认的更新已不可用。请重新检查后再确认安装。",
   },
   {
-    matches: /update|upgrade|release|更新|版本/i,
+    matches: /update|upgrade|release|检查更新|安装更新|应用更新|可用版本|发布版本/i,
     en: "Token Station could not check for updates. Check the network connection and try again later.",
     zh: "Token Station 无法检查更新。请检查网络连接，稍后重试。",
   },
@@ -220,8 +278,10 @@ function selectedAppLanguage(language?: Language): Language {
 
 export function humanizeAppError(error: unknown, language?: Language): string {
   const raw = appErrorText(error);
+  const routerGuidance = routerConfigGuidance(raw);
   const guidance = APP_ERROR_GUIDANCE.find((item) => item.matches.test(raw));
   const chinese = selectedAppLanguage(language) === "zh-CN";
+  if (routerGuidance) return chinese ? routerGuidance.zh : routerGuidance.en;
   if (guidance) return chinese ? guidance.zh : guidance.en;
   return chinese
     ? "操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。"
