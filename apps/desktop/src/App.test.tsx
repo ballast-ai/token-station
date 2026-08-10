@@ -19,7 +19,7 @@ const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
 const getStatsMock = vi.mocked(getStats);
 const FIRST_RUN_GUIDE_STORAGE_KEY = "token-station-first-run-guide";
-const FIRST_RUN_GUIDE_VERSION = "b-v1";
+const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v1";
 
 const emptyRoute: AgentRouteView = {
   mode: "inherit",
@@ -259,56 +259,538 @@ beforeEach(() => {
   });
 });
 
-it("shows the provider step on the first local App session", async () => {
-  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
-
-  render(<App />);
-
-  expect(await screen.findByRole("dialog", { name: "先添加一个模型供应商" })).toBeInTheDocument();
-  expect(Number(
-    screen.getByRole("progressbar", { name: "引导进度：第 1 步，共 4 步" })
-      .getAttribute("aria-valuenow"),
-  )).toBeCloseTo(25);
-  expect(screen.getByRole("button", { name: "添加供应商", hidden: true })).toHaveAttribute(
-    "data-onboarding-active",
-    "true",
-  );
-});
-
-it("walks through provider, routing, and Agent targets in dependency order", async () => {
+it("teaches a new user by spotlighting the real add-provider button", async () => {
   window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
   const user = userEvent.setup();
 
   render(<App />);
 
-  await screen.findByRole("dialog", { name: "先添加一个模型供应商" });
-  await user.click(screen.getByRole("button", { name: "下一步" }));
-  expect(screen.getByRole("dialog", { name: "配置并启动路由" })).toBeInTheDocument();
-  const routingButton = screen.getByRole("button", { name: "路由", hidden: true });
-  expect(routingButton).not.toHaveAttribute("data-onboarding-target");
-  expect(within(routingButton).getByText("路由")).toHaveAttribute(
-    "data-onboarding-active",
-    "true",
-  );
-  expect(screen.getByRole("button", { name: "添加供应商", hidden: true })).not.toHaveAttribute(
-    "data-onboarding-active",
-  );
+  const coachmark = await screen.findByRole("dialog", { name: "添加你的第一个供应商" });
+  expect(coachmark).toHaveTextContent("添加供应商 · 1/5");
+  expect(screen.queryByRole("button", { name: "下一步" })).toBeNull();
+  const addProvider = screen.getByRole("button", { name: "添加供应商" });
+  expect(addProvider).toHaveAttribute("data-onboarding-active", "true");
+  expect(addProvider).toHaveAccessibleDescription("点击这里进入供应商配置，完成操作后引导会自动继续。");
+  expect(addProvider).toHaveFocus();
 
-  await user.click(screen.getByRole("button", { name: "下一步" }));
-  expect(screen.getByRole("dialog", { name: "接入你的第一个 Agent" })).toBeInTheDocument();
-  expect(
-    screen.getByRole("button", { name: /检查 Agent 接入/, hidden: true }),
-  ).toHaveAttribute("data-onboarding-active", "true");
+  await user.tab();
+  expect(within(coachmark).getByRole("button", { name: "稍后继续" })).toHaveFocus();
+  await user.tab({ shift: true });
+  expect(addProvider).toHaveFocus();
 
-  await user.click(screen.getByRole("button", { name: "下一步" }));
-  expect(screen.getByRole("dialog", { name: "以后想再看教程" })).toBeInTheDocument();
-  const settingsButton = screen.getByRole("button", { name: "设置", hidden: true });
-  expect(settingsButton).not.toHaveAttribute("data-onboarding-target");
-  expect(within(settingsButton).getByText("设置")).toHaveAttribute(
-    "data-onboarding-active",
-    "true",
-  );
-  expect(screen.getByRole("button", { name: "完成引导" })).toBeInTheDocument();
+  const workspace = document.querySelector<HTMLElement>(".station-content");
+  expect(workspace).not.toBeNull();
+  workspace!.scrollTop = 240;
+  await user.click(addProvider);
+
+  expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
+  expect(await screen.findByRole("dialog", { name: "选择一个模型供应商" })).toBeInTheDocument();
+  expect(workspace).toHaveProperty("scrollTop", 0);
+});
+
+it("walks through provider configuration and advances only after a real save", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  const user = userEvent.setup();
+  const added = stateFixture({
+    providers: [{
+      name: "openai",
+      provider: "openai-compatible",
+      base_url: "https://api.openai.com/v1",
+      models: ["gpt-5.1"],
+      has_auth: true,
+    }],
+    draft_revision: 1,
+    config_dirty: true,
+  });
+  let saveAttempts = 0;
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "get_state") return stateFixture();
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") return [];
+    if (command === "preview_provider_endpoints") {
+      return {
+        chat: "https://api.openai.com/v1/chat/completions",
+        responses: "https://api.openai.com/v1/responses",
+        messages: "https://api.openai.com/v1/messages",
+        loopback: false,
+      };
+    }
+    if (command === "add_provider_with_credential") {
+      saveAttempts += 1;
+      if (saveAttempts === 1) throw new Error("credential rejected");
+      return added;
+    }
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+
+  render(<App />);
+
+  await screen.findByRole("dialog", { name: "添加你的第一个供应商" });
+  await user.click(screen.getByRole("button", { name: "添加供应商" }));
+  expect(await screen.findByRole("dialog", { name: "选择一个模型供应商" })).toBeInTheDocument();
+  expect(screen.getByRole("list", { name: "常规供应商列表" }))
+    .toHaveAttribute("data-onboarding-active", "true");
+  await user.click(screen.getByPlaceholderText("搜索供应商、模型或标签…"));
+  expect(screen.getByRole("dialog", { name: "选择一个模型供应商" })).toBeInTheDocument();
+  await user.click(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" }));
+
+  const credentialCoachmark = await screen.findByRole("dialog", { name: "填写供应商凭据" });
+  expect(credentialCoachmark).toHaveTextContent("添加供应商 · 3/5");
+  expect(screen.getByRole("group", { name: "供应商凭据" }))
+    .toHaveAttribute("data-onboarding-active", "true");
+  await user.type(screen.getByLabelText("API Key"), "secret-test");
+  await user.click(within(credentialCoachmark).getByRole("button", { name: "下一项：选择模型" }));
+
+  const modelCoachmark = await screen.findByRole("dialog", { name: "选择至少一个模型" });
+  expect(screen.getByRole("group", { name: "供应商模型" }))
+    .toHaveAttribute("data-onboarding-active", "true");
+  await user.click(within(modelCoachmark).getByRole("button", { name: "配置好了，去保存" }));
+
+  const saveCoachmark = await screen.findByRole("dialog", { name: "保存供应商" });
+  await user.click(within(saveCoachmark).getByRole("button", { name: "返回选择模型" }));
+  const revisitedModels = await screen.findByRole("dialog", { name: "选择至少一个模型" });
+  await user.click(within(revisitedModels).getByRole("button", { name: "配置好了，去保存" }));
+  await screen.findByRole("dialog", { name: "保存供应商" });
+  const saveProvider = screen.getByRole("button", { name: "添加供应商" });
+  expect(saveProvider).toHaveAttribute("data-onboarding-active", "true");
+  await user.click(saveProvider);
+
+  expect(await screen.findByText(/credential rejected/)).toBeInTheDocument();
+  expect(screen.getByRole("dialog", { name: "保存供应商" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "OpenAI" })).toBeInTheDocument();
+
+  await user.click(saveProvider);
+
+  expect(await screen.findByRole("heading", { name: "全局路由" })).toBeInTheDocument();
+  expect(await screen.findByRole("dialog", { name: "选择路由模式" })).toBeInTheDocument();
+});
+
+it("spotlights routing controls and advances only when the requested revision is really running", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  const user = userEvent.setup();
+  let emitServe: ((serve: ServeView) => void) | undefined;
+  listenMock.mockImplementation(async (_eventName, handler) => {
+    emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+    return () => undefined;
+  });
+  const provider = {
+    name: "openai",
+    provider: "openai-compatible",
+    base_url: "https://api.openai.com/v1",
+    models: ["gpt-5.1"],
+    has_auth: true,
+  };
+  const initial = stateFixture({
+    providers: [provider],
+    tiers: {
+      high: { upstream: "openai", model: "gpt-5.1" },
+      mid: { upstream: "openai", model: "gpt-5.1" },
+      low: { upstream: "openai", model: "gpt-5.1" },
+    },
+    draft_revision: 1,
+    saved_revision: 1,
+    config_dirty: false,
+  });
+  const applying = stateFixture({
+    providers: [provider],
+    tiers: {
+      high: { upstream: "openai", model: "gpt-5.1" },
+      mid: { upstream: "openai", model: "gpt-5.1" },
+      low: { upstream: "openai", model: "gpt-5.1" },
+    },
+    draft_revision: 2,
+    saved_revision: 2,
+    config_dirty: false,
+    serve: serveFixture({ phase: "starting" }),
+  });
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "get_state") return initial;
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") return [];
+    if (command === "serve_start") return applying;
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+
+  render(<App />);
+  const entryCoachmark = await screen.findByRole("dialog", { name: "打开路由配置" });
+  expect(entryCoachmark).toHaveTextContent("配置路由 · 1/4");
+  const routingNav = screen.getByRole("button", { name: "路由" });
+  expect(routingNav).toHaveAttribute("data-onboarding-active", "true");
+  await user.click(routingNav);
+
+  const modeCoachmark = await screen.findByRole("dialog", { name: "选择路由模式" });
+  expect(screen.getByRole("region", { name: "路由模式" }))
+    .toHaveAttribute("data-onboarding-active", "true");
+  await user.click(within(modeCoachmark).getByRole("button", { name: "沿用当前模式" }));
+
+  const configCoachmark = await screen.findByRole("dialog", { name: "配置模型路由" });
+  expect(screen.getByRole("group", { name: "三档模型配置" }))
+    .toHaveAttribute("data-onboarding-active", "true");
+  await user.click(within(configCoachmark).getByRole("button", { name: "配置好了，去应用" }));
+
+  await screen.findByRole("dialog", { name: "保存并应用路由" });
+  const saveAndApply = screen.getByRole("button", { name: "保存并应用" });
+  expect(saveAndApply).toHaveAttribute("data-onboarding-active", "true");
+  await user.click(saveAndApply);
+
+  expect(await screen.findByText("正在应用配置…")).toBeInTheDocument();
+  expect(screen.getByRole("dialog", { name: "保存并应用路由" })).toBeInTheDocument();
+  act(() => emitServe?.(serveFixture({
+    phase: "running",
+    app_runtime: "running",
+    listener_reachable: true,
+    running_revision: 1,
+  })));
+  expect(screen.getByRole("heading", { name: "全局路由" })).toBeInTheDocument();
+
+  act(() => emitServe?.(serveFixture({
+    phase: "running",
+    app_runtime: "running",
+    listener_reachable: false,
+    running_revision: 2,
+  })));
+  expect(screen.getByRole("heading", { name: "全局路由" })).toBeInTheDocument();
+
+  act(() => emitServe?.(serveFixture({
+    phase: "running",
+    app_runtime: "running",
+    listener_reachable: true,
+    running_revision: 2,
+  })));
+
+  expect(await screen.findByRole("heading", { name: "Agent 管理" })).toBeInTheDocument();
+  expect(await screen.findByRole("dialog", { name: "未检测到可接入 Agent" })).toBeInTheDocument();
+});
+
+it("does not treat a running but unconfigured route as onboarding-complete", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  const provider = {
+    name: "openai",
+    provider: "openai-compatible",
+    base_url: "https://api.openai.com/v1",
+    models: ["gpt-5.1"],
+    has_auth: true,
+  };
+  const unconfigured = stateFixture({
+    providers: [provider],
+    serve: serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 0,
+    }),
+  });
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "get_state") return unconfigured;
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") return [];
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+
+  render(<App />);
+
+  expect(await screen.findByRole("dialog", { name: "打开路由配置" })).toBeInTheDocument();
+  expect(screen.queryByRole("dialog", { name: "打开 Agent 管理" })).toBeNull();
+});
+
+it("resumes at Agent and can finish honestly when no installation is detected", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  const user = userEvent.setup();
+  const provider = {
+    name: "openai",
+    provider: "openai-compatible",
+    base_url: "https://api.openai.com/v1",
+    models: ["gpt-5.1"],
+    has_auth: true,
+  };
+  const ready = stateFixture({
+    providers: [provider],
+    tiers: {
+      high: { upstream: "openai", model: "gpt-5.1" },
+      mid: { upstream: "openai", model: "gpt-5.1" },
+      low: { upstream: "openai", model: "gpt-5.1" },
+    },
+    draft_revision: 1,
+    saved_revision: 1,
+    config_dirty: false,
+    config_error: null,
+    serve: serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 1,
+    }),
+  });
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "get_state") return ready;
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") return [];
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+
+  render(<App />);
+
+  const entryCoachmark = await screen.findByRole("dialog", { name: "打开 Agent 管理" });
+  expect(entryCoachmark).toHaveTextContent("接入 Agent · 1/3");
+  const agentNav = screen.getByRole("button", { name: "Agent" });
+  expect(agentNav).toHaveAttribute("data-onboarding-active", "true");
+  await user.click(agentNav);
+
+  expect(await screen.findByRole("heading", { name: "Agent 管理" })).toBeInTheDocument();
+  const emptyCoachmark = await screen.findByRole("dialog", { name: "未检测到可接入 Agent" });
+  const rescan = screen.getByRole("button", { name: "重新扫描" });
+  expect(rescan).toHaveAttribute("data-onboarding-active", "true");
+  await user.click(rescan);
+  await waitFor(() => expect(
+    invokeMock.mock.calls.filter(([command]) => command === "scan_agents"),
+  ).toHaveLength(2));
+  await user.click(within(emptyCoachmark).getByRole("button", { name: "暂不接入，完成设置" }));
+
+  expect(await screen.findByRole("dialog", { name: "基础设置完成" })).toBeInTheDocument();
+  expect(screen.getByText("供应商和路由已就绪，Agent 尚未接入。"))
+    .toBeInTheDocument();
+  expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(FIRST_RUN_GUIDE_VERSION);
+  await user.click(screen.getByRole("button", { name: "返回概览" }));
+  expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
+});
+
+it("continues from rescan to Agent selection when an installation appears", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  const user = userEvent.setup();
+  const provider = {
+    name: "openai",
+    provider: "openai-compatible",
+    base_url: "https://api.openai.com/v1",
+    models: ["gpt-5.1"],
+    has_auth: true,
+  };
+  const ready = stateFixture({
+    providers: [provider],
+    tiers: {
+      high: { upstream: "openai", model: "gpt-5.1" },
+      mid: { upstream: "openai", model: "gpt-5.1" },
+      low: { upstream: "openai", model: "gpt-5.1" },
+    },
+    draft_revision: 1,
+    saved_revision: 1,
+    serve: serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 1,
+    }),
+  });
+  let scans = 0;
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "get_state") return ready;
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") {
+      scans += 1;
+      return scans === 1 ? [] : [scannedClaude];
+    }
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+
+  render(<App />);
+  await screen.findByRole("dialog", { name: "打开 Agent 管理" });
+  await user.click(screen.getByRole("button", { name: "Agent" }));
+  await screen.findByRole("dialog", { name: "未检测到可接入 Agent" });
+  await user.click(screen.getByRole("button", { name: "重新扫描" }));
+
+  expect(await screen.findByRole("dialog", { name: "选择一个 Agent" })).toBeInTheDocument();
+  expect(screen.getByRole("navigation", { name: "Agent 列表" }))
+    .toHaveAttribute("data-onboarding-active", "true");
+});
+
+it("finishes only after an Agent rescan reports CONNECTED", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  const user = userEvent.setup();
+  const provider = {
+    name: "openai",
+    provider: "openai-compatible",
+    base_url: "https://api.openai.com/v1",
+    models: ["gpt-5.1"],
+    has_auth: true,
+  };
+  const ready = stateFixture({
+    providers: [provider],
+    tiers: {
+      high: { upstream: "openai", model: "gpt-5.1" },
+      mid: { upstream: "openai", model: "gpt-5.1" },
+      low: { upstream: "openai", model: "gpt-5.1" },
+    },
+    saved_revision: 1,
+    draft_revision: 1,
+    serve: serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 1,
+      instance_id: "instance-ready",
+      virtual_key: "vk-test",
+    }),
+  });
+  let connected = false;
+  let resolveConnectedScan: ((agents: AgentView[]) => void) | undefined;
+  const connectedScan = new Promise<AgentView[]>((resolve) => {
+    resolveConnectedScan = resolve;
+  });
+  const connectedAgent = structuredClone(scannedClaude);
+  connectedAgent.status = "CONNECTED";
+  connectedAgent.installations[0].managed = true;
+  connectedAgent.installations[0].connected = true;
+  connectedAgent.installations[0].compatibility.status = "CONNECTED";
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "get_state") return ready;
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") {
+      if (!connected) return [scannedClaude];
+      return connectedScan;
+    }
+    if (command === "plan_agent_connection") return projectionPlan("op-onboarding", "token-onboarding");
+    if (command === "apply_agent_plan") {
+      connected = true;
+      return { operation_id: "op-onboarding", maintenance_warning: null };
+    }
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+
+  render(<App />);
+  await screen.findByRole("dialog", { name: "打开 Agent 管理" });
+  await user.click(screen.getByRole("button", { name: "Agent" }));
+
+  await screen.findByRole("dialog", { name: "选择一个 Agent" });
+  expect(screen.getByRole("navigation", { name: "Agent 列表" }))
+    .toHaveAttribute("data-onboarding-active", "true");
+  await user.click(screen.getByRole("button", { name: "Claude Code" }));
+
+  const connectCoachmark = await screen.findByRole("dialog", { name: "一键接入 Agent" });
+  const connect = screen.getByRole("button", { name: "一键接入" });
+  expect(connect).toHaveAttribute("data-onboarding-active", "true");
+  expect(connectCoachmark).toHaveTextContent("接入 Agent · 3/3");
+  await user.click(connect);
+
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
+    "apply_agent_plan",
+    { operationId: "op-onboarding", confirmationToken: "token-onboarding" },
+  ));
+  expect(screen.queryByRole("dialog", { name: "首次设置完成" })).toBeNull();
+  resolveConnectedScan?.([connectedAgent]);
+  expect(await screen.findByRole("dialog", { name: "首次设置完成" })).toBeInTheDocument();
+  expect(screen.getByText("供应商、路由和 Agent 均已就绪，Token Station 现在可以接管模型请求。"))
+    .toBeInTheDocument();
+  expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(FIRST_RUN_GUIDE_VERSION);
+});
+
+it("requires an exact installation choice before connecting a multi-installation Agent", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  const user = userEvent.setup();
+  const provider = {
+    name: "openai",
+    provider: "openai-compatible",
+    base_url: "https://api.openai.com/v1",
+    models: ["gpt-5.1"],
+    has_auth: true,
+  };
+  const ready = stateFixture({
+    providers: [provider],
+    tiers: {
+      high: { upstream: "openai", model: "gpt-5.1" },
+      mid: { upstream: "openai", model: "gpt-5.1" },
+      low: { upstream: "openai", model: "gpt-5.1" },
+    },
+    saved_revision: 1,
+    draft_revision: 1,
+    serve: serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 1,
+      instance_id: "instance-ready",
+    }),
+  });
+  const multiInstall = structuredClone(scannedClaude);
+  const secondInstall = structuredClone(multiInstall.installations[0]);
+  secondInstall.discovery.executable_path = "/opt/claude-preview";
+  secondInstall.discovery.canonical_path = "/opt/claude-preview";
+  secondInstall.discovery.version_raw = "10.0.0";
+  secondInstall.discovery.version_normalized = "10.0.0";
+  secondInstall.compatibility.installation_path = "/opt/claude-preview";
+  multiInstall.installations.push(secondInstall);
+  multiInstall.status = "MULTIPLE_INSTALLATIONS";
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "get_state") return ready;
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") return [multiInstall];
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+
+  render(<App />);
+  await screen.findByRole("dialog", { name: "打开 Agent 管理" });
+  await user.click(screen.getByRole("button", { name: "Agent" }));
+  await screen.findByRole("dialog", { name: "选择一个 Agent" });
+  await user.click(screen.getByRole("button", { name: "Claude Code" }));
+
+  expect(await screen.findByRole("dialog", { name: "选择要接管的安装" })).toBeInTheDocument();
+  const picker = screen.getByRole("button", { name: "选择安装" });
+  expect(picker).toHaveAttribute("data-onboarding-active", "true");
+  expect(screen.queryByRole("dialog", { name: "一键接入 Agent" })).toBeNull();
+
+  await user.click(picker);
+  await user.click(screen.getByRole("option", { name: "claude-preview · v10.0.0" }));
+
+  expect(await screen.findByRole("dialog", { name: "一键接入 Agent" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "一键接入" }))
+    .toHaveAttribute("data-onboarding-active", "true");
+});
+
+it("shows an already-complete summary without asking for repeated setup", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  const user = userEvent.setup();
+  const provider = {
+    name: "openai",
+    provider: "openai-compatible",
+    base_url: "https://api.openai.com/v1",
+    models: ["gpt-5.1"],
+    has_auth: true,
+  };
+  const ready = stateFixture({
+    providers: [provider],
+    tiers: {
+      high: { upstream: "openai", model: "gpt-5.1" },
+      mid: { upstream: "openai", model: "gpt-5.1" },
+      low: { upstream: "openai", model: "gpt-5.1" },
+    },
+    saved_revision: 1,
+    draft_revision: 1,
+    serve: serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 1,
+      instance_id: "instance-ready",
+    }),
+  });
+  const connectedAgent = structuredClone(scannedClaude);
+  connectedAgent.status = "CONNECTED";
+  connectedAgent.installations[0].managed = true;
+  connectedAgent.installations[0].connected = true;
+  connectedAgent.installations[0].compatibility.status = "CONNECTED";
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "get_state") return ready;
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") return [connectedAgent];
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+
+  render(<App />);
+
+  expect(await screen.findByRole("dialog", { name: "首次设置已完成" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "返回概览" }));
+
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
+  expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(FIRST_RUN_GUIDE_VERSION);
 });
 
 it("persists a skipped guide and does not show it on the next App session", async () => {
@@ -316,8 +798,8 @@ it("persists a skipped guide and does not show it on the next App session", asyn
   const user = userEvent.setup();
   const firstSession = render(<App />);
 
-  await screen.findByRole("dialog", { name: "先添加一个模型供应商" });
-  await user.click(screen.getByRole("button", { name: "跳过引导" }));
+  await screen.findByRole("dialog", { name: "添加你的第一个供应商" });
+  await user.click(screen.getByRole("button", { name: "不再提示" }));
 
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(
     FIRST_RUN_GUIDE_VERSION,
@@ -337,28 +819,31 @@ it("reopens the guide from the About page without clearing the dismissed version
   await user.click(screen.getByRole("button", { name: /关于/ }));
   await user.click(screen.getByRole("button", { name: "重新查看新手引导" }));
 
-  expect(await screen.findByRole("dialog", { name: "先添加一个模型供应商" })).toBeInTheDocument();
-  expect(screen.getByRole("heading", { name: "概览", hidden: true })).toBeInTheDocument();
+  expect(await screen.findByRole("dialog", { name: "添加你的第一个供应商" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "概览" })).toBeInTheDocument();
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(
     FIRST_RUN_GUIDE_VERSION,
   );
 });
 
-it("treats Escape as a persistent dismissal and restores focus to the App", async () => {
+it("treats Escape as a pause, restores focus, and offers setup next session", async () => {
   window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
   const user = userEvent.setup();
-  render(<App />);
+  const firstSession = render(<App />);
 
-  await screen.findByRole("dialog", { name: "先添加一个模型供应商" });
+  await screen.findByRole("dialog", { name: "添加你的第一个供应商" });
   await user.keyboard("{Escape}");
 
   expect(screen.queryByRole("dialog")).toBeNull();
-  expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(
-    FIRST_RUN_GUIDE_VERSION,
-  );
+  expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBeNull();
   await waitFor(() => {
     expect(screen.getByRole("button", { name: "Token Station 概览" })).toHaveFocus();
   });
+
+  firstSession.unmount();
+  render(<App />);
+  expect(await screen.findByRole("dialog", { name: "添加你的第一个供应商" }))
+    .toBeInTheDocument();
 });
 
 it("renders a supported virtual Agent entirely from registry metadata", async () => {

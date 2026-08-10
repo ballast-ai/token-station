@@ -46,6 +46,7 @@ interface AgentRoutePageProps {
   ) => void;
   onViewQuotaUsage: () => void;
   onSetRoutingMode?: (mode: "tiered" | "quota_first") => void;
+  onInstallationSelected?: () => void;
   embedded?: boolean;
 }
 
@@ -191,6 +192,7 @@ export default function AgentRoutePage({
   onSaveQuotaPlan,
   onViewQuotaUsage,
   onSetRoutingMode = () => {},
+  onInstallationSelected,
   embedded = false,
 }: AgentRoutePageProps) {
   const { copy } = useLocalizedCopy();
@@ -389,11 +391,16 @@ export default function AgentRoutePage({
             installations={agent?.installations ?? []}
             selectedPath={selectedPath}
             disabled={busy}
-            onSelect={setSelectedPath}
+            onboardingTarget="agent-installation"
+            onSelect={(path) => {
+              setSelectedPath(path);
+              onInstallationSelected?.();
+            }}
           />
           <button
             className={`btn agent-primary-action ${managed ? "" : "primary"}`}
             type="button"
+            data-onboarding-target={!managed ? "agent-connect" : undefined}
             disabled={busy || !canOperate}
             onClick={() => void (managed ? restoreOfficial() : applyConnection())}
             title={managed

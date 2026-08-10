@@ -163,12 +163,18 @@ export default function HomePage({
           </div>
         </div>
 
-        <TierRouteEditor
-          tiers={tiers}
-          providers={providers}
-          disabled={busy}
-          onTierChange={onTierChange}
-        />
+        <div
+          role="group"
+          aria-label={copy("Three-tier model configuration", "三档模型配置")}
+          data-onboarding-target="route-config"
+        >
+          <TierRouteEditor
+            tiers={tiers}
+            providers={providers}
+            disabled={busy}
+            onTierChange={onTierChange}
+          />
+        </div>
 
         {profileOpen && <div className="profile-manager compact-profile-manager">
           <div className="profile-create-row">
@@ -231,7 +237,13 @@ export default function HomePage({
             <button className="btn" type="button" disabled={busy || applying} onClick={onApplyAll}>
               {copy("Apply to all Agents", "应用到全部 Agent")}
             </button>
-            <button className="btn primary" type="button" disabled={busy || applying} onClick={onSave}>
+            <button
+              className="btn primary"
+              type="button"
+              data-onboarding-target="route-apply"
+              disabled={busy || applying}
+              onClick={onSave}
+            >
               {applying ? copy("Applying…", "应用中…") : copy("Save and apply", "保存并应用")}
             </button>
           </div>

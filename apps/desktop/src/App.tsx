@@ -32,8 +32,11 @@ import {
 } from "./api";
 import AppShell, { type AppView } from "./components/AppShell";
 import FirstRunGuide, {
+  FirstRunCompletionDialog,
   markFirstRunGuideDismissed,
   shouldOpenFirstRunGuide,
+  type FirstRunMicroStep,
+  type FirstRunSetupStep,
 } from "./components/FirstRunGuide";
 import {
   readHiddenAgentIds,
@@ -85,6 +88,29 @@ function emptyAgentRoute(state: StateView): AgentRouteView {
   };
 }
 
+function hasConnectedAgent(agents: AgentView[]): boolean {
+  return agents.some((agent) =>
+    agent.status === "CONNECTED"
+      || agent.installations.some((installation) => installation.connected),
+  );
+}
+
+function firstIncompleteSetupStep(state: StateView, agents: AgentView[]): FirstRunSetupStep {
+  if (!state.providers.some((provider) => provider.models.length > 0)) return "provider";
+  const routeConfigured = state.routing_mode === "quota_first"
+    ? (state.quota_accounts ?? []).some((account) => account.upstream && account.model)
+    : Object.values(state.tiers).every((tier) => tier.upstream && tier.model);
+  const routeReady = routeConfigured
+    && state.serve.app_runtime === "running"
+    && state.serve.listener_reachable
+    && state.serve.error === null
+    && state.serve.running_revision === state.saved_revision
+    && !state.config_dirty
+    && state.config_error === null;
+  if (!routeReady) return "route";
+  return hasConnectedAgent(agents) ? "complete" : "agent";
+}
+
 export function configSaveStatus(state: StateView, language: Language = "en"): string {
   const chinese = language === "zh-CN";
   if (state.config_dirty) return chinese ? "有未保存更改" : "Unsaved changes";
@@ -124,6 +150,9 @@ function StationApp() {
   });
   const [providerCatalogMode, setProviderCatalogMode] = useState<ProviderCatalogMode>("regular");
   const [firstRunGuideOpen, setFirstRunGuideOpen] = useState(false);
+  const [firstRunSetupStep, setFirstRunSetupStep] = useState<FirstRunSetupStep | null>(null);
+  const [firstRunMicroStep, setFirstRunMicroStep] = useState<FirstRunMicroStep | null>(null);
+  const [firstRunCompletion, setFirstRunCompletion] = useState<"connected" | "skipped" | null>(null);
   const [regularCatalogFilters, setRegularCatalogFilters] = useState<RegularCatalogFilters>({
     query: "",
     region: "all",
@@ -266,6 +295,26 @@ function StationApp() {
     if (shouldOpenFirstRunGuide()) setFirstRunGuideOpen(true);
   }, [state]);
 
+  useEffect(() => {
+    if (firstRunSetupStep !== "agent" || !hasConnectedAgent(agents)) return;
+    markFirstRunGuideDismissed();
+    setFirstRunGuideOpen(false);
+    setFirstRunSetupStep(null);
+    setFirstRunMicroStep(null);
+    setFirstRunCompletion("connected");
+  }, [agents, firstRunSetupStep]);
+
+  useEffect(() => {
+    if (
+      firstRunSetupStep === "agent"
+      && firstRunMicroStep === "agent-scan-empty"
+      && !hasConnectedAgent(agents)
+      && agents.some((item) => item.installations.length > 0)
+    ) {
+      setFirstRunMicroStep("agent-select");
+    }
+  }, [agents, firstRunMicroStep, firstRunSetupStep]);
+
   // Record a target revision only for an explicit Save and Apply. A normal
   // initial transition from starting to running is not a successful config apply.
   useEffect(() => {
@@ -276,17 +325,39 @@ function StationApp() {
 
     if (
       phase === "running"
+      && state.serve.app_runtime === "running"
+      && state.serve.listener_reachable
       && state.serve.running_revision === targetRevision
       && state.serve.error === null
+      && !state.config_dirty
+      && state.config_error === null
     ) {
       pendingApplyRevisionRef.current = null;
-      setMessage(copy(
-        `Configuration applied · revision ${targetRevision}`,
-        `配置已应用 · revision ${targetRevision}`,
-      ));
+      if (firstRunSetupStep === "route") {
+        viewHistoryRef.current = [];
+        setFirstRunSetupStep("agent");
+        setFirstRunMicroStep(
+          agents.some((item) => item.installations.length > 0)
+            ? "agent-select"
+            : "agent-scan-empty",
+        );
+        setView("agents");
+        setMessage(copy(
+          "Routing is running. Connect an Agent next.",
+          "路由已运行，接下来接入 Agent。",
+        ));
+      } else {
+        setMessage(copy(
+          `Configuration applied · revision ${targetRevision}`,
+          `配置已应用 · revision ${targetRevision}`,
+        ));
+      }
       const timer = window.setTimeout(
         () => setMessage((current) => (
-          current.startsWith("Configuration applied") || current.startsWith("配置已应用")
+          current.startsWith("Configuration applied")
+            || current.startsWith("配置已应用")
+            || current.startsWith("Routing is running")
+            || current.startsWith("路由已运行")
             ? ""
             : current
         )),
@@ -300,7 +371,18 @@ function StationApp() {
       pendingApplyRevisionRef.current = null;
     }
     return undefined;
-  }, [state?.serve.error, state?.serve.phase, state?.serve.running_revision]);
+  }, [
+    agents,
+    copy,
+    firstRunSetupStep,
+    state?.config_dirty,
+    state?.config_error,
+    state?.serve.app_runtime,
+    state?.serve.error,
+    state?.serve.listener_reachable,
+    state?.serve.phase,
+    state?.serve.running_revision,
+  ]);
 
   // Rescan when runtime state changes from not ready to ready. The first app scan can occur before the gateway starts,
   // That scan_agents call got runtime=None, so all installations had connected=false. Managed
@@ -455,6 +537,17 @@ function StationApp() {
   const route = selectedAgentId ? (state.agent_routes?.[selectedAgentId] ?? emptyAgentRoute(state)) : undefined;
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
   const saveStatus = configSaveStatus(state, language);
+  const recommendedFirstRunStep = firstIncompleteSetupStep(state, agents);
+  const activeFirstRunStep = firstRunSetupStep ?? recommendedFirstRunStep;
+  const activeFirstRunMicroStep = firstRunMicroStep
+    ?? (activeFirstRunStep === "provider"
+      ? "provider-entry"
+      : activeFirstRunStep === "route"
+        ? "route-entry"
+        : activeFirstRunStep === "agent"
+          ? "agent-entry"
+          : "complete");
+  const agentDetected = agents.some((item) => item.installations.length > 0);
 
   // Quota-first Save and Apply persists the account list before restarting the proxy.
   const saveQuota = (accounts: QuotaAccount[]) =>
@@ -557,7 +650,17 @@ function StationApp() {
           selectedAgentId={selectedAgentId}
           scanBusy={scanBusy}
           onRescan={() => void rescanAgents()}
-          onOpenAgent={(id) => navigate(`agent:${id}`)}
+          onOpenAgent={(id) => {
+            navigate(`agent:${id}`);
+            if (firstRunGuideOpen && activeFirstRunMicroStep === "agent-select") {
+              const selected = agents.find((item) => item.metadata.agent_id === id);
+              setFirstRunMicroStep(
+                (selected?.installations.length ?? 0) > 1
+                  ? "agent-installation"
+                  : "agent-connect",
+              );
+            }
+          }}
         >
           {metadata && route && (
             <AgentRoutePage
@@ -576,6 +679,11 @@ function StationApp() {
               onSaveQuotaPlan={saveQuotaPlan}
               onViewQuotaUsage={() => navigate("quota-usage")}
               onSetRoutingMode={(mode) => void run(() => setRoutingMode(mode, metadata.agent_id))}
+              onInstallationSelected={() => {
+                if (firstRunGuideOpen && activeFirstRunMicroStep === "agent-installation") {
+                  setFirstRunMicroStep("agent-connect-multiple");
+                }
+              }}
               embedded
             />
           )}
@@ -630,6 +738,8 @@ function StationApp() {
             setView("overview");
             setMessage("");
             setError("");
+            setFirstRunSetupStep(null);
+            setFirstRunMicroStep(null);
             setFirstRunGuideOpen(true);
           }}
           onSaved={showState}
@@ -649,10 +759,26 @@ function StationApp() {
           freeFilters={freeCatalogFilters}
           onFreeFiltersChange={setFreeCatalogFilters}
           onLoadFree={() => void loadFreeCatalog()}
+          onProviderSelected={() => {
+            if (firstRunGuideOpen && activeFirstRunMicroStep === "provider-choice") {
+              setFirstRunMicroStep("provider-credential");
+            }
+          }}
           onSelectFree={(preset) => setView(`free-provider:${preset.id}`)}
           onAdded={(next, message) => {
-            showState(next, message);
-            setView(viewHistoryRef.current.pop() ?? "home");
+            if (firstRunSetupStep === "provider") {
+              showState(next, copy(
+                "Provider added. Configure routing next.",
+                "供应商已添加，接下来配置路由。",
+              ));
+              viewHistoryRef.current = [];
+              setFirstRunSetupStep("route");
+              setFirstRunMicroStep("route-mode");
+              setView("home");
+            } else {
+              showState(next, message);
+              setView(viewHistoryRef.current.pop() ?? "home");
+            }
           }}
         />
       )}
@@ -666,7 +792,16 @@ function StationApp() {
             onBack={() => setView("add-provider")}
             onBusyChange={setFreeProviderBusy}
             onAdded={(next, nextMessage) => {
-              showState(next, nextMessage);
+              showState(next, firstRunSetupStep === "provider"
+                ? copy(
+                    "Provider added. Configure routing next.",
+                    "供应商已添加，接下来配置路由。",
+                  )
+                : nextMessage);
+              if (firstRunSetupStep === "provider") {
+                setFirstRunSetupStep("route");
+                setFirstRunMicroStep("route-mode");
+              }
               setView("home");
             }}
           />
@@ -684,9 +819,85 @@ function StationApp() {
       })()}
       <FirstRunGuide
         open={firstRunGuideOpen}
+        microStep={activeFirstRunMicroStep}
+        scanBusy={scanBusy}
+        onBack={() => {
+          if (activeFirstRunMicroStep === "provider-models") {
+            setFirstRunMicroStep("provider-credential");
+          } else if (activeFirstRunMicroStep === "provider-save") {
+            setFirstRunMicroStep("provider-models");
+          } else if (activeFirstRunMicroStep === "route-config") {
+            setFirstRunMicroStep("route-mode");
+          } else if (activeFirstRunMicroStep === "route-apply") {
+            setFirstRunMicroStep("route-config");
+          } else if (activeFirstRunMicroStep === "agent-installation") {
+            setFirstRunMicroStep("agent-select");
+          } else if (activeFirstRunMicroStep === "agent-connect") {
+            setFirstRunMicroStep("agent-select");
+          } else if (activeFirstRunMicroStep === "agent-connect-multiple") {
+            setFirstRunMicroStep("agent-installation");
+          }
+        }}
+        onTargetAction={() => {
+          if (activeFirstRunMicroStep === "provider-entry") {
+            setFirstRunSetupStep("provider");
+            setFirstRunMicroStep("provider-choice");
+          } else if (activeFirstRunMicroStep === "provider-credential") {
+            setFirstRunMicroStep("provider-models");
+          } else if (activeFirstRunMicroStep === "provider-models") {
+            setFirstRunMicroStep("provider-save");
+          } else if (activeFirstRunMicroStep === "route-entry") {
+            setFirstRunSetupStep("route");
+            setFirstRunMicroStep("route-mode");
+          } else if (activeFirstRunMicroStep === "route-mode") {
+            setFirstRunMicroStep("route-config");
+          } else if (activeFirstRunMicroStep === "route-config") {
+            setFirstRunMicroStep("route-apply");
+          } else if (activeFirstRunMicroStep === "agent-entry") {
+            setFirstRunSetupStep("agent");
+            setFirstRunMicroStep(agentDetected ? "agent-select" : "agent-scan-empty");
+          } else if (activeFirstRunMicroStep === "complete") {
+            markFirstRunGuideDismissed();
+            setFirstRunGuideOpen(false);
+            setFirstRunSetupStep(null);
+            setFirstRunMicroStep(null);
+            viewHistoryRef.current = [];
+            setView("overview");
+            setMessage("");
+            setError("");
+          }
+        }}
+        onSkipAgent={() => {
+          markFirstRunGuideDismissed();
+          setFirstRunGuideOpen(false);
+          setFirstRunSetupStep(null);
+          setFirstRunMicroStep(null);
+          setFirstRunCompletion("skipped");
+        }}
+        onPause={() => {
+          setFirstRunGuideOpen(false);
+          setFirstRunSetupStep(null);
+          setFirstRunMicroStep(null);
+          window.requestAnimationFrame(() => {
+            document.querySelector<HTMLElement>("[data-onboarding-return-focus]")?.focus();
+          });
+        }}
         onDismiss={() => {
           markFirstRunGuideDismissed();
           setFirstRunGuideOpen(false);
+          setFirstRunSetupStep(null);
+          setFirstRunMicroStep(null);
+        }}
+      />
+      <FirstRunCompletionDialog
+        open={firstRunCompletion !== null}
+        agentSkipped={firstRunCompletion === "skipped"}
+        onFinish={() => {
+          setFirstRunCompletion(null);
+          viewHistoryRef.current = [];
+          setView("overview");
+          setMessage("");
+          setError("");
         }}
       />
     </AppShell>

@@ -21,7 +21,11 @@ export default function RoutingModeSelector({
     : copy("Routing mode", "路由模式");
 
   return (
-    <section className="routing-mode-section" aria-label={label}>
+    <section
+      className="routing-mode-section"
+      aria-label={label}
+      data-onboarding-target={agent ? undefined : "route-mode"}
+    >
       <div className="routing-mode-copy">
         <span>{copy("ROUTING STRATEGY", "路由策略")}</span>
         <div>

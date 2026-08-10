@@ -112,7 +112,11 @@ export default function QuotaPriorityPanel({
   );
 
   return (
-    <section className="panel quota-panel">
+    <section
+      className="panel quota-panel"
+      aria-label={copy("Quota routing configuration", "额度路由配置")}
+      data-onboarding-target="route-config"
+    >
       <div className="panel-head split-heading">
         <div>
           <h2>{copy("Quota-first", "额度优先")}</h2>
@@ -230,6 +234,7 @@ export default function QuotaPriorityPanel({
         <button
           className="btn primary"
           type="button"
+          data-onboarding-target="route-apply"
           disabled={busy || applying}
           onClick={() => onSave(entries.filter((entry) => entry.upstream && entry.model))}
         >

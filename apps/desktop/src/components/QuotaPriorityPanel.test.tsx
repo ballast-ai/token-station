@@ -44,6 +44,15 @@ function renderPanel(overrides: Partial<ComponentProps<typeof QuotaPriorityPanel
 }
 
 describe("QuotaPriorityPanel quota plans", () => {
+  it("exposes quota configuration and its real apply action to onboarding", () => {
+    renderPanel();
+
+    expect(screen.getByRole("region", { name: "额度路由配置" }))
+      .toHaveAttribute("data-onboarding-target", "route-config");
+    expect(screen.getByRole("button", { name: "保存并应用" }))
+      .toHaveAttribute("data-onboarding-target", "route-apply");
+  });
+
   it("uses the shadcn controls for quota plan rows instead of native selects", () => {
     const { planSection } = renderPanel();
 
