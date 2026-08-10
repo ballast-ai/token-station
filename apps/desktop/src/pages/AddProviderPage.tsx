@@ -16,6 +16,7 @@ import ModelPicker, { type CatalogStatus } from "../components/ModelPicker";
 import PageBackButton from "../components/PageBackButton";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { englishProviderName } from "../providerCopy";
+import { humanizeAppError } from "../errors";
 
 export type ProviderCatalogMode = "regular" | "free";
 
@@ -182,7 +183,7 @@ export default function AddProviderPage({
       .catch((caught) => {
         if (!active) return;
         setEndpointPreview(null);
-        setEndpointError(String(caught));
+        setEndpointError(humanizeAppError(caught));
       });
     return () => {
       active = false;
@@ -301,7 +302,7 @@ export default function AddProviderPage({
       setDiscovery(result);
       setDiscoveredModels((current) => [...new Set([...current, ...result.models])]);
     } catch (caught) {
-      setDiscovery({ models: [], source: "none", fetched_at_ms: null, warning: String(caught) });
+      setDiscovery({ models: [], source: "none", fetched_at_ms: null, warning: humanizeAppError(caught) });
     } finally {
       setDiscovering(false);
     }
@@ -352,7 +353,7 @@ export default function AddProviderPage({
           : copy("Provider added", "供应商已添加"),
       );
     } catch (caught) {
-      setError(String(caught));
+      setError(humanizeAppError(caught));
     } finally {
       setSaving(false);
     }

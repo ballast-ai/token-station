@@ -61,14 +61,10 @@ import QuotaUsagePage from "./pages/QuotaUsagePage";
 import SettingsHub from "./pages/SettingsHub";
 import UsageWorkspace from "./pages/UsageWorkspace";
 import "./App.css";
+import { humanizeAppError } from "./errors";
 
 function errorText(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object") {
-    const value = error as { message?: unknown; code?: unknown };
-    return [value.message, value.code && `code=${value.code}`].filter(Boolean).map(String).join(" · ");
-  }
-  return String(error);
+  return humanizeAppError(error);
 }
 
 function hasErrorCode(error: unknown, code: string): boolean {
@@ -266,8 +262,8 @@ function StationApp() {
     if (shouldOpenFirstRunGuide()) setFirstRunGuideOpen(true);
   }, [state]);
 
-  // 只有显式「保存并应用」记录目标 revision；普通首次启动即使经历
-  // starting -> running，也不是一次配置应用成功。
+  // Record a target revision only for an explicit Save and Apply. A normal
+  // initial transition from starting to running is not a successful config apply.
   useEffect(() => {
     const phase = state?.serve.phase;
     if (!state) return undefined;
@@ -294,18 +290,22 @@ function StationApp() {
       );
       return () => window.clearTimeout(timer);
     }
-    // 失败回退到旧实例时 phase 也是 running；error 是权威失败信号。迟到的旧
-    // running_revision 且无 error 可能只是 500ms 轮询乱序，保留目标继续等待。
+    // Falling back to the old instance after a failure also reports a running
+    // phase; error is the authoritative failure signal. A late old
+    // running_revision without an error may only be a reordered 500 ms poll, so
+    // keep waiting for the target revision.
     if (state.serve.error !== null || phase !== "running") {
       pendingApplyRevisionRef.current = null;
     }
     return undefined;
   }, [state?.serve.error, state?.serve.phase, state?.serve.running_revision]);
 
-  // 运行态从「未就绪」变「就绪」时自动重扫一次。开 app 的首扫可能早于网关起来,
-  // 那次 scan_agents 拿到 runtime=None → 所有安装 connected=false → 已接管的
-  // Agent 误显「需修复」。顶栏 500ms 轮询会自纠,但扫描结果不会跟着刷。运行态一
-  // 就绪就补一次扫,让卡片与真实运行态对齐(rescanAgents 内部有去重/排队保护)。
+  // Rescan once when runtime changes from not ready to ready. The initial app
+  // scan can run before the gateway starts, so scan_agents receives runtime=None
+  // and marks every installation disconnected, incorrectly showing managed
+  // Agents as needing repair. The 500 ms header poll corrects runtime but not the
+  // scan results, so rescan when ready to align cards with reality. rescanAgents
+  // already deduplicates and queues requests.
   useEffect(() => {
     if (!state) return;
     const ready = state.serve.app_runtime === "running" && Boolean(state.serve.listener_reachable);
@@ -315,9 +315,11 @@ function StationApp() {
     };
     const previous = runtimeObservationRef.current;
     runtimeObservationRef.current = observation;
-    // 首次观测(null)不算「变就绪」——那一刻若已就绪,load() 的首扫已带上 runtime;
-    // 真正的 未就绪→就绪，或仍就绪但 serving instance 已切换时补扫。后者确保
-    // Applying.old → Running(new) 后 Agent adapter readiness 不会停留在旧实例。
+    // The first observation (null) is not a ready transition. If runtime is
+    // already ready then load() included it in the first scan. Rescan after a
+    // real not-ready-to-ready transition or when the serving instance changes
+    // while ready. The latter prevents Agent adapter readiness from staying on
+    // the old instance after Applying.old -> Running(new).
     const becameReady = previous?.ready === false && ready;
     const servingInstanceChanged = Boolean(
       previous?.ready
@@ -456,14 +458,14 @@ function StationApp() {
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
   const saveStatus = configSaveStatus(state, language);
 
-  // 额度优先「保存并应用」:先落库账户列表,再重启代理让新一版生效。
+  // Quota-first Save and Apply persists the account list before restarting the proxy.
   const saveQuota = (accounts: QuotaAccount[]) =>
     void run(async () => {
       await setQuotaAccounts(accounts);
       return serveStart();
     }, undefined, true);
 
-  // 声明供应商额度计划(供本地估算):写进草稿,随下次「保存并应用」生效。
+  // Store provider quota plans in the draft for local estimates; the next Save and Apply activates them.
   const saveQuotaPlan = (
     upstream: string,
     lenMs: number,
@@ -490,7 +492,7 @@ function StationApp() {
       )}
       {message && state.serve.phase !== "starting" && <div className="banner ok global-banner">{message}</div>}
       {error && <div className="banner err global-banner">{error}</div>}
-      {state.serve.error && <div className="banner err global-banner">{state.serve.error}</div>}
+      {state.serve.error && <div className="banner err global-banner">{humanizeAppError(state.serve.error, language)}</div>}
 
       {view === "overview" && (
         <OverviewPage
@@ -514,7 +516,7 @@ function StationApp() {
           onViewQuotaUsage={() => navigate("quota-usage")}
           busy={busy}
           applying={state.serve.phase === "starting"}
-          configError={state.config_error}
+          configError={state.config_error ? humanizeAppError(state.config_error, language) : null}
           keywords={state.keywords}
           saveStatus={saveStatus}
           localOnly={state.local_only}

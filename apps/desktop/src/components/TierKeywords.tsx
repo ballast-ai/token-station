@@ -2,13 +2,14 @@ import { useState } from "react";
 import type { TierSlot } from "../api";
 import { useLocalizedCopy } from "./LanguageProvider";
 
-/** 三档关键词库的静态文案。顺序=优先级(强→中→弱),与内核 rules 定序一致:
- *  同一句话同时命中两档的词时向上升档。列表只显示用户自己加的词,从空开始。 */
+/** Static copy for the three-tier keyword library. Order matches core rule priority
+ *  from strong to medium to weak, so a phrase matching two tiers moves upward.
+ *  Lists start empty and show only user-added keywords. */
 
 export interface TierKeywordsProps {
   keywords: Record<TierSlot, string[]>;
   disabled?: boolean;
-  /** 该档是否已配置好供应商+模型(未配置则不能加词,内核会拒绝空池规则)。 */
+  /** Whether this tier has a provider and model; the core rejects keywords targeting an empty pool. */
   configured: Record<TierSlot, boolean>;
   onAdd: (slot: TierSlot, keyword: string) => void | Promise<void>;
   onRemove: (slot: TierSlot, keyword: string) => void | Promise<void>;
@@ -47,7 +48,7 @@ export default function TierKeywords({
       placeholder: copy("Enter a keyword and press Return", "输入关键词，回车加入"),
     },
   ];
-  // 每档一个独立输入框状态。
+  // Keep independent input state for each tier.
   const [drafts, setDrafts] = useState<Record<TierSlot, string>>({
     high: "",
     mid: "",

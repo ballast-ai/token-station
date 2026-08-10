@@ -1,7 +1,7 @@
 //! The local metrics store: one `SQLite` database, on by default, holding
 //! request metadata and nothing else.
 //!
-//! Created on first start (`首启即建`), written on every exchange, and — the
+//! Created on first start, written on every exchange, and — the
 //! part that matters — **structurally unable to hold content**: every column
 //! is drawn from `token-station-metrics`' `RequestRecord`, whose fields are
 //! numbers, closed enums, or operator-configured names. There is no column a

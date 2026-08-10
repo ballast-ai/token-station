@@ -11,17 +11,17 @@ members = [
     "crates/release",
     "crates/router-core",
 ]
-# WASM guest 测试件：目标是 wasm32-wasip2，不能进主 workspace 的构建图。
-# plugin-runtime 的测试用子进程 cargo 构建它。
+# WASM guest test fixture targeting wasm32-wasip2. Keep it out of the main
+# workspace build graph; plugin-runtime tests build it in a cargo subprocess.
 exclude = [
     "crates/plugin-runtime/tests/guests/test-provider",
     "plugins/official/agent-anthropic",
     "plugins/official/agent-openai",
     "plugins/official/agent-openai-responses",
     "plugins/official/provider-openai-compatible",
-    # 桌面 app（Tauri）刻意排除在严格 workspace 之外：它庞大的 GUI 依赖树不进
-    # clippy-pedantic / cargo-deny 门禁。它 path 依赖 token-station-cli，复用内核
-    # 而不分叉。
+    # Deliberately exclude the Tauri desktop app from the strict workspace so its
+    # large GUI dependency tree does not enter clippy-pedantic or cargo-deny gates.
+    # Its path dependency on token-station-cli reuses the core without a fork.
     "apps/desktop/src-tauri",
 ]
 
@@ -30,10 +30,10 @@ edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/GlimpseEngine/token-station"
 rust-version = "1.95"
-# 版本号缺失的 path 依赖本来就过不了 `cargo publish`，这里只是把事实声明出来，
-# 让 cargo-deny 的 wildcard 检查得以对 workspace 内部依赖放行。到 conformance
-# 需要作为独立发布物拆出去那天（架构 §9.1），翻转此标志并给依赖补版本号——
-# wildcard 检查从那一刻起开始把关，正合适。
+# Path dependencies without versions cannot pass `cargo publish`; this merely
+# states that fact so cargo-deny can allow workspace-internal dependencies. When
+# conformance becomes an independent release artifact under architecture section
+# 9.1, flip this flag and add dependency versions so wildcard checks begin then.
 publish = false
 
 [workspace.dependencies]
@@ -48,8 +48,8 @@ all = "warn"
 pedantic = "warn"
 
 
-# 发布产物的确定性与体积：单编译单元 + thin LTO + 去符号。
-# 完整配方（工具链钉版、路径重映射、确定性打包）在 scripts/build-release.sh。
+# Release determinism and size: one codegen unit, thin LTO, and stripped symbols.
+# See scripts/build-release.sh for toolchain pinning, path remapping, and deterministic packaging.
 [profile.release]
 codegen-units = 1
 lto = "thin"

@@ -24,7 +24,7 @@ impl Default for HealthPolicy {
     }
 }
 
-/// Per-upstream failure counting: the `简化版健康检查` of C1#2.
+/// Per-upstream failure counting: the simplified health check from C1#2.
 ///
 /// Timestamps are inputs, never read from a clock — same discipline as
 /// [`crate::Router::route`], and for the same reason: the state machine must
@@ -48,7 +48,7 @@ impl Default for HealthPolicy {
 ///
 /// Ejection expires into [`Health::Degraded`], not `Healthy`: the router
 /// prefers healthy candidates and uses degraded ones only when nothing better
-/// remains, so the first request after cooldown is the probe (`恢复探测`) —
+/// remains, so the first request after cooldown is the recovery probe —
 /// real traffic, sent only when the alternative is failing anyway. One success
 /// restores `Healthy`; one countable failure re-ejects immediately (a probe
 /// that fails needs no second opinion).

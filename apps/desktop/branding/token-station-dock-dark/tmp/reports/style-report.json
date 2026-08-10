@@ -1,0 +1,90 @@
+{
+  "mode": "icon-spec-authoring",
+  "layout": "delivery",
+  "spec": "/Users/rainlu/local/token-station-dock-icon/apps/desktop/branding/token-station-dock-dark/tmp/work/spec.json",
+  "work_spec": "tmp/work/spec.json",
+  "name": "TokenStationDockDark",
+  "canvas": 1024,
+  "target_platforms": [],
+  "deliverable_type": null,
+  "source_reference": "The native 1024px icon_512x512@2x.png representation extracted from apps/desktop/src-tauri/icons/icon.icns",
+  "brief": "Create the dark runtime Dock icon by inverting the current Token Station icon while preserving the orange route stripe exactly.",
+  "renderer": "@resvg/resvg-js",
+  "generated_files": [
+    "token-station-dock-dark.preview.svg",
+    "token-station-dock-dark.preview.png",
+    "token-station-dock-dark.svg",
+    "token-station-dock-dark.png",
+    "layers/01-runtime-dark-icon.svg",
+    "tmp/README.md",
+    "tmp/reports/style-report.json",
+    "tmp/reports/package-verification.json",
+    "tmp/reports/reference-diff.png",
+    "tmp/reports/reference-overlay.png",
+    "tmp/reports/reference-side-by-side.png",
+    "tmp/reports/visual-review.json"
+  ],
+  "generated_directories": [
+    "tmp/reports",
+    "layers",
+    "tmp"
+  ],
+  "preview_svg": "token-station-dock-dark.preview.svg",
+  "preview_png": "token-station-dock-dark.preview.png",
+  "app_svg": "token-station-dock-dark.svg",
+  "app_png": "token-station-dock-dark.png",
+  "layers": [
+    "layers/01-runtime-dark-icon.svg"
+  ],
+  "apple_adapter": null,
+  "preview_background_layers": [],
+  "icon_composer_layer_decisions": [],
+  "background_mode": "spec",
+  "semantic_review": {
+    "status": "exact-enough",
+    "identity_risk": "low",
+    "basis": "The current shipped icon is transformed directly without redrawing its geometry.",
+    "route": "png-fallback-recommended",
+    "notes": "Raster is intentional because this is a color-only runtime variant of the shipped raster icon. The orange stripe and antialiased orange edge pixels remain unchanged."
+  },
+  "source_analysis": {
+    "fidelity_target": "Preserve the exact current icon geometry and orange stripe while swapping the light and dark neutral colors.",
+    "identity_risk": "low",
+    "route": "png-fallback-recommended",
+    "must_preserve": [
+      "the native transparent outer padding and rounded-corner alpha mask",
+      "the orange diagonal stripe and its antialiased edges",
+      "the two black diagonal tracks",
+      "the central horizontal bar",
+      "the existing spacing, crop, and proportions"
+    ],
+    "must_not_add": [
+      "blue dots, orange squares, alternate station marks, text, glow, or new geometry"
+    ],
+    "components": [
+      {
+        "id": "runtime-dark-icon",
+        "layer": "runtime dark icon",
+        "format": "png",
+        "spec_constraints": [
+          "invert non-orange RGB channels only",
+          "keep alpha unchanged"
+        ]
+      }
+    ],
+    "acceptance_checks": [
+      "output remains 1024 by 1024",
+      "orange pixels are byte-identical to the source",
+      "non-orange pixels are RGB inverses of the source"
+    ]
+  },
+  "warnings": [
+    "recommended package shape is 2-5 semantic layers, or at most 8 for an explicit bounded pane/sticker style"
+  ],
+  "claims": [
+    "spec-driven reusable cross-platform icon source package",
+    "semantic source layers retained",
+    "rounded preview PNG rendered by @resvg/resvg-js",
+    "unrounded app/source canvas outputs retained separately from preview masking"
+  ]
+}

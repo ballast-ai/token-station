@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-# 与 workspace 声明一致；当前锁文件和 Windows 构建门禁以 1.95 为最低版本。
+# Match the workspace declaration; the lockfile and Windows build gate require at least 1.95.
 rust-version = "1.95"
 publish.workspace = true
 
@@ -18,11 +18,12 @@ wasmtime = { version = "46", default-features = false, features = [
     "runtime",
     "component-model",
     "cranelift",
-    # 编译缓存：同一批 WASM 组件每次启动都现编译(Cranelift)要数秒/个,启动全花在这。
-    # 内置缓存按内容+配置哈希落盘,重启直接反序列化;unsafe 全在 wasmtime 内部。
+    # Compilation cache: compiling each WASM component with Cranelift on every
+    # start takes seconds. Persist the built-in cache by content and config hash,
+    # then deserialize on restart; unsafe code remains inside wasmtime.
     "cache",
-    # 测试用手写 WAT 构造「import 了 wasi:sockets 的组件」来证明拒收路径；
-    # 生产加载的是二进制 .wasm，不经过 wat。
+    # Tests use handwritten WAT for a component importing wasi:sockets to prove
+    # the rejection path. Production loads binary .wasm without WAT.
     "wat",
 ] }
 wasmtime-wasi = "46"

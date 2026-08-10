@@ -28,7 +28,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   }),
 }));
 
-// 供应商选择器是可点击的品牌卡片目录，不是 <select>；按可见标签点卡片。
+// The provider picker is a clickable brand-card catalog, not a <select>; click cards by visible label.
 const pickPreset = (user: ReturnType<typeof userEvent.setup>, label: string) =>
   user.click(screen.getByText(label, { selector: ".provider-catalog-card-title strong" }));
 
@@ -264,10 +264,10 @@ describe("AddProviderPage", () => {
     renderPage();
 
     const grid = screen.getByRole("list", { name: "常规供应商列表" });
-    // 官方/按量 API 与本机/自托管两组的代表都以卡片呈现。
+    // Representatives of official usage-based APIs and local self-hosted providers both appear as cards.
     expect(within(grid).getByText("MiniMax（中国）")).toBeInTheDocument();
     expect(within(grid).getByText("本地 Ollama")).toBeInTheDocument();
-    // 聚合候选(AGGREGATOR_CANDIDATES)不进默认目录,不作为卡片提供。
+    // Aggregator candidates are excluded from the default catalog and do not appear as cards.
     expect(screen.queryByText(/OpenRouter/)).toBeNull();
   });
 

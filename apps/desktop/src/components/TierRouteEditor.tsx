@@ -42,7 +42,7 @@ export default function TierRouteEditor({
         const provider = providers.find((candidate) => candidate.name === tier.upstream);
         // A stored selection whose provider/model no longer exists in the shared
         // pool is shown as invalid — not silently re-listed as if valid — so the
-        // user notices and reselects (the "老旧选项残留" they reported). The valid
+        // user notices and reselects, avoiding the stale-option residue they reported. The valid
         // choices stay in the dropdown, so reselecting is one click away.
         const staleSuffix = copy(" (unavailable — reselect)", "（已失效·请重选）");
         const providerMissing = Boolean(tier.upstream) && !provider;

@@ -2,7 +2,7 @@
 //!
 //! Distinct from the metrics store on purpose. The store is queryable history
 //! and can be switched off; this is the operational trace that is always
-//! written (`文件日志：始终写、轮转`), so "the store was off" never means "we
+//! written and rotated unconditionally, so "the store was off" never means "we
 //! are blind". Both write the same `RequestRecord`, so neither can carry what
 //! the other could not.
 

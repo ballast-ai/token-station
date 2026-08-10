@@ -67,8 +67,8 @@ impl ConfigSource for StaticConfigSource {
 ///
 /// A refresh that fails — the config service is unreachable, the file was
 /// deleted mid-write, a remote profile is malformed — leaves the previous
-/// configuration serving. The client requirement is `云端不可达沿用缓存，数据面
-/// 照常`; this type is that sentence.
+/// configuration serving. This type implements the requirement to keep using
+/// cached configuration and continue the data plane when the cloud is unreachable.
 ///
 /// The asymmetry with the first load is deliberate. Starting with no
 /// configuration at all is a fatal misconfiguration and the process should say

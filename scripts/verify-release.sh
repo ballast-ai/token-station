@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# 验证官方产物确实由公开源码编出（C1#7 出口标准）。用法：
+# Verify that official artifacts were built from public source (C1#7 release gate). Usage:
 #
 #   git checkout v<version>
 #   scripts/verify-release.sh <target-triple> <official.tar.gz>
 #
-# 第一道比对是归档字节；归档层若因 tar/gzip 环境差异不一致，退到第二道：
-# 逐个比对归档内文件的 SHA-256——那才是「二进制由此源码编出」的实质命题。
-# 两道都过不了才是不一致。
+# First compare archive bytes. If tar or gzip environment differences prevent a
+# match, compare each archived file's SHA-256. The latter proves binaries came
+# from this source. Report a mismatch only when both checks fail.
 
 set -euo pipefail
 

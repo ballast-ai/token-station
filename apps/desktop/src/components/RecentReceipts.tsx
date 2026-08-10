@@ -6,7 +6,7 @@ import {
   type ReceiptRouteView,
   type ReceiptView,
 } from "../api";
-import { humanizeErrorCode } from "../errors";
+import { humanizeAppError, humanizeErrorCode } from "../errors";
 import { useLocalizedCopy } from "./LanguageProvider";
 
 const MAX_RECEIPTS = 5;
@@ -75,7 +75,7 @@ function formatDecisionReason(
   }
 }
 
-/** 额度决策快照的一行摘要:剩余/距刷新/速率余量/状态。 */
+/** One-line quota decision summary: remaining quota, time to reset, rate headroom, and state. */
 function formatQuotaDecision(
   quota: NonNullable<ReceiptRouteView["quota"]>,
   copy: (english: string, simplifiedChinese: string) => string,
@@ -266,7 +266,7 @@ export default function RecentReceipts() {
         setLastUpdatedAt(Date.now());
       }
     } catch (caught) {
-      if (mounted.current) setError(String(caught));
+      if (mounted.current) setError(humanizeAppError(caught));
     } finally {
       inFlight.current = false;
       if (

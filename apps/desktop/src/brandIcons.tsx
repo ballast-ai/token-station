@@ -1,5 +1,6 @@
-// 品牌 logo 映射:把供应商预设 id / Agent id 映射到 @lobehub/icons 的彩色
-// Avatar 图标。没有官方 logo 的(如 Hermes)返回 null,调用方用首字母色块兜底。
+// Brand logo mapping from provider preset IDs and Agent IDs to colored
+// @lobehub/icons avatars. Return null when no official logo exists, such as for
+// Hermes, so the caller can fall back to an initial tile.
 import { useState, type ComponentType } from "react";
 import {
   AlibabaCloud,
@@ -46,13 +47,13 @@ import {
 
 type BrandGlyph = ComponentType<{ size: number }>;
 
-/** lobehub 图标本体可直接渲染;多数品牌另带 `.Color`,全部品牌都带 `.Avatar`。 */
+/** Base lobehub icons render directly; most brands also expose `.Color`, and all expose `.Avatar`. */
 type BrandIcon = BrandGlyph & {
   Avatar: BrandGlyph;
   Color?: BrandGlyph;
 };
 
-// 供应商预设 id → 品牌图标。带地区/Plan 后缀的归到同一品牌。
+// Map provider preset IDs to brand icons. Regional and plan suffixes share a brand.
 const PROVIDER_ICONS: Record<string, BrandIcon> = {
   openai: OpenAI,
   anthropic: Anthropic,
@@ -75,7 +76,7 @@ const PROVIDER_ICONS: Record<string, BrandIcon> = {
   xai: Grok,
   volcengine_ark: Volcengine,
   volcengine_ark_coding: Volcengine,
-  // BytePlus 无独立 logo,用其母品牌火山引擎(Volcengine)。
+  // BytePlus has no separate logo, so use its parent brand, Volcengine.
   byteplus_ark: Volcengine,
   byteplus_ark_coding: Volcengine,
   siliconflow: SiliconCloud,
@@ -104,7 +105,7 @@ const PROVIDER_ICONS: Record<string, BrandIcon> = {
   ollama: Ollama,
 };
 
-// Agent id → 品牌图标。Hermes(Nous Hermes)无 @lobehub logo → 走 AGENT_IMAGES 自带图。
+// Map Agent IDs to brand icons. Hermes has no @lobehub icon, so use AGENT_IMAGES.
 const AGENT_ICONS: Record<string, BrandIcon> = {
   "claude-code": ClaudeCode,
   "claude-desktop": Claude,
@@ -115,15 +116,16 @@ const AGENT_ICONS: Record<string, BrandIcon> = {
   cursor: Cursor,
 };
 
-// Agent id → 自带位图 logo(放在 public/ 下,按 URL 引用)。@lobehub 没有的品牌
-// (如 Hermes)用它;文件缺失时 <BrandImage> 自动回退到首字母块,不会白屏。
+// Map Agent IDs to bundled bitmap logos under public/, referenced by URL. Use
+// these for brands missing from @lobehub, such as Hermes. If a file is missing,
+// <BrandImage> falls back to an initial tile instead of rendering blank.
 type AgentImage = { src: string; shape?: "app" };
 const AGENT_IMAGES: Record<string, AgentImage> = {
   "nous-hermes-agent": { src: "/agents/hermes.png" },
   workbuddy: { src: "/agents/workbuddy.png", shape: "app" },
 };
 
-/** 首字母/缩写色块,用于没有品牌 logo 的对象。 */
+/** Initial or abbreviation tile for items without a brand logo. */
 function Fallback({ text, size }: { text: string; size: number }) {
   return (
     <span className="brand-fallback" style={{ width: size, height: size }}>
@@ -132,7 +134,7 @@ function Fallback({ text, size }: { text: string; size: number }) {
   );
 }
 
-/** 自带位图 logo;加载失败(文件未放置)时回退到首字母块。 */
+/** Bundled bitmap logo that falls back to an initial tile if loading fails. */
 function BrandImage({
   src,
   fallback,
@@ -159,14 +161,14 @@ function BrandImage({
   );
 }
 
-/** 供应商品牌 logo;无匹配用 label 首字母兜底。 */
+/** Provider brand logo that falls back to the label's initial when unmatched. */
 export function ProviderIcon({ id, label, size = 28 }: { id: string; label: string; size?: number }) {
   const Icon = PROVIDER_ICONS[id];
   if (Icon) return <Icon.Avatar size={size} />;
   return <Fallback text={label.slice(0, 1).toUpperCase()} size={size} />;
 }
 
-/** Agent 品牌 logo;使用完整品牌图形而非黑底 Avatar,避免标记被缩成角落小点。 */
+/** Agent brand logo using the full mark instead of a black avatar that shrinks it into a corner. */
 export function AgentIcon({ id, fallback, size = 24 }: { id: string; fallback: string; size?: number }) {
   const image = AGENT_IMAGES[id];
   const Icon = AGENT_ICONS[id];

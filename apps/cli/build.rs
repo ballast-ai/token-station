@@ -1,4 +1,4 @@
-//! Wires the builtin plugin tier (架构 §12.1). With `--features
+//! Wires the builtin plugin tier (architecture section 12.1). With `--features
 //! builtin-plugins` the release pipeline points `TOKEN_STATION_PLUGINS_DIST`
 //! at a staged plugins directory and the official packages are compiled into
 //! the binary. A plain `cargo build` has no builtin tier and none of this

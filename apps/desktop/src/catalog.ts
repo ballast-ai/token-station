@@ -1,16 +1,17 @@
-// OpenAI Chat Completions 供应商预设。Base URL、示例模型与分类均以官方资料为准；
-// 型号会变化，所以模型仅作可编辑建议，不替代运行时 /models 发现。
+// OpenAI Chat Completions provider presets. Base URLs, example models, and
+// categories follow official sources. Models are editable suggestions because
+// catalogs change; they do not replace runtime /models discovery.
 
 export type ProviderServiceClass = "first_party" | "managed_inference" | "self_hosted" | "aggregator";
 
 export interface ProviderPreset {
-  id: string; // 供应商标识 = 上游名默认值
+  id: string; // Provider identifier and default upstream name.
   label: string;
   baseUrl: string;
   models: string[];
   needsKey: boolean;
   note?: string;
-  local?: boolean; // 本机运行的供应商(如 Ollama/LM Studio);选中即默认勾「本地模型」
+  local?: boolean; // Locally hosted provider such as Ollama or LM Studio; selected presets default to local models.
   protocol: "openai_chat_completions";
   region: string;
   subscription: string;
@@ -225,9 +226,10 @@ const OFFICIAL_AND_MANAGED_PRESETS: ProviderPreset[] = [
   }),
 ];
 
-// 本机自托管:只收录 Ollama 一个代表。其余本地运行时(LM Studio / vLLM / llama.cpp
-// / LocalAI 等)都是同一套 OpenAI 兼容 + 本机地址,用「自定义配置」勾「本地模型」即可
-// 接入,不必逐一铺预设。
+// Keep Ollama as the single representative for local self-hosting. Other local
+// runtimes such as LM Studio, vLLM, llama.cpp, and LocalAI use the same
+// OpenAI-compatible protocol and local address, so users can connect them with
+// a custom configuration marked as a local model instead of separate presets.
 const SELF_HOSTED_PRESETS: ProviderPreset[] = [
   verified({
     id: "ollama", label: "本地 Ollama", baseUrl: "http://127.0.0.1:11434/v1", models: ["llama3.3", "qwen2.5", "deepseek-r1"],

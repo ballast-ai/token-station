@@ -1,5 +1,5 @@
 //! `plugin new / build / test`: the third-party developer chain
-//! (架构 §12.4, stage B3).
+//! (architecture section 12.4, stage B3).
 //!
 //! The scaffold is not a stub — it is the official OpenAI-compatible
 //! provider adapter with its identity renamed. It compiles, and it passes

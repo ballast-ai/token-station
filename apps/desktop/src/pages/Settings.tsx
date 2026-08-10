@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getEgress, SettingsView, StateView, setSettings, type EgressView } from "../api";
 import { LanguageBoundary, useLanguage } from "../components/LanguageProvider";
+import { humanizeAppError } from "../errors";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Input } from "../components/ui/input";
@@ -17,17 +18,17 @@ function settingsFailure(caught: unknown): { field: string; message: string } {
   if (caught && typeof caught === "object") {
     const value = caught as { field?: unknown; message?: unknown };
     if (typeof value.field === "string" && typeof value.message === "string") {
-      return { field: value.field, message: value.message };
+      return { field: value.field, message: humanizeAppError(value) };
     }
   }
   return {
     field: "",
-    message: caught instanceof Error ? caught.message : String(caught),
+    message: humanizeAppError(caught),
   };
 }
 
-/// 设置页:代理开关、出站策略与只读环境信息。
-/// 改开关对*正在运行*的 serve 不生效,需重启代理——面板明说。
+/// Settings page for proxy switches, egress policy, and read-only environment details.
+/// Switch changes do not affect a running server until the proxy restarts; the panel states this explicitly.
 function SettingsContent({
   settings,
   serveRunning,
