@@ -316,11 +316,13 @@ it("persists a skipped guide and does not show it on the next App session", asyn
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
-it("reopens the guide from Settings without clearing the dismissed version", async () => {
+it("reopens the guide from the About page without clearing the dismissed version", async () => {
   const user = userEvent.setup();
   render(<App />);
 
   await user.click(await screen.findByRole("button", { name: "设置" }));
+  expect(screen.queryByRole("button", { name: "重新查看新手引导" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: /关于/ }));
   await user.click(screen.getByRole("button", { name: "重新查看新手引导" }));
 
   expect(await screen.findByRole("dialog", { name: "先添加一个模型供应商" })).toBeInTheDocument();

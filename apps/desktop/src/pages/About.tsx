@@ -23,11 +23,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 function AboutContent({
   desktopVersion,
   coreVersion,
+  onOpenFirstRunGuide,
 }: {
   desktopVersion: string;
   coreVersion: string;
+  onOpenFirstRunGuide?: () => void;
 }) {
-  const { t } = useLanguage();
+  const { copy, t } = useLanguage();
   const [update, setUpdate] = useState<DesktopUpdateView | null>(null);
   const [busy, setBusy] = useState<"" | "checking" | "installing" | "restarting">("");
   const [err, setErr] = useState("");
@@ -83,7 +85,7 @@ function AboutContent({
     }
   };
 
-  const copy = (url: string) => {
+  const copyReleaseUrl = (url: string) => {
     navigator.clipboard.writeText(url);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
@@ -124,7 +126,7 @@ function AboutContent({
           {update.release_url && (
             <span className="inline-url">
               <span className="mono">{update.release_url}</span>
-              <Button variant="outline" size="sm" onClick={() => copy(update.release_url)}>
+              <Button variant="outline" size="sm" onClick={() => copyReleaseUrl(update.release_url)}>
                 {copied ? t("about.copied") : t("about.copyLink")}
               </Button>
             </span>
@@ -169,6 +171,11 @@ function AboutContent({
                   ? t("about.installVersion", { version: update.version ?? "" })
                   : t("about.check")}
         </Button>
+        {onOpenFirstRunGuide && (
+          <Button variant="outline" type="button" onClick={onOpenFirstRunGuide}>
+            {copy("Review getting started guide", "重新查看新手引导")}
+          </Button>
+        )}
       </div>
 
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
