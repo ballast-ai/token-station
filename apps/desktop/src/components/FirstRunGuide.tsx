@@ -290,6 +290,9 @@ export default function FirstRunGuide({
                     advanceOnTargetClick: false,
                     continueLabel: copy("Back to Overview", "返回概览"),
                   };
+  const lockWorkspaceScroll = content.target === "route-mode"
+    || content.target === "route-config"
+    || content.target === "route-apply";
 
   useLayoutEffect(() => {
     if (!open) return undefined;
@@ -341,9 +344,40 @@ export default function FirstRunGuide({
         // visible so the coachmark can sit above the catalog instead of covering cards.
         workspace.scrollTop = 0;
       } else {
-        target.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "auto" });
+        target.scrollIntoView({
+          block: lockWorkspaceScroll ? "center" : "nearest",
+          inline: "nearest",
+          behavior: "auto",
+        });
       }
       target.focus({ preventScroll: true });
+      let unlockWorkspaceScroll = () => {};
+      if (lockWorkspaceScroll && workspace) {
+        const lockedScrollTop = workspace.scrollTop;
+        const lockedScrollLeft = workspace.scrollLeft;
+        const preventUserScroll = (event: Event) => {
+          const eventTarget = event.target;
+          if (
+            eventTarget instanceof Element
+            && eventTarget.closest('[data-onboarding-floating="true"]')
+          ) return;
+          event.preventDefault();
+        };
+        const restoreWorkspaceScroll = () => {
+          if (workspace.scrollTop !== lockedScrollTop) workspace.scrollTop = lockedScrollTop;
+          if (workspace.scrollLeft !== lockedScrollLeft) workspace.scrollLeft = lockedScrollLeft;
+        };
+        workspace.setAttribute("data-onboarding-scroll-locked", "true");
+        workspace.addEventListener("wheel", preventUserScroll, { passive: false });
+        workspace.addEventListener("touchmove", preventUserScroll, { passive: false });
+        workspace.addEventListener("scroll", restoreWorkspaceScroll);
+        unlockWorkspaceScroll = () => {
+          workspace.removeEventListener("wheel", preventUserScroll);
+          workspace.removeEventListener("touchmove", preventUserScroll);
+          workspace.removeEventListener("scroll", restoreWorkspaceScroll);
+          workspace.removeAttribute("data-onboarding-scroll-locked");
+        };
+      }
       measure();
       if (content.advanceOnTargetClick) target.addEventListener("click", activate);
       window.addEventListener("resize", measure);
@@ -354,6 +388,7 @@ export default function FirstRunGuide({
       resizeObserver?.observe(target);
 
       detachTarget = () => {
+        unlockWorkspaceScroll();
         target.removeEventListener("click", activate);
         window.removeEventListener("resize", measure);
         window.removeEventListener("scroll", measure, true);
@@ -387,7 +422,7 @@ export default function FirstRunGuide({
       mutationObserver?.disconnect();
       detachTarget();
     };
-  }, [content.advanceOnTargetClick, content.target, open]);
+  }, [content.advanceOnTargetClick, content.target, lockWorkspaceScroll, open]);
 
   useLayoutEffect(() => {
     if (!open) return undefined;

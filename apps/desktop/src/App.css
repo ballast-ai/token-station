@@ -902,6 +902,11 @@ body[data-first-run-guide-active="true"] [data-onboarding-floating="true"] {
   pointer-events: auto;
 }
 
+.station-content[data-onboarding-scroll-locked="true"] {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 .first-run-coachmark::before {
   position: absolute;
   top: 0;
