@@ -15,9 +15,10 @@ and coverage gates.
 
 ## Scope
 
-- Run the MSI lifecycle on pushes to `main`.
+- Run the MSI lifecycle when a GitHub Release is published.
 - Run the MSI lifecycle when a maintainer starts CI with `workflow_dispatch`.
-- Skip the MSI lifecycle for all pull requests, including desktop changes.
+- Skip the MSI lifecycle for ordinary pushes and all pull requests, including
+  desktop changes.
 
 ## Non-goals
 
@@ -34,9 +35,10 @@ workflow.
 
 ## User-visible behavior and failures
 
-For a pull request, `Windows x64 MSI real lifecycle` is shown as skipped. Other PR
-checks continue normally. On `main` or a manual run, an MSI lifecycle failure
-continues to fail CI and retains its diagnostic artifacts.
+For a pull request or an ordinary branch push, `Windows x64 MSI real lifecycle`
+is shown as skipped. Other checks continue normally. On a published Release or a
+manual run, an MSI lifecycle failure continues to fail CI and retains its
+diagnostic artifacts.
 
 ## Accessibility and interaction
 
@@ -46,8 +48,7 @@ impact. Maintainers use the existing GitHub Actions manual-run control.
 ## Public test boundary and acceptance criteria
 
 - A pull-request event does not satisfy the `windows-msi` job condition.
-- A push whose ref is `refs/heads/main` satisfies the event portion of the
-  condition.
+- A `release` event satisfies the event portion of the condition.
 - A `workflow_dispatch` event satisfies the event portion of the condition.
 - The existing changed-path output and prerequisite jobs still gate actual MSI
   execution.
@@ -62,5 +63,6 @@ Windows release must still pass the full lifecycle through `main` or a manual ru
 
 ## Implementation status
 
-Implemented. The MSI lifecycle no longer runs for pull requests and remains
-enabled for `main` and manually dispatched CI runs.
+Implemented. The MSI lifecycle no longer runs for ordinary pushes or pull
+requests and remains enabled for published Releases and manually dispatched CI
+runs.
