@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 900" role="img" aria-label="How Token Station works on mobile">
+  <style>
+    .text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;text-anchor:middle}
+    .headline{font-size:34px;font-weight:760;letter-spacing:.2px;fill:#1F2328}
+    .card-title{font-size:32px;font-weight:760;fill:#1F2328}
+    .body{font-size:22px;font-weight:520;fill:#4A4F55}
+    .center-title{font-size:34px;font-weight:800;letter-spacing:.5px;fill:#FFFFFF}
+    .center-subtitle{font-size:22px;font-weight:700;letter-spacing:.8px;fill:#FFEDE7}
+    .value{font-size:26px;font-weight:700;fill:#FFFFFF}
+    .pill-text{font-size:20px;font-weight:750;fill:#FFFFFF}
+    .destination{font-size:22px;font-weight:700;fill:#1F2328}
+  </style>
+
+  <rect width="720" height="900" fill="#F7F5F0"/>
+
+  <text class="text headline" x="360" y="45">ONE LOCAL GATEWAY.</text>
+  <text class="text headline" x="360" y="82">THE RIGHT MODEL FOR EVERY REQUEST.</text>
+
+  <!-- Three independent cards in one vertical product story. -->
+  <rect x="70" y="120" width="580" height="150" rx="28" fill="#FFFDFC" stroke="#D8D3CA" stroke-width="2"/>
+  <rect x="70" y="335" width="580" height="260" rx="32" fill="#B94024"/>
+  <rect x="70" y="660" width="580" height="150" rx="28" fill="#FFFDFC" stroke="#D8D3CA" stroke-width="2"/>
+
+  <!-- Two simple downward directional cues; no topology lines. -->
+  <circle cx="360" cy="302" r="22" fill="#FFFDFC" stroke="#D8D3CA" stroke-width="2"/>
+  <path d="M348 296 L360 308 L372 296" fill="none" stroke="#B94024" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="360" cy="628" r="22" fill="#FFFDFC" stroke="#D8D3CA" stroke-width="2"/>
+  <path d="M348 622 L360 634 L372 622" fill="none" stroke="#B94024" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Input card. -->
+  <text class="text card-title" x="360" y="168">YOUR AI AGENTS</text>
+  <line x1="130" y1="190" x2="590" y2="190" stroke="#E5E1DA" stroke-width="2"/>
+  <text class="text body" x="360" y="232">Claude Code · Codex · WorkBuddy</text>
+
+  <!-- Token Station value card. -->
+  <text class="text center-title" x="360" y="382">TOKEN STATION</text>
+  <text class="text center-subtitle" x="360" y="416">LOCAL SMART ROUTING</text>
+  <line x1="130" y1="438" x2="590" y2="438" stroke="#E99A84" stroke-width="2"/>
+  <text class="text value" x="360" y="480">MATCH EACH TASK TO THE RIGHT MODEL</text>
+  <text class="text value" x="360" y="526">USE QUOTA BEFORE RESET</text>
+  <rect x="145" y="548" width="190" height="34" rx="17" fill="#A9341D" stroke="#E99A84" stroke-width="1.5"/>
+  <text class="text pill-text" x="240" y="572">RUST CORE</text>
+  <rect x="355" y="548" width="220" height="34" rx="17" fill="#A9341D" stroke="#E99A84" stroke-width="1.5"/>
+  <text class="text pill-text" x="465" y="572">SANDBOXED WASM</text>
+
+  <!-- Destination card. -->
+  <text class="text card-title" x="360" y="708">YOUR MODELS</text>
+  <line x1="130" y1="730" x2="590" y2="730" stroke="#E5E1DA" stroke-width="2"/>
+  <text class="text destination" x="360" y="765">CLOUD · BYOK</text>
+  <text class="text destination" x="360" y="797">LOCAL · OLLAMA</text>
+</svg>

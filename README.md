@@ -24,7 +24,10 @@ AI agents use different configuration files and request protocols. LLM providers
 ## How it works
 
 <p align="center">
-  <img src="docs/assets/token-station-architecture-en.svg" alt="Token Station request-routing architecture" width="720">
+  <picture>
+    <source media="(max-width: 600px)" srcset="docs/assets/token-station-architecture-en-mobile.svg">
+    <img src="docs/assets/token-station-architecture-en.svg" alt="Token Station request-routing architecture" width="720">
+  </picture>
 </p>
 
 The gateway only binds to a loopback address. A request sent to a cloud provider still leaves the device and is subject to that provider's data policy. Strict local routing only admits providers verified as loopback endpoints.

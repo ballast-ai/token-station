@@ -1,95 +1,52 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" role="img" aria-label="Token Station request routing architecture">
-  <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#D63B16"/>
-    </marker>
-    <style>
-      .text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;fill:#171B1F;text-anchor:middle}
-      .title{font-size:32px;font-weight:750;letter-spacing:.3px}
-      .card-title{font-size:26px;font-weight:750}
-      .detail{font-size:20px;font-weight:550}
-      .tag{font-size:18px;font-weight:700}
-      .host{fill:#FBF8F2;stroke:#D63B16;stroke-width:4}
-      .rust-card{fill:#FFFDF8;stroke:#D63B16;stroke-width:3}
-      .wasm-card{fill:#EEF5FA;stroke:#195D97;stroke-width:3}
-      .external{fill:#FFFDF8;stroke:#252B30;stroke-width:3}
-      .rust-tag{fill:#FFF4EE;stroke:#D63B16;stroke-width:2}
-      .wasm-tag{fill:#F7FBFE;stroke:#195D97;stroke-width:2}
-      .flow{fill:none;stroke:#D63B16;stroke-width:5;stroke-linecap:round;stroke-linejoin:round}
-    </style>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 720" role="img" aria-label="How Token Station works">
+  <style>
+    .text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;text-anchor:middle}
+    .headline{font-size:34px;font-weight:760;letter-spacing:.4px;fill:#1F2328}
+    .card-title{font-size:30px;font-weight:760;letter-spacing:.2px;fill:#1F2328}
+    .body{font-size:18px;font-weight:520;fill:#4A4F55}
+    .center-title{font-size:42px;font-weight:800;letter-spacing:.8px;fill:#FFFFFF}
+    .center-subtitle{font-size:23px;font-weight:700;letter-spacing:1.5px;fill:#FFEDE7}
+    .value{font-size:24px;font-weight:680;letter-spacing:.25px;fill:#FFFFFF}
+    .pill-text{font-size:16px;font-weight:750;letter-spacing:.35px;fill:#FFFFFF}
+    .destination{font-size:25px;font-weight:700;fill:#1F2328}
+  </style>
 
-  <rect width="1440" height="900" fill="#F7F4EE"/>
+  <rect width="1440" height="720" fill="#F7F5F0"/>
 
-  <!-- Rust-owned execution boundary is below arrows and cards. -->
-  <rect class="host" x="48" y="196" width="1344" height="430" rx="24"/>
+  <text class="text headline" x="720" y="84">ONE LOCAL GATEWAY. THE RIGHT MODEL FOR EVERY REQUEST.</text>
 
-  <!-- Main arrows are painted behind cards. -->
-  <path class="flow" d="M720 158 V176 H192 V274" marker-end="url(#arrow)"/>
-  <path class="flow" d="M312 415 H332" marker-end="url(#arrow)"/>
-  <path class="flow" d="M576 415 H596" marker-end="url(#arrow)"/>
-  <path class="flow" d="M840 415 H860" marker-end="url(#arrow)"/>
-  <path class="flow" d="M1104 415 H1124" marker-end="url(#arrow)"/>
-  <path class="flow" d="M1248 550 V672"/>
-  <path class="flow" d="M1248 672 H955 V714" marker-end="url(#arrow)"/>
-  <path class="flow" d="M1248 672 H1245 V714" marker-end="url(#arrow)"/>
+  <!-- Three independent product cards. -->
+  <rect x="60" y="190" width="320" height="380" rx="32" fill="#FFFDFC" stroke="#D8D3CA" stroke-width="2"/>
+  <rect x="470" y="190" width="500" height="380" rx="36" fill="#B94024"/>
+  <rect x="1060" y="190" width="320" height="380" rx="32" fill="#FFFDFC" stroke="#D8D3CA" stroke-width="2"/>
 
-  <!-- External request source. -->
-  <rect class="external" x="420" y="48" width="600" height="110" rx="18"/>
-  <text class="text title" x="720" y="93">AI AGENTS</text>
-  <text class="text detail" x="720" y="130">Claude Code · Codex · WorkBuddy · Other Agents</text>
+  <!-- Two simple directional cues; no topology lines. -->
+  <circle cx="425" cy="380" r="30" fill="#FFFDFC" stroke="#D8D3CA" stroke-width="2"/>
+  <path d="M417 368 L429 380 L417 392" fill="none" stroke="#B94024" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="1015" cy="380" r="30" fill="#FFFDFC" stroke="#D8D3CA" stroke-width="2"/>
+  <path d="M1007 368 L1019 380 L1007 392" fill="none" stroke="#B94024" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
 
-  <!-- Rust-owned execution boundary label. -->
-  <text class="text title" x="720" y="239" fill="#D63B16">RUST HOST / CORE</text>
+  <!-- Input card. -->
+  <text class="text card-title" x="220" y="290">YOUR AI AGENTS</text>
+  <line x1="110" y1="326" x2="330" y2="326" stroke="#E5E1DA" stroke-width="2"/>
+  <text class="text body" x="220" y="390">Claude Code · Codex · WorkBuddy</text>
 
-  <!-- 01 / Loopback gateway. -->
-  <rect class="rust-card" x="72" y="280" width="240" height="270" rx="18"/>
-  <text class="text card-title" x="192" y="329">LOOPBACK</text>
-  <text class="text card-title" x="192" y="361">GATEWAY</text>
-  <text class="text detail" x="192" y="399">127.0.0.1:8787</text>
-  <rect class="rust-tag" x="92" y="418" width="200" height="38" rx="9"/>
-  <text class="text tag" x="192" y="444" fill="#B92F12">LOCAL AUTH</text>
-  <rect class="rust-tag" x="92" y="468" width="200" height="38" rx="9"/>
-  <text class="text tag" x="192" y="494" fill="#B92F12">LOOPBACK ONLY</text>
+  <!-- Token Station value card. -->
+  <text class="text center-title" x="720" y="257">TOKEN STATION</text>
+  <text class="text center-subtitle" x="720" y="295">LOCAL SMART ROUTING</text>
+  <line x1="525" y1="322" x2="915" y2="322" stroke="#E99A84" stroke-width="2"/>
+  <text class="text value" x="720" y="371">MATCH EACH TASK TO</text>
+  <text class="text value" x="720" y="402">THE RIGHT MODEL</text>
+  <text class="text value" x="720" y="449">USE QUOTA</text>
+  <text class="text value" x="720" y="480">BEFORE RESET</text>
+  <rect x="540" y="516" width="160" height="38" rx="19" fill="#A9341D" stroke="#E99A84" stroke-width="1.5"/>
+  <text class="text pill-text" x="620" y="541">RUST CORE</text>
+  <rect x="720" y="516" width="180" height="38" rx="19" fill="#A9341D" stroke="#E99A84" stroke-width="1.5"/>
+  <text class="text pill-text" x="810" y="541">SANDBOXED WASM</text>
 
-  <!-- 02 / Sandboxed agent protocol adapter. -->
-  <rect class="wasm-card" x="336" y="280" width="240" height="270" rx="18"/>
-  <text class="text card-title" x="456" y="329">AGENT WASM</text>
-  <text class="text card-title" x="456" y="361">ADAPTER</text>
-  <text class="text detail" x="456" y="407">PROTOCOL</text>
-  <text class="text detail" x="456" y="435">TRANSLATION</text>
-  <rect class="wasm-tag" x="356" y="468" width="200" height="38" rx="9"/>
-  <text class="text tag" x="456" y="494" fill="#195D97">SANDBOXED</text>
-
-  <!-- 03 / Local routing policy. -->
-  <rect class="rust-card" x="600" y="280" width="240" height="270" rx="18"/>
-  <text class="text card-title" x="720" y="329">LOCAL</text>
-  <text class="text card-title" x="720" y="361">ROUTER</text>
-  <text class="text detail" x="720" y="404">TIERED ROUTING</text>
-  <text class="text tag" x="720" y="432" fill="#B92F12">HIGH · MID · LOW</text>
-  <text class="text detail" x="720" y="476">QUOTA-FIRST</text>
-  <text class="text tag" x="720" y="504" fill="#B92F12">RESET + REMAINING</text>
-
-  <!-- 04 / Sandboxed provider protocol adapter. -->
-  <rect class="wasm-card" x="864" y="280" width="240" height="270" rx="18"/>
-  <text class="text card-title" x="984" y="329">PROVIDER WASM</text>
-  <text class="text card-title" x="984" y="361">ADAPTER</text>
-  <text class="text detail" x="984" y="407">PROTOCOL</text>
-  <text class="text detail" x="984" y="435">TRANSLATION</text>
-  <rect class="wasm-tag" x="884" y="468" width="200" height="38" rx="9"/>
-  <text class="text tag" x="984" y="494" fill="#195D97">SANDBOXED</text>
-
-  <!-- 05 / Rust owns all validated outbound I/O. -->
-  <rect class="rust-card" x="1128" y="280" width="240" height="270" rx="18"/>
-  <text class="text card-title" x="1248" y="329">RUST VALIDATED</text>
-  <text class="text card-title" x="1248" y="361">EGRESS</text>
-  <text class="text detail" x="1248" y="420">CREDENTIALS · POLICY</text>
-  <text class="text detail" x="1248" y="451">NETWORK I/O</text>
-
-  <!-- External destinations, reachable only through Rust validated egress. -->
-  <rect class="external" x="820" y="720" width="270" height="120" rx="18"/>
-  <text class="text card-title" x="955" y="790">CLOUD BYOK</text>
-  <rect class="external" x="1110" y="720" width="270" height="120" rx="18"/>
-  <text class="text card-title" x="1245" y="776">OLLAMA /</text>
-  <text class="text card-title" x="1245" y="810">LOCAL MODELS</text>
+  <!-- Destination card. -->
+  <text class="text card-title" x="1220" y="290">YOUR MODELS</text>
+  <line x1="1110" y1="326" x2="1330" y2="326" stroke="#E5E1DA" stroke-width="2"/>
+  <text class="text destination" x="1220" y="392">CLOUD · BYOK</text>
+  <text class="text destination" x="1220" y="452">LOCAL · OLLAMA</text>
 </svg>

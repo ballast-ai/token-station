@@ -24,7 +24,10 @@
 ## 工作原理
 
 <p align="center">
-  <img src="docs/assets/token-station-architecture-zh-CN.svg" alt="Token Station 请求路由架构" width="720">
+  <picture>
+    <source media="(max-width: 600px)" srcset="docs/assets/token-station-architecture-zh-CN-mobile.svg">
+    <img src="docs/assets/token-station-architecture-zh-CN.svg" alt="Token Station 请求路由架构" width="720">
+  </picture>
 </p>
 
 网关只允许绑定回环地址。路由到云供应商的请求仍然会离开设备，并受该供应商的数据政策约束。严格本地路由只允许端点经校验为回环地址的 Provider。
