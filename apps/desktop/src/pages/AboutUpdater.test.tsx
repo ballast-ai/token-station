@@ -103,7 +103,7 @@ describe("desktop in-app update", () => {
     await user.click(await screen.findByRole("button", { name: "下载并更新到 1.1.3" }));
     await user.click(screen.getByRole("button", { name: "确认更新并重启" }));
 
-    expect(await screen.findByText(/update_version_changed/)).toBeInTheDocument();
+    expect(await screen.findByText("可用更新已经发生变化。请重新检查后再确认安装。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "检查更新" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "下载并更新到 1.1.3" })).not.toBeInTheDocument();
     expect(screen.getByText(/releases\/tag\/v1.1.3/)).toBeInTheDocument();

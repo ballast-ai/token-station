@@ -24,6 +24,17 @@ describe("humanizeAppError", () => {
     );
   });
 
+  it("explains that an update candidate changed without exposing its internal code", () => {
+    const raw = "update_version_changed: confirmed 1.1.3 but latest is now 1.1.4";
+
+    expect(humanizeAppError(raw, "en")).toBe(
+      "A newer update became available. Check again before installing.",
+    );
+    expect(humanizeAppError(raw, "zh-CN")).toBe(
+      "可用更新已经发生变化。请重新检查后再确认安装。",
+    );
+  });
+
   it("does not expose an unknown backend string", () => {
     const raw = "secret internal transaction detail /Users/example/config.json";
 

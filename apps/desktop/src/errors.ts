@@ -175,6 +175,16 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     zh: "暂时无法获取最新的供应商数据。请保留当前设置，稍后再次刷新。",
   },
   {
+    matches: /update_version_changed:/i,
+    en: "A newer update became available. Check again before installing.",
+    zh: "可用更新已经发生变化。请重新检查后再确认安装。",
+  },
+  {
+    matches: /update_expected_version_missing:/i,
+    en: "The selected update is no longer available. Check again before installing.",
+    zh: "之前确认的更新已不可用。请重新检查后再确认安装。",
+  },
+  {
     matches: /update|upgrade|release|更新|版本/i,
     en: "Token Station could not check for updates. Check the network connection and try again later.",
     zh: "Token Station 无法检查更新。请检查网络连接，稍后重试。",
