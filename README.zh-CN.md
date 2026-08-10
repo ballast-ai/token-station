@@ -23,27 +23,11 @@
 
 ## 工作原理
 
-```text
-Claude Code / Codex / Gemini CLI / 其他 Agent
-                         │
-                         ▼
-              127.0.0.1:8787 + 本地鉴权
-                         │
-                  Agent WASM 适配器
-                         │
-                         ▼
-        ┌────────── 本地路由器 ──────────┐
-        │ 三档路由：高 / 中 / 低         │
-        │ 额度优先：重置时间 + 剩余额度  │
-        └────────────────────────────────┘
-                         │
-               Provider WASM 适配器
-                   ┌─────┴─────┐
-                   ▼           ▼
-               云端 BYOK   Ollama / 本地模型
-```
+<p align="center">
+  <img src="docs/assets/token-station-architecture-zh-CN.svg" alt="Token Station 请求路由架构" width="720">
+</p>
 
-网关只允许绑定回环地址。路由到云供应商的请求仍然会离开设备，并受该供应商的数据政策约束。严格本地路由只允许经过校验的回环 Provider。
+网关只允许绑定回环地址。路由到云供应商的请求仍然会离开设备，并受该供应商的数据政策约束。严格本地路由只允许端点经校验为回环地址的 Provider。
 
 ## 核心能力
 

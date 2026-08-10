@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" role="img" aria-label="Token Station request routing architecture">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#D63B16"/>
+    </marker>
+    <style>
+      .text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;fill:#171B1F;text-anchor:middle}
+      .title{font-size:32px;font-weight:750;letter-spacing:.3px}
+      .card-title{font-size:26px;font-weight:750}
+      .detail{font-size:20px;font-weight:550}
+      .tag{font-size:18px;font-weight:700}
+      .host{fill:#FBF8F2;stroke:#D63B16;stroke-width:4}
+      .rust-card{fill:#FFFDF8;stroke:#D63B16;stroke-width:3}
+      .wasm-card{fill:#EEF5FA;stroke:#195D97;stroke-width:3}
+      .external{fill:#FFFDF8;stroke:#252B30;stroke-width:3}
+      .rust-tag{fill:#FFF4EE;stroke:#D63B16;stroke-width:2}
+      .wasm-tag{fill:#F7FBFE;stroke:#195D97;stroke-width:2}
+      .flow{fill:none;stroke:#D63B16;stroke-width:5;stroke-linecap:round;stroke-linejoin:round}
+    </style>
+  </defs>
+
+  <rect width="1440" height="900" fill="#F7F4EE"/>
+
+  <!-- Rust-owned execution boundary is below arrows and cards. -->
+  <rect class="host" x="48" y="196" width="1344" height="430" rx="24"/>
+
+  <!-- Main arrows are painted behind cards. -->
+  <path class="flow" d="M720 158 V176 H192 V274" marker-end="url(#arrow)"/>
+  <path class="flow" d="M312 415 H332" marker-end="url(#arrow)"/>
+  <path class="flow" d="M576 415 H596" marker-end="url(#arrow)"/>
+  <path class="flow" d="M840 415 H860" marker-end="url(#arrow)"/>
+  <path class="flow" d="M1104 415 H1124" marker-end="url(#arrow)"/>
+  <path class="flow" d="M1248 550 V672"/>
+  <path class="flow" d="M1248 672 H955 V714" marker-end="url(#arrow)"/>
+  <path class="flow" d="M1248 672 H1245 V714" marker-end="url(#arrow)"/>
+
+  <!-- External request source. -->
+  <rect class="external" x="420" y="48" width="600" height="110" rx="18"/>
+  <text class="text title" x="720" y="93">AI AGENTS</text>
+  <text class="text detail" x="720" y="130">Claude Code · Codex · Gemini CLI · Other Agents</text>
+
+  <!-- Rust-owned execution boundary label. -->
+  <text class="text title" x="720" y="239" fill="#D63B16">RUST HOST / CORE</text>
+
+  <!-- 01 / Loopback gateway. -->
+  <rect class="rust-card" x="72" y="280" width="240" height="270" rx="18"/>
+  <text class="text card-title" x="192" y="329">LOOPBACK</text>
+  <text class="text card-title" x="192" y="361">GATEWAY</text>
+  <text class="text detail" x="192" y="399">127.0.0.1:8787</text>
+  <rect class="rust-tag" x="92" y="418" width="200" height="38" rx="9"/>
+  <text class="text tag" x="192" y="444" fill="#B92F12">LOCAL AUTH</text>
+  <rect class="rust-tag" x="92" y="468" width="200" height="38" rx="9"/>
+  <text class="text tag" x="192" y="494" fill="#B92F12">LOOPBACK ONLY</text>
+
+  <!-- 02 / Sandboxed agent protocol adapter. -->
+  <rect class="wasm-card" x="336" y="280" width="240" height="270" rx="18"/>
+  <text class="text card-title" x="456" y="329">AGENT WASM</text>
+  <text class="text card-title" x="456" y="361">ADAPTER</text>
+  <text class="text detail" x="456" y="407">PROTOCOL</text>
+  <text class="text detail" x="456" y="435">TRANSLATION</text>
+  <rect class="wasm-tag" x="356" y="468" width="200" height="38" rx="9"/>
+  <text class="text tag" x="456" y="494" fill="#195D97">SANDBOXED</text>
+
+  <!-- 03 / Local routing policy. -->
+  <rect class="rust-card" x="600" y="280" width="240" height="270" rx="18"/>
+  <text class="text card-title" x="720" y="329">LOCAL</text>
+  <text class="text card-title" x="720" y="361">ROUTER</text>
+  <text class="text detail" x="720" y="404">TIERED ROUTING</text>
+  <text class="text tag" x="720" y="432" fill="#B92F12">HIGH · MID · LOW</text>
+  <text class="text detail" x="720" y="476">QUOTA-FIRST</text>
+  <text class="text tag" x="720" y="504" fill="#B92F12">RESET + REMAINING</text>
+
+  <!-- 04 / Sandboxed provider protocol adapter. -->
+  <rect class="wasm-card" x="864" y="280" width="240" height="270" rx="18"/>
+  <text class="text card-title" x="984" y="329">PROVIDER WASM</text>
+  <text class="text card-title" x="984" y="361">ADAPTER</text>
+  <text class="text detail" x="984" y="407">PROTOCOL</text>
+  <text class="text detail" x="984" y="435">TRANSLATION</text>
+  <rect class="wasm-tag" x="884" y="468" width="200" height="38" rx="9"/>
+  <text class="text tag" x="984" y="494" fill="#195D97">SANDBOXED</text>
+
+  <!-- 05 / Rust owns all validated outbound I/O. -->
+  <rect class="rust-card" x="1128" y="280" width="240" height="270" rx="18"/>
+  <text class="text card-title" x="1248" y="329">RUST VALIDATED</text>
+  <text class="text card-title" x="1248" y="361">EGRESS</text>
+  <text class="text detail" x="1248" y="420">CREDENTIALS · POLICY</text>
+  <text class="text detail" x="1248" y="451">NETWORK I/O</text>
+
+  <!-- External destinations, reachable only through Rust validated egress. -->
+  <rect class="external" x="820" y="720" width="270" height="120" rx="18"/>
+  <text class="text card-title" x="955" y="790">CLOUD BYOK</text>
+  <rect class="external" x="1110" y="720" width="270" height="120" rx="18"/>
+  <text class="text card-title" x="1245" y="776">OLLAMA /</text>
+  <text class="text card-title" x="1245" y="810">LOCAL MODELS</text>
+</svg>
