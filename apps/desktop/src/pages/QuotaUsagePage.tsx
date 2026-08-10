@@ -8,23 +8,24 @@ import {
 } from "../api";
 import PageBackButton from "../components/PageBackButton";
 import { useLocalizedCopy } from "../components/LanguageProvider";
+import { humanizeAppError } from "../errors";
 
 interface QuotaUsagePageProps {
   providers: ProviderView[];
   onBack: () => void;
 }
 
-/** 刷新间隔:额度是运行时状态,轻量轮询让页面跟着真实用量走。 */
+/** Refresh interval for lightweight polling that keeps runtime quota data current. */
 const REFRESH_MS = 5000;
 
-/** 超过此阈值视为「不刷新」(如 OpenRouter 预付余额,ms_until_reset 为 u64::MAX)。 */
+/** Values above this threshold mean no reset, such as OpenRouter prepaid balance with u64::MAX. */
 const NO_RESET_MS = 100 * 24 * 60 * 60 * 1000;
 
 function permilleToPercent(permille: number): number {
   return Math.round((permille / 1000) * 1000) / 10;
 }
 
-/** 把毫秒时长格式化成「2h 5m」「3m 20s」「45s」这种紧凑读法。 */
+/** Format millisecond durations as compact values such as `2h 5m`, `3m 20s`, or `45s`. */
 function formatDuration(ms: number): string {
   if (ms <= 0) return "—";
   const totalSeconds = Math.floor(ms / 1000);
@@ -47,7 +48,7 @@ export default function QuotaUsagePage({ providers, onBack }: QuotaUsagePageProp
       setSnapshot(await getQuotaSnapshot());
       setError(null);
     } catch (caught) {
-      setError(typeof caught === "string" ? caught : String(caught));
+      setError(humanizeAppError(caught));
     } finally {
       setLoading(false);
     }

@@ -405,7 +405,7 @@ impl Drop for ScanInFlightGuard<'_> {
 }
 
 fn snapshot_master_key_path(paths: &AgentIntegrationPaths) -> PathBuf {
-    // 落在 agent-integration 数据根(snapshots 的父目录)下,与快照同级、私有 0600。
+    // Store beside snapshots under the agent-integration data root with private 0600 permissions.
     paths
         .snapshot_root
         .parent()
@@ -413,9 +413,11 @@ fn snapshot_master_key_path(paths: &AgentIntegrationPaths) -> PathBuf {
         .join("snapshot-master.key")
 }
 
-/// 确保快照主密钥文件存在(0600),不存在则生成。OS 钥匙串已彻底移除:密钥只存本地
-/// 私有文件。非破坏性:不删除任何快照或归属记录。(从更早只有钥匙串密钥的版本升级
-/// 上来时,旧快照无法解密,但开发版重签名本就已让那把钥匙串密钥失效。)
+/// Ensure the 0600 snapshot master-key file exists, generating it when absent.
+/// The OS keychain is no longer used; the key lives only in this private local
+/// file. This is non-destructive and never removes snapshots or ownership data.
+/// Snapshots from older keychain-only versions cannot be decrypted, but
+/// development re-signing had already invalidated that keychain key.
 fn ensure_master_key_file(key_path: &Path) {
     if key_path.exists() {
         return;
@@ -423,8 +425,9 @@ fn ensure_master_key_file(key_path: &Path) {
     let _ = FileMasterKeyStore::new(key_path.to_path_buf()).load_or_create(true);
 }
 
-/// 把 `removals`(一组 Remove 操作)应用到 `target` 配置并原子写回,保留原权限。
-/// 文件不存在则直接成功。用于强制断开:只删受管字段,不碰用户其它内容。
+/// Apply `removals` to the target config and write atomically while preserving
+/// permissions. A missing file succeeds. Force disconnect uses this to remove
+/// only managed fields without touching other user content.
 fn force_strip_owned(
     target: &Path,
     format: DocumentFormat,
@@ -443,7 +446,7 @@ fn force_strip_owned(
         .map_err(AgentCommandError::internal)
 }
 
-/// 原子写回配置文件(同目录临时文件 + rename),尽量恢复原权限。
+/// Atomically rewrite a config through a sibling temporary file and rename, preserving permissions when possible.
 fn write_config_atomic(
     target: &Path,
     bytes: &[u8],
@@ -474,9 +477,11 @@ fn write_config_atomic(
 
 impl AgentCommandState {
     pub fn new(paths: AgentIntegrationPaths) -> Result<Self, String> {
-        // 快照主密钥改存本地私有文件(0600),不再依赖 OS 钥匙串——开发版重签名会让
-        // 钥匙串条目失效,导致恢复/断开彻底锁死(用户反馈的 code=agent_operation_rejected)。
-        // 快照本就加密、且备份的是本来就明文躺在磁盘上的配置,密钥落文件安全性不变。
+        // Store the snapshot master key in a private local 0600 file instead of
+        // the OS keychain. Development re-signing invalidated keychain entries and
+        // could permanently block restoration or disconnect with
+        // agent_operation_rejected. Snapshots are encrypted copies of config that
+        // already exists as plaintext on disk, so file storage does not weaken it.
         let key_path = snapshot_master_key_path(&paths);
         ensure_master_key_file(&key_path);
         Self::new_with_master_key(paths, Arc::new(FileMasterKeyStore::new(key_path)))
@@ -867,9 +872,11 @@ impl AgentCommandState {
         self.issue_plan(prepared, &record, session_label, None)
     }
 
-    /// 强制断开(兜底):不依赖钥匙串/基线快照。按归属记录把 Token Station 注入的
-    /// 受管字段从当前配置里删掉,再清除归属记录、取消固定基线快照。用于快照因密钥
-    /// 丢失而无法解密、正常「恢复原始配置」被拒时自救。无法精确还原被覆盖的原值。
+    /// Force-disconnect fallback that does not require the keychain or baseline
+    /// snapshot. Remove Token Station-managed fields according to ownership,
+    /// clear ownership, and unpin the baseline snapshot. This recovers when a lost
+    /// key makes snapshots unreadable and normal restoration is rejected, but it
+    /// cannot reconstruct overwritten original values exactly.
     fn force_forget(
         &self,
         agent_id: &str,
@@ -887,9 +894,9 @@ impl AgentCommandState {
             ));
         }
 
-        // 先解析全部 companion 格式，再做任何写盘。旧 ownership 若不能由对应
-        // Connector 的显式合同确认格式，强制断开也必须失败关闭，不能先改主配置
-        // 再在 companion 处失败。
+        // Parse every companion format before writing anything. If the connector's
+        // explicit contract cannot confirm a legacy ownership format, force
+        // disconnect must fail closed before changing the main config.
         let companion_formats = owned
             .iter()
             .map(|ownership| {
@@ -918,11 +925,12 @@ impl AgentCommandState {
             let disconnect = connector
                 .disconnect_patch_for_document(&document)
                 .map_err(AgentCommandError::internal)?;
-            // 主配置:普通连接器仍使用固定 Remove；WorkBuddy 会按模型 ID 动态过滤，
-            // 避免强制断开时顺手删除用户后来添加的其它模型。
+            // Main config: regular connectors use fixed Remove operations, while
+            // WorkBuddy filters dynamically by model ID so force disconnect does
+            // not remove models the user added later.
             force_strip_owned(target, connector.format(), connector.label(), &disconnect)?;
-            // companion:用持久化格式或 Connector 的旧记录显式合同解析，再按
-            // owned_paths 删除。
+            // Companion config: parse the persisted format or a connector's
+            // explicit legacy contract, then remove owned_paths.
             for (companion, document_format) in
                 ownership.companion_files.iter().zip(companion_formats)
             {
@@ -1982,7 +1990,7 @@ pub(crate) fn plan_agent_disconnect(
     state.plan_disconnect(&agent_id, &installation_path, window.label())
 }
 
-/// 强制断开兜底:快照因密钥丢失不可解密、正常恢复被拒时,直接删受管字段 + 清归属。
+/// Force-disconnect fallback: remove managed fields and ownership when a lost key blocks normal snapshot restoration.
 #[tauri::command(async)]
 pub(crate) fn force_forget_agent(
     state: State<'_, AgentCommandState>,
@@ -3284,7 +3292,7 @@ mod tests {
         let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
         install_scan(&state, catalog, vec![record(&target, false)]);
 
-        // 建立接管:写入受管字段 + 归属记录 + 快照。
+        // Establish management by writing managed fields, ownership records, and a snapshot.
         let runtime = runtime("vk-force-forget");
         let connection = state
             .plan_connection(
@@ -3348,7 +3356,7 @@ mod tests {
             1
         );
 
-        // 强制断开:force_forget 不触碰钥匙串(方法体内无 self.keys),只按归属删受管字段。
+        // force_forget does not access the keychain; it removes managed fields only according to ownership.
         state.force_forget("claude-code", "/opt/claude").unwrap();
 
         let after_forget = String::from_utf8(std::fs::read(&target).unwrap()).unwrap();

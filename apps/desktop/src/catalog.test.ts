@@ -5,7 +5,7 @@ const byId = new Map(PROVIDER_CATALOG.map((preset) => [preset.id, preset]));
 
 describe("provider catalog", () => {
   it("ships a broad set of verified non-aggregator defaults", () => {
-    // 本机自托管只保留 Ollama 一个代表(其余用自定义配置接入),门槛按云端目录规模设。
+    // Keep Ollama as the sole local self-hosted representative; connect others through custom config.
     expect(PROVIDER_CATALOG.length).toBeGreaterThanOrEqual(40);
     expect(PROVIDER_CATALOG.every((preset) => preset.serviceClass !== "aggregator")).toBe(true);
     expect(AGGREGATOR_CANDIDATES.length).toBeGreaterThan(0);

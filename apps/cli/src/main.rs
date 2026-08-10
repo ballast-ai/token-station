@@ -433,7 +433,7 @@ fn upgrade_command(yes: bool, check_only: bool) -> Result<(), String> {
         return Ok(());
     }
 
-    // 显式确认升级: nothing downloads without a human saying so.
+    // Require explicit upgrade confirmation; nothing downloads without human approval.
     if !yes {
         eprint!("download and verify {}? [y/N] ", release.tag_name);
         let mut answer = String::new();
@@ -634,7 +634,7 @@ fn serve(config_path: &Path) -> Result<(), String> {
         plugins: config.plugins.clone(),
     });
 
-    // 默认开鉴权: the virtual key exists before the port does.
+    // Authentication is on by default; the virtual key exists before the port does.
     let key = if config.server.auth {
         let (key, created) = virtual_key::load_or_create(&config.data.dir)?;
         if created {

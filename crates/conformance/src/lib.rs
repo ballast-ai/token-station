@@ -24,7 +24,7 @@
 //! the same suite in their own CI without a WASM toolchain. The seam is also why
 //! these gates exist and are tested before any runtime does.
 //!
-//! What that seam cannot carry is the architecture's `安全` row — no network, no
+//! What that seam cannot carry is the architecture's security row — no network, no
 //! file system, bounded memory and time. Those are properties of the sandbox the
 //! runtime constructs, not answers an adapter can be asked for, and no fixture
 //! here pretends to check them.

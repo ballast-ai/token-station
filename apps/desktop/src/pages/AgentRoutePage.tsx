@@ -25,6 +25,7 @@ import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import RoutingModeSelector from "../components/RoutingModeSelector";
 import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy } from "../components/LanguageProvider";
+import { humanizeAppError } from "../errors";
 
 interface AgentRoutePageProps {
   metadata: AgentUiMetadataView;
@@ -49,22 +50,14 @@ interface AgentRoutePageProps {
   embedded?: boolean;
 }
 
-/** 每个 Agent 的"接入改动已展示过"标记键;localStorage 持久,故只出现一次。 */
+/** Per-Agent key recording that connection changes were shown; localStorage makes it appear only once. */
 const diffShownKey = (agentId: string) => `ts:agent-connect-diff-shown:${agentId}`;
 
-/** 接管改动里最能说明"数据流向哪"的关键字段;这些是让用户安心的重点。 */
+/** Managed fields that best explain where data flows and therefore matter most to users. */
 const KEY_CHANGE_HINT = /url|base|token|key|auth|endpoint|host|proxy/i;
 
 function errorText(error: unknown) {
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object") {
-    const value = error as { message?: unknown; code?: unknown; stage?: unknown };
-    return [value.message, value.code && `code=${value.code}`, value.stage && `stage=${value.stage}`]
-      .filter(Boolean)
-      .map(String)
-      .join(" · ");
-  }
-  return String(error);
+  return humanizeAppError(error);
 }
 
 function statusCopy(
@@ -72,6 +65,7 @@ function statusCopy(
   agent: AgentView | undefined,
   installation: AgentInstallationView | undefined,
   copy: (english: string, simplifiedChinese: string) => string,
+  language: "en" | "zh-CN",
 ) {
   if (!agent || agent.installations.length === 0) {
     return {
@@ -153,7 +147,10 @@ function statusCopy(
     return {
       tone: "danger",
       label: copy("Unavailable", "暂不可接入"),
-      detail: installation.compatibility.message,
+      detail: humanizeAppError({
+        code: installation.compatibility.reason_code,
+        message: installation.compatibility.message,
+      }, language),
     };
   }
   return {
@@ -193,12 +190,12 @@ export default function AgentRoutePage({
   onSetRoutingMode = () => {},
   embedded = false,
 }: AgentRoutePageProps) {
-  const { copy } = useLocalizedCopy();
+  const { copy, language } = useLocalizedCopy();
   const [selectedPath, setSelectedPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
-  // 首次接入后展示的配置改动;看过一次(localStorage)后永久不再打扰。
+  // Show configuration changes after the first connection, then persist dismissal in localStorage.
   const [connectDiff, setConnectDiff] = useState<ConfigPlanView | null>(null);
   const dismissConnectDiff = () => setConnectDiff(null);
 
@@ -212,7 +209,7 @@ export default function AgentRoutePage({
     [agent, selectedPath],
   );
 
-  const status = statusCopy(metadata, agent, installation, copy);
+  const status = statusCopy(metadata, agent, installation, copy, language);
   const managed = installation?.managed ?? false;
   const canConnect = Boolean(
     installation
@@ -245,8 +242,8 @@ export default function AgentRoutePage({
     }
   };
 
-  // 接入:计划后直接应用,不再单独等用户确认(那一步只是徒增等待)。接入后的
-  // 「首次接入·我们动了什么」diff 卡片仍会展示一次,做事后透明告知。
+  // Connect immediately after planning without a redundant confirmation wait.
+  // The post-connection diff card still appears once for transparency.
   const applyConnection = async () => {
     if (!installation || !canOperate || busy) return;
     setBusy(true);
@@ -287,8 +284,10 @@ export default function AgentRoutePage({
     }
   };
 
-  // 恢复官方配置并断开:按归属记录剥掉 TS 注入的受管字段,让 Agent 回到官方默认配置,
-  // 再清除接管记录。不依赖加密快照/主密钥,确定性、始终可成功(取代旧的「强制断开」兜底)。
+  // Restore official configuration and disconnect by removing TS-managed fields
+  // according to ownership records, returning the Agent to official defaults,
+  // then clearing ownership. This deterministic path replaces the old force-
+  // disconnect fallback and does not depend on encrypted snapshots or a master key.
   const restoreOfficial = async () => {
     if (!installation || busy) return;
     setBusy(true);
@@ -329,7 +328,7 @@ export default function AgentRoutePage({
     );
   };
 
-  // 保存并（若代理运行中）热重启**仅此 Agent**的路由：不动其它 Agent，不整体重启。
+  // Save and hot-restart only this Agent's route when the proxy is running; do not affect other Agents.
   const saveRoute = () => runState(
     () => restartAgentRoute(metadata.agent_id),
     serveRunning
@@ -337,8 +336,8 @@ export default function AgentRoutePage({
       : copy("Custom routing saved", "独立路由已保存"),
   );
 
-  // 「跟随主页」模式下，把当前主页三档路由立即应用到此 Agent（热重启其路由；inherit
-  // 时 restart 会清掉该 Agent 的独立路由，回落到主页配置并即时生效）。
+  // In Follow Home mode, apply the current home tiers to this Agent immediately.
+  // Restarting an inherited route clears the Agent-specific route and hot-applies the home configuration.
   const applyHomeRoute = () => runState(
     () => restartAgentRoute(metadata.agent_id),
     serveRunning
@@ -555,7 +554,7 @@ export default function AgentRoutePage({
               </button>
             </>
           )}
-          {route.config_error && <span className="foot-hint error-text">{route.config_error}</span>}
+          {route.config_error && <span className="foot-hint error-text">{humanizeAppError(route.config_error)}</span>}
         </footer>
       </section>
       )}

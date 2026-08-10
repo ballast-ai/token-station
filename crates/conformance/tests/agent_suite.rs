@@ -153,7 +153,7 @@ impl AgentAdapter for OpenAiClient {
             messages,
             tools,
             response_format: None,
-            // ToolChoice::Other(Value) 兜底使 from_value 全值域可解。
+            // ToolChoice::Other(Value) lets from_value cover the full value domain.
             tool_choice: body
                 .get("tool_choice")
                 .map(|v| serde_json::from_value(v.clone()).expect("ToolChoice accepts any value")),

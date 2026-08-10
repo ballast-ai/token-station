@@ -868,7 +868,7 @@ mod tests {
             openclaw.version_probe.runtime,
             Some(ProbeRuntime::NodePackage { .. })
         ));
-        // Gemini CLI 同时覆盖 Unix `env node` 和 Windows npm shim。
+        // Cover both Unix `env node` and the Windows npm shim for Gemini CLI.
         assert!(matches!(
             registry.descriptors()[3].version_probe.runtime,
             Some(ProbeRuntime::NodePackage { .. })

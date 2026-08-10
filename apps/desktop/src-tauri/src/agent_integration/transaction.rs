@@ -2831,8 +2831,9 @@ mod tests {
             original_owner: baseline.record.original_owner.clone(),
         };
 
-        // 外部工具已经移除了 Token Station 的受管字段，但保留了归属记录。
-        // 这与基线在受管路径上的状态一致，应当允许幂等断开并清理归属。
+        // An external tool removed Token Station-managed fields but left the
+        // ownership record. This matches the baseline state on managed paths, so
+        // allow an idempotent disconnect and clear ownership.
         std::fs::write(
             &target,
             br#"{"unowned":"keep","later_user_field":{"enabled":true}}"#,

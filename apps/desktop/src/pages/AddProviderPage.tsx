@@ -16,6 +16,7 @@ import ModelPicker, { type CatalogStatus } from "../components/ModelPicker";
 import PageBackButton from "../components/PageBackButton";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { englishProviderName } from "../providerCopy";
+import { humanizeAppError } from "../errors";
 
 export type ProviderCatalogMode = "regular" | "free";
 
@@ -87,7 +88,7 @@ export default function AddProviderPage({
   onLoadFree,
   onSelectFree,
 }: AddProviderPageProps) {
-  const { copy } = useLocalizedCopy();
+  const { copy, language } = useLocalizedCopy();
   const offerLabel = (kind: FreeOfferKind) => (
     kind === "recurring" ? copy("Always free", "长期免费") : copy("Trial credit", "试用额度")
   );
@@ -182,7 +183,7 @@ export default function AddProviderPage({
       .catch((caught) => {
         if (!active) return;
         setEndpointPreview(null);
-        setEndpointError(String(caught));
+        setEndpointError(humanizeAppError(caught));
       });
     return () => {
       active = false;
@@ -193,6 +194,9 @@ export default function AddProviderPage({
     if (endpointPreview && !endpointPreview.loopback) setLocal(false);
   }, [endpointPreview]);
 
+  const catalogWarning = discovery?.warning
+    ? humanizeAppError(discovery.warning, language)
+    : discovery?.warning;
   const catalogStatus: CatalogStatus = discovering
     ? { label: copy("Loading…", "正在获取…"), tone: "loading" }
     : discovery?.source === "live"
@@ -202,7 +206,7 @@ export default function AddProviderPage({
             `已同步 ${discovery.models.length} 个`,
           ),
           tone: "live",
-          warning: discovery.warning,
+          warning: catalogWarning,
         }
       : discovery?.source === "cache"
         ? {
@@ -211,10 +215,10 @@ export default function AddProviderPage({
               `使用缓存 · ${discovery.models.length} 个`,
             ),
             tone: "cache",
-            warning: discovery.warning,
+            warning: catalogWarning,
           }
         : discovery
-          ? { label: copy("Failed to load", "获取失败"), tone: "error", warning: discovery.warning }
+          ? { label: copy("Failed to load", "获取失败"), tone: "error", warning: catalogWarning }
           : {
               label: copy(
                 `Built-in suggestions · ${catalogModels.length}`,
@@ -263,10 +267,7 @@ export default function AddProviderPage({
         models: [],
         source: "none",
         fetched_at_ms: null,
-        warning: copy(
-          "Enter a provider name and base URL first.",
-          "请先填写供应商名称和 Base URL。",
-        ),
+        warning: "model_catalog_provider_required",
       });
       return;
     }
@@ -275,10 +276,7 @@ export default function AddProviderPage({
         models: [],
         source: "none",
         fetched_at_ms: null,
-        warning: copy(
-          "Save the env/file credential reference before loading the model catalog.",
-          "env/file 只保存引用；请先保存供应商，再读取模型目录。",
-        ),
+        warning: "model_catalog_reference_requires_save",
       });
       return;
     }
@@ -287,10 +285,7 @@ export default function AddProviderPage({
         models: [],
         source: "none",
         fetched_at_ms: null,
-        warning: copy(
-          "Enter an API key to load this provider's model catalog.",
-          "填写 API Key 后才能读取该供应商的模型目录。",
-        ),
+        warning: "model_catalog_api_key_required",
       });
       return;
     }
@@ -352,7 +347,7 @@ export default function AddProviderPage({
           : copy("Provider added", "供应商已添加"),
       );
     } catch (caught) {
-      setError(String(caught));
+      setError(humanizeAppError(caught));
     } finally {
       setSaving(false);
     }

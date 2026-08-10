@@ -1,12 +1,26 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { setDockThemeIcon } from "../api";
 import {
   THEME_STORAGE_KEY,
   ThemeProvider,
   useTheme,
   type ResolvedTheme,
 } from "./ThemeProvider";
+
+const { setDockThemeIconMock, setWindowThemeMock } = vi.hoisted(() => ({
+  setDockThemeIconMock: vi.fn(),
+  setWindowThemeMock: vi.fn(),
+}));
+
+vi.mock("../api", () => ({
+  setDockThemeIcon: setDockThemeIconMock,
+}));
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({ setTheme: setWindowThemeMock }),
+}));
 
 type ChangeListener = (event: MediaQueryListEvent) => void;
 
@@ -49,6 +63,9 @@ function ThemeProbe() {
 }
 
 beforeEach(() => {
+  setDockThemeIconMock.mockReset().mockResolvedValue(undefined);
+  setWindowThemeMock.mockReset().mockResolvedValue(undefined);
+  Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
   window.localStorage.clear();
   document.documentElement.classList.remove("light", "dark");
   systemTheme = "light";
@@ -113,6 +130,50 @@ describe("ThemeProvider", () => {
     await user.click(screen.getByRole("button", { name: "System" }));
     expect(changeListeners).toHaveLength(1);
     expect(screen.getByText("system:dark")).toBeInTheDocument();
+  });
+
+  it("keeps the macOS Dock icon in sync with the resolved theme", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    systemTheme = "dark";
+    installMatchMedia();
+    const user = userEvent.setup();
+
+    render(
+      <ThemeProvider>
+        <ThemeProbe />
+      </ThemeProvider>,
+    );
+
+    await waitFor(() =>
+      expect(setDockThemeIcon).toHaveBeenCalledWith("dark"),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Light" }));
+    await waitFor(() =>
+      expect(setDockThemeIcon).toHaveBeenCalledWith("light"),
+    );
+  });
+
+  it("keeps the page theme active when the native Dock update fails", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    setDockThemeIconMock.mockRejectedValue(new Error("native Dock update failed"));
+    const user = userEvent.setup();
+
+    render(
+      <ThemeProvider>
+        <ThemeProbe />
+      </ThemeProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Dark" }));
+    expect(screen.getByText("dark:dark")).toBeInTheDocument();
+    expect(document.documentElement).toHaveClass("dark");
   });
 
   it("ignores invalid persisted values", () => {

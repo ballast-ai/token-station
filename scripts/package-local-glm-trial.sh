@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 生成可分发的本地 GLM 试用包；不接受、也不写入任何 API Key。
+# Build a distributable local GLM trial package without accepting or writing API keys.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)

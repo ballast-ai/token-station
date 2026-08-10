@@ -7,6 +7,7 @@ import {
 } from "../api";
 import { ReceiptDetails } from "./RecentReceipts";
 import { useLocalizedCopy } from "./LanguageProvider";
+import { humanizeAppError } from "../errors";
 import {
   Select,
   SelectContent,
@@ -134,7 +135,7 @@ export default function UsageRequestLog({
         if (active) setData(next);
       })
       .catch((caught) => {
-        if (active) setError(String(caught));
+        if (active) setError(humanizeAppError(caught));
       })
       .finally(() => {
         if (active) setLoading(false);

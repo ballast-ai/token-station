@@ -33,8 +33,9 @@ export default function ModelPicker({
   const { copy } = useLocalizedCopy();
   const [query, setQuery] = useState("");
   const [customModel, setCustomModel] = useState("");
-  // 本次打开期间刚被选中/新增的模型,按操作顺序沉到列表末尾,便于用户回看刚加的项。
-  // 只是本地视图状态:组件重新打开(重挂载)即清空,恢复纯首字母排序。
+  // Move models selected or added during this opening to the end in action order
+  // so users can review them. This is local view state and resets to alphabetical
+  // order when the component remounts.
   const [recent, setRecent] = useState<string[]>([]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
 
@@ -43,7 +44,7 @@ export default function ModelPicker({
 
   const visible = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
-    // 默认按首字母排序;本次选中的模型移到末尾(保持选中顺序),让"刚加的"一眼可见。
+    // Sort alphabetically by default, then append current selections in selection order so new additions stay visible.
     const sorted = [...new Set(models)].sort((left, right) => left.localeCompare(right));
     const recentTail = recent.filter((model) => models.includes(model));
     const tailSet = new Set(recentTail);

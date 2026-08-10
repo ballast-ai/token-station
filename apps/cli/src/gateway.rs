@@ -10,7 +10,7 @@
 //! ```
 //!
 //! Everything here blocks; the axum layer runs it on a blocking thread and
-//! bridges streams back through a channel. That is the架构 choice: the wasm
+//! bridges streams back through a channel. That is the architectural choice: the wasm
 //! runtime is synchronous, so the data plane is too, and async stops at the
 //! server facade.
 //!
@@ -55,7 +55,7 @@ use crate::sse::SseFrameDecoder;
 use crate::config::{ApiDialect, ClientConfig, EgressConfig};
 use crate::secrets::SecretStore;
 
-/// Caps on what crosses the proxy, applied by the host per 架构 §六.
+/// Caps on what crosses the proxy, applied by the host per architecture section 6.
 pub(crate) const MAX_INBOUND_BODY: usize = 10 * 1024 * 1024;
 
 /// Per-request timeout for a background quota-balance poll. Short: it must never

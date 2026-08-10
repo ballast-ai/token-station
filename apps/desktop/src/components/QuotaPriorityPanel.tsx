@@ -16,15 +16,15 @@ import { Separator } from "./ui/separator";
 
 interface QuotaPriorityPanelProps {
   providers: ProviderView[];
-  /** 已持久化的轮换账户(供应商+模型),按优先级顺序。面板以此为初值。 */
+  /** Persisted rotation accounts, provider plus model, in priority order; used as initial panel state. */
   accounts: QuotaAccount[];
   busy: boolean;
   applying: boolean;
-  /** 保存并应用:上抛当前的完整账户列表(已过滤未选完的行),由上层落库+重启。 */
+  /** Save and Apply sends the complete account list, excluding incomplete rows, for persistence and restart. */
   onSave: (accounts: QuotaAccount[]) => void;
-  /** 跳转到实时额度查看页。 */
+  /** Navigate to the live quota page. */
   onViewUsage: () => void;
-  /** 声明/清除某供应商的额度计划(用于本地估算)。 */
+  /** Declare or clear a provider quota plan for local estimates. */
   onSavePlan: (
     upstream: string,
     lenMs: number,
@@ -33,7 +33,7 @@ interface QuotaPriorityPanelProps {
   ) => void;
 }
 
-/** 额度计划的窗口预设,覆盖最常见的订阅刷新周期。 */
+/** Quota-window presets covering common subscription reset periods. */
 const WINDOW_PRESETS: { label: [string, string]; ms: number }[] = [
   { label: ["5 hours", "5 小时"], ms: 5 * 60 * 60 * 1000 },
   { label: ["1 day", "1 天"], ms: 24 * 60 * 60 * 1000 },
@@ -43,9 +43,9 @@ const WINDOW_PRESETS: { label: [string, string]; ms: number }[] = [
 type QuotaEntry = QuotaAccount;
 
 /**
- * 额度优先模式的主面板:添加参与轮换的「供应商 + 模型」账户(不限数量),请求优先用
- * 「最接近刷新、且仍有余量」的账户,让每一份额度在刷新前用尽。行的先后即同额度时的
- * 调用优先级。此模式不出现关键词路由与只走本地。
+ * Main quota-first panel. Add any number of provider-and-model accounts. Requests
+ * prefer the account closest to reset that still has capacity, using quota before
+ * it expires. Row order breaks ties. Keyword and local-only routing are hidden in this mode.
  */
 export default function QuotaPriorityPanel({
   providers,
@@ -57,20 +57,20 @@ export default function QuotaPriorityPanel({
   onSavePlan,
 }: QuotaPriorityPanelProps) {
   const { copy } = useLocalizedCopy();
-  // 有序账户列表 —— 行顺序即同额度时的调用优先级。以已持久化的 accounts 为初值。
+  // Ordered account list; row order is the tie-break priority. Initialize from persisted accounts.
   const [entries, setEntries] = useState<QuotaEntry[]>(() =>
     accounts.map((account) => ({ upstream: account.upstream, model: account.model })),
   );
-  // 持久化后(保存返回最新 state)重新同步:此时会顺带清掉未选完的行。编辑期间的
-  // 本地改动不受影响,只有当落库内容真正变化时才重置。
+  // Resynchronize after persistence returns fresh state, removing incomplete rows.
+  // Preserve local edits and reset only when persisted content actually changes.
   const accountsKey = accounts.map((account) => `${account.upstream}/${account.model}`).join(",");
   useEffect(() => {
     setEntries(accounts.map((account) => ({ upstream: account.upstream, model: account.model })));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- accountsKey 概括了 accounts 的内容
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- accountsKey summarizes account content.
   }, [accountsKey]);
 
-  // 新行留空,不预填供应商;方便连选靠的是下拉里把「上次选的那家」置顶(见
-  // providerOptions),而不是替用户先选好。
+  // Leave new rows empty instead of preselecting a provider. providerOptions
+  // makes repeated selection easy by placing the last provider first.
   const addEntry = () => setEntries((prev) => [...prev, { upstream: "", model: "" }]);
   const removeEntry = (index: number) =>
     setEntries((prev) => prev.filter((_, i) => i !== index));
@@ -86,8 +86,8 @@ export default function QuotaPriorityPanel({
     };
   };
 
-  // `preferred` 是「上次选的那家」——把它顶到选项最上面,连选同一供应商时点开就在
-  // 第一个。当前行若已选(`current`),则以它为置顶项(带勾);否则用 preferred。
+  // `preferred` is the last selected provider and appears first for repeated
+  // selection. If the current row has a selection, put `current` first with a check.
   const providerOptions = (current: string, preferred: string): CompactComboboxOption[] => {
     const pinned = current || preferred;
     const pinnedExists = providers.some((p) => p.name === pinned);
@@ -106,7 +106,7 @@ export default function QuotaPriorityPanel({
     ];
   };
 
-  // 参与轮换的去重供应商(计划是按供应商的,与具体模型无关)。
+  // Deduplicated providers in the rotation; plans belong to providers, not individual models.
   const planProviders = Array.from(
     new Set(entries.map((entry) => entry.upstream).filter(Boolean)),
   );
@@ -162,7 +162,7 @@ export default function QuotaPriorityPanel({
             <p className="quota-empty">{copy("No models added yet.", "还没有添加模型。")}</p>
           ) : (
             entries.map((entry, index) => {
-              // 上次选的那家:当前行之前最近一个已选供应商,用于把它在下拉里置顶。
+              // Use the nearest selected provider in an earlier row as the preferred dropdown item.
               const preferred =
                 entries.slice(0, index).reverse().find((e) => e.upstream)?.upstream ?? "";
               return (
@@ -240,7 +240,7 @@ export default function QuotaPriorityPanel({
   );
 }
 
-/** 单个供应商的额度计划编辑行:刷新窗口 + 额度上限 + 单位。上限为空即清除计划。 */
+/** Provider quota-plan row with reset window, limit, and unit; an empty limit clears the plan. */
 function QuotaPlanRow({
   upstream,
   plan,
@@ -268,7 +268,7 @@ function QuotaPlanRow({
   const limitId = useId();
   const unitId = useId();
 
-  // 外部计划变化(保存后 state 刷新)时重新同步本地字段。
+  // Resynchronize local fields when an external plan changes after saved state refreshes.
   useEffect(() => {
     setLenMs(presetOf(plan?.len_ms));
     setLimit(plan?.limit ? String(plan.limit) : "");

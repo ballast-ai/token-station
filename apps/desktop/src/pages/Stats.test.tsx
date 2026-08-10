@@ -274,7 +274,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
       await Promise.all(siblings.map(({ promise }) => promise));
     });
     await waitFor(() => expect(refresh).not.toBeDisabled());
-    expect(screen.getByText(/stats failed/)).toBeInTheDocument();
+    expect(screen.getByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
   });
 
   it("does not start a queued refresh after the page unmounts", async () => {

@@ -17,10 +17,10 @@ export interface ProviderView {
   has_auth: boolean;
   credential_source?: "store" | "env" | "file" | "none";
   credential_reference?: string;
-  /** 本机运行的供应商(如本地 Ollama);「只走本地」路由据此把流量锁在本机。 */
+  /** Locally hosted provider, such as Ollama. Local-only routing uses this to keep traffic on the machine. */
   local?: boolean;
   access_tier?: "free" | "paid";
-  /** 已声明的额度计划(供本地估算);未设则为非窗口/按量。 */
+  /** Declared quota plan for local estimates; absent means non-windowed or usage-based. */
   quota_plan?: QuotaPlanView | null;
 }
 
@@ -84,7 +84,7 @@ export interface ProviderEndpointPreview {
   chat: string;
   responses: string;
   messages: string;
-  /** 后端统一判定的回环端点资格；只有 true 才能标记为本地模型。 */
+  /** Backend-determined loopback eligibility; only true endpoints can be marked as local models. */
   loopback: boolean;
 }
 
@@ -173,7 +173,7 @@ export type ReceiptDecidedByView =
   | { tier: "exact_model"; model: string }
   | { tier: "quota" };
 
-/** 额度优先决策快照:为什么选了这个账户(决策时的窗口/速率画像)。 */
+/** Quota-first decision snapshot explaining the selected account's window and rate state. */
 export interface ReceiptQuotaView {
   reset_ms: number | null;
   remaining_permille: number | null;
@@ -189,7 +189,7 @@ export interface ReceiptRouteView {
   decided_by: ReceiptDecidedByView;
   fallbacks: number;
   features: ReceiptFeaturesView;
-  /** 仅额度优先路由存在;三档路由为 undefined。 */
+  /** Present only for quota-first routing; undefined for tiered routing. */
   quota?: ReceiptQuotaView | null;
 }
 
@@ -309,7 +309,7 @@ export interface AgentRouteView {
   tiers: Record<TierSlot, TierView>;
   config_error: string | null;
   profile: string | null;
-  /** 该 Agent 的有效路由模式：自身覆盖优先，否则跟随主页默认。 */
+  /** Effective routing mode for this Agent: its override first, otherwise the home default. */
   routing_mode: "tiered" | "quota_first";
 }
 
@@ -318,7 +318,7 @@ export interface QuotaAccount {
   model: string;
 }
 
-/** 运行时额度来源:供应商响应头(权威)/ 本地账本估算 / 无数据。 */
+/** Runtime quota source: authoritative provider headers, local ledger estimate, or no data. */
 export type QuotaSource = "authoritative" | "estimated" | "none";
 
 export interface QuotaWindowSnapshot {
@@ -382,17 +382,17 @@ export interface StateView {
   deleted_providers?: string[];
   provider_recovery_error?: string | null;
   tiers: Record<TierSlot, TierView>;
-  /** 每档(弱/中/强)的用户关键词库;命中即强制走该档(路由第 1 层覆盖)。 */
+  /** User keyword library for each tier; a match forces that tier at routing layer 1. */
   keywords: Record<TierSlot, string[]>;
   agent_routes: Record<string, AgentRouteView>;
   profiles: string[];
-  /** 「只走本地」:锁定路由只用标了 local 的供应商,请求不出本机。 */
+  /** Local-only routing uses providers marked local and keeps requests on the machine. */
   local_only: boolean;
-  /** `local_only` 下本地无可用时是否许可退到云(默认关=严格本地)。 */
+  /** Whether local_only may fall back to cloud when no local target is available; false means strict local routing. */
   allow_cloud_fallback: boolean;
-  /** 路由模式:`tiered`(三档智能路由,默认)或 `quota_first`(额度优先)。 */
+  /** Routing mode: tiered intelligent routing by default, or quota_first. */
   routing_mode: "tiered" | "quota_first";
-  /** 额度优先轮换账户(供应商+模型),按优先级顺序;全局共享。 */
+  /** Globally shared quota-first rotation accounts, provider plus model, in priority order. */
   quota_accounts: QuotaAccount[];
   serve: ServeView;
   draft_revision: number;
@@ -680,7 +680,7 @@ export interface RouterTableView {
   default_pool: string;
   assumed_context_window: number;
   threshold: number | null;
-  // rules / hint_routes 原样透传,结构随内核演进,故用宽松类型。
+  // Pass rules and hint_routes through unchanged; use loose types as the core schema evolves.
   rules: Record<string, unknown>[];
   hint_routes: Record<string, unknown>[];
   bands: BandView[];
@@ -747,6 +747,8 @@ export interface DiagnosticPreview {
 }
 
 export const getState = () => invoke<StateView>("get_state");
+export const setDockThemeIcon = (theme: "light" | "dark") =>
+  invoke<void>("set_dock_theme_icon", { theme });
 export const getRecoveryState = () => invoke<RecoveryState>("get_recovery_state");
 export const getRecoveryDiagnostics = () =>
   invoke<DiagnosticPreview>("get_recovery_diagnostics");
@@ -794,24 +796,24 @@ export const addFreeProvider = (
     guardConfirmed,
   });
 
-/** 设置「只走本地」及其云兜底许可(写进 home router,Agent inherit 自动跟随)。 */
+/** Set local-only routing and cloud fallback in the home router; inherited Agents follow automatically. */
 export const setLocalRouting = (localOnly: boolean, allowCloudFallback: boolean) =>
   invoke<StateView>("set_local_routing", {
     localOnly,
     allowCloudFallback,
   });
 
-/** 切换路由模式:三档智能路由(`tiered`)或额度优先(`quota_first`)。 */
+/** Switch between tiered intelligent routing and quota-first routing. */
 export const setRoutingMode = (mode: "tiered" | "quota_first", agentId?: string) =>
   invoke<StateView>("set_routing_mode", { mode, agentId: agentId ?? null });
 
 export const setQuotaAccounts = (accounts: QuotaAccount[]) =>
   invoke<StateView>("set_quota_accounts", { accounts });
 
-/** 查询运行中网关的实时额度快照(需代理运行)。 */
+/** Query the running gateway's live quota snapshot; requires the proxy to be running. */
 export const getQuotaSnapshot = () => invoke<QuotaSnapshot>("get_quota_snapshot");
 
-/** 声明/清除某供应商的额度计划(供本地估算);limit 或 len_ms 为 0 即清除。 */
+/** Declare or clear a provider quota plan for local estimates; zero limit or len_ms clears it. */
 export const setQuotaPlan = (
   upstream: string,
   lenMs: number,
@@ -878,11 +880,11 @@ export const setTier = (
   model: string | null,
 ) => invoke<StateView>("set_tier", { slot, upstream, model });
 
-/** 往某档(弱/中/强)关键词库加一个词;命中即强制走该档。 */
+/** Add a keyword to a tier; matching it forces that tier. */
 export const addKeyword = (slot: TierSlot, keyword: string) =>
   invoke<StateView>("add_keyword", { slot, keyword });
 
-/** 从某档关键词库删除一个词。 */
+/** Remove a keyword from a tier. */
 export const removeKeyword = (slot: TierSlot, keyword: string) =>
   invoke<StateView>("remove_keyword", { slot, keyword });
 
@@ -907,7 +909,7 @@ export const deleteProfile = (name: string) =>
 
 export const saveAgentRoutes = () => invoke<StateView>("save_agent_routes");
 
-/** 保存并热重启**单个 Agent**的路由(代理运行中时即时生效,不影响其它 Agent)。 */
+/** Save and hot-restart one Agent route; apply immediately without affecting other Agents. */
 export const restartAgentRoute = (agentId: string) =>
   invoke<StateView>("restart_agent_route", { agentId });
 
@@ -1004,9 +1006,11 @@ export const planAgentDisconnect = (agentId: AgentId, installationPath: string) 
   invoke<ConfigPlanView>("plan_agent_disconnect", { agentId, installationPath });
 
 /**
- * 恢复官方配置并断开:按归属记录剥掉 TS 注入的受管字段,让 Agent 回到官方默认配置,
- * 再清归属。不依赖加密快照/主密钥,确定性、始终可成功——这是「恢复官方配置并断开」
- * 主按钮走的路径(取代了旧的快照精确还原 + 独立「强制断开」兜底)。
+ * Restore official configuration and disconnect by removing TS-managed fields
+ * according to ownership records, returning the Agent to its official defaults,
+ * then clearing ownership. This deterministic path does not depend on encrypted
+ * snapshots or a master key. It replaces exact snapshot restoration and the
+ * separate force-disconnect fallback.
  */
 export const forceForgetAgent = (agentId: AgentId, installationPath: string) =>
   invoke<void>("force_forget_agent", { agentId, installationPath });
@@ -1041,17 +1045,19 @@ export const setSettings = (
 });
 
 // ---------------------------------------------------------------------------
-// 数据面(只读):优先走本地 HTTP `/admin/*`,让同一份前端脱离 Tauri 壳也能跑
-// (浏览器直连 dev、将来远程管理台)。代理没起或请求失败时,在 Tauri 壳内回退
-// IPC——这样「代理已停止」时用量/路由表页仍然可用(读草稿与本地库),行为与
-// 改造前一致。特权操作(Agent 事务 / 写配置 / 密钥)只走 IPC,永不上 HTTP。
+// The read-only data plane prefers local HTTP `/admin/*`, allowing the same
+// frontend to run outside Tauri for direct browser development and a future
+// remote console. If the proxy is stopped or a request fails, the Tauri shell
+// falls back to IPC so usage and routing pages can still read drafts and the
+// local database. Privileged operations such as Agent transactions, config
+// writes, and secrets always use IPC and never HTTP.
 
 const IN_TAURI = "__TAURI_INTERNALS__" in window;
 
 let adminBase: string | null = null;
 let adminKey: string | null = null;
 
-/** App 每次刷新状态时同步数据面端点(App.tsx 调用)。 */
+/** Synchronize the data-plane endpoint whenever App.tsx refreshes state. */
 export function setAdminEndpoint(serve: ServeView) {
   const reachable = serve.app_runtime === "running" && serve.listener_reachable;
   adminBase = reachable ? `http://${serve.listen}` : null;
@@ -1065,8 +1071,8 @@ export function browserAdminEndpoint(storage: Pick<Storage, "getItem">) {
   } as const;
 }
 
-// 纯浏览器模式(无 Tauri 壳)只允许从 localStorage 取非敏感监听端点。
-// 虚拟 key 永不进入持久化 Web Storage；启用鉴权时使用 Tauri 壳。
+// Browser-only mode may read only the non-sensitive listen endpoint from localStorage.
+// Never persist the virtual key in Web Storage; use the Tauri shell when auth is enabled.
 if (!IN_TAURI) {
   const endpoint = browserAdminEndpoint(localStorage);
   adminBase = endpoint.base;
@@ -1080,9 +1086,9 @@ async function dataGet<T>(path: string, ipcFallback: () => Promise<T>): Promise<
         headers: adminKey ? { authorization: `Bearer ${adminKey}` } : {},
       });
       if (response.ok) return (await response.json()) as T;
-      // 非 2xx(如 key 失效)也回退 IPC;纯浏览器下直接报错。
+      // Fall back to IPC for non-2xx responses such as an invalid key; browser-only mode throws.
     } catch {
-      // 网络失败(代理刚停等):走回退。
+      // Fall back after network failures, such as when the proxy has just stopped.
     }
   }
   if (IN_TAURI) return ipcFallback();
@@ -1142,8 +1148,9 @@ export const getRequestReceipts = ({
     pageSize,
   });
 
-// 注意语义差:HTTP 返回**运行中**配置的路由表,IPC 回退返回可编辑草稿。
-// 代理运行时以运行态为准,正是数据面该报告的事实。
+// Preserve the semantic difference: HTTP returns the running routing table,
+// while IPC fallback returns the editable draft. When the proxy runs, runtime
+// state is authoritative and is what the data plane should report.
 export const getRouterTable = () =>
   dataGet<RouterTableView>("/admin/router-table", () =>
     invoke<RouterTableView>("get_router_table"),

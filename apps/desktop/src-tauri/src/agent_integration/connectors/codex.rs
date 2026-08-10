@@ -22,8 +22,8 @@ static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
     ],
     config_format: DocumentFormat::Toml,
     config_path_template: "${HOME}/.codex/config.toml",
-    // model 也被 connect_patch 改写(=auto)且在 owned_paths() 里,必须一并声明,
-    // 否则归属元数据与实际改写不一致,恢复/展示会漏掉 model。
+    // connect_patch also rewrites model to auto and includes it in owned_paths(),
+    // so declare it here or ownership metadata, restoration, and display will omit it.
     owned_fields: &["model", "model_provider", "model_providers.tokenstation"],
     requires_virtual_key: true,
     restart_required: false,

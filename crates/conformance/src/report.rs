@@ -12,12 +12,12 @@ use std::fmt;
 /// One property the suite asserts of an adapter.
 ///
 /// These do not map one-to-one onto the rows of the architecture's acceptance
-/// table. The table's `请求转换` / `响应转换` / `错误映射` rows are all
+/// table. The request conversion, response conversion, and error mapping rows are all
 /// [`Check::FixtureMatch`] — they differ only in which fixture family produced
 /// the case, which the [`Outcome::case`] name records. The rows that need their
 /// own check are the ones a fixture comparison cannot express.
 ///
-/// The table's `安全` row is deliberately absent. No network, no file system,
+/// The table's security row is deliberately absent. No network, no file system,
 /// and the memory and time bounds are properties of the sandbox the runtime
 /// builds, not of anything an adapter can be asked to compute. `plugin-runtime`
 /// enforces them; a fixture that claimed to would be theatre.

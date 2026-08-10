@@ -66,5 +66,5 @@ it("surfaces the error when the proxy is not running", async () => {
 
   render(<QuotaUsagePage providers={[]} onBack={vi.fn()} />);
 
-  expect(await screen.findByText(/代理未运行/)).toBeInTheDocument();
+  expect(await screen.findByText("本地代理尚未运行。请先启动代理，然后重试。")).toBeInTheDocument();
 });
