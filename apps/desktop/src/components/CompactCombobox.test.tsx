@@ -11,6 +11,18 @@ const OPTIONS = [
 ];
 
 describe("CompactCombobox", () => {
+  it("exposes the open menu as an onboarding floating layer", async () => {
+    const user = userEvent.setup();
+    render(
+      <CompactCombobox ariaLabel="供应商" value="" options={OPTIONS} onChange={vi.fn()} />,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: "供应商" }));
+
+    expect(screen.getByRole("listbox").parentElement)
+      .toHaveAttribute("data-onboarding-floating", "true");
+  });
+
   it("keeps the user's active option when its parent rerenders", async () => {
     const user = userEvent.setup();
     const { rerender } = render(

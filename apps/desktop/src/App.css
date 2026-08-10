@@ -853,9 +853,6 @@ body {
 
 /* ---- First-run guided setup -------------------------------------------- */
 .first-run-spotlight-root {
-  position: fixed;
-  z-index: 80;
-  inset: 0;
   pointer-events: none;
 }
 
@@ -886,7 +883,7 @@ body {
 
 .first-run-coachmark {
   position: fixed;
-  z-index: 82;
+  z-index: 83;
   max-height: calc(100vh - 32px);
   overflow: auto;
   padding: 20px;
@@ -898,6 +895,11 @@ body {
   box-shadow: 0 26px 72px rgb(0 0 0 / 34%);
   pointer-events: auto;
   animation: first-run-coachmark-in 160ms ease-out both;
+}
+
+body[data-first-run-guide-active="true"] [data-onboarding-floating="true"] {
+  z-index: 84;
+  pointer-events: auto;
 }
 
 .first-run-coachmark::before {

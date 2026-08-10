@@ -136,6 +136,7 @@ export default function InstallationPicker({
         <div
           className="installation-picker-menu"
           role="listbox"
+          data-onboarding-floating="true"
           aria-label={copy(`${agentName} installations`, `${agentName} 安装列表`)}
         >
           {options.map((option, index) => {

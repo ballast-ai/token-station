@@ -266,6 +266,7 @@ it("teaches a new user by spotlighting the real add-provider button", async () =
   render(<App />);
 
   const coachmark = await screen.findByRole("dialog", { name: "添加你的第一个供应商" });
+  expect(document.body).toHaveAttribute("data-first-run-guide-active", "true");
   expect(coachmark).toHaveTextContent("添加供应商 · 1/5");
   expect(screen.queryByRole("button", { name: "下一步" })).toBeNull();
   const addProvider = screen.getByRole("button", { name: "添加供应商" });
@@ -598,8 +599,10 @@ it("continues from rescan to Agent selection when an installation appears", asyn
   await user.click(screen.getByRole("button", { name: "重新扫描" }));
 
   expect(await screen.findByRole("dialog", { name: "选择一个 Agent" })).toBeInTheDocument();
-  expect(screen.getByRole("navigation", { name: "Agent 列表" }))
+  expect(screen.getByRole("region", { name: "Agent 选择列表" }))
     .toHaveAttribute("data-onboarding-active", "true");
+  expect(screen.getByRole("navigation", { name: "Agent 列表" }))
+    .not.toHaveAttribute("data-onboarding-active");
 });
 
 it("finishes only after an Agent rescan reports CONNECTED", async () => {
@@ -660,7 +663,7 @@ it("finishes only after an Agent rescan reports CONNECTED", async () => {
   await user.click(screen.getByRole("button", { name: "Agent" }));
 
   await screen.findByRole("dialog", { name: "选择一个 Agent" });
-  expect(screen.getByRole("navigation", { name: "Agent 列表" }))
+  expect(screen.getByRole("region", { name: "Agent 选择列表" }))
     .toHaveAttribute("data-onboarding-active", "true");
   await user.click(screen.getByRole("button", { name: "Claude Code" }));
 
@@ -737,6 +740,8 @@ it("requires an exact installation choice before connecting a multi-installation
   expect(screen.queryByRole("dialog", { name: "一键接入 Agent" })).toBeNull();
 
   await user.click(picker);
+  await user.tab();
+  expect(screen.getByRole("option", { name: "claude · v9.9.9" })).toHaveFocus();
   await user.click(screen.getByRole("option", { name: "claude-preview · v10.0.0" }));
 
   expect(await screen.findByRole("dialog", { name: "一键接入 Agent" })).toBeInTheDocument();
@@ -835,6 +840,7 @@ it("treats Escape as a pause, restores focus, and offers setup next session", as
   await user.keyboard("{Escape}");
 
   expect(screen.queryByRole("dialog")).toBeNull();
+  expect(document.body).not.toHaveAttribute("data-first-run-guide-active");
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBeNull();
   await waitFor(() => {
     expect(screen.getByRole("button", { name: "Token Station 概览" })).toHaveFocus();
