@@ -82,9 +82,8 @@ impl RequestFeatures {
         let mut has_images = false;
 
         for message in &request.messages {
-            // The system prompt is fixed Agent scaffolding. Count it only in
-            // estimated_input_tokens for context-window fitting, not in
-            // conversation_tokens for difficulty scoring.
+            // The system prompt is fixed Agent scaffolding. Include it only in estimated_input_tokens for context
+            // context-window fitting), not conversation_tokens used for difficulty scoring.
             let is_conversation = message.role != Role::System;
             let mut add = |tokens: u32| {
                 estimated_input_tokens = estimated_input_tokens.saturating_add(tokens);

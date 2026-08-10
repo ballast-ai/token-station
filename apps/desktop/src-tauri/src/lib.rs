@@ -2091,7 +2091,9 @@ mod dock_icon_tests {
     #[test]
     fn embeds_png_dock_icons() {
         for theme in ["light", "dark"] {
-            assert!(dock_icon_bytes(theme).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+            assert!(dock_icon_bytes(theme)
+                .unwrap()
+                .starts_with(b"\x89PNG\r\n\x1a\n"));
         }
     }
 }
