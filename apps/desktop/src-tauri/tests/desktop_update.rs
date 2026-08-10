@@ -4,8 +4,8 @@ use std::sync::{
 };
 
 use token_station_desktop_lib::desktop_update::{
-    check_with, install_with, DesktopUpdateOperation, DesktopUpdateStatus, DesktopUpdateView,
-    WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE,
+    check_with, install_with, DesktopUpdateOperation, DesktopUpdatePrepareFailure,
+    DesktopUpdateStatus, DesktopUpdateView, WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE,
 };
 
 #[test]
@@ -67,9 +67,10 @@ async fn a_download_or_signature_failure_never_stops_the_gateway_or_installs() {
     let install_events = Arc::clone(&events);
     let result = install_with(
         "official-public-key",
+        "1.1.3",
         move || async move {
             check_events.lock().unwrap().push("check");
-            Ok(Some("signed-package"))
+            Ok(Some(("1.1.3".to_owned(), "signed-package")))
         },
         move |package| async move {
             download_events.lock().unwrap().push("download");
@@ -93,6 +94,70 @@ async fn a_download_or_signature_failure_never_stops_the_gateway_or_installs() {
 }
 
 #[tokio::test]
+async fn a_changed_latest_version_is_rejected_before_download_or_gateway_stop() {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let check_events = Arc::clone(&events);
+    let download_events = Arc::clone(&events);
+    let prepare_events = Arc::clone(&events);
+    let install_events = Arc::clone(&events);
+    let result = install_with(
+        "official-public-key",
+        "1.1.3",
+        move || async move {
+            check_events.lock().unwrap().push("check");
+            Ok(Some(("1.1.4".to_owned(), "signed-package")))
+        },
+        move |package| async move {
+            download_events.lock().unwrap().push("download");
+            Ok((package, b"verified-bytes".to_vec()))
+        },
+        move || async move {
+            prepare_events.lock().unwrap().push("prepare-gateway");
+            Ok(())
+        },
+        move |_package, _bytes, _prepared| {
+            install_events.lock().unwrap().push("install");
+            Ok(())
+        },
+        |_prepared| async { Ok(()) },
+    )
+    .await;
+
+    assert_eq!(
+        result.unwrap_err(),
+        "update_version_changed: 已确认更新到 1.1.3，但当前可用版本已变为 1.1.4；请重新检查并确认"
+    );
+    assert_eq!(*events.lock().unwrap(), vec!["check"]);
+}
+
+#[tokio::test]
+async fn a_missing_expected_version_is_rejected_before_checking_again() {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let check_events = Arc::clone(&events);
+
+    let result = install_with(
+        "official-public-key",
+        "  ",
+        move || async move {
+            check_events.lock().unwrap().push("check");
+            Ok(Some(("1.1.3".to_owned(), "signed-package")))
+        },
+        |package| async move { Ok((package, b"verified-bytes".to_vec())) },
+        || async { Ok(()) },
+        |_package, _bytes, _prepared| Ok(()),
+        |_prepared| async { Ok(()) },
+    )
+    .await;
+
+    assert_eq!(
+        result.unwrap_err(),
+        "update_expected_version_missing: 缺少已确认的更新版本，请重新检查"
+    );
+    assert!(events.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn a_verified_update_stops_the_gateway_only_before_installing() {
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
 
@@ -102,9 +167,10 @@ async fn a_verified_update_stops_the_gateway_only_before_installing() {
     let install_events = Arc::clone(&events);
     let result = install_with(
         "official-public-key",
+        "1.1.3",
         move || async move {
             check_events.lock().unwrap().push("check");
-            Ok(Some("signed-package"))
+            Ok(Some(("1.1.3".to_owned(), "signed-package")))
         },
         move |package| async move {
             download_events.lock().unwrap().push("download-and-verify");
@@ -141,7 +207,8 @@ async fn a_failed_install_recovers_a_previously_running_gateway() {
 
     let result = install_with(
         "official-public-key",
-        || async { Ok(Some("signed-package")) },
+        "1.1.3",
+        || async { Ok(Some(("1.1.3".to_owned(), "signed-package"))) },
         |package| async move { Ok((package, b"verified-bytes".to_vec())) },
         move || async move {
             prepare_events.lock().unwrap().push("prepare-gateway");
@@ -164,5 +231,73 @@ async fn a_failed_install_recovers_a_previously_running_gateway() {
     assert_eq!(
         *events.lock().unwrap(),
         vec!["prepare-gateway", "install-failed", "restore-gateway"]
+    );
+}
+
+#[tokio::test]
+async fn a_failed_gateway_prepare_recovers_before_returning_the_error() {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let prepare_events = Arc::clone(&events);
+    let install_events = Arc::clone(&events);
+    let recover_events = Arc::clone(&events);
+    let result = install_with(
+        "official-public-key",
+        "1.1.3",
+        || async { Ok(Some(("1.1.3".to_owned(), "signed-package"))) },
+        |package| async move { Ok((package, b"verified-bytes".to_vec())) },
+        move || async move {
+            prepare_events.lock().unwrap().push("prepare-failed");
+            Err(DesktopUpdatePrepareFailure::new(
+                "update_gateway_stop_timeout: 等待本地网关安全停止超时",
+                true,
+            ))
+        },
+        move |_package, _bytes, _was_active| {
+            install_events.lock().unwrap().push("install");
+            Ok(())
+        },
+        move |was_active| async move {
+            assert!(was_active);
+            recover_events.lock().unwrap().push("restore-gateway");
+            Ok(())
+        },
+    )
+    .await;
+
+    assert_eq!(
+        result.unwrap_err(),
+        "update_gateway_stop_timeout: 等待本地网关安全停止超时"
+    );
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec!["prepare-failed", "restore-gateway"]
+    );
+}
+
+#[tokio::test]
+async fn a_failed_gateway_prepare_preserves_both_prepare_and_recovery_errors() {
+    let result = install_with(
+        "official-public-key",
+        "1.1.3",
+        || async { Ok(Some(("1.1.3".to_owned(), "signed-package"))) },
+        |package| async move { Ok((package, b"verified-bytes".to_vec())) },
+        || async {
+            Err(DesktopUpdatePrepareFailure::new(
+                "update_gateway_stop_timeout: 等待本地网关安全停止超时",
+                true,
+            ))
+        },
+        |_package, _bytes, _was_active| Ok(()),
+        |was_active| async move {
+            assert!(was_active);
+            Err("startup_cleanup_in_progress: 网关仍在停止".to_owned())
+        },
+    )
+    .await;
+
+    assert_eq!(
+        result.unwrap_err(),
+        "update_gateway_stop_timeout: 等待本地网关安全停止超时; update_gateway_restore_failed: startup_cleanup_in_progress: 网关仍在停止"
     );
 }

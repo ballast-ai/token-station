@@ -19,6 +19,25 @@ import {
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 
+function requiresFreshUpdateCheck(message: string): boolean {
+  return message.includes("update_version_changed:")
+    || message.includes("update_expected_version_missing:");
+}
+
+function invalidateUpdateCandidate(
+  update: DesktopUpdateView | null,
+  message: string,
+): DesktopUpdateView | null {
+  return update ? {
+    ...update,
+    status: "unavailable",
+    version: null,
+    notes: null,
+    pub_date: null,
+    message,
+  } : null;
+}
+
 /// About and updates page. It only performs the anonymous version check allowed by the core and never replaces binaries.
 function AboutContent({
   desktopVersion,
@@ -67,12 +86,20 @@ function AboutContent({
   };
 
   const install = async () => {
+    const expectedVersion = update?.version;
+    if (!expectedVersion) {
+      const message = copy("The selected update version is missing; check again.", "缺少已确认的更新版本，请重新检查。");
+      setConfirmOpen(false);
+      setUpdate((current) => invalidateUpdateCandidate(current, message));
+      setErr(message);
+      return;
+    }
     setConfirmOpen(false);
     setBusy("installing");
     setErr("");
     setProgress(null);
     try {
-      const started = await installDesktopUpdateAndRestart();
+      const started = await installDesktopUpdateAndRestart(expectedVersion);
       if (started) {
         setBusy("restarting");
       } else {
@@ -80,7 +107,12 @@ function AboutContent({
         setBusy("");
       }
     } catch (e) {
-      setErr(String(e));
+      const message = String(e);
+      if (requiresFreshUpdateCheck(message)) {
+        setUpdate((current) => invalidateUpdateCandidate(current, message));
+      } else {
+        setErr(message);
+      }
       setBusy("");
     }
   };
@@ -116,6 +148,7 @@ function AboutContent({
           {update.status === "update_available" ? (
             <>
               <b>{t("about.updateFound", { version: update.version ?? "" })}</b>
+              {update.pub_date && <span>{t("about.releaseDate", { date: update.pub_date })}</span>}
               {update.notes && <span>{update.notes}</span>}
             </>
           ) : update.status === "up_to_date" ? (

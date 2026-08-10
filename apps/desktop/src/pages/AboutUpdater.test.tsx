@@ -68,6 +68,7 @@ describe("desktop in-app update", () => {
 
     expect(await screen.findByText("发现新版本 1.1.3")).toBeInTheDocument();
     expect(screen.getByText("安全更新")).toBeInTheDocument();
+    expect(screen.getByText("发布日期：2026-08-06T07:00:00Z")).toBeInTheDocument();
     await user.click(
       screen.getByRole("button", { name: "下载并更新到 1.1.3" }),
     );
@@ -79,6 +80,32 @@ describe("desktop in-app update", () => {
     expect(installDesktopUpdateAndRestart).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "确认更新并重启" }));
-    expect(installDesktopUpdateAndRestart).toHaveBeenCalledTimes(1);
+    expect(installDesktopUpdateAndRestart).toHaveBeenCalledWith("1.1.3");
+  });
+
+  it("returns to update checking when the confirmed latest version changes", async () => {
+    vi.mocked(checkDesktopUpdate).mockResolvedValue({
+      status: "update_available",
+      current_version: "1.1.2",
+      version: "1.1.3",
+      notes: "安全更新",
+      pub_date: "2026-08-06T07:00:00Z",
+      release_url: "https://github.com/ballast-ai/token-station/releases/tag/v1.1.3",
+      message: null,
+    });
+    vi.mocked(installDesktopUpdateAndRestart).mockRejectedValue(
+      "update_version_changed: 已确认更新到 1.1.3，但当前可用版本已变为 1.1.4；请重新检查并确认",
+    );
+
+    const user = userEvent.setup();
+    render(<About desktopVersion="1.1.2" coreVersion="0.2.0" />);
+    await user.click(screen.getByRole("button", { name: "检查更新" }));
+    await user.click(await screen.findByRole("button", { name: "下载并更新到 1.1.3" }));
+    await user.click(screen.getByRole("button", { name: "确认更新并重启" }));
+
+    expect(await screen.findByText(/update_version_changed/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "检查更新" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "下载并更新到 1.1.3" })).not.toBeInTheDocument();
+    expect(screen.getByText(/releases\/tag\/v1.1.3/)).toBeInTheDocument();
   });
 });

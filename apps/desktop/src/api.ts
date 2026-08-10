@@ -1158,5 +1158,5 @@ export const getEgress = () =>
 export const checkDesktopUpdate = () =>
   invoke<DesktopUpdateView>("check_desktop_update");
 
-export const installDesktopUpdateAndRestart = () =>
-  invoke<boolean>("install_desktop_update_and_restart");
+export const installDesktopUpdateAndRestart = (expectedVersion: string) =>
+  invoke<boolean>("install_desktop_update_and_restart", { expectedVersion });
