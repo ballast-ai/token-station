@@ -16,7 +16,7 @@ use crate::RequestFeatures;
 /// pasted here and mistaken for the name of an upstream.
 ///
 /// This is also the string that reaches the metrics store and, later, the
-/// cloud-sync whitelist — the docs call it the upstream reference name, and this is that type.
+/// cloud-sync whitelist — the docs call it `上游引用名`, and this is that type.
 /// So the narrowness buys something concrete: whatever else leaks, it is not a
 /// key someone typed into the wrong field.
 ///
@@ -152,7 +152,7 @@ pub enum DecidedBy {
 ///
 /// Deterministic: [`crate::Router::route`] reads no clock and draws no random
 /// number, so replaying a decision from the audit log against the same config
-/// reproduces it exactly. `C3#3`, the recent routing-decisions view, depends on that, and so
+/// reproduces it exactly. `C3#3` (`最近 N 条路由决策`) depends on that, and so
 /// does the server and the client agreeing.
 ///
 /// Content-free by construction. See [`RequestFeatures`] for how.
@@ -165,7 +165,7 @@ pub struct Decision {
     /// health first, then the operator's own order within a health class.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallbacks: Vec<UpstreamModel>,
-    /// What the router looked at. This is the classifier-feature transparency
+    /// What the router looked at. This is the `分类器看了什么特征` transparency
     /// credential: for any request, the user can see exactly which features
     /// produced the route, and that none of them is their prompt.
     pub features: RequestFeatures,

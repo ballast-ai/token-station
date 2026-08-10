@@ -218,7 +218,7 @@ fn a_trivial_turn_stays_cheap_under_a_heavy_agent_harness() {
     // The regression that motivated scoring on conversation content only: an
     // agent (e.g. OpenCode) wraps a one-word user turn in a multi-thousand-token
     // system prompt and a dozen advertised tools. Neither the system prompt nor
-    // the tool count is the user's request; a simple greeting must still land in `cheap`.
+    // the tool count is the user's request — a "你好" must still land in `cheap`.
     let mut request = ChatRequest::new(
         "auto",
         vec![
@@ -649,7 +649,7 @@ fn local_only_serves_a_local_pool() {
 
 #[test]
 fn local_only_without_fallback_refuses_a_cloud_only_pool() {
-    // The Chinese keyword for "prove" routes to `sota`, which carries only cloud upstreams.
+    // "证明" fires the rule into `sota`, which carries only cloud upstreams.
     // Local-only with no fallback must refuse rather than leave the machine.
     let error = Router::new(local_only_config(false))
         .expect("validates")

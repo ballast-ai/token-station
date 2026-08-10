@@ -10,7 +10,7 @@
 //! the text itself is read and dropped, per [`crate::RequestFeatures`]'s
 //! contract.
 
-/// Phrases that ask for deliberate reasoning, such as "step by step" or "pros and cons".
+/// Phrases that ask for deliberate reasoning ("step by step", "利弊").
 pub(crate) const REASONING_MARKERS: &[&str] = &[
     // English (V1 list, verbatim).
     "step by step",

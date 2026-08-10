@@ -141,14 +141,14 @@ const fn assumed_context_window_default() -> u32 {
 
 /// A rule the operator wrote. Highest priority, always.
 ///
-/// This is the overrideable fallback in the transparency design: whatever the heuristic or
+/// This is the `可覆写兜底` of the transparency design: whatever the heuristic or
 /// a future classifier would have chosen, a rule overrides it, and the decision
 /// records which rule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     /// Stable across edits; it is what lands in the decision record and in the
-    /// cloud-sync whitelist (the matched routing-rule ID).
+    /// cloud-sync whitelist (`路由命中规则 ID`).
     pub id: String,
     #[serde(rename = "when")]
     pub matcher: Match,
@@ -183,7 +183,7 @@ pub struct Match {
     ///
     /// This predicate reads the prompt. That is fine and it is local — what it
     /// must never do is remember. A keyword hit produces `DecidedBy::Rule { id }`
-    /// and nothing else, so the record cannot reveal that the request said "prove".
+    /// and nothing else, so the record cannot tell you the request said `证明`.
     /// One bit per configured keyword would still be a content channel.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords_any: Vec<String>,
@@ -313,19 +313,16 @@ impl Heuristic {
     #[must_use]
     pub fn score(&self, features: &RequestFeatures) -> u32 {
         let weights = &self.weights;
-        // Score difficulty from conversation content, excluding the Agent's fixed
-        // system-prompt scaffolding. Counting thousands of system tokens would
-        // push every request into the high tier; see conversation_tokens.
+        // 难度按对话内容打分,不含系统 prompt:agent 的固定脚手架(几千 token 系统
+        // prompt)否则会把每条请求都顶到高档(见 conversation_tokens 注释)。
         let mut score = features
             .conversation_tokens
             .saturating_div(weights.tokens_per_point.max(1));
 
-        // advertised tool_count is fixed per Agent. OpenCode sends its full tool
-        // set on every request regardless of difficulty, so exclude it from the
-        // difficulty score. Previously tool_count * per_tool could push a simple
-        // greeting into the high tier. tool_count still gates capabilities so
-        // tool requests reach models that support calls; per_tool remains stored
-        // but no longer contributes to scoring.
+        // 注意:advertised tool_count(request.tools.len())是每个 agent 的固定值——
+        // OpenCode 每条都带全套工具,与任务难度无关,故不计入难度打分(以前 tool_count
+        // ×per_tool 是"你好"被顶到高档的主因之一)。tool_count 仍用于能力门禁:带工具的
+        // 请求必须路由到支持工具调用的模型(见 route.rs)。per_tool 权重保留但不再参与打分。
         score = score.saturating_add(
             features
                 .code_block_count
@@ -598,48 +595,39 @@ impl fmt::Display for ConfigError {
         match self {
             Self::UnsupportedVersion(version) => write!(
                 f,
-                "当前配置版本是 {version}，但 Token Station 只支持版本 {CONFIG_VERSION}。请先更新或重新创建配置，然后再启动。"
+                "config version {version} is not {CONFIG_VERSION}; a breaking change ships a new version rather than reinterpreting this one"
             ),
             Self::AssumedContextWindowIsZero => f.write_str(
-                "上下文窗口不能设为 0。请先把 `assumed_context_window` 设为大于 0 的值，然后再启动。",
+                "assumed_context_window of 0 would make every model with an unreported context window unroutable",
             ),
-            Self::NoPools => f.write_str(
-                "你还没有设置路由池。必须先设置至少一个路由池，才能启动 Token Station。",
-            ),
-            Self::EmptyPool(pool) => write!(
-                f,
-                "路由池 `{pool}` 里还没有模型。请先添加至少一个供应商和模型，然后再启动。"
-            ),
+            Self::NoPools => f.write_str("a router with no pools can route nothing"),
+            Self::EmptyPool(pool) => write!(f, "pool `{pool}` has no members"),
             Self::UnknownPool {
                 pool,
                 referenced_by,
-            } => write!(
-                f,
-                "{referenced_by} 使用了不存在的路由池 `{pool}`。请创建这个路由池，或改选一个已有路由池。"
-            ),
+            } => write!(f, "{referenced_by} routes to pool `{pool}`, which does not exist"),
             Self::EmptyRuleId => f.write_str(
-                "有一条路由规则没有 ID。请为每条规则设置唯一 ID，然后再保存。",
+                "a rule must have an id; it is what the decision record and the audit log name",
             ),
             Self::DuplicateRuleId(id) => write!(
                 f,
-                "多条路由规则使用了同一个 ID `{id}`。请为每条规则设置唯一 ID，然后再保存。"
+                "two rules share the id `{id}`; a decision record could not say which one fired"
             ),
             Self::RuleMatchesEverything(id) => write!(
                 f,
-                "路由规则 `{id}` 没有任何条件，会匹配所有请求。请为它添加条件，或改用 `default_pool` 作为兜底。"
+                "rule `{id}` has no predicates, so it matches every request and every rule after it is dead; use `default_pool`"
             ),
             Self::DuplicateHintRoute { kind, value } => write!(
                 f,
-                "多条提示路由使用了相同条件 `{kind:?}` = `{value}`。请只保留其中一条。"
+                "two hint routes share `{kind:?}` = `{value}`"
             ),
             Self::TokensPerPointIsZero => {
-                f.write_str(
-                    "路由评分参数 `heuristic.weights.tokens_per_point` 不能是 0。请把它设为大于 0 的值。",
-                )
+                f.write_str("heuristic.weights.tokens_per_point of 0 would divide by zero")
             }
             Self::BandsNotDescending { first, second } => write!(
                 f,
-                "路由分档必须按 `at_least` 从高到低排列。当前 {first} 后面跟着 {second}，请调整顺序。"
+                "heuristic.bands must be strictly descending by at_least; \
+                 {first} is followed by {second}, which could never fire"
             ),
         }
     }
@@ -719,16 +707,16 @@ mod tests {
         assert!(heuristic.bands.is_empty());
 
         let features = RequestFeatures {
-            conversation_tokens: 2_000, // 20 from conversation tokens, excluding the system prompt
-            tool_count: 1,              // Excluded from difficulty; used only for capability gating
+            conversation_tokens: 2_000, // 20(难度按对话 token,不含系统 prompt)
+            tool_count: 1,              // 不再计入难度分(仅供能力门禁)
             code_block_count: 1,        // 8
-            message_count: 3,           // 6 from two extra turns times 3
+            message_count: 3,           // 6(2 个 extra turn × 3)
             // Ported counts present but every ported weight defaulted to 0.
             reasoning_marker_count: 9,
             simple_indicator_count: 9,
             ..RequestFeatures::default()
         };
-        assert_eq!(heuristic.score(&features), 34); // 20 + 8 + 6; tool_count no longer scores
+        assert_eq!(heuristic.score(&features), 34); // 20 + 8 + 6(tool_count 不再计分)
         assert_eq!(heuristic.select(54), ("sota", 40));
         assert_eq!(heuristic.select(39), ("cheap", 40));
     }
@@ -869,19 +857,6 @@ mod tests {
             Err(ConfigError::RuleMatchesEverything(
                 "long-context".to_owned()
             ))
-        );
-    }
-
-    #[test]
-    fn a_missing_routing_pool_explains_how_to_continue() {
-        let mut broken = config();
-        broken.pools.clear();
-
-        let error = broken.validate().expect_err("missing pools must be rejected");
-        assert_eq!(error, ConfigError::NoPools);
-        assert_eq!(
-            error.to_string(),
-            "你还没有设置路由池。必须先设置至少一个路由池，才能启动 Token Station。"
         );
     }
 
@@ -1070,7 +1045,7 @@ mod tests {
             bands: Vec::new(),
         };
         let features = RequestFeatures {
-            // tokens_per_point=1 makes the base u32::MAX; json_schema then exercises saturating_add.
+            // tokens_per_point=1 → base = u32::MAX,再叠加 json_schema 触发 saturating_add。
             conversation_tokens: u32::MAX,
             requires_json_schema: true,
             ..RequestFeatures::default()

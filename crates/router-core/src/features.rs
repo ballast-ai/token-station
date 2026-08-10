@@ -30,7 +30,7 @@ pub struct RequestFeatures {
     /// Estimated tokens of the CONVERSATION only (non-system messages). Agents
     /// (OpenCode/Claude Code) ship a fixed multi-thousand-token system prompt
     /// every turn; counting it as difficulty pins every request to the top tier.
-    /// Difficulty scoring uses this so a trivial greeting stays trivial regardless
+    /// Difficulty scoring uses this so a trivial "你好" stays trivial regardless
     /// of the agent's scaffolding.
     #[serde(default)]
     pub conversation_tokens: u32,
@@ -82,9 +82,8 @@ impl RequestFeatures {
         let mut has_images = false;
 
         for message in &request.messages {
-            // The system prompt is fixed Agent scaffolding. Count it only in
-            // estimated_input_tokens for context-window fitting, not in
-            // conversation_tokens for difficulty scoring.
+            // 系统 prompt 是 agent 的固定脚手架,只进 estimated_input_tokens(供上下文
+            // 窗口拟合),不进 conversation_tokens(供难度打分)。
             let is_conversation = message.role != Role::System;
             let mut add = |tokens: u32| {
                 estimated_input_tokens = estimated_input_tokens.saturating_add(tokens);
@@ -303,8 +302,8 @@ mod tests {
             ]),
             &[],
         );
-        assert!(features.reasoning_marker_count >= 3); // step-by-step, reasoning, analysis, pros and cons
-        assert!(features.math_term_count >= 2); // proof and theorem
+        assert!(features.reasoning_marker_count >= 3); // 一步一步/推理/分析/利弊
+        assert!(features.math_term_count >= 2); // 证明/定理
         assert!(features.system_format_hint);
         assert_eq!(features.question_count, 1); // fullwidth ?
     }
