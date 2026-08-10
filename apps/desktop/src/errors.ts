@@ -56,3 +56,164 @@ export function humanizeErrorCode(
         suggestion: "Copy the request ID and inspect the local logs.",
       });
 }
+
+interface LocalizedAppError {
+  matches: RegExp;
+  en: string;
+  zh: string;
+}
+
+const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
+  {
+    matches: /apply_in_progress|configuration update.*(?:progress|running)|配置.*(?:正在应用|处理中)/i,
+    en: "Another configuration update is still running. Wait a moment, then try again.",
+    zh: "另一项配置更新仍在进行。请稍等片刻，然后重试。",
+  },
+  {
+    matches: /没有设置路由池|no route pools?|routing.*not configured/i,
+    en: "Routing is not configured yet. Select a provider and model for at least one route, then save and apply.",
+    zh: "路由尚未配置。请至少为一个路由选择供应商和模型，然后保存并应用。",
+  },
+  {
+    matches: /路由池.*(?:缺少|未配置)|route pool.*(?:missing|incomplete)|tier.*(?:missing|unconfigured)/i,
+    en: "A route is incomplete. Select both a provider and a model for that route, then save again.",
+    zh: "有一个路由尚未配置完整。请同时选择供应商和模型，然后重新保存。",
+  },
+  {
+    matches: /unknown (?:provider|upstream)|未知供应商|未知上游|provider.*not found/i,
+    en: "The selected provider is no longer available. Choose an existing provider and save again.",
+    zh: "所选供应商已不可用。请选择现有供应商，然后重新保存。",
+  },
+  {
+    matches: /unknown model|未知模型|model.*not found|模型.*不存在/i,
+    en: "The selected model is no longer available. Refresh the model list and choose another model.",
+    zh: "所选模型已不可用。请刷新模型列表，然后选择其他模型。",
+  },
+  {
+    matches: /unknown agent|未知 Agent|agent.*not found|计划不存在或已消费/i,
+    en: "This Agent is no longer available or its setup has expired. Rescan Agents and start the setup again.",
+    zh: "这个 Agent 已不可用，或接入操作已经过期。请重新扫描 Agent，然后再次开始接入。",
+  },
+  {
+    matches: /缺少供应商和模型|(?:high|mid|low|上|中|下).*档.*(?:缺少|未配置)/i,
+    en: "A route is incomplete. Select both a provider and a model for that route, then save again.",
+    zh: "有一个路由尚未配置完整。请同时选择供应商和模型，然后重新保存。",
+  },
+  {
+    matches: /credential|api[ _-]?key|auth(?:entication|orization)?|鉴权|凭据|密钥/i,
+    en: "The credential could not be used. Check the API key and its permissions, then try again.",
+    zh: "凭据无法使用。请检查 API Key 及其权限，然后重试。",
+  },
+  {
+    matches: /open_external_failed|could not open.*(?:page|url)|无法打开外部页面/i,
+    en: "The external page could not be opened. Check the URL and your default browser, then try again.",
+    zh: "无法打开外部页面。请检查网址和默认浏览器，然后重试。",
+  },
+  {
+    matches: /timed? ?out|timeout|超时/i,
+    en: "The operation took too long and was stopped. Check the network connection, then try again.",
+    zh: "操作等待时间过长，已停止。请检查网络连接，然后重试。",
+  },
+  {
+    matches: /network|connect(?:ion)?|dns|tls|certificate|request failed|网络|连接失败|证书/i,
+    en: "Token Station could not reach the service. Check the network, Base URL, and proxy settings, then try again.",
+    zh: "Token Station 无法连接到服务。请检查网络、Base URL 和代理设置，然后重试。",
+  },
+  {
+    matches: /invalid.*(?:url|address)|proxy address|代理地址无效|地址.*不合法/i,
+    en: "The address is not valid. Enter a complete HTTP, HTTPS, or SOCKS5 address and try again.",
+    zh: "地址格式不正确。请输入完整的 HTTP、HTTPS 或 SOCKS5 地址，然后重试。",
+  },
+  {
+    matches: /address already in use|port.*(?:used|busy)|listener|listen_restore|端口.*占用|监听/i,
+    en: "The local proxy could not use its configured address. Close the app using that port or choose another port, then restart the proxy.",
+    zh: "本地代理无法使用当前监听地址。请关闭占用该端口的应用，或换一个端口，然后重启代理。",
+  },
+  {
+    matches: /proxy.*not running|代理未运行/i,
+    en: "The local proxy is not running. Start the proxy, then try again.",
+    zh: "本地代理尚未运行。请先启动代理，然后重试。",
+  },
+  {
+    matches: /generation|proxy.*(?:start|restart)|代理启动|启动代理/i,
+    en: "The local proxy could not restart safely. Quit and reopen Token Station, then try again.",
+    zh: "本地代理无法安全重启。请退出并重新打开 Token Station，然后重试。",
+  },
+  {
+    matches: /state_poisoned|app_state_poisoned|写锁已损坏|状态不可用|operation_.*poisoned/i,
+    en: "Token Station's local state is temporarily unavailable. Restart the app; your saved configuration will remain unchanged.",
+    zh: "Token Station 的本地状态暂时不可用。请重启应用，已保存的配置不会改变。",
+  },
+  {
+    matches: /resource limit|资源上限|response.*(?:too large|MiB)|超过.*限制/i,
+    en: "The service returned more data than Token Station can safely process. Narrow the request or try again later.",
+    zh: "服务返回的数据超过 Token Station 的安全处理上限。请缩小请求范围，或稍后重试。",
+  },
+  {
+    matches: /model_providers|configuration format|config(?:uration)? file|配置格式|配置结构|JSON5|TOML|YAML/i,
+    en: "The configuration file has a format Token Station cannot safely edit. Fix the file syntax or restore a known-good backup, then rescan.",
+    zh: "配置文件格式无法安全编辑。请修复文件语法，或恢复可用备份，然后重新扫描。",
+  },
+  {
+    matches: /baseline|before_hash|revision_hash|前置值|基线快照|revision.*changed|配置.*已变化/i,
+    en: "The configuration changed after it was opened. Reload the latest version, review it, and apply the change again.",
+    zh: "配置在打开后又发生了变化。请重新加载最新版本，确认后再次应用。",
+  },
+  {
+    matches: /permission denied|read-only file|failed to (?:read|write)|无法(?:读取|写入)|权限/i,
+    en: "Token Station could not access the required local file. Check file permissions and available disk space, then try again.",
+    zh: "Token Station 无法访问所需的本地文件。请检查文件权限和磁盘空间，然后重试。",
+  },
+  {
+    matches: /database|sqlite|schema|指标库|数据库/i,
+    en: "The local data store could not be opened safely. Use Recovery mode to inspect or export the local data.",
+    zh: "本地数据无法安全打开。请使用自救模式检查或导出本地数据。",
+  },
+  {
+    matches: /quota|usage|pricing|catalog|额度|用量|价格目录|模型目录/i,
+    en: "The latest provider data is unavailable. Keep the current settings and try refreshing again later.",
+    zh: "暂时无法获取最新的供应商数据。请保留当前设置，稍后再次刷新。",
+  },
+  {
+    matches: /update|upgrade|release|更新|版本/i,
+    en: "Token Station could not check for updates. Check the network connection and try again later.",
+    zh: "Token Station 无法检查更新。请检查网络连接，稍后重试。",
+  },
+];
+
+function appErrorText(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object") {
+    const value = error as {
+      code?: unknown;
+      message?: unknown;
+      suggestion?: unknown;
+      detail?: unknown;
+    };
+    return [value.code, value.message, value.suggestion, value.detail]
+      .filter((part) => part !== null && part !== undefined)
+      .map(String)
+      .join(" ");
+  }
+  return String(error ?? "");
+}
+
+function selectedAppLanguage(language?: Language): Language {
+  if (language) return language;
+  try {
+    return window.localStorage.getItem("token-station-language") === "zh-CN" ? "zh-CN" : "en";
+  } catch {
+    return "en";
+  }
+}
+
+export function humanizeAppError(error: unknown, language?: Language): string {
+  const raw = appErrorText(error);
+  const guidance = APP_ERROR_GUIDANCE.find((item) => item.matches.test(raw));
+  const chinese = selectedAppLanguage(language) === "zh-CN";
+  if (guidance) return chinese ? guidance.zh : guidance.en;
+  return chinese
+    ? "操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。"
+    : "The operation could not be completed. Try again. If it still fails, open the local logs from Recovery mode.";
+}

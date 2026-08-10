@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -7,6 +7,12 @@ import {
   useTheme,
   type ResolvedTheme,
 } from "./ThemeProvider";
+
+const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: invokeMock,
+}));
 
 type ChangeListener = (event: MediaQueryListEvent) => void;
 
@@ -49,6 +55,8 @@ function ThemeProbe() {
 }
 
 beforeEach(() => {
+  invokeMock.mockReset();
+  Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
   window.localStorage.clear();
   document.documentElement.classList.remove("light", "dark");
   systemTheme = "light";
@@ -113,6 +121,31 @@ describe("ThemeProvider", () => {
     await user.click(screen.getByRole("button", { name: "System" }));
     expect(changeListeners).toHaveLength(1);
     expect(screen.getByText("system:dark")).toBeInTheDocument();
+  });
+
+  it("keeps the macOS Dock icon in sync with the resolved theme", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    systemTheme = "dark";
+    installMatchMedia();
+    const user = userEvent.setup();
+
+    render(
+      <ThemeProvider>
+        <ThemeProbe />
+      </ThemeProvider>,
+    );
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("set_dock_theme_icon", { theme: "dark" }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Light" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("set_dock_theme_icon", { theme: "light" }),
+    );
   });
 
   it("ignores invalid persisted values", () => {

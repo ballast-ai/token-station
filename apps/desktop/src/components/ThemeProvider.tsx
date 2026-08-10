@@ -65,6 +65,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       void import("@tauri-apps/api/window")
         .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(resolvedTheme))
         .catch(() => undefined);
+      void import("@tauri-apps/api/core")
+        .then(({ invoke }) => invoke("set_dock_theme_icon", { theme: resolvedTheme }))
+        .catch(() => undefined);
     }
   }, [resolvedTheme]);
 

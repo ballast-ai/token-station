@@ -129,8 +129,9 @@ mod tests {
 
     #[test]
     fn absorb_is_last_nonzero_wins_per_field() {
-        // Anthropic streaming reports twice. message_start contains input-side buckets, and message_delta
-        // Always include output counts. Two absorb calls must produce one complete total.
+        // Anthropic streaming reports usage twice: message_start carries input
+        // buckets, and the final message_delta carries output counts. Absorbing
+        // both must produce one complete usage record.
         let mut acc = Usage::default();
         acc.absorb(Usage {
             input_tokens: 1000,

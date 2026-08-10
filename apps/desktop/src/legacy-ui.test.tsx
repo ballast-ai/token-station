@@ -177,7 +177,7 @@ describe("legacy desktop read-only pages", () => {
     first.unmount();
     vi.mocked(getRouterTable).mockRejectedValueOnce(new Error("router down"));
     render(<RouterTable />);
-    expect(await screen.findByText(/router down/)).toBeInTheDocument();
+    expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
   });
 
   it("loads grouped stats, changes scope and detail view, and formats nullable cost", async () => {
@@ -247,7 +247,7 @@ describe("legacy desktop read-only pages", () => {
     first.unmount();
     vi.mocked(getStats).mockRejectedValueOnce(new Error("stats down"));
     render(<Stats />);
-    expect(await screen.findByText(/stats down/)).toBeInTheDocument();
+    expect((await screen.findAllByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).length).toBeGreaterThan(0);
   });
 
   it("loads and refreshes plugin metadata, including empty values", async () => {
@@ -265,7 +265,7 @@ describe("legacy desktop read-only pages", () => {
   it("shows plugin errors", async () => {
     vi.mocked(getPlugins).mockRejectedValue(new Error("plugin down"));
     render(<Plugins />);
-    expect(await screen.findByText(/plugin down/)).toBeInTheDocument();
+    expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
   });
 });
 
@@ -357,7 +357,7 @@ describe("settings and update actions", () => {
     render(<Settings settings={settings} serveRunning={false} onSaved={vi.fn()} />);
     await user.click(screen.getByRole("switch", { name: /本地指标/ }));
     await user.click(screen.getByRole("button", { name: "保存" }));
-    expect(await screen.findByText(/settings denied/)).toBeInTheDocument();
+    expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
   });
 
   it("focuses and describes the proxy URL for a structured settings error", async () => {
@@ -374,10 +374,10 @@ describe("settings and update actions", () => {
     await user.type(proxyUrl, "ftp://invalid.example");
     await user.click(screen.getByRole("button", { name: "保存" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("代理地址无效");
+    expect(await screen.findByRole("alert")).toHaveTextContent("地址格式不正确。请输入完整的 HTTP、HTTPS 或 SOCKS5 地址，然后重试。");
     await waitFor(() => expect(proxyUrl).toHaveFocus());
     expect(proxyUrl).toHaveAttribute("aria-invalid", "true");
-    expect(proxyUrl).toHaveAccessibleDescription("代理地址无效");
+    expect(proxyUrl).toHaveAccessibleDescription("地址格式不正确。请输入完整的 HTTP、HTTPS 或 SOCKS5 地址，然后重试。");
   });
 
   it("reports newer and current releases and copies a release URL", async () => {
@@ -402,7 +402,7 @@ describe("settings and update actions", () => {
     const user = userEvent.setup();
     render(<About desktopVersion="0.1.0" coreVersion="0.2.0" />);
     await user.click(screen.getByRole("button", { name: "检查更新" }));
-    expect(await screen.findByText(/upgrade down/)).toBeInTheDocument();
+    expect(await screen.findByText("Token Station 无法检查更新。请检查网络连接，稍后重试。")).toBeInTheDocument();
   });
 
   it("shows an unpublished release as a normal result instead of a GitHub 404", async () => {
@@ -538,9 +538,9 @@ describe("model selection and provider model management", () => {
     await waitFor(() => expect(updateProviderModels).toHaveBeenCalledWith("openai", ["old", "new"]));
     expect(onSaved).toHaveBeenCalledWith(state);
     await user.click(screen.getByRole("button", { name: "刷新模型" }));
-    expect(await screen.findByText(/catalog down/)).toBeInTheDocument();
+    expect(await screen.findByText("暂时无法获取最新的供应商数据。请保留当前设置，稍后再次刷新。")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存模型" }));
-    expect(await screen.findByText(/save down/)).toBeInTheDocument();
+    expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
     expect(within(screen.getByText(/代理运行中/).parentElement!).getByRole("button")).toBeEnabled();
   });
 

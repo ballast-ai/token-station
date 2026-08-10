@@ -107,7 +107,7 @@ body {
   color: #8a90a2;
 }
 
-/* 顶栏 */
+/* Header */
 .topbar {
   display: flex;
   align-items: center;
@@ -171,7 +171,7 @@ body {
   background: #f0f1f5;
 }
 
-/* 虚拟 key 条 */
+/* Virtual-key strip */
 .keybar {
   display: flex;
   align-items: center;
@@ -193,7 +193,7 @@ body {
   flex: 1;
 }
 
-/* 横幅 */
+/* Banner */
 .banner {
   padding: 9px 12px;
   border-radius: 8px;
@@ -213,7 +213,7 @@ body {
   color: var(--signal);
 }
 
-/* 面板 */
+/* Panels */
 .panel {
   background: #fff;
   border: 1px solid #e9ebf2;
@@ -232,7 +232,7 @@ body {
   font-size: 12.5px;
 }
 
-/* 三档栅格 */
+/* Three-tier grid */
 .tier-grid {
   display: grid;
   grid-template-columns: 150px 1fr 1fr;
@@ -271,7 +271,7 @@ body {
   background: linear-gradient(135deg, #74838f, #4a5568);
 }
 
-/* ---- 关键词路由(每档一个词库) --------------------------------------------- */
+/* ---- Keyword routing, one library per tier -------------------------------- */
 .keyword-panel .keyword-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -381,7 +381,7 @@ body {
   color: #c0392b;
 }
 
-/* 供应商 */
+/* Providers */
 .provider-list {
   display: flex;
   flex-direction: column;
@@ -467,7 +467,7 @@ body {
   min-width: 220px;
 }
 
-/* 按钮 */
+/* Buttons */
 .btn {
   padding: 8px 14px;
   border-radius: 8px;
@@ -513,7 +513,7 @@ body {
   background: #fdeaea;
 }
 
-/* agent 栏(多 agent 可同时接入) */
+/* Agent bar; multiple Agents can connect simultaneously */
 .agent .ai {
   font-weight: 700;
 }
@@ -542,7 +542,7 @@ body {
   color: #a0a6b8;
 }
 
-/* 添加供应商:预设驱动 */
+/* Add provider: preset-driven */
 .add-panel {
   padding-top: 12px;
   border-top: 1px dashed #e9ebf2;
@@ -769,7 +769,7 @@ body {
 .catalog-diff span { padding: 5px 8px; border-radius: 7px; background: var(--surface-2); }
 .catalog-diff .added { color: var(--success); }
 .catalog-diff .removed { color: var(--danger); }
-/* 模型目录 + 能力合成一张表:每个模型一行,不再重复。 */
+/* Merge model catalog and capabilities into one row per model. */
 .model-ledger { display: grid; gap: 6px; margin-bottom: 10px; }
 .model-ledger-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
 .model-ledger-row.stale { border-style: dashed; }
@@ -1483,7 +1483,7 @@ body {
   overflow: hidden;
   border-radius: 12px;
 }
-/* 头像用位图(Hermes)时给个圆形裁切,和 lobehub 彩色 Avatar 观感一致。 */
+/* Crop bitmap avatars such as Hermes to match colored lobehub avatars. */
 .agent-large-mark .brand-image { width: 50px; height: 50px; border-radius: 50%; }
 .agent-connect-box {
   max-width: 440px;
@@ -1499,7 +1499,7 @@ body {
   white-space: nowrap;
 }
 
-/* 接入前的改动确认:内联、紧凑,不用弹窗。列出将写入配置的字段。 */
+/* Compact inline pre-connection change confirmation listing fields to write. */
 .projection-inline {
   margin-top: -4px;
   padding: 11px 13px;
@@ -1661,7 +1661,7 @@ body {
 .topbar-mode-switch button { padding: 7px 14px; font-size: 12px; font-weight: 500; }
 
 /* Quota-first panel */
-/* ── 额度计划编辑(面板内,供本地估算) ──────────────────────────── */
+/* Quota-plan editing for local estimates */
 .quota-plan-section {
   margin-top: 14px;
   display: flex;
@@ -1731,7 +1731,7 @@ body {
   }
 }
 
-/* ── 实时额度查看页 ─────────────────────────────────────────────── */
+/* Live quota page */
 .quota-usage-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -2023,7 +2023,7 @@ body {
 .checkbox-label { display: flex; flex-direction: row; align-items: flex-start; gap: 8px; cursor: pointer; font-size: 12px; }
 .checkbox-label input[type="checkbox"] { width: 15px; height: 15px; margin-top: 1px; flex-shrink: 0; cursor: pointer; accent-color: var(--signal); }
 
-/* 供应商预设:图标网格卡片(对标 cc-switch) */
+/* Provider presets: icon grid cards inspired by cc-switch */
 .preset-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .preset-card { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font-size: 13px; text-align: left; cursor: pointer; transition: border-color .12s, background .12s; }
 .preset-card:hover:not(:disabled) { border-color: color-mix(in srgb, var(--signal) 40%, var(--line)); background: var(--surface-2); }
@@ -2032,14 +2032,14 @@ body {
 .preset-card-glyph { width: 28px; height: 28px; flex-shrink: 0; display: grid; place-items: center; }
 .preset-card-glyph.custom { font-size: 15px; color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; }
 .preset-card-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 无品牌 logo 时的首字母/缩写兜底块 */
+/* Initial or abbreviation fallback when no brand logo exists */
 .brand-fallback { display: inline-grid; place-items: center; border-radius: 7px; background: var(--surface-2); color: var(--muted); font-size: 11px; font-weight: 700; line-height: 1; }
 .brand-image { border-radius: 50%; object-fit: cover; background: #fff; border: 1px solid var(--line); }
 .brand-image.brand-image-app { border: 0; border-radius: 22%; object-fit: contain; background: transparent; }
-/* 侧栏 Agent 有 logo(svg)时去掉外框,让品牌彩色块干净显示 */
+/* Remove the frame around sidebar Agent SVG logos for a clean brand mark */
 .rail-glyph:has(svg) { border: none; background: transparent; }
 
-/* 首次接入的配置改动:从 Agent 卡片延伸下来的内联提示(非弹窗) */
+/* First-connection config changes shown inline below the Agent card */
 .connect-diff-card { margin-top: -8px; border: 1px solid color-mix(in srgb, var(--signal) 32%, var(--line)); background: color-mix(in srgb, var(--signal) 5%, var(--surface)); }
 .connect-diff-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .connect-diff-head h2 { margin: 2px 0 0; }
@@ -2220,7 +2220,7 @@ body {
   .language-option { transition: none; }
 }
 
-/* ---- Agent 接入站 ------------------------------------------------------- */
+/* ---- Agent connection station ------------------------------------------- */
 .agents-page {
   --agent-canvas: #f7f8fc;
   --agent-surface: #ffffff;
@@ -2964,9 +2964,9 @@ body {
   .agent-chevron { transition: none; }
 }
 
-/* ---- 子页面(#5)---- */
+/* ---- Subpages (#5) ------------------------------------------------------- */
 
-/* tab 导航 */
+/* Tab navigation */
 .tabs {
   display: flex;
   gap: 4px;
@@ -3019,7 +3019,7 @@ pre.block {
   word-break: break-word;
 }
 
-/* key/value 只读栅格 */
+/* Read-only key/value grid */
 .kv-grid {
   display: grid;
   grid-template-columns: 120px 1fr;
@@ -3036,7 +3036,7 @@ pre.block {
   word-break: break-all;
 }
 
-/* 设置开关 */
+/* Settings toggles */
 .setting-row {
   padding: 12px 0;
   border-bottom: 1px solid var(--line);
@@ -3087,7 +3087,7 @@ pre.block {
   overflow-wrap: anywhere;
 }
 
-/* 业务应用挂载前的独立自救壳 */
+/* Standalone recovery shell shown before the main app mounts */
 .recovery-shell {
   min-height: 100vh;
   display: grid;
@@ -3185,7 +3185,7 @@ pre.block {
   line-height: 1.5;
 }
 
-/* Agent 预算预警 */
+/* Agent budget warning */
 .budget-section {
   margin: 16px 0;
   padding: 14px;
@@ -3281,7 +3281,7 @@ pre.block {
   .price-model-field { grid-column: auto; }
 }
 
-/* 用量卡片 */
+/* Usage cards */
 .stat-cards {
   display: flex;
   flex-wrap: wrap;
@@ -3312,7 +3312,7 @@ pre.block {
   margin-top: 3px;
 }
 
-/* 通用网格表 */
+/* Generic grid table */
 .grid-table {
   width: 100%;
   border-collapse: collapse;
@@ -3331,7 +3331,7 @@ pre.block {
   border-bottom: 1px solid var(--line);
 }
 
-/* 用量观测台账 */
+/* Usage observation ledger */
 .usage-page {
   --usage-output: #25a86f;
   --usage-cache: #8b5cf6;
@@ -4232,7 +4232,7 @@ pre.block {
   .usage-rail-output { transition: none; }
 }
 
-/* 路由表层 */
+/* Routing-table layers */
 .layer {
   margin: 14px 0;
 }
@@ -4271,7 +4271,7 @@ pre.block {
   margin-left: 8px;
 }
 
-/* Free-provider onboarding — Signal Grid (方案 A). */
+/* Free-provider onboarding: Signal Grid, option A. */
 :root { --free: #238c62; --free-soft: #e8f7f0; }
 :root.dark { --free: #54d49d; --free-soft: rgba(84, 212, 157, .11); }
 

@@ -19,6 +19,7 @@ import {
 } from "../api";
 import ModelPicker, { CatalogStatus } from "./ModelPicker";
 import { useLocalizedCopy } from "./LanguageProvider";
+import { humanizeAppError } from "../errors";
 
 interface ProviderModelManagerProps {
   provider: ProviderView;
@@ -213,7 +214,7 @@ export default function ProviderModelManager({
       ));
       setEditKey("");
     } catch (caught) {
-      setError(String(caught));
+      setError(humanizeAppError(caught));
     } finally {
       setEditing(false);
     }
@@ -228,7 +229,7 @@ export default function ProviderModelManager({
       setTestResults(results);
       setTestedAtMs(Date.now());
     } catch (caught) {
-      setError(String(caught));
+      setError(humanizeAppError(caught));
     } finally {
       setTesting(false);
     }
@@ -241,7 +242,7 @@ export default function ProviderModelManager({
     try {
       onSaved(await setProviderModelVision(provider.name, model, state !== "declared"));
     } catch (caught) {
-      setError(String(caught));
+      setError(humanizeAppError(caught));
     } finally {
       setCapabilitySaving(null);
     }
@@ -262,7 +263,7 @@ export default function ProviderModelManager({
         onSaved(await getState());
       }
     } catch (caught) {
-      setStatus({ label: copy("Fetch failed", "获取失败"), tone: "error", warning: String(caught) });
+      setStatus({ label: copy("Fetch failed", "获取失败"), tone: "error", warning: humanizeAppError(caught) });
     } finally {
       setRefreshing(false);
     }
@@ -277,7 +278,7 @@ export default function ProviderModelManager({
       onSaved(next);
       setStatus({ label: copy(`Saved ${selected.length}`, `已保存 ${selected.length} 个`), tone: "live" });
     } catch (caught) {
-      setError(String(caught));
+      setError(humanizeAppError(caught));
     } finally {
       setSaving(false);
     }

@@ -413,9 +413,11 @@ fn snapshot_master_key_path(paths: &AgentIntegrationPaths) -> PathBuf {
         .join("snapshot-master.key")
 }
 
-/// Ensure the snapshot master-key file exists (0600), and generate it if absent. The OS keychain is fully removed; the key exists only in a local
-/// private file. Non-destructive: does not delete snapshots or ownership records. (When upgrading from an earlier version that used only a keychain key
-/// during startup, old snapshots cannot be decrypted, but development re-signing already invalidated that keychain key.)
+/// Ensure the 0600 snapshot master-key file exists, generating it when absent.
+/// The OS keychain is no longer used; the key lives only in this private local
+/// file. This is non-destructive and never removes snapshots or ownership data.
+/// Snapshots from older keychain-only versions cannot be decrypted, but
+/// development re-signing had already invalidated that keychain key.
 fn ensure_master_key_file(key_path: &Path) {
     if key_path.exists() {
         return;
@@ -423,8 +425,9 @@ fn ensure_master_key_file(key_path: &Path) {
     let _ = FileMasterKeyStore::new(key_path.to_path_buf()).load_or_create(true);
 }
 
-/// Apply `removals` (a set of Remove operations) to the `target` configuration and write it atomically while preserving original permissions.
-/// Return success when the file does not exist. Used for force disconnect: remove only managed fields and preserve all other user content.
+/// Apply `removals` to the target config and write atomically while preserving
+/// permissions. A missing file succeeds. Force disconnect uses this to remove
+/// only managed fields without touching other user content.
 fn force_strip_owned(
     target: &Path,
     format: DocumentFormat,
@@ -474,9 +477,11 @@ fn write_config_atomic(
 
 impl AgentCommandState {
     pub fn new(paths: AgentIntegrationPaths) -> Result<Self, String> {
-        // Store the snapshot master key in a private local file (0600) instead of the OS keychain. Development re-signing can
-        // Keychain entries become invalid and block recovery or disconnect. User reports show code=agent_operation_rejected.
-        // Snapshots are encrypted and back up configuration already stored as plaintext on disk. File key storage does not change security.
+        // Store the snapshot master key in a private local 0600 file instead of
+        // the OS keychain. Development re-signing invalidated keychain entries and
+        // could permanently block restoration or disconnect with
+        // agent_operation_rejected. Snapshots are encrypted copies of config that
+        // already exists as plaintext on disk, so file storage does not weaken it.
         let key_path = snapshot_master_key_path(&paths);
         ensure_master_key_file(&key_path);
         Self::new_with_master_key(paths, Arc::new(FileMasterKeyStore::new(key_path)))
@@ -867,9 +872,11 @@ impl AgentCommandState {
         self.issue_plan(prepared, &record, session_label, None)
     }
 
-    /// Force disconnect (fallback): does not depend on the keychain or baseline snapshot. Use ownership records to remove fields injected by Token Station
-    /// Remove managed fields from the current configuration, clear ownership records, and unpin the baseline snapshot. Use this when a snapshot key
-    /// is lost and snapshots cannot be decrypted, or normal “restore original configuration” is rejected. It cannot recover overwritten original values exactly.
+    /// Force-disconnect fallback that does not require the keychain or baseline
+    /// snapshot. Remove Token Station-managed fields according to ownership,
+    /// clear ownership, and unpin the baseline snapshot. This recovers when a lost
+    /// key makes snapshots unreadable and normal restoration is rejected, but it
+    /// cannot reconstruct overwritten original values exactly.
     fn force_forget(
         &self,
         agent_id: &str,
@@ -918,8 +925,9 @@ impl AgentCommandState {
             let disconnect = connector
                 .disconnect_patch_for_document(&document)
                 .map_err(AgentCommandError::internal)?;
-            // Primary config: normal connectors use fixed Remove operations. WorkBuddy filters dynamically by model ID.
-            // Do not remove other models that the user added after connection during forced disconnect.
+            // Main config: regular connectors use fixed Remove operations, while
+            // WorkBuddy filters dynamically by model ID so force disconnect does
+            // not remove models the user added later.
             force_strip_owned(target, connector.format(), connector.label(), &disconnect)?;
             // Companion config: parse the persisted format or a connector's
             // explicit legacy contract, then remove owned_paths.

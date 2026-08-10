@@ -3,6 +3,7 @@ import { previewProviderRemoval } from "../api";
 import type { ProviderRemovalPreview, ProviderView, StateView } from "../api";
 import ProviderModelManager from "./ProviderModelManager";
 import { useLocalizedCopy } from "./LanguageProvider";
+import { humanizeAppError } from "../errors";
 
 interface ProviderListProps {
   providers: ProviderView[];
@@ -35,7 +36,7 @@ export default function ProviderList({
     try {
       setRemoval(await previewProviderRemoval(name));
     } catch (caught) {
-      setRemovalError(String(caught));
+      setRemovalError(humanizeAppError(caught));
     }
   };
 

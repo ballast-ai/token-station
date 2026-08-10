@@ -22,8 +22,9 @@ static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
     ],
     config_format: DocumentFormat::Json,
     config_path_template: "${HOME}/.config/opencode/opencode.json",
-    // Write only provider.tokenstation. Select the model through tokenstation/auto in that block. Do not write top-level model.
-    // owned_fields must match owned_paths() and connect_patch(). Otherwise, ownership and restore are incorrect.
+    // Write only provider.tokenstation. The model is selected as tokenstation/auto
+    // inside that block, not through the top-level model. owned_fields must match
+    // owned_paths() and connect_patch() or ownership and restoration will drift.
     owned_fields: &["provider.tokenstation"],
     requires_virtual_key: true,
     restart_required: false,

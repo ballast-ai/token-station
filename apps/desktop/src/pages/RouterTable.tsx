@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { RouterTableView, getRouterTable } from "../api";
 import { LanguageBoundary, useLanguage } from "../components/LanguageProvider";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { humanizeAppError } from "../errors";
 
 /// Visualizes the four routing layers in the core's short-circuit order:
 /// 1 rules (hard matches) -> 2 agent hints -> 3 heuristic tiers -> 4 default fallback.
@@ -13,7 +14,7 @@ function RouterTableContent() {
   useEffect(() => {
     getRouterTable()
       .then(setRt)
-      .catch((e) => setErr(String(e)));
+      .catch((e) => setErr(humanizeAppError(e)));
   }, []);
 
   if (err) return <Card className="settings-card"><CardContent><div className="banner err">{err}</div></CardContent></Card>;

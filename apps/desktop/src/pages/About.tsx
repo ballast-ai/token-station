@@ -18,6 +18,7 @@ import {
 } from "../components/ui/alert-dialog";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { humanizeAppError } from "../errors";
 
 /// About and updates page. It only performs the anonymous version check allowed by the core and never replaces binaries.
 function AboutContent({
@@ -60,7 +61,7 @@ function AboutContent({
     try {
       setUpdate(await checkDesktopUpdate());
     } catch (e) {
-      setErr(String(e));
+      setErr(humanizeAppError(e));
     } finally {
       setBusy("");
     }
@@ -80,7 +81,7 @@ function AboutContent({
         setBusy("");
       }
     } catch (e) {
-      setErr(String(e));
+      setErr(humanizeAppError(e));
       setBusy("");
     }
   };

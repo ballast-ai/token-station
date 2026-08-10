@@ -6,7 +6,7 @@ import {
   type ReceiptRouteView,
   type ReceiptView,
 } from "../api";
-import { humanizeErrorCode } from "../errors";
+import { humanizeAppError, humanizeErrorCode } from "../errors";
 import { useLocalizedCopy } from "./LanguageProvider";
 
 const MAX_RECEIPTS = 5;
@@ -266,7 +266,7 @@ export default function RecentReceipts() {
         setLastUpdatedAt(Date.now());
       }
     } catch (caught) {
-      if (mounted.current) setError(String(caught));
+      if (mounted.current) setError(humanizeAppError(caught));
     } finally {
       inFlight.current = false;
       if (

@@ -1,5 +1,6 @@
-// OpenAI Chat Completions provider presets. Base URLs, example models, and categories follow official sources.
-// Models can change. Treat models as editable suggestions and keep runtime /models discovery authoritative.
+// OpenAI Chat Completions provider presets. Base URLs, example models, and
+// categories follow official sources. Models are editable suggestions because
+// catalogs change; they do not replace runtime /models discovery.
 
 export type ProviderServiceClass = "first_party" | "managed_inference" | "self_hosted" | "aggregator";
 
@@ -225,9 +226,10 @@ const OFFICIAL_AND_MANAGED_PRESETS: ProviderPreset[] = [
   }),
 ];
 
-// Local self-hosted: include only Ollama as the representative. Other local runtimes, such as LM Studio, vLLM, and llama.cpp
-// / LocalAI, and others) use the same OpenAI-compatible interface and local address. Select Custom configuration and Local model.
-// Connect without defining each preset.
+// Keep Ollama as the single representative for local self-hosting. Other local
+// runtimes such as LM Studio, vLLM, llama.cpp, and LocalAI use the same
+// OpenAI-compatible protocol and local address, so users can connect them with
+// a custom configuration marked as a local model instead of separate presets.
 const SELF_HOSTED_PRESETS: ProviderPreset[] = [
   verified({
     id: "ollama", label: "本地 Ollama", baseUrl: "http://127.0.0.1:11434/v1", models: ["llama3.3", "qwen2.5", "deepseek-r1"],

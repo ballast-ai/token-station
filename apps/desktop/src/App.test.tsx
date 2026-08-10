@@ -592,7 +592,7 @@ describe("desktop station navigation", () => {
     await waitFor(() => expect(screen.queryByText("正在应用配置…")).toBeNull());
     expect(screen.queryByText(/配置已应用/)).toBeNull();
     if (expectedError) {
-      expect(screen.getByText(expectedError)).toBeInTheDocument();
+      expect(screen.getByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
     }
   });
 
@@ -744,8 +744,9 @@ describe("desktop station navigation", () => {
   });
 
   it("rescans once the runtime becomes ready after a not-ready first load", async () => {
-    // The gateway can be unavailable when the app opens. The initial load scan has a not-ready runtime state. Managed Agents
-    // This can incorrectly show Repair required. When runtime becomes ready, scan again to align the card with real state.
+    // The gateway is not ready when the app opens, so load() initially reports a
+    // not-ready runtime and managed Agents incorrectly appear to need repair.
+    // Rescan when polling reports ready so cards match the real state.
     const notReady = stateFixture({
       serve: serveFixture({
         phase: "starting",
@@ -1350,7 +1351,7 @@ describe("desktop station navigation", () => {
 
     await openAgent(user, "Codex");
     await user.click(screen.getByRole("radio", { name: "独立路由" }));
-    expect(screen.getByText("Agent `codex` 的 high 档缺少供应商和模型")).toBeInTheDocument();
+    expect(screen.getByText("有一个路由尚未配置完整。请同时选择供应商和模型，然后重新保存。")).toBeInTheDocument();
 
     await user.click(navigation().getByRole("button", { name: "路由" }));
 
