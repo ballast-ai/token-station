@@ -191,7 +191,10 @@ impl Connector for ClaudeDesktopConnector {
             // Claude's Cowork egress must remain restricted to the local
             // Token Station gateway; a wildcard turns this connector into an
             // arbitrary network-access grant.
-            replace(path(&[COWORK_EGRESS_ALLOWED_HOSTS]), json!(LOOPBACK_EGRESS_HOSTS)),
+            replace(
+                path(&[COWORK_EGRESS_ALLOWED_HOSTS]),
+                json!(LOOPBACK_EGRESS_HOSTS),
+            ),
         ])
     }
 
@@ -308,6 +311,7 @@ impl Connector for ClaudeDesktopConnector {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -366,5 +370,88 @@ mod tests {
         }
 
         fs::remove_dir_all(root).expect("temporary files clean up");
+    }
+
+    #[test]
+    fn claude_desktop_connector_contract_covers_rejection_and_legacy_paths() {
+        let home = Path::new("/tmp/token-station-claude-desktop-home");
+        let profile = CONNECTOR.config_path(home);
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            profile,
+            home.join("Library/Application Support/Claude-3p/configLibrary")
+                .join(format!("{PROFILE_ID}.json"))
+        );
+        assert_eq!(
+            CONNECTOR.create_dir_error(),
+            "创建 Claude Desktop configLibrary 失败"
+        );
+
+        let adapter_unavailable = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/claude-desktop",
+            token: Some("vk-test"),
+            adapter_ready: false,
+        };
+        assert!(CONNECTOR
+            .validate_preconditions(&adapter_unavailable)
+            .expect_err("an unavailable adapter must reject the connection")
+            .contains("网关未加载 agent-anthropic"));
+
+        let token_missing = ConnectInput {
+            base_url: adapter_unavailable.base_url,
+            token: None,
+            adapter_ready: true,
+        };
+        assert_eq!(
+            CONNECTOR
+                .validate_preconditions(&token_missing)
+                .expect_err("a virtual key is required"),
+            "Claude Desktop 接入缺少本地虚拟 Key"
+        );
+        assert_eq!(
+            CONNECTOR
+                .validate_source(&ConfigDocument::Toml(Box::default()))
+                .expect_err("a non-JSON document must be rejected"),
+            "Claude Desktop Connector 收到错误的配置格式"
+        );
+        assert_eq!(
+            CONNECTOR
+                .validate_source(&ConfigDocument::Json(json!([])))
+                .expect_err("a non-object profile must be rejected"),
+            "Claude Desktop 3P profile 必须是 JSON 对象"
+        );
+
+        let metadata = profile
+            .parent()
+            .expect("profile has parent")
+            .join("_meta.json");
+        assert_eq!(
+            CONNECTOR.legacy_companion_format(&profile, &metadata),
+            Some(DocumentFormat::Json)
+        );
+        let deployment = deployment_mode_paths(&profile)
+            .expect("profile has a deployment mode root")[0]
+            .clone();
+        assert_eq!(
+            CONNECTOR.legacy_companion_format(&profile, &deployment),
+            Some(DocumentFormat::Json)
+        );
+        assert_eq!(
+            CONNECTOR.legacy_companion_format(&profile, &home.join("unrelated.json")),
+            None
+        );
+        assert_eq!(
+            CONNECTOR.disconnect_patch().len(),
+            CONNECTOR.owned_paths().len()
+        );
+        assert_eq!(
+            CONNECTOR
+                .validate_projected(&ConfigDocument::Json(json!({})), &adapter_unavailable)
+                .expect_err("an incomplete projection must be rejected"),
+            "Claude Desktop 3P profile 写入前复验失败"
+        );
+        assert!(CONNECTOR
+            .success_message(&adapter_unavailable)
+            .contains(adapter_unavailable.base_url));
     }
 }
