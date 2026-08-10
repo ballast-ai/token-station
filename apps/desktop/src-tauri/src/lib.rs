@@ -619,7 +619,7 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
             }
         }
 
-        if let Some(agent_routes) = draft["agent_routes"].as_object_mut() {
+        if let Some(agent_routes) = draft.get_mut("agent_routes").and_then(Value::as_object_mut) {
             for route in agent_routes.values_mut() {
                 for slot in ["high", "mid", "low"] {
                     if route["custom_route"][slot].is_object() {
@@ -628,7 +628,7 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
                 }
             }
         }
-        if let Some(profiles) = draft["profiles"].as_object_mut() {
+        if let Some(profiles) = draft.get_mut("profiles").and_then(Value::as_object_mut) {
             for profile in profiles.values_mut() {
                 for slot in ["high", "mid", "low"] {
                     if profile[slot].is_object() {
@@ -4984,6 +4984,23 @@ mod tests {
     }
 
     #[test]
+    fn prepare_desktop_draft_preserves_omitted_optional_maps() {
+        let source = template(
+            std::path::Path::new("/tmp/token-station-data"),
+            std::path::Path::new("/tmp/plugins"),
+        );
+        assert!(source.get("agent_routes").is_none());
+        assert!(source.get("profiles").is_none());
+
+        let prepared = prepare_desktop_draft(source, std::path::Path::new("/tmp"));
+
+        assert!(prepared.get("agent_routes").is_none());
+        assert!(prepared.get("profiles").is_none());
+        serde_json::from_value::<ClientConfig>(prepared)
+            .expect("desktop preparation must preserve the ClientConfig shape");
+    }
+
+    #[test]
     fn free_provider_catalog_exposes_only_reviewed_free_models() {
         let presets = list_free_provider_presets();
         assert_eq!(presets.len(), 13);
@@ -5832,6 +5849,36 @@ mod tests {
 
         assert!(error.as_deref().is_some_and(|e| e.contains("只读保护")));
         assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn loading_config_without_agent_routes_or_profiles_stays_materializable() {
+        let root = scratch_home("omitted-routing-maps");
+        let path = root.join("token-station.json");
+        let source = template_for_test(&root);
+        assert!(source.get("agent_routes").is_none());
+        assert!(source.get("profiles").is_none());
+        let original = serde_json::to_vec(&source).expect("config fixture serializes");
+        std::fs::write(&path, &original).expect("config fixture writes");
+
+        let (draft, saved, error) = load_draft_state(
+            &path,
+            &root.join("token-station-data"),
+            &root.join("plugins"),
+        );
+
+        assert_eq!(error, None);
+        assert!(saved.get("agent_routes").is_none());
+        assert!(saved.get("profiles").is_none());
+        assert!(draft.get("agent_routes").is_none());
+        assert!(draft.get("profiles").is_none());
+        serde_json::from_value::<ClientConfig>(draft)
+            .expect("loaded desktop draft remains structurally valid");
+        assert_eq!(
+            std::fs::read(&path).expect("source config remains readable"),
+            original
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
