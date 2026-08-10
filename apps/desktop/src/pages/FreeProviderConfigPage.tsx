@@ -152,7 +152,12 @@ export default function FreeProviderConfigPage({
       {error && <div className="banner err">{error}</div>}
 
       <div className="free-config-grid">
-        <section className="panel free-credential-panel">
+        <section
+          className="panel free-credential-panel"
+          role="group"
+          aria-label={copy("Provider credentials", "供应商凭据")}
+          data-onboarding-target="provider-credential"
+        >
           <div className="panel-head">
             <span className="step-index">01</span>
             <div>
@@ -217,6 +222,7 @@ export default function FreeProviderConfigPage({
           <button
             className="btn primary free-submit"
             type="button"
+            data-onboarding-target="provider-save"
             disabled={!canSubmit}
             onClick={() => void submit()}
           >
@@ -230,7 +236,12 @@ export default function FreeProviderConfigPage({
           )}</p>
         </section>
 
-        <section className="panel free-model-panel">
+        <section
+          className="panel free-model-panel"
+          role="group"
+          aria-label={copy("Provider models", "供应商模型")}
+          data-onboarding-target="provider-models"
+        >
           <div className="panel-head free-model-head">
             <span className="step-index">02</span>
             <div>

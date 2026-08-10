@@ -115,17 +115,16 @@ export default function AppShell({
                 disabled={commandBusy && !selected}
                 aria-current={selected ? "page" : undefined}
                 aria-label={label}
+                data-onboarding-target={
+                  item.view === "home"
+                    ? "routing"
+                    : item.view === "agents"
+                      ? "agent-entry"
+                      : undefined
+                }
                 onClick={() => onNavigate(item.view)}
               >
-                <span
-                  data-onboarding-target={
-                    item.view === "home"
-                      ? "routing"
-                      : item.view === "settings"
-                        ? "settings"
-                        : undefined
-                  }
-                >
+                <span data-onboarding-target={item.view === "settings" ? "settings" : undefined}>
                   {label}
                 </span>
                 {item.view === "agents" && agents.length > connectedAgents && (

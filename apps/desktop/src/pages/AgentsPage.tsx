@@ -55,7 +55,13 @@ export default function AgentsPage({
           <h1>{copy("Agents", "Agent 管理")}</h1>
           <p>{copy("Choose an Agent on the left, then manage connection and routing on the right.", "在左侧选择 Agent，在右侧管理接入和独立路由。")}</p>
         </div>
-        <Button variant="outline" size="sm" onClick={onRescan} disabled={scanBusy}>
+        <Button
+          variant="outline"
+          size="sm"
+          data-onboarding-target="agent-rescan"
+          onClick={onRescan}
+          disabled={scanBusy}
+        >
           <RefreshCw className={scanBusy ? "is-spinning" : ""} />
           {scanBusy ? copy("Scanning…", "扫描中…") : copy("Rescan", "重新扫描")}
         </Button>
@@ -72,7 +78,11 @@ export default function AgentsPage({
           </CardHeader>
           <CardContent>
             <ScrollArea className="agent-master-scroll">
-              <nav className="agent-master-nav" aria-label={copy("Agent list", "Agent 列表")}>
+              <nav
+                className="agent-master-nav"
+                aria-label={copy("Agent list", "Agent 列表")}
+                data-onboarding-target="agent-list"
+              >
                 {registry.map((metadata) => {
                   const agent = agents.find((candidate) => candidate.metadata.agent_id === metadata.agent_id);
                   const selected = metadata.agent_id === selectedAgentId;
