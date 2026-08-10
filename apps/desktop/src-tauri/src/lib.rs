@@ -4505,6 +4505,16 @@ fn desktop_updater<R: Runtime>(
         .map_err(|error| format!("更新器初始化失败：{error}"))
 }
 
+#[cfg(target_os = "windows")]
+fn desktop_update_platform_unsupported_message() -> Option<&'static str> {
+    Some(desktop_update::WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn desktop_update_platform_unsupported_message() -> Option<&'static str> {
+    None
+}
+
 #[tauri::command]
 async fn check_desktop_update(
     app: AppHandle,
@@ -4512,6 +4522,9 @@ async fn check_desktop_update(
 ) -> Result<DesktopUpdateView, String> {
     let current = app.package_info().version.to_string();
     let _lease = operation.try_begin()?;
+    if let Some(message) = desktop_update_platform_unsupported_message() {
+        return Ok(DesktopUpdateView::unsupported(&current, message));
+    }
 
     Ok(
         desktop_update::check_with(&current, OFFICIAL_PUBLIC_KEY, || async {
@@ -4587,6 +4600,9 @@ async fn install_desktop_update_and_restart(
     operation: State<'_, DesktopUpdateOperation>,
 ) -> Result<bool, String> {
     let _lease = operation.try_begin()?;
+    if let Some(message) = desktop_update_platform_unsupported_message() {
+        return Err(message.to_owned());
+    }
     if OFFICIAL_PUBLIC_KEY.trim().is_empty() {
         return Err("当前构建没有内置官方更新公钥，不能在 App 内安装更新。".to_owned());
     }

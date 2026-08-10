@@ -10,11 +10,11 @@ fail() {
   exit 1
 }
 
+readonly mac_platforms=(darwin-aarch64 darwin-x86_64)
+
 mkdir -p "$test_dir/payloads"
-for platform in darwin-aarch64 darwin-x86_64 windows-x86_64; do
-  suffix="tar.gz"
-  [[ "$platform" == windows-* ]] && suffix="msi"
-  payload="$test_dir/payloads/token-station-$platform.$suffix"
+for platform in "${mac_platforms[@]}"; do
+  payload="$test_dir/payloads/token-station-$platform.tar.gz"
   printf 'payload-%s\n' "$platform" >"$payload"
   printf 'trusted-signature-%s\n' "$platform" >"$payload.sig"
 done
@@ -27,14 +27,13 @@ node "$root/scripts/create-desktop-update-manifest.mjs" \
   --notes-file "$test_dir/notes.md" \
   --output "$test_dir/latest.json" \
   --artifact "darwin-aarch64=$test_dir/payloads/token-station-darwin-aarch64.tar.gz" \
-  --artifact "darwin-x86_64=$test_dir/payloads/token-station-darwin-x86_64.tar.gz" \
-  --artifact "windows-x86_64=$test_dir/payloads/token-station-windows-x86_64.msi"
+  --artifact "darwin-x86_64=$test_dir/payloads/token-station-darwin-x86_64.tar.gz"
 
 node - "$test_dir/latest.json" <<'NODE'
 const fs = require("node:fs");
 const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 if (manifest.version !== "1.2.3") throw new Error("wrong version");
-for (const platform of ["darwin-aarch64", "darwin-x86_64", "windows-x86_64"]) {
+for (const platform of ["darwin-aarch64", "darwin-x86_64"]) {
   const entry = manifest.platforms[platform];
   if (!entry?.url.startsWith("https://github.com/ballast-ai/token-station/releases/download/v1.2.3/")) {
     throw new Error(`wrong URL for ${platform}`);
@@ -43,9 +42,24 @@ for (const platform of ["darwin-aarch64", "darwin-x86_64", "windows-x86_64"]) {
     throw new Error(`wrong signature for ${platform}`);
   }
 }
+if ("windows-x86_64" in manifest.platforms) {
+  throw new Error("first updater release must not publish a Windows platform entry");
+}
 NODE
 
-rm "$test_dir/payloads/token-station-windows-x86_64.msi.sig"
+if node "$root/scripts/create-desktop-update-manifest.mjs" \
+  --version 1.2.3 \
+  --pub-date 2026-08-06T08:00:00Z \
+  --release-base-url https://github.com/ballast-ai/token-station/releases/download/v1.2.3 \
+  --output "$test_dir/windows-rejected.json" \
+  --artifact "darwin-aarch64=$test_dir/payloads/token-station-darwin-aarch64.tar.gz" \
+  --artifact "darwin-x86_64=$test_dir/payloads/token-station-darwin-x86_64.tar.gz" \
+  --artifact "windows-x86_64=$test_dir/payloads/token-station-windows-x86_64.msi" \
+  >"$test_dir/windows-rejected.log" 2>&1; then
+  fail "manifest generation accepted a Windows updater artifact for the first release"
+fi
+
+rm "$test_dir/payloads/token-station-darwin-x86_64.tar.gz.sig"
 if node "$root/scripts/create-desktop-update-manifest.mjs" \
   --version 1.2.3 \
   --pub-date 2026-08-06T08:00:00Z \
@@ -53,7 +67,6 @@ if node "$root/scripts/create-desktop-update-manifest.mjs" \
   --output "$test_dir/rejected.json" \
   --artifact "darwin-aarch64=$test_dir/payloads/token-station-darwin-aarch64.tar.gz" \
   --artifact "darwin-x86_64=$test_dir/payloads/token-station-darwin-x86_64.tar.gz" \
-  --artifact "windows-x86_64=$test_dir/payloads/token-station-windows-x86_64.msi" \
   >"$test_dir/rejected.log" 2>&1; then
   fail "manifest generation accepted a missing offline signature"
 fi
@@ -66,12 +79,34 @@ if (config.plugins?.updater?.pubkey !== "") {
   throw new Error("local updater plugin must initialize with an explicit empty public key");
 }
 NODE
-grep -Fq 'TOKEN_STATION_UPDATER_PUBKEY: ${{ vars.TOKEN_STATION_UPDATER_PUBKEY }}' "$workflow" \
-  || fail "desktop workflow does not inject the official public key"
-grep -Fq 'tauri signer generate' "$workflow" \
-  || fail "desktop workflow does not create an untrusted temporary bundler key"
-grep -Fq '*.app.tar.gz' "$workflow" \
-  || fail "desktop workflow does not retain the macOS updater payload"
+node - "$workflow" <<'NODE'
+const fs = require("node:fs");
+const workflow = fs.readFileSync(process.argv[2], "utf8");
+const windowsStart = workflow.indexOf("\n  windows:");
+const macos = workflow.slice(0, windowsStart);
+const windows = workflow.slice(windowsStart);
+for (const required of [
+  "TOKEN_STATION_UPDATER_PUBKEY: ${{ vars.TOKEN_STATION_UPDATER_PUBKEY }}",
+  "tauri signer generate",
+  "*.app.tar.gz",
+]) {
+if (!macos.includes(required)) {
+    throw new Error(`macOS release path lost required updater setting: ${required}`);
+  }
+}
+if (!windows.includes("if: ${{ false }} # First public desktop release is macOS-only.")) {
+  throw new Error("Windows desktop release job must be explicitly skipped for the first release");
+}
+for (const forbidden of [
+  "TOKEN_STATION_UPDATER_PUBKEY",
+  "tauri signer generate",
+  "TAURI_SIGNING_PRIVATE_KEY",
+]) {
+  if (windows.includes(forbidden)) {
+    throw new Error(`Windows first release must not configure updater signing: ${forbidden}`);
+  }
+}
+NODE
 if grep -Eq '^[[:space:]]+.*\*\.sig[[:space:]]*$' "$workflow"; then
   fail "desktop workflow uploads temporary CI signatures"
 fi

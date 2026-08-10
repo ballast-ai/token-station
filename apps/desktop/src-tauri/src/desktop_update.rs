@@ -10,6 +10,8 @@ pub const RELEASES_URL: &str = "https://github.com/ballast-ai/token-station/rele
 pub const LATEST_JSON_URL: &str =
     "https://github.com/ballast-ai/token-station/releases/latest/download/latest.json";
 pub const PROGRESS_EVENT: &str = "desktop-update-progress";
+pub const WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE: &str =
+    "Windows 首版暂不支持应用内更新；请从正式发布页手动下载安装。";
 
 /// The private key never reaches the build. Production builds inject only the
 /// matching public key; source/local builds deliberately compile without one.
@@ -78,7 +80,7 @@ pub struct DesktopUpdateView {
 }
 
 impl DesktopUpdateView {
-    fn unsupported(current_version: &str) -> Self {
+    pub fn unsupported(current_version: &str, message: impl Into<String>) -> Self {
         Self {
             status: DesktopUpdateStatus::Unsupported,
             current_version: current_version.to_owned(),
@@ -86,10 +88,7 @@ impl DesktopUpdateView {
             notes: None,
             pub_date: None,
             release_url: RELEASES_URL.to_owned(),
-            message: Some(
-                "当前构建没有内置官方更新公钥，不能在 App 内安装更新；请从正式发布页手动下载安装。"
-                    .to_owned(),
-            ),
+            message: Some(message.into()),
         }
     }
 }
@@ -106,7 +105,10 @@ where
     Fut: Future<Output = Result<Option<DesktopUpdateCandidate>, String>>,
 {
     if public_key.trim().is_empty() {
-        return DesktopUpdateView::unsupported(current_version);
+        return DesktopUpdateView::unsupported(
+            current_version,
+            "当前构建没有内置官方更新公钥，不能在 App 内安装更新；请从正式发布页手动下载安装。",
+        );
     }
 
     match check().await {

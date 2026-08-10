@@ -4,7 +4,8 @@ use std::sync::{
 };
 
 use token_station_desktop_lib::desktop_update::{
-    check_with, install_with, DesktopUpdateOperation, DesktopUpdateStatus,
+    check_with, install_with, DesktopUpdateOperation, DesktopUpdateStatus, DesktopUpdateView,
+    WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE,
 };
 
 #[test]
@@ -17,6 +18,21 @@ fn concurrent_update_operations_are_rejected_until_the_first_finishes() {
     );
     drop(first);
     assert!(operation.try_begin().is_ok());
+}
+
+#[test]
+fn unsupported_platform_view_keeps_release_page_available() {
+    let view = DesktopUpdateView::unsupported("1.1.2", WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE);
+
+    assert_eq!(view.status, DesktopUpdateStatus::Unsupported);
+    assert_eq!(view.current_version, "1.1.2");
+    assert_eq!(view.version, None);
+    assert!(view
+        .message
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Windows"));
+    assert!(view.release_url.ends_with("/releases"));
 }
 
 #[tokio::test]
