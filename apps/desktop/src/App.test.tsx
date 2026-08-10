@@ -463,6 +463,87 @@ it("spotlights routing controls and advances only when the requested revision is
   expect(await screen.findByRole("dialog", { name: "未检测到可接入 Agent" })).toBeInTheDocument();
 });
 
+it("pins each route teaching target and restores main scrolling when paused", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  const user = userEvent.setup();
+  const provider = {
+    name: "openai",
+    provider: "openai-compatible",
+    base_url: "https://api.openai.com/v1",
+    models: ["gpt-5.1"],
+    has_auth: true,
+  };
+  const initial = stateFixture({
+    providers: [provider],
+    tiers: {
+      high: { upstream: "openai", model: "gpt-5.1" },
+      mid: { upstream: "openai", model: "gpt-5.1" },
+      low: { upstream: "openai", model: "gpt-5.1" },
+    },
+    draft_revision: 1,
+    saved_revision: 1,
+    config_dirty: false,
+  });
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "get_state") return initial;
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") return [];
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+
+  render(<App />);
+  await screen.findByRole("dialog", { name: "打开路由配置" });
+  await user.click(screen.getByRole("button", { name: "路由" }));
+
+  const workspace = document.querySelector<HTMLElement>(".station-content");
+  expect(workspace).not.toBeNull();
+  const expectScrollLocked = (attemptedTop: number) => {
+    const wheelEvent = new WheelEvent("wheel", { deltaY: 120, cancelable: true });
+    act(() => {
+      workspace!.dispatchEvent(wheelEvent);
+    });
+    expect(wheelEvent.defaultPrevented).toBe(true);
+    const lockedTop = workspace!.scrollTop;
+    act(() => {
+      workspace!.scrollTop = attemptedTop;
+      workspace!.dispatchEvent(new Event("scroll"));
+    });
+    expect(workspace!.scrollTop).toBe(lockedTop);
+  };
+
+  const modeCoachmark = await screen.findByRole("dialog", { name: "选择路由模式" });
+  expectScrollLocked(180);
+  await user.click(within(modeCoachmark).getByRole("button", { name: "沿用当前模式" }));
+
+  const configCoachmark = await screen.findByRole("dialog", { name: "配置模型路由" });
+  expectScrollLocked(360);
+  const highProvider = screen.getByRole("combobox", { name: "上档供应商" });
+  await user.click(highProvider);
+  const optionWheel = new WheelEvent("wheel", { deltaY: 120, cancelable: true });
+  act(() => {
+    screen.getByRole("listbox").dispatchEvent(optionWheel);
+  });
+  expect(optionWheel.defaultPrevented).toBe(false);
+  await user.click(highProvider);
+  await user.click(within(configCoachmark).getByRole("button", { name: "配置好了，去应用" }));
+
+  await screen.findByRole("dialog", { name: "保存并应用路由" });
+  expectScrollLocked(540);
+  await user.keyboard("{Escape}");
+
+  expect(screen.queryByRole("dialog")).toBeNull();
+  const wheelAfterPause = new WheelEvent("wheel", { deltaY: 120, cancelable: true });
+  act(() => {
+    workspace!.dispatchEvent(wheelAfterPause);
+  });
+  expect(wheelAfterPause.defaultPrevented).toBe(false);
+  act(() => {
+    workspace!.scrollTop = 720;
+    workspace!.dispatchEvent(new Event("scroll"));
+  });
+  expect(workspace!.scrollTop).toBe(720);
+});
+
 it("does not treat a running but unconfigured route as onboarding-complete", async () => {
   window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
   const provider = {
