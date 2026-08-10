@@ -50,11 +50,11 @@ Claude Code / Codex / Gemini CLI / 其他 Agent
 - **两种路由模式。** 三档路由根据显式关键词、请求能力和确定性复杂度分数，把任务分到高、中、低三档模型；额度优先路由会优先选择更值得在重置前消耗的账户。
 - **每个 Agent 独立配置。** Agent 可以跟随全局路由、使用独立路由，或挂载一份可复用的路由方案。
 - **丰富的供应商目录。** 桌面端内置 40 多个可编辑预设，覆盖官方 API、托管推理服务和 Ollama，另有免费或试用额度目录，也支持自定义 OpenAI 兼容端点。
-- **多协议 Agent 接入。** 沙箱适配器可以接收 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 和 Gemini 请求，并统一交给本地路由控制面。
+- **沙箱化 WASM 插件架构。** 5 个官方适配器覆盖 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses、Gemini 和 OpenAI 兼容供应商。适配器不能直接访问网络、文件系统、环境变量或明文凭证；需要权限的操作统一由 Rust 宿主校验。
 - **用量与成本可见。** 查看请求数、Token、延迟、错误、额度周期和成本估算，Token Station 的请求日志和指标库不保存 Prompt 或 Response 正文。
 - **故障处理。** 异常上游会被临时摘除并进入冷却；供应商诊断会分别报告 DNS、TLS、HTTP、鉴权、模型访问和生成失败。
 - **可逆的 Connector 接入。** 八种内置 Connector 会生成边界明确的变更计划，只写归属字段，保留私有备份；断开时只移除 Token Station 注入的字段，不删除无关配置。
-- **桌面端与 CLI。** 日常使用走 Tauri 桌面端，网关、供应商、插件、统计、备份和恢复也提供 Rust CLI。
+- **Rust 原生内核，桌面端与 CLI 共用。** 本地网关、路由器、凭证解析、指标和插件宿主都由 Rust 实现。Tauri 桌面端与原生 CLI 复用同一套内核，不重复实现路由逻辑。
 
 供应商预设只是可编辑的起点，不代表可用性承诺。模型、免费额度、地区和限额可能由供应商随时调整。
 

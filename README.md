@@ -50,11 +50,11 @@ The gateway only binds to a loopback address. A request sent to a cloud provider
 - **Two routing modes.** Three-tier routing maps requests to High, Mid, or Low models using explicit keywords, request capabilities, and a deterministic complexity score. Quota-first routing favors accounts whose allowance is most useful to spend before reset.
 - **Per-agent policies.** Each agent can inherit the global route, use an independent route, or mount a reusable routing profile.
 - **Broad provider catalog.** The desktop app includes 40+ editable presets for first-party APIs, managed inference services, and Ollama, plus a curated catalog of free or trial offers. Custom OpenAI-compatible endpoints are supported.
-- **Protocol-aware agent access.** Sandboxed adapters accept Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, and Gemini request shapes, then route them through the same local control plane.
+- **Sandboxed WASM plugin architecture.** Five official adapters cover Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, Gemini, and OpenAI-compatible providers. Adapters cannot directly access the network, filesystem, environment variables, or plaintext credentials; the Rust host validates privileged operations.
 - **Usage and cost visibility.** Inspect requests, tokens, latency, errors, quota windows, and estimated cost without storing prompt or response bodies in Token Station's request log or metrics database.
 - **Failure handling.** Unhealthy upstreams are temporarily ejected, cooldowns are tracked locally, and provider diagnosis separates DNS, TLS, HTTP, authentication, model access, and generation failures.
 - **Reversible connector integration.** For the eight built-in connectors, Token Station creates a bounded change plan, writes only owned fields, keeps a private backup, and can remove its fields without deleting unrelated agent settings.
-- **Desktop and CLI surfaces.** Use the Tauri desktop app for daily routing, or the Rust CLI for gateway, provider, plugin, statistics, backup, and restore workflows.
+- **Rust-native core, shared by desktop and CLI.** The local gateway, router, credential resolver, metrics layer, and plugin host are implemented in Rust. The Tauri desktop app and native CLI reuse the same core instead of duplicating routing logic.
 
 Provider presets are editable starting points, not availability guarantees. Models, free tiers, regions, and limits can change at the provider.
 
