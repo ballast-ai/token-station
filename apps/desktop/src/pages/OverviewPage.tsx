@@ -132,7 +132,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
         <Card>
           <CardHeader><CardTitle>{copy("Shortcuts", "快捷键")}</CardTitle></CardHeader>
           <CardContent className="overview-actions-list">
-            <button type="button" onClick={() => onNavigate("agents")}><Bot /><span><strong>{copy("Review Agent connections", "检查 Agent 接入")}</strong><small>{copy(`${pendingAgents} detected Agents are not managed`, `${pendingAgents} 个已检测 Agent 尚未接管`)}</small></span></button>
+            <button data-onboarding-target="agent-connect" type="button" onClick={() => onNavigate("agents")}><Bot /><span><strong>{copy("Review Agent connections", "检查 Agent 接入")}</strong><small>{copy(`${pendingAgents} detected Agents are not managed`, `${pendingAgents} 个已检测 Agent 尚未接管`)}</small></span></button>
             <button type="button" onClick={() => onNavigate("usage")}><Clock3 /><span><strong>{copy("Review local usage", "查看本地用量")}</strong><small>{copy("Requests, reliability, tokens, and cost", "请求、成功率、Token 与成本")}</small></span></button>
             <button type="button" onClick={() => onNavigate("logs")}><Activity /><span><strong>{copy("Inspect request receipts", "检查请求回执")}</strong><small>{copy("Routing decisions without prompt or response bodies", "仅含路由决策，不含提示词与响应正文")}</small></span></button>
           </CardContent>

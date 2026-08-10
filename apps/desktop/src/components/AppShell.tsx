@@ -83,6 +83,7 @@ export default function AppShell({
     <div className="station-shell station-shell-topnav">
       <header className="station-header">
         <button
+          data-onboarding-return-focus
           className="station-brand-top"
           type="button"
           disabled={commandBusy}
@@ -107,6 +108,7 @@ export default function AppShell({
             return (
               <Button
                 key={item.view}
+                data-onboarding-target={item.view === "home" ? "routing" : undefined}
                 className="station-primary-link"
                 variant="ghost"
                 size="sm"
@@ -151,7 +153,7 @@ export default function AppShell({
             {resolvedTheme === "dark" ? <Sun /> : <Moon />}
           </Button>
           {!needsBack && (
-            <Button variant="outline" size="sm" type="button" disabled={commandBusy} onClick={() => onNavigate("add-provider")}>
+            <Button data-onboarding-target="add-provider" variant="outline" size="sm" type="button" disabled={commandBusy} onClick={() => onNavigate("add-provider")}>
               <Plus />{t("nav.addProvider")}
             </Button>
           )}

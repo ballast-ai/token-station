@@ -31,6 +31,10 @@ import {
   type TierSlot,
 } from "./api";
 import AppShell, { type AppView } from "./components/AppShell";
+import FirstRunGuide, {
+  markFirstRunGuideDismissed,
+  shouldOpenFirstRunGuide,
+} from "./components/FirstRunGuide";
 import {
   readHiddenAgentIds,
   updateHiddenAgentIds,
@@ -119,6 +123,7 @@ function StationApp() {
     region: "all",
   });
   const [providerCatalogMode, setProviderCatalogMode] = useState<ProviderCatalogMode>("regular");
+  const [firstRunGuideOpen, setFirstRunGuideOpen] = useState(false);
   const [regularCatalogFilters, setRegularCatalogFilters] = useState<RegularCatalogFilters>({
     query: "",
     region: "all",
@@ -130,6 +135,7 @@ function StationApp() {
   const pendingServeRef = useRef<ServeView | null>(null);
   const viewHistoryRef = useRef<AppView[]>([]);
   const pendingApplyRevisionRef = useRef<number | null>(null);
+  const firstRunGuideCheckedRef = useRef(false);
   const runtimeObservationRef = useRef<{
     ready: boolean;
     instanceId: string | null;
@@ -252,6 +258,12 @@ function StationApp() {
 
   useEffect(() => {
     if (state) setAdminEndpoint(state.serve);
+  }, [state]);
+
+  useEffect(() => {
+    if (!state || firstRunGuideCheckedRef.current) return;
+    firstRunGuideCheckedRef.current = true;
+    if (shouldOpenFirstRunGuide()) setFirstRunGuideOpen(true);
   }, [state]);
 
   // Record a target revision only for an explicit Save and Apply. A normal
@@ -613,6 +625,13 @@ function StationApp() {
           registry={orderedRegistry}
           hiddenAgentIds={hiddenAgentIds}
           onAgentVisibilityChange={setAgentVisible}
+          onOpenFirstRunGuide={() => {
+            viewHistoryRef.current = [];
+            setView("overview");
+            setMessage("");
+            setError("");
+            setFirstRunGuideOpen(true);
+          }}
           onSaved={showState}
         />
       )}
@@ -663,6 +682,13 @@ function StationApp() {
           </section>
         );
       })()}
+      <FirstRunGuide
+        open={firstRunGuideOpen}
+        onDismiss={() => {
+          markFirstRunGuideDismissed();
+          setFirstRunGuideOpen(false);
+        }}
+      />
     </AppShell>
   );
 }

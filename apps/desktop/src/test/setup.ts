@@ -33,6 +33,7 @@ if (!("ResizeObserver" in globalThis)) {
 // App and LanguageProvider default-language suites clear this preference themselves.
 beforeEach(() => {
   window.localStorage.setItem("token-station-language", "zh-CN");
+  window.localStorage.setItem("token-station-first-run-guide", "b-v1");
   window.localStorage.removeItem(AGENT_VISIBILITY_STORAGE_KEY);
 });
 
