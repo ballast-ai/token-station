@@ -503,6 +503,13 @@ it("pins each route teaching target and restores main scrolling when paused", as
       workspace!.dispatchEvent(wheelEvent);
     });
     expect(wheelEvent.defaultPrevented).toBe(true);
+    const overlayWheel = new WheelEvent("wheel", { deltaY: 120, cancelable: true });
+    const blocker = document.querySelector<HTMLElement>(".first-run-spotlight-blocker");
+    expect(blocker).not.toBeNull();
+    act(() => {
+      blocker!.dispatchEvent(overlayWheel);
+    });
+    expect(overlayWheel.defaultPrevented).toBe(true);
     const lockedTop = workspace!.scrollTop;
     act(() => {
       workspace!.scrollTop = attemptedTop;
