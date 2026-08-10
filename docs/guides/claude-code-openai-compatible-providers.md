@@ -68,7 +68,7 @@ The four configurations share `token-station-e2e/plugins/`. Install the plugins 
 
 ## 4. Store API keys safely
 
-Do not send API keys in chat. Do not put them in JSON, command arguments, or shell scripts. This zsh function hides terminal input and writes the key through standard input to the macOS keychain:
+Do not send API keys in chat. Do not put them in JSON, command arguments, or shell scripts. This zsh function hides terminal input and writes the key through standard input to the private local credential file:
 
 ```zsh
 store_provider_key() {
@@ -90,7 +90,7 @@ store_provider_key glm GLM
 unset -f store_provider_key
 ```
 
-The CLI prints only the stored upstream and slot. It does not print the key. The configurations use different upstream names. Although each slot is named `provider_api_key`, keychain entries remain isolated by `upstream/slot`.
+The CLI prints only the stored upstream and slot. It does not print the key. The configurations use different upstream names. Although each slot is named `provider_api_key`, local credentials remain isolated by `upstream/slot`.
 
 ## 5. Check configurations and run real probes
 
@@ -205,7 +205,7 @@ Provider-specific fields such as `reasoning_content`, `reasoning_details`, and `
 ./target/release/token-station-cli key remove glm provider_api_key
 ```
 
-After removal, run `upstream test` again. It must return a keychain missing-credential error without an upstream request. Do not write the key to an environment variable or temporary file to verify removal.
+After removal, run `upstream test` again. It must return a local missing-credential error without an upstream request. Do not write the key to an environment variable or temporary file to verify removal.
 
 ## 10. Rules for a new provider
 

@@ -81,7 +81,23 @@ describe("RecoveryShell", () => {
     expect(screen.getByRole("alertdialog", { name: "安装应用更新？" })).toBeInTheDocument();
     expect(installDesktopUpdateAndRestart).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "确认更新并重启" }));
-    await waitFor(() => expect(installDesktopUpdateAndRestart).toHaveBeenCalledOnce());
+    await waitFor(() => expect(installDesktopUpdateAndRestart).toHaveBeenCalledWith("2"));
+  });
+
+  it("returns to update checking when the recovery-mode candidate changes", async () => {
+    vi.mocked(installDesktopUpdateAndRestart).mockRejectedValue(
+      "update_version_changed: 已确认更新到 2，但当前可用版本已变为 3；请重新检查并确认",
+    );
+    const user = userEvent.setup();
+    render(<RecoveryShell initialState={safeState} />);
+    await user.click(await screen.findByRole("button", { name: "检查更新" }));
+    await user.click(await screen.findByRole("button", { name: "下载并更新到 2" }));
+    await user.click(screen.getByRole("button", { name: "确认更新并重启" }));
+
+    expect(await screen.findByText(/update_version_changed/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "检查更新" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "下载并更新到 2" })).not.toBeInTheDocument();
+    expect(screen.getByText(/https:\/\/example\.test/)).toBeInTheDocument();
   });
 
   it("requires an explicit raw-data confirmation before export", async () => {

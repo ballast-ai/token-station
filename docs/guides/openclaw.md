@@ -1,11 +1,11 @@
 # Secure OpenClaw Connection Guide
 
-Token Station Desktop can automatically find  OpenClaw starting with
-`0.1.0`. It creates a configuration preview for accepted versions. The current exact
-accepted version is `2026.6.11`. Other versions have the “unknown” state, so
-Token Station does not write their configuration. Before the accepted range
-expands, add fixtures for the new version, verify the official schema, and run
-isolated acceptance.
+Token Station Desktop can automatically find and connect OpenClaw starting with
+`0.1.0`. The built-in compatibility catalog currently has no version blocklist. It does
+not reject a connection only because the version differs from one exact
+version. This does not mean that every future version has passed real
+acceptance. Paths, configuration structure, adapter readiness, and the internal
+plan still fail closed before a write.
 
 Official sources:
 
@@ -27,12 +27,13 @@ The scan does not run install, update, doctor, or repair. It does not create an
 OpenClaw directory. It does not start Gateway. If the scan finds multiple
 installations, select one target.
 
-## 2. Preview before connection
+## 2. Connection changes
 
-Select OpenClaw on the Agents page and select **Preview Connection**.
-The page shows the target configuration and these owned paths:
+Select OpenClaw on the Agents page and select **One-click Connect**.
+The desktop app creates an internal plan and writes it immediately. After the
+first connection, it shows the key changes.
 
-
+The Connector owns these paths:
 
 ```text
 /models/providers/tokenstation
@@ -78,39 +79,36 @@ of an owned path uses `$include`. Adding a sibling directly can change
 OpenClaw include merge and override semantics. Do not risk configuration loss
 until include-aware multi-file transactions are available.
 
-## 3. Confirmation, write, and recovery
+## 3. Write and disconnect
 
 The backend writes only when all conditions are true:
 
-1. The version exactly matches the compatibility catalog.
+1. The Agent descriptor is admitted and its version is not in the compatibility blocklist.
 2. The installation and configuration path still match the latest scan.
 3. `agent-openai` is loaded in the Token Station runtime.
-4. The user confirms the installation, target configuration, and redacted differences.
-5. The plan and confirmation token are not expired.
+4. The internal plan, file revision, and confirmation token are still valid.
 
-After confirmation, The backend creates an AES-256-GCM encrypted snapshot.
+Selecting **One-click Connect** gives consent to write. The backend creates an AES-256-GCM encrypted snapshot.
 It atomically replaces and reparses the configuration. It then runs a self-check
-and commits ownership. The snapshot master key is stored in the OS keychain.
+and commits ownership. The snapshot master key is stored in a private local
+`snapshot-master.key`.
 
-**Disconnect** removes only the two owned paths. It
+**Restore Official Configuration and Disconnect** removes only the two owned paths. It
 preserves other fields that the user changed after connection. If the user or
-another tool changes an owned value, Token Station refuses the write and requires a new preview.
-**Restore Snapshot** uses the same confirmation flow.
+another tool changes an owned value, Token Station refuses to overwrite it and requires a new scan.
 
 Historical `openclaw.json.token-station.bak` files are read-only candidates.
 Token Station does not overwrite, delete, or restore them automatically.
 
 ## 4. Behavior after an OpenClaw update
 
-For example, after an update from `2026.6.11` to `2026.7.1`, the built-in
-catalog returns `DETECTED_UNKNOWN`:
-
-- It continues to show the installation path, version, and diagnostics.
-- It does not create a connection plan.
-- A connected installation keeps safe disconnect and recovery actions.
-- Token Station does not downgrade or upgrade OpenClaw automatically.
-- A later signed compatibility catalog can add exact accepted versions without
-  remotely delivering Connector code.
+After an OpenClaw update, Token Station scans the version, paths, and
+configuration structure again. An empty blocklist does not reject a connection
+only because the version changed. The signed compatibility catalog can add an
+explicit blocked range. The Connector still rejects an incompatible schema or
+owned-path structure before writing. Token Station does not downgrade or
+upgrade OpenClaw automatically. The catalog cannot deliver Connector code
+remotely.
 
 If a new version changes the `openclaw.json` schema, add an `openclaw-v2`
 Connector. Keep old versions bound to `openclaw-v1`. Do not silently change
