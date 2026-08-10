@@ -12,6 +12,9 @@ on:
     paths-ignore:
       - '**.md'
       - 'LICENSE'
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 # A new push to the same PR makes every result from the older commit obsolete.
@@ -356,12 +359,12 @@ jobs:
     name: Windows x64 MSI real lifecycle
     needs: [changes, windows-rust]
     # This release-grade gate builds two installers and exercises the complete
-    # lifecycle. Run it for main and manual release validation, not for routine
-    # pull requests. Regular PR jobs still cover frontend and Rust behavior.
+    # lifecycle. Run it for published releases and manual release validation,
+    # not for routine pushes or pull requests. Regular CI still covers behavior.
     if: >-
       !cancelled() &&
       needs.changes.outputs.installer == 'true' &&
-      (github.ref == 'refs/heads/main' ||
+      (github.event_name == 'release' ||
        github.event_name == 'workflow_dispatch')
     runs-on: windows-latest
     steps:
