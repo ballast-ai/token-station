@@ -78,7 +78,7 @@ cargo build --release -p token-station-cli
 ## 4. 安全写入 API Key
 
 不要把 API Key 发到聊天，也不要写进 JSON、命令行参数或 shell 脚本。以下 zsh 函数
-会隐藏终端输入，并通过标准输入把 Key 写入 macOS 钥匙串：
+会隐藏终端输入，并通过标准输入把 Key 写入本地私有凭证文件：
 
 ```zsh
 store_provider_key() {
@@ -101,7 +101,7 @@ unset -f store_provider_key
 ```
 
 CLI 只输出已存储的 upstream/slot，不回显 Key。四份配置使用不同 upstream 名，虽然
-slot 都叫 `provider_api_key`，钥匙串条目仍按 `upstream/slot` 隔离。
+slot 都叫 `provider_api_key`，本地凭证仍按 `upstream/slot` 隔离。
 
 ## 5. 配置检查与真实探活
 
@@ -223,7 +223,7 @@ claude --model claude-3-5-haiku-20241022 \
 ./target/release/token-station-cli key remove glm provider_api_key
 ```
 
-删除后再次执行 `upstream test` 应得到钥匙串缺失错误且不发出上游请求。不要为了验证
+删除后再次执行 `upstream test` 应得到本地凭证缺失错误且不发出上游请求。不要为了验证
 删除结果而重新把 Key 写入环境变量或临时文件。
 
 ## 10. 新供应商接入规则

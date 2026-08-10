@@ -34,6 +34,25 @@ function failureText(error: unknown): string {
   return humanizeAppError(error);
 }
 
+function requiresFreshUpdateCheck(message: string): boolean {
+  return message.includes("update_version_changed:")
+    || message.includes("update_expected_version_missing:");
+}
+
+function invalidateUpdateCandidate(
+  update: DesktopUpdateView | null,
+  message: string,
+): DesktopUpdateView | null {
+  return update ? {
+    ...update,
+    status: "unavailable",
+    version: null,
+    notes: null,
+    pub_date: null,
+    message,
+  } : null;
+}
+
 export default function RecoveryShell({ initialState, initialError }: RecoveryShellProps) {
   const { copy } = useLocalizedCopy();
   const [state, setState] = useState<RecoveryState | null>(initialState ?? null);
@@ -113,17 +132,33 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
   };
 
   const installUpdate = async () => {
+    const expectedVersion = upgrade?.version;
+    if (!expectedVersion) {
+      const message = copy(
+        "The selected update version is missing; check again.",
+        "缺少已确认的更新版本，请重新检查。",
+      );
+      setConfirmUpdate(false);
+      setUpgrade((current) => invalidateUpdateCandidate(current, message));
+      setError(message);
+      return;
+    }
     setConfirmUpdate(false);
     setBusy("install-update");
     setError("");
     try {
-      const started = await installDesktopUpdateAndRestart();
+      const started = await installDesktopUpdateAndRestart(expectedVersion);
       if (!started) {
         setUpgrade(await checkDesktopUpdate());
         setBusy("");
       }
     } catch (caught) {
-      setError(failureText(caught));
+      const message = failureText(caught);
+      if (requiresFreshUpdateCheck(message)) {
+        setUpgrade((current) => invalidateUpdateCandidate(current, message));
+      } else {
+        setError(message);
+      }
       setBusy("");
     }
   };

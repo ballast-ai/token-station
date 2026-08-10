@@ -12,8 +12,8 @@
 export GLM_API_KEY='你的 GLM API Key'
 ```
 
-不要把此命令写入 shell 历史、配置文件或提交到 Git。若需要持久保管，请改用
-系统钥匙串：
+不要把此命令写入 shell 历史、配置文件或提交到 Git。若需要持久保管，可以写入
+数据目录下受私有权限保护的明文 `secrets.json`：
 
 ```bash
 ./token-station-cli key set glm provider_api_key
@@ -22,7 +22,7 @@ export GLM_API_KEY='你的 GLM API Key'
 然后将 `token-station.json` 内的 `auth` 改为：
 
 ```json
-{ "slot": "provider_api_key", "keyring": true }
+{ "slot": "provider_api_key", "store": true }
 ```
 
 ## 2. 选择正确端点
@@ -87,6 +87,6 @@ IDE 或 Agent 的 OpenAI-compatible 配置为：Base URL
 - 本地虚拟 Key 位于 `data/virtual-key`，权限为仅当前用户可读；不要提交它。
 - 文件日志与指标库不保存 prompt/response 内容，但会记录用量、延迟和路由元数据。
 - 关闭服务不等于撤销 GLM Key；如怀疑泄露，应在 GLM 控制台撤销 Key，并执行
-  `key remove glm provider_api_key`（若使用了钥匙串）。
+  `key remove glm provider_api_key`（若使用了本地凭证文件）。
 
 GLM 端点与鉴权方式依据 [Z.AI 官方 HTTP API 文档](https://docs.z.ai/guides/develop/http/introduction)。

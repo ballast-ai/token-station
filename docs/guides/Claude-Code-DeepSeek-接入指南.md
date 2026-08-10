@@ -54,7 +54,8 @@ export DEEPSEEK_API_KEY='你的 DeepSeek API Key'
 ```
 
 不要把 Key 写进 JSON、命令参数或仓库文件。也可以把样例配置的 `auth` 改成
-`{"slot":"provider_api_key","keyring":true}`，再通过标准输入写入系统钥匙串：
+`{"slot":"provider_api_key","store":true}`，再通过标准输入写入数据目录下
+受私有权限保护的明文 `secrets.json`：
 
 ```bash
 printf '%s' "$DEEPSEEK_API_KEY" | \

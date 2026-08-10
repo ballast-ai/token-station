@@ -2,24 +2,31 @@
 
 本文描述当前可执行源码，面向维护 Token Station 桌面端 Agent 控制面的开发者。
 
-“接入 Agent”仅表示：在用户确认后修改目标 Agent 的本机配置，使其模型请求进入
+“接入 Agent”仅表示：用户点击“一键接入”后修改目标 Agent 的本机配置，使其模型请求进入
 Token Station 回环代理。桌面 App 不会安装、升级、启动或修复第三方 Agent，也不会改变
 `crates/router-core/**` 中的路由算法和核心契约。
 
 ## 1. 当前能力
 
-内置 Registry 有五种 Agent：
+内置 Registry 当前有九种 Agent，其中八种提供通用 Connector，Cursor 使用被动发现和
+专用 SQLite 接入：
 
 | Agent | 发现 | 正式配置接入 | Connector | 入站 Adapter |
 |---|---|---|---|---|
 | Claude Code | 是 | 是 | `claude-code-v1` | `agent-anthropic` |
+| Claude Desktop | 是 | 是 | `claude-desktop-3p-v1` | `agent-anthropic` |
 | Codex | 是 | 是 | `codex-v1` | `agent-openai-responses` |
+| Gemini CLI | 是 | 是 | `gemini-cli-v1` | `agent-gemini` |
 | OpenCode | 是 | 是 | `opencode-v1` | `agent-openai` |
-| OpenClaw | 是 | 是（内置精确版本 `2026.6.11`） | `openclaw-v1` | `agent-openai` |
-| Hermes | 是 | 是（内置 package 精确版本 `0.18.0`） | `hermes-v1` | `agent-openai` |
+| OpenClaw | 是 | 是 | `openclaw-v1` | `agent-openai` |
+| Hermes | 是 | 是 | `hermes-v1` | `agent-openai` |
+| WorkBuddy | 是 | 是 | `workbuddy-v1` | `agent-openai` |
+| Cursor | 被动发现 | macOS / Windows 专用 SQLite 接入 | 无 | OpenAI 兼容路由 |
 
-列表由后端 Registry 动态返回，前端没有固定 Agent 联合类型。OpenClaw 和 Hermes 的其他
-版本默认仍是 unknown，不能因已有本地 Connector 而越过版本门禁。
+列表由后端 Registry 动态返回，前端没有固定 Agent 联合类型。当前内置兼容目录的
+blocklist 为空，不用最低版本或 SemVer 白名单阻断接入；精确安装路径、可运行性、
+唯一 Connector、适配器就绪、计划令牌和目录安全边界仍然必须满足。签名兼容目录可以
+用更高 sequence 新增明确阻断规则，但不能注入代码或扩大 Connector 权限。
 
 ## 2. 控制面流程
 
@@ -30,14 +37,16 @@ Token Station 回环代理。桌面 App 不会安装、升级、启动或修复�
   → 内置/签名兼容目录计算状态和允许动作
   → 用户选择唯一安装实例
   → 后端生成短时、脱敏的配置计划
-  → 页面展示目标、owned paths 和差异
-  → 用户逐项确认
+  → 同一次点击中前端取得目标、owned paths、差异和确认令牌
+  → 前端立即提交 Apply
   → 后端复验扫描、版本、指纹、目录与代理运行态
   → 加密快照 → 原子写入 → 写后解析/自检 → ownership 提交
+  → 首次接入在写入后展示改动字段
 ```
 
 前端只能提交 `agent_id`、最近扫描中的精确 `installation_path`、`operation_id` 和
-确认令牌，不能提交目标配置路径、patch、配置字节或命令。确认令牌绑定计划摘要、Webview
+确认令牌，不能提交目标配置路径、patch、配置字节或命令。当前 UI 把计划和 Apply 放在
+一次点击内；确认令牌绑定计划摘要、Webview
 会话、随机挑战和过期时间；计划仅保存在内存中，成功或失败消费后不能重放。
 
 当前 Tauri IPC：
@@ -59,8 +68,8 @@ Token Station 回环代理。桌面 App 不会安装、升级、启动或修复�
 
 主要状态：
 
-- `DETECTED_VERIFIED`：精确命中已验证范围，可以预览接入；
-- `DETECTED_INFERRED`：命中受限补丁范围且配置指纹一致，可以在额外风险确认后接入；
+- `DETECTED_VERIFIED`：命中允许范围，可以生成内部计划并接入；
+- `DETECTED_INFERRED`：命中受限补丁范围且配置指纹一致，仍需通过更严格的计划门禁；
 - `DETECTED_UNKNOWN`：版本或指纹未知，只读展示；
 - `DETECTED_BLOCKED`：命中明确阻断规则，禁止接入；
 - `INSTALLED_BROKEN`：可找到程序但版本探测失败；
@@ -74,7 +83,7 @@ Token Station 回环代理。桌面 App 不会安装、升级、启动或修复�
 Connector ID，不能携带脚本、下载器、配置路径或 Connector 代码。签名、schema、有效期、
 sequence 回滚或缓存完整性任一检查失败时 fail closed；离线回退只能收紧写入能力。
 
-## 4. 五种正式 Connector
+## 4. 内置 Connector
 
 ### Claude Code
 
@@ -92,6 +101,13 @@ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
 
 其他顶层字段和其他 `env` 键保留。只有 `agent-anthropic` 运行态就绪时才能接入。
 
+### Claude Desktop
+
+目标为 Claude 3P profile 的固定配置库条目，同时管理 `_meta.json` 与两个
+deployment mode companion。主 profile 只拥有 inference provider、回环 Base URL、
+本地虚拟 Key、鉴权方式、chooser 开关和回环 egress allowlist。Claude Desktop
+需要重启后生效。
+
 ### Codex
 
 目标为 `~/.codex/config.toml`。owned paths：
@@ -106,13 +122,19 @@ Connector 使用 `toml_edit` 保留非归属表、字段和注释，写入 Respo
 从 `TOKENSTATION_KEY` 环境变量取本地虚拟 Key。只有 `agent-openai-responses` 就绪时
 才能接入。
 
+### Gemini CLI
+
+主目标为 `~/.gemini/.env`，只拥有 `GOOGLE_GEMINI_BASE_URL` 和 `GEMINI_API_KEY`；
+同时把 `~/.gemini/settings.json` 的 `security.auth.selectedType` 设为
+`gemini-api-key`。请求由 `agent-gemini` 处理。
+
 ### OpenCode
 
 目标为 `~/.config/opencode/opencode.json`。唯一 owned subtree 是
 `/provider/tokenstation`，其他 Provider 和顶层字段保留。只有 `agent-openai` 就绪时
 才能接入。
 
-五个 Connector 都先解析源配置并验证父级结构。配置不存在时可从空对象/空文档生成；无效
+所有 Connector 都先解析源配置并验证父级结构。配置不存在时可从空对象/空文档生成；无效
 UTF-8、无效 JSON/TOML 或 owned path 父级类型错误时，在快照和写入前拒绝。
 
 ### OpenClaw
@@ -130,13 +152,26 @@ Connector 使用 round-trip AST 保留注释、尾逗号和未知字段，并复
 `api_mode: chat_completions`，使用 lossless YAML 编辑器保留根注释和未知字段，并拒绝重复键、
 merge key、多文档或 flow/deep-path 歧义写入。
 
+### WorkBuddy
+
+目标为已发现安装对应的 `models.json`，只拥有 `models` 与 `availableModels`，写入
+`tokenstation-auto` 模型并指向本地 `/v1/chat/completions`。其他 JSON 字段保留。
+
+### Cursor
+
+Cursor 没有通用 Connector。macOS 与 Windows 上，用户必须先自行退出 Cursor；专用命令
+随后备份 `applicationUser` 与 OpenAI Key 两条原值，并在一笔 SQLite 事务中写入
+Token Station Base URL 和本机虚拟 Key，回读不匹配时立即恢复原值。该路径当前没有
+ownership 记录或应用内断开按钮，不能套用下文通用 Connector 的恢复承诺；也可以在
+Cursor 设置中手动填写 TS API。
+
 ## 5. 配置事务、归属和恢复
 
 所有新增写入统一经过 `TransactionEngine`：
 
-1. 核验用户确认、计划有效期、兼容目录 sequence 和安装绑定；
-2. 核验目标文件 revision，防止预览后被其他进程修改；
-3. 在 OS keychain 中取得本机 master key；
+1. 核验一键接入流程带回的确认令牌、计划有效期、兼容目录 sequence 和安装绑定；
+2. 核验目标文件 revision，防止计划生成后被其他进程修改；
+3. 从本地私有 `snapshot-master.key` 读取本机 master key；
 4. 创建 AES-256-GCM 加密快照，索引和密文使用私有权限；
 5. 同目录写临时文件、flush/fsync、恢复元数据并原子替换；
 6. 写后重新读取、解析并执行 Connector 自检；
@@ -144,7 +179,7 @@ merge key、多文档或 flow/deep-path 歧义写入。
 8. 任一步骤失败时按加密快照恢复；恢复失败明确报告 repair-required。
 
 断开和快照恢复只投影 declared owned paths。用户在接入后新增或修改的非归属字段保留；如果
-用户或其他工具修改了受管值，则拒绝写入并要求重新预览。
+用户或其他工具修改了受管值，则拒绝写入并要求重新扫描。
 
 历史版本可能留下：
 
@@ -198,7 +233,7 @@ Agent 发布新版本后，默认结果是 `DETECTED_UNKNOWN`，不是继续盲�
 5. 实现版本化 Connector，最小化 owned paths；
 6. 补配置缺失、未知字段、非法配置、快照、并发、回滚、断开和恢复测试；
 7. 在内置目录加入精确版本，未知和未来版本继续保护；
-8. 完成真实环境 E2E 和 UI 预览验收；
+8. 完成真实环境 E2E 和 UI 首次接入改动展示验收；
 9. 检查 `crates/router-core/**` 摘要和专项红线门禁；
 10. 最后才把 admission 从 `discovery_only` 改为 `supported`。
 

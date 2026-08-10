@@ -16,13 +16,14 @@
 | 命令 | 作用 |
 |---|---|
 | `serve` | 启动回环代理。 |
-| `key set / remove` | 在 OS 钥匙串里存 / 删上游凭证。 |
-| `upstream list / add / remove / test` | 列出 / 增删 / 探活上游。 |
+| `key set / remove` | 在本地私有凭证文件中存 / 删上游凭证。 |
+| `upstream list / add / remove / test / diagnose` | 列出 / 增删 / 探活 / 分层诊断上游。 |
 | `config set / edit` | 翻开关，或在校验保护下编辑整份配置。 |
 | `plugin list / install / remove / info / new / build / test` | 插件的安装面与开发面。 |
 | `rule list` | 查看路由表（只读）。 |
 | `stats` | 聚合本地指标库。 |
 | `upgrade` | 匿名检查新版，签名验证通过后才更新。 |
+| `backup / restore` | 备份或可逆恢复配置与指标库。 |
 
 ---
 
@@ -56,12 +57,13 @@ token-station-cli upstream add <name> \
   --provider <dialect> \
   --base-url <url> \
   --model "<model>[,tool][,vision][,json-schema][,ctx=N]" \
-  [--auth keyring | env:<VAR> | file:<PATH>] \
+  [--auth store | keyring | env:<VAR> | file:<PATH>] \
   [--slot provider_api_key] \
   [--pool <pool>]
 
 token-station-cli upstream remove <name>
 token-station-cli upstream test <name> [--model <model>]
+token-station-cli upstream diagnose <name> [--model <model>]
 ```
 
 | 参数 | 说明 |
@@ -70,12 +72,13 @@ token-station-cli upstream test <name> [--model <model>]
 | `--provider` | provider 方言；必须由一个已发现的插件包提供（`plugin list` 显示有哪些）。 |
 | `--base-url` | 基址，**不能夹带凭证**，否则被拒。 |
 | `--model` | 可重复；`,tool` `,vision` `,json-schema` `,ctx=N` 声明能力。 |
-| `--auth` | 凭证位置：`keyring` / `env:<VAR>` / `file:<PATH>`。开放上游（如本地 Ollama）省略。 |
+| `--auth` | 凭证位置：`store` / `env:<VAR>` / `file:<PATH>`。`keyring` 是 `store` 的旧命令行别名，不再表示 OS 钥匙串。开放上游（如本地 Ollama）省略。 |
 | `--slot` | 凭证槽名，默认 `provider_api_key`。 |
 | `--pool` | 同时把这些模型追加到该池，让路由能到达它们。 |
 
 - `upstream remove`：当仍有池路由到它时被拒。
 - `upstream test`：对每个声明的模型发一次**真实**的最小 completion，会消耗额度。
+- `upstream diagnose`：逐层检查 DNS / 网络、HTTP、鉴权、模型和生成，便于区分“能连通”和“能使用”。
 
 ## config
 
@@ -145,3 +148,15 @@ token-station-cli upgrade [--yes] [--check-only]
 | `--check-only` | 只检查上报，从不下载（与 `--yes` 互斥）。 |
 
 验证原理见 [../release/可复现构建与发布验证.md](../release/可复现构建与发布验证.md)。
+
+## backup / restore
+
+```bash
+token-station-cli backup <目录>
+token-station-cli restore <目录>
+```
+
+`backup` 写出已验证的配置和可选的 `metrics.sqlite` 在线快照。它不包含
+`secrets.json`、Agent 配置、ownership 或加密快照。`restore` 会先校验备份，
+再把当前文件保留为 `.pre-restore` 后缀并原子替换；运行中的 `serve` 需要重启
+才会使用恢复后的配置。

@@ -310,7 +310,7 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
       egressAuthSlot: "proxy_password",
     }],
     ["desktop update check", () => checkDesktopUpdate(), "check_desktop_update", undefined],
-    ["desktop update install", () => installDesktopUpdateAndRestart(), "install_desktop_update_and_restart", undefined],
+    ["desktop update install", () => installDesktopUpdateAndRestart("1.1.3"), "install_desktop_update_and_restart", { expectedVersion: "1.1.3" }],
     ["recovery state", () => getRecoveryState(), "get_recovery_state", undefined],
     ["recovery diagnostics", () => getRecoveryDiagnostics(), "get_recovery_diagnostics", undefined],
     ["recovery folder", () => openRecoveryFolder(), "open_recovery_folder", undefined],
