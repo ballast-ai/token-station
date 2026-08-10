@@ -1,5 +1,6 @@
-// Brand logo map: map provider preset IDs and Agent IDs to colored @lobehub/icons
-// Avatar icon. Return null for brands without an official logo, such as Hermes. The caller uses a colored initial block.
+// Brand logo mapping from provider preset IDs and Agent IDs to colored
+// @lobehub/icons avatars. Return null when no official logo exists, such as for
+// Hermes, so the caller can fall back to an initial tile.
 import { useState, type ComponentType } from "react";
 import {
   AlibabaCloud,
@@ -115,8 +116,9 @@ const AGENT_ICONS: Record<string, BrandIcon> = {
   cursor: Cursor,
 };
 
-// Agent ID to bundled bitmap logo. Store it in public/ and reference it by URL. This covers brands missing from @lobehub.
-// (such as Hermes) uses it. If the file is missing, <BrandImage> falls back to an initial block and does not show a blank page.
+// Map Agent IDs to bundled bitmap logos under public/, referenced by URL. Use
+// these for brands missing from @lobehub, such as Hermes. If a file is missing,
+// <BrandImage> falls back to an initial tile instead of rendering blank.
 type AgentImage = { src: string; shape?: "app" };
 const AGENT_IMAGES: Record<string, AgentImage> = {
   "nous-hermes-agent": { src: "/agents/hermes.png" },

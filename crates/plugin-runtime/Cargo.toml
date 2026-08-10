@@ -18,8 +18,9 @@ wasmtime = { version = "46", default-features = false, features = [
     "runtime",
     "component-model",
     "cranelift",
-    # Compilation cache: compiling each WASM component with Cranelift at every start takes several seconds per component and dominates startup.
-    # The built-in cache stores content and config hashes on disk and deserializes them after restart. All unsafe code remains inside wasmtime.
+    # Compilation cache: compiling each WASM component with Cranelift on every
+    # start takes seconds. Persist the built-in cache by content and config hash,
+    # then deserialize on restart; unsafe code remains inside wasmtime.
     "cache",
     # Tests use handwritten WAT for a component importing wasi:sockets to prove
     # the rejection path. Production loads binary .wasm without WAT.

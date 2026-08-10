@@ -8,6 +8,7 @@ import {
 } from "../api";
 import PageBackButton from "../components/PageBackButton";
 import { useLocalizedCopy } from "../components/LanguageProvider";
+import { humanizeAppError } from "../errors";
 
 interface QuotaUsagePageProps {
   providers: ProviderView[];
@@ -47,7 +48,7 @@ export default function QuotaUsagePage({ providers, onBack }: QuotaUsagePageProp
       setSnapshot(await getQuotaSnapshot());
       setError(null);
     } catch (caught) {
-      setError(typeof caught === "string" ? caught : String(caught));
+      setError(humanizeAppError(caught));
     } finally {
       setLoading(false);
     }

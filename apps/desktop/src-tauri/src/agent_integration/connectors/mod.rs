@@ -561,10 +561,12 @@ mod tests {
             assert!(connector.config_path(home).starts_with(home));
             assert!(!connector.create_dir_error().is_empty());
             assert!(!connector.owned_paths().is_empty());
-            // owned_fields metadata must match the actual owned_paths() count. A mismatch causes incorrect coverage
-            // This can omit or add fields in ownership records, restore, and UI display. Examples include the July 2026 OpenCode phantom model and Codex
-            // This includes missing model fields. Field string formats can differ by connector. For example, claude-code uses a plain environment-variable name,
-            // OpenCode uses dotted paths. Check only coverage count, not the strings.
+            // The number of owned_fields entries must match the paths actually
+            // owned by owned_paths(). Misalignment causes ownership records,
+            // restoration, and UI display to omit or invent fields, as seen in
+            // the July 2026 OpenCode phantom model and missing Codex model bugs.
+            // Connectors may format field strings differently, so validate only
+            // the count rather than the strings themselves.
             assert_eq!(
                 connector.capabilities().owned_fields.len(),
                 connector.owned_paths().len(),

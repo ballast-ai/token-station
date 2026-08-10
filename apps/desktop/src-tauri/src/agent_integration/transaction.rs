@@ -2831,8 +2831,9 @@ mod tests {
             original_owner: baseline.record.original_owner.clone(),
         };
 
-        // An external tool removed Token Station managed fields but kept the ownership record.
-        // This matches the baseline state on managed paths. Permit an idempotent disconnect and clear ownership.
+        // An external tool removed Token Station-managed fields but left the
+        // ownership record. This matches the baseline state on managed paths, so
+        // allow an idempotent disconnect and clear ownership.
         std::fs::write(
             &target,
             br#"{"unowned":"keep","later_user_field":{"enabled":true}}"#,

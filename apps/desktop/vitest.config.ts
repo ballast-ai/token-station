@@ -14,9 +14,10 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     clearMocks: true,
     restoreMocks: true,
-    // @lobehub/icons brand logos add a transitive dependency on emoji-mart .json files. Let Vite inline them.
-    // transpile it. Otherwise, native Node ESM fails to load without the `with { type: "json" }` assertion,
-    // silently skip the App and AddProviderPage render smoke tests.
+    // @lobehub/icons brand logos depend transitively on emoji-mart JSON. Let Vite
+    // inline and transform it; otherwise native Node ESM lacks the
+    // `with { type: "json" }` assertion and silently skips the App and
+    // AddProviderPage rendering smoke tests.
     server: {
       deps: {
         inline: [/@lobehub/, /emoji-mart/],

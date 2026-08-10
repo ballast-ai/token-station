@@ -747,6 +747,8 @@ export interface DiagnosticPreview {
 }
 
 export const getState = () => invoke<StateView>("get_state");
+export const setDockThemeIcon = (theme: "light" | "dark") =>
+  invoke<void>("set_dock_theme_icon", { theme });
 export const getRecoveryState = () => invoke<RecoveryState>("get_recovery_state");
 export const getRecoveryDiagnostics = () =>
   invoke<DiagnosticPreview>("get_recovery_diagnostics");
@@ -1004,9 +1006,11 @@ export const planAgentDisconnect = (agentId: AgentId, installationPath: string) 
   invoke<ConfigPlanView>("plan_agent_disconnect", { agentId, installationPath });
 
 /**
- * Restore official configuration and disconnect: remove TS-managed fields by ownership record and return the Agent to its official default configuration.
- * Then clear ownership. This does not depend on encrypted snapshots or the primary key. It is deterministic and always succeeds. This is Restore official configuration and disconnect.
- * The primary-button path replaces exact snapshot restore and the separate Force disconnect fallback.
+ * Restore official configuration and disconnect by removing TS-managed fields
+ * according to ownership records, returning the Agent to its official defaults,
+ * then clearing ownership. This deterministic path does not depend on encrypted
+ * snapshots or a master key. It replaces exact snapshot restoration and the
+ * separate force-disconnect fallback.
  */
 export const forceForgetAgent = (agentId: AgentId, installationPath: string) =>
   invoke<void>("force_forget_agent", { agentId, installationPath });
@@ -1041,10 +1045,12 @@ export const setSettings = (
 });
 
 // ---------------------------------------------------------------------------
-// Read-only data plane: prefer local HTTP `/admin/*` so the same frontend can run without the Tauri shell
-// (direct browser development and a future remote console). In the Tauri shell, IPC is the fallback if the proxy is stopped or the request fails
-// IPC keeps the usage and routing-table pages available when the proxy is stopped. It reads drafts and the local database. This matches
-// Behavior matches the state before the change. Privileged operations, including Agent transactions, configuration writes, and secrets, use IPC only and never HTTP.
+// The read-only data plane prefers local HTTP `/admin/*`, allowing the same
+// frontend to run outside Tauri for direct browser development and a future
+// remote console. If the proxy is stopped or a request fails, the Tauri shell
+// falls back to IPC so usage and routing pages can still read drafts and the
+// local database. Privileged operations such as Agent transactions, config
+// writes, and secrets always use IPC and never HTTP.
 
 const IN_TAURI = "__TAURI_INTERNALS__" in window;
 
@@ -1142,8 +1148,9 @@ export const getRequestReceipts = ({
     pageSize,
   });
 
-// Note the semantic difference: HTTP returns the active routing table. IPC fallback returns the editable draft.
-// Use runtime state while the proxy runs. This is the correct data-plane fact.
+// Preserve the semantic difference: HTTP returns the running routing table,
+// while IPC fallback returns the editable draft. When the proxy runs, runtime
+// state is authoritative and is what the data plane should report.
 export const getRouterTable = () =>
   dataGet<RouterTableView>("/admin/router-table", () =>
     invoke<RouterTableView>("get_router_table"),

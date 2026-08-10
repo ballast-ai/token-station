@@ -61,14 +61,10 @@ import QuotaUsagePage from "./pages/QuotaUsagePage";
 import SettingsHub from "./pages/SettingsHub";
 import UsageWorkspace from "./pages/UsageWorkspace";
 import "./App.css";
+import { humanizeAppError } from "./errors";
 
 function errorText(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object") {
-    const value = error as { message?: unknown; code?: unknown };
-    return [value.message, value.code && `code=${value.code}`].filter(Boolean).map(String).join(" · ");
-  }
-  return String(error);
+  return humanizeAppError(error);
 }
 
 function hasErrorCode(error: unknown, code: string): boolean {
@@ -294,18 +290,22 @@ function StationApp() {
       );
       return () => window.clearTimeout(timer);
     }
-    // The phase is also running after fallback to the old instance. The error is the authoritative failure signal. A late old
-    // A running_revision without an error can result from a 500 ms polling race. Keep the target and continue waiting.
+    // Falling back to the old instance after a failure also reports a running
+    // phase; error is the authoritative failure signal. A late old
+    // running_revision without an error may only be a reordered 500 ms poll, so
+    // keep waiting for the target revision.
     if (state.serve.error !== null || phase !== "running") {
       pendingApplyRevisionRef.current = null;
     }
     return undefined;
   }, [state?.serve.error, state?.serve.phase, state?.serve.running_revision]);
 
-  // Rescan when runtime state changes from not ready to ready. The first app scan can occur before the gateway starts,
-  // That scan_agents call got runtime=None, so all installations had connected=false. Managed
-  // can incorrectly show Repair required. The 500 ms top-bar poll corrects itself, but scan results do not refresh. When runtime state
-  // Scan once when ready to align cards with actual runtime state. rescanAgents has deduplication and queue protection.
+  // Rescan once when runtime changes from not ready to ready. The initial app
+  // scan can run before the gateway starts, so scan_agents receives runtime=None
+  // and marks every installation disconnected, incorrectly showing managed
+  // Agents as needing repair. The 500 ms header poll corrects runtime but not the
+  // scan results, so rescan when ready to align cards with reality. rescanAgents
+  // already deduplicates and queues requests.
   useEffect(() => {
     if (!state) return;
     const ready = state.serve.app_runtime === "running" && Boolean(state.serve.listener_reachable);
@@ -315,9 +315,11 @@ function StationApp() {
     };
     const previous = runtimeObservationRef.current;
     runtimeObservationRef.current = observation;
-    // The first observation (null) is not a transition to ready. If already ready, the initial load() scan includes runtime.
-    // Scan when state changes from not ready to ready, or when the serving instance changes while ready. The latter ensures
-    // After Applying(old) -> Running(new), Agent adapter readiness must not remain on the old instance.
+    // The first observation (null) is not a ready transition. If runtime is
+    // already ready then load() included it in the first scan. Rescan after a
+    // real not-ready-to-ready transition or when the serving instance changes
+    // while ready. The latter prevents Agent adapter readiness from staying on
+    // the old instance after Applying.old -> Running(new).
     const becameReady = previous?.ready === false && ready;
     const servingInstanceChanged = Boolean(
       previous?.ready
@@ -490,7 +492,7 @@ function StationApp() {
       )}
       {message && state.serve.phase !== "starting" && <div className="banner ok global-banner">{message}</div>}
       {error && <div className="banner err global-banner">{error}</div>}
-      {state.serve.error && <div className="banner err global-banner">{state.serve.error}</div>}
+      {state.serve.error && <div className="banner err global-banner">{humanizeAppError(state.serve.error, language)}</div>}
 
       {view === "overview" && (
         <OverviewPage
@@ -514,7 +516,7 @@ function StationApp() {
           onViewQuotaUsage={() => navigate("quota-usage")}
           busy={busy}
           applying={state.serve.phase === "starting"}
-          configError={state.config_error}
+          configError={state.config_error ? humanizeAppError(state.config_error, language) : null}
           keywords={state.keywords}
           saveStatus={saveStatus}
           localOnly={state.local_only}

@@ -33,8 +33,9 @@ export default function ModelPicker({
   const { copy } = useLocalizedCopy();
   const [query, setQuery] = useState("");
   const [customModel, setCustomModel] = useState("");
-  // Move models selected or added during this session to the end in operation order so users can review recent additions.
-  // This is local view state only. Remounting the component clears it and restores alphabetical order.
+  // Move models selected or added during this opening to the end in action order
+  // so users can review them. This is local view state and resets to alphabetical
+  // order when the component remounts.
   const [recent, setRecent] = useState<string[]>([]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
 

@@ -10,6 +10,7 @@ import { ProviderIcon } from "../brandIcons";
 import PageBackButton from "../components/PageBackButton";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { englishProviderName } from "../providerCopy";
+import { humanizeAppError } from "../errors";
 
 interface FreeProviderConfigPageProps {
   preset: FreeProviderPresetView;
@@ -57,7 +58,7 @@ export default function FreeProviderConfigPage({
     try {
       await openUrl(url);
     } catch (caught) {
-      setError(`${copy("Could not open the external page:", "无法打开外部页面：")} ${String(caught)}`);
+      setError(humanizeAppError({ code: "open_external_failed", detail: caught }));
     }
   };
 
@@ -86,7 +87,7 @@ export default function FreeProviderConfigPage({
         ),
       );
     } catch (caught) {
-      setError(String(caught));
+      setError(humanizeAppError(caught));
     } finally {
       setSaving(false);
       onBusyChange(false);

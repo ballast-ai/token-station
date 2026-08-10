@@ -103,9 +103,31 @@ describe("desktop in-app update", () => {
     await user.click(await screen.findByRole("button", { name: "下载并更新到 1.1.3" }));
     await user.click(screen.getByRole("button", { name: "确认更新并重启" }));
 
-    expect(await screen.findByText(/update_version_changed/)).toBeInTheDocument();
+    expect(await screen.findByText("可用更新已经发生变化。请重新检查后再确认安装。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "检查更新" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "下载并更新到 1.1.3" })).not.toBeInTheDocument();
     expect(screen.getByText(/releases\/tag\/v1.1.3/)).toBeInTheDocument();
+  });
+
+  it("localizes a Chinese update result message in English mode", async () => {
+    window.localStorage.setItem("token-station-language", "en");
+    vi.mocked(checkDesktopUpdate).mockResolvedValue({
+      status: "unavailable",
+      current_version: "1.1.2",
+      version: null,
+      notes: null,
+      pub_date: null,
+      release_url: "https://github.com/ballast-ai/token-station/releases",
+      message: "当前构建没有内置官方更新公钥，不能在 App 内安装更新。",
+    });
+
+    const user = userEvent.setup();
+    render(<About desktopVersion="1.1.2" coreVersion="0.2.0" />);
+    await user.click(screen.getByRole("button", { name: "Check for updates" }));
+
+    expect(await screen.findByText(
+      "This build cannot install updates because it does not include the official update public key. Download the app from the Releases page instead.",
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/当前构建没有内置官方更新公钥/)).not.toBeInTheDocument();
   });
 });

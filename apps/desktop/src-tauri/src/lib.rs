@@ -1,9 +1,10 @@
 //! Token Station desktop backend.
 //!
-//! This does not rewrite routing or gateway logic. It uses `token-station-cli` as a library and reuses the same
-//! `Gateway` / `ClientConfig` / `server::serve` / keychain. The GUI is one layer over this core
-//! panel. The three-tier routing panel writes to tier_high, tier_mid, and tier_low pools in `router.pools`
-//! Enter one (provider, model) pair for each tier. Heuristic `bands` then classify requests automatically.
+//! This crate does not rewrite routing or gateway logic. It uses
+//! `token-station-cli` as a library and reuses the same `Gateway`, `ClientConfig`,
+//! `server::serve`, and keychain. The GUI is a panel over that core. Its three
+//! routing tiers populate tier_high, tier_mid, and tier_low pools with one
+//! provider-model pair each, then heuristic bands select among them.
 //!
 //! Partially configured tiers are invalid under RouterConfig validation, so the
 //! draft remains a serde_json::Value and materializes as ClientConfig only when
@@ -69,9 +70,10 @@ const TIER_HIGH: &str = "tier_high";
 const TIER_MID: &str = "tier_mid";
 const TIER_LOW: &str = "tier_low";
 
-/// Stable id for each tier’s “keyword override” rule. Keywords added to a tier enter the corresponding rule’s
-/// `keywords_any`—a match selects this tier and overrides complexity tiers (highest priority in router-core layer 1).
-/// The id is stable because audit and decision records also use it as the `matched routing rule ID`.
+/// Stable ID for each tier's keyword override rule. User keywords enter the
+/// rule's keywords_any list and force that tier ahead of complexity scoring at
+/// router-core layer 1. IDs remain stable because decision records and audits
+/// also store them as matched routing-rule IDs.
 const KW_RULE_HIGH: &str = "kw-high";
 const KW_RULE_MID: &str = "kw-mid";
 const KW_RULE_LOW: &str = "kw-low";
@@ -99,8 +101,9 @@ const TIER_ORDER: [(&str, &str, &str); 3] = [
 const CUT_HIGH: u32 = 55;
 const CUT_MID: u32 = 22;
 
-/// Derive required desktop inbound adapters from Connector capability declarations. Deduplicate repeated adapters while preserving
-/// Stable order of the build-time Connector registry. Adding a Connector no longer requires changing this location.
+/// Derive required desktop inbound adapters from Connector capabilities.
+/// Deduplicate adapters while preserving build-time registry order so adding a
+/// Connector no longer requires changes here.
 fn desktop_agents() -> Vec<&'static str> {
     let mut agents = Vec::new();
     for connector in agent_integration::connectors::builtin_connectors() {
@@ -500,8 +503,9 @@ fn seed_builtin_pricing(draft: &mut Value) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Upgrade the CLI-era single Chat inbound configuration to the desktop three-inbound draft, and anchor relative runtime directories to
-/// Directory that contains the configuration file. Change only the in-memory draft; do not touch the original file until the user saves.
+/// Upgrade a CLI-era single-Chat inbound config into the desktop three-inbound
+/// draft and anchor relative runtime paths to the config directory. Change only
+/// the in-memory draft until the user saves.
 fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Value {
     let agents = draft["plugins"]["agents"].as_array();
     let legacy_alias = agents.is_none_or(Vec::is_empty)
@@ -518,9 +522,10 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
         draft["plugins"]["agents"] = json!(desktop_agents());
     }
 
-    // Ensure agents includes inbound adapters for all builtin connectors. In old configurations, agents was a fixed snapshot
-    // A snapshot. New adapters such as agent-gemini are not added automatically. The gateway does not load them, so the related Agent
-    // Connection fails if the gateway did not load agent-xxx. Add missing entries here while preserving order and other user entries.
+    // Ensure agents contains every built-in connector adapter. Legacy configs
+    // captured a fixed snapshot, so newer adapters such as agent-gemini would be
+    // missing and their Agents rejected because the gateway did not load them.
+    // Add missing adapters while preserving existing order and custom entries.
     if !draft["plugins"]["agents"].is_array() {
         draft["plugins"]["agents"] = json!([]);
     }
@@ -544,11 +549,12 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
     anchor(&mut draft["plugins"]["dir"], config_dir);
     anchor(&mut draft["data"]["dir"], config_dir);
 
-    // Capability migration: upgrade model tool_state and json_schema_state values in existing configurations from `unknown` to
-    // `declared`. Earlier, add_provider recorded new models as unknown, and tool-call routing fails closed
-    // (unknown is always rejected), so all Agents with tools, such as OpenCode, fail routing. The catalog contains only
-    // An OpenAI-compatible chat provider supports tools and structured output by contract when declared. Keep vision unchanged because model
-    // can differ). Upgrade only `unknown`. Do not override operator-set `unsupported` or `verified` states.
+    // Capability migration: promote tool_state and json_schema_state from
+    // unknown to declared. Early add_provider versions wrote unknown, while
+    // tool routing fails closed and rejected every tool-using Agent. Catalog
+    // entries are OpenAI-compatible chat providers whose contract includes tools
+    // and structured output. Keep vision unchanged because it varies by model,
+    // and never overwrite explicit unsupported or verified states.
     if let Some(upstreams) = draft["upstreams"].as_object_mut() {
         for upstream in upstreams.values_mut() {
             if upstream["access_tier"].as_str() == Some("free") {
@@ -570,10 +576,11 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
         }
     }
 
-    // Remove dangling references. After provider or model deletion or migration, clean independent agent_routes and profiles
-    // Policy groups can contain stale tiers that point to missing providers or models from before the gate. Remove them
-    // Reset to no selection so the UI does not show a deleted stale option.
-    // Run only when upstreams is a valid object. This prevents damaged config from marking all references as dangling.
+    // Remove dangling references after provider or model deletion and migration.
+    // Agent-specific routes and profiles created before validation may retain
+    // missing targets. Reset them to unselected so the UI does not show stale
+    // choices. Run only when upstreams is a valid object to avoid treating every
+    // target in a damaged config as dangling.
     if draft["upstreams"].is_object() {
         let valid: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = draft
             ["upstreams"]
@@ -642,8 +649,9 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
     draft
 }
 
-/// Existing configurations must pass the CLI read, default filling, and structural validation flow. On failure, return a safe template for
-/// for display, with a read-only error gate that rejects later save and start operations to prevent overwriting the damaged file.
+/// Existing configs must pass complete CLI loading, defaulting, and structural
+/// validation. On failure, return a safe display template with a read-only gate
+/// that blocks saving and starting to protect the damaged file.
 #[cfg(test)]
 fn load_draft(config_path: &std::path::Path, root: &std::path::Path) -> (Value, Option<String>) {
     let (draft, _saved, error) = load_draft_state(
@@ -856,8 +864,7 @@ struct StateView {
     tiers: std::collections::BTreeMap<String, TierView>,
     agent_routes: std::collections::BTreeMap<String, AgentRouteView>,
     profiles: Vec<String>,
-    /// User keyword sets for each tier (high/mid/low). A direct control for user routing, stored
-    /// stored in `router.rules` as `keywords_any`.
+    /// Per-tier user keyword libraries that provide direct routing control through router.rules keywords_any.
     keywords: std::collections::BTreeMap<String, Vec<String>>,
     /// Local-only routing uses providers marked local and keeps requests on the machine.
     local_only: bool,
@@ -1072,8 +1079,9 @@ impl AppInner {
         Ok(())
     }
 
-    /// Build a candidate configuration while holding the lock. Replace the authoritative draft only after complete materialization and successful revision recording.
-    /// The caller closure may modify only the configuration draft. Update other AppInner state separately after a successful commit.
+    /// Build a candidate config under the lock and replace the authoritative draft
+    /// only after materialization and revision recording succeed. The callback may
+    /// edit only the config draft; update other AppInner state after commit.
     fn edit_validated_draft<T>(
         &mut self,
         edit: impl FnOnce(&mut Self) -> Result<T, String>,
@@ -1145,8 +1153,9 @@ impl AppInner {
             return Err(message);
         }
         if let Err(error) = self.config_state.finish_save(&draft) {
-            // Configuration was committed atomically. The pending journal is promoted at the next start,
-            // Do not report a final state-write failure as a configuration-save failure.
+            // The config committed atomically. The pending journal will be
+            // promoted on next startup, so do not misreport a trailing state-write
+            // failure as a failed config save.
             eprintln!("configuration saved but revision finalization failed: {error}");
         }
         for upstream in self.pending_provider_keys.keys() {
@@ -1310,9 +1319,10 @@ impl AppInner {
         self.home_keywords()
     }
 
-    /// Rewrite `router.rules` from the given three-tier keyword mapping. Rule order is priority (high → mid → low),
-    /// Emit rules only for tiers that have both keywords and a configured pool. Preserve non-keyword rules written by the operator
-    /// Preserve them unchanged afterward. Do not emit rules for empty keyword sets or unconfigured tiers, to avoid references to missing pools.
+    /// Rewrite router.rules from the supplied tier-keyword map in high-to-low
+    /// priority order. Emit rules only for tiers with keywords and configured
+    /// pools. Preserve operator-authored non-keyword rules afterward. Empty or
+    /// unconfigured tiers emit no rule, avoiding references to missing pools.
     fn apply_keyword_map(&mut self, map: &std::collections::BTreeMap<String, Vec<String>>) {
         let mut rules: Vec<Value> = Vec::new();
         for (slot, pool, rule_id) in TIER_ORDER {
@@ -2021,7 +2031,101 @@ fn supported_agent_ids() -> Vec<String> {
         .collect()
 }
 
-// ---- Tauri commands ---------------------------------------------------------------
+// ---- Tauri commands --------------------------------------------------------
+
+fn dock_icon_bytes(theme: &str) -> Result<&'static [u8], String> {
+    match theme {
+        "light" => Ok(include_bytes!("../icons/icon-light.png")),
+        "dark" => Ok(include_bytes!("../icons/icon-dark.png")),
+        _ => Err(format!("unsupported Dock icon theme: {theme}")),
+    }
+}
+
+#[tauri::command]
+async fn set_dock_theme_icon(app: tauri::AppHandle, theme: String) -> Result<(), String> {
+    let icon_bytes = dock_icon_bytes(&theme)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        app.run_on_main_thread(move || {
+            let _ = result_tx.send(apply_macos_dock_icon(icon_bytes));
+        })
+        .map_err(|error| format!("failed to schedule Dock icon update: {error}"))?;
+
+        let apply_result = tauri::async_runtime::spawn_blocking(move || {
+            result_rx.recv_timeout(Duration::from_secs(2))
+        })
+        .await
+        .map_err(|error| format!("failed to join Dock icon update: {error}"))?
+        .map_err(|error| format!("timed out waiting for Dock icon update: {error}"))?;
+        apply_result?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, icon_bytes);
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_dock_icon(icon_bytes: &'static [u8]) -> Result<(), String> {
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApp, NSImage};
+    use objc2_foundation::NSData;
+
+    let main_thread = MainThreadMarker::new()
+        .ok_or_else(|| "Dock icon update did not run on the AppKit main thread".to_string())?;
+    let data = NSData::with_bytes(icon_bytes);
+    let image = NSImage::initWithData(NSImage::alloc(), &data)
+        .ok_or_else(|| "failed to decode the embedded Dock icon".to_string())?;
+    let application = NSApp(main_thread);
+
+    // AppKit requires application icon updates on the main thread.
+    unsafe { application.setApplicationIconImage(Some(&image)) };
+    let applied_image = application
+        .applicationIconImage()
+        .ok_or_else(|| "AppKit did not retain the Dock icon".to_string())?;
+    if !std::ptr::eq(&*image, &*applied_image) {
+        return Err("AppKit did not apply the requested Dock icon".to_string());
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod dock_icon_tests {
+    use super::dock_icon_bytes;
+
+    #[test]
+    fn accepts_supported_dock_icon_themes() {
+        for theme in ["light", "dark"] {
+            assert!(dock_icon_bytes(theme).is_ok());
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_dock_icon_theme() {
+        assert!(dock_icon_bytes("system").is_err());
+    }
+
+    #[test]
+    fn embeds_png_dock_icons() {
+        for theme in ["light", "dark"] {
+            assert!(dock_icon_bytes(theme)
+                .unwrap()
+                .starts_with(b"\x89PNG\r\n\x1a\n"));
+        }
+    }
+
+    #[test]
+    fn embeds_distinct_light_and_dark_dock_icons() {
+        assert_ne!(
+            dock_icon_bytes("light").unwrap(),
+            dock_icon_bytes("dark").unwrap()
+        );
+    }
+}
 
 #[tauri::command]
 fn get_state(state: State<'_, AppStateManaged>) -> StateView {
@@ -2422,10 +2526,11 @@ fn add_provider_impl(
         .filter(|m| !m.trim().is_empty())
         .map(|m| {
             json!({
-                // The OpenAI Chat Completions contract includes tool calls and structured output. Every catalog entry is
-                // Declare tool and structured-output support by default for OpenAI-compatible chat providers. Otherwise, routing rejects unknown
-                // fail closed, so all Agents with tools, such as OpenCode, are rejected. Vision varies by model.
-                // Keep unknown conservatively. The upstream rejects unsupported use at runtime, which is standard behavior.
+                // OpenAI Chat Completions includes tools and structured output,
+                // and catalog entries are compatible chat providers, so declare
+                // support by default. Leaving these unknown would fail closed and
+                // reject every tool-using Agent. Keep vision unknown because it
+                // varies by model; unsupported requests can degrade at runtime.
                 "model": m,
                 "tool": true,
                 "vision": false,
@@ -2449,8 +2554,9 @@ fn add_provider_impl(
         "base_url": base_url,
         "models": model_objs,
     });
-    // Write the local key only for providers marked local. Keep normal cloud-provider config unchanged and align with serde
-    // Align with skip_serializing_if. local_only uses this value to keep traffic on the local machine.
+    // Write the local key only when marked local, preserving ordinary cloud
+    // provider configs in line with serde skip_serializing_if. local_only uses it
+    // to keep traffic on the machine.
     if local {
         up["local"] = json!(true);
     }
@@ -2501,8 +2607,9 @@ fn add_provider_impl(
     Ok(inner.snapshot())
 }
 
-/// Set “local only” and its cloud fallback permission. Write both to the home `router` so inherited Agent routes follow them automatically.
-/// When disabled, remove both keys so normal configurations remain unchanged, consistent with serde default=false.
+/// Set local-only routing and cloud fallback in the home router so inherited
+/// Agents follow automatically. Remove both keys when disabled to preserve
+/// ordinary configs and serde's false default.
 #[tauri::command]
 fn set_local_routing(
     state: State<'_, AppStateManaged>,
@@ -2846,8 +2953,9 @@ fn prepare_discovery_credential(
     Ok(DiscoveryCredential::Explicit(None))
 }
 
-/// Fetch the provider’s current model catalog. Run the network request on a blocking worker so it does not block the Tauri UI.
-/// When using a saved key, require the request URL to match the provider configuration so credentials cannot be forwarded to an arbitrary address.
+/// Fetch the provider's current model catalog on a blocking worker without
+/// blocking the Tauri UI. When using a saved key, require the request URL to
+/// match provider configuration so credentials cannot be forwarded elsewhere.
 fn apply_discovered_model_capabilities(
     inner: &mut AppInner,
     name: &str,
@@ -3972,8 +4080,9 @@ fn classify_settings_error(message: String) -> SettingsCommandError {
     }
 }
 
-/// Settings page: toggle server.auth and data.metrics. If the draft can materialize, write it to disk, matching config set behavior;
-/// Otherwise, change only the draft until a complete save. Note: these changes do not affect a running serve; restart the proxy.
+/// Settings page command for server.auth and data.metrics. Persist after
+/// successful materialization, matching config set; otherwise keep draft-only
+/// changes until a full save. Running serve instances require a proxy restart.
 #[tauri::command]
 #[allow(
     clippy::too_many_arguments,
@@ -4282,8 +4391,9 @@ fn remove_model_price(
     Ok(next)
 }
 
-/// Usage page: read-only aggregate metrics database. `since` = all / <N>h / <N>d; `by` = agent/upstream/model/pool/status/hour/day
-/// or empty. Return `empty=true` when the metrics database does not exist; do not report an error.
+/// Read-only usage aggregation. since accepts all, hours, or days; by accepts
+/// agent, upstream, model, pool, status, hour, day, or empty. Return empty=true
+/// rather than an error when the metrics database does not exist.
 #[tauri::command]
 fn get_stats(
     state: State<'_, AppStateManaged>,
@@ -4347,8 +4457,9 @@ fn get_stats(
     })
 }
 
-/// Home page: the five most recent body-free Request Receipts. If the metrics database has not been created, including when
-/// metrics) return an empty array. The read layer itself limits results to five.
+/// Return the five most recent body-free Request Receipts for the home page.
+/// Return an empty array if the metrics database does not exist, including when
+/// metrics are disabled. The read layer enforces the five-item limit.
 #[tauri::command]
 fn get_recent_receipts(
     state: State<'_, AppStateManaged>,
@@ -4520,6 +4631,7 @@ fn desktop_update_platform_unsupported_message() -> Option<&'static str> {
     Some(desktop_update::MACOS_ONLY_FIRST_RELEASE_UNSUPPORTED_MESSAGE)
 }
 
+/// Check the signed desktop update channel without changing the installed app.
 #[tauri::command]
 async fn check_desktop_update(
     app: AppHandle,
@@ -4846,8 +4958,10 @@ pub fn run() {
                 return Ok(());
             }
 
-            // Validate existing configuration and apply defaults through the CLI before reuse. Put damaged configuration into read-only
-            // Protection prevents silent overwrite with an empty template. Upgrade the legacy single OpenAI inbound config only in memory.
+            // Reuse existing config after complete CLI validation and defaulting.
+            // Damaged config enters read-only protection and is never silently
+            // replaced by an empty template. Upgrade legacy single-OpenAI inbound
+            // config only in memory.
             let (draft, saved, load_error) = load_draft_state(
                 &desktop_paths.config_file,
                 &desktop_paths.data_dir,
@@ -4886,6 +5000,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            set_dock_theme_icon,
             get_state,
             get_runtime_state,
             preview_provider_endpoints,

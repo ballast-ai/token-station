@@ -12,6 +12,7 @@ import {
   type RecoveryState,
 } from "../api";
 import { diagnosticInput } from "../diagnostics";
+import { humanizeAppError } from "../errors";
 import { useLocalizedCopy } from "./LanguageProvider";
 import {
   AlertDialog,
@@ -30,7 +31,7 @@ interface RecoveryShellProps {
 }
 
 function failureText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return humanizeAppError(error);
 }
 
 function requiresFreshUpdateCheck(message: string): boolean {
@@ -152,9 +153,10 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
         setBusy("");
       }
     } catch (caught) {
+      const rawMessage = String(caught);
       const message = failureText(caught);
-      if (requiresFreshUpdateCheck(message)) {
-        setUpgrade((current) => invalidateUpdateCandidate(current, message));
+      if (requiresFreshUpdateCheck(rawMessage)) {
+        setUpgrade((current) => invalidateUpdateCandidate(current, rawMessage));
       } else {
         setError(message);
       }
@@ -185,7 +187,7 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
             <b>{initialError
               ? copy("Interface rendering error", "前端渲染异常")
               : copy("Database compatibility protection", "数据库兼容性保护")}</b>
-            <span>{initialError?.message ?? state?.message}</span>
+            <span>{humanizeAppError(initialError ?? state?.message)}</span>
           </div>
         )}
         {state?.found_schema != null && (
@@ -207,7 +209,7 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
               ? copy(`Version ${upgrade.version} is available`, `发现新版本 ${upgrade.version}`)
               : upgrade.status === "up_to_date"
                 ? copy(`Version ${upgrade.current_version} is up to date`, `当前已是最新版本 ${upgrade.current_version}`)
-                : upgrade.message}
+                : humanizeAppError(upgrade.message)}
             {upgrade.release_url && <span className="mono"> · {upgrade.release_url}</span>}
           </div>
         )}

@@ -19,6 +19,7 @@ import {
 } from "../api";
 import ModelPicker, { CatalogStatus } from "./ModelPicker";
 import { useLocalizedCopy } from "./LanguageProvider";
+import { humanizeAppError } from "../errors";
 
 interface ProviderModelManagerProps {
   provider: ProviderView;
@@ -76,22 +77,24 @@ function costLabel(
 const resultStatus = (
   result: ModelDiscoveryView,
   copy: (english: string, simplifiedChinese: string) => string,
+  language: "en" | "zh-CN",
 ): CatalogStatus => {
+  const warning = result.warning ? humanizeAppError(result.warning, language) : result.warning;
   if (result.source === "live") {
     return {
       label: copy(`Synced ${result.models.length}`, `已同步 ${result.models.length} 个`),
       tone: "live",
-      warning: result.warning,
+      warning,
     };
   }
   if (result.source === "cache") {
     return {
       label: copy(`Using cache · ${result.models.length}`, `使用缓存 · ${result.models.length} 个`),
       tone: "cache",
-      warning: result.warning,
+      warning,
     };
   }
-  return { label: copy("Fetch failed", "获取失败"), tone: "error", warning: result.warning };
+  return { label: copy("Fetch failed", "获取失败"), tone: "error", warning };
 };
 
 export default function ProviderModelManager({
@@ -213,7 +216,7 @@ export default function ProviderModelManager({
       ));
       setEditKey("");
     } catch (caught) {
-      setError(String(caught));
+      setError(humanizeAppError(caught));
     } finally {
       setEditing(false);
     }
@@ -228,7 +231,7 @@ export default function ProviderModelManager({
       setTestResults(results);
       setTestedAtMs(Date.now());
     } catch (caught) {
-      setError(String(caught));
+      setError(humanizeAppError(caught));
     } finally {
       setTesting(false);
     }
@@ -241,7 +244,7 @@ export default function ProviderModelManager({
     try {
       onSaved(await setProviderModelVision(provider.name, model, state !== "declared"));
     } catch (caught) {
-      setError(String(caught));
+      setError(humanizeAppError(caught));
     } finally {
       setCapabilitySaving(null);
     }
@@ -257,12 +260,12 @@ export default function ProviderModelManager({
       setModels((current) => mergeModels(current, result.models));
       setCatalog(result.catalog ?? []);
       setDiff({ added: result.added ?? [], removed: result.removed ?? [] });
-      setStatus(resultStatus(result, copy));
+      setStatus(resultStatus(result, copy, language));
       if (result.capabilities_updated) {
         onSaved(await getState());
       }
     } catch (caught) {
-      setStatus({ label: copy("Fetch failed", "获取失败"), tone: "error", warning: String(caught) });
+      setStatus({ label: copy("Fetch failed", "获取失败"), tone: "error", warning: humanizeAppError(caught) });
     } finally {
       setRefreshing(false);
     }
@@ -277,7 +280,7 @@ export default function ProviderModelManager({
       onSaved(next);
       setStatus({ label: copy(`Saved ${selected.length}`, `已保存 ${selected.length} 个`), tone: "live" });
     } catch (caught) {
-      setError(String(caught));
+      setError(humanizeAppError(caught));
     } finally {
       setSaving(false);
     }

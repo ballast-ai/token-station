@@ -6,23 +6,23 @@
 # This script is the recipe: rerunning it from a release tag should produce
 # byte-identical artifacts. Each element removes one source of nondeterminism:
 #
-#   RELEASE_TOOLCHAIN pins the compiler version. rust-toolchain.toml tracks stable.
-#     That applies to development. A release requires an exact version. A version change changes the recipe.
-#   `--locked` pins all dependency versions. Cargo.lock is committed.
-#   `--remap-path-prefix` rewrites the build path and cargo home to fixed values.
-#     Remove traces of who built in each directory.
-#   SOURCE_DATE_EPOCH uses the release commit timestamp, not the wall clock.
-#   GNU tar uses `--format=ustar`, fixed order, owner, and timestamp, plus `gzip -n`.
-#     Remove nondeterminism from the archive layer.
+#   - RELEASE_TOOLCHAIN pins the compiler. rust-toolchain.toml tracks stable for
+#     development, while releases require an exact version.
+#   - --locked pins every dependency version through the committed Cargo.lock.
+#   - --remap-path-prefix rewrites build and cargo-home paths to fixed values.
+#   - SOURCE_DATE_EPOCH comes from the release commit rather than the wall clock.
+#   - GNU tar ustar format, fixed order, owner, timestamps, and gzip -n make the
+#     archive deterministic.
 #
 # Output goes to dist/: a tar.gz containing the CLI binary, four official plugin
 # packages, example configuration, and LICENSE.
 #
-# Official binaries embed official plugins at the builtin tier (architecture §12.1). First build four WASM plugins,
-# Then build the CLI with `--features builtin-plugins` and TOKEN_STATION_PLUGINS_DIST.
-# `include_bytes!` embeds plugin bytes in the binary, so the bare binary needs no installation. The tarball still includes
-# plugins-dist/ copy. The registry selects builtin for duplicate dialects, so duplicates are harmless. Plugin builds
-# This must occur before the CLI build. The binary embeds file contents, not paths, so reproducibility is unchanged.
+# Official binaries embed official plugins in the builtin tier from architecture
+# section 12.1. Build the four WASM plugins first, then build the CLI with
+# builtin-plugins and TOKEN_STATION_PLUGINS_DIST. include_bytes! embeds plugin
+# bytes so the standalone binary needs no installation. The tarball also carries
+# plugins-dist; registry prefers builtin for the same dialect, so duplication is
+# harmless. Embedded content, not paths, preserves reproducibility.
 
 set -euo pipefail
 

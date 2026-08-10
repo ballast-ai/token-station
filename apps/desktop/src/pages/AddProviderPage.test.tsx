@@ -225,6 +225,29 @@ describe("AddProviderPage", () => {
     expect(await screen.findByText(/云端地址不能标记为本地模型/)).toBeInTheDocument();
   });
 
+  it("localizes a model-catalog warning returned while adding a provider", async () => {
+    window.localStorage.setItem("token-station-language", "en");
+    const user = userEvent.setup();
+    renderPage();
+
+    await pickPreset(user, "OpenAI");
+    await screen.findByText("https://api.minimaxi.com/v1/chat/completions");
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    vi.mocked(invoke).mockResolvedValueOnce({
+      models: ["gpt-test"],
+      source: "cache",
+      fetched_at_ms: 1,
+      warning: "模型目录请求失败：socket reset",
+    });
+
+    await user.click(screen.getByRole("button", { name: "Refresh models" }));
+
+    expect(await screen.findByText(
+      "The latest provider data is unavailable. Keep the current settings and try refreshing again later.",
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/模型目录请求失败/)).not.toBeInTheDocument();
+  });
+
   it("keeps the local-model flag available for the Ollama loopback preset", async () => {
     window.localStorage.setItem("token-station-language", "zh-CN");
     const user = userEvent.setup();

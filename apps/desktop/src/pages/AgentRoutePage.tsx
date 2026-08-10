@@ -25,6 +25,7 @@ import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import RoutingModeSelector from "../components/RoutingModeSelector";
 import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy } from "../components/LanguageProvider";
+import { humanizeAppError } from "../errors";
 
 interface AgentRoutePageProps {
   metadata: AgentUiMetadataView;
@@ -56,15 +57,7 @@ const diffShownKey = (agentId: string) => `ts:agent-connect-diff-shown:${agentId
 const KEY_CHANGE_HINT = /url|base|token|key|auth|endpoint|host|proxy/i;
 
 function errorText(error: unknown) {
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object") {
-    const value = error as { message?: unknown; code?: unknown; stage?: unknown };
-    return [value.message, value.code && `code=${value.code}`, value.stage && `stage=${value.stage}`]
-      .filter(Boolean)
-      .map(String)
-      .join(" · ");
-  }
-  return String(error);
+  return humanizeAppError(error);
 }
 
 function statusCopy(
@@ -72,6 +65,7 @@ function statusCopy(
   agent: AgentView | undefined,
   installation: AgentInstallationView | undefined,
   copy: (english: string, simplifiedChinese: string) => string,
+  language: "en" | "zh-CN",
 ) {
   if (!agent || agent.installations.length === 0) {
     return {
@@ -153,7 +147,10 @@ function statusCopy(
     return {
       tone: "danger",
       label: copy("Unavailable", "暂不可接入"),
-      detail: installation.compatibility.message,
+      detail: humanizeAppError({
+        code: installation.compatibility.reason_code,
+        message: installation.compatibility.message,
+      }, language),
     };
   }
   return {
@@ -193,7 +190,7 @@ export default function AgentRoutePage({
   onSetRoutingMode = () => {},
   embedded = false,
 }: AgentRoutePageProps) {
-  const { copy } = useLocalizedCopy();
+  const { copy, language } = useLocalizedCopy();
   const [selectedPath, setSelectedPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -212,7 +209,7 @@ export default function AgentRoutePage({
     [agent, selectedPath],
   );
 
-  const status = statusCopy(metadata, agent, installation, copy);
+  const status = statusCopy(metadata, agent, installation, copy, language);
   const managed = installation?.managed ?? false;
   const canConnect = Boolean(
     installation
@@ -287,8 +284,10 @@ export default function AgentRoutePage({
     }
   };
 
-  // Restore official configuration and disconnect. Remove TS-managed fields by ownership so the Agent returns to official defaults,
-  // Then clear the ownership record. This needs no encrypted snapshot or primary key and always succeeds. It replaces Force disconnect.
+  // Restore official configuration and disconnect by removing TS-managed fields
+  // according to ownership records, returning the Agent to official defaults,
+  // then clearing ownership. This deterministic path replaces the old force-
+  // disconnect fallback and does not depend on encrypted snapshots or a master key.
   const restoreOfficial = async () => {
     if (!installation || busy) return;
     setBusy(true);
@@ -555,7 +554,7 @@ export default function AgentRoutePage({
               </button>
             </>
           )}
-          {route.config_error && <span className="foot-hint error-text">{route.config_error}</span>}
+          {route.config_error && <span className="foot-hint error-text">{humanizeAppError(route.config_error)}</span>}
         </footer>
       </section>
       )}
