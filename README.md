@@ -49,13 +49,13 @@ Provider presets are editable starting points, not availability guarantees. Mode
 
 | Agent | Integration | Inbound protocol |
 |---|---|---|
-| Claude Code | Built-in connector | Anthropic Messages |
+| <a href="https://github.com/anthropics/claude-code"><img src="docs/assets/agents/claude-code.svg" width="20" height="20" alt=""> Claude Code</a> | Built-in connector | Anthropic Messages |
 | Claude Desktop | Built-in connector | Anthropic Messages |
-| Codex | Built-in connector | OpenAI Responses |
+| <a href="https://github.com/openai/codex"><img src="docs/assets/agents/codex.svg" width="20" height="20" alt=""> Codex</a> | Built-in connector | OpenAI Responses |
 | Gemini CLI | Built-in connector | Gemini |
 | Hermes Agent | Built-in connector | OpenAI Chat Completions |
 | OpenClaw | Built-in connector | OpenAI Chat Completions |
-| WorkBuddy | Built-in connector | OpenAI Chat Completions |
+| <a href="https://www.workbuddy.ai/"><img src="apps/desktop/public/agents/workbuddy.png" width="20" height="20" alt=""> WorkBuddy</a> | Built-in connector | OpenAI Chat Completions |
 | OpenCode | Built-in connector | OpenAI Chat Completions |
 | Cursor | Dedicated setup on macOS and Windows | OpenAI-compatible endpoint |
 

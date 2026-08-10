@@ -49,13 +49,13 @@
 
 | Agent | 接入方式 | 入站协议 |
 |---|---|---|
-| Claude Code | 内置 Connector | Anthropic Messages |
+| <a href="https://github.com/anthropics/claude-code"><img src="docs/assets/agents/claude-code.svg" width="20" height="20" alt=""> Claude Code</a> | 内置 Connector | Anthropic Messages |
 | Claude Desktop | 内置 Connector | Anthropic Messages |
-| Codex | 内置 Connector | OpenAI Responses |
+| <a href="https://github.com/openai/codex"><img src="docs/assets/agents/codex.svg" width="20" height="20" alt=""> Codex</a> | 内置 Connector | OpenAI Responses |
 | Gemini CLI | 内置 Connector | Gemini |
 | Hermes Agent | 内置 Connector | OpenAI Chat Completions |
 | OpenClaw | 内置 Connector | OpenAI Chat Completions |
-| WorkBuddy | 内置 Connector | OpenAI Chat Completions |
+| <a href="https://www.workbuddy.ai/"><img src="apps/desktop/public/agents/workbuddy.png" width="20" height="20" alt=""> WorkBuddy</a> | 内置 Connector | OpenAI Chat Completions |
 | OpenCode | 内置 Connector | OpenAI Chat Completions |
 | Cursor | macOS 与 Windows 专用接入 | OpenAI 兼容端点 |
 
