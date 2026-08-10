@@ -52,6 +52,34 @@ readonly plugins=(
   agent-gemini
   provider-openai-compatible
 )
+
+host_os="$(uname -s)"
+readonly host_os
+
+is_windows_target=false
+if [[ "$target" == *-pc-windows-* ]]; then
+  is_windows_target=true
+elif [[ -z "$target" ]]; then
+  case "$host_os" in
+    MINGW*|MSYS*|CYGWIN*) is_windows_target=true ;;
+  esac
+fi
+
+enable_updater_artifacts=false
+if [[ "$mode" == "production" && "$is_windows_target" != "true" ]]; then
+  enable_updater_artifacts=true
+  : "${TOKEN_STATION_UPDATER_PUBKEY:?production desktop build needs TOKEN_STATION_UPDATER_PUBKEY}"
+  updater_pubkey_upper="$(LC_ALL=C tr '[:lower:]' '[:upper:]' <<<"$TOKEN_STATION_UPDATER_PUBKEY")"
+  if [[ "$updater_pubkey_upper" == *"SECRET KEY"* || "$updater_pubkey_upper" == *"PRIVATE KEY"* ]]; then
+    echo "TOKEN_STATION_UPDATER_PUBKEY appears to contain private key material" >&2
+    exit 1
+  fi
+  if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -z "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
+    echo "production desktop build needs a temporary TAURI_SIGNING_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY_PATH to create updater payloads" >&2
+    exit 1
+  fi
+fi
+
 stage="$(mktemp -d "${TMPDIR:-/tmp}/token-station-desktop.XXXXXX")"
 readonly stage
 trap 'rm -rf "$stage"' EXIT
@@ -91,6 +119,11 @@ cargo test --locked \
   desktop_bundled_plugins_load_without_an_external_plugin_directory
 
 tauri_args=(build --ci --features bundled-plugins)
+if [[ "$enable_updater_artifacts" == "true" ]]; then
+  updater_artifact_config="$stage/updater-artifacts.json"
+  printf '%s\n' '{"bundle":{"createUpdaterArtifacts":true}}' >"$updater_artifact_config"
+  tauri_args+=(--config "$updater_artifact_config")
+fi
 if [[ -n "$test_version" ]]; then
   test_version_config="$stage/test-version.json"
   printf '%s\n' "{\"version\":\"$test_version\"}" >"$test_version_config"
@@ -106,7 +139,7 @@ if [[ -n "$target" ]]; then
   binary_path="$root/apps/desktop/src-tauri/target/$target/release/token-station-desktop"
 fi
 
-case "$(uname -s)" in
+case "$host_os" in
   Darwin)
     if [[ "$mode" == "local" ]]; then
       export APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:--}"

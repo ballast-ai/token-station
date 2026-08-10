@@ -257,6 +257,7 @@ interface SettingsHubProps {
   registry: AgentUiMetadataView[];
   hiddenAgentIds: ReadonlySet<string>;
   onAgentVisibilityChange: (agentId: string, visible: boolean) => void;
+  onOpenFirstRunGuide: () => void;
   onSaved: (state: StateView) => void;
 }
 
@@ -266,6 +267,7 @@ function SettingsHubContent({
   registry,
   hiddenAgentIds,
   onAgentVisibilityChange,
+  onOpenFirstRunGuide,
   onSaved,
 }: SettingsHubProps) {
   const [section, setSection] = useState<SettingsSection>("general");
@@ -317,6 +319,7 @@ function SettingsHubContent({
           <About
             desktopVersion={settings.desktop_version ?? settings.version}
             coreVersion={settings.core_version ?? settings.version}
+            onOpenFirstRunGuide={onOpenFirstRunGuide}
           />
         )}
       </div>

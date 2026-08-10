@@ -8,7 +8,7 @@ import {
   applyHomeRouteToAllAgents,
   applyAgentPlan,
   applySnapshotRestore,
-  checkUpgrade,
+  checkDesktopUpdate,
   discoverProviderModels,
   deleteProfile,
   editProvider,
@@ -26,6 +26,7 @@ import {
   listFreeProviderPresets,
   listAgentSnapshots,
   listenServeState,
+  listenDesktopUpdateProgress,
   planAgentConnection,
   planAgentDisconnect,
   planSnapshotRestore,
@@ -52,6 +53,7 @@ import {
   updateProviderModels,
   removeAgentBudget,
   removeModelPrice,
+  installDesktopUpdateAndRestart,
   exportRecoveryBundle,
   getRecoveryDiagnostics,
   getRecoveryState,
@@ -242,6 +244,12 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
     expect(listenMock).toHaveBeenCalledWith("serve-state-changed", expect.any(Function));
   });
 
+  it("subscribes to desktop updater progress without exposing updater permissions", async () => {
+    const handler = vi.fn();
+    await listenDesktopUpdateProgress(handler);
+    expect(listenMock).toHaveBeenCalledWith("desktop-update-progress", expect.any(Function));
+  });
+
   it.each([
     ["get state", () => getState(), "get_state", undefined],
     ["get runtime facts", () => getRuntimeState(), "get_runtime_state", undefined],
@@ -301,7 +309,8 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
       egressAuthUsername: "x",
       egressAuthSlot: "proxy_password",
     }],
-    ["upgrade", () => checkUpgrade(), "check_upgrade", undefined],
+    ["desktop update check", () => checkDesktopUpdate(), "check_desktop_update", undefined],
+    ["desktop update install", () => installDesktopUpdateAndRestart(), "install_desktop_update_and_restart", undefined],
     ["recovery state", () => getRecoveryState(), "get_recovery_state", undefined],
     ["recovery diagnostics", () => getRecoveryDiagnostics(), "get_recovery_diagnostics", undefined],
     ["recovery folder", () => openRecoveryFolder(), "open_recovery_folder", undefined],

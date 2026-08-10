@@ -456,6 +456,8 @@ jobs:
           cargo audit -D unsound
           --file apps/desktop/src-tauri/Cargo.lock
           --ignore RUSTSEC-2024-0429
+      - run: tests/build-desktop-verbosity.sh
+      - run: tests/desktop-updater-release.sh
       - run: >-
           cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml
           --config apps/desktop/src-tauri/deny.toml check

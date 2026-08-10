@@ -18,6 +18,8 @@ vi.mock("./api", async (importOriginal) => {
 const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
 const getStatsMock = vi.mocked(getStats);
+const FIRST_RUN_GUIDE_STORAGE_KEY = "token-station-first-run-guide";
+const FIRST_RUN_GUIDE_VERSION = "b-v1";
 
 const emptyRoute: AgentRouteView = {
   mode: "inherit",
@@ -241,6 +243,7 @@ async function openAgentVisibility(user: ReturnType<typeof userEvent.setup>) {
 
 beforeEach(() => {
   window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "zh-CN");
+  window.localStorage.setItem(FIRST_RUN_GUIDE_STORAGE_KEY, FIRST_RUN_GUIDE_VERSION);
   window.localStorage.removeItem(AGENT_VISIBILITY_STORAGE_KEY);
   listenMock.mockReset();
   listenMock.mockResolvedValue(vi.fn());
@@ -253,6 +256,108 @@ beforeEach(() => {
     if (command === "scan_agents") return [];
     if (command === "get_request_receipts") return { items: [], total: 0, page: 1, page_size: 20 };
     throw new Error(`unexpected IPC command: ${command}`);
+  });
+});
+
+it("shows the provider step on the first local App session", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+
+  render(<App />);
+
+  expect(await screen.findByRole("dialog", { name: "先添加一个模型供应商" })).toBeInTheDocument();
+  expect(Number(
+    screen.getByRole("progressbar", { name: "引导进度：第 1 步，共 4 步" })
+      .getAttribute("aria-valuenow"),
+  )).toBeCloseTo(25);
+  expect(screen.getByRole("button", { name: "添加供应商", hidden: true })).toHaveAttribute(
+    "data-onboarding-active",
+    "true",
+  );
+});
+
+it("walks through provider, routing, and Agent targets in dependency order", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  const user = userEvent.setup();
+
+  render(<App />);
+
+  await screen.findByRole("dialog", { name: "先添加一个模型供应商" });
+  await user.click(screen.getByRole("button", { name: "下一步" }));
+  expect(screen.getByRole("dialog", { name: "配置并启动路由" })).toBeInTheDocument();
+  const routingButton = screen.getByRole("button", { name: "路由", hidden: true });
+  expect(routingButton).not.toHaveAttribute("data-onboarding-target");
+  expect(within(routingButton).getByText("路由")).toHaveAttribute(
+    "data-onboarding-active",
+    "true",
+  );
+  expect(screen.getByRole("button", { name: "添加供应商", hidden: true })).not.toHaveAttribute(
+    "data-onboarding-active",
+  );
+
+  await user.click(screen.getByRole("button", { name: "下一步" }));
+  expect(screen.getByRole("dialog", { name: "接入你的第一个 Agent" })).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: /检查 Agent 接入/, hidden: true }),
+  ).toHaveAttribute("data-onboarding-active", "true");
+
+  await user.click(screen.getByRole("button", { name: "下一步" }));
+  expect(screen.getByRole("dialog", { name: "以后想再看教程" })).toBeInTheDocument();
+  const settingsButton = screen.getByRole("button", { name: "设置", hidden: true });
+  expect(settingsButton).not.toHaveAttribute("data-onboarding-target");
+  expect(within(settingsButton).getByText("设置")).toHaveAttribute(
+    "data-onboarding-active",
+    "true",
+  );
+  expect(screen.getByRole("button", { name: "完成引导" })).toBeInTheDocument();
+});
+
+it("persists a skipped guide and does not show it on the next App session", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  const user = userEvent.setup();
+  const firstSession = render(<App />);
+
+  await screen.findByRole("dialog", { name: "先添加一个模型供应商" });
+  await user.click(screen.getByRole("button", { name: "跳过引导" }));
+
+  expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(
+    FIRST_RUN_GUIDE_VERSION,
+  );
+  firstSession.unmount();
+  render(<App />);
+  await screen.findByRole("heading", { name: "概览" });
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("reopens the guide from the About page without clearing the dismissed version", async () => {
+  const user = userEvent.setup();
+  render(<App />);
+
+  await user.click(await screen.findByRole("button", { name: "设置" }));
+  expect(screen.queryByRole("button", { name: "重新查看新手引导" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: /关于/ }));
+  await user.click(screen.getByRole("button", { name: "重新查看新手引导" }));
+
+  expect(await screen.findByRole("dialog", { name: "先添加一个模型供应商" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "概览", hidden: true })).toBeInTheDocument();
+  expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(
+    FIRST_RUN_GUIDE_VERSION,
+  );
+});
+
+it("treats Escape as a persistent dismissal and restores focus to the App", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  const user = userEvent.setup();
+  render(<App />);
+
+  await screen.findByRole("dialog", { name: "先添加一个模型供应商" });
+  await user.keyboard("{Escape}");
+
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(
+    FIRST_RUN_GUIDE_VERSION,
+  );
+  await waitFor(() => {
+    expect(screen.getByRole("button", { name: "Token Station 概览" })).toHaveFocus();
   });
 });
 

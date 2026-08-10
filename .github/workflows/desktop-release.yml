@@ -26,6 +26,7 @@ jobs:
       APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
       APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+      TOKEN_STATION_UPDATER_PUBKEY: ${{ vars.TOKEN_STATION_UPDATER_PUBKEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -37,6 +38,12 @@ jobs:
         with:
           targets: wasm32-wasip2,${{ matrix.target }}
       - run: npm --prefix apps/desktop ci
+      - name: Generate untrusted temporary updater bundler key
+        run: |
+          key_path="$RUNNER_TEMP/token-station-updater-ci.key"
+          npx --prefix apps/desktop tauri signer generate --ci --force --password temporary-ci-only --write-keys "$key_path" >/dev/null
+          echo "TAURI_SIGNING_PRIVATE_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=temporary-ci-only" >> "$GITHUB_ENV"
       - name: Require Apple signing and notarization secrets
         run: |
           test -n "$APPLE_CERTIFICATE"
@@ -71,10 +78,12 @@ jobs:
           path: |
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
           if-no-files-found: error
 
   windows:
     name: Windows (x86_64-pc-windows-msvc)
+    if: ${{ false }} # First public desktop release is macOS-only.
     runs-on: windows-latest
     env:
       WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
