@@ -49,15 +49,17 @@
 
 | Agent | 接入方式 | 入站协议 |
 |---|---|---|
-| <a href="https://github.com/anthropics/claude-code"><img src="docs/assets/agents/claude-code.svg" width="20" height="20" alt=""> Claude Code</a> | 内置 Connector | Anthropic Messages |
-| Claude Desktop | 内置 Connector | Anthropic Messages |
-| <a href="https://github.com/openai/codex"><img src="docs/assets/agents/codex.svg" width="20" height="20" alt=""> Codex</a> | 内置 Connector | OpenAI Responses |
-| Gemini CLI | 内置 Connector | Gemini |
-| Hermes Agent | 内置 Connector | OpenAI Chat Completions |
-| OpenClaw | 内置 Connector | OpenAI Chat Completions |
-| <a href="https://www.workbuddy.ai/"><img src="apps/desktop/public/agents/workbuddy.png" width="20" height="20" alt=""> WorkBuddy</a> | 内置 Connector | OpenAI Chat Completions |
-| OpenCode | 内置 Connector | OpenAI Chat Completions |
-| Cursor | macOS 与 Windows 专用接入 | OpenAI 兼容端点 |
+| <a href="https://github.com/anthropics/claude-code"><img src="docs/assets/agents/claude-code.svg" width="20" height="20" alt="">&nbsp;Claude Code</a> | 内置 Connector | Anthropic Messages |
+| <a href="https://github.com/anthropics"><img src="docs/assets/agents/claude-desktop.svg" width="20" height="20" alt="">&nbsp;Claude Desktop</a> | 内置 Connector | Anthropic Messages |
+| <a href="https://github.com/openai/codex"><img src="docs/assets/agents/codex.svg" width="20" height="20" alt="">&nbsp;Codex</a> | 内置 Connector | OpenAI Responses |
+| <a href="https://github.com/google-gemini/gemini-cli"><img src="docs/assets/agents/gemini-cli.svg" width="20" height="20" alt="">&nbsp;Gemini CLI</a> | 内置 Connector | Gemini |
+| <a href="https://github.com/NousResearch/hermes-agent"><img src="apps/desktop/public/agents/hermes.png" width="20" height="20" alt="">&nbsp;Hermes Agent</a> | 内置 Connector | OpenAI Chat Completions |
+| <a href="https://github.com/openclaw/openclaw"><img src="docs/assets/agents/openclaw.svg" width="20" height="20" alt="">&nbsp;OpenClaw</a> | 内置 Connector | OpenAI Chat Completions |
+| <a href="https://www.workbuddy.ai/"><img src="apps/desktop/public/agents/workbuddy.png" width="20" height="20" alt="">&nbsp;WorkBuddy</a> | 内置 Connector | OpenAI Chat Completions |
+| <a href="https://github.com/anomalyco/opencode"><img src="docs/assets/agents/opencode.svg" width="20" height="20" alt="">&nbsp;OpenCode</a> | 内置 Connector | OpenAI Chat Completions |
+| <a href="https://github.com/cursor/cursor"><img src="docs/assets/agents/cursor.svg" width="20" height="20" alt="">&nbsp;Cursor</a> | macOS 与 Windows 专用接入 | OpenAI 兼容端点 |
+
+Claude Desktop 目前没有公开的产品仓库；该链接指向 Anthropic 官方 GitHub 组织页。
 
 对于八种内置 Connector，点击“一键接入”会生成并立即应用边界明确的计划，首次接入会在写入后展示改动字段。Cursor 使用独立路径：先退出 Cursor，再由专用接入备份并修改本地 SQLite 中的两个设置。Cursor 不在 Connector 字段归属和应用内断开流程内，也可以选择手动配置。
 
