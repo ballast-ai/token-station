@@ -1,108 +1,215 @@
-# token-station
+<div align="center">
+  <img src="apps/desktop/public/icon.png" alt="Token Station icon" width="112" />
 
-[中文](README.zh-CN.md)
+# Token Station
 
-A loopback LLM proxy with local routing. Point your IDE, agent, or any
-OpenAI-compatible client at `127.0.0.1`, and token-station routes each request
-to the right upstream — your own API keys, your local models — by rules you
-wrote and evaluated on your machine. Requests routed to a cloud provider are
-sent to that configured provider; strict local mode uses verified loopback
-providers only.
+### Local routing control plane for AI agents and LLM providers
 
+Connect Claude Code, Codex, Gemini CLI, and other agents to one loopback gateway. Route each request by task complexity or remaining quota across your own API providers and local models.
+
+[![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![Platform](https://img.shields.io/badge/public%20desktop-macOS%20Apple%20Silicon-lightgrey.svg)](https://github.com/ballast-ai/token-station/releases/latest) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
+
+[Download](https://github.com/ballast-ai/token-station/releases/latest) · [Documentation](docs/README.md) · [Report an issue](https://github.com/ballast-ai/token-station/issues) · [简体中文](README.zh-CN.md)
+</div>
+
+## Why Token Station?
+
+AI agents use different configuration files and request protocols. LLM providers expose different endpoints, models, limits, and reset windows. A static provider switch chooses one configuration before an agent starts. Token Station stays in the request path, so it can make a different routing decision for every request while keeping that decision on your machine.
+
+- Send difficult work to a high-capability model and routine work to a cheaper or local model.
+- Drain quota-bearing accounts before their reset windows, then fall back to metered providers.
+- Give every agent its own route, or let all agents inherit one global policy.
+- Keep routing rules, provider credentials, usage metadata, and cost estimates under local control.
+
+## How it works
+
+```text
+Claude Code / Codex / Gemini CLI / other agents
+                         │
+                         ▼
+              127.0.0.1:8787 + local auth
+                         │
+                  Agent WASM adapter
+                         │
+                         ▼
+        ┌────────── Local router ──────────┐
+        │ Tiered: High / Mid / Low         │
+        │ Quota-first: reset + headroom    │
+        └──────────────────────────────────┘
+                         │
+                Provider WASM adapter
+                   ┌─────┴─────┐
+                   ▼           ▼
+             Cloud BYOK   Ollama / local
 ```
-IDE / agent ──▶ 127.0.0.1:8787 ──▶ rules → hints → heuristic → default
-                                        │
-                     ┌──────────────────┼──────────────────┐
-                     ▼                  ▼                  ▼
-               api.openai.com     api.groq.com      localhost:11434
-               (your key)         (your key)        (your Ollama)
+
+The gateway only binds to a loopback address. A request sent to a cloud provider still leaves the device and is subject to that provider's data policy. Strict local routing only admits providers verified as loopback endpoints.
+
+## Features
+
+- **Two routing modes.** Three-tier routing maps requests to High, Mid, or Low models using explicit keywords, request capabilities, and a deterministic complexity score. Quota-first routing favors accounts whose allowance is most useful to spend before reset.
+- **Per-agent policies.** Each agent can inherit the global route, use an independent route, or mount a reusable routing profile.
+- **Broad provider catalog.** The desktop app includes 40+ editable presets for first-party APIs, managed inference services, and Ollama, plus a curated catalog of free or trial offers. Custom OpenAI-compatible endpoints are supported.
+- **Protocol-aware agent access.** Sandboxed adapters accept Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, and Gemini request shapes, then route them through the same local control plane.
+- **Usage and cost visibility.** Inspect requests, tokens, latency, errors, quota windows, and estimated cost without storing prompt or response bodies in Token Station's request log or metrics database.
+- **Failure handling.** Unhealthy upstreams are temporarily ejected, cooldowns are tracked locally, and provider diagnosis separates DNS, TLS, HTTP, authentication, model access, and generation failures.
+- **Reversible connector integration.** For the eight built-in connectors, Token Station creates a bounded change plan, writes only owned fields, keeps a private backup, and can remove its fields without deleting unrelated agent settings.
+- **Desktop and CLI surfaces.** Use the Tauri desktop app for daily routing, or the Rust CLI for gateway, provider, plugin, statistics, backup, and restore workflows.
+
+Provider presets are editable starting points, not availability guarantees. Models, free tiers, regions, and limits can change at the provider.
+
+## Supported agents
+
+| Agent | Integration | Inbound protocol |
+|---|---|---|
+| Claude Code | Built-in connector | Anthropic Messages |
+| Claude Desktop | Built-in connector | Anthropic Messages |
+| Codex | Built-in connector | OpenAI Responses |
+| Gemini CLI | Built-in connector | Gemini |
+| Hermes Agent | Built-in connector | OpenAI Chat Completions |
+| OpenClaw | Built-in connector | OpenAI Chat Completions |
+| WorkBuddy | Built-in connector | OpenAI Chat Completions |
+| OpenCode | Built-in connector | OpenAI Chat Completions |
+| Cursor | Dedicated setup on macOS and Windows | OpenAI-compatible endpoint |
+
+For the eight built-in connectors, clicking **Connect** creates and immediately applies a bounded plan. The first connection shows the changed fields after the write. Cursor is a separate path: quit Cursor first, then one-click setup backs up and updates two values in its local SQLite settings. Cursor is not covered by connector ownership or the in-app disconnect flow; manual setup remains available.
+
+## Download and install
+
+Download the current release from **[GitHub Releases](https://github.com/ballast-ai/token-station/releases/latest)**.
+
+### Current public artifacts
+
+| Target | Availability |
+|---|---|
+| macOS desktop, Apple Silicon | Available as the `token-station_*_aarch64.dmg` asset |
+| macOS CLI, Apple Silicon | Available as the `token-station-cli-*-aarch64-apple-darwin.tar.gz` asset |
+| macOS Intel desktop | Not included in the current public release |
+| Windows desktop | Build and installer tests exist, but no public installer is included in the current release |
+| Linux desktop | Build workflow exists, but no public package is included in the current release |
+
+Use macOS 11.0 or newer. The executable's deployment target is 11.0, although the current app bundle metadata still shows 10.13 and needs correction. The desktop app and CLI are versioned independently, so their asset versions may differ. To confirm an Apple Silicon Mac, open **Apple menu > About This Mac**, or run `uname -m` and check for `arm64`.
+
+The current DMG is not Developer ID signed or Apple notarized. macOS may block the first launch. Drag Token Station to Applications, then right-click the app and choose **Open**, followed by **Open** again. If Gatekeeper still keeps the quarantine attribute, run:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/token-station.app
 ```
 
-## Download
+Do not disable Gatekeeper system-wide.
 
-Desktop app and CLI: **[Releases](https://github.com/ballast-ai/token-station/releases/latest)**.
-
-- **macOS (Apple Silicon)** — `token-station_1.1.2_aarch64.dmg`. This build is **not yet Apple-signed**, so on first launch macOS Gatekeeper blocks it. To open: right-click the app → **Open** → **Open**, or run once: `xattr -dr com.apple.quarantine /Applications/token-station.app`. Intel and signed builds are coming in a later patch.
-- **Windows (x64)** — the per-user `.msi` installer. It installs into your user profile and needs **no administrator rights**; downgrades are blocked, so uninstall first if you need an older build.
-- **Linux** — desktop packages (`.deb` / `.AppImage` / `.rpm`) are coming shortly.
-- **CLI (all platforms)** — the `token-station-cli-*.tar.gz` archives are the standalone gateway with the official plugins embedded; `scripts/verify-release.sh` proves they were built from this source.
-
-## Why this exists 
-
-Model routing usually means a cloud gateway reading your traffic. token-station
-takes the opposite bet: **routing is a local decision**. The router, the rules,
-the metrics, and your keys all live on your machine. The proxy's outbound
-connections are exactly the upstreams you configured — plus one anonymous
-version check, only when you run `upgrade`, never in the background. The
-Desktop price editor can also query the public models.dev catalog only after
-you explicitly press its “查询公开价格” button; that request carries no provider
-credentials or prompt data.
-
-- **Content cannot reach disk.** The request log and metrics store are built
-  from a record type whose fields are numbers, closed enums, or names from
-  your own config. There is no column a prompt could go into — and the tests
-  prove it by grepping the raw database bytes for a canary.
-- **Keys stay in the OS keychain**, resolved per request, injected into one
-  header, never logged. A key pasted into a URL is refused at config load.
-- **Plugins are sandboxed WASM.** Provider adapters translate protocols; they
-  get no network and no secrets. An exfiltration gate checks every outbound
-  request against the endpoint you configured before any credential resolves.
-- **Auth is on by default.** A local virtual key exists before the port does;
-  loopback is a boundary against the network, not against other processes.
+The current release also has no checksum or signature asset for independent integrity verification. If your threat model requires a verifiable binary, build from source or wait for a signed release instead of removing quarantine.
 
 ## Quick start
 
-```bash
-git clone https://github.com/ballast-ai/token-station
-cd token-station
-cargo build --release -p token-station-cli
+You need at least one provider API key or a local model endpoint. Token Station does not import Claude, Codex, or other agent subscriptions and OAuth sessions as provider accounts. Quota-first routing uses recognized provider rate-limit headers when available; otherwise it estimates a quota plan from traffic observed through this gateway and cannot see usage from other clients.
 
-cp apps/cli/example-config.json token-station.json
-./target/release/token-station-cli upstream add openai_personal \
-  --provider openai-compatible --base-url https://api.openai.com/v1 \
-  --model "gpt-5.5,tool,vision,json-schema,ctx=400000" \
-  --auth keyring --pool sota
-./target/release/token-station-cli key set openai_personal provider_api_key
-./target/release/token-station-cli serve
+1. Open Token Station and choose **Add Provider**. Pick a preset or enter a custom OpenAI-compatible endpoint, then add its models and API key.
+2. Open **Routing**. Choose three-tier or quota-first routing, configure the models or accounts, then choose **Save and apply**. This starts or reloads the local proxy.
+3. Open **Agents** and scan installed agents. For a built-in connector, clicking **Connect** writes immediately and then shows what changed. For Cursor, follow the separate setup warning above.
+4. Send one request from a managed agent. It will connect to the authenticated loopback gateway at `127.0.0.1:8787`.
+5. Open **Usage** to verify the routing decision, tokens, latency, failures, quota state, and estimated cost.
+
+If a workload must not leave the device, add a local provider such as Ollama and enable strict local routing. Do not rely on a model name alone to establish locality.
+
+## Security and data boundaries
+
+| Boundary | Current behavior |
+|---|---|
+| Listener | The client rejects non-loopback listen addresses. Local authentication is enabled by default with a per-installation virtual key. |
+| Request content | Request and response bodies exist in memory while Token Station forwards them, but Token Station does not add them to its request log or metrics database. Automated tests scan those stores for test markers. |
+| Cloud routing | A cloud upstream receives the requests routed to it. Token Station cannot override that provider's retention, logging, or training policy. |
+| Provider credentials | The default store is a plaintext `secrets.json` readable only by the current user account. Other processes running as the same user may still read it. Environment-variable and standalone-file sources are also supported. Credential values are excluded from logs, errors, and sandboxed plugins. |
+| Plugin sandbox | WASM adapters receive no network, filesystem, environment, arguments, or inherited standard I/O. Memory and call time are limited. |
+| Outbound authorization | Before adding a credential to a request, the host checks that its destination and credential name match the provider you configured. |
+| Agent configuration | Clicking **Connect** is consent to write. Built-in connectors use bounded plans, revision checks, private backups or ownership records, atomic writes, and recovery flows. The first-connection diff is shown after writing. Cursor uses the separate SQLite path described above. |
+
+Private file permissions separate the default credential store from other user accounts, but the file is not encrypted at rest. Use environment variables or a separately managed secret file if your threat model requires a different custody mechanism.
+
+## FAQ
+
+<details>
+<summary><strong>Is Token Station a cloud gateway?</strong></summary>
+
+No. The router and proxy run on your machine and require no Token Station account. Traffic only reaches a cloud service when the selected upstream is a cloud provider you configured, or when you explicitly invoke a feature that fetches public catalog, pricing, or release data.
+
+</details>
+
+<details>
+<summary><strong>How is this different from switching provider configs?</strong></summary>
+
+A config switcher selects one provider before an agent runs. Token Station keeps a local gateway in the request path and can choose a provider and model per request. It can also apply different policies to different agents without duplicating the routing engine.
+
+</details>
+
+<details>
+<summary><strong>Does Token Station store prompts or responses?</strong></summary>
+
+Not in its application request log or metrics database. Those stores contain routing decisions, closed status values, timings, usage, configured names, and cost estimates. Request bodies still exist in process memory while being proxied, and cloud providers can retain what you send under their own policies.
+
+</details>
+
+<details>
+<summary><strong>Can it use my Claude or Codex subscription?</strong></summary>
+
+Not automatically. Agent subscriptions and OAuth sessions are not provider accounts in Token Station. Configure your own provider API key, a supported free or trial API offer, or a local model endpoint.
+
+</details>
+
+<details>
+<summary><strong>What happens when I disconnect an agent?</strong></summary>
+
+For the eight built-in connectors, disconnect removes Token Station-owned fields and returns the agent to its official configuration path while preserving unrelated settings. Cursor's dedicated SQLite setup does not yet have this managed disconnect flow.
+
+</details>
+
+<details>
+<summary><strong>Can I use a local model only?</strong></summary>
+
+Yes. Add an Ollama or another loopback OpenAI-compatible provider, mark it as local, and enable strict local routing. Cloud fallback is a separate explicit option.
+
+</details>
+
+## Documentation
+
+- [Agent setup guides](docs/guides/) (English)
+
+## Development
+
+Requirements: Rust 1.95 or newer, Node.js 22.23.1, npm, and the `wasm32-wasip2` Rust target. Platform-specific Tauri system dependencies are documented in the development guide.
+
+```bash
+git clone https://github.com/ballast-ai/token-station.git
+cd token-station
+rustup target add wasm32-wasip2
+npm --prefix apps/desktop ci
+npm --prefix apps/desktop run tauri:dev
 ```
 
-Then point your client at `http://127.0.0.1:8787/v1` with the owner-only
-virtual key stored at `token-station-data/virtual-key`. Ask for model `auto`
-and the router decides; ask for a concrete model and you get it.
+Use the repository's `tauri:dev` command instead of invoking Tauri directly. It builds and embeds the five official WASM adapters required by the desktop gateway.
 
-Manage it from the same binary: `upstream list/add/remove/test`,
-`rule list`, `config set/edit`, `stats` (volume, errors, latency, tokens —
-read from the local metrics store).
+<details>
+<summary><strong>Quality gates</strong></summary>
 
-## Verifying official binaries
+```bash
+scripts/check-rust-format.sh
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+npm --prefix apps/desktop run test:coverage
+npm --prefix apps/desktop run build
+```
 
-Official releases are designed to be reproducible and signed: an Ed25519-signed
-manifest proves the publisher, and rebuilding at the release tag proves the
-source — `scripts/verify-release.sh` does both comparisons for you.
+</details>
 
-The signing key lives offline. **Note (pre-release):** the release public key is
-not yet embedded in this build (`OFFICIAL_RELEASE_PUBKEY_HEX` is empty), so
-`upgrade` refuses to download rather than trust an unverified binary. Until the
-key is injected by a reviewed release build, verify official binaries manually
-per [docs/release/可复现构建与发布验证.md](docs/release/可复现构建与发布验证.md).
-Embedding the key is a release prerequisite, not an optional step.
+## Contributing
 
-## Status
+Issues and focused pull requests are welcome. Read the contribution guide first. User-visible UI, interaction, state, contract, or release behavior changes require a design document under `docs/design/` before tests and implementation.
 
-C1 (minimal usable client) is complete: streaming proxy, four-layer routing,
-upstream health ejection, OS keychain custody, metrics, CLI management
-surface, and this release engineering. OpenAI-compatible upstreams (including
-Ollama, vLLM, and most BYOK providers) work today; native Anthropic/Gemini
-adapters are next, guided by community feedback.
+## Project status
 
-User-facing docs live under [docs/](docs/), currently in Chinese: product
-docs for users ([docs/product/](docs/product/)), contributor docs for anyone
-maintaining, developing, or testing it ([docs/contributing/](docs/contributing/)),
-plus getting-started guides ([docs/guides/](docs/guides/)) and release
-verification and packaging ([docs/release/](docs/release/)).
+Token Station is an early public release. The local gateway, desktop control plane, two routing modes, built-in agent connectors, provider catalog, usage views, and recovery paths are implemented. Distribution is narrower than the source compatibility matrix: the current public desktop release is macOS Apple Silicon only, and the DMG is not yet Apple-signed or notarized.
 
 ## License
 
-Apache-2.0. The routing kernel, plugin ABI, and this client are the open
-core; a hosted platform (accounts, cloud sync of **metadata only**, bills
-reconciliation) is being built on the same crates.
+Licensed under the [Apache License 2.0](LICENSE).

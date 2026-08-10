@@ -45,7 +45,7 @@ Set the environment variable only in the terminal that starts Token Station:
 export DEEPSEEK_API_KEY='your DeepSeek API Key'
 ```
 
-Do not put the key in JSON, command arguments, or repository files. You can also change `auth` in the sample configuration to `{"slot":"provider_api_key","keyring":true}`. Then write the key through standard input to the system keychain:
+Do not put the key in JSON, command arguments, or repository files. You can also change `auth` in the sample configuration to `{"slot":"provider_api_key","store":true}`. Then write the key through standard input to the private plaintext `secrets.json` file in the data directory:
 
 ```bash
 printf '%s' "$DEEPSEEK_API_KEY" | \

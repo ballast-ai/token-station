@@ -1,11 +1,11 @@
 # Secure Hermes Agent Connection Guide
 
-Token Station Desktop can automatically find NousResearch Hermes Agent. It
-creates a configuration preview only for the locally accepted
-`hermes-agent 0.18.0`. This package version corresponds to the official
-`v2026.7.1` release. The package version `0.18.2` from the current official
-`v2026.7.7.2` release remains “unknown,” so Token Station does not write its
-configuration.
+Token Station Desktop can automatically find and connect NousResearch Hermes
+Agent. The built-in compatibility catalog currently has no version blocklist.
+It does not reject all versions other than `hermes-agent 0.18.0`. This does
+not mean that every future version has passed real acceptance. Configuration
+structure, adapter readiness, and the internal plan still fail closed before
+a write.
 
 Official sources:
 
@@ -19,7 +19,7 @@ Official sources:
 The desktop app performs these read-only checks:
 
 - Executable: `hermes`. Version command: `hermes version`.
-- It normalizes `Hermes Agent v0.18.0 (2026.7.1)` to the first package SemVer, `0.18.0`.
+- It normalizes version output to the first package SemVer.
 - Environment override: `HERMES_HOME/config.yaml`.
 - Default path: `~/.hermes/config.yaml` on macOS, Linux, and WSL.
   The Windows path is `%LOCALAPPDATA%/hermes/config.yaml`.
@@ -29,7 +29,7 @@ The scan does not run setup, update, doctor, migrate, or repair. It does not
 install or upgrade Hermes. It does not start the Hermes gateway. If the scan
 finds multiple installations, select one target.
 
-## 2. Preview before connection
+## 2. Connection changes
 
 `hermes-v1` owns only these five scalar paths:
 
@@ -41,7 +41,9 @@ finds multiple installations, select one target.
 /model/api_mode
 ```
 
-After confirmation, the target structure is:
+When you select **One-click Connect**, the desktop app creates an internal plan
+and writes it immediately. After the first connection, it shows the key
+changes. The target structure is:
 
 ```yaml
 model:
@@ -60,11 +62,11 @@ tools, skills, memory, other providers, or undeclared fields under `model`.
 Hermes recommends `.env` for normal long-term keys. This Connector writes a
 local Token Station virtual key. It manages one YAML transaction to avoid a
 non-atomic update across `config.yaml` and `.env`. It declares
-`model.api_key` as sensitive. The preview and IPC show only a redacted value.
-Before the write, an encrypted snapshot protects the original configuration
-with the OS keychain. The secure writer normalizes new-file permissions.
-Consider a dedicated environment variable only after multi-file atomic
-transactions are available.
+`model.api_key` as sensitive. IPC and the post-write change summary show only
+a redacted value. A private local `snapshot-master.key` protects the encrypted
+snapshot of the original configuration. The secure writer normalizes new-file
+permissions. Consider a dedicated environment variable only after multi-file
+atomic transactions are available.
 
 ## 3. YAML safety boundaries
 
@@ -80,12 +82,12 @@ YAML documents, duplicate keys, merge keys, a non-object root, a non-object
 `model`, or a parent-type conflict on an owned path. Error messages do not
 include original configuration lines or the virtual key.
 
-## 4. Confirmation, write, and recovery
+## 4. Write and disconnect
 
-The backend writes only when all conditions are true. The version must match
-exactly. The installation must be unique. The configuration fingerprint must
-be unchanged. `agent-openai` must be ready. The user must confirm the
-installation, target file, and redacted differences.
+The backend writes only when all conditions are true. The Agent descriptor must
+be admitted and outside the blocklist. The installation must be unique. The
+configuration fingerprint must be unchanged. `agent-openai` must be ready.
+The internal plan and confirmation token must still be valid.
 
 The backend then runs this sequence:
 
@@ -93,19 +95,23 @@ The backend then runs this sequence:
 encrypted snapshot → revision check → same-directory atomic replacement → YAML reparse → Connector self-check → ownership commit
 ```
 
-Disconnect restores only the five owned paths. Restore Snapshot can restore the
-exact original bytes. If another tool changes an owned value, revision or
-ownership checks invalidate the old plan. Scan and preview again. Historical
-`.bak` files are read-only candidates. Token Station does not overwrite,
-delete, or restore them automatically.
+Selecting **One-click Connect** gives consent to write. **Restore Official
+Configuration and Disconnect** removes only the five owned paths.
+If another tool changes an owned value, revision or ownership checks invalidate
+the old plan. Scan again. Historical `.bak` files are read-only candidates.
+Token Station does not overwrite, delete, or restore them automatically.
 
 ## 5. Behavior after a Hermes update
 
-Versions other than `0.18.0` have the `DETECTED_UNKNOWN` state. You can view
-details, scan again, and export diagnostics. You cannot preview a connection.
-Before support expands, verify the new official tag, YAML schema, Provider
-runtime, version output, lossless fixtures, and isolated E2E. If owned paths or
-protocols change, add `hermes-v2`. Do not change `hermes-v1` silently.
+After a Hermes update, Token Station scans the version, paths, and configuration
+structure again. An empty blocklist does not reject a connection only because
+the version changed. The signed compatibility catalog can add an explicit
+blocked range. The Connector still rejects an incompatible YAML schema or
+owned-path structure before writing.
+
+To expand real acceptance, verify the official tag, Provider runtime, version
+output, lossless fixtures, and isolated E2E. If owned paths or protocols change,
+add `hermes-v2`. Do not change `hermes-v1` silently.
 
 Token Station does not run `hermes update` automatically. It does not change
 `crates/router-core/**` to pass acceptance. cc-Switch is a competitor
