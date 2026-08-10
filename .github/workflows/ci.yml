@@ -355,15 +355,14 @@ jobs:
   windows-msi:
     name: Windows x64 MSI real lifecycle
     needs: [changes, windows-rust]
-    # Installer lifecycle validation: build the release desktop application twice, about 41 minutes times two.
-    # A merge to main means the code is ready for release, so run it there. Do not run it for routine develop merges.
-    # PRs that change desktop or installer paths are still blocked.
+    # This release-grade gate builds two installers and exercises the complete
+    # lifecycle. Run it for main and manual release validation, not for routine
+    # pull requests. Regular PR jobs still cover frontend and Rust behavior.
     if: >-
       !cancelled() &&
       needs.changes.outputs.installer == 'true' &&
       (github.ref == 'refs/heads/main' ||
-       github.event_name == 'workflow_dispatch' ||
-       github.event_name == 'pull_request')
+       github.event_name == 'workflow_dispatch')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
