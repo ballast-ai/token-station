@@ -68,6 +68,10 @@ CI、联网开发机或构建日志。
 
 ## Windows 正式发布
 
+首版公开桌面发布不支持 Windows，`desktop-release.yml` 会显式跳过 Windows job。若后续临时
+构建 Windows MSI，只发布人工下载安装包；Windows 不注入 Updater 公钥、不生成 Updater
+payload，也不写入 `latest.json`。
+
 Windows CI 导入代码签名证书后，将证书指纹和时间戳地址交给构建脚本。需要以下仓库密钥：
 
 | 密钥 | 内容 |
@@ -80,21 +84,24 @@ Windows CI 导入代码签名证书后，将证书指纹和时间戳地址交给
 
 ## CI 发布门禁
 
-`.github/workflows/desktop-release.yml` 在 `v*` tag 和手动触发时运行，分别生成 Apple Silicon、Intel 和 Windows x64 安装包。CI 缺少签名密钥时会直接失败，不会退化为未签名发布。
+`.github/workflows/desktop-release.yml` 在 `v*` tag 和手动触发时运行。首版只生成 Apple
+Silicon 和 Intel 两个 macOS 安装包与应用内更新载荷，Windows job 显式跳过。CI 缺少
+macOS 签名密钥时会直接失败，不会退化为未签名发布。
 
 桌面 CI 与现有 CLI 可复现构建流水线相互独立。桌面任务只上传已经通过插件、路径、签名和公证检查的安装包。
 
 ## Updater 离线签名与发布
 
 Tauri Updater 的签名校验不能关闭。生产构建通过
-`bundle.createUpdaterArtifacts=true` 生成 macOS `.app.tar.gz` 和 Windows `.msi` 更新载荷。
+`bundle.createUpdaterArtifacts=true` 生成 macOS `.app.tar.gz` 更新载荷。
 Tauri bundler 当前要求构建时存在签名 key，所以 CI 只生成一次性临时 key 让 bundler 产出
-载荷；对应临时 `.sig` 不上传、不进入 GitHub Release，也不被 App 信任。
+载荷；对应临时 `.sig` 不上传、不进入 GitHub Release，也不被 App 信任。Windows 首版不生成
+Updater payload。
 
 CI 完成后，发布者按以下顺序操作：
 
-1. 从 Desktop Release Actions artifacts 下载三个已经完成系统代码签名和审计的载荷：
-   `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`。
+1. 从 Desktop Release Actions artifacts 下载两个已经完成系统代码签名和审计的 macOS 载荷：
+   `darwin-aarch64`、`darwin-x86_64`。
 2. 在离线签名机逐个执行：
 
    ```bash
@@ -107,8 +114,8 @@ CI 完成后，发布者按以下顺序操作：
    unset TAURI_SIGNING_PRIVATE_KEY_PASSWORD
    ```
 
-   对另外两个载荷重复执行。不要把密码写进仓库、聊天、shell history 或发布附件。
-3. 人工核对三个载荷、三个正式 `.sig`、版本号、系统代码签名和发布 tag 都属于同一批
+   对另一个 macOS 载荷重复执行。不要把密码写进仓库、聊天、shell history 或发布附件。
+3. 人工核对两个 macOS 载荷、两个正式 `.sig`、版本号、系统代码签名和发布 tag 都属于同一批
    审计产物。
 4. 生成静态 manifest：
 
@@ -120,13 +127,12 @@ CI 完成后，发布者按以下顺序操作：
      --notes-file /staging/release-notes.md \
      --output /staging/latest.json \
      --artifact darwin-aarch64=/staging/token-station-darwin-aarch64.app.tar.gz \
-     --artifact darwin-x86_64=/staging/token-station-darwin-x86_64.app.tar.gz \
-     --artifact windows-x86_64=/staging/token-station-windows-x86_64.msi
+     --artifact darwin-x86_64=/staging/token-station-darwin-x86_64.app.tar.gz
    ```
 
-   脚本要求所有正式 `.sig` 与载荷相邻，并把签名内容内嵌进 `latest.json`；缺任一平台或
-   签名会失败。
-5. 把三个载荷、三个正式 `.sig`、`latest.json`、DMG/MSI 和 CLI 发布资产上传到同一个
+   脚本要求两个 macOS 正式 `.sig` 与载荷相邻，并把签名内容内嵌进 `latest.json`；
+   缺任一平台或签名会失败；传入 `windows-x86_64` 会被拒绝。
+5. 把两个 macOS 载荷、两个正式 `.sig`、`latest.json`、DMG 和 CLI 发布资产上传到同一个
    draft Release。确认 manifest URL 能下载同一 Release 中的载荷后，才允许发布。
 
 发布阻断条件：正式 keypair 尚未完成离线生成/备份、公钥不匹配、任一正式签名缺失、

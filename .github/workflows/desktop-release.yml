@@ -83,12 +83,12 @@ jobs:
 
   windows:
     name: Windows (x86_64-pc-windows-msvc)
+    if: ${{ false }} # First public desktop release is macOS-only.
     runs-on: windows-latest
     env:
       WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
       WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
       WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
-      TOKEN_STATION_UPDATER_PUBKEY: ${{ vars.TOKEN_STATION_UPDATER_PUBKEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -100,13 +100,6 @@ jobs:
         with:
           targets: wasm32-wasip2,x86_64-pc-windows-msvc
       - run: npm --prefix apps/desktop ci
-      - name: Generate untrusted temporary updater bundler key
-        shell: bash
-        run: |
-          key_path="$RUNNER_TEMP/token-station-updater-ci.key"
-          npx --prefix apps/desktop tauri signer generate --ci --force --password temporary-ci-only --write-keys "$key_path" >/dev/null
-          echo "TAURI_SIGNING_PRIVATE_KEY_PATH=$key_path" >> "$GITHUB_ENV"
-          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=temporary-ci-only" >> "$GITHUB_ENV"
       - name: Require Windows signing secrets
         shell: pwsh
         run: |
