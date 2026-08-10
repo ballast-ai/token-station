@@ -212,7 +212,11 @@ export default function CompactCombobox({
       </button>
 
       {open && (
-        <div className="compact-combobox-popover" style={popoverStyle}>
+        <div
+          className="compact-combobox-popover"
+          data-onboarding-floating="true"
+          style={popoverStyle}
+        >
           {searchable && (
             <label className="compact-combobox-search">
               <span aria-hidden="true">⌕</span>

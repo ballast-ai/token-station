@@ -68,7 +68,12 @@ export default function AgentsPage({
       </header>
 
       <div className="agent-master-detail">
-        <Card className="agent-master-list-card">
+        <Card
+          className="agent-master-list-card"
+          role="region"
+          aria-label={copy("Agent selector", "Agent 选择列表")}
+          data-onboarding-target="agent-list"
+        >
           <CardHeader>
             <div>
               <span className="page-eyebrow">AGENTS</span>
@@ -81,7 +86,6 @@ export default function AgentsPage({
               <nav
                 className="agent-master-nav"
                 aria-label={copy("Agent list", "Agent 列表")}
-                data-onboarding-target="agent-list"
               >
                 {registry.map((metadata) => {
                   const agent = agents.find((candidate) => candidate.metadata.agent_id === metadata.agent_id);

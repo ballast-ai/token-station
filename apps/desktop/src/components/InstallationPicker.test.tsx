@@ -112,7 +112,10 @@ describe("InstallationPicker", () => {
 
     expect(screen.queryByText("/Users/x/bin/claude")).toBeNull();
     await user.click(screen.getByRole("button", { name: /选择安装/ }));
-    expect(screen.getByRole("option", { name: "claude · v1.2.3" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("listbox"))
+      .toHaveAttribute("data-onboarding-floating", "true");
+    expect(screen.getByRole("option", { name: "claude · v1.2.3" }))
+      .toHaveAttribute("aria-selected", "true");
     expect(screen.getByText("C:\\Tools\\claude.exe")).toBeInTheDocument();
     await user.click(screen.getByRole("option", { name: "claude.exe · v2.0.0" }));
     expect(onSelect).toHaveBeenCalledWith("C:\\Tools\\claude.exe");

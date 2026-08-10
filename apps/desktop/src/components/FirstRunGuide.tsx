@@ -292,6 +292,16 @@ export default function FirstRunGuide({
                   };
 
   useLayoutEffect(() => {
+    if (!open) return undefined;
+    const previous = document.body.getAttribute("data-first-run-guide-active");
+    document.body.setAttribute("data-first-run-guide-active", "true");
+    return () => {
+      if (previous === null) document.body.removeAttribute("data-first-run-guide-active");
+      else document.body.setAttribute("data-first-run-guide-active", previous);
+    };
+  }, [open]);
+
+  useLayoutEffect(() => {
     if (!open || !content.target) {
       setTargetRect(null);
       return undefined;
@@ -401,8 +411,15 @@ export default function FirstRunGuide({
         "a[href]",
         "[tabindex]",
       ].join(",");
+      const floatingCandidates = [
+        ...document.querySelectorAll<HTMLElement>('[data-onboarding-floating="true"]'),
+      ].flatMap((layer) => [
+        ...(layer.matches(focusableSelector) ? [layer] : []),
+        ...layer.querySelectorAll<HTMLElement>(focusableSelector),
+      ]);
       const candidates = [
         ...(target ? [target, ...target.querySelectorAll<HTMLElement>(focusableSelector)] : []),
+        ...floatingCandidates,
         ...(coachmarkRef.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? []),
       ].filter((element, index, items) => (
         !element.hasAttribute("disabled") && items.indexOf(element) === index
@@ -421,13 +438,14 @@ export default function FirstRunGuide({
 
   if (!open) return null;
   const padding = 7;
+  const viewportInset = 8;
   const viewportWidth = window.innerWidth;
   const viewportHeight = window.innerHeight;
   const hole = targetRect ? {
-    top: Math.max(0, targetRect.top - padding),
-    left: Math.max(0, targetRect.left - padding),
-    right: Math.min(viewportWidth, targetRect.right + padding),
-    bottom: Math.min(viewportHeight, targetRect.bottom + padding),
+    top: clamp(targetRect.top - padding, viewportInset, viewportHeight - viewportInset),
+    left: clamp(targetRect.left - padding, viewportInset, viewportWidth - viewportInset),
+    right: clamp(targetRect.right + padding, viewportInset, viewportWidth - viewportInset),
+    bottom: clamp(targetRect.bottom + padding, viewportInset, viewportHeight - viewportInset),
   } : null;
   const cardWidth = Math.min(360, viewportWidth - 32);
   const estimatedCardHeight = 230;
