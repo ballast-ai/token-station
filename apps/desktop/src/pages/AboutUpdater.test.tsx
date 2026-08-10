@@ -1,0 +1,84 @@
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import About from "./About";
+import {
+  checkDesktopUpdate,
+  installDesktopUpdateAndRestart,
+  listenDesktopUpdateProgress,
+} from "../api";
+
+vi.mock("../api", () => ({
+  checkDesktopUpdate: vi.fn(),
+  installDesktopUpdateAndRestart: vi.fn(),
+  listenDesktopUpdateProgress: vi.fn(),
+}));
+
+describe("desktop in-app update", () => {
+  beforeEach(() => {
+    vi.mocked(checkDesktopUpdate).mockReset();
+    vi.mocked(installDesktopUpdateAndRestart).mockReset();
+    vi.mocked(listenDesktopUpdateProgress).mockReset().mockResolvedValue(() => undefined);
+  });
+
+  it("shows signed download progress while installation is in flight", async () => {
+    let onProgress: ((progress: { downloaded: number; total: number | null }) => void) | undefined;
+    vi.mocked(listenDesktopUpdateProgress).mockImplementation(async (handler) => {
+      onProgress = handler;
+      return () => undefined;
+    });
+    vi.mocked(checkDesktopUpdate).mockResolvedValue({
+      status: "update_available",
+      current_version: "1.1.2",
+      version: "1.1.3",
+      notes: null,
+      pub_date: null,
+      release_url: "https://example.test/v1.1.3",
+      message: null,
+    });
+    vi.mocked(installDesktopUpdateAndRestart).mockImplementation(() => new Promise(() => undefined));
+
+    const user = userEvent.setup();
+    render(<About desktopVersion="1.1.2" coreVersion="0.2.0" />);
+    await user.click(screen.getByRole("button", { name: "检查更新" }));
+    await user.click(await screen.findByRole("button", { name: "下载并更新到 1.1.3" }));
+    await user.click(screen.getByRole("button", { name: "确认更新并重启" }));
+    onProgress?.({ downloaded: 50, total: 100 });
+
+    expect(await screen.findByRole("progressbar")).toHaveAttribute("aria-valuenow", "50");
+    expect(screen.getByText("已下载 50%")).toBeInTheDocument();
+  });
+
+  it("requires confirmation before installing an available signed update", async () => {
+    vi.mocked(checkDesktopUpdate).mockResolvedValue({
+      status: "update_available",
+      current_version: "1.1.2",
+      version: "1.1.3",
+      notes: "安全更新",
+      pub_date: "2026-08-06T07:00:00Z",
+      release_url: "https://github.com/ballast-ai/token-station/releases/tag/v1.1.3",
+      message: null,
+    });
+    vi.mocked(installDesktopUpdateAndRestart).mockResolvedValue(true);
+
+    const user = userEvent.setup();
+    render(<About desktopVersion="1.1.2" coreVersion="0.2.0" />);
+
+    await user.click(screen.getByRole("button", { name: "检查更新" }));
+
+    expect(await screen.findByText("发现新版本 1.1.3")).toBeInTheDocument();
+    expect(screen.getByText("安全更新")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "下载并更新到 1.1.3" }),
+    );
+
+    expect(
+      await screen.findByRole("alertdialog", { name: "安装应用更新？" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "取消" })).toHaveFocus();
+    expect(installDesktopUpdateAndRestart).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "确认更新并重启" }));
+    expect(installDesktopUpdateAndRestart).toHaveBeenCalledTimes(1);
+  });
+});

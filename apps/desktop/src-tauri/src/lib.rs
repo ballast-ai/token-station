@@ -11,6 +11,7 @@
 
 pub mod agent_integration;
 mod config_state;
+pub mod desktop_update;
 mod free_provider_catalog;
 mod model_catalog;
 mod pricing_catalog;
@@ -21,11 +22,12 @@ mod serve_lifecycle;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
+use tauri_plugin_updater::UpdaterExt;
 use zeroize::Zeroizing;
 
 use token_station_cli::budget::{AgentBudget, BudgetStatus};
@@ -50,6 +52,10 @@ use agent_integration::commands::{
 use agent_integration::registry::AgentRegistry;
 use agent_integration::types::AdmissionStatus;
 use config_state::ConfigState;
+use desktop_update::{
+    DesktopUpdateCandidate, DesktopUpdateOperation, DesktopUpdateProgress, DesktopUpdateView,
+    LATEST_JSON_URL, OFFICIAL_PUBLIC_KEY, PROGRESS_EVENT,
+};
 use model_catalog::ModelDiscoveryView;
 use pricing_catalog::ModelPriceSuggestionView;
 use recovery::{
@@ -999,17 +1005,6 @@ struct PluginsView {
     agent: String,
     dialects: Vec<String>,
     listing: String,
-}
-
-/// Update-check view. Perform only an anonymous version check through core `upgrade::check`; do not replace the binary.
-#[derive(Serialize)]
-struct UpgradeView {
-    status: String,
-    current: String,
-    latest_tag: String,
-    html_url: String,
-    newer: bool,
-    message: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -4496,48 +4491,167 @@ fn get_plugins(state: State<'_, AppStateManaged>) -> Result<PluginsView, String>
     })
 }
 
-/// About/Updates page: anonymous version check, the core’s only permitted outbound connection. Compare versions and provide a release-page link only,
-/// Does not replace its own binary. Desktop apps update through their own channels; this only reports whether a newer version exists.
+fn desktop_updater<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    let endpoint = LATEST_JSON_URL
+        .parse()
+        .map_err(|error| format!("更新地址无效：{error}"))?;
+    app.updater_builder()
+        .pubkey(OFFICIAL_PUBLIC_KEY)
+        .endpoints(vec![endpoint])
+        .map_err(|error| format!("更新地址配置失败：{error}"))?
+        .build()
+        .map_err(|error| format!("更新器初始化失败：{error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn desktop_update_platform_unsupported_message() -> Option<&'static str> {
+    Some(desktop_update::WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn desktop_update_platform_unsupported_message() -> Option<&'static str> {
+    None
+}
+
 #[tauri::command]
-fn check_upgrade() -> UpgradeView {
-    let current = env!("CARGO_PKG_VERSION").to_string();
-    match upgrade::check_latest(upgrade::DEFAULT_ENDPOINT) {
-        Ok(upgrade::CheckResult::Published(release)) => {
-            let newer = upgrade::is_newer(&current, &release.tag_name);
-            UpgradeView {
-                status: if newer {
-                    "update_available"
-                } else {
-                    "up_to_date"
-                }
-                .to_owned(),
-                current,
-                latest_tag: release.tag_name,
-                html_url: release.html_url,
-                newer,
-                message: None,
-            }
-        }
-        Ok(upgrade::CheckResult::NoPublishedRelease) => UpgradeView {
-            status: "no_published_release".to_owned(),
-            current,
-            latest_tag: String::new(),
-            html_url: String::new(),
-            newer: false,
-            message: Some("当前还没有可用的正式发布版本".to_owned()),
-        },
-        Err(error) => {
-            eprintln!("update check unavailable: {error}");
-            UpgradeView {
-                status: "unavailable".to_owned(),
-                current,
-                latest_tag: String::new(),
-                html_url: String::new(),
-                newer: false,
-                message: Some("暂时无法检查更新，请稍后重试".to_owned()),
-            }
-        }
+async fn check_desktop_update(
+    app: AppHandle,
+    operation: State<'_, DesktopUpdateOperation>,
+) -> Result<DesktopUpdateView, String> {
+    let current = app.package_info().version.to_string();
+    let _lease = operation.try_begin()?;
+    if let Some(message) = desktop_update_platform_unsupported_message() {
+        return Ok(DesktopUpdateView::unsupported(&current, message));
     }
+
+    Ok(
+        desktop_update::check_with(&current, OFFICIAL_PUBLIC_KEY, || async {
+            let update = desktop_updater(&app)?
+                .check()
+                .await
+                .map_err(|error| format!("暂时无法检查更新，请稍后重试：{error}"))?;
+            Ok(update.map(|update| DesktopUpdateCandidate {
+                version: update.version.to_string(),
+                notes: update.body,
+                pub_date: update.date.map(|date| date.to_string()),
+            }))
+        })
+        .await,
+    )
+}
+
+async fn prepare_gateway_for_desktop_update(app: AppHandle) -> Result<bool, String> {
+    let Some(state) = app.try_state::<AppStateManaged>() else {
+        return Ok(false);
+    };
+    let was_active = {
+        let inner = state.0.lock().unwrap();
+        matches!(
+            inner.server,
+            ServerLifecycle::Starting { .. }
+                | ServerLifecycle::Applying { .. }
+                | ServerLifecycle::Running { .. }
+        )
+    };
+    begin_serve_stop(app.clone(), state.inner());
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let stopped = {
+                let state = app.state::<AppStateManaged>();
+                let inner = state.0.lock().unwrap();
+                matches!(
+                    inner.server,
+                    ServerLifecycle::Stopped { .. } | ServerLifecycle::Failed { .. }
+                )
+            };
+            if stopped {
+                return Ok(was_active);
+            }
+            if Instant::now() >= deadline {
+                return Err("update_gateway_stop_timeout: 等待本地网关安全停止超时".to_owned());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    })
+    .await
+    .map_err(|error| format!("等待本地网关停止任务失败：{error}"))?
+}
+
+async fn restore_gateway_after_failed_update(
+    app: AppHandle,
+    was_active: bool,
+) -> Result<(), String> {
+    if !was_active {
+        return Ok(());
+    }
+    let Some(state) = app.try_state::<AppStateManaged>() else {
+        return Ok(());
+    };
+    begin_serve_start(app.clone(), state.inner(), prepare_server).map(|_| ())
+}
+
+#[tauri::command]
+async fn install_desktop_update_and_restart(
+    app: AppHandle,
+    operation: State<'_, DesktopUpdateOperation>,
+) -> Result<bool, String> {
+    let _lease = operation.try_begin()?;
+    if let Some(message) = desktop_update_platform_unsupported_message() {
+        return Err(message.to_owned());
+    }
+    if OFFICIAL_PUBLIC_KEY.trim().is_empty() {
+        return Err("当前构建没有内置官方更新公钥，不能在 App 内安装更新。".to_owned());
+    }
+
+    let updater = desktop_updater(&app)?;
+    let progress_app = app.clone();
+    let prepare_app = app.clone();
+    let recover_app = app.clone();
+    let installed = desktop_update::install_with(
+        OFFICIAL_PUBLIC_KEY,
+        || async move {
+            updater
+                .check()
+                .await
+                .map_err(|error| format!("暂时无法检查更新，请稍后重试：{error}"))
+        },
+        move |update| async move {
+            let mut downloaded = 0_u64;
+            let bytes = update
+                .download(
+                    move |chunk_length, total| {
+                        downloaded = downloaded.saturating_add(chunk_length as u64);
+                        let _ = progress_app
+                            .emit(PROGRESS_EVENT, DesktopUpdateProgress { downloaded, total });
+                    },
+                    || {},
+                )
+                .await
+                .map_err(|error| format!("更新包下载或签名校验失败，当前版本未被替换：{error}"))?;
+            Ok((update, bytes))
+        },
+        move || prepare_gateway_for_desktop_update(prepare_app),
+        |update, bytes, _was_active| {
+            update
+                .install(bytes)
+                .map_err(|error| format!("更新安装失败，当前版本未被替换：{error}"))
+        },
+        move |was_active| restore_gateway_after_failed_update(recover_app, was_active),
+    )
+    .await?;
+    if !installed {
+        return Ok(false);
+    }
+
+    #[cfg(target_os = "windows")]
+    return Ok(true);
+
+    #[cfg(not(target_os = "windows"))]
+    app.restart()
 }
 
 /// Minimal recovery control plane. These commands depend only on application
@@ -4583,6 +4697,7 @@ fn open_recovery_folder(paths: State<'_, DesktopPaths>) -> Result<String, String
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let desktop_paths = DesktopPaths::from_app_roots(
                 app.path().app_config_dir()?,
@@ -4602,6 +4717,7 @@ pub fn run() {
             // Agent command state, so normal read/write IPC cannot be invoked
             // behind the recovery shell.
             app.manage(desktop_paths.clone());
+            app.manage(DesktopUpdateOperation::default());
             if recovery::inspect_recovery_state(&desktop_paths.data_dir).mode == RecoveryMode::Safe
             {
                 return Ok(());
@@ -4707,7 +4823,8 @@ pub fn run() {
             get_request_receipts,
             get_router_table,
             get_plugins,
-            check_upgrade,
+            check_desktop_update,
+            install_desktop_update_and_restart,
             get_recovery_state,
             get_recovery_diagnostics,
             record_frontend_diagnostic,

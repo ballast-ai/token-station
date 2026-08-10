@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Token Station · 首次进入引导原型</title>
+  <style>
+    @font-face {
+      font-family: "IBM Plex Sans";
+      src: url("../node_modules/@fontsource/ibm-plex-sans/files/ibm-plex-sans-latin-400-normal.woff2") format("woff2");
+      font-weight: 400;
+    }
+    @font-face {
+      font-family: "IBM Plex Sans";
+      src: url("../node_modules/@fontsource/ibm-plex-sans/files/ibm-plex-sans-latin-600-normal.woff2") format("woff2");
+      font-weight: 600;
+    }
+    @font-face {
+      font-family: "IBM Plex Mono";
+      src: url("../node_modules/@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-500-normal.woff2") format("woff2");
+      font-weight: 500;
+    }
+
+    :root {
+      --canvas: #f4f6fa;
+      --surface: #ffffff;
+      --surface-2: #f8f9fc;
+      --ink: #182133;
+      --muted: #738096;
+      --line: #e1e6ef;
+      --line-strong: #cfd6e3;
+      --signal: #5368e8;
+      --signal-dark: #3f52c7;
+      --signal-soft: #edf0ff;
+      --success: #1b8a5a;
+      --success-soft: #e9f7f0;
+      --warning: #a96a12;
+      --shadow-dialog: 0 34px 90px rgba(18, 28, 52, 0.24), 0 8px 24px rgba(18, 28, 52, 0.12);
+      font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: #dfe4ed;
+      font-synthesis: none;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { width: 100%; min-width: 720px; min-height: 100%; margin: 0; }
+    body { min-height: 100vh; overflow: hidden; }
+    button { font: inherit; }
+    button:focus-visible { outline: 3px solid rgba(83, 104, 232, 0.36); outline-offset: 3px; }
+
+    .prototype-note {
+      position: fixed;
+      top: 12px;
+      left: 50%;
+      z-index: 90;
+      transform: translateX(-50%);
+      padding: 6px 10px;
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 999px;
+      color: rgba(255, 255, 255, 0.88);
+      background: rgba(16, 24, 40, 0.72);
+      backdrop-filter: blur(10px);
+      font: 500 11px/1 "IBM Plex Mono", monospace;
+      letter-spacing: 0.02em;
+    }
+
+    .desktop-frame {
+      position: fixed;
+      inset: 0;
+      padding: 26px 28px 84px;
+      background: linear-gradient(145deg, #d7dde8, #edf0f5 55%, #dbe1eb);
+    }
+    .app-window {
+      width: min(1180px, 100%);
+      height: 100%;
+      margin: 0 auto;
+      overflow: hidden;
+      border: 1px solid #c8cfdb;
+      border-radius: 12px;
+      background: var(--canvas);
+      box-shadow: 0 24px 70px rgba(26, 36, 57, 0.19);
+    }
+    .titlebar {
+      height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      border-bottom: 1px solid var(--line);
+      color: #8b95a7;
+      background: #f9fafc;
+      font-size: 11px;
+    }
+    .traffic { position: absolute; left: 13px; display: flex; gap: 7px; }
+    .traffic i { width: 10px; height: 10px; border-radius: 50%; background: #d4d9e3; }
+    .app-header {
+      height: 72px;
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      padding: 0 28px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.96);
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; white-space: nowrap; }
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border-radius: 7px;
+      color: white;
+      background: var(--signal);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.24);
+    }
+    .brand-mark svg { width: 19px; height: 19px; }
+    .nav { display: flex; align-self: stretch; align-items: stretch; gap: 2px; }
+    .nav span { display: flex; align-items: center; position: relative; padding: 0 12px; color: #657086; font-size: 13px; }
+    .nav span.active { color: var(--ink); font-weight: 600; }
+    .nav span.active::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: 0; height: 2px; background: var(--signal); }
+    .header-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    .runtime-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 174px;
+      padding: 8px 11px;
+      border: 1px solid #d8e0db;
+      border-radius: 8px;
+      background: #f5faf7;
+    }
+    .runtime-pill .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px rgba(27, 138, 90, .12); }
+    .runtime-pill.idle { border-color: var(--line); background: var(--surface-2); }
+    .runtime-pill.idle .pulse { background: #9aa4b5; box-shadow: 0 0 0 4px rgba(115, 128, 150, .1); }
+    .runtime-pill strong { display: block; font-size: 11px; }
+    .runtime-pill small, .mono { font-family: "IBM Plex Mono", monospace; }
+    .runtime-pill small { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; }
+    .header-btn { height: 34px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 7px; color: #344057; background: white; font-size: 12px; }
+
+    .dashboard { height: calc(100% - 106px); overflow: hidden; padding: 30px 34px; }
+    .dashboard-heading { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 22px; }
+    .eyebrow { color: var(--signal); font: 500 10px/1.2 "IBM Plex Mono", monospace; letter-spacing: .09em; }
+    .dashboard h1 { margin: 7px 0 5px; font-size: 27px; letter-spacing: -0.035em; }
+    .dashboard-heading p { margin: 0; color: var(--muted); font-size: 12px; }
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
+    .card { border: 1px solid var(--line); border-radius: 9px; background: white; }
+    .metric { min-height: 112px; padding: 15px; }
+    .metric > span { color: var(--muted); font-size: 11px; }
+    .metric strong { display: block; margin: 15px 0 5px; font-size: 22px; letter-spacing: -0.03em; }
+    .metric p { margin: 0; color: #8a95a8; font-size: 10px; }
+    .status-badge { display: inline-flex; align-items: center; gap: 7px; color: var(--success); font-size: 16px; }
+    .status-badge.idle { color: #7d8798; }
+    .status-badge i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+    .main-grid { display: grid; grid-template-columns: 1.14fr .86fr; gap: 14px; }
+    .panel { min-height: 206px; padding: 17px; }
+    .panel h2 { margin: 0 0 14px; font-size: 13px; }
+    .route-row, .action-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid #edf0f5; }
+    .route-row span { width: 48px; color: var(--muted); font-size: 10px; }
+    .route-row strong { min-width: 160px; font-size: 12px; }
+    .route-row code { color: #7f899b; font-size: 10px; }
+    .action-icon { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 7px; color: var(--signal); background: var(--signal-soft); }
+    .action-row div { display: grid; gap: 2px; }
+    .action-row strong { font-size: 11px; }
+    .action-row small { color: var(--muted); font-size: 9px; }
+
+    .veil { position: fixed; inset: 0; z-index: 20; background: rgba(19, 27, 44, 0.55); backdrop-filter: blur(2px); animation: veil-in .22s ease-out; }
+    .veil.soft { background: rgba(19, 27, 44, 0.22); backdrop-filter: blur(1px); }
+    .dialog {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      z-index: 30;
+      width: min(790px, calc(100vw - 72px));
+      min-height: 500px;
+      transform: translate(-50%, -50%);
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.8);
+      border-radius: 13px;
+      background: var(--surface);
+      box-shadow: var(--shadow-dialog);
+      animation: dialog-in .28s cubic-bezier(.2,.8,.2,1);
+    }
+
+    /* Variant A — station route */
+    .route-dialog { display: grid; grid-template-columns: 282px minmax(0, 1fr); }
+    .route-rail { position: relative; padding: 36px 30px; color: white; background: #263456; overflow: hidden; }
+    .route-rail::before { content: ""; position: absolute; inset: auto -60px -110px auto; width: 240px; height: 240px; border: 1px solid rgba(150, 167, 255, .18); border-radius: 50%; box-shadow: 0 0 0 40px rgba(150, 167, 255, .06), 0 0 0 80px rgba(150, 167, 255, .035); }
+    .route-rail .eyebrow { color: #aeb9ff; }
+    .route-rail h2 { margin: 10px 0 8px; font-size: 24px; line-height: 1.18; letter-spacing: -0.035em; }
+    .route-rail > p { margin: 0; color: #aeb7ca; font-size: 12px; line-height: 1.6; }
+    .stations { position: relative; display: grid; gap: 3px; margin-top: 28px; }
+    .stations::before { content: ""; position: absolute; left: 12px; top: 23px; bottom: 23px; width: 2px; background: rgba(172, 185, 255, .22); }
+    .station {
+      position: relative;
+      display: grid;
+      grid-template-columns: 26px 1fr;
+      gap: 12px;
+      align-items: center;
+      width: 100%;
+      min-height: 62px;
+      padding: 7px 3px;
+      border: 0;
+      color: #9da8bd;
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+    }
+    .station-dot { position: relative; z-index: 1; width: 14px; height: 14px; margin-left: 6px; border: 2px solid #66718a; border-radius: 50%; background: #263456; transition: .2s ease; }
+    .station strong { display: block; color: #c7cede; font-size: 12px; }
+    .station small { display: block; margin-top: 3px; font-size: 10px; }
+    .station.done .station-dot { border-color: #7ed6b1; background: #7ed6b1; box-shadow: inset 0 0 0 3px #263456; }
+    .station.active { color: white; }
+    .station.active strong { color: white; }
+    .station.active .station-dot { border-color: white; background: var(--signal); box-shadow: 0 0 0 5px rgba(126, 145, 255, .22); }
+    .station.active .station-dot::after { content: ""; position: absolute; inset: -7px; border: 1px solid rgba(255,255,255,.45); border-radius: 50%; animation: station-pulse 1.8s ease-out infinite; }
+    .rail-foot { position: absolute; left: 30px; bottom: 28px; color: #8894ab; font: 500 9px/1.4 "IBM Plex Mono", monospace; }
+    .guide-main { min-height: 500px; display: flex; flex-direction: column; padding: 34px 38px 28px; }
+    .guide-top { display: flex; justify-content: space-between; align-items: flex-start; }
+    .step-label { color: var(--signal); font: 500 10px/1.2 "IBM Plex Mono", monospace; letter-spacing: .08em; }
+    .icon-button { width: 32px; height: 32px; border: 0; border-radius: 7px; color: #818ba0; background: transparent; cursor: pointer; font-size: 21px; line-height: 1; }
+    .icon-button:hover { background: var(--surface-2); color: var(--ink); }
+    .guide-main h1 { margin: 19px 0 9px; font-size: 27px; letter-spacing: -0.04em; }
+    .guide-description { max-width: 430px; min-height: 48px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
+    .demo-surface { position: relative; min-height: 156px; display: grid; align-items: center; margin: 24px 0; padding: 24px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); overflow: hidden; }
+    .demo-surface::after { content: ""; position: absolute; right: -28px; top: -50px; width: 160px; height: 160px; border-radius: 50%; background: radial-gradient(circle, rgba(83,104,232,.12), transparent 67%); }
+    .demo-console { position: relative; z-index: 1; display: grid; grid-template-columns: 42px 1fr auto; gap: 12px; align-items: center; }
+    .demo-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 9px; color: var(--signal); background: white; box-shadow: 0 4px 14px rgba(38, 52, 86, .08); }
+    .demo-icon svg { width: 20px; height: 20px; }
+    .demo-console strong { display: block; font-size: 13px; }
+    .demo-console small { display: block; margin-top: 5px; color: var(--muted); font: 500 10px/1.3 "IBM Plex Mono", monospace; }
+    .demo-state { display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 999px; color: var(--success); background: var(--success-soft); font-size: 10px; }
+    .demo-state i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .guide-tip { display: flex; align-items: flex-start; gap: 8px; color: #68748a; font-size: 11px; line-height: 1.5; }
+    .guide-tip b { color: var(--warning); }
+    .guide-actions { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 18px; border-top: 1px solid var(--line); }
+    .spacer { flex: 1; }
+    .btn { min-height: 36px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 7px; color: #3b465c; background: white; cursor: pointer; font-weight: 500; font-size: 12px; }
+    .btn:hover { border-color: #aeb8c9; background: #fafbfc; }
+    .btn.primary { border-color: var(--signal); color: white; background: var(--signal); }
+    .btn.primary:hover { background: var(--signal-dark); }
+    .btn.text { border-color: transparent; color: var(--muted); background: transparent; }
+    .btn:disabled { opacity: .42; cursor: default; }
+
+    /* Variant B — spotlight */
+    .spotlight {
+      position: fixed;
+      z-index: 25;
+      border: 2px solid white;
+      border-radius: 11px;
+      box-shadow: 0 0 0 9999px rgba(17, 25, 42, .67), 0 0 0 6px rgba(83, 104, 232, .45), 0 18px 50px rgba(16, 24, 40, .24);
+      pointer-events: none;
+      transition: all .36s cubic-bezier(.2,.8,.2,1);
+    }
+    .spotlight.step-0 { top: 57px; right: max(56px, calc((100vw - 1124px) / 2 + 28px)); width: 112px; height: 48px; }
+    .spotlight.step-1 { top: 57px; left: max(265px, calc((100vw - 1124px) / 2 + 237px)); width: 60px; height: 48px; }
+    .spotlight.step-2 { top: 448px; right: max(56px, calc((100vw - 1124px) / 2 + 34px)); width: 38%; max-width: 456px; height: 56px; }
+    .tour-card {
+      position: fixed;
+      z-index: 35;
+      width: 370px;
+      padding: 22px;
+      border: 1px solid rgba(255,255,255,.75);
+      border-radius: 11px;
+      background: white;
+      box-shadow: var(--shadow-dialog);
+      animation: dialog-in .24s ease-out;
+    }
+    .tour-card.step-0 { top: 122px; right: max(56px, calc((100vw - 1124px) / 2 + 28px)); }
+    .tour-card.step-1 { top: 122px; left: max(228px, calc((100vw - 1124px) / 2 + 190px)); }
+    .tour-card.step-2 { top: 282px; left: max(228px, calc((100vw - 1124px) / 2 + 190px)); }
+    .tour-card::before { content: ""; position: absolute; width: 11px; height: 11px; transform: rotate(45deg); background: white; }
+    .tour-card.step-0::before { right: 38px; top: -6px; border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
+    .tour-card.step-1::before { left: 62px; top: -6px; border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
+    .tour-card.step-2::before { right: -6px; top: 172px; border-right: 1px solid var(--line); border-top: 1px solid var(--line); }
+    .tour-head { display: flex; justify-content: space-between; gap: 20px; }
+    .tour-head span { color: var(--signal); font: 500 10px/1.3 "IBM Plex Mono", monospace; }
+    .tour-card h2 { margin: 14px 0 8px; font-size: 19px; }
+    .tour-card p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+    .tour-progress { display: flex; gap: 5px; margin: 18px 0; }
+    .tour-progress i { height: 3px; flex: 1; border-radius: 999px; background: #e4e8f0; }
+    .tour-progress i.active { background: var(--signal); }
+    .tour-actions { display: flex; align-items: center; gap: 8px; }
+
+    /* Variant C — quick-start drawer */
+    .drawer {
+      position: fixed;
+      z-index: 30;
+      top: 34px;
+      right: 0;
+      bottom: 72px;
+      width: min(410px, 46vw);
+      display: flex;
+      flex-direction: column;
+      padding: 30px;
+      border-left: 1px solid rgba(255,255,255,.8);
+      background: white;
+      box-shadow: -20px 0 70px rgba(22, 31, 52, .18);
+      animation: drawer-in .32s cubic-bezier(.2,.8,.2,1);
+    }
+    .drawer-top { display: flex; justify-content: space-between; }
+    .drawer h1 { margin: 10px 0 7px; font-size: 24px; letter-spacing: -0.035em; }
+    .drawer > p { margin: 0 0 24px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .checklist { display: grid; gap: 9px; }
+    .check-item {
+      display: grid;
+      grid-template-columns: 30px 1fr auto;
+      gap: 11px;
+      align-items: center;
+      min-height: 70px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      color: var(--ink);
+      background: white;
+      text-align: left;
+      cursor: pointer;
+      transition: .18s ease;
+    }
+    .check-item:hover { border-color: #bbc5d7; transform: translateY(-1px); }
+    .check-item.active { border-color: rgba(83,104,232,.55); background: var(--signal-soft); box-shadow: 0 0 0 3px rgba(83,104,232,.08); }
+    .check-item.done { background: #fbfcfd; }
+    .check-number { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--muted); font: 500 10px/1 "IBM Plex Mono", monospace; background: white; }
+    .check-item.active .check-number { border-color: var(--signal); color: white; background: var(--signal); }
+    .check-item.done .check-number { border-color: var(--success); color: white; background: var(--success); }
+    .check-item strong { display: block; font-size: 12px; }
+    .check-item small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
+    .check-arrow { color: #9ba5b6; }
+    .drawer-detail { margin-top: 18px; padding: 15px; border-left: 3px solid var(--signal); color: #58647a; background: #f7f8fc; font-size: 11px; line-height: 1.6; }
+    .drawer-actions { display: flex; gap: 8px; margin-top: auto; padding-top: 18px; border-top: 1px solid var(--line); }
+
+    .complete-state { min-height: 360px; display: grid; place-items: center; padding: 36px; text-align: center; }
+    .complete-mark { width: 62px; height: 62px; display: grid; place-items: center; margin: 0 auto 18px; border-radius: 50%; color: white; background: var(--success); box-shadow: 0 0 0 9px var(--success-soft); font-size: 28px; }
+    .complete-state h2 { margin: 0 0 8px; font-size: 25px; }
+    .complete-state p { max-width: 420px; margin: 0 auto 22px; color: var(--muted); font-size: 12px; line-height: 1.65; }
+    .complete-actions { display: flex; justify-content: center; gap: 8px; }
+
+    .reopen {
+      position: fixed;
+      right: 28px;
+      bottom: 86px;
+      z-index: 35;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 38px;
+      padding: 0 14px;
+      border: 1px solid #d3d9e5;
+      border-radius: 8px;
+      color: #39455c;
+      background: white;
+      box-shadow: 0 12px 34px rgba(25, 35, 58, .16);
+      cursor: pointer;
+    }
+    .reopen[hidden] { display: none; }
+
+    .switcher {
+      position: fixed;
+      left: 50%;
+      bottom: 18px;
+      z-index: 100;
+      display: grid;
+      grid-template-columns: 36px minmax(250px, auto) 36px;
+      align-items: center;
+      gap: 4px;
+      padding: 5px;
+      transform: translateX(-50%);
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 11px;
+      color: white;
+      background: rgba(17, 24, 39, .92);
+      box-shadow: 0 14px 40px rgba(10, 17, 31, .28);
+      backdrop-filter: blur(14px);
+    }
+    .switcher button { width: 36px; height: 34px; border: 0; border-radius: 7px; color: white; background: rgba(255,255,255,.08); cursor: pointer; font-size: 17px; }
+    .switcher button:hover { background: rgba(255,255,255,.16); }
+    .switcher-label { padding: 0 12px; text-align: center; }
+    .switcher-label strong { display: block; font-size: 11px; }
+    .switcher-label small { display: block; margin-top: 2px; color: #9eabba; font: 500 9px/1.25 "IBM Plex Mono", monospace; }
+
+    @keyframes veil-in { from { opacity: 0; } }
+    @keyframes dialog-in { from { opacity: 0; transform: translate(-50%, -47%) scale(.98); } }
+    @keyframes drawer-in { from { transform: translateX(35px); opacity: 0; } }
+    @keyframes station-pulse { to { transform: scale(1.65); opacity: 0; } }
+
+    @media (max-width: 940px) {
+      .desktop-frame { padding-inline: 16px; }
+      .app-header { padding-inline: 20px; gap: 12px; }
+      .nav span { padding-inline: 7px; }
+      .nav span:nth-last-child(-n+2) { display: none; }
+      .header-btn { display: none; }
+      .dashboard { padding: 25px 24px; }
+      .metrics { grid-template-columns: repeat(2, 1fr); }
+      .metric:nth-last-child(-n+2) { display: none; }
+      .route-dialog { grid-template-columns: 240px minmax(0, 1fr); }
+      .route-rail { padding-inline: 24px; }
+      .guide-main { padding-inline: 30px; }
+      .spotlight { display: none; }
+      .tour-card, .tour-card.step-0, .tour-card.step-1, .tour-card.step-2 { left: 50%; right: auto; top: 50%; transform: translate(-50%, -50%); }
+      .tour-card::before { display: none; }
+    }
+    @media (max-height: 680px) {
+      .desktop-frame { padding-top: 18px; }
+      .dialog { min-height: 458px; }
+      .route-rail, .guide-main { min-height: 458px; }
+      .guide-main { padding-top: 25px; padding-bottom: 22px; }
+      .demo-surface { min-height: 125px; margin-block: 16px; }
+      .drawer { padding-top: 22px; padding-bottom: 20px; }
+      .drawer > p { margin-bottom: 14px; }
+      .check-item { min-height: 60px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="prototype-note">PROTOTYPE · 交互演示，不会修改配置</div>
+
+  <div class="desktop-frame" aria-hidden="true">
+    <section class="app-window">
+      <div class="titlebar"><span class="traffic"><i></i><i></i><i></i></span>Token Station</div>
+      <header class="app-header">
+        <div class="brand">
+          <span class="brand-mark">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 17h16M6 13l6-8 6 8M8 17V9m8 8V9M10 13h4"/></svg>
+          </span>
+          <span>Token Station</span>
+        </div>
+        <nav class="nav"><span class="active">概览</span><span id="mock-route-nav">路由</span><span>Agent</span><span>供应商</span><span>用量</span><span>设置</span></nav>
+        <div class="header-actions">
+          <div id="mock-runtime-pill" class="runtime-pill idle"><i class="pulse"></i><span><strong id="mock-runtime">代理未启动</strong><small id="mock-endpoint">等待路由配置</small></span></div>
+          <button class="header-btn" type="button">＋ 添加供应商</button>
+        </div>
+      </header>
+      <main class="dashboard">
+        <header class="dashboard-heading"><div><span class="eyebrow">RUNTIME STATUS</span><h1>概览</h1><p>代理运行状态、当前路由、请求与成本，一屏看清。</p></div></header>
+        <section class="metrics">
+          <article class="card metric"><span>代理状态</span><strong id="mock-status" class="status-badge idle"><i></i>未运行</strong><p id="mock-revision" class="mono">尚无已应用路由</p></article>
+          <article class="card metric"><span>今日成本</span><strong>$0.00</strong><p>尚无请求 · 等待完成首次配置</p></article>
+          <article class="card metric"><span>已接管 Agent</span><strong id="mock-agent-count">0 / 5</strong><p id="mock-agent-copy">2 个已检测待接入</p></article>
+          <article class="card metric"><span>供应商</span><strong id="mock-provider-count">0</strong><p id="mock-provider-copy">先添加一个供应商</p></article>
+        </section>
+        <section class="main-grid">
+          <article class="card panel"><h2>当前路由快照</h2><div class="route-row"><span>上档</span><strong data-mock-route>尚未配置</strong><code data-mock-provider>—</code></div><div class="route-row"><span>中档</span><strong data-mock-route>尚未配置</strong><code data-mock-provider>—</code></div><div class="route-row"><span>下档</span><strong data-mock-route>尚未配置</strong><code data-mock-provider>—</code></div></article>
+          <article class="card panel"><h2>下一步</h2><div class="action-row"><span class="action-icon">↗</span><div><strong>检查 Agent 接入</strong><small>2 个 Agent 尚未接管</small></div></div><div class="action-row"><span class="action-icon">⌁</span><div><strong>调整全局路由</strong><small>为不同任务选择模型</small></div></div><div class="action-row"><span class="action-icon">◎</span><div><strong>查看本地用量</strong><small>请求、Token 与成本</small></div></div></article>
+        </section>
+      </main>
+    </section>
+  </div>
+
+  <main id="experience"></main>
+  <button id="reopen" class="reopen" type="button" hidden>↺ 重新打开新手引导</button>
+
+  <nav class="switcher" aria-label="原型方案切换">
+    <button type="button" data-switch="-1" aria-label="上一个方案">←</button>
+    <div class="switcher-label" aria-live="polite"><strong id="variant-name"></strong><small id="state-readout"></small></div>
+    <button type="button" data-switch="1" aria-label="下一个方案">→</button>
+  </nav>
+
+  <script>
+    // Three variants of the first-run guide, switchable via ?variant=, in a standalone throwaway HTML prototype.
+    const variants = [
+      { key: "a", name: "A — 站点路线图弹窗" },
+      { key: "b", name: "B — 页面聚光灯讲解" },
+      { key: "c", name: "C — 快速开始侧面板" },
+    ];
+
+    const steps = [
+      {
+        title: "先添加一个模型供应商",
+        short: "添加供应商",
+        hint: "连接 OpenAI、Anthropic 或本地模型。",
+        description: "选择模型供应商并填写凭据。密钥只保存在本机；保存前可以先运行连接测试，避免把无效配置带入路由。",
+        detail: "从右上角“添加供应商”进入目录，测试通过后再保存。",
+        endpoint: "OpenAI · Anthropic · 本地模型",
+        state: "已连接",
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 9h8M8 13h5"/></svg>',
+      },
+      {
+        title: "配置并启动路由",
+        short: "启动路由",
+        hint: "选择模型，然后保存并应用路由。",
+        description: "进入“路由”，为上、中、下三档选择模型，然后点击“保存并应用”。右上角显示“代理运行中”后，这条路由才真正可用。",
+        detail: "至少配置一个可用模型；保存与应用成功后再接入 Agent，避免请求无处可去。",
+        endpoint: "上档 → 中档 → 下档",
+        state: "保存并应用",
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 6h6a3 3 0 0 1 3 3v9M5 18h6a3 3 0 0 0 3-3V9m0 0h5m-2-2 2 2-2 2"/></svg>',
+      },
+      {
+        title: "接入你的第一个 Agent",
+        short: "接入 Agent",
+        hint: "让 Codex、Claude Code 等工具使用统一路由。",
+        description: "Token Station 会扫描本机已安装的 Agent。选择一个 Agent，检查即将修改的配置，再明确确认接入。",
+        detail: "接入前会展示变更预览；原配置保留快照，之后可以安全断开。",
+        endpoint: "Codex · Claude Code",
+        state: "待接入",
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="7" width="14" height="11" rx="3"/><path d="M9 12h.01M15 12h.01M9 16h6M12 7V4"/></svg>',
+      },
+    ];
+
+    let variant = new URLSearchParams(location.search).get("variant")?.toLowerCase();
+    if (!variants.some((item) => item.key === variant)) variant = "a";
+    let step = 0;
+    let open = true;
+    let completed = false;
+
+    const experience = document.querySelector("#experience");
+    const reopen = document.querySelector("#reopen");
+    const variantName = document.querySelector("#variant-name");
+    const stateReadout = document.querySelector("#state-readout");
+
+    function stationList() {
+      return steps.map((item, index) => `
+        <button class="station ${index < step ? "done" : ""} ${index === step ? "active" : ""}" type="button" data-step="${index}">
+          <i class="station-dot"></i><span><strong>${item.short}</strong><small>${index < step ? "已看过" : index === step ? "当前步骤" : "接下来"}</small></span>
+        </button>`).join("");
+    }
+
+    function progressBars() {
+      return steps.map((_, index) => `<i class="${index <= step ? "active" : ""}"></i>`).join("");
+    }
+
+    function guideButtons(type = "standard") {
+      const previous = `<button class="btn" type="button" data-action="prev" ${step === 0 ? "disabled" : ""}>上一步</button>`;
+      const nextLabel = step === steps.length - 1 ? "完成引导" : "下一步";
+      if (type === "tour") return `<div class="tour-actions"><button class="btn text" type="button" data-action="close">跳过引导</button><span class="spacer"></span>${previous}<button class="btn primary" type="button" data-action="next">${nextLabel}</button></div>`;
+      return `<div class="guide-actions"><button class="btn text" type="button" data-action="close">以后再说</button><span class="spacer"></span>${previous}<button class="btn primary" type="button" data-action="next">${nextLabel}</button></div>`;
+    }
+
+    function completeMarkup(wrapper = "dialog") {
+      return `<div class="veil"></div><section class="${wrapper}" role="dialog" aria-modal="true" aria-labelledby="complete-title"><div class="complete-state"><div><div class="complete-mark">✓</div><h2 id="complete-title">准备就绪</h2><p>你已经了解 Token Station 的起步路径。正式版本中，完成情况会根据真实运行状态判断，而不是只看是否点击过。</p><div class="complete-actions"><button class="btn" type="button" data-action="restart">重新演示</button><button class="btn primary" type="button" data-action="close">进入概览</button></div></div></div></section>`;
+    }
+
+    function renderA() {
+      if (completed) return completeMarkup("dialog");
+      const item = steps[step];
+      return `
+        <div class="veil"></div>
+        <section class="dialog route-dialog" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+          <aside class="route-rail"><span class="eyebrow">FIRST RUN · 3 STOPS</span><h2>三站之后，<br>开始接管模型流量</h2><p>沿着真实操作顺序走一遍，约 1 分钟。</p><div class="stations">${stationList()}</div><span class="rail-foot">LOCAL-FIRST CONTROL PLANE</span></aside>
+          <div class="guide-main">
+            <div class="guide-top"><span class="step-label">STEP ${String(step + 1).padStart(2, "0")} / 03</span><button class="icon-button" type="button" data-action="close" aria-label="关闭引导">×</button></div>
+            <h1 id="guide-title">${item.title}</h1><p class="guide-description">${item.description}</p>
+            <div class="demo-surface"><div class="demo-console"><span class="demo-icon">${item.icon}</span><span><strong>${item.short}</strong><small>${item.endpoint}</small></span><span class="demo-state"><i></i>${item.state}</span></div></div>
+            <div class="guide-tip"><b>提示</b><span>${item.detail}</span></div>${guideButtons()}
+          </div>
+        </section>`;
+    }
+
+    function renderB() {
+      if (completed) return completeMarkup("dialog");
+      const item = steps[step];
+      return `
+        <div class="spotlight step-${step}" aria-hidden="true"></div>
+        <section class="tour-card step-${step}" role="dialog" aria-modal="true" aria-labelledby="tour-title">
+          <div class="tour-head"><span>页面讲解 · ${step + 1}/3</span><button class="icon-button" type="button" data-action="close" aria-label="关闭引导">×</button></div>
+          <h2 id="tour-title">${item.title}</h2><p>${item.description}</p><div class="tour-progress">${progressBars()}</div>${guideButtons("tour")}
+        </section>`;
+    }
+
+    function renderC() {
+      if (completed) return completeMarkup("drawer");
+      const item = steps[step];
+      const checklist = steps.map((entry, index) => `
+        <button class="check-item ${index < step ? "done" : ""} ${index === step ? "active" : ""}" type="button" data-step="${index}">
+          <span class="check-number">${index < step ? "✓" : index + 1}</span><span><strong>${entry.short}</strong><small>${entry.hint}</small></span><span class="check-arrow">›</span>
+        </button>`).join("");
+      return `<div class="veil soft"></div><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><div class="drawer-top"><span class="eyebrow">QUICK START</span><button class="icon-button" type="button" data-action="close" aria-label="关闭引导">×</button></div><h1 id="drawer-title">让 Token Station 跑起来</h1><p>按顺序完成三件事，也可以先关闭，稍后从右下角继续。</p><div class="checklist">${checklist}</div><div class="drawer-detail"><strong>${item.title}</strong><br>${item.detail}</div><div class="drawer-actions"><button class="btn text" type="button" data-action="close">暂时关闭</button><span class="spacer"></span><button class="btn primary" type="button" data-action="next">${step === steps.length - 1 ? "完成引导" : "完成这一步"}</button></div></aside>`;
+    }
+
+    function render() {
+      const meta = variants.find((item) => item.key === variant);
+      variantName.textContent = meta.name;
+      stateReadout.textContent = completed ? "引导已完成 · 未持久化" : open ? `步骤 ${step + 1}/3 · 引导打开` : "引导已关闭 · 可重新打开";
+      reopen.hidden = open;
+      experience.innerHTML = open ? (variant === "a" ? renderA() : variant === "b" ? renderB() : renderC()) : "";
+      syncMockState();
+    }
+
+    function syncMockState() {
+      const routeReady = step >= 2 || completed;
+      const providerReady = step >= 1 || completed;
+      const runtimePill = document.querySelector("#mock-runtime-pill");
+      const status = document.querySelector("#mock-status");
+      runtimePill.classList.toggle("idle", !routeReady);
+      status.classList.toggle("idle", !routeReady);
+      document.querySelector("#mock-runtime").textContent = routeReady ? "代理运行中" : "代理未启动";
+      document.querySelector("#mock-endpoint").textContent = routeReady ? "127.0.0.1:8787" : providerReady ? "等待保存并应用" : "等待路由配置";
+      status.lastChild.textContent = routeReady ? "运行中" : "未运行";
+      document.querySelector("#mock-revision").textContent = routeReady ? "revision 1 · 127.0.0.1:8787" : "尚无已应用路由";
+      document.querySelector("#mock-provider-count").textContent = providerReady ? "1" : "0";
+      document.querySelector("#mock-provider-copy").textContent = providerReady ? "1 个供应商已连接" : "先添加一个供应商";
+      document.querySelector("#mock-agent-count").textContent = completed ? "1 / 5" : "0 / 5";
+      document.querySelector("#mock-agent-copy").textContent = completed ? "已接入第一个 Agent" : "2 个已检测待接入";
+      const models = ["claude-opus-4.1", "claude-sonnet-4", "claude-haiku-3.5"];
+      document.querySelectorAll("[data-mock-route]").forEach((node, index) => { node.textContent = routeReady ? models[index] : "尚未配置"; });
+      document.querySelectorAll("[data-mock-provider]").forEach((node) => { node.textContent = routeReady ? "anthropic" : "—"; });
+    }
+
+    function setVariant(direction) {
+      const index = variants.findIndex((item) => item.key === variant);
+      variant = variants[(index + direction + variants.length) % variants.length].key;
+      step = 0;
+      completed = false;
+      open = true;
+      const params = new URLSearchParams(location.search);
+      params.set("variant", variant);
+      history.replaceState(null, "", `${location.pathname}?${params}`);
+      render();
+    }
+
+    document.addEventListener("click", (event) => {
+      const switchButton = event.target.closest("[data-switch]");
+      if (switchButton) return setVariant(Number(switchButton.dataset.switch));
+      const stepButton = event.target.closest("[data-step]");
+      if (stepButton) { step = Number(stepButton.dataset.step); completed = false; return render(); }
+      const action = event.target.closest("[data-action]")?.dataset.action;
+      if (action === "next") { if (step < steps.length - 1) step += 1; else completed = true; render(); }
+      if (action === "prev") { step = Math.max(0, step - 1); completed = false; render(); }
+      if (action === "close") { open = false; completed = false; render(); reopen.focus(); }
+      if (action === "restart") { step = 0; completed = false; open = true; render(); }
+    });
+
+    reopen.addEventListener("click", () => { open = true; step = 0; completed = false; render(); });
+    document.addEventListener("keydown", (event) => {
+      if (["INPUT", "TEXTAREA"].includes(event.target.tagName) || event.target.isContentEditable) return;
+      if (event.key === "ArrowLeft") setVariant(-1);
+      if (event.key === "ArrowRight") setVariant(1);
+      if (event.key === "Escape" && open) { open = false; completed = false; render(); reopen.focus(); }
+    });
+
+    render();
+  </script>
+</body>
+</html>

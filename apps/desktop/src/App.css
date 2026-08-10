@@ -851,6 +851,152 @@ body {
   }
 }
 
+/* ---- First-run page tour ----------------------------------------------- */
+.first-run-guide-overlay[data-slot="dialog-overlay"] {
+  background: transparent;
+  backdrop-filter: none;
+}
+
+.first-run-guide-spotlight {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+  border: 2px solid var(--surface);
+  border-radius: 10px;
+  background: transparent;
+  box-shadow:
+    0 0 0 9999px color-mix(in srgb, var(--ink) 66%, transparent),
+    0 0 0 6px color-mix(in srgb, var(--signal) 42%, transparent),
+    0 18px 48px color-mix(in srgb, var(--ink) 22%, transparent);
+  transition: top 220ms ease, left 220ms ease, width 220ms ease, height 220ms ease;
+}
+
+.first-run-guide-dialog {
+  position: fixed;
+  z-index: 50;
+  width: min(380px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  display: grid;
+  gap: 16px;
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  outline: none;
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 26px 70px color-mix(in srgb, var(--ink) 24%, transparent);
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.first-run-guide-dialog[data-placement="center"] {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.first-run-guide-dialog[data-placement="below"]::before,
+.first-run-guide-dialog[data-placement="left"]::before {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  transform: rotate(45deg);
+}
+
+.first-run-guide-dialog[data-placement="below"]::before {
+  top: -7px;
+  right: 34px;
+  border-right: 0;
+  border-bottom: 0;
+}
+
+.first-run-guide-dialog[data-placement="left"]::before {
+  right: -7px;
+  top: calc(50% - 6px);
+  border-left: 0;
+  border-bottom: 0;
+}
+
+.first-run-guide-header {
+  position: relative;
+  gap: 10px;
+  padding-right: 30px;
+}
+
+.first-run-guide-step {
+  color: var(--signal);
+  font: 500 10px/1.25 "IBM Plex Mono", monospace;
+  letter-spacing: .04em;
+}
+
+.first-run-guide-close[data-slot="button"] {
+  position: absolute;
+  top: -7px;
+  right: -9px;
+  color: var(--muted);
+}
+
+.first-run-guide-title[data-slot="dialog-title"] {
+  margin-top: 4px;
+  font-size: 19px;
+  line-height: 1.25;
+  font-weight: 650;
+  letter-spacing: -.02em;
+}
+
+.first-run-guide-dialog [data-slot="dialog-description"] {
+  line-height: 1.65;
+}
+
+.first-run-guide-dialog [data-slot="progress"] {
+  height: 3px;
+}
+
+.first-run-guide-actions[data-slot="dialog-footer"] {
+  margin: 0;
+  padding: 14px 0 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.first-run-guide-actions [data-action="skip"] {
+  margin-right: auto;
+  color: var(--muted);
+}
+
+@starting-style {
+  .first-run-guide-dialog[data-state="open"] {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  .first-run-guide-dialog[data-placement="center"][data-state="open"] {
+    transform: translate(-50%, calc(-50% - 4px));
+  }
+}
+
+@media (max-height: 620px) {
+  .first-run-guide-dialog {
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .first-run-guide-actions[data-slot="dialog-footer"] {
+    padding-top: 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .first-run-guide-spotlight,
+  .first-run-guide-dialog {
+    transition: none;
+  }
+}
+
 /* ---- Station shell ------------------------------------------------------ */
 .station-shell {
   min-height: 100vh;
@@ -1518,11 +1664,13 @@ body {
 /* ── 额度计划编辑(面板内,供本地估算) ──────────────────────────── */
 .quota-plan-section {
   margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--line);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+}
+
+.quota-plan-separator {
+  margin-bottom: 4px;
 }
 
 .quota-plan-head {
@@ -1543,17 +1691,44 @@ body {
 
 .quota-plan-row {
   display: grid;
-  grid-template-columns: 1fr 120px 130px 110px;
-  gap: 8px;
+  grid-template-columns: minmax(128px, max-content) minmax(0, 1fr);
+  gap: 12px;
   align-items: center;
 }
 
 .quota-plan-name {
   font-size: 13px;
   font-weight: 600;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.quota-plan-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 136px), 1fr));
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.quota-plan-field {
+  min-width: 0;
+}
+
+.quota-plan-select-trigger,
+.quota-plan-limit-input {
+  width: 100%;
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .quota-plan-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    gap: 8px;
+  }
 }
 
 /* ── 实时额度查看页 ─────────────────────────────────────────────── */

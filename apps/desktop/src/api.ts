@@ -694,13 +694,25 @@ export interface PluginsView {
   listing: string;
 }
 
-export interface UpgradeView {
-  status?: "up_to_date" | "update_available" | "no_published_release" | "unavailable";
-  current: string;
-  latest_tag: string;
-  html_url: string;
-  newer: boolean;
-  message?: string | null;
+export type DesktopUpdateStatus =
+  | "up_to_date"
+  | "update_available"
+  | "unsupported"
+  | "unavailable";
+
+export interface DesktopUpdateView {
+  status: DesktopUpdateStatus;
+  current_version: string;
+  version: string | null;
+  notes: string | null;
+  pub_date: string | null;
+  release_url: string;
+  message: string | null;
+}
+
+export interface DesktopUpdateProgress {
+  downloaded: number;
+  total: number | null;
 }
 
 export interface RecoveryState {
@@ -910,6 +922,10 @@ export const serveStop = () => invoke<StateView>("serve_stop");
 
 export const listenServeState = (handler: (serve: ServeView) => void) =>
   listen<ServeView>("serve-state-changed", (event) => handler(event.payload));
+
+export const listenDesktopUpdateProgress = (
+  handler: (progress: DesktopUpdateProgress) => void,
+) => listen<DesktopUpdateProgress>("desktop-update-progress", (event) => handler(event.payload));
 
 export const listAgentRegistry = () =>
   invoke<AgentUiMetadataView[]>("list_agent_registry");
@@ -1139,4 +1155,8 @@ export const getPlugins = () =>
 export const getEgress = () =>
   dataGet<EgressView>("/admin/egress", () => invoke<EgressView>("get_egress"));
 
-export const checkUpgrade = () => invoke<UpgradeView>("check_upgrade");
+export const checkDesktopUpdate = () =>
+  invoke<DesktopUpdateView>("check_desktop_update");
+
+export const installDesktopUpdateAndRestart = () =>
+  invoke<boolean>("install_desktop_update_and_restart");

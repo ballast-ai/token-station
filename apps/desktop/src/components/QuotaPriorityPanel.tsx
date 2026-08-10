@@ -1,7 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { ProviderView, QuotaAccount, QuotaPlanView } from "../api";
 import CompactCombobox, { type CompactComboboxOption } from "./CompactCombobox";
 import { useLocalizedCopy } from "./LanguageProvider";
+import { Field, FieldGroup, FieldLabel } from "./ui/field";
+import { Input } from "./ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "./ui/select";
+import { Separator } from "./ui/separator";
 
 interface QuotaPriorityPanelProps {
   providers: ProviderView[];
@@ -192,6 +203,7 @@ export default function QuotaPriorityPanel({
 
       {planProviders.length > 0 && (
         <div className="quota-plan-section">
+          <Separator className="quota-plan-separator" />
           <div className="quota-plan-head">
             <strong>{copy("Quota plans (optional)", "额度计划(可选)")}</strong>
             <span>
@@ -252,6 +264,9 @@ function QuotaPlanRow({
   const [lenMs, setLenMs] = useState(presetOf(plan?.len_ms));
   const [limit, setLimit] = useState(plan?.limit ? String(plan.limit) : "");
   const [unit, setUnit] = useState<"tokens" | "requests">(plan?.unit ?? "tokens");
+  const windowId = useId();
+  const limitId = useId();
+  const unitId = useId();
 
   // Resynchronize local fields when an external plan changes after saved state refreshes.
   useEffect(() => {
@@ -268,49 +283,89 @@ function QuotaPlanRow({
 
   return (
     <div className="quota-plan-row">
-      <span className="quota-plan-name">{upstream}</span>
-      <select
-        className="select"
-        aria-label={copy(`${upstream} reset window`, `${upstream} 刷新窗口`)}
-        value={lenMs}
-        disabled={busy}
-        onChange={(event) => {
-          const next = Number(event.target.value);
-          setLenMs(next);
-          commit(next, limit, unit);
-        }}
-      >
-        {WINDOW_PRESETS.map((preset) => (
-          <option key={preset.ms} value={preset.ms}>
-            {copy(preset.label[0], preset.label[1])}
-          </option>
-        ))}
-      </select>
-      <input
-        className="input"
-        type="number"
-        min={0}
-        aria-label={copy(`${upstream} allowance`, `${upstream} 额度上限`)}
-        placeholder={copy("Limit", "额度上限")}
-        value={limit}
-        disabled={busy}
-        onChange={(event) => setLimit(event.target.value)}
-        onBlur={() => commit(lenMs, limit, unit)}
-      />
-      <select
-        className="select"
-        aria-label={copy(`${upstream} unit`, `${upstream} 单位`)}
-        value={unit}
-        disabled={busy}
-        onChange={(event) => {
-          const next = event.target.value as "tokens" | "requests";
-          setUnit(next);
-          commit(lenMs, limit, next);
-        }}
-      >
-        <option value="tokens">tokens</option>
-        <option value="requests">requests</option>
-      </select>
+      <span className="quota-plan-name" title={upstream}>{upstream}</span>
+      <FieldGroup className="quota-plan-controls">
+        <Field className="quota-plan-field" data-disabled={busy ? true : undefined}>
+          <FieldLabel className="sr-only" htmlFor={windowId}>
+            {copy(`${upstream} reset window`, `${upstream} 刷新窗口`)}
+          </FieldLabel>
+          <Select
+            value={String(lenMs)}
+            disabled={busy}
+            onValueChange={(value) => {
+              const next = Number(value);
+              setLenMs(next);
+              commit(next, limit, unit);
+            }}
+          >
+            <SelectTrigger
+              id={windowId}
+              className="quota-plan-select-trigger"
+              size="sm"
+              aria-label={copy(`${upstream} reset window`, `${upstream} 刷新窗口`)}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent align="end">
+              <SelectGroup>
+                {WINDOW_PRESETS.map((preset) => (
+                  <SelectItem key={preset.ms} value={String(preset.ms)}>
+                    {copy(preset.label[0], preset.label[1])}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </Field>
+
+        <Field className="quota-plan-field" data-disabled={busy ? true : undefined}>
+          <FieldLabel className="sr-only" htmlFor={limitId}>
+            {copy(`${upstream} allowance`, `${upstream} 额度上限`)}
+          </FieldLabel>
+          <Input
+            id={limitId}
+            className="quota-plan-limit-input"
+            type="number"
+            min={0}
+            aria-label={copy(`${upstream} allowance`, `${upstream} 额度上限`)}
+            placeholder={copy("Limit", "额度上限")}
+            value={limit}
+            disabled={busy}
+            onChange={(event) => setLimit(event.target.value)}
+            onBlur={() => commit(lenMs, limit, unit)}
+          />
+        </Field>
+
+        <Field className="quota-plan-field" data-disabled={busy ? true : undefined}>
+          <FieldLabel className="sr-only" htmlFor={unitId}>
+            {copy(`${upstream} unit`, `${upstream} 单位`)}
+          </FieldLabel>
+          <Select
+            value={unit}
+            disabled={busy}
+            onValueChange={(value) => {
+              const next = value as "tokens" | "requests";
+              setUnit(next);
+              commit(lenMs, limit, next);
+            }}
+          >
+            <SelectTrigger
+              id={unitId}
+              className="quota-plan-select-trigger"
+              size="sm"
+              aria-label={copy(`${upstream} unit`, `${upstream} 单位`)}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent align="end">
+              <SelectGroup>
+                <SelectItem value="tokens">tokens</SelectItem>
+                <SelectItem value="requests">requests</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </Field>
+      </FieldGroup>
     </div>
   );
 }
