@@ -364,8 +364,16 @@ export default function FirstRunGuide({
           event.preventDefault();
         };
         const restoreWorkspaceScroll = () => {
-          if (workspace.scrollTop !== lockedScrollTop) workspace.scrollTop = lockedScrollTop;
-          if (workspace.scrollLeft !== lockedScrollLeft) workspace.scrollLeft = lockedScrollLeft;
+          let restored = false;
+          if (workspace.scrollTop !== lockedScrollTop) {
+            workspace.scrollTop = lockedScrollTop;
+            restored = true;
+          }
+          if (workspace.scrollLeft !== lockedScrollLeft) {
+            workspace.scrollLeft = lockedScrollLeft;
+            restored = true;
+          }
+          if (restored) measure();
         };
         workspace.setAttribute("data-onboarding-scroll-locked", "true");
         window.addEventListener("wheel", preventUserScroll, { passive: false, capture: true });
