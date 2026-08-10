@@ -5,7 +5,7 @@
 
 ### 面向 AI Agent 与 LLM 供应商的本地路由控制台
 
-让 Claude Code、Codex、Gemini CLI 等 Agent 统一连接一个本地网关，再按任务复杂度或账户剩余额度，把每次请求路由到你的 API 供应商或本地模型。
+让 Claude Code、Codex、WorkBuddy 等 Agent 统一连接一个本地网关，再按任务复杂度或账户剩余额度，把每次请求路由到你的 API 供应商或本地模型。
 
 [![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![Platform](https://img.shields.io/badge/public%20desktop-macOS%20Apple%20Silicon-lightgrey.svg)](https://github.com/ballast-ai/token-station/releases/latest) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
 

@@ -5,7 +5,7 @@
 
 ### Local routing control plane for AI agents and LLM providers
 
-Connect Claude Code, Codex, Gemini CLI, and other agents to one loopback gateway. Route each request by task complexity or remaining quota across your own API providers and local models.
+Connect Claude Code, Codex, WorkBuddy, and other agents to one loopback gateway. Route each request by task complexity or remaining quota across your own API providers and local models.
 
 [![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![Platform](https://img.shields.io/badge/public%20desktop-macOS%20Apple%20Silicon-lightgrey.svg)](https://github.com/ballast-ai/token-station/releases/latest) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
 

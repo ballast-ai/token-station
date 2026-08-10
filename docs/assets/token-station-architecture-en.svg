@@ -37,7 +37,7 @@
   <!-- External request source. -->
   <rect class="external" x="420" y="48" width="600" height="110" rx="18"/>
   <text class="text title" x="720" y="93">AI AGENTS</text>
-  <text class="text detail" x="720" y="130">Claude Code · Codex · Gemini CLI · Other Agents</text>
+  <text class="text detail" x="720" y="130">Claude Code · Codex · WorkBuddy · Other Agents</text>
 
   <!-- Rust-owned execution boundary label. -->
   <text class="text title" x="720" y="239" fill="#D63B16">RUST HOST / CORE</text>
