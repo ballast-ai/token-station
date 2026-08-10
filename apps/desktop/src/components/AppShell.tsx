@@ -108,7 +108,6 @@ export default function AppShell({
             return (
               <Button
                 key={item.view}
-                data-onboarding-target={item.view === "home" ? "routing" : undefined}
                 className="station-primary-link"
                 variant="ghost"
                 size="sm"
@@ -118,7 +117,17 @@ export default function AppShell({
                 aria-label={label}
                 onClick={() => onNavigate(item.view)}
               >
-                {label}
+                <span
+                  data-onboarding-target={
+                    item.view === "home"
+                      ? "routing"
+                      : item.view === "settings"
+                        ? "settings"
+                        : undefined
+                  }
+                >
+                  {label}
+                </span>
                 {item.view === "agents" && agents.length > connectedAgents && (
                   <span className="station-nav-alert" aria-hidden="true" />
                 )}
