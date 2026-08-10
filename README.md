@@ -49,15 +49,17 @@ Provider presets are editable starting points, not availability guarantees. Mode
 
 | Agent | Integration | Inbound protocol |
 |---|---|---|
-| <a href="https://github.com/anthropics/claude-code"><img src="docs/assets/agents/claude-code.svg" width="20" height="20" alt=""> Claude Code</a> | Built-in connector | Anthropic Messages |
-| Claude Desktop | Built-in connector | Anthropic Messages |
-| <a href="https://github.com/openai/codex"><img src="docs/assets/agents/codex.svg" width="20" height="20" alt=""> Codex</a> | Built-in connector | OpenAI Responses |
-| Gemini CLI | Built-in connector | Gemini |
-| Hermes Agent | Built-in connector | OpenAI Chat Completions |
-| OpenClaw | Built-in connector | OpenAI Chat Completions |
-| <a href="https://www.workbuddy.ai/"><img src="apps/desktop/public/agents/workbuddy.png" width="20" height="20" alt=""> WorkBuddy</a> | Built-in connector | OpenAI Chat Completions |
-| OpenCode | Built-in connector | OpenAI Chat Completions |
-| Cursor | Dedicated setup on macOS and Windows | OpenAI-compatible endpoint |
+| <a href="https://github.com/anthropics/claude-code"><img src="docs/assets/agents/claude-code.svg" width="20" height="20" alt="">&nbsp;Claude Code</a> | Built-in connector | Anthropic Messages |
+| <a href="https://github.com/anthropics"><img src="docs/assets/agents/claude-desktop.svg" width="20" height="20" alt="">&nbsp;Claude Desktop</a> | Built-in connector | Anthropic Messages |
+| <a href="https://github.com/openai/codex"><img src="docs/assets/agents/codex.svg" width="20" height="20" alt="">&nbsp;Codex</a> | Built-in connector | OpenAI Responses |
+| <a href="https://github.com/google-gemini/gemini-cli"><img src="docs/assets/agents/gemini-cli.svg" width="20" height="20" alt="">&nbsp;Gemini CLI</a> | Built-in connector | Gemini |
+| <a href="https://github.com/NousResearch/hermes-agent"><img src="apps/desktop/public/agents/hermes.png" width="20" height="20" alt="">&nbsp;Hermes Agent</a> | Built-in connector | OpenAI Chat Completions |
+| <a href="https://github.com/openclaw/openclaw"><img src="docs/assets/agents/openclaw.svg" width="20" height="20" alt="">&nbsp;OpenClaw</a> | Built-in connector | OpenAI Chat Completions |
+| <a href="https://www.workbuddy.ai/"><img src="apps/desktop/public/agents/workbuddy.png" width="20" height="20" alt="">&nbsp;WorkBuddy</a> | Built-in connector | OpenAI Chat Completions |
+| <a href="https://github.com/anomalyco/opencode"><img src="docs/assets/agents/opencode.svg" width="20" height="20" alt="">&nbsp;OpenCode</a> | Built-in connector | OpenAI Chat Completions |
+| <a href="https://github.com/cursor/cursor"><img src="docs/assets/agents/cursor.svg" width="20" height="20" alt="">&nbsp;Cursor</a> | Dedicated setup on macOS and Windows | OpenAI-compatible endpoint |
+
+Claude Desktop does not currently have a public product repository; its link opens Anthropic's official GitHub organization.
 
 For the eight built-in connectors, clicking **Connect** creates and immediately applies a bounded plan. The first connection shows the changed fields after the write. Cursor is a separate path: quit Cursor first, then one-click setup backs up and updates two values in its local SQLite settings. Cursor is not covered by connector ownership or the in-app disconnect flow; manual setup remains available.
 
