@@ -1664,11 +1664,13 @@ body {
 /* ── 额度计划编辑(面板内,供本地估算) ──────────────────────────── */
 .quota-plan-section {
   margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--line);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+}
+
+.quota-plan-separator {
+  margin-bottom: 4px;
 }
 
 .quota-plan-head {
@@ -1689,17 +1691,44 @@ body {
 
 .quota-plan-row {
   display: grid;
-  grid-template-columns: 1fr 120px 130px 110px;
-  gap: 8px;
+  grid-template-columns: minmax(128px, max-content) minmax(0, 1fr);
+  gap: 12px;
   align-items: center;
 }
 
 .quota-plan-name {
   font-size: 13px;
   font-weight: 600;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.quota-plan-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 136px), 1fr));
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.quota-plan-field {
+  min-width: 0;
+}
+
+.quota-plan-select-trigger,
+.quota-plan-limit-input {
+  width: 100%;
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .quota-plan-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    gap: 8px;
+  }
 }
 
 /* ── 实时额度查看页 ─────────────────────────────────────────────── */
