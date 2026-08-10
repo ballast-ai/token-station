@@ -419,7 +419,7 @@ describe("settings and update actions", () => {
     render(<About desktopVersion="0.1.0" coreVersion="0.2.0" />);
     await user.click(screen.getByRole("button", { name: "检查更新" }));
 
-    expect(await screen.findByText("暂无公开发布版本")).toBeInTheDocument();
+    expect(await screen.findByText("暂无公开发布版本。请稍后重试，或打开发布页查看。")).toBeInTheDocument();
     expect(screen.queryByText(/404/)).not.toBeInTheDocument();
   });
 });
@@ -542,6 +542,29 @@ describe("model selection and provider model management", () => {
     await user.click(screen.getByRole("button", { name: "保存模型" }));
     expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
     expect(within(screen.getByText(/代理运行中/).parentElement!).getByRole("button")).toBeEnabled();
+  });
+
+  it("localizes a Chinese model-catalog warning in English mode", async () => {
+    window.localStorage.setItem("token-station-language", "en");
+    const provider: ProviderView = {
+      name: "openai", provider: "openai", base_url: "https://api.example/v1",
+      models: ["configured"], has_auth: true,
+    };
+    vi.mocked(discoverProviderModels).mockResolvedValue({
+      models: ["configured"],
+      source: "cache",
+      fetched_at_ms: 1,
+      warning: "模型目录请求失败：socket reset",
+    });
+
+    const user = userEvent.setup();
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Refresh models" }));
+
+    expect(await screen.findByText(
+      "The latest provider data is unavailable. Keep the current settings and try refreshing again later.",
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/模型目录请求失败/)).not.toBeInTheDocument();
   });
 
   it("未定价 Provider 显示成本未知而不是零成本", async () => {
@@ -761,6 +784,27 @@ describe("model selection and provider model management", () => {
 });
 
 describe("provider deletion lifecycle", () => {
+  it("does not expose a raw provider recovery error in English mode", () => {
+    window.localStorage.setItem("token-station-language", "en");
+    render(
+      <ProviderList
+        providers={[]}
+        deletedProviders={[]}
+        recoveryError={"恢复供应商失败：/Users/example/private.json"}
+        serveRunning={false}
+        busy={false}
+        onRemove={vi.fn()}
+        onRestore={vi.fn()}
+        onStateChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(
+      "The operation could not be completed. Try again. If it still fails, open the local logs from Recovery mode.",
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/\/Users\/example/)).not.toBeInTheDocument();
+  });
+
   it("删除前展示路由引用并禁止确认", async () => {
     const provider: ProviderView = {
       name: "referenced", provider: "openai-compatible", base_url: "https://api.example/v1",

@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { PNG } from "/Users/rainlu/.codex/skills/app-icon-gen/scripts/node_modules/pngjs/lib/png.js";
+import { PNG } from "pngjs";
 
 const [inputPath, outputPath] = process.argv.slice(2);
 const image = PNG.sync.read(readFileSync(inputPath));

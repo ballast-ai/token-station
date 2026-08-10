@@ -1,7 +1,7 @@
 {
   "mode": "icon-spec-authoring",
   "layout": "delivery",
-  "spec": "/Users/rainlu/local/token-station-dock-icon/apps/desktop/branding/token-station-dock-dark/tmp/work/spec.json",
+  "spec": "tmp/work/spec.json",
   "work_spec": "tmp/work/spec.json",
   "name": "TokenStationDockDark",
   "canvas": 1024,
@@ -21,8 +21,7 @@
     "tmp/reports/package-verification.json",
     "tmp/reports/reference-diff.png",
     "tmp/reports/reference-overlay.png",
-    "tmp/reports/reference-side-by-side.png",
-    "tmp/reports/visual-review.json"
+    "tmp/reports/reference-side-by-side.png"
   ],
   "generated_directories": [
     "tmp/reports",

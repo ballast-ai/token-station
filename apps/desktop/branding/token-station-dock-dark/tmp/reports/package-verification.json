@@ -1,6 +1,6 @@
 {
   "status": "ok",
-  "out": "/Users/rainlu/local/token-station-dock-icon/apps/desktop/branding/token-station-dock-dark",
+  "out": ".",
   "style_report": "tmp/reports/style-report.json",
   "reports_dir": "tmp/reports",
   "target_platforms": [],
@@ -51,8 +51,7 @@
       "tmp/reports/package-verification.json",
       "tmp/reports/reference-diff.png",
       "tmp/reports/reference-overlay.png",
-      "tmp/reports/reference-side-by-side.png",
-      "tmp/reports/visual-review.json"
+      "tmp/reports/reference-side-by-side.png"
     ],
     "problems": []
   },

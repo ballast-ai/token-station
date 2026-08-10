@@ -7,6 +7,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { setDockThemeIcon } from "../api";
 
 export type Theme = "light" | "dark" | "system";
 export type ResolvedTheme = Exclude<Theme, "system">;
@@ -62,12 +64,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     document.documentElement.classList.remove("light", "dark");
     document.documentElement.classList.add(resolvedTheme);
     if ("__TAURI_INTERNALS__" in window) {
-      void import("@tauri-apps/api/window")
-        .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(resolvedTheme))
-        .catch(() => undefined);
-      void import("@tauri-apps/api/core")
-        .then(({ invoke }) => invoke("set_dock_theme_icon", { theme: resolvedTheme }))
-        .catch(() => undefined);
+      void getCurrentWindow().setTheme(resolvedTheme).catch(() => undefined);
+      void setDockThemeIcon(resolvedTheme).catch(() => undefined);
     }
   }, [resolvedTheme]);
 

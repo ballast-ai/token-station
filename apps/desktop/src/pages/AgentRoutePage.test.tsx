@@ -66,6 +66,70 @@ describe("AgentRoutePage multi-install admission", () => {
     vi.mocked(forceForgetAgent).mockReset().mockReturnValue(new Promise(() => undefined));
   });
 
+  it("does not expose a raw compatibility message in English mode", () => {
+    window.localStorage.setItem("token-station-language", "en");
+    const blocked = installation("/opt/homebrew/bin/claude", "1.0.0");
+    blocked.discovery.is_path_default = true;
+    blocked.discovery.conflict_group = null;
+    blocked.compatibility = {
+      ...blocked.compatibility,
+      status: "DETECTED_BLOCKED",
+      reason_code: "BLOCKED_VERSION_MATCH",
+      message: "当前版本在阻断列表中：/Users/example/private",
+      allowed_actions: ["view_details"],
+    };
+    const agent: AgentView = {
+      metadata: {
+        agent_id: "claude-code",
+        legacy_kind: "cc",
+        display_name: "Claude Code",
+        icon_key: "claude",
+        admission: "supported",
+        ui_order: 10,
+        nav_mark: "C",
+      },
+      installations: [blocked],
+      status: "DETECTED_BLOCKED",
+      catalog_sequence: 1,
+      catalog_expires_at_ms: null,
+      catalog_source: "builtin",
+      catalog_warning: null,
+    };
+
+    render(
+      <AgentRoutePage
+        metadata={agent.metadata}
+        agent={agent}
+        route={{
+          mode: "inherit",
+          tiers: {
+            high: { upstream: null, model: null },
+            mid: { upstream: null, model: null },
+            low: { upstream: null, model: null },
+          },
+          config_error: null,
+          profile: null,
+          routing_mode: "tiered",
+        }}
+        providers={[]}
+        profiles={[]}
+        quotaAccounts={[]}
+        serveRunning
+        applying={false}
+        onStateChange={vi.fn()}
+        onRescan={vi.fn()}
+        onSaveQuota={vi.fn()}
+        onSaveQuotaPlan={vi.fn()}
+        onViewQuotaUsage={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(
+      "The operation could not be completed. Try again. If it still fails, open the local logs from Recovery mode.",
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/当前版本在阻断列表/)).not.toBeInTheDocument();
+  });
+
   it("lets the user connect the exact Claude Code installation they selected", async () => {
     const user = userEvent.setup();
     const installations = [

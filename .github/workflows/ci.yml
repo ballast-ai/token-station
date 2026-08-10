@@ -28,9 +28,10 @@ permissions:
   contents: read
 
 jobs:
-  # Use the gh CLI to determine whether changes affect the desktop app or installer.
-  # Do not check out code or add third-party actions. This repository limits supply-chain dependencies.
-  # Set true for all non-pull_request events. The windows-msi event condition decides whether it runs.
+  # Determine whether this change touches the desktop app or installer. Query
+  # PR files with gh without checking out code or adding another third-party
+  # action; this repository deliberately limits supply-chain dependencies.
+  # Non-PR events always return true and leave scheduling to windows-msi.
   changes:
     runs-on: ubuntu-latest
     permissions:
@@ -59,16 +60,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # The keyring Linux backend, secret-service, uses D-Bus and needs headers at build time.
+      # The Linux keyring backend (secret-service) needs D-Bus headers at build time.
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
           # plugin-runtime tests compile tests/guests/* into real WASM components.
           targets: wasm32-wasip2
-      # A full wasmtime, tokio, and sqlite rebuild takes about seven minutes. The cache removes most of it. Five WASM
-      # The guest is an independent crate excluded from the workspace. Tests build it in a subprocess with a separate target.
-      # Each item must be listed to use the cache.
+      # A clean wasmtime+tokio+sqlite build takes about seven minutes; caching
+      # removes most of that cost. The five WASM guests are standalone crates
+      # excluded from the workspace and built by test subprocesses with their
+      # own target directories, so each one must be listed explicitly.
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -88,12 +90,12 @@ jobs:
       - run: scripts/check-rust-format.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-      # The local gate always runs doc -D warnings. Without it in CI, the rule is only a convention.
+      # Keep the existing local rustdoc -D warnings gate enforceable in CI.
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # Allowed licenses, RustSec advisories, and dependency sources. Configuration is in deny.toml.
+  # Enforce license allowlists, RustSec advisories, and dependency sources from deny.toml.
   deny:
     runs-on: ubuntu-latest
     steps:
@@ -102,8 +104,9 @@ jobs:
         with:
           command: check
 
-  # This overlaps the deny advisories but runs separately. audit reads only Cargo.lock and does not need
-  # build graph. It still enforces the rule when deny graph construction fails. The two failure signals are also clearer.
+  # Run audit separately despite advisory overlap with deny. It reads only
+  # Cargo.lock, remains useful if deny cannot build its graph, and reports a
+  # clearer independent failure signal.
   audit:
     runs-on: ubuntu-latest
     steps:
@@ -268,19 +271,20 @@ jobs:
           apps/desktop/src-tauri/target/desktop-agent.lcov
           apps/desktop/src-tauri/src/agent_integration 90
 
-  # This job does one task that Linux cannot do: compile the desktop application on a macOS host,
-  # This type-checks code behind #[cfg(target_os = "macos")], such as verified_workbuddy_bundle,
-  # It calls /usr/bin/codesign) to get type checking.
+  # This job does the one thing Linux cannot: compile the desktop app on a
+  # macOS host so #[cfg(target_os = "macos")] code is type-checked, including
+  # verified_workbuddy_bundle and its /usr/bin/codesign invocation.
   #
-  # It previously used a macOS and Windows matrix to run four specified tests. Review showed that all four tests
-  # The host is platform-independent. The platform is passed as a Platform::Macos/Windows enum argument,
-  # The transaction test uses FailBeforeReplaceWriter to inject AtomicWriteStage::Permission.
-  # to simulate timing without changing a real DACL. All four are plain #[test] tests without cfg guards,
-  # The desktop-rust full cargo test at 1x already covers them. Rerunning at 10x/2x cost
-  # A repeat adds no coverage. A separate windows-rust job runs all cargo tests on Windows.
-  # This includes the repository's only test guarded by #[cfg(windows)].
-  # （ownership_store_hardens_a_legacy_regular_index_before_reading），
-  # That is the operation that requires Windows, but it was absent from the old specified test list.
+  # This used to be a macOS+Windows matrix that ran four selected tests. All
+  # four are host-independent: Platform::Macos/Windows is passed as an enum,
+  # while the transaction test injects FailBeforeReplaceWriter at
+  # AtomicWriteStage::Permission without touching a real DACL. They are plain
+  # #[test] cases with no cfg guard and are already covered by desktop-rust's
+  # full cargo test. Repeating them at 10x/2x runner cost added no coverage.
+  # windows-rust separately runs the full suite, including the repository's
+  # only #[cfg(windows)] test,
+  # ownership_store_hardens_a_legacy_regular_index_before_reading, which is
+  # genuinely Windows-only and was absent from the old selected list.
   macos-compile-check:
     name: macOS compile check
     if: github.event_name != 'pull_request'
@@ -295,24 +299,24 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
           workspaces: apps/desktop/src-tauri
-      # `--all-targets` also compiles test code, including macOS-only test code
-      # This check finds damage before a release tag is created.
+      # --all-targets also compiles tests so broken macOS-specific test code is
+      # caught here instead of waiting for a release tag.
       - run: >-
           cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
           --all-targets
 
   windows-rust:
     name: Windows full Rust and desktop gates
-    # On PRs, the Linux rust job runs the same clippy and tests. Windows costs twice as much.
-    # Do not rerun the full suite on the PR. Run the complete cross-platform gate after merge to develop.
+    # The Linux rust job covers the same clippy/test suite for PRs. Avoid the 2x
+    # Windows rerun until a change reaches develop and needs the full platform gate.
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      # Defender real-time scanning inspects many small files from Rust incremental compilation.
-      # Excluding the workspace usually makes builds 20–40% faster.
+      # Defender scans the many small Rust incremental files individually;
+      # excluding the workspace typically shortens builds by 20-40%.
       - name: Exclude the workspace from Defender real-time scanning
         shell: pwsh
         run: |
@@ -371,8 +375,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      # Defender real-time scanning inspects many small files from Rust incremental compilation.
-      # Excluding the workspace usually makes builds 20–40% faster.
+      # Defender scans the many small Rust incremental files individually;
+      # excluding the workspace typically shortens builds by 20-40%.
       - name: Exclude the workspace from Defender real-time scanning
         shell: pwsh
         run: |
@@ -456,6 +460,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.20.2
+      - run: node scripts/check-ci-msi-trigger-policy.mjs
       - run: node scripts/check-rustsec-exceptions.mjs
       - run: >-
           cargo audit -D unsound

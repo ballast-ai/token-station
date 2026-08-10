@@ -747,6 +747,8 @@ export interface DiagnosticPreview {
 }
 
 export const getState = () => invoke<StateView>("get_state");
+export const setDockThemeIcon = (theme: "light" | "dark") =>
+  invoke<void>("set_dock_theme_icon", { theme });
 export const getRecoveryState = () => invoke<RecoveryState>("get_recovery_state");
 export const getRecoveryDiagnostics = () =>
   invoke<DiagnosticPreview>("get_recovery_diagnostics");

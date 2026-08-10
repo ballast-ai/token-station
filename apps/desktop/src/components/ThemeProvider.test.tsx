@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { setDockThemeIcon } from "../api";
 import {
   THEME_STORAGE_KEY,
   ThemeProvider,
@@ -8,10 +9,17 @@ import {
   type ResolvedTheme,
 } from "./ThemeProvider";
 
-const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+const { setDockThemeIconMock, setWindowThemeMock } = vi.hoisted(() => ({
+  setDockThemeIconMock: vi.fn(),
+  setWindowThemeMock: vi.fn(),
+}));
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: invokeMock,
+vi.mock("../api", () => ({
+  setDockThemeIcon: setDockThemeIconMock,
+}));
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({ setTheme: setWindowThemeMock }),
 }));
 
 type ChangeListener = (event: MediaQueryListEvent) => void;
@@ -55,7 +63,8 @@ function ThemeProbe() {
 }
 
 beforeEach(() => {
-  invokeMock.mockReset();
+  setDockThemeIconMock.mockReset().mockResolvedValue(undefined);
+  setWindowThemeMock.mockReset().mockResolvedValue(undefined);
   Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
   window.localStorage.clear();
   document.documentElement.classList.remove("light", "dark");
@@ -139,13 +148,32 @@ describe("ThemeProvider", () => {
     );
 
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith("set_dock_theme_icon", { theme: "dark" }),
+      expect(setDockThemeIcon).toHaveBeenCalledWith("dark"),
     );
 
     await user.click(screen.getByRole("button", { name: "Light" }));
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith("set_dock_theme_icon", { theme: "light" }),
+      expect(setDockThemeIcon).toHaveBeenCalledWith("light"),
     );
+  });
+
+  it("keeps the page theme active when the native Dock update fails", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    setDockThemeIconMock.mockRejectedValue(new Error("native Dock update failed"));
+    const user = userEvent.setup();
+
+    render(
+      <ThemeProvider>
+        <ThemeProbe />
+      </ThemeProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Dark" }));
+    expect(screen.getByText("dark:dark")).toBeInTheDocument();
+    expect(document.documentElement).toHaveClass("dark");
   });
 
   it("ignores invalid persisted values", () => {
