@@ -81,6 +81,14 @@ export default function FirstRunGuide({ open, onDismiss }: FirstRunGuideProps) {
         "选择已检测的 Agent，检查即将修改的配置，再明确确认接入。",
       ),
     },
+    {
+      target: "settings",
+      title: copy("Review this guide anytime", "以后想再看教程"),
+      description: copy(
+        "Select Settings, open About, and then choose Review getting started guide.",
+        "点击顶部“设置”，进入“关于”，再选择“重新查看新手引导”。",
+      ),
+    },
   ], [copy]);
   const step = steps[stepIndex];
   const [targetRect, setTargetRect] = useState<MeasuredRect | null>(null);
@@ -192,7 +200,10 @@ export default function FirstRunGuide({ open, onDismiss }: FirstRunGuideProps) {
         >
           <DialogHeader className="first-run-guide-header">
             <span className="first-run-guide-step">
-              {copy(`Page tour · ${stepIndex + 1}/3`, `页面讲解 · ${stepIndex + 1}/3`)}
+              {copy(
+                `Page tour · ${stepIndex + 1}/${steps.length}`,
+                `页面讲解 · ${stepIndex + 1}/${steps.length}`,
+              )}
             </span>
             <Button
               className="first-run-guide-close"

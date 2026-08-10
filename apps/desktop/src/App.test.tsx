@@ -266,9 +266,9 @@ it("shows the provider step on the first local App session", async () => {
 
   expect(await screen.findByRole("dialog", { name: "先添加一个模型供应商" })).toBeInTheDocument();
   expect(Number(
-    screen.getByRole("progressbar", { name: "引导进度：第 1 步，共 3 步" })
+    screen.getByRole("progressbar", { name: "引导进度：第 1 步，共 4 步" })
       .getAttribute("aria-valuenow"),
-  )).toBeCloseTo(100 / 3);
+  )).toBeCloseTo(25);
   expect(screen.getByRole("button", { name: "添加供应商", hidden: true })).toHaveAttribute(
     "data-onboarding-active",
     "true",
@@ -284,7 +284,9 @@ it("walks through provider, routing, and Agent targets in dependency order", asy
   await screen.findByRole("dialog", { name: "先添加一个模型供应商" });
   await user.click(screen.getByRole("button", { name: "下一步" }));
   expect(screen.getByRole("dialog", { name: "配置并启动路由" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "路由", hidden: true })).toHaveAttribute(
+  const routingButton = screen.getByRole("button", { name: "路由", hidden: true });
+  expect(routingButton).not.toHaveAttribute("data-onboarding-target");
+  expect(within(routingButton).getByText("路由")).toHaveAttribute(
     "data-onboarding-active",
     "true",
   );
@@ -297,6 +299,16 @@ it("walks through provider, routing, and Agent targets in dependency order", asy
   expect(
     screen.getByRole("button", { name: /检查 Agent 接入/, hidden: true }),
   ).toHaveAttribute("data-onboarding-active", "true");
+
+  await user.click(screen.getByRole("button", { name: "下一步" }));
+  expect(screen.getByRole("dialog", { name: "以后想再看教程" })).toBeInTheDocument();
+  const settingsButton = screen.getByRole("button", { name: "设置", hidden: true });
+  expect(settingsButton).not.toHaveAttribute("data-onboarding-target");
+  expect(within(settingsButton).getByText("设置")).toHaveAttribute(
+    "data-onboarding-active",
+    "true",
+  );
+  expect(screen.getByRole("button", { name: "完成引导" })).toBeInTheDocument();
 });
 
 it("persists a skipped guide and does not show it on the next App session", async () => {
