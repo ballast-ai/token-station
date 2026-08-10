@@ -20,7 +20,7 @@ token-station 的内核是一个本地回环 LLM 代理二进制（`apps/cli`）
 
 关键设计约束:**GUI 不重写任何路由 / 网关 / 协议逻辑。** Tauri 后端把
 `token-station-cli` 当**库**直接调（复用 `Gateway` / `server::serve` /
-`ClientConfig` / keychain / `stats` / `plugins` / `upgrade`)。`router-core` /
+`ClientConfig` / `secrets` / `stats` / `plugins` / `upgrade`)。`router-core` /
 `gateway` / `plugin-runtime` 零重写,GUI 只是这套内核的一层面板。
 
 ---
@@ -67,8 +67,9 @@ token-station 的内核是一个本地回环 LLM 代理二进制（`apps/cli`）
   `default_pool`。**只有「已选好 (供应商, 模型)」的档才纳入路由**，两档也能跑。
 - 这些切点是能跑的合理默认值,**将来由评测中心校准替换**（护城河那条线）。
 
-供应商 = 一个 `openai-compatible` 上游。Key 存系统钥匙串（`secrets::keyring_set`），
-配置文件里只留指向 keychain 的 `auth.slot`，**明文 Key 不落盘**。
+供应商 = 一个 `openai-compatible` 上游。Key 默认存入数据目录下受私有权限保护的
+明文 `secrets.json`，配置文件里只保留 `auth.slot` 和 `store: true` 引用；也可
+改用环境变量或独立文件。
 
 ---
 
@@ -95,11 +96,11 @@ token-station 的内核是一个本地回环 LLM 代理二进制（`apps/cli`）
 | command | 作用 |
 |---|---|
 | `get_state` | 快照:providers / tiers / serve / config_error / settings |
-| `add_provider` / `remove_provider` | 增删上游;有 key 进 keychain |
+| `add_provider` / `remove_provider` | 增删上游；有 Key 时写入本地私有凭证文件 |
 | `set_tier` | 设/清某一档 (供应商, 模型)，触发 `rebuild_routing` |
 | `save_config` | 校验 + 原子写盘（校验不过不写） |
 | `serve_start` / `serve_stop` | 起停后台 serve runtime;起时按 `server.auth` 生成/复用虚拟 Key |
-| `scan_agents` / `plan_agent_connection` / `apply_agent_plan` | 只读发现、预览确认并事务接入（见 §7） |
+| `scan_agents` / `plan_agent_connection` / `apply_agent_plan` | 只读发现、生成有界计划并事务接入；当前 UI 在一次点击内连续调用（见 §7） |
 | `plan_agent_disconnect` | 预览断开，只恢复 owned paths |
 | `list_agent_snapshots` / `plan_snapshot_restore` / `apply_snapshot_restore` | 列出加密快照、预览并事务恢复 |
 | `set_settings` | 切 auth / metrics 开关 |
@@ -151,16 +152,16 @@ token-station 的内核是一个本地回环 LLM 代理二进制（`apps/cli`）
 
 Agent 页面由后端 Registry 动态生成，先执行只读发现和版本兼容判断。Claude Code、Codex、
 OpenCode、OpenClaw、Hermes 只有在版本允许、安装实例唯一且对应 Adapter 就绪时才能生成脱敏计划。
-前端逐项确认后，后端再次复验并统一经过加密快照、
+用户点击“一键接入”后，前端在同次操作内请求计划并提交确认令牌，后端再次复验并统一经过加密快照、
 原子写入、写后校验和 ownership 提交。旧 `connect_agent` 直写入口已删除。
 
 **⚠️ CC 接入的安全闸——务必理解:** `~/.claude/settings.json` 是全局配置，会影响读取它的
-Claude Code 进程。后端既检查 `agent-anthropic` 运行态，也要求明确预览目标和 diff；任何
+Claude Code 进程。后端既检查 `agent-anthropic` 运行态，也要求计划明确目标和 diff；任何
 一项不满足都不会创建快照或写配置。断开只恢复 Token Station 声明的 owned env keys，保留
 用户其他设置。
 
 历史 `.token-station.bak` 只作为只读候选展示，不覆盖、不删除、不自动恢复。新操作只使用
-OS keychain 保护的加密快照。完整契约见
+本地私有 `snapshot-master.key` 保护的加密快照。完整契约见
 [桌面App-Agent接入机制.md](桌面App-Agent接入机制.md)。
 
 ---

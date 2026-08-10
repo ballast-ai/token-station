@@ -57,17 +57,17 @@ owned paths 是 Connector 唯一可写范围，同时也是 HMAC 归属检查、
 所有写入必须进入统一事务：
 
 ```text
-服务端预览
-→ 用户确认
+服务端生成有界计划
+→ 用户点击接入，同次操作带回确认令牌
 → 复核安装/版本/目录/文件 revision
-→ OS keychain 主密钥 + AES-256-GCM 快照
+→ 本地私有主密钥 + AES-256-GCM 快照
 → 同目录原子替换
 → 写后解析与 Connector 自检
 → ownership revision 提交
 → 失败时按快照恢复
 ```
 
-用户改动受管值后，Connector 必须拒绝覆盖并要求重新预览；非归属字段必须逐字节或语义保留。
+用户改动受管值后，Connector 必须拒绝覆盖并要求重新扫描；非归属字段必须逐字节或语义保留。
 
 ## 6. 版本矩阵
 
@@ -92,7 +92,7 @@ Agent 更新时先只读探测。Connector 契约未变可通过更高 sequence 
 ### 配置与恢复
 
 - 文件缺失、空文件、合法复杂文件、未知字段、注释、重复键、非法 UTF-8/语法；
-- connect 幂等边界、预览后并发修改、写前/写后各阶段故障；
+- connect 幂等边界、计划生成后并发修改、写前/写后各阶段故障；
 - encrypted snapshot、权限、随机 nonce、篡改、缺钥匙、保留与 pinned；
 - disconnect/restore 只改 owned paths，保留后续用户字段；
 - 恢复失败单独报告 `repair-required`，不得吞掉主错误。
