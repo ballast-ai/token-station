@@ -1,52 +1,58 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 720" role="img" aria-label="How Token Station works">
   <style>
-    .text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;text-anchor:middle}
-    .headline{font-size:34px;font-weight:760;letter-spacing:.4px;fill:#1F2328}
-    .card-title{font-size:30px;font-weight:760;letter-spacing:.2px;fill:#1F2328}
-    .body{font-size:18px;font-weight:520;fill:#4A4F55}
-    .center-title{font-size:42px;font-weight:800;letter-spacing:.8px;fill:#FFFFFF}
-    .center-subtitle{font-size:23px;font-weight:700;letter-spacing:1.5px;fill:#FFEDE7}
-    .value{font-size:24px;font-weight:680;letter-spacing:.25px;fill:#FFFFFF}
-    .pill-text{font-size:16px;font-weight:750;letter-spacing:.35px;fill:#FFFFFF}
-    .destination{font-size:25px;font-weight:700;fill:#1F2328}
+    .text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;text-anchor:middle}
+    .headline{font-size:34px;font-weight:600;fill:#24292F}
+    .card-title{font-size:30px;font-weight:600;fill:#24292F}
+    .body{font-size:18px;font-weight:400;fill:#57606A}
+    .agent-name{font-size:22px;font-weight:500;fill:#3D444D}
+    .center-title{font-size:40px;font-weight:600;fill:#24292F}
+    .center-subtitle{font-size:22px;font-weight:500;fill:#6E6258}
+    .value{font-size:24px;font-weight:500;fill:#24292F}
+    .pill-text{font-size:16px;font-weight:500;fill:#3D444D}
+    .destination{font-size:22px;font-weight:500;fill:#24292F}
+    .destination-note{font-size:18px;font-weight:400;fill:#57606A}
   </style>
 
-  <rect width="1440" height="720" fill="#F7F5F0"/>
+  <rect width="1440" height="720" fill="#FAF9F7"/>
 
-  <text class="text headline" x="720" y="84">ONE LOCAL GATEWAY. THE RIGHT MODEL FOR EVERY REQUEST.</text>
+  <text class="text headline" x="720" y="84">One local gateway, the right model for every request</text>
 
   <!-- Three independent product cards. -->
-  <rect x="60" y="190" width="320" height="380" rx="32" fill="#FFFDFC" stroke="#D8D3CA" stroke-width="2"/>
-  <rect x="470" y="190" width="500" height="380" rx="36" fill="#B94024"/>
-  <rect x="1060" y="190" width="320" height="380" rx="32" fill="#FFFDFC" stroke="#D8D3CA" stroke-width="2"/>
+  <rect x="60" y="190" width="320" height="380" rx="32" fill="#FFFFFF" stroke="#D8D2C8" stroke-width="2"/>
+  <rect x="470" y="190" width="500" height="380" rx="36" fill="#F3EFE8" stroke="#C7BFB4" stroke-width="2"/>
+  <rect x="1060" y="190" width="320" height="380" rx="32" fill="#FFFFFF" stroke="#D8D2C8" stroke-width="2"/>
 
   <!-- Two simple directional cues; no topology lines. -->
-  <circle cx="425" cy="380" r="30" fill="#FFFDFC" stroke="#D8D3CA" stroke-width="2"/>
-  <path d="M417 368 L429 380 L417 392" fill="none" stroke="#B94024" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="1015" cy="380" r="30" fill="#FFFDFC" stroke="#D8D3CA" stroke-width="2"/>
-  <path d="M1007 368 L1019 380 L1007 392" fill="none" stroke="#B94024" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="425" cy="380" r="30" fill="#FFFFFF" stroke="#D8D2C8" stroke-width="2"/>
+  <path d="M417 368 L429 380 L417 392" fill="none" stroke="#B65F2A" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="1015" cy="380" r="30" fill="#FFFFFF" stroke="#D8D2C8" stroke-width="2"/>
+  <path d="M1007 368 L1019 380 L1007 392" fill="none" stroke="#B65F2A" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
 
   <!-- Input card. -->
-  <text class="text card-title" x="220" y="290">YOUR AI AGENTS</text>
+  <text class="text card-title" x="220" y="290">Supported AI agents</text>
   <line x1="110" y1="326" x2="330" y2="326" stroke="#E5E1DA" stroke-width="2"/>
-  <text class="text body" x="220" y="390">Claude Code · Codex · WorkBuddy</text>
+  <text class="text agent-name" x="220" y="378">Claude Code</text>
+  <text class="text agent-name" x="220" y="423">Codex</text>
+  <text class="text agent-name" x="220" y="468">WorkBuddy</text>
 
   <!-- Token Station value card. -->
-  <text class="text center-title" x="720" y="257">TOKEN STATION</text>
-  <text class="text center-subtitle" x="720" y="295">LOCAL SMART ROUTING</text>
-  <line x1="525" y1="322" x2="915" y2="322" stroke="#E99A84" stroke-width="2"/>
-  <text class="text value" x="720" y="371">MATCH EACH TASK TO</text>
-  <text class="text value" x="720" y="402">THE RIGHT MODEL</text>
-  <text class="text value" x="720" y="449">USE QUOTA</text>
-  <text class="text value" x="720" y="480">BEFORE RESET</text>
-  <rect x="540" y="516" width="160" height="38" rx="19" fill="#A9341D" stroke="#E99A84" stroke-width="1.5"/>
-  <text class="text pill-text" x="620" y="541">RUST CORE</text>
-  <rect x="720" y="516" width="180" height="38" rx="19" fill="#A9341D" stroke="#E99A84" stroke-width="1.5"/>
-  <text class="text pill-text" x="810" y="541">SANDBOXED WASM</text>
+  <text class="text center-title" x="720" y="257">Token Station</text>
+  <text class="text center-subtitle" x="720" y="295">Local smart routing</text>
+  <line x1="525" y1="322" x2="915" y2="322" stroke="#D8D2C8" stroke-width="2"/>
+  <text class="text value" x="720" y="371">Match each task to</text>
+  <text class="text value" x="720" y="402">the right model</text>
+  <text class="text value" x="720" y="449">Use remaining quota</text>
+  <text class="text value" x="720" y="480">before reset</text>
+  <rect x="495" y="516" width="230" height="38" rx="12" fill="#E7E1D8"/>
+  <text class="text pill-text" x="610" y="541">High-performance Rust core</text>
+  <rect x="735" y="516" width="210" height="38" rx="12" fill="#E7E1D8"/>
+  <text class="text pill-text" x="840" y="541">Sandboxed WASM plugins</text>
 
   <!-- Destination card. -->
-  <text class="text card-title" x="1220" y="290">YOUR MODELS</text>
+  <text class="text card-title" x="1220" y="290">Available models</text>
   <line x1="1110" y1="326" x2="1330" y2="326" stroke="#E5E1DA" stroke-width="2"/>
-  <text class="text destination" x="1220" y="392">CLOUD · BYOK</text>
-  <text class="text destination" x="1220" y="452">LOCAL · OLLAMA</text>
+  <text class="text destination" x="1220" y="376">Cloud models</text>
+  <text class="text destination-note" x="1220" y="405">Use your own API key</text>
+  <text class="text destination" x="1220" y="452">Local models</text>
+  <text class="text destination-note" x="1220" y="481">Run with Ollama</text>
 </svg>
