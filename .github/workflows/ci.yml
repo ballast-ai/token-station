@@ -355,15 +355,14 @@ jobs:
   windows-msi:
     name: Windows x64 MSI real lifecycle
     needs: [changes, windows-rust]
-    # 安装器生命周期验证：连编两遍 release 桌面应用，约 41 分钟 x 2 倍率。
-    # 进 main 即意味着准备发正式版，是跑它的正确时点；develop 的日常合并不跑。
-    # 改动了桌面/安装器路径的 PR 仍会被拦截。
+    # This release-grade gate builds two installers and exercises the complete
+    # lifecycle. Run it for main and manual release validation, not for routine
+    # pull requests. Regular PR jobs still cover frontend and Rust behavior.
     if: >-
       !cancelled() &&
       needs.changes.outputs.installer == 'true' &&
       (github.ref == 'refs/heads/main' ||
-       github.event_name == 'workflow_dispatch' ||
-       github.event_name == 'pull_request')
+       github.event_name == 'workflow_dispatch')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
