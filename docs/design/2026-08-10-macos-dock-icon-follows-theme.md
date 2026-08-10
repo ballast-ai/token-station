@@ -69,7 +69,7 @@ Windows 与 Linux 接收同一个命令时保持无操作，现有窗口主题�
 - 图标来源包验证通过，`review_required` 为 `false`；圆角 Alpha 与当前 ICNS 完全一致。
 - `ThemeProvider` 专项测试 6/6 通过。
 - Rust Dock 图标专项测试 3/3 通过。
-- 完整前端测试 29 个文件、257 项全部通过。
+- 完整前端测试 29 个文件、260 项全部通过。
 - `cargo test --workspace` 全部通过；代理测试中 1 项按设计标记为 ignored。
 - `scripts/build-desktop.sh --local` 构建、签名检查与桌面产物审计通过。
 - 按用户要求没有替换 `/Applications/token-station.app`。直接运行构建目录里的 App 后，真实

@@ -153,9 +153,10 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
         setBusy("");
       }
     } catch (caught) {
+      const rawMessage = String(caught);
       const message = failureText(caught);
-      if (requiresFreshUpdateCheck(message)) {
-        setUpgrade((current) => invalidateUpdateCandidate(current, message));
+      if (requiresFreshUpdateCheck(rawMessage)) {
+        setUpgrade((current) => invalidateUpdateCandidate(current, rawMessage));
       } else {
         setError(message);
       }
