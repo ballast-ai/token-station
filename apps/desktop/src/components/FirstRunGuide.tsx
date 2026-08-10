@@ -368,12 +368,12 @@ export default function FirstRunGuide({
           if (workspace.scrollLeft !== lockedScrollLeft) workspace.scrollLeft = lockedScrollLeft;
         };
         workspace.setAttribute("data-onboarding-scroll-locked", "true");
-        workspace.addEventListener("wheel", preventUserScroll, { passive: false });
-        workspace.addEventListener("touchmove", preventUserScroll, { passive: false });
+        window.addEventListener("wheel", preventUserScroll, { passive: false, capture: true });
+        window.addEventListener("touchmove", preventUserScroll, { passive: false, capture: true });
         workspace.addEventListener("scroll", restoreWorkspaceScroll);
         unlockWorkspaceScroll = () => {
-          workspace.removeEventListener("wheel", preventUserScroll);
-          workspace.removeEventListener("touchmove", preventUserScroll);
+          window.removeEventListener("wheel", preventUserScroll, true);
+          window.removeEventListener("touchmove", preventUserScroll, true);
           workspace.removeEventListener("scroll", restoreWorkspaceScroll);
           workspace.removeAttribute("data-onboarding-scroll-locked");
         };
