@@ -177,6 +177,9 @@ hdiutil attach \
   -mountpoint "$layout_mount_point" \
   >/dev/null
 layout_mounted=true
+if [[ -e "$layout_mount_point/.fseventsd" ]]; then
+  /bin/rm -rf -- "$layout_mount_point/.fseventsd"
+fi
 
 if ! osascript "$finder_layout_script" configure "$layout_mount_point" >/dev/null; then
   echo "Finder 没能写入 DMG 拖拽布局，请确认 Finder 可以正常启动后重试。" >&2

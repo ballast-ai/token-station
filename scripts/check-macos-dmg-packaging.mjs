@@ -140,6 +140,7 @@ if (packager) {
     ["Finder 布局配置", /configure-dmg-layout\.applescript/],
     ["Finder 元数据落盘检查", /\.DS_Store/],
     ["清理临时 FSEvents 目录", /\/bin\/rm -rf -- "\$layout_mount_point\/\.fseventsd"/],
+    ["Finder 布局前清理临时目录", /layout_mounted=true[\s\S]*\/bin\/rm -rf -- "\$layout_mount_point\/\.fseventsd"[\s\S]*osascript .* configure/],
     ["只读压缩输出", /hdiutil convert[\s\S]*-format UDZO/],
   ];
   for (const [label, pattern] of requiredPackagerPatterns) {
