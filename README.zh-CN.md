@@ -7,7 +7,7 @@
 
 让 Claude Code、Codex、WorkBuddy 等 Agent 统一连接一个本地网关，再按任务复杂度或账户剩余额度，把每次请求路由到你的 API 供应商或本地模型。
 
-[![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![Platform](https://img.shields.io/badge/public%20desktop-macOS%20Apple%20Silicon-lightgrey.svg)](https://github.com/ballast-ai/token-station/releases/latest) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![Release type](https://img.shields.io/badge/v1.1.3-source%20release-lightgrey.svg)](https://github.com/ballast-ai/token-station/releases/latest) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
 
 [下载](https://github.com/ballast-ai/token-station/releases/latest) · [文档](docs/README.md) · [提交问题](https://github.com/ballast-ai/token-station/issues) · [English](README.md)
 </div>
@@ -71,23 +71,13 @@ Claude Desktop 目前没有公开的产品仓库；该链接指向 Anthropic 官
 
 | 目标 | 状态 |
 |---|---|
-| macOS 桌面端，Apple Silicon | 已提供 `token-station_*_aarch64.dmg` 资产 |
-| macOS CLI，Apple Silicon | 已提供 `token-station-cli-*-aarch64-apple-darwin.tar.gz` 资产 |
-| macOS Intel 桌面端 | 当前公开 Release 未提供 |
-| Windows 桌面端 | 已有构建和安装器测试，当前公开 Release 未提供安装包 |
-| Linux 桌面端 | 已有构建流程，当前公开 Release 未提供安装包 |
+| v1.1.3 源码 | GitHub 自动生成 `zip` 和 `tar.gz` |
+| macOS 桌面端 | v1.1.3 不提供签名安装包 |
+| macOS 与 Linux CLI | v1.1.3 不提供二进制归档 |
+| Windows 与 Linux 桌面端 | 当前不提供安装包 |
 
-请使用 macOS 11.0 或更新版本。可执行文件的部署目标是 11.0，但当前 App bundle 元数据仍显示 10.13，后续需要校正。桌面端和 CLI 独立版本化，因此资产版本号可能不同。确认 Mac 芯片时，可以打开“苹果菜单 > 关于本机”，也可以运行 `uname -m`，结果为 `arm64` 即 Apple Silicon。
-
-当前 DMG 尚未完成 Developer ID 签名和 Apple 公证，macOS 可能阻止首次启动。把 Token Station 拖入“应用程序”后，右键点击 App，选择“打开”，再确认一次“打开”。如果 Gatekeeper 仍保留隔离属性，可以运行：
-
-```bash
-xattr -dr com.apple.quarantine /Applications/token-station.app
-```
-
-不要为了安装 Token Station 而全局关闭 Gatekeeper。
-
-当前 Release 也没有可供独立校验完整性的校验和或签名资产。如果你的威胁模型要求可验证二进制，请从源码构建，或等待签名版本，不要移除隔离属性。
+请使用 macOS 11.0 或更新版本。v1.1.3 的源码归档不是已签名的安装包；需要
+可验证二进制时，请按仓库文档从源码构建，或等待后续签名版本。不要为了安装 Token Station 而全局关闭 Gatekeeper。
 
 ## 快速开始
 
