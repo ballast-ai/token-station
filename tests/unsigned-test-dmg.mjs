@@ -12,6 +12,14 @@ const filename = "token-station_1.1.3_aarch64_UNSIGNED-UNNOTARIZED.dmg";
 const markerName = "未签名测试版.txt";
 const provenanceName = "构建来源.txt";
 
+const desktopBuilder = read("scripts/build-desktop.sh");
+assert.match(desktopBuilder, /rustc --print sysroot/);
+assert.match(desktopBuilder, /--remap-path-prefix=\$rust_sysroot=\/rustc/);
+
+const desktopAuditor = read("scripts/audit-desktop-artifact.sh");
+assert.match(desktopAuditor, /--rust-sysroot/);
+assert.match(desktopAuditor, /leaks the Rust sysroot path/);
+
 const packager = read("scripts/package-macos-dmg.sh");
 assert.match(packager, /--unsigned-test/);
 assert.match(packager, /UNSIGNED-UNNOTARIZED/);

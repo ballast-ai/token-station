@@ -88,14 +88,19 @@ if ! rustup target list --installed | grep -qx "$wasm_target"; then
   rustup target add "$wasm_target"
 fi
 
+rust_sysroot="$(rustc --print sysroot)"
+readonly rust_sysroot
+[[ -n "$rust_sysroot" && -d "$rust_sysroot" ]] || {
+  echo "Rust sysroot could not be resolved; the build stopped before creating an artifact." >&2
+  exit 1
+}
+
 # Set the path remaps BEFORE building the plugins. Otherwise the plugin wasm is
 # compiled with the real paths baked into its panic/location strings, and
 # `include_bytes!` (the bundled-plugins layer) then embeds them into the desktop
-# binary. Remap BOTH the source checkout ($root) AND the cargo registry
-# (CARGO_HOME) — dependency panic locations otherwise leak the builder's home
-# path (e.g. /Users/<name>/.cargo/...), which carries the username. Mirrors
-# scripts/build-release.sh. (std paths are already remapped by rustc to /rustc/.)
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$root=/build"
+# binary. Remap the source checkout, Cargo Home, and Rust sysroot so dependency
+# and standard-library panic locations cannot expose a builder username.
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$root=/build --remap-path-prefix=$rust_sysroot=/rustc"
 
 mkdir -p "$stage/plugins-dist"
 for plugin in "${plugins[@]}"; do
@@ -196,7 +201,8 @@ esac
   --mode "$mode" \
   --binary "$binary_path" \
   --bundle-root "$bundle_root" \
-  --source-root "$root"
+  --source-root "$root" \
+  --rust-sysroot "$rust_sysroot"
 
 if [[ "$host_os" == "Darwin" && "$mode" == "production" ]]; then
   app_path="$bundle_root/macos/token-station.app"
