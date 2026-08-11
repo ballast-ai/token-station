@@ -30,6 +30,35 @@ static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
     restart_required: false,
 };
 
+fn model_value(input: &ConnectInput<'_>) -> serde_json::Value {
+    let mut model = json!({
+        "id": "auto",
+        "name": "Token Station Auto",
+        "input": ["text"]
+    });
+    if let Some(metadata) = input.model_metadata {
+        if metadata.vision {
+            model["input"] = json!(["text", "image"]);
+        }
+        model["contextWindow"] = json!(metadata.context);
+        model["maxTokens"] = json!(metadata.output);
+        if let Some(cost) = &metadata.cost {
+            let mut projected = json!({
+                "input": cost.input,
+                "output": cost.output
+            });
+            if let Some(rate) = cost.cache_read {
+                projected["cacheRead"] = json!(rate);
+            }
+            if let Some(rate) = cost.cache_write {
+                projected["cacheWrite"] = json!(rate);
+            }
+            model["cost"] = projected;
+        }
+    }
+    model
+}
+
 impl Connector for OpenClawConnector {
     fn capabilities(&self) -> &'static ConnectorCapabilities {
         &CAPABILITIES
@@ -44,6 +73,10 @@ impl Connector for OpenClawConnector {
 
     fn label(&self) -> &'static str {
         "OpenClaw openclaw.json"
+    }
+
+    fn projects_model_metadata(&self) -> bool {
+        true
     }
 
     fn format(&self) -> DocumentFormat {
@@ -109,7 +142,7 @@ impl Connector for OpenClawConnector {
         ] {
             if root
                 .pointer(pointer)
-                .is_some_and(|value| !value.is_object())
+                .is_some_and(|value| !value.is_object() && !value.is_null())
             {
                 return Err(format!("OpenClaw openclaw.json 的 {label} 必须是对象"));
             }
@@ -121,6 +154,7 @@ impl Connector for OpenClawConnector {
         let token = input
             .token
             .ok_or_else(|| "OpenClaw 接入缺少虚拟 Key".to_string())?;
+        let model = model_value(input);
         Ok(vec![
             PatchOperation {
                 operation: PatchKind::Replace,
@@ -129,15 +163,7 @@ impl Connector for OpenClawConnector {
                     "baseUrl": input.base_url,
                     "apiKey": token,
                     "api": "openai-completions",
-                    "models": [{
-                        "id": "auto",
-                        "name": "Token Station Auto",
-                        "reasoning": false,
-                        "input": ["text"],
-                        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-                        "contextWindow": 200000,
-                        "maxTokens": 32000
-                    }]
+                    "models": [model]
                 })),
             },
             PatchOperation {
@@ -177,17 +203,24 @@ impl Connector for OpenClawConnector {
             && provider["api"] == json!("openai-completions")
             && provider["models"][0]["id"] == json!("auto")
             && root.pointer("/agents/defaults/model/primary") == Some(&json!("tokenstation/auto"));
-        if valid {
-            Ok(())
-        } else {
-            Err("OpenClaw 写入前复验失败".to_string())
+        if !valid {
+            return Err("OpenClaw 写入前复验失败".to_string());
         }
+        if provider["models"][0] != model_value(input) {
+            return Err("OpenClaw 写入前复验模型元数据失败".to_string());
+        }
+        Ok(())
     }
 
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
+        let metadata = match input.model_metadata {
+            Some(value) if value.cost.is_some() => "已同步安全模型限制和一致价格",
+            Some(_) => "已同步安全模型限制；价格未知，未写入猜测值",
+            None => "模型限制和价格未知，未写入猜测值",
+        };
         format!(
-            "OpenClaw 已通过 openai-completions 指向 {}；配置已进入加密快照和 ownership 管理。",
-            input.base_url
+            "OpenClaw 已通过 openai-completions 指向 {}；{}；配置已进入加密快照和 ownership 管理。",
+            input.base_url, metadata
         )
     }
 }

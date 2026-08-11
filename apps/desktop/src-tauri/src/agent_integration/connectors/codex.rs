@@ -24,7 +24,13 @@ static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
     config_path_template: "${HOME}/.codex/config.toml",
     // connect_patch also rewrites model to auto and includes it in owned_paths(),
     // so declare it here or ownership metadata, restoration, and display will omit it.
-    owned_fields: &["model", "model_provider", "model_providers.tokenstation"],
+    owned_fields: &[
+        "model",
+        "model_provider",
+        "model_context_window",
+        "model_auto_compact_token_limit",
+        "model_providers.tokenstation",
+    ],
     requires_virtual_key: true,
     restart_required: false,
 };
@@ -61,6 +67,8 @@ impl Connector for CodexConnector {
         vec![
             path(&["model"]),
             path(&["model_provider"]),
+            path(&["model_context_window"]),
+            path(&["model_auto_compact_token_limit"]),
             path(&["model_providers", "tokenstation"]),
         ]
     }
@@ -71,6 +79,10 @@ impl Connector for CodexConnector {
             "tokenstation",
             "experimental_bearer_token",
         ])]
+    }
+
+    fn projects_model_metadata(&self) -> bool {
+        true
     }
 
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String> {
@@ -117,6 +129,16 @@ impl Connector for CodexConnector {
                 .into_iter()
                 .map(|(field, value)| replace(&["model_providers", "tokenstation", field], value)),
         );
+        if let Some(metadata) = input.model_metadata {
+            operations.push(replace(
+                &["model_context_window"],
+                json!(metadata.context),
+            ));
+            operations.push(replace(
+                &["model_auto_compact_token_limit"],
+                json!(metadata.context - metadata.output),
+            ));
+        }
         // Older connectors wrote env_key. Codex prefers it over the embedded
         // bearer token, so leaving it behind makes a GUI connection depend on
         // an environment variable it never receives.
@@ -172,13 +194,29 @@ impl Connector for CodexConnector {
         if provider.get("env_key").is_some() {
             return Err("Codex 写入前复验遗留 env_key".to_string());
         }
+        if let Some(metadata) = input.model_metadata {
+            let context = root
+                .get("model_context_window")
+                .and_then(toml_edit::Item::as_integer);
+            let compact = root
+                .get("model_auto_compact_token_limit")
+                .and_then(toml_edit::Item::as_integer);
+            if context != Some(i64::from(metadata.context))
+                || compact != Some(i64::from(metadata.context - metadata.output))
+            {
+                return Err("Codex 写入前复验模型上下文或自动压缩阈值失败".to_string());
+            }
+        }
         Ok(())
     }
 
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
+        let metadata = input.model_metadata.map_or("模型限制未知，未写入上下文设置", |_| {
+            "已同步安全上下文窗口和自动压缩阈值"
+        });
         format!(
-            "Codex 已通过 Responses API 指向 {}(~/.codex/config.toml,已备份)。",
-            input.base_url
+            "Codex 已通过 Responses API 指向 {}(~/.codex/config.toml,已备份；{})。",
+            input.base_url, metadata
         )
     }
 }

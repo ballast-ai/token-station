@@ -34,23 +34,34 @@ fn model_value(input: &ConnectInput<'_>) -> Result<Value, String> {
     let token = input
         .token
         .ok_or_else(|| "WorkBuddy 接入缺少虚拟 Key".to_string())?;
-    Ok(json!({
+    let tools = input.model_metadata.is_some_and(|metadata| metadata.tools);
+    let reasoning = input
+        .model_metadata
+        .is_some_and(|metadata| metadata.reasoning);
+    let mut model = json!({
         "id": MODEL_ID,
         "name": "Token Station",
         "vendor": "Token Station",
         "url": model_endpoint(input.base_url),
         "apiKey": token,
-        "supportsToolCall": true,
-        "supportsImages": true,
-        "supportsReasoning": true,
+        "supportsToolCall": tools,
+        "supportsImages": input.model_metadata.is_some_and(|metadata| metadata.vision),
+        "supportsReasoning": reasoning,
         "onlyReasoning": false,
-        "reasoning": {
+        "useCustomProtocol": true
+    });
+    if reasoning {
+        model["reasoning"] = json!({
             "defaultEffort": "medium",
             "supportedEfforts": ["low", "medium", "high"],
             "canDisableThinking": true
-        },
-        "useCustomProtocol": true
-    }))
+        });
+    }
+    if let Some(metadata) = input.model_metadata {
+        model["maxInputTokens"] = json!(metadata.context);
+        model["maxOutputTokens"] = json!(metadata.output);
+    }
+    Ok(model)
 }
 
 fn arrays(document: &ConfigDocument) -> Result<(Vec<Value>, Vec<Value>, bool), String> {
@@ -63,12 +74,12 @@ fn arrays(document: &ConfigDocument) -> Result<(Vec<Value>, Vec<Value>, bool), S
         return Ok((items, available, true));
     }
     let models = match root.get("models") {
-        None => Vec::new(),
+        None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(items)) => items.clone(),
         Some(_) => return Err("WorkBuddy models.json 的 models 必须是数组".to_string()),
     };
     let available = match root.get("availableModels") {
-        None => Vec::new(),
+        None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(items)) => items.clone(),
         Some(_) => return Err("WorkBuddy models.json 的 availableModels 必须是数组".to_string()),
     };
@@ -144,6 +155,10 @@ impl Connector for WorkBuddyConnector {
         Ok(())
     }
 
+    fn projects_model_metadata(&self) -> bool {
+        true
+    }
+
     fn connect_patch(&self, input: &ConnectInput<'_>) -> Result<Vec<PatchOperation>, String> {
         Ok(replace_arrays(
             vec![model_value(input)?],
@@ -160,6 +175,33 @@ impl Connector for WorkBuddyConnector {
         self.validate_source(document)?;
         let (mut models, mut available, native_array) = arrays(document)?;
         models.push(model_value(input)?);
+        if !available.iter().any(|item| item.as_str() == Some(MODEL_ID)) {
+            available.push(json!(MODEL_ID));
+        }
+        Ok(replace_arrays(models, available, native_array))
+    }
+
+    fn validate_refresh_source(&self, document: &ConfigDocument) -> Result<(), String> {
+        arrays(document).map(|_| ())
+    }
+
+    fn refresh_patch_for_document(
+        &self,
+        document: &ConfigDocument,
+        input: &ConnectInput<'_>,
+    ) -> Result<Vec<PatchOperation>, String> {
+        let (mut models, mut available, native_array) = arrays(document)?;
+        let replacement = model_value(input)?;
+        let mut replaced = false;
+        for model in &mut models {
+            if model.get("id").and_then(Value::as_str) == Some(MODEL_ID) {
+                *model = replacement.clone();
+                replaced = true;
+            }
+        }
+        if !replaced {
+            return Err("WorkBuddy refresh requires the managed tokenstation-auto model".to_string());
+        }
         if !available.iter().any(|item| item.as_str() == Some(MODEL_ID)) {
             available.push(json!(MODEL_ID));
         }
@@ -210,9 +252,12 @@ impl Connector for WorkBuddyConnector {
     }
 
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
+        let metadata = input.model_metadata.map_or("模型限制未知，未写入猜测值", |_| {
+            "已同步上下文和最大输出限制"
+        });
         format!(
-            "WorkBuddy 已加入 Token Station 自定义模型并指向 {}；原 models.json 已备份。",
-            model_endpoint(input.base_url)
+            "WorkBuddy 已加入 Token Station 自定义模型并指向 {}；{}；原 models.json 已备份。",
+            model_endpoint(input.base_url), metadata
         )
     }
 }

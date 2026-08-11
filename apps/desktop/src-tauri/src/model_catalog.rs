@@ -715,7 +715,8 @@ pub(crate) fn catalog_for_provider(
                 tool: capability.tool_state(),
                 vision: capability.vision_state(),
                 json_schema: capability.json_schema_state(),
-                context_window: (capability.context_window > 0).then_some(capability.context_window),
+                context_window: (capability.context_window > 0)
+                    .then_some(capability.context_window),
                 max_output_tokens: capability
                     .extensions
                     .get("max_output_tokens")
@@ -929,7 +930,10 @@ mod tests {
         assert_eq!(model.max_output_tokens, Some(32_768));
         assert_eq!(model.cost.as_ref().and_then(|cost| cost.input), Some(0.2));
         assert_eq!(model.cost.as_ref().and_then(|cost| cost.output), Some(0.6));
-        assert_eq!(model.cost.as_ref().and_then(|cost| cost.cache_read), Some(0.04));
+        assert_eq!(
+            model.cost.as_ref().and_then(|cost| cost.cache_read),
+            Some(0.04)
+        );
         assert_eq!(model.cost.as_ref().and_then(|cost| cost.cache_write), None);
     }
 

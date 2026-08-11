@@ -66,6 +66,10 @@ impl Connector for OpenCodeConnector {
         vec![path(&["provider", "tokenstation", "options", "apiKey"])]
     }
 
+    fn projects_model_metadata(&self) -> bool {
+        true
+    }
+
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String> {
         if !input.adapter_ready {
             return Err(
@@ -86,7 +90,7 @@ impl Connector for OpenCodeConnector {
         };
         if root
             .get("provider")
-            .is_none_or(serde_json::Value::is_object)
+            .is_none_or(|value| value.is_object() || value.is_null())
         {
             Ok(())
         } else {
@@ -98,11 +102,12 @@ impl Connector for OpenCodeConnector {
         let token = input
             .token
             .ok_or_else(|| "OpenCode 接入缺少虚拟 Key".to_string())?;
+        let vision = input.model_metadata.is_some_and(|metadata| metadata.vision);
         let mut model = json!({
             "name": "auto (智能路由)",
-            "attachment": true,
+            "attachment": vision,
             "modalities": {
-                "input": ["text", "image"],
+                "input": if vision { json!(["text", "image"]) } else { json!(["text"]) },
                 "output": ["text"]
             }
         });
@@ -159,11 +164,17 @@ impl Connector for OpenCodeConnector {
                     |cost| provider["models"]["auto"]["cost"] == json!(cost),
                 )
         });
+        let vision = input.model_metadata.is_some_and(|metadata| metadata.vision);
+        let expected_input = if vision {
+            json!(["text", "image"])
+        } else {
+            json!(["text"])
+        };
         let valid = provider["npm"] == json!("@ai-sdk/openai-compatible")
             && provider["name"] == json!("token-station")
             && provider["models"]["auto"]["name"] == json!("auto (智能路由)")
-            && provider["models"]["auto"]["attachment"] == json!(true)
-            && provider["models"]["auto"]["modalities"]["input"] == json!(["text", "image"])
+            && provider["models"]["auto"]["attachment"] == json!(vision)
+            && provider["models"]["auto"]["modalities"]["input"] == expected_input
             && provider["models"]["auto"]["modalities"]["output"] == json!(["text"])
             && provider["options"]["baseURL"] == json!(input.base_url)
             && provider["options"]["apiKey"] == json!(token)

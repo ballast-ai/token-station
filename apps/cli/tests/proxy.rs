@@ -1693,28 +1693,38 @@ fn scoped_models_auth_and_unknown_namespaces_fail_closed() {
             .build(),
     );
 
-    let models = agent
-        .get(format!("{}/agents/opencode/v1/models", proxy.url))
-        .header("authorization", &format!("Bearer {}", proxy.virtual_key))
-        .call()
-        .expect("namespaced models answers");
-    assert_eq!(models.status().as_u16(), 200);
-    let models: Value = serde_json::from_str(
-        &models
-            .into_body()
-            .read_to_string()
-            .expect("OpenCode models body reads"),
-    )
-    .expect("OpenCode models body is JSON");
-    let ids = models["data"]
-        .as_array()
-        .expect("models data is an array")
-        .iter()
-        .map(|model| model["id"].as_str().expect("model id"))
-        .collect::<std::collections::BTreeSet<_>>();
+    let model_ids = |path: &str| {
+        let models = agent
+            .get(format!("{}{}", proxy.url, path))
+            .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+            .call()
+            .expect("models endpoint answers");
+        assert_eq!(models.status().as_u16(), 200);
+        let models: Value = serde_json::from_str(
+            &models
+                .into_body()
+                .read_to_string()
+                .expect("models body reads"),
+        )
+        .expect("models body is JSON");
+        models["data"]
+            .as_array()
+            .expect("models data is an array")
+            .iter()
+            .map(|model| model["id"].as_str().expect("model id").to_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
     assert_eq!(
-        ids,
-        std::collections::BTreeSet::from(["agent-model", "home-model"])
+        model_ids("/agents/opencode/v1/models"),
+        std::collections::BTreeSet::from(["home-model".to_owned()])
+    );
+    assert_eq!(
+        model_ids("/agents/codex/v1/models"),
+        std::collections::BTreeSet::from(["agent-model".to_owned()])
+    );
+    assert_eq!(
+        model_ids("/v1/models"),
+        std::collections::BTreeSet::from(["home-model".to_owned()])
     );
 
     let wrong_key = agent
@@ -2566,6 +2576,60 @@ fn translated_anthropic_server_tool_fails_before_upstream_with_receipt_reason() 
         json!("provider_tool_unsupported")
     );
     assert_eq!(conversion["reason_detail"], json!("web_search"));
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn translated_responses_hosted_tool_fails_before_upstream_with_receipt_reason() {
+    let mock = MockUpstream::start(Vec::new());
+    let key = key_file("responses-hosted-tool-capability", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-openai-responses");
+
+    for (tool, expected_detail) in [
+        ("web_search", "web_search"),
+        ("file_search", "other_tool_type"),
+    ] {
+        let (status, body) = post_scoped(
+            &proxy,
+            "/agents/codex/v1/responses",
+            &json!({
+                "model": "auto",
+                "input": "use a provider-hosted tool",
+                "tools": [{"type": tool}]
+            }),
+            &proxy.virtual_key,
+            false,
+        );
+
+        assert_eq!(status, 400, "body={body}");
+        assert!(body.contains(tool), "body={body}");
+        assert_eq!(
+            mock.hits(),
+            0,
+            "unsupported hosted tools stop before upstream"
+        );
+
+        settle();
+        let (status, _, body) =
+            admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+        assert_eq!(status, 200, "body={body}");
+        let receipts: Value = serde_json::from_str(&body).expect("receipts are JSON");
+        assert_eq!(
+            receipts[0]["attempt_records"].as_array().map(Vec::len),
+            Some(0)
+        );
+        let conversion = receipts[0]["conversion_reports"]
+            .as_array()
+            .and_then(|reports| reports.first())
+            .expect("failed inbound conversion is recorded");
+        assert_eq!(conversion["stage"], json!("inbound_normalize"));
+        assert_eq!(
+            conversion["reason_code"],
+            json!("provider_tool_unsupported")
+        );
+        assert_eq!(conversion["reason_detail"], json!(expected_detail));
+    }
 
     std::fs::remove_file(key).ok();
 }

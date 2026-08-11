@@ -1097,16 +1097,16 @@ fn tools_of(value: &Value) -> Result<Vec<ToolDef>, String> {
         {
             continue;
         }
-        let name = if kind == "function" {
-            tool.get("name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| invalid("function tool declares no name"))?
-                .to_owned()
-        } else {
-            tool.get("name")
-                .and_then(Value::as_str)
-                .map_or_else(|| kind.to_owned(), str::to_owned)
-        };
+        if kind != "function" {
+            return Err(capability(format!(
+                "Responses provider-hosted tool `{kind}` requires a native Responses provider; the translated route cannot execute it"
+            )));
+        }
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("function tool declares no name"))?
+            .to_owned();
         if !names.insert(name.clone()) {
             return Err(invalid("Responses tools contain a duplicate provider name"));
         }

@@ -324,7 +324,7 @@ fn models_response(state: &AppState, agent_id: Option<&str>) -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(document.to_owned()))
+        .body(Body::from(document.clone()))
         .expect("a literal response builds")
 }
 

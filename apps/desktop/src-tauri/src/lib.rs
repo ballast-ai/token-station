@@ -3666,28 +3666,37 @@ fn save_agent_routes(state: State<'_, AppStateManaged>) -> Result<StateView, Str
 #[tauri::command]
 fn restart_agent_route(
     state: State<'_, AppStateManaged>,
+    agents: State<'_, AgentCommandState>,
     agent_id: String,
 ) -> Result<StateView, String> {
-    let mut inner = state.0.lock().unwrap();
-    if !supported_agent_ids().contains(&agent_id) {
-        return Err(format!("未知 Agent：{agent_id}"));
-    }
-    // Persist the draft exactly as "save custom routing" does.
-    inner.promote_agent_route_drafts()?;
-    inner.save_draft()?;
-    inner.agent_route_drafts.clear();
+    let snapshot = {
+        let mut inner = state.0.lock().unwrap();
+        if !supported_agent_ids().contains(&agent_id) {
+            return Err(format!("未知 Agent：{agent_id}"));
+        }
+        // Persist the draft exactly as "save custom routing" does.
+        inner.promote_agent_route_drafts()?;
+        inner.save_draft()?;
+        inner.agent_route_drafts.clear();
 
-    // Materialize this one Agent's router from the saved config and hot-swap it
-    // on the running gateway. `None` ⇒ the Agent inherits Home, so the reload
-    // clears its per-Agent router.
-    let config = inner.materialize()?;
-    let router = config.custom_router_for_agent(&agent_id)?;
-    if let ServerLifecycle::Running { server, .. } = &inner.server {
-        server
-            .reload_agent_router(&agent_id, router)
-            .map_err(|error| format!("热重启 Agent 路由失败：{error}"))?;
+        // Materialize this one Agent's router from the saved config and hot-swap it
+        // on the running gateway. `None` means the Agent inherits Home, so the
+        // reload clears its per-Agent router.
+        let config = inner.materialize()?;
+        let router = config.custom_router_for_agent(&agent_id)?;
+        if let ServerLifecycle::Running { server, .. } = &inner.server {
+            server
+                .reload_agent_router(&agent_id, router)
+                .map_err(|error| format!("热重启 Agent 路由失败：{error}"))?;
+        }
+        inner.snapshot()
+    };
+    if let Ok(runtime) = runtime_from_app(state.inner()) {
+        agents
+            .refresh_model_metadata(Some(&agent_id), &runtime)
+            .map_err(|error| format!("Agent 路由已应用，但模型元数据刷新失败：{}", error.message))?;
     }
-    Ok(inner.snapshot())
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -3758,7 +3767,8 @@ fn complete_serve_start<R: Runtime>(
     };
     let mut discard = None;
     let mut retire = None;
-    let view = {
+    let mut published = false;
+    let mut view = {
         let state = app.state::<AppStateManaged>();
         let mut inner = state.0.lock().unwrap();
         let current = std::mem::replace(&mut inner.server, ServerLifecycle::Stopped { generation });
@@ -3771,11 +3781,14 @@ fn complete_serve_start<R: Runtime>(
                 },
                 Ok(prepared),
             ) if current == generation => match prepared.publish(revision) {
-                Ok(server) => ServerLifecycle::Running {
-                    generation,
-                    server,
-                    apply_error: None,
-                },
+                Ok(server) => {
+                    published = true;
+                    ServerLifecycle::Running {
+                        generation,
+                        server,
+                        apply_error: None,
+                    }
+                }
                 Err(failure) => ServerLifecycle::Failed {
                     generation,
                     listen,
@@ -3794,6 +3807,7 @@ fn complete_serve_start<R: Runtime>(
                 let same_listener = old.listen() == prepared.listen();
                 match prepared.publish(revision) {
                     Ok(server) => {
+                        published = true;
                         old.stop_accepting();
                         retire = Some(old);
                         ServerLifecycle::Running {
@@ -3909,6 +3923,29 @@ fn complete_serve_start<R: Runtime>(
         };
         Some(inner.serve_view())
     };
+    if published {
+        let app_state = app.state::<AppStateManaged>();
+        let agents = app.state::<AgentCommandState>();
+        if let Ok(runtime) = runtime_from_app(app_state.inner()) {
+            if let Err(error) = agents.refresh_model_metadata(None, &runtime) {
+                let mut inner = app_state.0.lock().unwrap();
+                if let ServerLifecycle::Running {
+                    generation: current,
+                    apply_error,
+                    ..
+                } = &mut inner.server
+                {
+                    if *current == generation {
+                        *apply_error = Some(format!(
+                            "代理已启动，但 Agent 模型元数据刷新失败：{}",
+                            error.message
+                        ));
+                        view = Some(inner.serve_view());
+                    }
+                }
+            }
+        }
+    }
     if let Some(prepared) = discard {
         prepared.discard();
     }
