@@ -1,8 +1,8 @@
 name: Build Linux Desktop
 
-# Linux 桌面包(deb / AppImage / rpm)不做代码签名,所以无需任何 secrets——
-# 手动点 "Run workflow" 即可,产物在本次运行的 Artifacts 里下载。
-# 也会在推 v* tag 时自动跑,给正式发布产出 Linux 包。
+# Linux desktop packages are unsigned and are only produced when the formal
+# artifact gate is explicitly enabled. Successful packages remain internal
+# workflow artifacts and are not attached to a GitHub Release automatically.
 on:
   workflow_dispatch:
   push:
@@ -12,9 +12,28 @@ permissions:
   contents: read
 
 jobs:
+  release-mode:
+    runs-on: ubuntu-24.04
+    outputs:
+      enabled: ${{ steps.mode.outputs.enabled }}
+    steps:
+      - id: mode
+        env:
+          FORMAL_ARTIFACTS_ENABLED: ${{ vars.TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED }}
+        run: |
+          if [[ "$FORMAL_ARTIFACTS_ENABLED" == "true" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "已启用正式 Linux 桌面包构建。"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "本次只发布 GitHub 源码，跳过 Linux 桌面包构建。"
+          fi
+
   linux:
+    needs: release-mode
+    if: needs.release-mode.outputs.enabled == 'true'
     name: Linux (x86_64-unknown-linux-gnu)
-    # 22.04 的 glibc/webkit 更旧,产出的包能在更广的发行版上运行(向前兼容)。
+    # Ubuntu 22.04 keeps glibc and WebKit compatibility broad.
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4

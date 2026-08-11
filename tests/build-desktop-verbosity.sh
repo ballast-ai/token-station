@@ -17,9 +17,10 @@ make_fixture() {
   fake_bin="$fixture/bin"
   state="$fixture/state"
 
-  mkdir -p "$repo/scripts" "$repo/apps/desktop" "$fake_bin" "$state"
+  mkdir -p "$repo/scripts" "$repo/apps/desktop/src-tauri" "$fake_bin" "$state"
   cp "$project_root/scripts/build-desktop.sh" "$repo/scripts/build-desktop.sh"
   chmod +x "$repo/scripts/build-desktop.sh"
+  printf '{\n  "version": "1.1.3"\n}\n' >"$repo/apps/desktop/src-tauri/tauri.conf.json"
 
   local plugin
   for plugin in \
@@ -36,6 +37,12 @@ make_fixture() {
   cat >"$repo/scripts/audit-desktop-artifact.sh" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+SCRIPT
+
+  cat >"$repo/scripts/package-macos-dmg.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" >"$TEST_STATE/dmg-package-args"
 SCRIPT
 
   cat >"$fake_bin/rustup" <<'SCRIPT'
@@ -73,7 +80,7 @@ set -euo pipefail
 echo "$os_name"
 SCRIPT
 
-  chmod +x "$repo/scripts/audit-desktop-artifact.sh" "$fake_bin"/*
+  chmod +x "$repo/scripts/audit-desktop-artifact.sh" "$repo/scripts/package-macos-dmg.sh" "$fake_bin"/*
 }
 
 run_build() {
@@ -165,6 +172,10 @@ test_production_build_creates_updater_payloads_without_publishing_the_temporary_
   run_macos_production_build >/dev/null
   grep -Fq '"createUpdaterArtifacts":true' "$state/tauri-configs" \
     || fail "macOS production build did not enable updater artifacts"
+  grep -Fxq -- '--architecture' "$state/dmg-package-args" \
+    || fail "macOS production build did not invoke the compliant DMG packager"
+  grep -Fxq -- 'aarch64' "$state/dmg-package-args" \
+    || fail "macOS production build passed the wrong DMG architecture"
 }
 
 test_windows_production_build_does_not_require_updater_artifacts_for_the_first_release() {

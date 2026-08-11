@@ -1,8 +1,9 @@
-# 发布流水线（C1#7）。推 v* tag 触发：四平台构建 → 确定性自证 → 草稿 release。
+# Formal binary release pipeline (C1#7). When explicitly enabled, a v* tag
+# builds four platforms, proves reproducibility, and creates a draft release.
 #
-# 这条流水线里没有、也永远不会有签名私钥。它产出未签名的 manifest.json；
-# 维护者在离线环境跑 `ts-release sign` 得到 manifest.json.sig，上传后再把
-# 草稿发布出去——完整步骤见 docs/release/可复现构建与发布验证.md。
+# This workflow never receives a signing private key. It produces an unsigned
+# manifest.json; a maintainer signs it offline, uploads manifest.json.sig, and
+# publishes the draft only after the complete release audit.
 
 name: Release
 
@@ -12,10 +13,32 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  TOKEN_STATION_RELEASE_PUBKEY_HEX: ${{ vars.TOKEN_STATION_RELEASE_PUBKEY_HEX }}
 
 jobs:
+  release-mode:
+    runs-on: ubuntu-24.04
+    outputs:
+      enabled: ${{ steps.mode.outputs.enabled }}
+    steps:
+      - id: mode
+        env:
+          FORMAL_ARTIFACTS_ENABLED: ${{ vars.TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED }}
+        run: |
+          if [[ "$FORMAL_ARTIFACTS_ENABLED" == "true" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "已启用正式 CLI 二进制构建。"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "本次只发布 GitHub 源码，跳过正式 CLI 二进制构建。"
+          fi
+
   build:
+    needs: release-mode
+    if: needs.release-mode.outputs.enabled == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -27,9 +50,17 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check tag, version, and public release key
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/cli/Cargo.toml | head -1)
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "发布标签 $GITHUB_REF_NAME 与 CLI 版本 $version 不一致。" >&2
+            exit 1
+          fi
+          node scripts/check-release-readiness.mjs --version "$version" --formal
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      # bsdtar 做不了确定性归档（无 --sort/--mtime）；配方要求 GNU tar。
+      # bsdtar lacks the ordering and timestamp controls required here.
       - if: runner.os == 'macOS'
         run: brew install gnu-tar
       - run: scripts/build-release.sh ${{ matrix.target }}
@@ -39,9 +70,10 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  # 同一配方从零重建一遍，字节必须一致——每次发布都把「可复现」自证一遍，
-  # 而不是只在文档里声称。
+  # Rebuild the same recipe from clean trees and require byte identity.
   reproducibility:
+    needs: release-mode
+    if: needs.release-mode.outputs.enabled == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -55,8 +87,11 @@ jobs:
           sha256sum -c first.sum
 
   publish:
-    needs: [build, reproducibility]
+    needs: [release-mode, build, reproducibility]
+    if: needs.release-mode.outputs.enabled == 'true'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
