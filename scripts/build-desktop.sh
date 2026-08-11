@@ -149,15 +149,13 @@ case "$host_os" in
       tauri_args+=(--bundles app)
     else
       : "${APPLE_SIGNING_IDENTITY:?production macOS build needs APPLE_SIGNING_IDENTITY}"
-      if [[ -n "${APPLE_API_ISSUER:-}" || -n "${APPLE_API_KEY:-}" || -n "${APPLE_API_KEY_PATH:-}" ]]; then
-        : "${APPLE_API_ISSUER:?App Store Connect notarization needs APPLE_API_ISSUER}"
-        : "${APPLE_API_KEY:?App Store Connect notarization needs APPLE_API_KEY}"
-        : "${APPLE_API_KEY_PATH:?App Store Connect notarization needs APPLE_API_KEY_PATH}"
-      else
-        : "${APPLE_ID:?Apple ID notarization needs APPLE_ID}"
-        : "${APPLE_PASSWORD:?Apple ID notarization needs APPLE_PASSWORD}"
-        : "${APPLE_TEAM_ID:?Apple ID notarization needs APPLE_TEAM_ID}"
-      fi
+      # The formal DMG is assembled after the signed and notarized App passes
+      # the desktop artifact audit. Updater payloads are still emitted because
+      # createUpdaterArtifacts is enabled above.
+      tauri_args+=(--bundles app)
+      : "${APPLE_API_ISSUER:?App Store Connect notarization needs APPLE_API_ISSUER}"
+      : "${APPLE_API_KEY:?App Store Connect notarization needs APPLE_API_KEY}"
+      : "${APPLE_API_KEY_PATH:?App Store Connect notarization needs APPLE_API_KEY_PATH}"
     fi
     ;;
   MINGW*|MSYS*|CYGWIN*)
@@ -199,5 +197,31 @@ esac
   --binary "$binary_path" \
   --bundle-root "$bundle_root" \
   --source-root "$root"
+
+if [[ "$host_os" == "Darwin" && "$mode" == "production" ]]; then
+  app_path="$bundle_root/macos/token-station.app"
+  desktop_version=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$root/apps/desktop/src-tauri/tauri.conf.json" | head -n 1)
+  [[ -n "$desktop_version" ]] || {
+    echo "desktop version is missing from tauri.conf.json" >&2
+    exit 1
+  }
+  case "$target" in
+    aarch64-apple-darwin) release_architecture="aarch64" ;;
+    x86_64-apple-darwin) release_architecture="x86_64" ;;
+    *)
+      echo "production macOS build needs an explicit aarch64 or x86_64 target" >&2
+      exit 1
+      ;;
+  esac
+  dmg_path="$bundle_root/dmg/token-station_${desktop_version}_${release_architecture}.dmg"
+  "$root/scripts/package-macos-dmg.sh" \
+    --app "$app_path" \
+    --output "$dmg_path" \
+    --volume-name "Token Station ${desktop_version}" \
+    --signing-identity "$APPLE_SIGNING_IDENTITY" \
+    --version "$desktop_version" \
+    --architecture "$release_architecture"
+fi
 
 echo "desktop artifact: PASS ($mode, ${target:-native})"

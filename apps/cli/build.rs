@@ -7,6 +7,7 @@
 use std::path::Path;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=TOKEN_STATION_RELEASE_PUBKEY_HEX");
     println!("cargo:rerun-if-env-changed=TOKEN_STATION_PLUGINS_DIST");
     if std::env::var_os("CARGO_FEATURE_BUILTIN_PLUGINS").is_none() {
         return;

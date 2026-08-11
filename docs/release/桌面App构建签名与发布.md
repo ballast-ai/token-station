@@ -48,7 +48,8 @@ export TAURI_SIGNING_PRIVATE_KEY_PATH="/tmp/throwaway-updater-ci.key"
 scripts/build-desktop.sh --production --target aarch64-apple-darwin
 ```
 
-也可以按 Tauri 官方支持的方式设置 `APPLE_ID`、`APPLE_PASSWORD` 和 `APPLE_TEAM_ID`。正式模式会检查 Developer ID 签名、Team ID、Gatekeeper、公证和票据装订状态，任一检查失败都会停止构建。
+正式 DMG 只接受 App Store Connect Team API key 公证，避免把 Apple ID 密码放入命令参数。
+正式模式会检查 Developer ID 签名、Team ID、Gatekeeper、公证和票据装订状态，任一检查失败都会停止构建。
 
 GitHub Actions 使用以下仓库密钥：
 
