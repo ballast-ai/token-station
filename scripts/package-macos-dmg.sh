@@ -50,7 +50,6 @@ readonly installer="$root/packaging/macos/安装 Token Station.command"
 readonly agent_rules="$root/packaging/macos/AGENTS.md"
 readonly formal_readme="$root/packaging/macos/安装前必读.md"
 readonly unsigned_test_readme="$root/packaging/macos/未签名测试版安装前必读.md"
-readonly finder_layout_script="$root/packaging/macos/configure-dmg-layout.applescript"
 readonly finder_layout_template="$root/packaging/macos/dmg-layout.dsstore.base64"
 readme="$formal_readme"
 packaging_source_commit=""
@@ -135,14 +134,7 @@ temporary_checksum="$publish_stage/$(basename "$checksum_path")"
 readonly temporary_checksum
 writable_dmg="$publish_stage/token-station-layout-writable.dmg"
 readonly writable_dmg
-layout_mount_point="$publish_stage/mount"
-readonly layout_mount_point
-layout_mounted=false
 cleanup() {
-  if [[ "$layout_mounted" == "true" ]]; then
-    osascript "$finder_layout_script" close "$layout_mount_point" >/dev/null 2>&1 || true
-    hdiutil detach "$layout_mount_point" >/dev/null 2>&1 || true
-  fi
   /bin/rm -rf -- "$stage"
   /bin/rm -rf -- "$publish_stage"
 }
@@ -178,35 +170,6 @@ hdiutil create \
   -fs HFS+ \
   -format UDRW \
   "$writable_dmg"
-/bin/mkdir "$layout_mount_point"
-hdiutil attach \
-  "$writable_dmg" \
-  -readwrite \
-  -noverify \
-  -noautoopen \
-  -mountpoint "$layout_mount_point" \
-  >/dev/null
-layout_mounted=true
-if [[ -e "$layout_mount_point/.fseventsd" ]]; then
-  /bin/rm -rf -- "$layout_mount_point/.fseventsd"
-fi
-[[ -s "$layout_mount_point/.DS_Store" ]] || {
-  echo "DMG 的 Finder 布局没有保存下来，已停止生成发布文件。" >&2
-  exit 1
-}
-if [[ -e "$layout_mount_point/.fseventsd" ]]; then
-  /bin/rm -rf -- "$layout_mount_point/.fseventsd"
-fi
-[[ ! -e "$layout_mount_point/.fseventsd" ]] || {
-  echo "DMG 中的 macOS 临时索引目录没有清理干净，已停止生成发布文件。" >&2
-  exit 1
-}
-/bin/sync
-if ! hdiutil detach "$layout_mount_point" >/dev/null; then
-  echo "DMG 布局已经生成，但暂存镜像无法安全卸载，请关闭相关 Finder 窗口后重试。" >&2
-  exit 1
-fi
-layout_mounted=false
 
 hdiutil convert \
   "$writable_dmg" \

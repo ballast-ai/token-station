@@ -31,11 +31,10 @@ assert.match(packager, new RegExp(provenanceName));
 assert.match(packager, /notarytool submit/);
 assert.match(packager, /stapler staple/);
 assert.match(packager, /-format UDRW/);
-assert.match(packager, /configure-dmg-layout\.applescript/);
 assert.match(packager, /\.DS_Store/);
-assert.match(packager, /\/bin\/rm -rf -- "\$layout_mount_point\/\.fseventsd"/);
 assert.match(packager, /base64 -D[\s\S]*finder_layout_template[\s\S]*stage\/\.DS_Store/);
 assert.match(packager, /hdiutil convert[\s\S]*-format UDZO/);
+assert.doesNotMatch(packager, /hdiutil attach/);
 
 const auditor = read("scripts/audit-macos-dmg.sh");
 assert.match(auditor, /--unsigned-test/);

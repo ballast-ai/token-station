@@ -139,9 +139,7 @@ if (packager) {
     ["测试包可见警告", /未签名测试版\.txt/],
     ["测试包构建来源", /构建来源\.txt/],
     ["可写布局镜像", /-format UDRW/],
-    ["Finder 布局配置", /configure-dmg-layout\.applescript/],
     ["Finder 元数据落盘检查", /\.DS_Store/],
-    ["清理临时 FSEvents 目录", /\/bin\/rm -rf -- "\$layout_mount_point\/\.fseventsd"/],
     ["解码受控 Finder 布局模板", /base64 -D[\s\S]*finder_layout_template[\s\S]*stage\/\.DS_Store/],
     ["只读压缩输出", /hdiutil convert[\s\S]*-format UDZO/],
   ];
@@ -153,6 +151,9 @@ if (packager) {
   }
   if (/hdiutil create[^\n]*"\$output_path"/.test(packager)) {
     failures.push(`${packagerPath} 不能在正式输出路径上直接创建未审计 DMG`);
+  }
+  if (/hdiutil attach/.test(packager)) {
+    failures.push(`${packagerPath} 不能挂载可写中间镜像，否则系统会写入临时目录`);
   }
 }
 
