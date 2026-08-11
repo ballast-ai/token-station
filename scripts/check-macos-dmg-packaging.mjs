@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,8 @@ const requiredFiles = [
   "packaging/macos/未签名测试版安装前必读.md",
   "packaging/macos/安装 Token Station.command",
   "packaging/macos/AGENTS.md",
+  "packaging/macos/configure-dmg-layout.applescript",
+  "packaging/macos/dmg-layout.dsstore.base64",
   "scripts/package-macos-dmg.sh",
   "scripts/audit-macos-dmg.sh",
 ];
@@ -135,6 +138,10 @@ if (packager) {
     ["打包源码提交", /packaging_source_commit/],
     ["测试包可见警告", /未签名测试版\.txt/],
     ["测试包构建来源", /构建来源\.txt/],
+    ["可写布局镜像", /-format UDRW/],
+    ["Finder 元数据落盘检查", /\.DS_Store/],
+    ["解码受控 Finder 布局模板", /base64 -D[\s\S]*finder_layout_template[\s\S]*stage\/\.DS_Store/],
+    ["只读压缩输出", /hdiutil convert[\s\S]*-format UDZO/],
   ];
   for (const [label, pattern] of requiredPackagerPatterns) {
     if (!pattern.test(packager)) failures.push(`${packagerPath} 缺少${label}`);
@@ -144,6 +151,22 @@ if (packager) {
   }
   if (/hdiutil create[^\n]*"\$output_path"/.test(packager)) {
     failures.push(`${packagerPath} 不能在正式输出路径上直接创建未审计 DMG`);
+  }
+  if (/hdiutil attach/.test(packager)) {
+    failures.push(`${packagerPath} 不能挂载可写中间镜像，否则系统会写入临时目录`);
+  }
+}
+
+const finderLayoutTemplatePath = "packaging/macos/dmg-layout.dsstore.base64";
+const finderLayoutTemplate = read(finderLayoutTemplatePath);
+if (finderLayoutTemplate) {
+  const decodedTemplate = Buffer.from(finderLayoutTemplate.replace(/\s/g, ""), "base64");
+  if (decodedTemplate.subarray(4, 8).toString("ascii") !== "Bud1") {
+    failures.push(`${finderLayoutTemplatePath} 不是有效的 Finder .DS_Store 模板`);
+  }
+  const templateDigest = crypto.createHash("sha256").update(decodedTemplate).digest("hex");
+  if (templateDigest !== "bd345bfc5b70ac1d47fa48c620d04d085b22cbe453dc0ed3542cad0403cc3f38") {
+    failures.push(`${finderLayoutTemplatePath} 与已验收布局不一致`);
   }
 }
 
@@ -164,9 +187,40 @@ if (auditor) {
     ["ad-hoc App 检查", /Signature=adhoc/],
     ["测试包警告检查", /未签名测试版\.txt/],
     ["测试包来源检查", /构建来源\.txt/],
+    ["Finder 元数据检查", /mounted_ds_store/],
+    ["Finder 布局回读", /configure-dmg-layout\.applescript[\s\S]*inspect/],
+    ["系统临时目录检查", /\.fseventsd/],
   ];
   for (const [label, pattern] of requiredAuditPatterns) {
     if (!pattern.test(auditor)) failures.push(`${auditorPath} 缺少${label}`);
+  }
+}
+
+const finderLayoutPath = "packaging/macos/configure-dmg-layout.applescript";
+const finderLayout = read(finderLayoutPath);
+if (finderLayout) {
+  const requiredFinderLayoutPatterns = [
+    ["配置模式", /configure/],
+    ["审计模式", /inspect/],
+    ["普通目录与挂载根目录兼容", /folder mountAlias/],
+    ["图标视图", /current view to icon view/],
+    ["关闭自动排列", /arrangement to not arranged/],
+    ["沿用 v1.1.2 图标尺寸", /icon size to 128/],
+    ["隐藏 Finder 工具栏", /toolbar visible to false/],
+    ["隐藏 Finder 侧边栏", /sidebar width to 0/],
+    ["920×600 窗口", /set bounds to \{[0-9]+, [0-9]+, [0-9]+, [0-9]+\}/],
+    ["App 固定坐标", /position of item "token-station\.app" .* to \{310, 170\}/],
+    ["Applications 固定坐标", /position of item "Applications" .* to \{610, 170\}/],
+    ["安装脚本固定坐标", /position of item "安装 Token Station\.command"/],
+    ["安装说明固定坐标", /position of item "安装前必读\.md"/],
+    ["构建来源固定坐标", /position of item "构建来源\.txt"/],
+    ["未签名提示固定坐标", /position of item "未签名测试版\.txt"/],
+    ["Agent 约束固定坐标", /position of item "AGENTS\.md"/],
+    ["正式包可省略构建来源", /if exists item "构建来源\.txt"[\s\S]*set position of item "构建来源\.txt"/],
+    ["正式包可省略未签名提示", /if exists item "未签名测试版\.txt"[\s\S]*set position of item "未签名测试版\.txt"/],
+  ];
+  for (const [label, pattern] of requiredFinderLayoutPatterns) {
+    if (!pattern.test(finderLayout)) failures.push(`${finderLayoutPath} 缺少${label}`);
   }
 }
 
