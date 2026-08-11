@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { RouterTableView, getRouterTable } from "../api";
 import { LanguageBoundary, useLanguage } from "../components/LanguageProvider";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { humanizeAppError } from "../errors";
 
-/// 四层路由表可视化。层序 = 内核 route 的短路顺序:
-/// 1 规则(硬匹配) → 2 提示(agent Hint) → 3 启发式分档 → 4 默认兜底。
+/// Visualizes the four routing layers in the core's short-circuit order:
+/// 1 rules (hard matches) -> 2 agent hints -> 3 heuristic tiers -> 4 default fallback.
 function RouterTableContent() {
   const { t } = useLanguage();
   const [rt, setRt] = useState<RouterTableView | null>(null);
@@ -13,7 +14,7 @@ function RouterTableContent() {
   useEffect(() => {
     getRouterTable()
       .then(setRt)
-      .catch((e) => setErr(String(e)));
+      .catch((e) => setErr(humanizeAppError(e)));
   }, []);
 
   if (err) return <Card className="settings-card"><CardContent><div className="banner err">{err}</div></CardContent></Card>;
@@ -30,7 +31,7 @@ function RouterTableContent() {
       </CardHeader>
       <CardContent className="settings-card-content">
 
-      {/* 第 1 层:规则 */}
+      {/* Layer 1: rules */}
       <div className="layer">
         <div className="layer-head"><span className="layer-no">1</span> {t("router.rules")}</div>
         {rt.rules.length === 0 ? (
@@ -40,7 +41,7 @@ function RouterTableContent() {
         )}
       </div>
 
-      {/* 第 2 层:提示 */}
+      {/* Layer 2: hints */}
       <div className="layer">
         <div className="layer-head"><span className="layer-no">2</span> {t("router.hints")}</div>
         {rt.hint_routes.length === 0 ? (
@@ -50,7 +51,7 @@ function RouterTableContent() {
         )}
       </div>
 
-      {/* 第 3 层:启发式分档 */}
+      {/* Layer 3: heuristic tiers */}
       <div className="layer">
         <div className="layer-head">
           <span className="layer-no">3</span> {t("router.bands")}
@@ -80,7 +81,7 @@ function RouterTableContent() {
         )}
       </div>
 
-      {/* 第 4 层:默认兜底 */}
+      {/* Layer 4: default fallback */}
       <div className="layer">
         <div className="layer-head"><span className="layer-no">4</span> {t("router.default")}</div>
         <div className="kv-grid">

@@ -1,55 +1,55 @@
-# cargo-deny 门禁（C0#6）。CI 在每个 PR 上运行 `cargo deny check`。
+# cargo-deny gate (C0#6). CI runs `cargo deny check` on every PR.
 #
-# 这个仓是 Apache-2.0 的开核开源仓，将来会被第三方以 crate 形式依赖（conformance
-# 要作为独立发布物被插件仓固定依赖，见架构 §9.1）。所以 license 走显式允许清单：
-# 新依赖带来清单外的 license 时，CI 拒绝，由人决定是扩清单还是换依赖——而不是
-# 事后在发布检查里发现。
+# This Apache-2.0 open-core repository will be consumed by third-party crates;
+# conformance will become a pinned plugin dependency under architecture section
+# 9.1. Use an explicit license allowlist so CI rejects new licenses and a person
+# chooses whether to extend the list or replace the dependency before release.
 
 [graph]
-# 所有 target 都检查。客户端要发 mac/win/linux 三平台，只检查本机 target 会漏掉
-# 平台特定依赖（将来 keyring、TLS 栈都是平台特定的）。
+# Check all targets. The client ships on macOS, Windows, and Linux, so host-only
+# checks would miss platform-specific dependencies such as keyrings and TLS stacks.
 all-features = true
 
 [licenses]
-# 与 Apache-2.0 项目相容、且当前依赖树实际出现过的集合。刻意小：
-# 加一条是显式决定，不是默认。
+# Deliberately small set of Apache-2.0-compatible licenses present in the current
+# dependency tree. Every addition must be an explicit decision.
 allow = [
     "Apache-2.0",
-    # wasmtime 全家（plugin-runtime 的 WASM 引擎）只提供这一种
+    # The wasmtime family used by plugin-runtime offers only this license.
     "Apache-2.0 WITH LLVM-exception",
-    # encoding_rs 是 `(Apache-2.0 OR MIT) AND BSD-3-Clause`——AND 绕不开
+    # encoding_rs is `(Apache-2.0 OR MIT) AND BSD-3-Clause`; the AND is unavoidable.
     "BSD-3-Clause",
-    # webpki-roots（Mozilla 根证书数据集）的许可，rustls 生态标配
+    # License for webpki-roots, Mozilla's root-certificate dataset used by rustls.
     "CDLA-Permissive-2.0",
-    # rustls-webpki / untrusted；ring 是 `Apache-2.0 AND ISC`，此项补齐 AND
+    # rustls-webpki and untrusted; ring is `Apache-2.0 AND ISC`, so this satisfies the AND.
     "ISC",
     "MIT",
-    # unicode-ident（proc-macro2 → syn → serde_derive 全链路的底座）与 icu 系列
+    # unicode-ident under proc-macro2, syn, and serde_derive, plus the ICU family.
     "Unicode-3.0",
-    # foldhash（hashbrown 的默认 hasher，wit-parser 的传递依赖）
+    # foldhash, the default hashbrown hasher and a transitive wit-parser dependency.
     "Zlib",
 ]
-# 刻意不放行的：r-efi 是 `MIT OR Apache-2.0 OR LGPL-2.1-or-later`，mach2 是
-# `BSD-2-Clause OR MIT OR Apache-2.0`——双许可里已有允许项，cargo-deny 会选中
-# 允许的那份，无需把 LGPL / BSD-2-Clause 加进清单。
-# license 字段缺失或无法解析时按低置信度拒绝，而不是猜。
+# Deliberately excluded: r-efi offers `MIT OR Apache-2.0 OR LGPL-2.1-or-later`,
+# and mach2 offers `BSD-2-Clause OR MIT OR Apache-2.0`. cargo-deny can select an
+# already allowed option, so LGPL and BSD-2-Clause need not be added. Reject
+# missing or unparseable license fields as low confidence instead of guessing.
 confidence-threshold = 0.9
 
 [bans]
-# 同一 crate 出现多个版本先警告不阻断：传递依赖的重复版本常常不受我们控制，
-# 阻断会让无关 PR 因为上游发版而红。二进制体积敏感时再收紧。
+# Warn but do not block duplicate crate versions because transitive duplication
+# is often outside our control and upstream releases should not break unrelated PRs.
 multiple-versions = "warn"
-# 通配符版本依赖拒绝——workspace 内部的 path 依赖除外（它们没有版本号是正常的）。
+# Reject wildcard versions except workspace-internal path dependencies, which normally have no version.
 wildcards = "deny"
 allow-wildcard-paths = true
 
 [advisories]
-# RustSec 通告。有漏洞即红；yanked 说明上游自己都不想让人用。
-# unmaintained 用 workspace 口径：只报直接依赖，传递依赖的失修由 bans/升级处理。
+# RustSec advisories fail on vulnerabilities or yanked releases. Report
+# unmaintained direct dependencies only; handle transitive ones through bans and upgrades.
 unmaintained = "workspace"
 yanked = "deny"
 
 [sources]
-# 只信 crates.io。git 依赖意味着不可复现的信任链，与可复现构建（C1#7）冲突。
+# Trust crates.io only. Git dependencies create a non-reproducible trust chain that conflicts with C1#7.
 unknown-registry = "deny"
 unknown-git = "deny"

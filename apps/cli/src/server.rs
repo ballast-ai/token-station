@@ -243,11 +243,11 @@ pub async fn serve(state: AppState, listener: TcpListener) -> std::io::Result<()
 
 /// The inbound gate. Loopback keeps the network out; this keeps out every
 /// other process on the machine that can open a socket to 127.0.0.1.
-/// 各家客户端把虚拟 key 放的地方不一样——从入站请求里按约定取出所有候选:
+/// Clients place the virtual key differently, so extract every supported candidate from the request:
 /// - OpenAI/Anthropic:`Authorization: Bearer <key>`
-/// - Gemini 原生(Gemini CLI):`x-goog-api-key: <key>` 头,或 `?key=<key>` 查询参数
+/// - Native Gemini (Gemini CLI): `x-goog-api-key: <key>` header or `?key=<key>` query parameter
 ///
-/// 鉴权只认 Bearer 会把 Gemini 的 key 无视掉,报 missing key。纯函数,便于测试。
+/// Bearer-only authentication would ignore Gemini keys and report them missing. Kept pure for testing.
 fn presented_virtual_keys<'a>(headers: &'a HeaderMap, query: Option<&'a str>) -> Vec<&'a str> {
     let mut keys = Vec::new();
     if let Some(bearer) = headers
@@ -670,23 +670,23 @@ mod tests {
 
     #[test]
     fn presented_virtual_keys_reads_bearer_goog_header_and_query() {
-        // Bearer(OpenAI/Anthropic)。
+        // Bearer authentication for OpenAI and Anthropic.
         let mut bearer = HeaderMap::new();
         bearer.insert("authorization", "Bearer vk-abc".parse().unwrap());
         assert_eq!(presented_virtual_keys(&bearer, None), vec!["vk-abc"]);
 
-        // Gemini 原生:x-goog-api-key 头。
+        // Native Gemini x-goog-api-key header.
         let mut goog = HeaderMap::new();
         goog.insert("x-goog-api-key", "vk-gem".parse().unwrap());
         assert_eq!(presented_virtual_keys(&goog, None), vec!["vk-gem"]);
 
-        // Gemini 原生备选:?key= 查询参数(混在其它参数中)。
+        // Native Gemini fallback: a ?key= query parameter among other parameters.
         assert_eq!(
             presented_virtual_keys(&HeaderMap::new(), Some("alt=1&key=vk-q&x=2")),
             vec!["vk-q"]
         );
 
-        // 三者都在时全取到(任一匹配即放行)。
+        // Collect all three when present; any matching candidate grants access.
         let mut all = HeaderMap::new();
         all.insert("authorization", "Bearer vk-b".parse().unwrap());
         all.insert("x-goog-api-key", "vk-g".parse().unwrap());
@@ -695,7 +695,7 @@ mod tests {
             vec!["vk-b", "vk-g", "vk-q"]
         );
 
-        // 没带 key 时为空。
+        // Return an empty list when no key is present.
         assert!(presented_virtual_keys(&HeaderMap::new(), None).is_empty());
         assert!(presented_virtual_keys(&HeaderMap::new(), Some("model=x")).is_empty());
     }

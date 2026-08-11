@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
-# 可复现构建配方（C1#7）。用法：
+# Reproducible build recipe (C1#7). Usage:
 #
 #   scripts/build-release.sh <target-triple>
 #
-# 这份脚本本身就是配方：任何人在发布 tag 的检出上重跑它，产物字节一致。
-# 配方的组成部分，每一项都在消除一类非确定性：
+# This script is the recipe: rerunning it from a release tag should produce
+# byte-identical artifacts. Each element removes one source of nondeterminism:
 #
-#   - RELEASE_TOOLCHAIN 钉死编译器版本（rust-toolchain.toml 跟踪 stable，
-#     那是开发口径；发布口径必须是精确版本——换版本就是换配方）；
-#   - --locked 钉死全部依赖版本（Cargo.lock 已入库）；
-#   - --remap-path-prefix 把构建路径与 cargo home 重写成固定值，
-#     消除「谁在哪个目录编译」的痕迹；
-#   - SOURCE_DATE_EPOCH 取自发布 commit 的时间戳，不取墙钟；
-#   - GNU tar --format=ustar + 固定排序/属主/时间戳 + gzip -n，
-#     消除归档层的非确定性。
+#   - RELEASE_TOOLCHAIN pins the compiler. rust-toolchain.toml tracks stable for
+#     development, while releases require an exact version.
+#   - --locked pins every dependency version through the committed Cargo.lock.
+#   - --remap-path-prefix rewrites build and cargo-home paths to fixed values.
+#   - SOURCE_DATE_EPOCH comes from the release commit rather than the wall clock.
+#   - GNU tar ustar format, fixed order, owner, timestamps, and gzip -n make the
+#     archive deterministic.
 #
-# 产物落在 dist/：一个 tar.gz，内含 CLI 二进制、四个官方插件包
-# （manifest.json + adapter.wasm）、示例配置与 LICENSE。
+# Output goes to dist/: a tar.gz containing the CLI binary, four official plugin
+# packages, example configuration, and LICENSE.
 #
-# 官方二进制内嵌官方插件（builtin 层，架构 §12.1）：先构建四个 WASM 插件，
-# 再以 --features builtin-plugins + TOKEN_STATION_PLUGINS_DIST 构建 CLI，
-# include_bytes! 把插件字节编进二进制——裸二进制零安装即可用。tarball 仍附带
-# plugins-dist/ 副本（registry 对同方言取 builtin，重复无害）。插件构建
-# 因此必须先于 CLI 构建；嵌入的是文件内容而非路径，不影响可复现性。
+# Official binaries embed official plugins in the builtin tier from architecture
+# section 12.1. Build the four WASM plugins first, then build the CLI with
+# builtin-plugins and TOKEN_STATION_PLUGINS_DIST. include_bytes! embeds plugin
+# bytes so the standalone binary needs no installation. The tarball also carries
+# plugins-dist; registry prefers builtin for the same dialect, so duplication is
+# harmless. Embedded content, not paths, preserves reproducibility.
 
 set -euo pipefail
 
@@ -30,7 +30,7 @@ TARGET=${1:?usage: scripts/build-release.sh <target-triple>}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# 发布工具链：改这里 = 改配方 = 官方产物换了可复现基线，必须随发布说明公告。
+# Release toolchain: changing this changes the recipe and reproducible baseline and must be announced.
 RELEASE_TOOLCHAIN=1.96.0
 
 VERSION=$(grep -m1 '^version' apps/cli/Cargo.toml | cut -d'"' -f2)
@@ -67,7 +67,7 @@ TOKEN_STATION_PLUGINS_DIST="${ROOT}/${STAGE}/plugins-dist" \
 cp "target/${TARGET}/release/token-station-cli" "$STAGE/"
 cp apps/cli/example-config.json LICENSE "$STAGE/"
 
-# 确定性归档需要 GNU tar；macOS 上是 brew 的 gtar（bsdtar 无 --sort/--mtime）。
+# Deterministic archives require GNU tar; on macOS use Homebrew gtar because bsdtar lacks --sort and --mtime.
 TAR=tar
 if ! tar --version 2>/dev/null | grep -q "GNU tar"; then
   TAR=gtar

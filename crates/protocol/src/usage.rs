@@ -129,8 +129,9 @@ mod tests {
 
     #[test]
     fn absorb_is_last_nonzero_wins_per_field() {
-        // Anthropic 流式两报:message_start 先带输入侧桶,message_delta
-        // 终带输出计数——absorb 两次后必须凑出完整一份。
+        // Anthropic streaming reports usage twice: message_start carries input
+        // buckets, and the final message_delta carries output counts. Absorbing
+        // both must produce one complete usage record.
         let mut acc = Usage::default();
         acc.absorb(Usage {
             input_tokens: 1000,

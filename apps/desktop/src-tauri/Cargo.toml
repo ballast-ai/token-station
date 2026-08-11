@@ -60,5 +60,10 @@ tauri = { version = "2", default-features = false, features = ["test"] }
 windows = { version = "=0.61.3", features = ["ApplicationModel", "Management_Deployment", "Storage_Search", "Win32_System_WinRT"] }
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.186"

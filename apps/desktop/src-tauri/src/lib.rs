@@ -1,13 +1,14 @@
-//! token-station 桌面客户端后端。
+//! Token Station desktop backend.
 //!
-//! 这里**不重写任何路由/网关逻辑**:它把 `token-station-cli` 当库调,复用同一套
-//! `Gateway` / `ClientConfig` / `server::serve` / keychain。GUI 只是这套内核的一层
-//! 面板。三档路由面板 = 往 `router.pools` 的 tier_high/tier_mid/tier_low 三个池里
-//! 各填一个 (供应商, 模型),再由 heuristic `bands` 自动分档。
+//! This crate does not rewrite routing or gateway logic. It uses
+//! `token-station-cli` as a library and reuses the same `Gateway`, `ClientConfig`,
+//! `server::serve`, and keychain. The GUI is a panel over that core. Its three
+//! routing tiers populate tier_high, tier_mid, and tier_low pools with one
+//! provider-model pair each, then heuristic bands select among them.
 //!
-//! 部分(未填满)的三档状态在 RouterConfig 校验下是非法的,所以草稿以
-//! `serde_json::Value` 承接,只有在「保存」或「启动」时才物化成 `ClientConfig`
-//! 走校验——校验不过就把错误原样报给用户,绝不写盘。
+//! Partially configured tiers are invalid under RouterConfig validation, so the
+//! draft remains a serde_json::Value and materializes as ClientConfig only when
+//! saving or starting. Failed validation is reported to the user without writing.
 
 pub mod agent_integration;
 mod config_state;
@@ -64,20 +65,21 @@ use recovery::{
 };
 use serve_lifecycle::{prepare_server, PreparedServer, RunningServer, StartFailure};
 
-/// 三个档位槽的池名——面板上/中/下三行对应这三个 `router.pools` 键。
+/// Pool names for the three tier slots shown as the panel's high, middle, and low rows.
 const TIER_HIGH: &str = "tier_high";
 const TIER_MID: &str = "tier_mid";
 const TIER_LOW: &str = "tier_low";
 
-/// 每档一条「关键词覆盖」规则的稳定 id。用户在某档加的关键词落进对应规则的
-/// `keywords_any`——命中即走该档,压过复杂度分档(router-core 第 1 层最高优先级)。
-/// id 稳定,因为它同时是决策记录/审计里 `路由命中规则 ID` 的取值。
+/// Stable ID for each tier's keyword override rule. User keywords enter the
+/// rule's keywords_any list and force that tier ahead of complexity scoring at
+/// router-core layer 1. IDs remain stable because decision records and audits
+/// also store them as matched routing-rule IDs.
 const KW_RULE_HIGH: &str = "kw-high";
 const KW_RULE_MID: &str = "kw-mid";
 const KW_RULE_LOW: &str = "kw-low";
 
-/// UI 档位槽(high/mid/low)→(池名, 关键词规则 id)。规则顺序即优先级:
-/// 高→中→低,同一句话若同时命中两档的词,向上升档(更安全)。
+/// Map UI slots to pool names and keyword-rule IDs. Rule order is priority from
+/// high to mid to low, so phrases matching multiple tiers move upward safely.
 fn tier_pool_and_rule(slot: &str) -> Result<(&'static str, &'static str), String> {
     match slot {
         "high" => Ok((TIER_HIGH, KW_RULE_HIGH)),
@@ -87,20 +89,21 @@ fn tier_pool_and_rule(slot: &str) -> Result<(&'static str, &'static str), String
     }
 }
 
-/// 从高到低的三档(UI 槽名, 池名, 关键词规则 id),写回 `router.rules` 时按此定序。
+/// Three tiers from high to low as UI slot, pool name, and keyword-rule ID; preserve this order in router.rules.
 const TIER_ORDER: [(&str, &str, &str); 3] = [
     ("high", TIER_HIGH, KW_RULE_HIGH),
     ("mid", TIER_MID, KW_RULE_MID),
     ("low", TIER_LOW, KW_RULE_LOW),
 ];
 
-/// 分档切点(启发式分数 → 档)。band 从高到低,`at_least` 严格递减,末档 0 兜底。
-/// 这些默认值将来由评测中心校准替换;现在给个能跑的合理值。
+/// Tier thresholds mapping heuristic scores to tiers. Bands descend strictly by
+/// at_least, with a final zero fallback. Evaluation will calibrate these defaults later.
 const CUT_HIGH: u32 = 55;
 const CUT_MID: u32 = 22;
 
-/// 桌面端所需入站适配器由 Connector 能力声明推导。重复 adapter 去重且保留
-/// build-time Connector registry 的稳定顺序；新增 Connector 不再要求修改此处。
+/// Derive required desktop inbound adapters from Connector capabilities.
+/// Deduplicate adapters while preserving build-time registry order so adding a
+/// Connector no longer requires changes here.
 fn desktop_agents() -> Vec<&'static str> {
     let mut agents = Vec::new();
     for connector in agent_integration::connectors::builtin_connectors() {
@@ -162,24 +165,24 @@ impl ServerLifecycle {
     }
 }
 
-/// 后端全局状态。用一把锁保护;命令都是短事务。
+/// Global backend state protected by one lock; commands are short transactions.
 struct AppInner {
-    /// 真实配置文件路径(`token-station.json`)。
+    /// Actual token-station.json configuration path.
     config_path: PathBuf,
-    /// 权威配置草稿。每次修改都先物化并校验候选值，再替换当前状态。
+    /// Authoritative config draft. Materialize and validate candidates before replacing current state.
     draft: Value,
-    /// 启动时既有配置无法读取/校验时保留错误。此时展示安全模板但禁止写盘，
-    /// 防止一次“保存”静默覆盖用户原文件。
+    /// Preserve startup read or validation errors. Show a safe template but block
+    /// writes so Save cannot silently overwrite the user's original file.
     load_error: Option<String>,
-    /// 可编辑、已保存配置的持久化身份；运行态版本由 Runtime Supervisor 持有。
+    /// Persistent identity of the editable saved config; Runtime Supervisor owns the running revision.
     config_state: ConfigState,
-    /// Agent 独立路由的进程内编辑态。允许档位为空，但绝不进入可保存的全局 draft。
+    /// In-process editing state for Agent-specific routes. Tiers may be empty but never enter the savable global draft.
     agent_route_drafts: BTreeMap<String, BTreeMap<String, TierView>>,
-    /// 代理服务的权威生命周期状态。
+    /// Authoritative proxy-service lifecycle state.
     server: ServerLifecycle,
-    /// 免费供应商验证会产生真实上游请求；用内存单飞集合限制重复/并发滥用。
+    /// Free-provider verification sends real upstream requests; an in-memory single-flight set limits duplication and abuse.
     pending_free_providers: BTreeSet<String>,
-    /// 已验证但尚未保存的 Provider Key。进程退出即清零，避免产生无配置引用的孤儿 Key。
+    /// Verified but unsaved provider keys. Clear them on exit to avoid orphaned keys without config references.
     pending_provider_keys: BTreeMap<String, Zeroizing<String>>,
 }
 
@@ -265,8 +268,8 @@ pub struct AgentIntegrationPaths {
     pub ownership_root: PathBuf,
 }
 
-/// 全新配置模板。空 upstreams / 空 pools——作为 `ClientConfig` 非法,但作为草稿
-/// 合法,直到用户至少配好一档。运行目录由 Tauri 的应用目录显式注入。
+/// New-config template. Empty upstreams and pools are invalid ClientConfig but a
+/// valid draft until the user configures one tier. Tauri injects runtime directories.
 fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value {
     let pricing = serde_json::to_value(PriceTable::builtin())
         .expect("the built-in price table always serializes");
@@ -500,8 +503,9 @@ fn seed_builtin_pricing(draft: &mut Value) -> Result<bool, String> {
     Ok(true)
 }
 
-/// 把 CLI 时代的单 Chat 入站配置升级为桌面端三入站草稿，并把相对运行目录锚到
-/// 配置文件所在目录。只改内存草稿；用户点击保存前不触碰原文件。
+/// Upgrade a CLI-era single-Chat inbound config into the desktop three-inbound
+/// draft and anchor relative runtime paths to the config directory. Change only
+/// the in-memory draft until the user saves.
 fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Value {
     let agents = draft["plugins"]["agents"].as_array();
     let legacy_alias = agents.is_none_or(Vec::is_empty)
@@ -518,9 +522,10 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
         draft["plugins"]["agents"] = json!(desktop_agents());
     }
 
-    // 确保所有内置连接器的入站适配器都在 agents 列表里:老配置的 agents 是当时写死的
-    // 快照,新增适配器(如 agent-gemini)不会自动进去,网关就不加载它 → 对应 Agent
-    // 接入被「网关未加载 agent-xxx」拒。这里补齐缺的,保留既有顺序与用户其它项。
+    // Ensure agents contains every built-in connector adapter. Legacy configs
+    // captured a fixed snapshot, so newer adapters such as agent-gemini would be
+    // missing and their Agents rejected because the gateway did not load them.
+    // Add missing adapters while preserving existing order and custom entries.
     if !draft["plugins"]["agents"].is_array() {
         draft["plugins"]["agents"] = json!([]);
     }
@@ -544,11 +549,12 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
     anchor(&mut draft["plugins"]["dir"], config_dir);
     anchor(&mut draft["data"]["dir"], config_dir);
 
-    // 能力迁移:把既有配置里模型的 tool_state / json_schema_state 从 "unknown" 升成
-    // "declared"。早期 add_provider 把新模型写成 unknown,而路由对工具调用 fail-closed
-    // (unknown 一律拒)→ 所有带工具的 Agent(OpenCode 等)一律路由失败。catalog 全是
-    // OpenAI 兼容聊天供应商,按契约支持工具/结构化输出,声明即可;视觉保持原样(因模型
-    // 而异)。只升 "unknown",不覆盖操作员显式标的 "unsupported"/"verified"。
+    // Capability migration: promote tool_state and json_schema_state from
+    // unknown to declared. Early add_provider versions wrote unknown, while
+    // tool routing fails closed and rejected every tool-using Agent. Catalog
+    // entries are OpenAI-compatible chat providers whose contract includes tools
+    // and structured output. Keep vision unchanged because it varies by model,
+    // and never overwrite explicit unsupported or verified states.
     if let Some(upstreams) = draft["upstreams"].as_object_mut() {
         for upstream in upstreams.values_mut() {
             if upstream["access_tier"].as_str() == Some("free") {
@@ -570,10 +576,11 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
         }
     }
 
-    // 清理悬空引用:provider/model 删除或迁移后,agent_routes 的独立路由与 profiles
-    // 策略组里可能残留指向已不存在供应商/模型的档位(门禁补齐前产生的旧残留)。把它们
-    // 归零成「未选择」,以免 UI 一直回显早已删掉的老选项(用户反馈的"老旧选项残留")。
-    // 仅在 upstreams 为合法对象时执行,避免损坏配置时把一切误判为悬空。
+    // Remove dangling references after provider or model deletion and migration.
+    // Agent-specific routes and profiles created before validation may retain
+    // missing targets. Reset them to unselected so the UI does not show stale
+    // choices. Run only when upstreams is a valid object to avoid treating every
+    // target in a damaged config as dangling.
     if draft["upstreams"].is_object() {
         let valid: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = draft
             ["upstreams"]
@@ -602,12 +609,12 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
                 return;
             };
             match valid.get(&upstream) {
-                // 供应商已删:整档归零成「未选择」。
+                // The provider was removed; reset the entire tier to unselected.
                 None => {
                     tier["upstream"] = Value::Null;
                     tier["model"] = Value::Null;
                 }
-                // 供应商在,但选的模型已下架:只清模型,保留供应商待用户重选。
+                // The provider remains but the model was removed; keep the provider for reselection.
                 Some(models) => {
                     if tier["model"]
                         .as_str()
@@ -642,8 +649,9 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
     draft
 }
 
-/// 既有配置必须完整通过 CLI 的读取/默认值填充/结构校验。失败时返回安全模板用于
-/// 展示，同时携带只读错误闸，后续保存/启动均会拒绝，避免覆盖损坏文件。
+/// Existing configs must pass complete CLI loading, defaulting, and structural
+/// validation. On failure, return a safe display template with a read-only gate
+/// that blocks saving and starting to protect the damaged file.
 #[cfg(test)]
 fn load_draft(config_path: &std::path::Path, root: &std::path::Path) -> (Value, Option<String>) {
     let (draft, _saved, error) = load_draft_state(
@@ -689,7 +697,7 @@ fn load_draft_state(
     }
 }
 
-/// 满 10 维的启发式权重:让内容驱动的自动分档真正生效(短中文难题也能升档)。
+/// Full ten-dimensional heuristic weights that make content-driven tiers effective even for short difficult prompts.
 fn default_weights() -> Value {
     json!({
         "tokens_per_point": 100,
@@ -710,7 +718,7 @@ fn default_weights() -> Value {
     })
 }
 
-// ---- 前端视图类型 -------------------------------------------------------------
+// ---- Frontend view types ----------------------------------------------------
 
 #[derive(Serialize)]
 struct ProviderView {
@@ -856,28 +864,27 @@ struct StateView {
     tiers: std::collections::BTreeMap<String, TierView>,
     agent_routes: std::collections::BTreeMap<String, AgentRouteView>,
     profiles: Vec<String>,
-    /// 三档(high/mid/low)各自的用户关键词库。「用户在控制路由」的抓手,直接
-    /// 落进 `router.rules` 的 `keywords_any`。
+    /// Per-tier user keyword libraries that provide direct routing control through router.rules keywords_any.
     keywords: std::collections::BTreeMap<String, Vec<String>>,
-    /// 「只走本地」:锁定路由只用标了 local 的供应商,请求不出本机。
+    /// Local-only routing uses providers marked local and keeps requests on the machine.
     local_only: bool,
-    /// `local_only` 下,本地无可用时是否许可退到云(默认关=严格本地)。
+    /// Whether local_only can use cloud fallback when no local target is available; false is strict local routing.
     allow_cloud_fallback: bool,
-    /// 路由模式:`tiered`(三档智能路由,默认)或 `quota_first`(额度优先)。
+    /// Routing mode: tiered intelligent routing by default, or quota_first.
     routing_mode: String,
-    /// 额度优先模式下参与轮换的账户(供应商+模型),按优先级顺序。全局共享。
+    /// Globally shared quota-first rotation accounts, provider plus model, in priority order.
     quota_accounts: Vec<QuotaAccountView>,
     serve: ServeView,
     draft_revision: u64,
     saved_revision: u64,
     config_dirty: bool,
-    /// 草稿能否物化成合法配置(能否保存/启动)。
+    /// Whether the draft materializes as a valid config and can be saved or started.
     config_error: Option<String>,
-    /// 设置页读取面:开关、出站策略 + 只读环境信息。
+    /// Settings read model: switches, egress policy, and read-only environment information.
     settings: SettingsView,
 }
 
-/// 设置页视图:代理开关、出站策略与只读环境信息。
+/// Settings view for proxy switches, egress policy, and read-only environment information.
 #[derive(Serialize)]
 struct SettingsView {
     listen: String,
@@ -897,9 +904,9 @@ struct SettingsView {
     egress_auth_slot: String,
 }
 
-// ---- 子页面视图类型(#5 全能力子页面)----------------------------------------
+// ---- Subpage view types for full-capability subpages (#5) ------------------
 
-/// 一档(某档位/分组)的用量聚合,`stats::Aggregate` 的可序列化镜像。
+/// Serializable mirror of stats::Aggregate for one tier or group.
 #[derive(Serialize)]
 struct AggView {
     requests: u64,
@@ -951,8 +958,8 @@ impl AggView {
     }
 }
 
-/// 用量页视图。`empty=true` 表示指标库还没建(serve 从未在 metrics 开启下跑过),
-/// 前端据此展示引导而非空表。
+/// Usage-page view. empty=true means the metrics database does not exist because
+/// serve never ran with metrics enabled, so the frontend shows guidance instead of an empty table.
 #[derive(Serialize)]
 struct StatsView {
     total: AggView,
@@ -969,8 +976,8 @@ struct ReceiptPageView {
     page_size: usize,
 }
 
-/// 四层路由表可视化。层序:rules(1) → hint_routes(2) → heuristic bands(3)
-/// → default_pool(4 兜底)。全部纯读草稿,零 API。
+/// Four-layer routing-table view in order: rules, hint routes, heuristic bands,
+/// then default-pool fallback. It reads only the draft and performs no API calls.
 #[derive(Serialize)]
 struct RouterTableView {
     default_pool: String,
@@ -982,7 +989,7 @@ struct RouterTableView {
     pools: Vec<PoolView>,
 }
 
-/// heuristic 一条 band:分数 ≥ at_least 落到 pool,并解出该 pool 当前的 (供应商, 模型)。
+/// One heuristic band: scores at or above at_least select its pool and current provider-model pair.
 #[derive(Serialize)]
 struct BandView {
     at_least: u32,
@@ -998,7 +1005,7 @@ struct PoolView {
     model: Option<String>,
 }
 
-/// 插件页视图。listing 复用内核 `render_list()` 的等宽文本(与 CLI `plugin list` 同源)。
+/// Plugins-page view whose monospace listing reuses core render_list(), shared with CLI `plugin list`.
 #[derive(Serialize)]
 struct PluginsView {
     dir: String,
@@ -1072,8 +1079,9 @@ impl AppInner {
         Ok(())
     }
 
-    /// 在锁内构造候选配置，完整物化并记录 revision 成功后才替换权威 draft。
-    /// 调用方闭包只允许修改配置 draft；其它 AppInner 状态必须在提交成功后单独更新。
+    /// Build a candidate config under the lock and replace the authoritative draft
+    /// only after materialization and revision recording succeed. The callback may
+    /// edit only the config draft; update other AppInner state after commit.
     fn edit_validated_draft<T>(
         &mut self,
         edit: impl FnOnce(&mut Self) -> Result<T, String>,
@@ -1145,8 +1153,9 @@ impl AppInner {
             return Err(message);
         }
         if let Err(error) = self.config_state.finish_save(&draft) {
-            // 配置已经原子提交成功。pending journal 会在下次启动时自动晋升，
-            // 不能把“状态尾写失败”误报成配置保存失败。
+            // The config committed atomically. The pending journal will be
+            // promoted on next startup, so do not misreport a trailing state-write
+            // failure as a failed config save.
             eprintln!("configuration saved but revision finalization failed: {error}");
         }
         for upstream in self.pending_provider_keys.keys() {
@@ -1273,14 +1282,14 @@ impl AppInner {
         tiers
     }
 
-    /// 某档的池是否已配置(有非空成员)。加关键词前必须成立,否则规则会指向空池。
+    /// Whether a tier pool has members. Keywords require this or their rule would target an empty pool.
     fn pool_present(&self, pool: &str) -> bool {
         self.draft["router"]["pools"][pool]
             .as_array()
             .is_some_and(|members| !members.is_empty())
     }
 
-    /// 读某条关键词规则(按 id)当前的 `keywords_any`。
+    /// Read the current keywords_any list for a keyword-rule ID.
     fn rule_keywords(&self, rule_id: &str) -> Vec<String> {
         self.draft["router"]["rules"]
             .as_array()
@@ -1297,7 +1306,7 @@ impl AppInner {
             .unwrap_or_default()
     }
 
-    /// 三档(high/mid/low)各自的关键词库,给前端展示。
+    /// Keyword libraries for high, mid, and low tiers, exposed to the frontend.
     fn home_keywords(&self) -> std::collections::BTreeMap<String, Vec<String>> {
         TIER_ORDER
             .iter()
@@ -1305,14 +1314,15 @@ impl AppInner {
             .collect()
     }
 
-    /// 当前三档的关键词映射(槽名 → 词表),作为写回前的快照来源。
+    /// Current mapping from tier slots to keyword lists, used as the pre-write snapshot.
     fn keyword_map(&self) -> std::collections::BTreeMap<String, Vec<String>> {
         self.home_keywords()
     }
 
-    /// 用给定的三档关键词映射,重写 `router.rules`。规则顺序=优先级(高→中→低),
-    /// 只为「有关键词且池已配置」的档发规则;非关键词规则(操作员手写的其它规则)
-    /// 原样保留在后面。空词表或未配置的档不发规则,避免指向不存在的池。
+    /// Rewrite router.rules from the supplied tier-keyword map in high-to-low
+    /// priority order. Emit rules only for tiers with keywords and configured
+    /// pools. Preserve operator-authored non-keyword rules afterward. Empty or
+    /// unconfigured tiers emit no rule, avoiding references to missing pools.
     fn apply_keyword_map(&mut self, map: &std::collections::BTreeMap<String, Vec<String>>) {
         let mut rules: Vec<Value> = Vec::new();
         for (slot, pool, rule_id) in TIER_ORDER {
@@ -1326,7 +1336,7 @@ impl AppInner {
                 "route_to": pool,
             }));
         }
-        // 保留任何非本模块管理的既有规则(id 不在三档之列),接在后面。
+        // Preserve existing rules not managed by this module and append them afterward.
         let managed = [KW_RULE_HIGH, KW_RULE_MID, KW_RULE_LOW];
         if let Some(existing) = self.draft["router"]["rules"].as_array() {
             for rule in existing {
@@ -1339,8 +1349,8 @@ impl AppInner {
         self.draft["router"]["rules"] = Value::Array(rules);
     }
 
-    /// 关键词归一:去首尾空白。用于去重(大小写不敏感,与内核 `keywords_any`
-    /// 的匹配一致)与存储(保留用户原样大小写用于展示)。
+    /// Normalize keywords by trimming whitespace. Deduplicate case-insensitively
+    /// to match core keywords_any behavior while preserving original case for display.
     fn add_tier_keyword(&mut self, slot: &str, keyword: &str) -> Result<(), String> {
         let (pool, _rule_id) = tier_pool_and_rule(slot)?;
         if !self.pool_present(pool) {
@@ -1379,7 +1389,7 @@ impl AppInner {
         Ok(())
     }
 
-    /// 清空某池时同步删掉它的关键词规则(否则规则 `route_to` 会指向空池,保存失败)。
+    /// Remove a pool's keyword rule when clearing it so route_to cannot reference an empty pool.
     fn drop_keyword_rule_for_pool(&mut self, pool: &str) {
         let Some(rule_id) = TIER_ORDER
             .iter()
@@ -1505,10 +1515,10 @@ impl AppInner {
             .unwrap_or_default()
     }
 
-    /// 根据当前已配置的档位,重建 pools 的档池引用 + heuristic bands + default。
-    /// 只把「已选好 (upstream, model)」的档纳入路由。
+    /// Rebuild tier-pool references, heuristic bands, and default from configured
+    /// tiers. Include only tiers with a selected upstream-model pair.
     fn rebuild_routing(&mut self) {
-        // 收集已配置的档(从高到低)。
+        // Collect configured tiers from high to low.
         let present: Vec<(&str, u32)> =
             [(TIER_HIGH, CUT_HIGH), (TIER_MID, CUT_MID), (TIER_LOW, 0u32)]
                 .into_iter()
@@ -1521,13 +1531,13 @@ impl AppInner {
                 .collect();
 
         if present.is_empty() {
-            // 一档都没有:清空启发式/默认,保存时会因空池报错提示用户。
+            // With no configured tiers, clear heuristic and default so saving reports the empty-pool error.
             self.draft["router"]["heuristic"] = Value::Null;
             self.draft["router"]["default_pool"] = json!("");
             return;
         }
 
-        // bands:present 已按高→低;末档强制 at_least=0 兜底,不漏请求。
+        // `present` is high to low; force the last band's at_least to zero so no request is missed.
         let last = present.len() - 1;
         let bands: Vec<Value> = present
             .iter()
@@ -1551,7 +1561,7 @@ impl AppInner {
         self.draft["router"]["default_pool"] = json!(lowest);
     }
 
-    /// 把草稿物化成 `ClientConfig`(校验)。失败返回人类可读错误。
+    /// Materialize and validate the draft as ClientConfig, returning a human-readable error on failure.
     fn materialize(&self) -> Result<ClientConfig, String> {
         if let Some(upstreams) = self.draft["upstreams"].as_object() {
             for (name, provider) in upstreams {
@@ -1745,12 +1755,12 @@ impl AppInner {
         }
     }
 
-    /// 数据目录(草稿里的绝对路径)。stats / receipts / plugins 都锚到它。
+    /// Absolute data directory from the draft, anchoring stats, receipts, and plugins.
     fn data_dir(&self) -> PathBuf {
         PathBuf::from(self.draft["data"]["dir"].as_str().unwrap_or_default())
     }
 
-    /// 解出某个 pool 当前第一个成员的 (供应商, 模型)——路由表/band 展示用。
+    /// Resolve a pool's first member as provider and model for routing-table and band display.
     fn pool_member(&self, pool: &str) -> (Option<String>, Option<String>) {
         let m = self.draft["router"]["pools"][pool]
             .as_array()
@@ -1790,7 +1800,7 @@ impl AppInner {
                 if let Some(pools) = self.draft["router"]["pools"].as_object_mut() {
                     pools.remove(pool);
                 }
-                // 池没了,它的关键词规则会指向空池,保存必失败——同步删掉。
+                // Remove the keyword rule with the pool so it cannot target an empty pool and break saving.
                 self.drop_keyword_rule_for_pool(pool);
             }
             _ => return Err("档位必须同时提供供应商和模型，或同时清空".to_string()),
@@ -2021,7 +2031,101 @@ fn supported_agent_ids() -> Vec<String> {
         .collect()
 }
 
-// ---- Tauri 命令 ---------------------------------------------------------------
+// ---- Tauri commands --------------------------------------------------------
+
+fn dock_icon_bytes(theme: &str) -> Result<&'static [u8], String> {
+    match theme {
+        "light" => Ok(include_bytes!("../icons/icon-light.png")),
+        "dark" => Ok(include_bytes!("../icons/icon-dark.png")),
+        _ => Err(format!("unsupported Dock icon theme: {theme}")),
+    }
+}
+
+#[tauri::command]
+async fn set_dock_theme_icon(app: tauri::AppHandle, theme: String) -> Result<(), String> {
+    let icon_bytes = dock_icon_bytes(&theme)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        app.run_on_main_thread(move || {
+            let _ = result_tx.send(apply_macos_dock_icon(icon_bytes));
+        })
+        .map_err(|error| format!("failed to schedule Dock icon update: {error}"))?;
+
+        let apply_result = tauri::async_runtime::spawn_blocking(move || {
+            result_rx.recv_timeout(Duration::from_secs(2))
+        })
+        .await
+        .map_err(|error| format!("failed to join Dock icon update: {error}"))?
+        .map_err(|error| format!("timed out waiting for Dock icon update: {error}"))?;
+        apply_result?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, icon_bytes);
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_dock_icon(icon_bytes: &'static [u8]) -> Result<(), String> {
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApp, NSImage};
+    use objc2_foundation::NSData;
+
+    let main_thread = MainThreadMarker::new()
+        .ok_or_else(|| "Dock icon update did not run on the AppKit main thread".to_string())?;
+    let data = NSData::with_bytes(icon_bytes);
+    let image = NSImage::initWithData(NSImage::alloc(), &data)
+        .ok_or_else(|| "failed to decode the embedded Dock icon".to_string())?;
+    let application = NSApp(main_thread);
+
+    // AppKit requires application icon updates on the main thread.
+    unsafe { application.setApplicationIconImage(Some(&image)) };
+    let applied_image = application
+        .applicationIconImage()
+        .ok_or_else(|| "AppKit did not retain the Dock icon".to_string())?;
+    if !std::ptr::eq(&*image, &*applied_image) {
+        return Err("AppKit did not apply the requested Dock icon".to_string());
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod dock_icon_tests {
+    use super::dock_icon_bytes;
+
+    #[test]
+    fn accepts_supported_dock_icon_themes() {
+        for theme in ["light", "dark"] {
+            assert!(dock_icon_bytes(theme).is_ok());
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_dock_icon_theme() {
+        assert!(dock_icon_bytes("system").is_err());
+    }
+
+    #[test]
+    fn embeds_png_dock_icons() {
+        for theme in ["light", "dark"] {
+            assert!(dock_icon_bytes(theme)
+                .unwrap()
+                .starts_with(b"\x89PNG\r\n\x1a\n"));
+        }
+    }
+
+    #[test]
+    fn embeds_distinct_light_and_dark_dock_icons() {
+        assert_ne!(
+            dock_icon_bytes("light").unwrap(),
+            dock_icon_bytes("dark").unwrap()
+        );
+    }
+}
 
 #[tauri::command]
 fn get_state(state: State<'_, AppStateManaged>) -> StateView {
@@ -2054,7 +2158,7 @@ fn get_runtime_state(
     state.0.lock().unwrap().serve_view()
 }
 
-/// 保存前预览三种入站协议最终会命中的 Provider URL。
+/// Preview the provider URL selected by each inbound protocol before saving.
 #[tauri::command]
 fn preview_provider_endpoints(base_url: String) -> Result<ProviderEndpointPreview, String> {
     let endpoint = ProviderEndpoint::try_new(base_url.trim())
@@ -2294,9 +2398,9 @@ async fn add_free_provider(
     Ok(inner.snapshot())
 }
 
-/// 从模型名里显式的尺寸标记推断上下文窗口:很多供应商把窗口直接写进 id
-/// (`moonshot-v1-128k`、`glm-5.2[1m]`、`qwen-turbo-1m`)。取所有 `<数字>k|m`
-/// 标记里最大的一个,并限定在合理区间(8k–10M),避免把版本号(`glm-4.6`)误判。
+/// Infer context windows from explicit size markers in model IDs such as
+/// `moonshot-v1-128k`, `glm-5.2[1m]`, and `qwen-turbo-1m`. Use the largest
+/// numeric k or m marker within 8k to 10M, avoiding version numbers like `glm-4.6`.
 fn context_window_from_marker(name: &str) -> Option<u64> {
     let bytes = name.as_bytes();
     let mut best: Option<u64> = None;
@@ -2344,7 +2448,7 @@ fn known_context_window(model: &str) -> u64 {
     128_000
 }
 
-/// 新增一个供应商(= 一个 openai-compatible 上游)。有 key 就存进系统钥匙串。
+/// Add an OpenAI-compatible upstream provider, storing its key in the system keychain when present.
 #[tauri::command]
 fn add_provider(
     state: State<'_, AppStateManaged>,
@@ -2422,10 +2526,11 @@ fn add_provider_impl(
         .filter(|m| !m.trim().is_empty())
         .map(|m| {
             json!({
-                // OpenAI Chat Completions 契约本就含工具调用与结构化输出,catalog 里全是
-                // OpenAI 兼容聊天供应商,故默认声明(declared)支持——否则路由对 unknown
-                // fail-closed,所有带工具的 Agent(OpenCode 等)一律被拒。视觉因模型而异,
-                // 保守留 unknown;真不支持会被上游打回(运行时降级),这正是标准做法。
+                // OpenAI Chat Completions includes tools and structured output,
+                // and catalog entries are compatible chat providers, so declare
+                // support by default. Leaving these unknown would fail closed and
+                // reject every tool-using Agent. Keep vision unknown because it
+                // varies by model; unsupported requests can degrade at runtime.
                 "model": m,
                 "tool": true,
                 "vision": false,
@@ -2449,12 +2554,13 @@ fn add_provider_impl(
         "base_url": base_url,
         "models": model_objs,
     });
-    // 只在标了本地时写 local 键,让普通云供应商的配置保持原样(与 serde 的
-    // skip_serializing_if 对齐)。local_only 路由据此把流量锁在本机。
+    // Write the local key only when marked local, preserving ordinary cloud
+    // provider configs in line with serde skip_serializing_if. local_only uses it
+    // to keep traffic on the machine.
     if local {
         up["local"] = json!(true);
     }
-    // 有 key → keychain,auth 指向 slot;没 key(如本地 Ollama)→ 省略 auth。
+    // Store a key in the keychain and point auth to its slot; omit auth when no key exists, as with local Ollama.
     let api_key = api_key
         .as_deref()
         .map(str::trim)
@@ -2501,8 +2607,9 @@ fn add_provider_impl(
     Ok(inner.snapshot())
 }
 
-/// 设置「只走本地」及其云兜底许可。写进 home `router`,agent inherit 自动跟随。
-/// 关掉时把两个键一并移除,让普通配置保持原样(与 serde default=false 对齐)。
+/// Set local-only routing and cloud fallback in the home router so inherited
+/// Agents follow automatically. Remove both keys when disabled to preserve
+/// ordinary configs and serde's false default.
 #[tauri::command]
 fn set_local_routing(
     state: State<'_, AppStateManaged>,
@@ -2516,7 +2623,7 @@ fn set_local_routing(
         inner.draft["router"]["local_only"] = json!(true);
         inner.draft["router"]["allow_cloud_fallback"] = json!(allow_cloud_fallback);
     } else if let Some(router) = inner.draft["router"].as_object_mut() {
-        // 「只走本地」关掉后,云许可无意义,一并清除,避免残留误导。
+        // Cloud fallback is meaningless when local-only is off, so clear both to avoid stale state.
         router.remove("local_only");
         router.remove("allow_cloud_fallback");
     }
@@ -2846,8 +2953,9 @@ fn prepare_discovery_credential(
     Ok(DiscoveryCredential::Explicit(None))
 }
 
-/// 获取厂商当前模型目录。网络请求在 blocking worker 上执行，不阻塞 Tauri UI。
-/// 使用已保存 Key 时强制请求 URL 与供应商配置一致，避免凭证被转发到任意地址。
+/// Fetch the provider's current model catalog on a blocking worker without
+/// blocking the Tauri UI. When using a saved key, require the request URL to
+/// match provider configuration so credentials cannot be forwarded elsewhere.
 fn apply_discovered_model_capabilities(
     inner: &mut AppInner,
     name: &str,
@@ -3058,7 +3166,7 @@ async fn test_provider(
     .map_err(|error| format!("Provider 测试任务异常结束：{error}"))?
 }
 
-/// 更新一个已添加供应商的模型集合，并保护三档仍在使用的模型引用。
+/// Update an existing provider's model set while protecting models referenced by routing tiers.
 fn replace_provider_models(
     inner: &mut AppInner,
     name: &str,
@@ -3178,7 +3286,7 @@ fn replace_provider_models(
         .map(|model| {
             existing.get(&model).cloned().unwrap_or_else(|| {
                 json!({
-                    // 见 add_provider 的同款注释:OpenAI 兼容聊天默认声明支持工具/结构化输出。
+                    // As in add_provider, OpenAI-compatible chat declares tools and structured output by default.
                     "model": model,
                     "tool": true,
                     "vision": false,
@@ -3308,7 +3416,7 @@ fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {
     }
     // Saved strategy groups (profiles) reference providers by name too; without
     // this scan a provider used only by a profile would pass the removal gate and
-    // leave that profile pointing at a deleted upstream (the "老旧选项残留" bug).
+    // leave that profile pointing at a deleted upstream, causing stale-option residue.
     if let Some(profiles) = inner.draft["profiles"].as_object() {
         for (profile_name, tiers) in profiles {
             for slot in ["high", "mid", "low"] {
@@ -3409,7 +3517,7 @@ fn restore_provider(state: State<'_, AppStateManaged>, name: String) -> Result<S
     Ok(inner.snapshot())
 }
 
-/// 设置某一档 = (供应商, 模型)。传 null 清空该档。
+/// Set a tier to a provider-model pair, or pass null to clear it.
 #[tauri::command]
 fn set_tier(
     state: State<'_, AppStateManaged>,
@@ -3423,7 +3531,7 @@ fn set_tier(
     Ok(inner.snapshot())
 }
 
-/// 往某档(high/mid/low)的关键词库加一个词。命中即强制走该档(router-core 第 1 层)。
+/// Add a keyword to a high, mid, or low tier; matches force that tier at router-core layer 1.
 #[tauri::command]
 fn add_keyword(
     state: State<'_, AppStateManaged>,
@@ -3435,7 +3543,7 @@ fn add_keyword(
     Ok(inner.snapshot())
 }
 
-/// 从某档关键词库删除一个词。
+/// Remove a keyword from a tier.
 #[tauri::command]
 fn remove_keyword(
     state: State<'_, AppStateManaged>,
@@ -3571,7 +3679,7 @@ fn apply_home_route_to_all_agents(state: State<'_, AppStateManaged>) -> Result<S
     Ok(inner.snapshot())
 }
 
-/// 校验 + 原子写盘。校验不过原样报错,不写盘(复刻 config edit 语义)。
+/// Validate and write atomically. Return validation errors without writing, matching config edit semantics.
 #[tauri::command]
 fn save_config(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
@@ -3940,7 +4048,7 @@ fn serve_stop(app: AppHandle, state: State<'_, AppStateManaged>) -> StateView {
     begin_serve_stop(app, state.inner())
 }
 
-/// 入站适配器的展示串:优先 `agents` 列表(逗号连接),否则回退单串 `agent`。
+/// Display inbound adapters from the comma-joined agents list, falling back to the single agent value.
 fn agents_display(plugins: &Value) -> String {
     let list: Vec<&str> = plugins["agents"]
         .as_array()
@@ -3953,7 +4061,7 @@ fn agents_display(plugins: &Value) -> String {
     }
 }
 
-// ---- 子页面命令(#5)----------------------------------------------------------
+// ---- Subpage commands (#5) -------------------------------------------------
 
 fn classify_settings_error(message: String) -> SettingsCommandError {
     let normalized = message.to_ascii_lowercase();
@@ -3972,8 +4080,9 @@ fn classify_settings_error(message: String) -> SettingsCommandError {
     }
 }
 
-/// 设置页:切换 server.auth / data.metrics 两个开关。能物化就落盘(复刻 config set),
-/// 否则只改草稿等完整保存。注意:改这两项对*正在运行*的 serve 不生效,需重启代理。
+/// Settings page command for server.auth and data.metrics. Persist after
+/// successful materialization, matching config set; otherwise keep draft-only
+/// changes until a full save. Running serve instances require a proxy restart.
 #[tauri::command]
 #[allow(
     clippy::too_many_arguments,
@@ -4282,8 +4391,9 @@ fn remove_model_price(
     Ok(next)
 }
 
-/// 用量页:只读聚合指标库。`since` = all / <N>h / <N>d;`by` = agent/upstream/model/pool/status/hour/day
-/// 或空。指标库还没建时返回 `empty=true`,不当错误报。
+/// Read-only usage aggregation. since accepts all, hours, or days; by accepts
+/// agent, upstream, model, pool, status, hour, day, or empty. Return empty=true
+/// rather than an error when the metrics database does not exist.
 #[tauri::command]
 fn get_stats(
     state: State<'_, AppStateManaged>,
@@ -4347,8 +4457,9 @@ fn get_stats(
     })
 }
 
-/// 主页：最近五条无正文 Request Receipt。指标库尚未创建（含关闭
-/// metrics）时返回空数组；读取层自身硬限制最多五条。
+/// Return the five most recent body-free Request Receipts for the home page.
+/// Return an empty array if the metrics database does not exist, including when
+/// metrics are disabled. The read layer enforces the five-item limit.
 #[tauri::command]
 fn get_recent_receipts(
     state: State<'_, AppStateManaged>,
@@ -4361,7 +4472,7 @@ fn get_recent_receipts(
     SqliteStore::recent_receipts(&db, limit)
 }
 
-/// 用量页：分页读取完整的无正文 Request Receipt 台账。
+/// Read the complete body-free Request Receipt ledger with pagination for the usage page.
 #[tauri::command]
 #[allow(
     clippy::too_many_arguments,
@@ -4412,7 +4523,7 @@ fn get_request_receipts(
     })
 }
 
-/// 路由表页:把草稿里的四层路由(规则/提示/启发式档/兜底)整理成可视化视图。纯读,零 API。
+/// Convert the draft's rules, hints, heuristic tiers, and fallback into a read-only routing-table view with no API calls.
 #[tauri::command]
 fn get_router_table(state: State<'_, AppStateManaged>) -> RouterTableView {
     let inner = state.0.lock().unwrap();
@@ -4467,8 +4578,8 @@ fn get_router_table(state: State<'_, AppStateManaged>) -> RouterTableView {
     }
 }
 
-/// 插件页:发现插件目录 + 复用内核 `render_list()` 的等宽清单(与 CLI `plugin list` 同源)。
-/// 不依赖完整配置,tiers 没配好也能看。
+/// Discover the plugin directory and reuse core render_list() for a monospace
+/// listing shared with CLI `plugin list`. This works even with incomplete tiers.
 #[tauri::command]
 fn get_plugins(state: State<'_, AppStateManaged>) -> Result<PluginsView, String> {
     let (plugins_cfg, data_dir) = {
@@ -4520,6 +4631,7 @@ fn desktop_update_platform_unsupported_message() -> Option<&'static str> {
     Some(desktop_update::MACOS_ONLY_FIRST_RELEASE_UNSUPPORTED_MESSAGE)
 }
 
+/// Check the signed desktop update channel without changing the installed app.
 #[tauri::command]
 async fn check_desktop_update(
     app: AppHandle,
@@ -4846,8 +4958,10 @@ pub fn run() {
                 return Ok(());
             }
 
-            // 有现成配置就经 CLI 的完整校验与默认值填充后沿用；损坏配置进入只读
-            // 保护，绝不以空模板静默覆盖。旧版单 OpenAI 入站只在内存中升级。
+            // Reuse existing config after complete CLI validation and defaulting.
+            // Damaged config enters read-only protection and is never silently
+            // replaced by an empty template. Upgrade legacy single-OpenAI inbound
+            // config only in memory.
             let (draft, saved, load_error) = load_draft_state(
                 &desktop_paths.config_file,
                 &desktop_paths.data_dir,
@@ -4886,6 +5000,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            set_dock_theme_icon,
             get_state,
             get_runtime_state,
             preview_provider_endpoints,
@@ -5176,7 +5291,7 @@ mod tests {
 
     #[test]
     fn prepare_desktop_draft_backfills_missing_builtin_agent_adapters() {
-        // 老配置的 agents 快照缺了后加的 agent-gemini。
+        // Legacy agents snapshots omit the later agent-gemini adapter.
         let draft = json!({
             "plugins": { "agents": ["agent-openai", "agent-anthropic", "agent-openai-responses"] }
         });
@@ -5187,7 +5302,7 @@ mod tests {
             .iter()
             .map(|value| value.as_str().unwrap().to_string())
             .collect();
-        // desktop_agents() 里的每个内置适配器都必须在(含 agent-gemini),原有项保留。
+        // Include every desktop_agents() built-in adapter, including agent-gemini, while preserving existing entries.
         assert!(agents.contains(&"agent-openai".to_string()));
         assert!(
             agents.contains(&"agent-gemini".to_string()),
@@ -5203,8 +5318,8 @@ mod tests {
 
     #[test]
     fn prepare_desktop_draft_prunes_dangling_agent_route_and_profile_references() {
-        // upstreams 只剩 `live`(带模型 keep)。agent_routes 与 profiles 里残留着指向
-        // 已删供应商 `gone` 的档位,以及 `live` 上一个已下架模型 `dropped` 的档位。
+        // Only upstream `live` with model `keep` remains. agent_routes and profiles
+        // still reference removed provider `gone` and removed model `dropped`.
         let draft = json!({
             "plugins": {"agents": desktop_agents()},
             "upstreams": { "live": { "models": [{ "model": "keep" }] } },
@@ -5230,13 +5345,13 @@ mod tests {
         let out = prepare_desktop_draft(draft, std::path::Path::new("/tmp"));
 
         let route = &out["agent_routes"]["opencode"]["custom_route"];
-        // 供应商已删 → 整档归零。
+        // A removed provider clears the entire tier.
         assert!(route["high"]["upstream"].is_null());
         assert!(route["high"]["model"].is_null());
-        // 供应商在、模型已下架 → 只清模型,保留供应商。
+        // A removed model clears only the model and keeps the provider.
         assert_eq!(route["mid"]["upstream"], json!("live"));
         assert!(route["mid"]["model"].is_null());
-        // 仍有效 → 原样保留。
+        // Preserve targets that remain valid.
         assert_eq!(route["low"]["upstream"], json!("live"));
         assert_eq!(route["low"]["model"], json!("keep"));
 
@@ -5249,15 +5364,15 @@ mod tests {
 
     #[test]
     fn known_context_window_reads_size_markers_then_family_defaults() {
-        // 模型名里的显式尺寸标记优先(供应商自己标的)。
+        // Prefer explicit size markers supplied in model names.
         assert_eq!(known_context_window("glm-5.2[1m]"), 1_000_000);
         assert_eq!(known_context_window("moonshot-v1-128k"), 128_000);
         assert_eq!(known_context_window("qwen-turbo-1m"), 1_000_000);
         assert_eq!(known_context_window("gpt-4-32k"), 32_000);
-        // 无标记 → 家族默认。
+        // Fall back to the family default when no marker exists.
         assert_eq!(known_context_window("gemini-2.5-pro"), 1_000_000);
         assert_eq!(known_context_window("claude-opus-4-8"), 200_000);
-        // 未知家族 / 版本号数字不误判 → 128k 兜底。
+        // Unknown families and version numbers use the 128k fallback without false inference.
         assert_eq!(known_context_window("deepseek-v4-pro"), 128_000);
         assert_eq!(known_context_window("glm-4.6"), 128_000);
         assert_eq!(known_context_window("some-obscure-model"), 128_000);
@@ -5304,11 +5419,11 @@ mod tests {
         });
         let out = prepare_desktop_draft(draft, std::path::Path::new("/tmp"));
         let models = out["upstreams"]["deepseek"]["models"].as_array().unwrap();
-        // unknown → declared(工具/结构化输出),视觉保持 unknown。
+        // Promote tools and structured output from unknown to declared while keeping vision unknown.
         assert_eq!(models[0]["tool_state"], json!("declared"));
         assert_eq!(models[0]["json_schema_state"], json!("declared"));
         assert_eq!(models[0]["vision_state"], json!("unknown"));
-        // 操作员显式标的 unsupported/verified 不被覆盖。
+        // Do not overwrite explicit operator-set unsupported or verified states.
         assert_eq!(models[1]["tool_state"], json!("unsupported"));
         assert_eq!(models[1]["json_schema_state"], json!("verified"));
     }
@@ -6243,7 +6358,7 @@ mod tests {
             "models": [{"model": "m"}]
         });
 
-        // 未配置的档不能加词(否则规则会指向空池,保存失败)。
+        // Unconfigured tiers cannot accept keywords because the rule would target an empty pool.
         let error = inner
             .add_tier_keyword("low", "提交git")
             .expect_err("adding to an unconfigured tier is refused");
@@ -6254,13 +6369,13 @@ mod tests {
             .unwrap();
 
         inner.add_tier_keyword("low", "提交git").unwrap();
-        // 大小写不敏感去重。
+        // Deduplicate case-insensitively.
         let dup = inner
             .add_tier_keyword("low", "提交GIT")
             .expect_err("case-insensitive duplicate is refused");
         assert!(dup.contains("已在"), "{dup}");
 
-        // 词进了 low 档的规则,指向 tier_low,且整份配置能通过内核校验。
+        // The keyword enters the low-tier rule targeting tier_low, and the full config validates.
         let keywords = inner.home_keywords();
         assert_eq!(keywords["low"], vec!["提交git".to_string()]);
         let config = inner
@@ -6275,7 +6390,7 @@ mod tests {
         assert_eq!(rule.route_to, TIER_LOW);
         assert_eq!(rule.matcher.keywords_any, vec!["提交git".to_string()]);
 
-        // 删词(大小写不敏感);词表空后规则整条移除,不留空 keywords_any。
+        // Remove case-insensitively and delete the rule when its list empties instead of leaving empty keywords_any.
         inner.remove_tier_keyword("low", "提交GIT").unwrap();
         assert!(inner.home_keywords()["low"].is_empty());
         assert!(inner.materialize().unwrap().router.rules.is_empty());
@@ -6296,7 +6411,7 @@ mod tests {
             "base_url": "https://example.com/v1",
             "models": [{"model": "m"}]
         });
-        // 需要另一档兜底,否则清空唯一的档会让 pools 变空。
+        // Keep another fallback tier so clearing the only tier does not empty pools.
         inner
             .set_tier_value(TIER_HIGH, Some("provider".into()), Some("m".into()))
             .unwrap();
@@ -6312,7 +6427,7 @@ mod tests {
             .iter()
             .any(|rule| rule.id == KW_RULE_LOW));
 
-        // 清空 low 档:其关键词规则必须同步消失,否则 route_to 指向空池、校验失败。
+        // Clearing the low tier must also remove its keyword rule or route_to would target an empty pool.
         inner.set_tier_value(TIER_LOW, None, None).unwrap();
         let config = inner
             .materialize()
@@ -7448,7 +7563,7 @@ mod tests {
                 .iter()
                 .find(|provider| provider.name == name)
                 .expect("the added provider is visible");
-            // OpenAI 兼容聊天默认声明支持工具/结构化输出(见 add_provider 注释);视觉保守留 Unknown。
+            // OpenAI-compatible chat declares tools and structured output by default; keep vision Unknown.
             assert_eq!(
                 provider.model_capabilities[0].tool,
                 CapabilityState::Declared
@@ -7856,7 +7971,7 @@ mod tests {
         let app = tauri::test::mock_app();
         assert!(app.manage(AppStateManaged(Mutex::new(inner))));
 
-        // 一个本地供应商(标 local)和一个云供应商。
+        // One local provider marked local and one cloud provider.
         add_provider(
             app.state(),
             "ollama".to_owned(),
@@ -7886,12 +8001,12 @@ mod tests {
         assert!(!view.local_only, "local_only is off until asked for");
         assert!(!view.allow_cloud_fallback);
 
-        // 打开「只走本地」+ 云兜底许可。
+        // Enable local-only routing with cloud fallback.
         let on = set_local_routing(app.state(), true, true).unwrap();
         assert!(on.local_only);
         assert!(on.allow_cloud_fallback);
 
-        // 关掉后两个键都被清除,配置回到与默认一致的干净状态。
+        // Disabling clears both keys and returns the config to clean default-equivalent state.
         let off = set_local_routing(app.state(), false, false).unwrap();
         assert!(!off.local_only);
         assert!(!off.allow_cloud_fallback);

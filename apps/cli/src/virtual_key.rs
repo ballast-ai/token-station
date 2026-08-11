@@ -1,8 +1,8 @@
 //! The local virtual key: what stands between the loopback port and every
 //! other process on this machine.
 //!
-//! Generated on first start (`首启自动生成`), never printed by the server, and
-//! required on every endpoint by default (`默认开鉴权`). Loopback is a boundary
+//! Generated automatically on first start, never printed by the server, and
+//! required on every endpoint by default. Loopback is a boundary
 //! against the network, not against local software — any browser tab that can
 //! issue `fetch("http://127.0.0.1:8787/...")` is on this side of it, and what
 //! it would reach is a proxy holding the operator's provider keys.

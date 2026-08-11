@@ -1,5 +1,5 @@
 //! Plugin discovery: the registry mapping a provider dialect to the package
-//! that speaks it (架构 §12.2, stages B0–B1).
+//! that speaks it (architecture section 12.2, stages B0-B1).
 //!
 //! Sources, merged in this order:
 //!
@@ -24,7 +24,7 @@
 //! the embedded copy and a `plugins-dist/` copy of the same package must
 //! start, so the loser is noted in `plugin list` instead of refused.
 //!
-//! # Trust (架构 §12.3, stage B2)
+//! # Trust (architecture section 12.3, stage B2)
 //!
 //! Dropping a package into the directory registers it in the catalog, but is
 //! not enough to receive traffic. A discovered package binds its dialects

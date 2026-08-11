@@ -295,7 +295,7 @@ impl AgentTierRoutes {
     }
 }
 
-/// The client's ejection policy (C1#2's `简化版健康检查`).
+/// The client's ejection policy (C1#2's simplified health check).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthConfig {
@@ -361,7 +361,7 @@ pub struct ServerConfig {
     /// that says otherwise is refused at startup, not warned about.
     pub listen: String,
     /// Require the local virtual key on every endpoint. On by default
-    /// (`默认开鉴权`): loopback is a boundary against the network, not against
+    /// (authentication on by default): loopback is a network boundary, not a boundary against
     /// other processes on this machine.
     #[serde(default = "default_true")]
     pub auth: bool,

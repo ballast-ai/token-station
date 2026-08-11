@@ -910,17 +910,18 @@ fn valid_npm_package_name(name: &str) -> bool {
     }
 }
 
-/// 二进制哈希缓存条目:同一路径只要 mtime + size 没变,SHA-256 就不必重算。
+/// Binary hash cache entry. Reuse SHA-256 while path, mtime, and size remain unchanged.
 struct CachedBinaryHash {
     modified_at_ms: Option<u64>,
     size: u64,
     sha256: String,
 }
 
-/// 进程级二进制哈希缓存(键=规范路径)。`DiscoveryScanner` 每次扫描都新建,故缓存放
-/// 全局、跨扫描存活。几乎每个 Agent 按钮都会先触发一次全量扫描,而 Agent 二进制可达
-/// 数百 MB(claude 225MB、opencode 138MB);没缓存时每次点击都要把它们从头 SHA-256
-/// 一遍,debug 构建下每次卡数秒。缓存让未变的二进制只 stat、不重哈希。
+/// Process-wide binary hash cache keyed by canonical path. DiscoveryScanner is
+/// recreated for every scan, so the cache must outlive individual scanners.
+/// Most Agent actions trigger a full scan, and Agent binaries can be hundreds of
+/// megabytes. Without this cache every click recomputes SHA-256 and stalls debug
+/// builds for seconds. Unchanged binaries now require only stat calls.
 static BINARY_HASH_CACHE: LazyLock<Mutex<BTreeMap<PathBuf, CachedBinaryHash>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
@@ -936,7 +937,7 @@ fn binary_facts(path: &Path) -> (Option<u64>, Option<String>) {
     (modified_at_ms, binary_sha256)
 }
 
-/// 查全局缓存,命中(路径 + mtime + size 一致)就复用,否则读盘算 SHA-256 并写回。
+/// Reuse the global cache when path, mtime, and size match; otherwise hash the file and update the cache.
 fn cached_binary_sha256(
     path: &Path,
     modified_at_ms: Option<u64>,
@@ -944,13 +945,14 @@ fn cached_binary_sha256(
 ) -> Option<String> {
     match BINARY_HASH_CACHE.lock() {
         Ok(mut cache) => lookup_or_hash(&mut cache, path, modified_at_ms, size, hash_file),
-        // 锁中毒也别崩,退化成老实哈希。
+        // Do not crash on a poisoned lock; fall back to hashing the file.
         Err(_) => hash_file(path).ok(),
     }
 }
 
-/// 缓存判断的纯逻辑(哈希函数注入,便于测试):mtime + size 一致则复用缓存,
-/// 否则调用 `hasher` 重算并更新缓存。拿不到 size(文件不存在/不可读)则不缓存。
+/// Pure cache decision logic with an injected hasher for tests. Reuse entries
+/// when mtime and size match; otherwise recalculate and update. Do not cache when
+/// size is unavailable because the file is missing or unreadable.
 fn lookup_or_hash(
     cache: &mut BTreeMap<PathBuf, CachedBinaryHash>,
     path: &Path,
@@ -1578,20 +1580,20 @@ mod tests {
         let mut cache = BTreeMap::new();
         let path = Path::new("/bin/agent");
 
-        // 首次:未命中 → 哈希一次。
+        // First lookup misses and hashes once.
         let first = lookup_or_hash(&mut cache, path, Some(100), Some(500), hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        // mtime + size 不变 → 复用,不再哈希。
+        // Unchanged mtime and size reuse the cache without hashing.
         let second = lookup_or_hash(&mut cache, path, Some(100), Some(500), hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(first, second);
-        // mtime 变 → 重算。
+        // Recalculate when mtime changes.
         lookup_or_hash(&mut cache, path, Some(200), Some(500), hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-        // size 变 → 重算。
+        // Recalculate when size changes.
         lookup_or_hash(&mut cache, path, Some(200), Some(600), hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 3);
-        // 拿不到 size(文件不可读)→ 不缓存,每次都哈希。
+        // An unreadable size disables caching, so every call hashes.
         lookup_or_hash(&mut cache, path, Some(200), None, hasher).unwrap();
         lookup_or_hash(&mut cache, path, Some(200), None, hasher).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 5);

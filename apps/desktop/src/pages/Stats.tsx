@@ -15,6 +15,7 @@ import PageBackButton from "../components/PageBackButton";
 import CompactCombobox from "../components/CompactCombobox";
 import UsageTrendChart, { type UsageTrendRange } from "../components/UsageTrendChart";
 import { useLocalizedCopy } from "../components/LanguageProvider";
+import { humanizeAppError } from "../errors";
 
 export function formatBudgetAmount(micros: number): string {
   if (micros === 0) return "0.00";
@@ -232,7 +233,7 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
         setAgentId(selected);
         loadForm(selected, statuses);
       })
-      .catch((error) => setBudgetErr(String(error)));
+      .catch((error) => setBudgetErr(humanizeAppError(error)));
   }, [loadForm]);
 
   const loadDashboard = useCallback(async (background = false) => {
@@ -283,7 +284,7 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
         setModelFilter("");
       }
     } catch (error) {
-      if (dashboardMounted.current && generation === requestGeneration.current) setErr(String(error));
+      if (dashboardMounted.current && generation === requestGeneration.current) setErr(humanizeAppError(error));
     } finally {
       if (dashboardMounted.current && generation === requestGeneration.current) {
         setLoading(false);
@@ -356,7 +357,7 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
       loadForm(agentId, statuses);
       setBudgetSaved(copy("Budget saved · Alerts only", "预算已保存 · 仅用于展示与预警"));
     } catch (error) {
-      setBudgetErr(String(error));
+      setBudgetErr(humanizeAppError(error));
     }
   };
 
@@ -369,7 +370,7 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
       loadForm(agentId, statuses);
       setBudgetSaved(copy("Budget deleted", "预算已删除"));
     } catch (error) {
-      setBudgetErr(String(error));
+      setBudgetErr(humanizeAppError(error));
     }
   };
 

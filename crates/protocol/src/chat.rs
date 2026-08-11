@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(round_tripped.arguments, r#"{"city": "Beijing"}"#);
     }
 
-    // ── 0.3.0(G2/G3)wire 契约 ─────────────────────────────────
+    // 0.3.0 (G2/G3) wire contract
 
     #[test]
     fn thinking_and_redacted_blocks_round_trip() {
@@ -357,13 +357,13 @@ mod tests {
 
     #[test]
     fn unknown_part_survives_verbatim_and_known_tags_win() {
-        // 未知 type 整对象保真往返。
+        // Round-trip the full object for unknown types without loss.
         let raw = serde_json::json!({"type": "audio", "audio_url": "https://x/a.mp3"});
         let part: ContentPart = serde_json::from_value(raw.clone()).expect("valid part");
         assert_eq!(part, ContentPart::Unknown(raw.clone()));
         assert_eq!(serde_json::to_value(&part).expect("serializable part"), raw);
 
-        // 已知 tag 恒优先于 Unknown 兜底。
+        // Known tags always take precedence over the Unknown fallback.
         let known: ContentPart =
             serde_json::from_value(serde_json::json!({"type": "text", "text": "hi"}))
                 .expect("valid part");
@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(json["finish_reason"], serde_json::json!("stop_sequence"));
         assert_eq!(json["stop_sequence"], serde_json::json!("\n\nHuman:"));
 
-        // 缺省不占 wire(0.2.x JSON 照读=前向兼容)。
+        // Omit defaults from the wire so 0.2.x JSON remains forward-compatible.
         let old: Choice = serde_json::from_value(
             serde_json::json!({"index": 0, "message": {"role": "assistant"}}),
         )
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn tool_choice_is_typed_but_wire_shape_is_unchanged() {
-        // 字符串形:0.2.x 时代经 extensions flatten 的顶层键,如今同键同值。
+        // String form: preserve the same flattened top-level key and value used by 0.2.x extensions.
         let request: ChatRequest =
             serde_json::from_str(r#"{"model":"auto","messages":[],"tool_choice":"required"}"#)
                 .expect("valid request");
@@ -414,7 +414,7 @@ mod tests {
         let json = serde_json::to_value(&request).expect("serializable request");
         assert_eq!(json["tool_choice"], serde_json::json!("required"));
 
-        // 对象形保真(provider 专属形状不折不丢)。
+        // Preserve object form without reshaping or dropping provider-specific data.
         let obj = serde_json::json!({"type": "function", "function": {"name": "f"}});
         let request: ChatRequest = serde_json::from_value(serde_json::json!({
             "model": "auto", "messages": [], "tool_choice": obj.clone(),

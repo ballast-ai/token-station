@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import App, { configSaveStatus } from "./App";
+import App, { configSaveStatus, firstRunRouteApplyComplete } from "./App";
 import { getStats } from "./api";
 import type { AgentRouteView, AgentUiMetadataView, AgentView, ServeView, StateView } from "./api";
 import { AGENT_VISIBILITY_STORAGE_KEY } from "./components/AgentVisibilityPreferences";
@@ -356,7 +356,9 @@ it("walks through provider configuration and advances only after a real save", a
   expect(saveProvider).toHaveAttribute("data-onboarding-active", "true");
   await user.click(saveProvider);
 
-  expect(await screen.findByText(/credential rejected/)).toBeInTheDocument();
+  expect(await screen.findByText(
+    "凭据无法使用。请检查 API Key 及其权限，然后重试。",
+  )).toBeInTheDocument();
   expect(screen.getByRole("dialog", { name: "保存供应商" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "OpenAI" })).toBeInTheDocument();
 
@@ -461,6 +463,24 @@ it("spotlights routing controls and advances only when the requested revision is
 
   expect(await screen.findByRole("heading", { name: "Agent 管理" })).toBeInTheDocument();
   expect(await screen.findByRole("dialog", { name: "未检测到可接入 Agent" })).toBeInTheDocument();
+});
+
+it("requires the saved and running revisions to match the requested revision", () => {
+  const mismatched = stateFixture({
+    saved_revision: 3,
+    config_dirty: false,
+    config_error: null,
+    serve: serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 2,
+      error: null,
+    }),
+  });
+  expect(firstRunRouteApplyComplete(mismatched, 2)).toBe(false);
+
+  expect(firstRunRouteApplyComplete({ ...mismatched, saved_revision: 2 }, 2)).toBe(true);
 });
 
 it("pins each route teaching target and restores main scrolling when paused", async () => {
@@ -641,6 +661,69 @@ it("resumes at Agent and can finish honestly when no installation is detected", 
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(FIRST_RUN_GUIDE_VERSION);
   await user.click(screen.getByRole("button", { name: "返回概览" }));
   expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
+});
+
+it("does not allow skipping an Agent after a failed scan", async () => {
+  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  const user = userEvent.setup();
+  const provider = {
+    name: "openai",
+    provider: "openai-compatible",
+    base_url: "https://api.openai.com/v1",
+    models: ["gpt-5.1"],
+    has_auth: true,
+  };
+  const ready = stateFixture({
+    providers: [provider],
+    tiers: {
+      high: { upstream: "openai", model: "gpt-5.1" },
+      mid: { upstream: "openai", model: "gpt-5.1" },
+      low: { upstream: "openai", model: "gpt-5.1" },
+    },
+    draft_revision: 1,
+    saved_revision: 1,
+    config_dirty: false,
+    config_error: null,
+    serve: serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 1,
+    }),
+  });
+  let scans = 0;
+  invokeMock.mockImplementation(async (command) => {
+    if (command === "get_state") return ready;
+    if (command === "list_agent_registry") return registryFixture;
+    if (command === "scan_agents") {
+      scans += 1;
+      if (scans === 2) throw new Error("scanner offline");
+      return [];
+    }
+    throw new Error(`unexpected IPC command: ${command}`);
+  });
+
+  render(<App />);
+  await screen.findByRole("dialog", { name: "打开 Agent 管理" });
+  await user.click(screen.getByRole("button", { name: "Agent" }));
+
+  const emptyCoachmark = await screen.findByRole("dialog", { name: "未检测到可接入 Agent" });
+  const rescan = screen.getByRole("button", { name: "重新扫描" });
+  expect(within(emptyCoachmark).getByRole("button", { name: "暂不接入，完成设置" }))
+    .toBeInTheDocument();
+
+  await user.click(rescan);
+  await waitFor(() => expect(scans).toBe(2));
+  expect(await screen.findByText(
+    "操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。",
+  )).toBeInTheDocument();
+  expect(within(emptyCoachmark).queryByRole("button", { name: "暂不接入，完成设置" }))
+    .toBeNull();
+
+  await user.click(rescan);
+  await waitFor(() => expect(scans).toBe(3));
+  expect(within(emptyCoachmark).getByRole("button", { name: "暂不接入，完成设置" }))
+    .toBeInTheDocument();
 });
 
 it("continues from rescan to Agent selection when an installation appears", async () => {
@@ -1171,7 +1254,7 @@ describe("desktop station navigation", () => {
     await waitFor(() => expect(screen.queryByText("正在应用配置…")).toBeNull());
     expect(screen.queryByText(/配置已应用/)).toBeNull();
     if (expectedError) {
-      expect(screen.getByText(expectedError)).toBeInTheDocument();
+      expect(screen.getByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
     }
   });
 
@@ -1323,8 +1406,9 @@ describe("desktop station navigation", () => {
   });
 
   it("rescans once the runtime becomes ready after a not-ready first load", async () => {
-    // 开 app 时网关还没起来:首扫(load)带的是「未就绪」运行态,已接管的 Agent
-    // 会误显「需修复」。运行态一就绪(轮询翻正)就必须补扫一次,让卡片对齐真实态。
+    // The gateway is not ready when the app opens, so load() initially reports a
+    // not-ready runtime and managed Agents incorrectly appear to need repair.
+    // Rescan when polling reports ready so cards match the real state.
     const notReady = stateFixture({
       serve: serveFixture({
         phase: "starting",
@@ -1351,14 +1435,14 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
-    // 首扫来自 load()(此刻运行态未就绪)。
+    // The first scan comes from load() while runtime is not ready.
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1));
-    // 500ms 轮询把运行态翻成就绪 → 未就绪→就绪跃迁触发补扫。
+    // The 500 ms poll marks runtime ready, and the transition triggers a rescan.
     await waitFor(
       () => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2),
       { timeout: 1_500 },
     );
-    // 之后持续就绪,不再重复补扫。
+    // Runtime remains ready afterward, so no additional rescan occurs.
     await waitFor(() => expect(screen.getByTestId("agent-runtime-connection")).toBeInTheDocument());
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2);
   });
@@ -1929,7 +2013,7 @@ describe("desktop station navigation", () => {
 
     await openAgent(user, "Codex");
     await user.click(screen.getByRole("radio", { name: "独立路由" }));
-    expect(screen.getByText("Agent `codex` 的 high 档缺少供应商和模型")).toBeInTheDocument();
+    expect(screen.getByText("有一个路由尚未配置完整。请同时选择供应商和模型，然后重新保存。")).toBeInTheDocument();
 
     await user.click(navigation().getByRole("button", { name: "路由" }));
 
@@ -2043,7 +2127,7 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "添加供应商" })).toBeNull();
-    // 供应商选择器为品牌卡片目录，按可见标签点卡片而非下拉选值。
+    // The provider picker is a brand-card catalog; click by visible label instead of selecting an option.
     await user.click(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" }));
     expect(screen.getByRole("button", { name: "添加供应商" })).toBeInTheDocument();
     await user.type(screen.getByLabelText("API Key"), "secret-test");
@@ -2141,7 +2225,7 @@ describe("desktop station navigation", () => {
       installationPath: "/opt/claude",
       expectedVersion: "9.9.9",
     }));
-    // 不再有「确认写入」步骤:计划后直接应用。
+    // There is no separate write-confirmation step; apply immediately after planning.
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", { operationId: "op-1", confirmationToken: "token-1" }));
     expect(await screen.findByText("Agent 已接入")).toBeInTheDocument();
     expect(scans).toBe(2);
@@ -2170,7 +2254,7 @@ describe("desktop station navigation", () => {
       installationPath: "/opt/claude",
       expectedVersion: "2.1.210",
     }));
-    // 计划后直接应用,无确认步骤。
+    // Apply immediately after planning without a confirmation step.
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", {
       operationId: "op-admitted",
       confirmationToken: "token-admitted",
@@ -2196,7 +2280,7 @@ describe("desktop station navigation", () => {
     render(<App />);
     await openAgent(user, "Claude Code");
     await user.click(await screen.findByRole("button", { name: "恢复官方配置并断开" }));
-    // 恢复官方配置走 force_forget:直接剥离注入字段,不再计划/确认加密快照还原。
+    // Restoring official config uses force_forget to remove injected fields without planning or confirming encrypted snapshot restoration.
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("force_forget_agent", {
       agentId: "claude-code",
       installationPath: "/opt/claude",

@@ -2,7 +2,7 @@
 //! signature verification. Never automatic.
 //!
 //! This is the **only** outbound destination that is not a user-configured
-//! upstream (the exit criterion's 外联可解释), and it is reached exclusively
+//! upstream (the exit criterion's explainable-egress rule), and it is reached exclusively
 //! when the operator runs this command — `serve` never phones home.
 //!
 //! The check asks the GitHub Releases API; trust does not: a downloaded
@@ -24,7 +24,7 @@ use token_station_release::{ReleaseManifest, parse_public_key, verify_bytes};
 /// by rebuilding, not by trusting our key.
 pub const OFFICIAL_RELEASE_PUBKEY_HEX: &str = "";
 
-/// Where the anonymous check goes (2026-07 拍板: GitHub Releases first).
+/// Where the anonymous check goes (July 2026 decision: GitHub Releases first).
 pub const DEFAULT_ENDPOINT: &str = "https://api.github.com/repos/GlimpseEngine/token-station";
 
 /// This build's version, from the crate that compiled it.
