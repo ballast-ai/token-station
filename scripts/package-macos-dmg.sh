@@ -190,6 +190,13 @@ done
   echo "DMG 的 Finder 布局没有保存下来，已停止生成发布文件。" >&2
   exit 1
 }
+if [[ -e "$layout_mount_point/.fseventsd" ]]; then
+  /bin/rm -rf -- "$layout_mount_point/.fseventsd"
+fi
+[[ ! -e "$layout_mount_point/.fseventsd" ]] || {
+  echo "DMG 中的 macOS 临时索引目录没有清理干净，已停止生成发布文件。" >&2
+  exit 1
+}
 /bin/sync
 if ! hdiutil detach "$layout_mount_point" >/dev/null; then
   echo "DMG 布局已经生成，但暂存镜像无法安全卸载，请关闭相关 Finder 窗口后重试。" >&2

@@ -139,6 +139,7 @@ if (packager) {
     ["可写布局镜像", /-format UDRW/],
     ["Finder 布局配置", /configure-dmg-layout\.applescript/],
     ["Finder 元数据落盘检查", /\.DS_Store/],
+    ["清理临时 FSEvents 目录", /\/bin\/rm -rf -- "\$layout_mount_point\/\.fseventsd"/],
     ["只读压缩输出", /hdiutil convert[\s\S]*-format UDZO/],
   ];
   for (const [label, pattern] of requiredPackagerPatterns) {
@@ -171,6 +172,7 @@ if (auditor) {
     ["测试包来源检查", /构建来源\.txt/],
     ["Finder 元数据检查", /mounted_ds_store/],
     ["Finder 布局回读", /configure-dmg-layout\.applescript[\s\S]*inspect/],
+    ["系统临时目录检查", /\.fseventsd/],
   ];
   for (const [label, pattern] of requiredAuditPatterns) {
     if (!pattern.test(auditor)) failures.push(`${auditorPath} 缺少${label}`);

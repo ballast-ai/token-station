@@ -56,6 +56,11 @@ trap cleanup EXIT
 hdiutil attach "$dmg_path" -readonly -nobrowse -mountpoint "$mount_point" >/dev/null
 mounted=true
 
+[[ ! -e "$mount_point/.fseventsd" ]] || {
+  echo "DMG 包含 macOS 打包时生成的临时 .fseventsd 目录，请清理后重新打包。" >&2
+  exit 1
+}
+
 readonly mounted_app="$mount_point/token-station.app"
 readonly mounted_applications="$mount_point/Applications"
 readonly mounted_readme="$mount_point/安装前必读.md"
