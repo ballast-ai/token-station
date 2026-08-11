@@ -6,6 +6,7 @@ readonly DEST_APP="/Applications/token-station.app"
 readonly LOCK_DIR="/Applications/.token-station-install.lock"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SOURCE_APP="$SCRIPT_DIR/token-station.app"
+readonly UNSIGNED_TEST_MARKER="$SCRIPT_DIR/未签名测试版.txt"
 
 TEMP_ROOT=""
 BACKUP_ROOT=""
@@ -16,6 +17,11 @@ had_previous=false
 installed_new=false
 completed=false
 lock_acquired=false
+unsigned_test=false
+
+if [[ -f "$UNSIGNED_TEST_MARKER" ]]; then
+  unsigned_test=true
+fi
 
 bundle_id() {
   /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$1/Contents/Info.plist" 2>/dev/null
@@ -24,6 +30,7 @@ bundle_id() {
 verify_app() {
   local app_path=$1
   local label=$2
+  local signature_details
 
   if [[ ! -d "$app_path" ]]; then
     echo "错误：没有找到${label}：$app_path" >&2
@@ -33,9 +40,16 @@ verify_app() {
     echo "错误：${label}不是官方 Token Station，已停止操作。" >&2
     return 1
   fi
-  if ! codesign --verify --deep --strict "$app_path"; then
+  if ! codesign --verify --deep --strict "$app_path" >/dev/null 2>&1; then
     echo "错误：${label}的代码签名没有通过验证，请重新从官方发布页面下载。" >&2
     return 1
+  fi
+  if [[ "$unsigned_test" == "true" ]]; then
+    signature_details=$(codesign -d --verbose=4 "$app_path" 2>&1 || true)
+    if [[ "$signature_details" != *"Signature=adhoc"* ]]; then
+      echo "错误：${label}不是预期的 ad-hoc 签名测试 App，已停止操作。" >&2
+      return 1
+    fi
   fi
 }
 
@@ -121,11 +135,24 @@ echo "  $DEST_APP"
 echo "脚本只会处理这个 App，不会关闭 Gatekeeper，也不会修改 SIP。"
 echo
 
+if [[ "$unsigned_test" == "true" ]]; then
+  echo "重要提醒：这是未签名、未经 Apple 公证的测试 App。"
+  echo "Apple 没有验证开发者身份，请只在已核对 GitHub Release 来源和 SHA-256 时继续。"
+  echo
+fi
+
 verify_app "$SOURCE_APP" "DMG 中的 App"
-codesign --verify --deep --strict "$SOURCE_APP"
-if ! spctl --assess --type execute --verbose=2 "$SOURCE_APP"; then
-  echo "错误：DMG 中的 App 没有通过 macOS 安全检查，请重新从官方发布页面下载。" >&2
-  exit 1
+if [[ "$unsigned_test" == "true" ]]; then
+  if spctl --assess --type execute --verbose=2 "$SOURCE_APP" >/dev/null 2>&1; then
+    echo "提醒：该测试 App 意外通过了本机 Gatekeeper，但它仍未完成 Apple 公证。" >&2
+  else
+    echo "已确认 Gatekeeper 会拒绝该未公证测试 App，安装脚本将只对 Token Station 进行放行。"
+  fi
+else
+  if ! spctl --assess --type execute --verbose=2 "$SOURCE_APP" >/dev/null 2>&1; then
+    echo "错误：DMG 中的 App 没有通过 macOS 安全检查，请重新从官方发布页面下载。" >&2
+    exit 1
+  fi
 fi
 
 read -r -p "确认安装 Token Station 吗？[yY] " answer

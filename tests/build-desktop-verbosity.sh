@@ -17,7 +17,7 @@ make_fixture() {
   fake_bin="$fixture/bin"
   state="$fixture/state"
 
-  mkdir -p "$repo/scripts" "$repo/apps/desktop/src-tauri" "$fake_bin" "$state"
+  mkdir -p "$repo/scripts" "$repo/apps/desktop/src-tauri" "$fake_bin" "$state" "$fixture/rust-sysroot"
   cp "$project_root/scripts/build-desktop.sh" "$repo/scripts/build-desktop.sh"
   chmod +x "$repo/scripts/build-desktop.sh"
   printf '{\n  "version": "1.1.3"\n}\n' >"$repo/apps/desktop/src-tauri/tauri.conf.json"
@@ -61,6 +61,16 @@ set -euo pipefail
 printf '%s\n' "${RUSTFLAGS:-<unset>}" >>"$TEST_STATE/cargo-rustflags"
 SCRIPT
 
+  cat >"$fake_bin/rustc" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == "--print sysroot" ]]; then
+  echo "$TEST_RUST_SYSROOT"
+  exit 0
+fi
+exit 1
+SCRIPT
+
   cat >"$fake_bin/npx" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -88,6 +98,7 @@ run_build() {
     PATH="$fake_bin:/usr/bin:/bin" \
     CARGO_HOME="$fixture/cargo-home" \
     RUSTFLAGS= \
+    TEST_RUST_SYSROOT="$fixture/rust-sysroot" \
     TEST_STATE="$state" \
     "$repo/scripts/build-desktop.sh" "$@"
 }
@@ -97,6 +108,7 @@ run_windows_production_build() {
     PATH="$fake_bin:/usr/bin:/bin" \
     CARGO_HOME="$fixture/cargo-home" \
     RUSTFLAGS= \
+    TEST_RUST_SYSROOT="$fixture/rust-sysroot" \
     TEST_STATE="$state" \
     WINDOWS_CERTIFICATE_THUMBPRINT="0123456789abcdef0123456789abcdef01234567" \
     WINDOWS_TIMESTAMP_URL="https://timestamp.example.test" \
@@ -108,6 +120,7 @@ run_macos_production_build() {
     PATH="$fake_bin:/usr/bin:/bin" \
     CARGO_HOME="$fixture/cargo-home" \
     RUSTFLAGS= \
+    TEST_RUST_SYSROOT="$fixture/rust-sysroot" \
     TEST_STATE="$state" \
     APPLE_SIGNING_IDENTITY="Developer ID Application: Example Corp (TEAMID)" \
     APPLE_API_ISSUER="issuer" \
@@ -141,10 +154,13 @@ test_all_rust_builds_remap_private_host_paths() {
   repo_root="$(cd "$repo" && pwd)"
   checkout_remap="--remap-path-prefix=$repo_root=/build"
   cargo_home_remap="--remap-path-prefix=$fixture/cargo-home=/cargo"
+  rust_sysroot_remap="--remap-path-prefix=$fixture/rust-sysroot=/rustc"
   [[ "$(grep -Fc -- "$checkout_remap" "$state/cargo-rustflags" || true)" == "6" ]] \
     || fail "plugin and Desktop Rust builds did not share the checkout path remap"
   [[ "$(grep -Fc -- "$cargo_home_remap" "$state/cargo-rustflags" || true)" == "6" ]] \
     || fail "plugin and Desktop Rust builds did not share the Cargo Home path remap"
+  [[ "$(grep -Fc -- "$rust_sysroot_remap" "$state/cargo-rustflags" || true)" == "6" ]] \
+    || fail "plugin and Desktop Rust builds did not share the Rust sysroot path remap"
 }
 
 test_production_build_requires_the_official_updater_public_key() {
@@ -153,6 +169,7 @@ test_production_build_requires_the_official_updater_public_key() {
     PATH="$fake_bin:/usr/bin:/bin" \
     CARGO_HOME="$fixture/cargo-home" \
     RUSTFLAGS= \
+    TEST_RUST_SYSROOT="$fixture/rust-sysroot" \
     TEST_STATE="$state" \
     APPLE_SIGNING_IDENTITY="Developer ID Application: Example Corp (TEAMID)" \
     APPLE_API_ISSUER="issuer" \
@@ -192,6 +209,7 @@ test_production_build_rejects_private_material_in_the_public_key_variable() {
     PATH="$fake_bin:/usr/bin:/bin" \
     CARGO_HOME="$fixture/cargo-home" \
     RUSTFLAGS= \
+    TEST_RUST_SYSROOT="$fixture/rust-sysroot" \
     TEST_STATE="$state" \
     APPLE_SIGNING_IDENTITY="Developer ID Application: Example Corp (TEAMID)" \
     APPLE_API_ISSUER="issuer" \
