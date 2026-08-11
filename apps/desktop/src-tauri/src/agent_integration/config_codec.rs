@@ -188,9 +188,7 @@ pub fn project_owned_paths(
             let baseline_semantic = json5_value_as_serde(&baseline.value)?;
             for operation in materialized_ancestor_restorations(&baseline_semantic, owned_paths) {
                 let current_semantic = json5_value_as_serde(&current.value)?;
-                if value_at_path(&current_semantic, &operation.path)
-                    .is_some_and(is_empty_object)
-                {
+                if value_at_path(&current_semantic, &operation.path).is_some_and(is_empty_object) {
                     apply_json5_operation(current, &operation)?;
                 }
             }
@@ -217,13 +215,9 @@ pub fn project_owned_paths(
                 };
                 apply_yaml_operation(current, &operation)?;
             }
-            for operation in
-                materialized_ancestor_restorations(&baseline_semantic, owned_paths)
-            {
+            for operation in materialized_ancestor_restorations(&baseline_semantic, owned_paths) {
                 let current_semantic = strict_yaml_semantic(&current.rendered, "YAML 当前配置")?;
-                if value_at_path(&current_semantic, &operation.path)
-                    .is_some_and(is_empty_object)
-                {
+                if value_at_path(&current_semantic, &operation.path).is_some_and(is_empty_object) {
                     apply_yaml_operation(current, &operation)?;
                 }
             }
@@ -1762,7 +1756,10 @@ mod tests {
             })
         );
         apply_patch(&mut json, &reverse).expect("JSON reverse restores the null parent");
-        assert_eq!(semantic_json(&json).unwrap(), json!({"provider": null, "keep": true}));
+        assert_eq!(
+            semantic_json(&json).unwrap(),
+            json!({"provider": null, "keep": true})
+        );
 
         let mut json5 = parse_rendered(
             "{ provider: null, keep: true }",
@@ -1829,12 +1826,7 @@ mod tests {
         let mut nested_connected = ConfigDocument::Json(json!({
             "security": {"auth": {"selectedType": "api-key"}, "audit": true}
         }));
-        project_owned_paths(
-            &mut nested_connected,
-            &nested_baseline,
-            &gemini_owned,
-        )
-        .unwrap();
+        project_owned_paths(&mut nested_connected, &nested_baseline, &gemini_owned).unwrap();
         assert_eq!(
             semantic_json(&nested_connected).unwrap(),
             json!({"security": {"auth": null, "audit": true}})
@@ -1867,12 +1859,8 @@ mod tests {
                 .map(str::to_string)
                 .collect(),
         }];
-        let baseline = parse_rendered(
-            "model: null\nkeep: true\n",
-            DocumentFormat::Yaml,
-            "Hermes",
-        )
-        .unwrap();
+        let baseline =
+            parse_rendered("model: null\nkeep: true\n", DocumentFormat::Yaml, "Hermes").unwrap();
         let mut connected = parse_rendered(
             "model:\n  default: auto\nkeep: true\n",
             DocumentFormat::Yaml,

@@ -3694,7 +3694,9 @@ fn restart_agent_route(
     if let Ok(runtime) = runtime_from_app(state.inner()) {
         agents
             .refresh_model_metadata(Some(&agent_id), &runtime)
-            .map_err(|error| format!("Agent 路由已应用，但模型元数据刷新失败：{}", error.message))?;
+            .map_err(|error| {
+                format!("Agent 路由已应用，但模型元数据刷新失败：{}", error.message)
+            })?;
     }
     Ok(snapshot)
 }

@@ -586,9 +586,7 @@ impl<'a> TransactionEngine<'a> {
                     &plan.view.owned_paths,
                     &key,
                 )
-                .map_err(|_| {
-                    failure(plan, TransactionStage::Ownership, "ownership_check_failed")
-                })?
+                .map_err(|_| failure(plan, TransactionStage::Ownership, "ownership_check_failed"))?
             } else {
                 false
             };
@@ -2115,12 +2113,7 @@ mod tests {
             &TEST_CLOCK,
         );
         engine
-            .apply_connection(
-                &connection,
-                &confirmation(&connection),
-                &admission(),
-                1_002,
-            )
+            .apply_connection(&connection, &confirmation(&connection), &admission(), 1_002)
             .unwrap();
         let ownership_key = OwnershipKey {
             agent_id: "openclaw".to_string(),
@@ -2149,9 +2142,7 @@ mod tests {
             compute_owned_value_macs(&managed_document, &legacy_paths, &keys.load().unwrap())
                 .unwrap();
         let revision = first_ownership.revision;
-        let first_ownership = ownership
-            .commit(first_ownership, Some(revision))
-            .unwrap();
+        let first_ownership = ownership.commit(first_ownership, Some(revision)).unwrap();
 
         let refreshed_metadata = AgentModelMetadata {
             context: 128_000,
@@ -2196,7 +2187,10 @@ mod tests {
         assert_eq!(model["input"], serde_json::json!(["text"]));
         let refreshed_ownership = ownership.load(&ownership_key).unwrap().unwrap();
         assert_eq!(refreshed_ownership.revision, 3);
-        assert_eq!(refreshed_ownership.baseline_snapshot_id, baseline_snapshot_id);
+        assert_eq!(
+            refreshed_ownership.baseline_snapshot_id,
+            baseline_snapshot_id
+        );
         assert!(refreshed_ownership
             .owned_paths
             .iter()
@@ -2248,7 +2242,10 @@ mod tests {
     fn disconnect_preserves_user_siblings_under_a_materialized_null_parent() {
         let root = scratch("materialized-parent-sibling");
         let target = root.join("openclaw.json");
-        write_initial(&target, br#"{"unowned":"keep","models":null,"agents":null}"#);
+        write_initial(
+            &target,
+            br#"{"unowned":"keep","models":null,"agents":null}"#,
+        );
         let metadata = AgentModelMetadata {
             context: 128_000,
             output: 8_192,
@@ -2288,12 +2285,7 @@ mod tests {
             &TEST_CLOCK,
         );
         engine
-            .apply_connection(
-                &connection,
-                &confirmation(&connection),
-                &admission(),
-                1_002,
-            )
+            .apply_connection(&connection, &confirmation(&connection), &admission(), 1_002)
             .unwrap();
         let ownership_key = OwnershipKey {
             agent_id: "openclaw".to_string(),
@@ -2328,8 +2320,7 @@ mod tests {
         let revision = record.revision;
         let record = ownership.commit(record, Some(revision)).unwrap();
 
-        let mut edited: Value =
-            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        let mut edited: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
         edited["models"]["userSetting"] = serde_json::json!({"keep": true});
         std::fs::write(&target, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
 
@@ -2365,8 +2356,7 @@ mod tests {
                 1_004,
             )
             .unwrap();
-        let disconnected: Value =
-            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        let disconnected: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
         assert_eq!(disconnected["models"]["userSetting"]["keep"], true);
         assert!(disconnected["models"]["providers"]
             .get("tokenstation")
