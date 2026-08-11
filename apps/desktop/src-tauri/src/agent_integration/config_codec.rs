@@ -177,12 +177,22 @@ pub fn project_owned_paths(
                 };
                 apply_json_operation(current, &operation)?;
             }
+            collapse_empty_materialized_ancestors(current, baseline, owned_paths)?;
             Ok(())
         }
         (ConfigDocument::Json5(current), ConfigDocument::Json5(baseline)) => {
             for path in owned_paths {
                 let value = json5_value_at(&baseline.value, &path.segments)?.cloned();
                 json5_set_value(&mut current.value, &path.segments, value)?;
+            }
+            let baseline_semantic = json5_value_as_serde(&baseline.value)?;
+            for operation in materialized_ancestor_restorations(&baseline_semantic, owned_paths) {
+                let current_semantic = json5_value_as_serde(&current.value)?;
+                if value_at_path(&current_semantic, &operation.path)
+                    .is_some_and(is_empty_object)
+                {
+                    apply_json5_operation(current, &operation)?;
+                }
             }
             Ok(())
         }
@@ -207,6 +217,16 @@ pub fn project_owned_paths(
                 };
                 apply_yaml_operation(current, &operation)?;
             }
+            for operation in
+                materialized_ancestor_restorations(&baseline_semantic, owned_paths)
+            {
+                let current_semantic = strict_yaml_semantic(&current.rendered, "YAML 当前配置")?;
+                if value_at_path(&current_semantic, &operation.path)
+                    .is_some_and(is_empty_object)
+                {
+                    apply_yaml_operation(current, &operation)?;
+                }
+            }
             Ok(())
         }
         (ConfigDocument::Dotenv(current), ConfigDocument::Dotenv(baseline)) => {
@@ -214,6 +234,91 @@ pub fn project_owned_paths(
         }
         _ => Err("当前配置与基线快照格式不一致".to_string()),
     }
+}
+
+fn collapse_empty_materialized_ancestors(
+    current: &mut Value,
+    baseline: &Value,
+    owned_paths: &[ConfigPath],
+) -> Result<(), String> {
+    for operation in materialized_ancestor_restorations(baseline, owned_paths) {
+        if value_at_path(current, &operation.path).is_some_and(is_empty_object) {
+            apply_json_operation(current, &operation)?;
+        }
+    }
+    Ok(())
+}
+
+fn materialized_ancestor_restorations(
+    baseline: &Value,
+    owned_paths: &[ConfigPath],
+) -> Vec<PatchOperation> {
+    let mut operations = Vec::new();
+    for owned_path in owned_paths {
+        for length in 1..owned_path.segments.len() {
+            let ancestor = ConfigPath {
+                segments: owned_path.segments[..length].to_vec(),
+            };
+            let (operation, value) = match baseline_path_state(baseline, &ancestor) {
+                BaselinePathState::Missing => (PatchKind::Remove, None),
+                BaselinePathState::Null => (PatchKind::Replace, Some(Value::Null)),
+                BaselinePathState::Other => continue,
+            };
+            operations.push(PatchOperation {
+                operation,
+                path: ancestor,
+                value,
+            });
+        }
+    }
+    operations.sort_by(|left, right| {
+        right
+            .path
+            .segments
+            .len()
+            .cmp(&left.path.segments.len())
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    operations.dedup_by(|left, right| left.path == right.path);
+    operations
+}
+
+enum BaselinePathState {
+    Missing,
+    Null,
+    Other,
+}
+
+fn baseline_path_state(root: &Value, path: &ConfigPath) -> BaselinePathState {
+    let mut current = root;
+    for segment in &path.segments {
+        let Some(object) = current.as_object() else {
+            return if current.is_null() {
+                BaselinePathState::Missing
+            } else {
+                BaselinePathState::Other
+            };
+        };
+        let Some(value) = object.get(segment) else {
+            return BaselinePathState::Missing;
+        };
+        current = value;
+    }
+    if current.is_null() {
+        BaselinePathState::Null
+    } else {
+        BaselinePathState::Other
+    }
+}
+
+fn value_at_path<'a>(root: &'a Value, path: &ConfigPath) -> Option<&'a Value> {
+    path.segments
+        .iter()
+        .try_fold(root, |value, segment| value.as_object()?.get(segment))
+}
+
+fn is_empty_object(value: &Value) -> bool {
+    value.as_object().is_some_and(serde_json::Map::is_empty)
 }
 
 fn empty_json5_document() -> ConfigDocument {
@@ -1681,6 +1786,101 @@ mod tests {
                 .expect_err("non-null non-object ancestors remain invalid")
                 .contains("父级不是对象"));
         }
+    }
+
+    #[test]
+    fn owned_projection_collapses_only_empty_materialized_ancestors() {
+        let gemini_owned = [ConfigPath {
+            segments: ["security", "auth", "selectedType"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }];
+        let baseline = ConfigDocument::Json(json!({"security": null, "keep": true}));
+        let mut connected = ConfigDocument::Json(json!({
+            "security": {"auth": {"selectedType": "api-key"}},
+            "keep": true
+        }));
+        project_owned_paths(&mut connected, &baseline, &gemini_owned).unwrap();
+        assert_eq!(
+            semantic_json(&connected).unwrap(),
+            json!({"security": null, "keep": true})
+        );
+
+        let mut edited = ConfigDocument::Json(json!({
+            "security": {
+                "auth": {"selectedType": "api-key", "userMode": "keep"},
+                "audit": true
+            },
+            "keep": true
+        }));
+        project_owned_paths(&mut edited, &baseline, &gemini_owned).unwrap();
+        assert_eq!(
+            semantic_json(&edited).unwrap(),
+            json!({
+                "security": {"auth": {"userMode": "keep"}, "audit": true},
+                "keep": true
+            })
+        );
+
+        let nested_baseline = ConfigDocument::Json(json!({
+            "security": {"auth": null, "audit": true}
+        }));
+        let mut nested_connected = ConfigDocument::Json(json!({
+            "security": {"auth": {"selectedType": "api-key"}, "audit": true}
+        }));
+        project_owned_paths(
+            &mut nested_connected,
+            &nested_baseline,
+            &gemini_owned,
+        )
+        .unwrap();
+        assert_eq!(
+            semantic_json(&nested_connected).unwrap(),
+            json!({"security": {"auth": null, "audit": true}})
+        );
+
+        let openclaw_owned = [ConfigPath {
+            segments: ["models", "providers", "tokenstation"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }];
+        let baseline = parse_rendered(
+            "{ models: null, keep: true }",
+            DocumentFormat::Json5,
+            "OpenClaw",
+        )
+        .unwrap();
+        let mut connected = parse_rendered(
+            "{ models: { providers: { tokenstation: { baseUrl: 'local' } } }, keep: true }",
+            DocumentFormat::Json5,
+            "OpenClaw",
+        )
+        .unwrap();
+        project_owned_paths(&mut connected, &baseline, &openclaw_owned).unwrap();
+        assert_eq!(semantic_json(&connected).unwrap()["models"], Value::Null);
+
+        let hermes_owned = [ConfigPath {
+            segments: ["model", "default"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }];
+        let baseline = parse_rendered(
+            "model: null\nkeep: true\n",
+            DocumentFormat::Yaml,
+            "Hermes",
+        )
+        .unwrap();
+        let mut connected = parse_rendered(
+            "model:\n  default: auto\nkeep: true\n",
+            DocumentFormat::Yaml,
+            "Hermes",
+        )
+        .unwrap();
+        project_owned_paths(&mut connected, &baseline, &hermes_owned).unwrap();
+        assert_eq!(semantic_json(&connected).unwrap()["model"], Value::Null);
     }
 
     #[test]

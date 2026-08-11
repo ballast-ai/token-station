@@ -3840,7 +3840,8 @@ mod tests {
         assert_eq!(drift.len(), 1);
         assert_eq!(drift[0].status, DriftStatus::ManagedChanges);
         assert!(drift[0].changes.iter().any(|change| {
-            change.path.segments == ["env"] && change.scope == DriftScope::Managed
+            change.path.segments == ["env", "ANTHROPIC_BASE_URL"]
+                && change.scope == DriftScope::Managed
         }));
         assert_eq!(std::fs::read(&target).unwrap(), drift_bytes);
         assert_eq!(

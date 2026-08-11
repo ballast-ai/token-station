@@ -7,8 +7,8 @@ use serde::Serialize;
 
 use super::config_codec::{parse_source_bytes, ConfigDocument};
 use super::ownership::{
-    compute_owned_value_macs, ownership_matches, CompanionOwnership, OwnershipKey, OwnershipRecord,
-    OwnershipStore,
+    compute_owned_value_macs, legacy_widened_ownership_matches, ownership_matches,
+    CompanionOwnership, OwnershipKey, OwnershipRecord, OwnershipStore,
 };
 use super::plan::{
     file_revision_hash, read_config_source, ConfigSource, OwnershipDisposition, PreparedChangePlan,
@@ -551,7 +551,48 @@ impl<'a> TransactionEngine<'a> {
                     .map_err(|_| {
                         failure(plan, TransactionStage::Ownership, "ownership_check_failed")
                     })?;
-            if !matches_record && !matches_projection {
+            let matches_legacy_widening = if binding.record.owned_paths != plan.view.owned_paths {
+                let baseline = self
+                    .snapshots
+                    .load(&binding.record.baseline_snapshot_id)
+                    .map_err(|_| {
+                        failure(plan, TransactionStage::Ownership, "ownership_check_failed")
+                    })?;
+                if baseline.record.agent_id != binding.record.agent_id
+                    || baseline.record.target_config_path != binding.record.target_config_path
+                    || baseline.record.connector_id != binding.record.connector_id
+                {
+                    return Err(failure(
+                        plan,
+                        TransactionStage::Ownership,
+                        "ownership_check_failed",
+                    ));
+                }
+                let baseline_document = parse_source_bytes(
+                    baseline
+                        .record
+                        .original_existed
+                        .then_some(baseline.exact_bytes.as_slice()),
+                    plan.format,
+                    plan.label,
+                )
+                .map_err(|_| {
+                    failure(plan, TransactionStage::Ownership, "ownership_check_failed")
+                })?;
+                legacy_widened_ownership_matches(
+                    &binding.record,
+                    &document,
+                    &baseline_document,
+                    &plan.view.owned_paths,
+                    &key,
+                )
+                .map_err(|_| {
+                    failure(plan, TransactionStage::Ownership, "ownership_check_failed")
+                })?
+            } else {
+                false
+            };
+            if !matches_record && !matches_projection && !matches_legacy_widening {
                 return Err(failure(
                     plan,
                     TransactionStage::Ownership,
@@ -1054,6 +1095,7 @@ impl<'a> TransactionEngine<'a> {
                     let mut updated = binding.record.clone();
                     updated.last_transaction_snapshot_id = snapshot.record.snapshot_id.clone();
                     updated.managed_after_hash = plan.view.expected_after_hash.clone();
+                    updated.owned_paths = plan.view.owned_paths.clone();
                     updated.owned_value_macs = owned_value_macs;
                     let mut companion_missing = false;
                     for companion in &mut updated.companion_files {
@@ -1064,6 +1106,7 @@ impl<'a> TransactionEngine<'a> {
                                 projected.last_transaction_snapshot_id.clone();
                             companion.document_format = projected.document_format;
                             companion.managed_after_hash = projected.managed_after_hash.clone();
+                            companion.owned_paths = projected.owned_paths.clone();
                             companion.owned_value_macs = projected.owned_value_macs.clone();
                         } else {
                             companion_missing = true;
@@ -1369,8 +1412,8 @@ mod tests {
     };
     use crate::agent_integration::types::SnapshotRecord;
     use crate::agent_integration::types::{
-        AllowedAction, BinarySource, CompatibilityDecision, Diagnostic, DiscoveryEvidence,
-        DiscoveryRecord, DiscoverySource, Platform, ReasonCode,
+        AllowedAction, BinarySource, CompatibilityDecision, ConfigPath, Diagnostic,
+        DiscoveryEvidence, DiscoveryRecord, DiscoverySource, Platform, ReasonCode,
     };
 
     struct TestKeys {
@@ -2084,8 +2127,31 @@ mod tests {
             installation_path: "/opt/openclaw".to_string(),
             target_config_path: target.to_string_lossy().into_owned(),
         };
-        let first_ownership = ownership.load(&ownership_key).unwrap().unwrap();
+        let mut first_ownership = ownership.load(&ownership_key).unwrap().unwrap();
         let baseline_snapshot_id = first_ownership.baseline_snapshot_id.clone();
+        let managed_source = read_config_source(&target).unwrap();
+        let managed_document = parse_source_bytes(
+            Some(managed_source.exact_bytes.as_slice()),
+            DocumentFormat::Json5,
+            "OpenClaw",
+        )
+        .unwrap();
+        let legacy_paths = vec![
+            ConfigPath {
+                segments: vec!["agents".to_string()],
+            },
+            ConfigPath {
+                segments: vec!["models".to_string()],
+            },
+        ];
+        first_ownership.owned_paths = legacy_paths.clone();
+        first_ownership.owned_value_macs =
+            compute_owned_value_macs(&managed_document, &legacy_paths, &keys.load().unwrap())
+                .unwrap();
+        let revision = first_ownership.revision;
+        let first_ownership = ownership
+            .commit(first_ownership, Some(revision))
+            .unwrap();
 
         let refreshed_metadata = AgentModelMetadata {
             context: 128_000,
@@ -2129,8 +2195,12 @@ mod tests {
         assert_eq!(model["maxTokens"], 8_192);
         assert_eq!(model["input"], serde_json::json!(["text"]));
         let refreshed_ownership = ownership.load(&ownership_key).unwrap().unwrap();
-        assert_eq!(refreshed_ownership.revision, 2);
+        assert_eq!(refreshed_ownership.revision, 3);
         assert_eq!(refreshed_ownership.baseline_snapshot_id, baseline_snapshot_id);
+        assert!(refreshed_ownership
+            .owned_paths
+            .iter()
+            .all(|path| path.segments != ["models"] && path.segments != ["agents"]));
 
         let baseline = snapshots
             .load(&refreshed_ownership.baseline_snapshot_id)
@@ -2170,6 +2240,139 @@ mod tests {
             serde_json::from_slice::<Value>(&std::fs::read(&target).unwrap()).unwrap(),
             serde_json::from_slice::<Value>(initial).unwrap()
         );
+        assert!(ownership.load(&ownership_key).unwrap().is_none());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn disconnect_preserves_user_siblings_under_a_materialized_null_parent() {
+        let root = scratch("materialized-parent-sibling");
+        let target = root.join("openclaw.json");
+        write_initial(&target, br#"{"unowned":"keep","models":null,"agents":null}"#);
+        let metadata = AgentModelMetadata {
+            context: 128_000,
+            output: 8_192,
+            vision: false,
+            tools: false,
+            reasoning: false,
+            cost: None,
+        };
+        let source = read_config_source(&target).unwrap();
+        let connection = build_connection_plan(
+            &OpenClawConnector,
+            &openclaw_discovery(&target),
+            &openclaw_verified(),
+            &target,
+            &source,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/v1",
+                token: Some("vk-sibling"),
+                adapter_ready: true,
+                model_metadata: Some(&metadata),
+            },
+            1,
+            None,
+            1_000,
+            "91".repeat(16),
+        )
+        .unwrap();
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        engine
+            .apply_connection(
+                &connection,
+                &confirmation(&connection),
+                &admission(),
+                1_002,
+            )
+            .unwrap();
+        let ownership_key = OwnershipKey {
+            agent_id: "openclaw".to_string(),
+            installation_path: "/opt/openclaw".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let mut record = ownership.load(&ownership_key).unwrap().unwrap();
+        assert!(record
+            .owned_paths
+            .iter()
+            .all(|path| path.segments != ["models"] && path.segments != ["agents"]));
+
+        let managed_source = read_config_source(&target).unwrap();
+        let managed_document = parse_source_bytes(
+            Some(managed_source.exact_bytes.as_slice()),
+            DocumentFormat::Json5,
+            "OpenClaw",
+        )
+        .unwrap();
+        let legacy_paths = vec![
+            ConfigPath {
+                segments: vec!["agents".to_string()],
+            },
+            ConfigPath {
+                segments: vec!["models".to_string()],
+            },
+        ];
+        record.owned_paths = legacy_paths.clone();
+        record.owned_value_macs =
+            compute_owned_value_macs(&managed_document, &legacy_paths, &keys.load().unwrap())
+                .unwrap();
+        let revision = record.revision;
+        let record = ownership.commit(record, Some(revision)).unwrap();
+
+        let mut edited: Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        edited["models"]["userSetting"] = serde_json::json!({"keep": true});
+        std::fs::write(&target, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
+
+        let baseline = snapshots.load(&record.baseline_snapshot_id).unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let current = read_config_source(&target).unwrap();
+        let disconnect = build_disconnect_plan(
+            &OpenClawConnector,
+            &openclaw_discovery(&target),
+            &openclaw_verified(),
+            &target,
+            &current,
+            &record,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            1_003,
+            "92".repeat(16),
+        )
+        .expect("an unrelated sibling must not cause ownership drift");
+        engine
+            .apply_disconnect(
+                &disconnect,
+                &confirmation_at(&disconnect, 1_003),
+                &admission(),
+                1_004,
+            )
+            .unwrap();
+        let disconnected: Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(disconnected["models"]["userSetting"]["keep"], true);
+        assert!(disconnected["models"]["providers"]
+            .get("tokenstation")
+            .is_none());
+        assert_eq!(disconnected["agents"], Value::Null);
+        assert_eq!(disconnected["unowned"], "keep");
         assert!(ownership.load(&ownership_key).unwrap().is_none());
         std::fs::remove_dir_all(root).ok();
     }
