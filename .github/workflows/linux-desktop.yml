@@ -1,8 +1,8 @@
 name: Build Linux Desktop
 
-# Linux desktop packages (deb, AppImage, and rpm) are unsigned, so they require no secrets.
-# Select Run workflow manually. Download the output from Artifacts for that run.
-# Also run automatically when a v* tag is pushed to produce Linux release packages.
+# Linux desktop packages are unsigned and are only produced when the formal
+# artifact gate is explicitly enabled. Successful packages remain internal
+# workflow artifacts and are not attached to a GitHub Release automatically.
 on:
   workflow_dispatch:
   push:
@@ -12,9 +12,28 @@ permissions:
   contents: read
 
 jobs:
+  release-mode:
+    runs-on: ubuntu-24.04
+    outputs:
+      enabled: ${{ steps.mode.outputs.enabled }}
+    steps:
+      - id: mode
+        env:
+          FORMAL_ARTIFACTS_ENABLED: ${{ vars.TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED }}
+        run: |
+          if [[ "$FORMAL_ARTIFACTS_ENABLED" == "true" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "已启用正式 Linux 桌面包构建。"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "本次只发布 GitHub 源码，跳过 Linux 桌面包构建。"
+          fi
+
   linux:
+    needs: release-mode
+    if: needs.release-mode.outputs.enabled == 'true'
     name: Linux (x86_64-unknown-linux-gnu)
-    # Ubuntu 22.04 has older glibc and WebKit. Its packages run on more distributions through forward compatibility.
+    # Ubuntu 22.04 keeps glibc and WebKit compatibility broad.
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
