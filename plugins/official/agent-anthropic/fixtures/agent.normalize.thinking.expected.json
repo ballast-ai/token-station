@@ -29,5 +29,5 @@
   ],
   "sampling": {"max_output_tokens": 1024},
   "stream": false,
-  "anthropic_thinking": {"type": "disabled"}
+  "anthropic_thinking": {"type": "adaptive"}
 }

@@ -65,14 +65,19 @@ fn capability(detail: impl Into<String>) -> String {
     fail(&ErrorEnvelope::new(ErrorCode::Capability, 400, detail))
 }
 
-fn validate_thinking(body: &Value) -> Result<(), String> {
+fn validate_thinking(body: &Value, agent_tool: Option<&str>) -> Result<(), String> {
     match body.get("thinking") {
         None | Some(Value::Null) => Ok(()),
         Some(Value::Object(config)) => match config.get("type").and_then(Value::as_str) {
-            // There is no provider-side consumer for this adapter-local
-            // extension yet. Accepting enabled/adaptive thinking would claim
-            // a capability while silently dropping its semantics upstream.
             Some("disabled") => Ok(()),
+            // Claude Desktop enables adaptive thinking as an optional client
+            // preference on ordinary 3P Gateway requests. The translated path
+            // can carry its separate output_config.effort as reasoning_effort,
+            // but cannot promise Anthropic thinking blocks or a token budget.
+            // Keep this downgrade scoped to the identified Desktop route;
+            // native Anthropic providers bypass normalization and preserve the
+            // original body verbatim.
+            Some("adaptive") if agent_tool == Some("claude-desktop") => Ok(()),
             Some(kind) => Err(capability(format!(
                 "Anthropic thinking type {kind} is not supported by the configured provider"
             ))),
@@ -791,7 +796,7 @@ impl Guest for AnthropicClient {
     fn normalize_inbound(envelope: String) -> Result<String, String> {
         let envelope: AgentRequestEnvelope = parse_input(&envelope)?;
         let body = &envelope.body;
-        validate_thinking(body)?;
+        validate_thinking(body, envelope.agent_tool.as_deref())?;
         validate_tool_choice(body)?;
         let model = body
             .get("model")

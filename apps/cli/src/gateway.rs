@@ -2791,6 +2791,9 @@ impl Gateway {
             protocol: agent.protocol.clone(),
             agent_tool: match agent.protocol.as_str() {
                 "openai-responses" => Some("codex".to_owned()),
+                "anthropic-messages" if record.agent_id.as_deref() == Some("claude-desktop") => {
+                    Some("claude-desktop".to_owned())
+                }
                 "anthropic-messages" if header_digest.contains("x-claude-code-session-id") => {
                     Some("claude-code".to_owned())
                 }

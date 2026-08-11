@@ -2522,6 +2522,50 @@ fn an_anthropic_message_round_trips_through_the_same_provider_pipeline() {
 }
 
 #[test]
+fn claude_desktop_adaptive_thinking_reaches_the_translated_provider() {
+    let upstream_answer = json!({
+        "id": "chatcmpl-adaptive",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "ready"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("claude-desktop-adaptive-thinking", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/claude-desktop/v1/messages",
+        &json!({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 128,
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "high"},
+            "messages": [{"role": "user", "content": "check the route"}]
+        }),
+        &proxy.virtual_key,
+        true,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    let seen = mock.seen();
+    assert_eq!(
+        seen.len(),
+        1,
+        "adaptive thinking must reach the upstream once"
+    );
+    assert_eq!(seen[0].path, "/v1/chat/completions");
+    assert_eq!(seen[0].body["reasoning_effort"], json!("high"));
+    assert!(seen[0].body.get("anthropic_thinking").is_none());
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn anthropic_enabled_thinking_is_refused_before_upstream() {
     let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
     let key = key_file("anthropic-enabled-thinking", "sk-test-key-abc");
@@ -2548,6 +2592,33 @@ fn anthropic_enabled_thinking_is_refused_before_upstream() {
             .is_some_and(|message| message.contains("thinking type enabled"))
     );
     assert_eq!(mock.hits(), 0, "enabled thinking is refused before routing");
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn anthropic_adaptive_thinking_without_claude_desktop_scope_is_refused() {
+    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
+    let key = key_file("anthropic-unscoped-adaptive-thinking", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, _, body) = send_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 128,
+            "thinking": {"type": "adaptive"},
+            "messages": [{"role": "user", "content": "think before answering"}]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(
+        mock.hits(),
+        0,
+        "unscoped adaptive thinking stays fail-closed"
+    );
 
     std::fs::remove_file(key).ok();
 }
