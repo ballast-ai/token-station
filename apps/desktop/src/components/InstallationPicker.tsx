@@ -7,6 +7,7 @@ interface InstallationPickerProps {
   installations: AgentInstallationView[];
   selectedPath: string;
   disabled?: boolean;
+  onboardingTarget?: string;
   onSelect: (path: string) => void;
 }
 
@@ -65,6 +66,7 @@ export default function InstallationPicker({
   installations,
   selectedPath,
   disabled = false,
+  onboardingTarget,
   onSelect,
 }: InstallationPickerProps) {
   const { language, copy } = useLocalizedCopy();
@@ -124,6 +126,7 @@ export default function InstallationPicker({
         type="button"
         aria-haspopup="listbox"
         aria-expanded={open}
+        data-onboarding-target={onboardingTarget}
         disabled={disabled}
         onClick={() => setOpen((current) => !current)}
       >
@@ -133,6 +136,7 @@ export default function InstallationPicker({
         <div
           className="installation-picker-menu"
           role="listbox"
+          data-onboarding-floating="true"
           aria-label={copy(`${agentName} installations`, `${agentName} 安装列表`)}
         >
           {options.map((option, index) => {

@@ -851,149 +851,159 @@ body {
   }
 }
 
-/* ---- First-run page tour ----------------------------------------------- */
-.first-run-guide-overlay[data-slot="dialog-overlay"] {
-  background: transparent;
-  backdrop-filter: none;
-}
-
-.first-run-guide-spotlight {
-  position: fixed;
-  z-index: 50;
+/* ---- First-run guided setup -------------------------------------------- */
+.first-run-spotlight-root {
   pointer-events: none;
-  border: 2px solid var(--surface);
-  border-radius: 10px;
-  background: transparent;
-  box-shadow:
-    0 0 0 9999px color-mix(in srgb, var(--ink) 66%, transparent),
-    0 0 0 6px color-mix(in srgb, var(--signal) 42%, transparent),
-    0 18px 48px color-mix(in srgb, var(--ink) 22%, transparent);
-  transition: top 220ms ease, left 220ms ease, width 220ms ease, height 220ms ease;
 }
 
-.first-run-guide-dialog {
+.first-run-spotlight-blocker {
   position: fixed;
-  z-index: 50;
-  width: min(380px, calc(100vw - 32px));
+  z-index: 80;
+  pointer-events: auto;
+  background: rgb(9 15 28 / 68%);
+}
+
+.first-run-spotlight-outline {
+  position: fixed;
+  z-index: 81;
+  border: 2px solid #fff;
+  border-radius: 11px;
+  pointer-events: none;
+  box-shadow:
+    0 0 0 3px var(--signal),
+    0 0 0 7px rgb(255 255 255 / 18%),
+    0 12px 32px rgb(0 0 0 / 28%);
+  animation: first-run-target-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes first-run-target-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--signal), 0 0 0 7px rgb(255 255 255 / 18%), 0 12px 32px rgb(0 0 0 / 28%); }
+  50% { box-shadow: 0 0 0 4px var(--signal), 0 0 0 10px rgb(255 255 255 / 8%), 0 12px 32px rgb(0 0 0 / 28%); }
+}
+
+.first-run-coachmark {
+  position: fixed;
+  z-index: 83;
   max-height: calc(100vh - 32px);
-  display: grid;
-  gap: 16px;
   overflow: auto;
   padding: 20px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--signal) 26%, var(--line));
+  border-radius: 14px;
   outline: none;
   color: var(--ink);
   background: var(--surface);
-  box-shadow: 0 26px 70px color-mix(in srgb, var(--ink) 24%, transparent);
-  transition: opacity 160ms ease, transform 160ms ease;
+  box-shadow: 0 26px 72px rgb(0 0 0 / 34%);
+  pointer-events: auto;
+  animation: first-run-coachmark-in 160ms ease-out both;
 }
 
-.first-run-guide-dialog[data-placement="center"] {
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
+body[data-first-run-guide-active="true"] [data-onboarding-floating="true"] {
+  z-index: 84;
+  pointer-events: auto;
 }
 
-.first-run-guide-dialog[data-placement="below"]::before,
-.first-run-guide-dialog[data-placement="left"]::before {
-  content: "";
+.station-content[data-onboarding-scroll-locked="true"] {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+.first-run-coachmark::before {
   position: absolute;
-  width: 12px;
-  height: 12px;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  transform: rotate(45deg);
+  top: 0;
+  left: 20px;
+  width: 48px;
+  height: 3px;
+  border-radius: 0 0 3px 3px;
+  background: var(--signal);
+  content: "";
 }
 
-.first-run-guide-dialog[data-placement="below"]::before {
-  top: -7px;
-  right: 34px;
-  border-right: 0;
-  border-bottom: 0;
-}
-
-.first-run-guide-dialog[data-placement="left"]::before {
-  right: -7px;
-  top: calc(50% - 6px);
-  border-left: 0;
-  border-bottom: 0;
-}
-
-.first-run-guide-header {
-  position: relative;
-  gap: 10px;
-  padding-right: 30px;
+@keyframes first-run-coachmark-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .first-run-guide-step {
+  display: block;
+  padding-right: 34px;
   color: var(--signal);
-  font: 500 10px/1.25 "IBM Plex Mono", monospace;
-  letter-spacing: .04em;
+  font: 600 10px/1.25 "IBM Plex Mono", monospace;
+  letter-spacing: .06em;
 }
 
 .first-run-guide-close[data-slot="button"] {
   position: absolute;
-  top: -7px;
-  right: -9px;
+  top: 12px;
+  right: 12px;
   color: var(--muted);
 }
 
-.first-run-guide-title[data-slot="dialog-title"] {
-  margin-top: 4px;
-  font-size: 19px;
-  line-height: 1.25;
+.first-run-coachmark h2 {
+  margin: 12px 30px 8px 0;
+  font-size: 20px;
   font-weight: 650;
-  letter-spacing: -.02em;
+  line-height: 1.3;
+  letter-spacing: -.025em;
 }
 
-.first-run-guide-dialog [data-slot="dialog-description"] {
-  line-height: 1.65;
-}
-
-.first-run-guide-dialog [data-slot="progress"] {
-  height: 3px;
-}
-
-.first-run-guide-actions[data-slot="dialog-footer"] {
+.first-run-coachmark p {
   margin: 0;
-  padding: 14px 0 0;
-  border-top: 1px solid var(--line);
-  border-radius: 0;
-  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
 }
 
-.first-run-guide-actions [data-action="skip"] {
+.first-run-coachmark-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.first-run-coachmark-actions > :first-child {
   margin-right: auto;
   color: var(--muted);
 }
 
-@starting-style {
-  .first-run-guide-dialog[data-state="open"] {
-    opacity: 0;
-    transform: translateY(-4px);
-  }
-
-  .first-run-guide-dialog[data-placement="center"][data-state="open"] {
-    transform: translate(-50%, calc(-50% - 4px));
-  }
+.first-run-complete-dialog {
+  width: min(400px, calc(100vw - 32px));
 }
 
-@media (max-height: 620px) {
-  .first-run-guide-dialog {
-    gap: 12px;
+@media (max-width: 520px), (max-height: 620px) {
+  .first-run-coachmark {
     padding: 16px;
   }
 
-  .first-run-guide-actions[data-slot="dialog-footer"] {
-    padding-top: 10px;
+  .first-run-coachmark h2 {
+    font-size: 18px;
+  }
+
+  .first-run-coachmark-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .first-run-coachmark-actions > :first-child {
+    margin-right: 0;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .first-run-guide-spotlight,
-  .first-run-guide-dialog {
-    transition: none;
+  .first-run-spotlight-outline,
+  .first-run-coachmark { animation: none; }
+}
+
+@media (forced-colors: active) {
+  .first-run-spotlight-outline {
+    border: 3px solid Highlight;
+    box-shadow: none;
+  }
+
+  .first-run-coachmark {
+    border: 2px solid CanvasText;
   }
 }
 

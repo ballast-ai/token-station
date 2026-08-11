@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 720" role="img" aria-label="How Token Station works">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 900" role="img" aria-label="How Token Station works on mobile">
   <defs>
     <linearGradient id="codex-fill" gradientUnits="userSpaceOnUse" x1="12" x2="12" y1="3" y2="21">
       <stop stop-color="#B1A7FF"/>
@@ -19,60 +19,59 @@
   <style>
     .text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;text-anchor:middle}
     .headline{font-size:34px;font-weight:600;fill:#24292F}
-    .card-title{font-size:30px;font-weight:600;fill:#24292F}
-    .body{font-size:18px;font-weight:400;fill:#57606A}
-    .agent-name{font-size:22px;font-weight:500;fill:#3D444D;text-anchor:start}
-    .center-title{font-size:40px;font-weight:600;fill:#24292F}
+    .card-title{font-size:32px;font-weight:600;fill:#24292F}
+    .body{font-size:22px;font-weight:400;fill:#57606A}
+    .agent-name{font-size:20px;font-weight:500;fill:#3D444D;text-anchor:start}
+    .center-title{font-size:34px;font-weight:600;fill:#24292F}
     .center-subtitle{font-size:22px;font-weight:500;fill:#6E6258}
-    .value{font-size:24px;font-weight:500;fill:#24292F}
-    .pill-text{font-size:16px;font-weight:500;fill:#3D444D}
+    .value{font-size:26px;font-weight:500;fill:#24292F}
+    .pill-text{font-size:18px;font-weight:500;fill:#3D444D}
     .destination{font-size:22px;font-weight:500;fill:#24292F}
     .destination-note{font-size:18px;font-weight:400;fill:#57606A}
   </style>
 
-  <rect width="1440" height="720" fill="#FAF9F7"/>
+  <rect width="720" height="900" fill="#FAF9F7"/>
 
-  <text class="text headline" x="720" y="84">One local gateway, the right model for every request</text>
+  <text class="text headline" x="360" y="45">One local gateway,</text>
+  <text class="text headline" x="360" y="82">the right model for every request</text>
 
-  <!-- Three independent product cards. -->
-  <rect x="60" y="190" width="320" height="380" rx="32" fill="#FFFFFF" stroke="#D8D2C8" stroke-width="2"/>
-  <rect x="470" y="190" width="500" height="380" rx="36" fill="#F3EFE8" stroke="#C7BFB4" stroke-width="2"/>
-  <rect x="1060" y="190" width="320" height="380" rx="32" fill="#FFFFFF" stroke="#D8D2C8" stroke-width="2"/>
+  <!-- Three independent cards in one vertical product story. -->
+  <rect x="70" y="120" width="580" height="150" rx="28" fill="#FFFFFF" stroke="#D8D2C8" stroke-width="2"/>
+  <rect x="70" y="335" width="580" height="260" rx="32" fill="#F3EFE8" stroke="#C7BFB4" stroke-width="2"/>
+  <rect x="70" y="650" width="580" height="200" rx="28" fill="#FFFFFF" stroke="#D8D2C8" stroke-width="2"/>
 
-  <!-- Two simple directional cues; no topology lines. -->
-  <circle cx="425" cy="380" r="30" fill="#FFFFFF" stroke="#D8D2C8" stroke-width="2"/>
-  <path d="M417 368 L429 380 L417 392" fill="none" stroke="#B65F2A" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="1015" cy="380" r="30" fill="#FFFFFF" stroke="#D8D2C8" stroke-width="2"/>
-  <path d="M1007 368 L1019 380 L1007 392" fill="none" stroke="#B65F2A" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Two simple downward directional cues; no topology lines. -->
+  <circle cx="360" cy="302" r="22" fill="#FFFFFF" stroke="#D8D2C8" stroke-width="2"/>
+  <path d="M348 296 L360 308 L372 296" fill="none" stroke="#B65F2A" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="360" cy="628" r="22" fill="#FFFFFF" stroke="#D8D2C8" stroke-width="2"/>
+  <path d="M348 622 L360 634 L372 622" fill="none" stroke="#B65F2A" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
 
   <!-- Input card. -->
-  <text class="text card-title" x="220" y="290">Featured AI agents</text>
-  <line x1="110" y1="326" x2="330" y2="326" stroke="#E5E1DA" stroke-width="2"/>
-  <use href="#claude-code-icon" x="138" y="350" width="30" height="30"/>
-  <text class="text agent-name" x="180" y="376">Claude Code</text>
-  <use href="#codex-icon" x="138" y="395" width="30" height="30"/>
-  <text class="text agent-name" x="180" y="421">Codex</text>
-  <use href="#workbuddy-icon" x="138" y="440" width="30" height="30"/>
-  <text class="text agent-name" x="180" y="466">WorkBuddy</text>
+  <text class="text card-title" x="360" y="168">Featured AI agents</text>
+  <line x1="130" y1="190" x2="590" y2="190" stroke="#E5E1DA" stroke-width="2"/>
+  <use href="#claude-code-icon" x="285" y="194" width="22" height="22"/>
+  <text class="text agent-name" x="320" y="212">Claude Code</text>
+  <use href="#codex-icon" x="285" y="218" width="22" height="22"/>
+  <text class="text agent-name" x="320" y="236">Codex</text>
+  <use href="#workbuddy-icon" x="285" y="242" width="22" height="22"/>
+  <text class="text agent-name" x="320" y="260">WorkBuddy</text>
 
   <!-- Token Station value card. -->
-  <text class="text center-title" x="720" y="257">Token Station</text>
-  <text class="text center-subtitle" x="720" y="295">Local smart routing</text>
-  <line x1="525" y1="322" x2="915" y2="322" stroke="#D8D2C8" stroke-width="2"/>
-  <text class="text value" x="720" y="371">Match each task to</text>
-  <text class="text value" x="720" y="402">the right model</text>
-  <text class="text value" x="720" y="449">Use remaining quota</text>
-  <text class="text value" x="720" y="480">before reset</text>
-  <rect x="495" y="516" width="230" height="38" rx="12" fill="#E7E1D8"/>
-  <text class="text pill-text" x="610" y="541">High-performance Rust core</text>
-  <rect x="735" y="516" width="210" height="38" rx="12" fill="#E7E1D8"/>
-  <text class="text pill-text" x="840" y="541">Sandboxed WASM plugins</text>
+  <text class="text center-title" x="360" y="382">Token Station</text>
+  <text class="text center-subtitle" x="360" y="416">Local smart routing</text>
+  <line x1="130" y1="438" x2="590" y2="438" stroke="#D8D2C8" stroke-width="2"/>
+  <text class="text value" x="360" y="480">Match each task to the right model</text>
+  <text class="text value" x="360" y="526">Use remaining quota before reset</text>
+  <rect x="95" y="548" width="250" height="34" rx="10" fill="#E7E1D8"/>
+  <text class="text pill-text" x="220" y="572">High-performance Rust core</text>
+  <rect x="355" y="548" width="270" height="34" rx="10" fill="#E7E1D8"/>
+  <text class="text pill-text" x="490" y="572">Sandboxed WASM plugins</text>
 
   <!-- Destination card. -->
-  <text class="text card-title" x="1220" y="290">Available models</text>
-  <line x1="1110" y1="326" x2="1330" y2="326" stroke="#E5E1DA" stroke-width="2"/>
-  <text class="text destination" x="1220" y="376">Cloud models</text>
-  <text class="text destination-note" x="1220" y="405">Use your own API key</text>
-  <text class="text destination" x="1220" y="452">Local models</text>
-  <text class="text destination-note" x="1220" y="481">Run with Ollama</text>
+  <text class="text card-title" x="360" y="695">Available models</text>
+  <line x1="130" y1="720" x2="590" y2="720" stroke="#E5E1DA" stroke-width="2"/>
+  <text class="text destination" x="360" y="752">Cloud models</text>
+  <text class="text destination-note" x="360" y="778">Use your own API key</text>
+  <text class="text destination" x="360" y="812">Local models</text>
+  <text class="text destination-note" x="360" y="838">Run with Ollama</text>
 </svg>
