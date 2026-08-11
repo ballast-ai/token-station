@@ -50,6 +50,7 @@ readonly installer="$root/packaging/macos/安装 Token Station.command"
 readonly agent_rules="$root/packaging/macos/AGENTS.md"
 readonly formal_readme="$root/packaging/macos/安装前必读.md"
 readonly unsigned_test_readme="$root/packaging/macos/未签名测试版安装前必读.md"
+readonly finder_layout_template="$root/packaging/macos/dmg-layout.dsstore.base64"
 readme="$formal_readme"
 packaging_source_commit=""
 tag_commit=""
@@ -131,6 +132,8 @@ temporary_dmg="$publish_stage/$(basename "$output_path")"
 readonly temporary_dmg
 temporary_checksum="$publish_stage/$(basename "$checksum_path")"
 readonly temporary_checksum
+writable_dmg="$publish_stage/token-station-layout-writable.dmg"
+readonly writable_dmg
 cleanup() {
   /bin/rm -rf -- "$stage"
   /bin/rm -rf -- "$publish_stage"
@@ -152,7 +155,28 @@ if [[ "$unsigned_test" == "true" ]]; then
     >"$stage/构建来源.txt"
 fi
 
-hdiutil create -volname "$volume_name" -srcfolder "$stage" -format UDZO "$temporary_dmg"
+if ! /usr/bin/base64 -D -i "$finder_layout_template" -o "$stage/.DS_Store"; then
+  echo "DMG 拖拽布局模板无法读取，请重新检出完整源码后重试。" >&2
+  exit 1
+fi
+[[ -s "$stage/.DS_Store" ]] || {
+  echo "DMG 拖拽布局模板是空文件，已停止生成发布文件。" >&2
+  exit 1
+}
+
+hdiutil create \
+  -volname "$volume_name" \
+  -srcfolder "$stage" \
+  -fs HFS+ \
+  -format UDRW \
+  "$writable_dmg"
+
+hdiutil convert \
+  "$writable_dmg" \
+  -format UDZO \
+  -imagekey zlib-level=9 \
+  -o "$temporary_dmg" \
+  >/dev/null
 if [[ "$unsigned_test" == "true" ]]; then
   "$root/scripts/audit-macos-dmg.sh" \
     --unsigned-test \
