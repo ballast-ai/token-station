@@ -1,21 +1,38 @@
-import { useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from "react";
 import { XIcon } from "lucide-react";
-import { Dialog as DialogPrimitive } from "radix-ui";
+import { useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { useLanguage } from "./LanguageProvider";
 import { Button } from "./ui/button";
 import {
   Dialog,
+  DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
-  DialogOverlay,
-  DialogPortal,
   DialogTitle,
 } from "./ui/dialog";
-import { Progress } from "./ui/progress";
 
 export const FIRST_RUN_GUIDE_STORAGE_KEY = "token-station-first-run-guide";
-export const FIRST_RUN_GUIDE_VERSION = "b-v1";
+export const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v1";
+
+export type FirstRunSetupStep = "provider" | "route" | "agent" | "complete";
+export type FirstRunMicroStep =
+  | "provider-entry"
+  | "provider-choice"
+  | "provider-credential"
+  | "provider-models"
+  | "provider-save"
+  | "route-entry"
+  | "route-mode"
+  | "route-config"
+  | "route-apply"
+  | "agent-entry"
+  | "agent-select"
+  | "agent-installation"
+  | "agent-connect"
+  | "agent-connect-multiple"
+  | "agent-scan-empty"
+  | "complete";
 
 export function shouldOpenFirstRunGuide(storage: Pick<Storage, "getItem"> = window.localStorage) {
   try {
@@ -37,221 +54,590 @@ export function markFirstRunGuideDismissed(
 
 interface FirstRunGuideProps {
   open: boolean;
+  microStep: FirstRunMicroStep;
+  canSkipAgent: boolean;
+  onTargetAction: () => void;
+  onBack: () => void;
+  onSkipAgent: () => void;
+  onPause: () => void;
   onDismiss: () => void;
 }
 
-interface MeasuredRect {
+interface SpotlightRect {
   top: number;
   left: number;
-  width: number;
-  height: number;
   right: number;
   bottom: number;
+  width: number;
+  height: number;
+}
+
+interface CoachmarkContent {
+  target: string | null;
+  index: string;
+  title: string;
+  description: string;
+  advanceOnTargetClick: boolean;
+  continueLabel: string | null;
+  backLabel?: string;
 }
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), Math.max(min, max));
 }
 
-export default function FirstRunGuide({ open, onDismiss }: FirstRunGuideProps) {
+export default function FirstRunGuide({
+  open,
+  microStep,
+  canSkipAgent,
+  onTargetAction,
+  onBack,
+  onSkipAgent,
+  onPause,
+  onDismiss,
+}: FirstRunGuideProps) {
   const { copy } = useLanguage();
-  const [stepIndex, setStepIndex] = useState(0);
-  const steps = useMemo(() => [
-    {
-      target: "add-provider",
-      title: copy("Add a model provider first", "先添加一个模型供应商"),
-      description: copy(
-        "Choose a provider, enter its credentials, and run the connection test before saving.",
-        "选择供应商并填写凭据，保存前先运行连接测试。",
-      ),
-    },
-    {
-      target: "routing",
-      title: copy("Configure and start routing", "配置并启动路由"),
-      description: copy(
-        "Choose models for the High, Medium, and Low tiers, then select Save and apply. The route is ready only after the proxy reports Running.",
-        "为上、中、下三档选择模型，然后点击“保存并应用”。右上角显示“代理运行中”后，这条路由才真正可用。",
-      ),
-    },
-    {
-      target: "agent-connect",
-      title: copy("Connect your first Agent", "接入你的第一个 Agent"),
-      description: copy(
-        "Choose a detected Agent, review the configuration changes, and then explicitly confirm the connection.",
-        "选择已检测的 Agent，检查即将修改的配置，再明确确认接入。",
-      ),
-    },
-    {
-      target: "settings",
-      title: copy("Review this guide anytime", "以后想再看教程"),
-      description: copy(
-        "Select Settings, open About, and then choose Review getting started guide.",
-        "点击顶部“设置”，进入“关于”，再选择“重新查看新手引导”。",
-      ),
-    },
-  ], [copy]);
-  const step = steps[stepIndex];
-  const [targetRect, setTargetRect] = useState<MeasuredRect | null>(null);
+  const [targetRect, setTargetRect] = useState<SpotlightRect | null>(null);
+  const targetActionRef = useRef(onTargetAction);
+  const coachmarkRef = useRef<HTMLElement>(null);
+  targetActionRef.current = onTargetAction;
+  const content: CoachmarkContent = microStep === "provider-entry"
+    ? {
+        target: "add-provider",
+        index: copy("ADD PROVIDER · 1/5", "添加供应商 · 1/5"),
+        title: copy("Add your first provider", "添加你的第一个供应商"),
+        description: copy(
+          "Select this button to open provider setup. The guide continues after the real action.",
+          "点击这里进入供应商配置，完成操作后引导会自动继续。",
+        ),
+        advanceOnTargetClick: true,
+        continueLabel: null,
+      }
+    : microStep === "provider-choice"
+      ? {
+          target: "provider-choice",
+          index: copy("ADD PROVIDER · 2/5", "添加供应商 · 2/5"),
+          title: copy("Choose a model provider", "选择一个模型供应商"),
+          description: copy(
+            "Choose the provider you want to configure. You remain in control of the provider and model choice.",
+            "点击你要配置的供应商；供应商和模型始终由你自己选择。",
+          ),
+          advanceOnTargetClick: false,
+          continueLabel: null,
+        }
+      : microStep === "provider-credential"
+        ? {
+            target: "provider-credential",
+            index: copy("ADD PROVIDER · 3/5", "添加供应商 · 3/5"),
+            title: copy("Enter provider credentials", "填写供应商凭据"),
+            description: copy(
+              "Enter the credential required by this provider. The guide never reads or displays its value.",
+              "填写该供应商需要的凭据；引导不会读取或展示凭据内容。",
+            ),
+            advanceOnTargetClick: false,
+            continueLabel: copy("Next: choose models", "下一项：选择模型"),
+          }
+        : microStep === "provider-models"
+          ? {
+              target: "provider-models",
+              index: copy("ADD PROVIDER · 4/5", "添加供应商 · 4/5"),
+              title: copy("Choose at least one model", "选择至少一个模型"),
+              description: copy(
+                "Keep or choose the models that this provider should expose, then continue to the real save action.",
+                "保留或选择这个供应商要提供的模型，然后前往真实保存操作。",
+              ),
+              advanceOnTargetClick: false,
+              continueLabel: copy("Configuration ready, go to save", "配置好了，去保存"),
+              backLabel: copy("Back to credentials", "返回填写凭据"),
+            }
+          : microStep === "provider-save"
+            ? {
+                target: "provider-save",
+                index: copy("ADD PROVIDER · 5/5", "添加供应商 · 5/5"),
+                title: copy("Save the provider", "保存供应商"),
+                description: copy(
+                  "Select the real save button. Routing begins only after the provider is saved successfully.",
+                  "点击真实保存按钮；只有供应商保存成功后，才会进入路由配置。",
+                ),
+                advanceOnTargetClick: false,
+                continueLabel: null,
+                backLabel: copy("Back to models", "返回选择模型"),
+              }
+            : microStep === "route-entry"
+              ? {
+                  target: "routing",
+                  index: copy("CONFIGURE ROUTING · 1/4", "配置路由 · 1/4"),
+                  title: copy("Open routing setup", "打开路由配置"),
+                  description: copy(
+                    "Select the real Routing navigation item to continue.",
+                    "点击真实“路由”导航，进入下一阶段配置。",
+                  ),
+                  advanceOnTargetClick: true,
+                  continueLabel: null,
+                }
+              : microStep === "route-mode"
+                ? {
+            target: "route-mode",
+            index: copy("CONFIGURE ROUTING · 2/4", "配置路由 · 2/4"),
+            title: copy("Choose a routing mode", "选择路由模式"),
+            description: copy("Review or choose how requests should be routed.", "查看并选择请求的路由方式。"),
+            advanceOnTargetClick: false,
+            continueLabel: copy("Use this mode", "沿用当前模式"),
+          }
+                : microStep === "route-config"
+                  ? {
+                      target: "route-config",
+                      index: copy("CONFIGURE ROUTING · 3/4", "配置路由 · 3/4"),
+                      title: copy("Configure model routing", "配置模型路由"),
+                      description: copy(
+                        "Review the providers and models required by the current routing mode, then continue to apply.",
+                        "检查当前路由模式所需的供应商和模型，然后前往应用。",
+                      ),
+                      advanceOnTargetClick: false,
+                      continueLabel: copy("Configuration ready, go to apply", "配置好了，去应用"),
+                      backLabel: copy("Back to routing mode", "返回路由模式"),
+                    }
+                  : microStep === "route-apply"
+                    ? {
+                        target: "route-apply",
+                        index: copy("CONFIGURE ROUTING · 4/4", "配置路由 · 4/4"),
+                        title: copy("Save and apply routing", "保存并应用路由"),
+                        description: copy(
+                          "Select the real save action. The guide waits for this exact revision to become reachable.",
+                          "点击真实保存操作；引导会等待这一版 revision 真正运行且监听可达。",
+                        ),
+                        advanceOnTargetClick: false,
+                        continueLabel: null,
+                        backLabel: copy("Back to route configuration", "返回检查配置"),
+                      }
+                    : microStep === "agent-entry"
+                      ? {
+                          target: "agent-entry",
+                          index: copy("CONNECT AGENT · 1/3", "接入 Agent · 1/3"),
+                          title: copy("Open Agent management", "打开 Agent 管理"),
+                          description: copy(
+                            "Select the real Agent navigation item to continue.",
+                            "点击真实“Agent”导航，查看本机检测结果。",
+                          ),
+                          advanceOnTargetClick: true,
+                          continueLabel: null,
+                        }
+                      : microStep === "agent-select"
+                        ? {
+              target: "agent-list",
+              index: copy("CONNECT AGENT · 2/3", "接入 Agent · 2/3"),
+              title: copy("Choose an Agent", "选择一个 Agent"),
+              description: copy("Choose a detected Agent to continue.", "选择一个检测到的 Agent 继续。"),
+              advanceOnTargetClick: false,
+              continueLabel: null,
+            }
+                        : microStep === "agent-installation"
+                          ? {
+                              target: "agent-installation",
+                              index: copy("CONNECT AGENT · 3/4", "接入 Agent · 3/4"),
+                              title: copy("Choose the installation to manage", "选择要接管的安装"),
+                              description: copy(
+                                "Multiple installations were detected. Open the real picker and choose the exact path to manage.",
+                                "检测到多份安装；打开真实选择器，选择要接管的精确路径。",
+                              ),
+                              advanceOnTargetClick: false,
+                              continueLabel: null,
+                              backLabel: copy("Back to Agent list", "返回 Agent 列表"),
+                            }
+                        : microStep === "agent-connect"
+                          ? {
+                              target: "agent-connect",
+                              index: copy("CONNECT AGENT · 3/3", "接入 Agent · 3/3"),
+                              title: copy("Connect the Agent", "一键接入 Agent"),
+                              description: copy(
+                                "Select the real connection action. Completion waits for a rescan to report CONNECTED.",
+                                "点击真实接入操作；完成状态必须等待重扫确认 CONNECTED。",
+                              ),
+                              advanceOnTargetClick: false,
+                              continueLabel: null,
+                              backLabel: copy("Back to Agent list", "返回 Agent 列表"),
+                            }
+                          : microStep === "agent-connect-multiple"
+                            ? {
+                                target: "agent-connect",
+                                index: copy("CONNECT AGENT · 4/4", "接入 Agent · 4/4"),
+                                title: copy("Connect the Agent", "一键接入 Agent"),
+                                description: copy(
+                                  "Select the real connection action. Completion waits for a rescan to report CONNECTED.",
+                                  "点击真实接入操作；完成状态必须等待重扫确认 CONNECTED。",
+                                ),
+                                advanceOnTargetClick: false,
+                                continueLabel: null,
+                                backLabel: copy("Back to installation", "返回选择安装"),
+                              }
+                          : microStep === "agent-scan-empty"
+                          ? {
+                              target: "agent-rescan",
+                              index: copy("CONNECT AGENT · 2/2", "接入 Agent · 2/2"),
+                              title: copy("No connectable Agent detected", "未检测到可接入 Agent"),
+                              description: copy(
+                                "Rescan after installing an Agent, or explicitly finish the basic setup without one.",
+                                "安装 Agent 后可重新扫描，也可以明确暂不接入并完成基础设置。",
+                              ),
+                              advanceOnTargetClick: false,
+                              continueLabel: null,
+                            }
+                          : {
+                    target: null,
+                    index: copy("FIRST SETUP · COMPLETE", "首次设置 · 已完成"),
+                    title: copy("First setup is complete", "首次设置已完成"),
+                    description: copy("No repeated setup is required.", "无需重复配置。"),
+                    advanceOnTargetClick: false,
+                    continueLabel: copy("Back to Overview", "返回概览"),
+                  };
+  const lockWorkspaceScroll = content.target === "route-mode"
+    || content.target === "route-config"
+    || content.target === "route-apply";
+  const targetPending = content.target !== null && targetRect === null;
 
-  useEffect(() => {
-    if (!open) setStepIndex(0);
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    const previous = document.body.getAttribute("data-first-run-guide-active");
+    document.body.setAttribute("data-first-run-guide-active", "true");
+    return () => {
+      if (previous === null) document.body.removeAttribute("data-first-run-guide-active");
+      else document.body.setAttribute("data-first-run-guide-active", previous);
+    };
   }, [open]);
 
   useLayoutEffect(() => {
-    if (!open) {
+    if (!open || !content.target) {
       setTargetRect(null);
-      return;
+      return undefined;
     }
-    const target = document.querySelector<HTMLElement>(
-      `[data-onboarding-target="${step.target}"]`,
-    );
-    target?.setAttribute("data-onboarding-active", "true");
+    let activeTarget: HTMLElement | null = null;
+    let detachTarget = () => {};
 
-    const measure = () => {
-      if (!target?.isConnected) {
-        setTargetRect(null);
-        return;
+    const attachTarget = (target: HTMLElement) => {
+      activeTarget = target;
+      const originalDescription = target.getAttribute("aria-describedby");
+      const originalTabIndex = target.getAttribute("tabindex");
+      const descriptionIds = new Set((originalDescription ?? "").split(/\s+/).filter(Boolean));
+      descriptionIds.add("first-run-coachmark-description");
+      target.setAttribute("aria-describedby", [...descriptionIds].join(" "));
+      target.setAttribute("data-onboarding-active", "true");
+      if (target.tabIndex < 0) target.setAttribute("tabindex", "-1");
+
+      const measure = () => {
+        const rect = target.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
+          setTargetRect(null);
+          return;
+        }
+        setTargetRect({
+          top: rect.top,
+          left: rect.left,
+          right: rect.right,
+          bottom: rect.bottom,
+          width: rect.width,
+          height: rect.height,
+        });
+      };
+      const activate = () => targetActionRef.current();
+      const workspace = target.closest<HTMLElement>(".station-content");
+      if (content.target === "provider-choice" && workspace) {
+        // The provider catalog is taller than compact windows. Keep the page header
+        // visible so the coachmark can sit above the catalog instead of covering cards.
+        workspace.scrollTop = 0;
+      } else {
+        target.scrollIntoView({
+          block: lockWorkspaceScroll ? "center" : "nearest",
+          inline: "nearest",
+          behavior: "auto",
+        });
       }
-      const rect = target.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) {
-        setTargetRect(null);
-        return;
+      target.focus({ preventScroll: true });
+      let unlockWorkspaceScroll = () => {};
+      if (lockWorkspaceScroll && workspace) {
+        const lockedScrollTop = workspace.scrollTop;
+        const lockedScrollLeft = workspace.scrollLeft;
+        const preventUserScroll = (event: Event) => {
+          const eventTarget = event.target;
+          if (
+            eventTarget instanceof Element
+            && eventTarget.closest('[data-onboarding-floating="true"], .first-run-coachmark')
+          ) return;
+          event.preventDefault();
+        };
+        const restoreWorkspaceScroll = () => {
+          let restored = false;
+          if (workspace.scrollTop !== lockedScrollTop) {
+            workspace.scrollTop = lockedScrollTop;
+            restored = true;
+          }
+          if (workspace.scrollLeft !== lockedScrollLeft) {
+            workspace.scrollLeft = lockedScrollLeft;
+            restored = true;
+          }
+          if (restored) measure();
+        };
+        workspace.setAttribute("data-onboarding-scroll-locked", "true");
+        window.addEventListener("wheel", preventUserScroll, { passive: false, capture: true });
+        window.addEventListener("touchmove", preventUserScroll, { passive: false, capture: true });
+        workspace.addEventListener("scroll", restoreWorkspaceScroll);
+        unlockWorkspaceScroll = () => {
+          window.removeEventListener("wheel", preventUserScroll, true);
+          window.removeEventListener("touchmove", preventUserScroll, true);
+          workspace.removeEventListener("scroll", restoreWorkspaceScroll);
+          workspace.removeAttribute("data-onboarding-scroll-locked");
+        };
       }
-      const padding = 6;
-      setTargetRect({
-        top: Math.max(8, rect.top - padding),
-        left: Math.max(8, rect.left - padding),
-        width: rect.width + padding * 2,
-        height: rect.height + padding * 2,
-        right: rect.right + padding,
-        bottom: rect.bottom + padding,
-      });
+      measure();
+      if (content.advanceOnTargetClick) target.addEventListener("click", activate);
+      window.addEventListener("resize", measure);
+      window.addEventListener("scroll", measure, true);
+      const resizeObserver = typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(measure);
+      resizeObserver?.observe(target);
+
+      detachTarget = () => {
+        unlockWorkspaceScroll();
+        target.removeEventListener("click", activate);
+        window.removeEventListener("resize", measure);
+        window.removeEventListener("scroll", measure, true);
+        resizeObserver?.disconnect();
+        target.removeAttribute("data-onboarding-active");
+        if (originalDescription === null) target.removeAttribute("aria-describedby");
+        else target.setAttribute("aria-describedby", originalDescription);
+        if (originalTabIndex === null) target.removeAttribute("tabindex");
+        else target.setAttribute("tabindex", originalTabIndex);
+      };
     };
 
-    measure();
-    const frame = window.requestAnimationFrame(measure);
-    window.addEventListener("resize", measure);
-    window.addEventListener("scroll", measure, true);
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
-    if (target) observer?.observe(target);
+    const findTarget = () => {
+      const nextTarget = document.querySelector<HTMLElement>(
+        `[data-onboarding-target="${content.target}"]`,
+      );
+      if (nextTarget === activeTarget) return;
+      detachTarget();
+      activeTarget = null;
+      setTargetRect(null);
+      if (nextTarget) attachTarget(nextTarget);
+    };
+
+    findTarget();
+    const mutationObserver = typeof MutationObserver === "undefined"
+      ? null
+      : new MutationObserver(findTarget);
+    mutationObserver?.observe(document.body, { childList: true, subtree: true });
 
     return () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener("resize", measure);
-      window.removeEventListener("scroll", measure, true);
-      observer?.disconnect();
-      target?.removeAttribute("data-onboarding-active");
+      mutationObserver?.disconnect();
+      detachTarget();
     };
-  }, [open, step.target]);
+  }, [content.advanceOnTargetClick, content.target, lockWorkspaceScroll, open]);
 
-  const placement = stepIndex === 2 ? "left" : "below";
-  const dialogStyle: CSSProperties | undefined = targetRect
-    ? (() => {
-        const cardWidth = Math.min(380, window.innerWidth - 32);
-        const cardHeight = 270;
-        if (placement === "left") {
-          return {
-            left: clamp(targetRect.left - cardWidth - 24, 16, window.innerWidth - cardWidth - 16),
-            top: clamp(
-              targetRect.top + targetRect.height / 2 - cardHeight / 2,
-              16,
-              window.innerHeight - cardHeight - 16,
-            ),
-          };
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onPause();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const target = content.target
+        ? document.querySelector<HTMLElement>(
+            `[data-onboarding-target="${content.target}"][data-onboarding-active="true"]`,
+          )
+        : null;
+      const focusableSelector = [
+        "button:not([disabled])",
+        "input:not([disabled])",
+        "select:not([disabled])",
+        "textarea:not([disabled])",
+        "a[href]",
+        "[tabindex]",
+      ].join(",");
+      const floatingCandidates = [
+        ...document.querySelectorAll<HTMLElement>('[data-onboarding-floating="true"]'),
+      ].flatMap((layer) => [
+        ...(layer.matches(focusableSelector) ? [layer] : []),
+        ...layer.querySelectorAll<HTMLElement>(focusableSelector),
+      ]);
+      const candidates = [
+        ...(target ? [target, ...target.querySelectorAll<HTMLElement>(focusableSelector)] : []),
+        ...floatingCandidates,
+        ...(coachmarkRef.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? []),
+      ].filter((element, index, items) => (
+        !element.hasAttribute("disabled") && items.indexOf(element) === index
+      ));
+      if (candidates.length === 0) return;
+      event.preventDefault();
+      const currentIndex = candidates.indexOf(document.activeElement as HTMLElement);
+      const nextIndex = event.shiftKey
+        ? (currentIndex <= 0 ? candidates.length - 1 : currentIndex - 1)
+        : (currentIndex < 0 || currentIndex === candidates.length - 1 ? 0 : currentIndex + 1);
+      candidates[nextIndex].focus();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [content.target, onPause, open]);
+
+  if (!open) return null;
+  const padding = 7;
+  const viewportInset = 8;
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const hole = targetRect ? {
+    top: clamp(targetRect.top - padding, viewportInset, viewportHeight - viewportInset),
+    left: clamp(targetRect.left - padding, viewportInset, viewportWidth - viewportInset),
+    right: clamp(targetRect.right + padding, viewportInset, viewportWidth - viewportInset),
+    bottom: clamp(targetRect.bottom + padding, viewportInset, viewportHeight - viewportInset),
+  } : null;
+  const cardWidth = Math.min(360, viewportWidth - 32);
+  const estimatedCardHeight = 230;
+  const cardGap = 18;
+  const cardStyle: CSSProperties = targetRect && targetRect.width > 0
+    ? targetRect.bottom + cardGap + estimatedCardHeight <= viewportHeight - 16
+      ? {
+          width: cardWidth,
+          left: clamp(targetRect.left, 16, viewportWidth - cardWidth - 16),
+          top: targetRect.bottom + cardGap,
         }
-        const preferredLeft = stepIndex === 0
-          ? targetRect.right - cardWidth
-          : targetRect.left - 24;
-        return {
-          left: clamp(preferredLeft, 16, window.innerWidth - cardWidth - 16),
-          top: clamp(targetRect.bottom + 18, 16, window.innerHeight - cardHeight - 16),
-        };
-      })()
-    : undefined;
+      : targetRect.right + cardGap + cardWidth <= viewportWidth - 16
+        ? {
+            width: cardWidth,
+            left: targetRect.right + cardGap,
+            top: clamp(targetRect.top, 16, viewportHeight - estimatedCardHeight - 16),
+          }
+        : targetRect.left - cardGap - cardWidth >= 16
+          ? {
+              width: cardWidth,
+              left: targetRect.left - cardGap - cardWidth,
+              top: clamp(targetRect.top, 16, viewportHeight - estimatedCardHeight - 16),
+            }
+          : {
+              width: cardWidth,
+              left: clamp(targetRect.left, 16, viewportWidth - cardWidth - 16),
+              top: clamp(
+                targetRect.top - cardGap - estimatedCardHeight,
+                16,
+                viewportHeight - estimatedCardHeight - 16,
+              ),
+            }
+    : {
+        width: cardWidth,
+        left: Math.max(16, (viewportWidth - cardWidth) / 2),
+        top: Math.max(16, (viewportHeight - 250) / 2),
+      };
 
-  return (
-    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onDismiss()}>
-      <DialogPortal>
-        <DialogOverlay className="first-run-guide-overlay" />
-        {targetRect && (
+  return createPortal(
+    <div className="first-run-spotlight-root">
+      {hole ? (
+        <>
+          <div className="first-run-spotlight-blocker" style={{ top: 0, left: 0, right: 0, height: hole.top }} />
+          <div className="first-run-spotlight-blocker" style={{ top: hole.top, left: 0, width: hole.left, height: hole.bottom - hole.top }} />
+          <div className="first-run-spotlight-blocker" style={{ top: hole.top, left: hole.right, right: 0, height: hole.bottom - hole.top }} />
+          <div className="first-run-spotlight-blocker" style={{ top: hole.bottom, left: 0, right: 0, bottom: 0 }} />
           <div
-            className="first-run-guide-spotlight"
-            data-onboarding-spotlight={step.target}
+            className="first-run-spotlight-outline"
             aria-hidden="true"
-            style={{
-              top: targetRect.top,
-              left: targetRect.left,
-              width: targetRect.width,
-              height: targetRect.height,
-            }}
+            style={{ top: hole.top, left: hole.left, width: hole.right - hole.left, height: hole.bottom - hole.top }}
           />
-        )}
-        <DialogPrimitive.Content
-          className="first-run-guide-dialog"
-          data-placement={targetRect ? placement : "center"}
-          style={dialogStyle}
-          onPointerDownOutside={(event) => event.preventDefault()}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            window.requestAnimationFrame(() => {
-              document.querySelector<HTMLElement>("[data-onboarding-return-focus]")?.focus();
-            });
-          }}
+        </>
+      ) : (
+        <div className="first-run-spotlight-blocker" style={{ inset: 0 }} />
+      )}
+      <section
+        ref={coachmarkRef}
+        className="first-run-coachmark"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="first-run-coachmark-title"
+        style={cardStyle}
+      >
+        <span className="first-run-guide-step">{content.index}</span>
+        <Button
+          className="first-run-guide-close"
+          variant="ghost"
+          size="icon-sm"
+          type="button"
+          aria-label={copy("Continue later", "稍后继续")}
+          onClick={onPause}
         >
-          <DialogHeader className="first-run-guide-header">
-            <span className="first-run-guide-step">
-              {copy(
-                `Page tour · ${stepIndex + 1}/${steps.length}`,
-                `页面讲解 · ${stepIndex + 1}/${steps.length}`,
-              )}
-            </span>
-            <Button
-              className="first-run-guide-close"
-              variant="ghost"
-              size="icon-sm"
-              type="button"
-              aria-label={copy("Close guide", "关闭引导")}
-              onClick={onDismiss}
-            >
-              <XIcon />
+          <XIcon />
+        </Button>
+        <h2 id="first-run-coachmark-title">{content.title}</h2>
+        <p id="first-run-coachmark-description" aria-live={targetPending ? "polite" : undefined}>
+          {targetPending
+            ? copy("Locating the action…", "正在定位操作位置…")
+            : content.description}
+        </p>
+        <div className="first-run-coachmark-actions">
+          <Button variant="ghost" size="sm" type="button" onClick={onDismiss}>
+            {copy("Don't show again", "不再提示")}
+          </Button>
+          {!targetPending && content.backLabel && (
+            <Button variant="outline" size="sm" type="button" onClick={onBack}>
+              {content.backLabel}
             </Button>
-            <DialogTitle className="first-run-guide-title">{step.title}</DialogTitle>
-            <DialogDescription>{step.description}</DialogDescription>
-          </DialogHeader>
-          <Progress
-            value={((stepIndex + 1) / steps.length) * 100}
-            aria-label={copy(
-              `Guide progress: step ${stepIndex + 1} of ${steps.length}`,
-              `引导进度：第 ${stepIndex + 1} 步，共 ${steps.length} 步`,
-            )}
-          />
-          <DialogFooter className="first-run-guide-actions">
-            <Button data-action="skip" variant="ghost" type="button" onClick={onDismiss}>
-              {copy("Skip guide", "跳过引导")}
+          )}
+          {!targetPending && content.continueLabel && (
+            <Button size="sm" type="button" onClick={onTargetAction}>
+              {content.continueLabel}
             </Button>
-            {stepIndex > 0 && (
-              <Button
-                variant="outline"
-                type="button"
-                onClick={() => setStepIndex((current) => current - 1)}
-              >
-                {copy("Previous", "上一步")}
-              </Button>
-            )}
-            <Button
-              type="button"
-              onClick={() => {
-                if (stepIndex === steps.length - 1) onDismiss();
-                else setStepIndex((current) => current + 1);
-              }}
-            >
-              {stepIndex === steps.length - 1
-                ? copy("Finish guide", "完成引导")
-                : copy("Next", "下一步")}
+          )}
+          {!targetPending && microStep === "agent-scan-empty" && canSkipAgent && (
+            <Button size="sm" type="button" onClick={onSkipAgent}>
+              {copy("Finish without an Agent", "暂不接入，完成设置")}
             </Button>
-          </DialogFooter>
-        </DialogPrimitive.Content>
-      </DialogPortal>
+          )}
+        </div>
+      </section>
+    </div>,
+    document.body,
+  );
+}
+
+interface FirstRunCompletionDialogProps {
+  open: boolean;
+  agentSkipped: boolean;
+  onFinish: () => void;
+}
+
+export function FirstRunCompletionDialog({
+  open,
+  agentSkipped,
+  onFinish,
+}: FirstRunCompletionDialogProps) {
+  const { copy } = useLanguage();
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onFinish()}>
+      <DialogContent className="first-run-complete-dialog" showCloseButton={false}>
+        <DialogHeader>
+          <span className="first-run-guide-step">
+            {copy("FIRST SETUP · COMPLETE", "首次设置 · 已完成")}
+          </span>
+          <DialogTitle>
+            {agentSkipped
+              ? copy("Basic setup complete", "基础设置完成")
+              : copy("First setup complete", "首次设置完成")}
+          </DialogTitle>
+          <DialogDescription>
+            {agentSkipped
+              ? copy(
+                  "The provider and route are ready. No Agent has been connected yet.",
+                  "供应商和路由已就绪，Agent 尚未接入。",
+                )
+              : copy(
+                  "The provider, route, and Agent are ready. Token Station can now manage model requests.",
+                  "供应商、路由和 Agent 均已就绪，Token Station 现在可以接管模型请求。",
+                )}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button type="button" onClick={onFinish}>
+            {copy("Back to Overview", "返回概览")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   );
 }

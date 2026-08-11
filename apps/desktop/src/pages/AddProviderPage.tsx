@@ -46,6 +46,7 @@ interface AddProviderPageProps {
   onFreeFiltersChange: (filters: FreeCatalogFilters) => void;
   onLoadFree: () => void;
   onSelectFree: (preset: FreeProviderPresetView) => void;
+  onProviderSelected?: () => void;
 }
 
 const regularRegion = (preset: ProviderPreset): "china" | "global" =>
@@ -87,6 +88,7 @@ export default function AddProviderPage({
   onFreeFiltersChange,
   onLoadFree,
   onSelectFree,
+  onProviderSelected,
 }: AddProviderPageProps) {
   const { copy, language } = useLocalizedCopy();
   const offerLabel = (kind: FreeOfferKind) => (
@@ -240,6 +242,7 @@ export default function AddProviderPage({
     setDiscoveredModels([]);
     setDiscovery(null);
     setError("");
+    onProviderSelected?.();
   };
 
   const leaveRegularConfig = () => {
@@ -379,7 +382,10 @@ export default function AddProviderPage({
           </span>
         </header>
 
-        <section className="panel unified-provider-catalog">
+        <section
+          className="panel unified-provider-catalog"
+          aria-label={copy("Choose a provider", "选择供应商")}
+        >
           <div className="provider-catalog-toolbar">
             <div className="provider-mode-switch" aria-label={copy("API type", "API 类型")}>
               <button
@@ -505,7 +511,12 @@ export default function AddProviderPage({
           )}
 
           {catalogMode === "regular" && visibleRegular.length > 0 && (
-            <div className="provider-catalog-grid" role="list" aria-label={copy("Standard providers", "常规供应商列表")}>
+            <div
+              className="provider-catalog-grid"
+              role="list"
+              aria-label={copy("Standard providers", "常规供应商列表")}
+              data-onboarding-target="provider-choice"
+            >
               {visibleRegular.map((item) => {
                 const custom = item.id === CUSTOM_ID;
                 const displayName = providerName(item.id, item.label);
@@ -526,14 +537,25 @@ export default function AddProviderPage({
           )}
 
           {catalogMode === "free" && !freeLoading && !freeError && visibleFree.length > 0 && (
-            <div className="provider-catalog-grid" role="list" aria-label={copy("Free providers", "免费供应商列表")}>
+            <div
+              className="provider-catalog-grid"
+              role="list"
+              aria-label={copy("Free providers", "免费供应商列表")}
+              data-onboarding-target="provider-choice"
+            >
               {visibleFree.map((item) => (
                 <article
                   className={`provider-catalog-card free offer-${item.offer_kind}`}
                   role="listitem"
                   key={item.id}
                 >
-                  <button type="button" onClick={() => onSelectFree(item)}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onProviderSelected?.();
+                      onSelectFree(item);
+                    }}
+                  >
                     <span className="provider-catalog-logo">
                       <ProviderIcon id={item.id} label={providerName(item.id, item.label)} size={30} />
                     </span>
@@ -626,7 +648,12 @@ export default function AddProviderPage({
             </a>
           </div>
         )}
-        <div className="wizard-step">
+        <div
+          className="wizard-step"
+          role="group"
+          aria-label={copy("Provider credentials", "供应商凭据")}
+          data-onboarding-target="provider-credential"
+        >
           <div className="step-index">01</div>
           <div className="step-body form-grid">
             <label className="field-label">
@@ -752,7 +779,12 @@ export default function AddProviderPage({
           </div>
         </div>
 
-        <div className="wizard-step">
+        <div
+          className="wizard-step"
+          role="group"
+          aria-label={copy("Provider models", "供应商模型")}
+          data-onboarding-target="provider-models"
+        >
           <div className="step-index">02</div>
           <div className="step-body">
             <label className="field-label">{copy("Select models", "选择模型")}</label>
@@ -776,7 +808,13 @@ export default function AddProviderPage({
           <button className="btn" type="button" disabled={disabled} onClick={leaveRegularConfig}>
             {copy("Back to catalog", "返回目录")}
           </button>
-          <button className="btn primary" type="button" disabled={disabled || !endpointPreview || Boolean(endpointError)} onClick={() => void submit()}>
+          <button
+            className="btn primary"
+            type="button"
+            data-onboarding-target="provider-save"
+            disabled={disabled || !endpointPreview || Boolean(endpointError)}
+            onClick={() => void submit()}
+          >
             {saving
               ? copy("Saving…", "正在保存…")
               : isExisting
