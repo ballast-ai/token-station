@@ -51,6 +51,7 @@ readonly agent_rules="$root/packaging/macos/AGENTS.md"
 readonly formal_readme="$root/packaging/macos/安装前必读.md"
 readonly unsigned_test_readme="$root/packaging/macos/未签名测试版安装前必读.md"
 readonly finder_layout_script="$root/packaging/macos/configure-dmg-layout.applescript"
+readonly finder_layout_template="$root/packaging/macos/dmg-layout.dsstore.base64"
 readme="$formal_readme"
 packaging_source_commit=""
 tag_commit=""
@@ -162,6 +163,15 @@ if [[ "$unsigned_test" == "true" ]]; then
     >"$stage/构建来源.txt"
 fi
 
+if ! /usr/bin/base64 -D -i "$finder_layout_template" -o "$stage/.DS_Store"; then
+  echo "DMG 拖拽布局模板无法读取，请重新检出完整源码后重试。" >&2
+  exit 1
+fi
+[[ -s "$stage/.DS_Store" ]] || {
+  echo "DMG 拖拽布局模板是空文件，已停止生成发布文件。" >&2
+  exit 1
+}
+
 hdiutil create \
   -volname "$volume_name" \
   -srcfolder "$stage" \
@@ -180,15 +190,6 @@ layout_mounted=true
 if [[ -e "$layout_mount_point/.fseventsd" ]]; then
   /bin/rm -rf -- "$layout_mount_point/.fseventsd"
 fi
-
-if ! osascript "$finder_layout_script" configure "$layout_mount_point" >/dev/null; then
-  echo "Finder 没能写入 DMG 拖拽布局，请确认 Finder 可以正常启动后重试。" >&2
-  exit 1
-fi
-for _ in {1..50}; do
-  [[ -s "$layout_mount_point/.DS_Store" ]] && break
-  sleep 0.2
-done
 [[ -s "$layout_mount_point/.DS_Store" ]] || {
   echo "DMG 的 Finder 布局没有保存下来，已停止生成发布文件。" >&2
   exit 1
