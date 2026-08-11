@@ -29,6 +29,10 @@ assert.match(packager, new RegExp(markerName));
 assert.match(packager, new RegExp(provenanceName));
 assert.match(packager, /notarytool submit/);
 assert.match(packager, /stapler staple/);
+assert.match(packager, /-format UDRW/);
+assert.match(packager, /configure-dmg-layout\.applescript/);
+assert.match(packager, /\.DS_Store/);
+assert.match(packager, /hdiutil convert[\s\S]*-format UDZO/);
 
 const auditor = read("scripts/audit-macos-dmg.sh");
 assert.match(auditor, /--unsigned-test/);
@@ -37,6 +41,19 @@ assert.match(auditor, /Signature=adhoc/);
 assert.match(auditor, new RegExp(markerName));
 assert.match(auditor, new RegExp(provenanceName));
 assert.match(auditor, /stapler validate/);
+assert.match(auditor, /mounted_ds_store/);
+assert.match(auditor, /configure-dmg-layout\.applescript[\s\S]*inspect/);
+
+const finderLayout = read("packaging/macos/configure-dmg-layout.applescript");
+assert.match(finderLayout, /current view to icon view/);
+assert.match(finderLayout, /arrangement to not arranged/);
+assert.match(finderLayout, /icon size to 128/);
+assert.match(finderLayout, /toolbar visible to false/);
+assert.match(finderLayout, /sidebar width to 0/);
+assert.match(finderLayout, /position of item "token-station\.app" .* to \{310, 170\}/);
+assert.match(finderLayout, /position of item "Applications" .* to \{610, 170\}/);
+assert.match(finderLayout, /if exists item "构建来源\.txt"/);
+assert.match(finderLayout, /if exists item "未签名测试版\.txt"/);
 
 const installer = read("packaging/macos/安装 Token Station.command");
 assert.match(installer, /UNSIGNED_TEST_MARKER/);
