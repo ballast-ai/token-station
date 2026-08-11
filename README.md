@@ -7,7 +7,7 @@
 
 Connect Claude Code, Codex, WorkBuddy, and other agents to one loopback gateway. Route each request by task complexity or remaining quota across your own API providers and local models.
 
-[![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![Platform](https://img.shields.io/badge/public%20desktop-macOS%20Apple%20Silicon-lightgrey.svg)](https://github.com/ballast-ai/token-station/releases/latest) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![Release type](https://img.shields.io/badge/v1.1.3-source%20release-lightgrey.svg)](https://github.com/ballast-ai/token-station/releases/latest) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
 
 [Download](https://github.com/ballast-ai/token-station/releases/latest) · [Documentation](docs/README.md) · [Report an issue](https://github.com/ballast-ai/token-station/issues) · [简体中文](README.zh-CN.md)
 </div>
@@ -71,23 +71,12 @@ Download the current release from **[GitHub Releases](https://github.com/ballast
 
 | Target | Availability |
 |---|---|
-| macOS desktop, Apple Silicon | Available as the `token-station_*_aarch64.dmg` asset |
-| macOS CLI, Apple Silicon | Available as the `token-station-cli-*-aarch64-apple-darwin.tar.gz` asset |
-| macOS Intel desktop | Not included in the current public release |
-| Windows desktop | Build and installer tests exist, but no public installer is included in the current release |
-| Linux desktop | Build workflow exists, but no public package is included in the current release |
+| v1.1.3 source | GitHub-generated `zip` and `tar.gz` archives |
+| macOS desktop | v1.1.3 does not include a signed installer |
+| macOS and Linux CLI | v1.1.3 does not include binary archives |
+| Windows and Linux desktop | No installer is currently provided |
 
-Use macOS 11.0 or newer. The executable's deployment target is 11.0, although the current app bundle metadata still shows 10.13 and needs correction. The desktop app and CLI are versioned independently, so their asset versions may differ. To confirm an Apple Silicon Mac, open **Apple menu > About This Mac**, or run `uname -m` and check for `arm64`.
-
-The current DMG is not Developer ID signed or Apple notarized. macOS may block the first launch. Drag Token Station to Applications, then right-click the app and choose **Open**, followed by **Open** again. If Gatekeeper still keeps the quarantine attribute, run:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/token-station.app
-```
-
-Do not disable Gatekeeper system-wide.
-
-The current release also has no checksum or signature asset for independent integrity verification. If your threat model requires a verifiable binary, build from source or wait for a signed release instead of removing quarantine.
+Use macOS 11.0 or newer. The v1.1.3 source archives are not signed installers. If you require a verifiable binary, follow the repository documentation to build from source or wait for a later signed release. Do not disable Gatekeeper system-wide to install Token Station.
 
 ## Quick start
 
