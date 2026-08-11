@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: scripts/audit-desktop-artifact.sh --mode <local|production> --binary <path> --bundle-root <path> --source-root <path>" >&2
+  echo "usage: scripts/audit-desktop-artifact.sh --mode <local|production> --binary <path> --bundle-root <path> --source-root <path> --rust-sysroot <path>" >&2
   exit 2
 }
 
@@ -10,17 +10,19 @@ mode=""
 binary=""
 bundle_root=""
 source_root=""
+rust_sysroot=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) mode=${2:-}; shift 2 ;;
     --binary) binary=${2:-}; shift 2 ;;
     --bundle-root) bundle_root=${2:-}; shift 2 ;;
     --source-root) source_root=${2:-}; shift 2 ;;
+    --rust-sysroot) rust_sysroot=${2:-}; shift 2 ;;
     *) usage ;;
   esac
 done
 [[ "$mode" == "local" || "$mode" == "production" ]] || usage
-[[ -n "$binary" && -n "$bundle_root" && -n "$source_root" ]] || usage
+[[ -n "$binary" && -n "$bundle_root" && -n "$source_root" && -n "$rust_sysroot" ]] || usage
 [[ -f "$binary" ]] || { echo "desktop executable missing: $binary" >&2; exit 1; }
 
 strings_file="$(mktemp "${TMPDIR:-/tmp}/token-station-strings.XXXXXX")"
@@ -80,6 +82,17 @@ fi
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 if [[ -n "$cargo_home" ]] && grep -Fq "$cargo_home" "$strings_file"; then
   echo "desktop executable leaks the cargo home path: $cargo_home" >&2
+  exit 1
+fi
+
+if grep -Fq "$rust_sysroot" "$strings_file"; then
+  echo "desktop executable leaks the Rust sysroot path" >&2
+  exit 1
+fi
+
+builder_home="${HOME:-}"
+if [[ -n "$builder_home" ]] && grep -Fq "$builder_home/" "$strings_file"; then
+  echo "desktop executable leaks the builder home path" >&2
   exit 1
 fi
 

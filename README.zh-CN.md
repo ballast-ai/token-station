@@ -7,7 +7,7 @@
 
 让 Claude Code、Codex、WorkBuddy 等 Agent 统一连接一个本地网关，再按任务复杂度或账户剩余额度，把每次请求路由到你的 API 供应商或本地模型。
 
-[![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![Release type](https://img.shields.io/badge/v1.1.3-source%20release-lightgrey.svg)](https://github.com/ballast-ai/token-station/releases/latest) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![Release type](https://img.shields.io/badge/v1.1.3-test%20DMG-orange.svg)](https://github.com/ballast-ai/token-station/releases/latest) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
 
 [下载](https://github.com/ballast-ai/token-station/releases/latest) · [文档](docs/README.md) · [提交问题](https://github.com/ballast-ai/token-station/issues) · [English](README.md)
 </div>
@@ -72,12 +72,14 @@ Claude Desktop 目前没有公开的产品仓库；该链接指向 Anthropic 官
 | 目标 | 状态 |
 |---|---|
 | v1.1.3 源码 | GitHub 自动生成 `zip` 和 `tar.gz` |
-| macOS 桌面端 | v1.1.3 不提供签名安装包 |
+| macOS 桌面端 | Apple Silicon 未签名、未公证测试 DMG |
 | macOS 与 Linux CLI | v1.1.3 不提供二进制归档 |
 | Windows 与 Linux 桌面端 | 当前不提供安装包 |
 
-请使用 macOS 11.0 或更新版本。v1.1.3 的源码归档不是已签名的安装包；需要
-可验证二进制时，请按仓库文档从源码构建，或等待后续签名版本。不要为了安装 Token Station 而全局关闭 Gatekeeper。
+请使用 macOS 11.0 或更新版本。v1.1.3 的 DMG 是 Apple Silicon 未签名、未公证测试包，
+不是正式签名安装包。打开前请核对发布页面的 SHA-256，并阅读 DMG 内安装说明。
+不要为了安装 Token Station 全局关闭 Gatekeeper。如果需要可验证二进制，请从源码构建，
+或等待后续签名版本。
 
 ## 快速开始
 
@@ -187,7 +189,7 @@ npm --prefix apps/desktop run build
 
 ## 项目状态
 
-Token Station 仍处于早期公开发布阶段。本地网关、桌面控制面、两种路由模式、内置 Agent Connector、供应商目录、用量视图和恢复链路已经实现。公开分发范围小于源码兼容矩阵：当前桌面 Release 只提供 macOS Apple Silicon 版本，DMG 还没有 Apple 签名和公证。
+Token Station 仍处于早期公开发布阶段。本地网关、桌面控制面、两种路由模式、内置 Agent Connector、供应商目录、用量视图和恢复链路已经实现。公开分发范围小于源码兼容矩阵：当前桌面 Release 只提供 macOS Apple Silicon 未签名、未公证测试 DMG。
 
 ## 许可证
 

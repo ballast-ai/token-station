@@ -7,7 +7,7 @@
 
 Connect Claude Code, Codex, WorkBuddy, and other agents to one loopback gateway. Route each request by task complexity or remaining quota across your own API providers and local models.
 
-[![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![Release type](https://img.shields.io/badge/v1.1.3-source%20release-lightgrey.svg)](https://github.com/ballast-ai/token-station/releases/latest) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![Release type](https://img.shields.io/badge/v1.1.3-test%20DMG-orange.svg)](https://github.com/ballast-ai/token-station/releases/latest) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
 
 [Download](https://github.com/ballast-ai/token-station/releases/latest) · [Documentation](docs/README.md) · [Report an issue](https://github.com/ballast-ai/token-station/issues) · [简体中文](README.zh-CN.md)
 </div>
@@ -72,11 +72,11 @@ Download the current release from **[GitHub Releases](https://github.com/ballast
 | Target | Availability |
 |---|---|
 | v1.1.3 source | GitHub-generated `zip` and `tar.gz` archives |
-| macOS desktop | v1.1.3 does not include a signed installer |
+| macOS desktop | Apple Silicon unsigned and unnotarized test DMG |
 | macOS and Linux CLI | v1.1.3 does not include binary archives |
 | Windows and Linux desktop | No installer is currently provided |
 
-Use macOS 11.0 or newer. The v1.1.3 source archives are not signed installers. If you require a verifiable binary, follow the repository documentation to build from source or wait for a later signed release. Do not disable Gatekeeper system-wide to install Token Station.
+Use macOS 11.0 or newer. The v1.1.3 DMG is an unsigned and unnotarized Apple Silicon test build, not a formally signed installer. Verify its published SHA-256 and read the included installation notice before opening it. Do not disable Gatekeeper system-wide to install Token Station. If you require a verifiable binary, build from source or wait for a later signed release.
 
 ## Quick start
 
