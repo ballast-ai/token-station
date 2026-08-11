@@ -14,11 +14,11 @@
 #   - GNU tar ustar format, fixed order, owner, timestamps, and gzip -n make the
 #     archive deterministic.
 #
-# Output goes to dist/: a tar.gz containing the CLI binary, four official plugin
+# Output goes to dist/: a tar.gz containing the CLI binary, five official plugin
 # packages, example configuration, and LICENSE.
 #
 # Official binaries embed official plugins in the builtin tier from architecture
-# section 12.1. Build the four WASM plugins first, then build the CLI with
+# section 12.1. Build the five WASM plugins first, then build the CLI with
 # builtin-plugins and TOKEN_STATION_PLUGINS_DIST. include_bytes! embeds plugin
 # bytes so the standalone binary needs no installation. The tarball also carries
 # plugins-dist; registry prefers builtin for the same dialect, so duplication is
@@ -29,6 +29,13 @@ set -euo pipefail
 TARGET=${1:?usage: scripts/build-release.sh <target-triple>}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
+
+: "${TOKEN_STATION_RELEASE_PUBKEY_HEX:?正式 CLI 构建缺少 TOKEN_STATION_RELEASE_PUBKEY_HEX 公钥}"
+if [[ ! "$TOKEN_STATION_RELEASE_PUBKEY_HEX" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "正式 CLI 构建的发布公钥必须是 64 位小写十六进制字符。" >&2
+  exit 1
+fi
+export TOKEN_STATION_RELEASE_PUBKEY_HEX
 
 # Release toolchain: changing this changes the recipe and reproducible baseline and must be announced.
 RELEASE_TOOLCHAIN=1.96.0

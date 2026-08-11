@@ -9,7 +9,26 @@ permissions:
   contents: read
 
 jobs:
+  release-mode:
+    runs-on: ubuntu-24.04
+    outputs:
+      enabled: ${{ steps.mode.outputs.enabled }}
+    steps:
+      - id: mode
+        env:
+          FORMAL_ARTIFACTS_ENABLED: ${{ vars.TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED }}
+        run: |
+          if [[ "$FORMAL_ARTIFACTS_ENABLED" == "true" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "已启用正式桌面二进制构建。"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "本次只发布 GitHub 源码，跳过正式桌面二进制构建。"
+          fi
+
   macos:
+    needs: release-mode
+    if: needs.release-mode.outputs.enabled == 'true'
     name: macOS (${{ matrix.target }})
     runs-on: macos-latest
     strategy:
@@ -38,6 +57,15 @@ jobs:
         with:
           targets: wasm32-wasip2,${{ matrix.target }}
       - run: npm --prefix apps/desktop ci
+      - name: Check formal release metadata and DMG policy
+        run: |
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "发布标签 $GITHUB_REF_NAME 与桌面版本 $version 不一致。" >&2
+            exit 1
+          fi
+          node scripts/check-release-readiness.mjs --version "$version"
+          node scripts/check-macos-dmg-packaging.mjs
       - name: Generate untrusted temporary updater bundler key
         run: |
           key_path="$RUNNER_TEMP/token-station-updater-ci.key"
@@ -83,6 +111,7 @@ jobs:
 
   windows:
     name: Windows (x86_64-pc-windows-msvc)
+    needs: release-mode
     if: ${{ false }} # First public desktop release is macOS-only.
     runs-on: windows-latest
     env:

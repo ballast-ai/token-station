@@ -1,8 +1,9 @@
-# Release workflow (C1#7). A v* tag starts four-platform builds, reproducibility proof, and a draft release.
+# Formal binary release pipeline (C1#7). When explicitly enabled, a v* tag
+# builds four platforms, proves reproducibility, and creates a draft release.
 #
-# This pipeline does not and will never contain the signing private key. It produces unsigned manifest.json.
-# A maintainer runs `ts-release sign` offline to create manifest.json.sig. After upload,
-# publish the draft. See the reproducible build and release verification guide for all steps.
+# This workflow never receives a signing private key. It produces an unsigned
+# manifest.json; a maintainer signs it offline, uploads manifest.json.sig, and
+# publishes the draft only after the complete release audit.
 
 name: Release
 
@@ -12,10 +13,32 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  TOKEN_STATION_RELEASE_PUBKEY_HEX: ${{ vars.TOKEN_STATION_RELEASE_PUBKEY_HEX }}
 
 jobs:
+  release-mode:
+    runs-on: ubuntu-24.04
+    outputs:
+      enabled: ${{ steps.mode.outputs.enabled }}
+    steps:
+      - id: mode
+        env:
+          FORMAL_ARTIFACTS_ENABLED: ${{ vars.TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED }}
+        run: |
+          if [[ "$FORMAL_ARTIFACTS_ENABLED" == "true" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "已启用正式 CLI 二进制构建。"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "本次只发布 GitHub 源码，跳过正式 CLI 二进制构建。"
+          fi
+
   build:
+    needs: release-mode
+    if: needs.release-mode.outputs.enabled == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -27,9 +50,17 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check tag, version, and public release key
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/cli/Cargo.toml | head -1)
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "发布标签 $GITHUB_REF_NAME 与 CLI 版本 $version 不一致。" >&2
+            exit 1
+          fi
+          node scripts/check-release-readiness.mjs --version "$version" --formal
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      # bsdtar cannot create deterministic archives because it has no `--sort` or `--mtime`. The recipe requires GNU tar.
+      # bsdtar lacks the ordering and timestamp controls required here.
       - if: runner.os == 'macOS'
         run: brew install gnu-tar
       - run: scripts/build-release.sh ${{ matrix.target }}
@@ -39,9 +70,10 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  # Rebuild from zero with the same recipe. The bytes must match. Every release proves reproducibility.
-  # instead of only claiming it in documentation.
+  # Rebuild the same recipe from clean trees and require byte identity.
   reproducibility:
+    needs: release-mode
+    if: needs.release-mode.outputs.enabled == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -55,8 +87,11 @@ jobs:
           sha256sum -c first.sum
 
   publish:
-    needs: [build, reproducibility]
+    needs: [release-mode, build, reproducibility]
+    if: needs.release-mode.outputs.enabled == 'true'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

@@ -19,10 +19,14 @@ use sha2::{Digest, Sha256};
 use token_station_release::{ReleaseManifest, parse_public_key, verify_bytes};
 
 /// The official release public key, lowercase hex, stamped in by the release
-/// pipeline. Empty in a source build: version *checking* still works, and
-/// [`download_and_verify`] refuses — someone who builds from source verifies
-/// by rebuilding, not by trusting our key.
-pub const OFFICIAL_RELEASE_PUBKEY_HEX: &str = "";
+/// recipe. Empty in a normal source build: version *checking* still works, and
+/// [`download_and_verify`] refuses. Official binaries inject the public key at
+/// compile time without exposing the offline signing key.
+pub const OFFICIAL_RELEASE_PUBKEY_HEX: &str = match option_env!("TOKEN_STATION_RELEASE_PUBKEY_HEX")
+{
+    Some(public_key) => public_key,
+    None => "",
+};
 
 /// Where the anonymous check goes (July 2026 decision: GitHub Releases first).
 pub const DEFAULT_ENDPOINT: &str = "https://api.github.com/repos/ballast-ai/token-station";
@@ -367,15 +371,14 @@ mod tests {
     }
 
     #[test]
-    fn this_build_ships_no_release_key_so_upgrades_are_fail_closed() {
-        // Tripwire for the honesty fix: while the embedded key is empty, the
-        // README says so and `upgrade` refuses. If a reviewed release build ever
-        // injects a real key, this test fails — a deliberate reminder to restore
-        // the README claim that the public key is in the source tree.
-        assert!(
-            OFFICIAL_RELEASE_PUBKEY_HEX.is_empty(),
-            "a real key is embedded now — update README/README.zh-CN to match"
-        );
+    fn the_release_key_matches_the_compile_time_input_and_is_well_formed() {
+        let expected = option_env!("TOKEN_STATION_RELEASE_PUBKEY_HEX").unwrap_or("");
+        assert_eq!(OFFICIAL_RELEASE_PUBKEY_HEX, expected);
+        if !expected.is_empty() {
+            assert_eq!(expected.len(), 64);
+            assert!(expected.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert_eq!(expected, expected.to_ascii_lowercase());
+        }
     }
 
     #[test]
