@@ -917,10 +917,11 @@ struct CachedBinaryHash {
     sha256: String,
 }
 
-/// Process-wide binary hash cache keyed by canonical path. Each `DiscoveryScanner` is new for every scan, so store the cache
-/// Persists globally across scans. Almost every Agent button starts a full scan first, and Agent binaries can be
-/// hundreds of MB (claude 225 MB, opencode 138 MB). Without caching, every click reads them from start to finish for SHA-256
-/// each time; in debug builds this can take several seconds. The cache lets unchanged binaries use stat without rehashing.
+/// Process-wide binary hash cache keyed by canonical path. DiscoveryScanner is
+/// recreated for every scan, so the cache must outlive individual scanners.
+/// Most Agent actions trigger a full scan, and Agent binaries can be hundreds of
+/// megabytes. Without this cache every click recomputes SHA-256 and stalls debug
+/// builds for seconds. Unchanged binaries now require only stat calls.
 static BINARY_HASH_CACHE: LazyLock<Mutex<BTreeMap<PathBuf, CachedBinaryHash>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
@@ -949,8 +950,9 @@ fn cached_binary_sha256(
     }
 }
 
-/// Pure cache-decision logic with an injected hash function for testing. Reuse the cache when mtime and size match;
-/// Otherwise, call `hasher` to recalculate and update the cache. Do not cache when size is unavailable because the file is absent or unreadable.
+/// Pure cache decision logic with an injected hasher for tests. Reuse entries
+/// when mtime and size match; otherwise recalculate and update. Do not cache when
+/// size is unavailable because the file is missing or unreadable.
 fn lookup_or_hash(
     cache: &mut BTreeMap<PathBuf, CachedBinaryHash>,
     path: &Path,

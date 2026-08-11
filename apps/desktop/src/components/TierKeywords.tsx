@@ -2,8 +2,9 @@ import { useState } from "react";
 import type { TierSlot } from "../api";
 import { useLocalizedCopy } from "./LanguageProvider";
 
-/** Static text for the three-tier keyword library. Order sets priority from strong to medium to weak and matches core rule order:
- * If one sentence matches terms in two tiers, use the higher tier. The list starts empty and shows only user-added terms. */
+/** Static copy for the three-tier keyword library. Order matches core rule priority
+ *  from strong to medium to weak, so a phrase matching two tiers moves upward.
+ *  Lists start empty and show only user-added keywords. */
 
 export interface TierKeywordsProps {
   keywords: Record<TierSlot, string[]>;

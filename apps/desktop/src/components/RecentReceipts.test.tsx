@@ -387,7 +387,7 @@ describe("RecentReceipts", () => {
 
     vi.mocked(getRecentReceipts).mockRejectedValue(new Error("database unavailable"));
     render(<RecentReceipts />);
-    expect(await screen.findByRole("alert")).toHaveTextContent("database unavailable");
+    expect(await screen.findByRole("alert")).toHaveTextContent("本地数据无法安全打开。请使用自救模式检查或导出本地数据。");
   });
 
   it("unknown 成本不把后端异常零值展示成零成本", async () => {

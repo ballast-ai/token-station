@@ -3,6 +3,7 @@ import { previewProviderRemoval } from "../api";
 import type { ProviderRemovalPreview, ProviderView, StateView } from "../api";
 import ProviderModelManager from "./ProviderModelManager";
 import { useLocalizedCopy } from "./LanguageProvider";
+import { humanizeAppError } from "../errors";
 
 interface ProviderListProps {
   providers: ProviderView[];
@@ -25,7 +26,7 @@ export default function ProviderList({
   onRestore,
   onStateChange,
 }: ProviderListProps) {
-  const { copy } = useLocalizedCopy();
+  const { copy, language } = useLocalizedCopy();
   const [managedProvider, setManagedProvider] = useState<string | null>(null);
   const [removal, setRemoval] = useState<ProviderRemovalPreview | null>(null);
   const [removalError, setRemovalError] = useState("");
@@ -35,7 +36,7 @@ export default function ProviderList({
     try {
       setRemoval(await previewProviderRemoval(name));
     } catch (caught) {
-      setRemovalError(String(caught));
+      setRemovalError(humanizeAppError(caught, language));
     }
   };
 
@@ -56,7 +57,9 @@ export default function ProviderList({
       </div>
 
       <div className="provider-list">
-        {recoveryError && <div className="manager-error">{recoveryError}</div>}
+        {recoveryError && (
+          <div className="manager-error">{humanizeAppError(recoveryError, language)}</div>
+        )}
         {deletedProviders.length > 0 && (
           <div className="provider-recovery" aria-label={copy("Provider recycle bin", "Provider 回收站")}>
             <strong>{copy("Recoverable providers", "可恢复的 Provider")}</strong>

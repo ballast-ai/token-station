@@ -55,7 +55,7 @@ export function markFirstRunGuideDismissed(
 interface FirstRunGuideProps {
   open: boolean;
   microStep: FirstRunMicroStep;
-  scanBusy: boolean;
+  canSkipAgent: boolean;
   onTargetAction: () => void;
   onBack: () => void;
   onSkipAgent: () => void;
@@ -89,7 +89,7 @@ function clamp(value: number, min: number, max: number) {
 export default function FirstRunGuide({
   open,
   microStep,
-  scanBusy,
+  canSkipAgent,
   onTargetAction,
   onBack,
   onSkipAgent,
@@ -293,6 +293,7 @@ export default function FirstRunGuide({
   const lockWorkspaceScroll = content.target === "route-mode"
     || content.target === "route-config"
     || content.target === "route-apply";
+  const targetPending = content.target !== null && targetRect === null;
 
   useLayoutEffect(() => {
     if (!open) return undefined;
@@ -359,7 +360,7 @@ export default function FirstRunGuide({
           const eventTarget = event.target;
           if (
             eventTarget instanceof Element
-            && eventTarget.closest('[data-onboarding-floating="true"]')
+            && eventTarget.closest('[data-onboarding-floating="true"], .first-run-coachmark')
           ) return;
           event.preventDefault();
         };
@@ -564,22 +565,26 @@ export default function FirstRunGuide({
           <XIcon />
         </Button>
         <h2 id="first-run-coachmark-title">{content.title}</h2>
-        <p id="first-run-coachmark-description">{content.description}</p>
+        <p id="first-run-coachmark-description" aria-live={targetPending ? "polite" : undefined}>
+          {targetPending
+            ? copy("Locating the action…", "正在定位操作位置…")
+            : content.description}
+        </p>
         <div className="first-run-coachmark-actions">
           <Button variant="ghost" size="sm" type="button" onClick={onDismiss}>
             {copy("Don't show again", "不再提示")}
           </Button>
-          {content.backLabel && (
+          {!targetPending && content.backLabel && (
             <Button variant="outline" size="sm" type="button" onClick={onBack}>
               {content.backLabel}
             </Button>
           )}
-          {content.continueLabel && (
+          {!targetPending && content.continueLabel && (
             <Button size="sm" type="button" onClick={onTargetAction}>
               {content.continueLabel}
             </Button>
           )}
-          {microStep === "agent-scan-empty" && !scanBusy && (
+          {!targetPending && microStep === "agent-scan-empty" && canSkipAgent && (
             <Button size="sm" type="button" onClick={onSkipAgent}>
               {copy("Finish without an Agent", "暂不接入，完成设置")}
             </Button>

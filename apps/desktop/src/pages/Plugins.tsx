@@ -3,6 +3,7 @@ import { PluginsView, getPlugins } from "../api";
 import { LanguageBoundary, useLanguage } from "../components/LanguageProvider";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { humanizeAppError } from "../errors";
 
 /// Plugins page: discovered plugin directory plus the monospace list shared with CLI `plugin list`.
 function PluginsContent() {
@@ -14,7 +15,7 @@ function PluginsContent() {
     setErr("");
     getPlugins()
       .then(setPv)
-      .catch((e) => setErr(String(e)));
+      .catch((e) => setErr(humanizeAppError(e)));
   };
   useEffect(load, []);
 

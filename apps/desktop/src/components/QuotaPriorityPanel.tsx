@@ -43,9 +43,9 @@ const WINDOW_PRESETS: { label: [string, string]; ms: number }[] = [
 type QuotaEntry = QuotaAccount;
 
 /**
- * Main panel for quota-first mode: add any number of provider and model accounts. Requests first use
- * Select the account closest to refresh that still has quota. This uses each quota before refresh. Row order is the
- * Call priority. This mode does not show keyword routing or local-only routing.
+ * Main quota-first panel. Add any number of provider-and-model accounts. Requests
+ * prefer the account closest to reset that still has capacity, using quota before
+ * it expires. Row order breaks ties. Keyword and local-only routing are hidden in this mode.
  */
 export default function QuotaPriorityPanel({
   providers,

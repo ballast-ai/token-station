@@ -28,6 +28,13 @@ if (!("ResizeObserver" in globalThis)) {
     value: ResizeObserverMock,
   });
 }
+const nativeGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
+HTMLElement.prototype.getBoundingClientRect = function getBoundingClientRectForTests() {
+  if (this.hasAttribute("data-onboarding-target")) {
+    return DOMRect.fromRect({ x: 100, y: 100, width: 320, height: 80 });
+  }
+  return nativeGetBoundingClientRect.call(this);
+};
 
 // Existing component-level suites exercise the explicitly selected Chinese UI.
 // App and LanguageProvider default-language suites clear this preference themselves.

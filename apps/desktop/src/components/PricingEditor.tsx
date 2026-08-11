@@ -9,6 +9,7 @@ import {
   suggestModelPrice,
 } from "../api";
 import { useLocalizedCopy } from "./LanguageProvider";
+import { humanizeAppError } from "../errors";
 
 function displayRate(rate: number | null): string {
   return rate == null ? "" : String(rate / 1_000_000);
@@ -45,7 +46,7 @@ export default function PricingEditor() {
   const [suggestion, setSuggestion] = useState<ModelPriceSuggestionView | null>(null);
 
   useEffect(() => {
-    getPriceTable().then(setTable).catch((value) => setError(String(value)));
+    getPriceTable().then(setTable).catch((value) => setError(humanizeAppError(value)));
   }, []);
 
   useEffect(() => {
@@ -134,7 +135,7 @@ export default function PricingEditor() {
         `已生成 price v${next.version}；正在运行的代理需重新应用配置。`,
       ));
     } catch (value) {
-      setError(String(value));
+      setError(humanizeAppError(value));
     }
   };
 
@@ -161,7 +162,7 @@ export default function PricingEditor() {
         `已生成 price v${next.version}；历史回执保持原成本。`,
       ));
     } catch (value) {
-      setError(String(value));
+      setError(humanizeAppError(value));
     }
   };
 

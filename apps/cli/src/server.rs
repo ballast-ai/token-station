@@ -670,7 +670,7 @@ mod tests {
 
     #[test]
     fn presented_virtual_keys_reads_bearer_goog_header_and_query() {
-        // Bearer(OpenAI/Anthropic)。
+        // Bearer authentication for OpenAI and Anthropic.
         let mut bearer = HeaderMap::new();
         bearer.insert("authorization", "Bearer vk-abc".parse().unwrap());
         assert_eq!(presented_virtual_keys(&bearer, None), vec!["vk-abc"]);

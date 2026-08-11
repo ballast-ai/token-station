@@ -18,6 +18,7 @@ import {
 } from "../components/ui/alert-dialog";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { humanizeAppError } from "../errors";
 
 function requiresFreshUpdateCheck(message: string): boolean {
   return message.includes("update_version_changed:")
@@ -48,7 +49,7 @@ function AboutContent({
   coreVersion: string;
   onOpenFirstRunGuide?: () => void;
 }) {
-  const { copy, t } = useLanguage();
+  const { copy, language, t } = useLanguage();
   const [update, setUpdate] = useState<DesktopUpdateView | null>(null);
   const [busy, setBusy] = useState<"" | "checking" | "installing" | "restarting">("");
   const [err, setErr] = useState("");
@@ -79,7 +80,7 @@ function AboutContent({
     try {
       setUpdate(await checkDesktopUpdate());
     } catch (e) {
-      setErr(String(e));
+      setErr(humanizeAppError(e, language));
     } finally {
       setBusy("");
     }
@@ -88,9 +89,10 @@ function AboutContent({
   const install = async () => {
     const expectedVersion = update?.version;
     if (!expectedVersion) {
-      const message = copy("The selected update version is missing; check again.", "缺少已确认的更新版本，请重新检查。");
+      const rawMessage = "update_expected_version_missing: selected update version is absent";
+      const message = humanizeAppError(rawMessage, language);
       setConfirmOpen(false);
-      setUpdate((current) => invalidateUpdateCandidate(current, message));
+      setUpdate((current) => invalidateUpdateCandidate(current, rawMessage));
       setErr(message);
       return;
     }
@@ -107,9 +109,10 @@ function AboutContent({
         setBusy("");
       }
     } catch (e) {
-      const message = String(e);
-      if (requiresFreshUpdateCheck(message)) {
-        setUpdate((current) => invalidateUpdateCandidate(current, message));
+      const rawMessage = String(e);
+      const message = humanizeAppError(rawMessage, language);
+      if (requiresFreshUpdateCheck(rawMessage)) {
+        setUpdate((current) => invalidateUpdateCandidate(current, rawMessage));
       } else {
         setErr(message);
       }
@@ -154,7 +157,7 @@ function AboutContent({
           ) : update.status === "up_to_date" ? (
             <>{t("about.latest", { current: update.current_version, latest: update.current_version })}</>
           ) : (
-            <>{update.message}</>
+            <>{humanizeAppError(update.message, language)}</>
           )}
           {update.release_url && (
             <span className="inline-url">
