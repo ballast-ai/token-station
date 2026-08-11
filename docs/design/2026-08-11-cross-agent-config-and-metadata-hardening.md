@@ -48,6 +48,8 @@ Cursor has no ordinary file connector in the current registry. Its existing SQLi
 8. Receipts record only finite hosted-tool categories. They must not include tool input, search queries, results, or credentials.
 9. A metadata refresh can change only connector-owned paths. It must verify the active ownership record before each write and keep the original encrypted disconnect baseline.
 10. Automatic refresh skips an installation unless its current version is verified and still selects the connector recorded by ownership. An incompatible or ambiguous installation remains unchanged and visible for manual repair.
+11. Ownership remains at the connector's declared leaf or subtree paths. A materialized null ancestor is restored only when it becomes empty, so a user-added sibling neither causes false drift nor gets removed.
+12. A legacy ownership record that widened to a null or absent parent can narrow only when the current managed leaves still match its authenticated parent value. Changed managed leaves remain a hard drift failure.
 
 ## User-visible Behavior
 
@@ -98,6 +100,8 @@ The receipt uses `web_search` for Web Search and `other_tool_type` for other pro
 
 When a user saves and applies an Agent route, Token Station refreshes metadata in every active file connector for that Agent. The refresh uses the existing transaction, ownership, snapshot, drift, and rollback checks. It does not replace the encrypted baseline used for disconnect.
 
+If route metadata becomes incomplete, Codex and Hermes remove the stale limits that Token Station previously managed. Disconnect still restores any original user value from the encrypted baseline.
+
 After proxy startup, Token Station also refreshes compatible managed connectors. It skips installations that currently fail compatibility admission. One unsupported Agent cannot make the running proxy report a network failure.
 
 Each `/agents/<agent>/v1/models` response contains only models reachable through that Agent's effective route. The unscoped `/v1/models` response continues to use the Home route. A hot route reload updates the next model-catalog response without a full gateway restart.
@@ -116,6 +120,10 @@ Reconnect can recover these values when they are explicitly `null`:
 The connector still rejects strings, numbers, booleans, and arrays where an object is required. WorkBuddy still rejects non-null, non-array collection values.
 
 Disconnect and transaction rollback restore an original null parent as null. They do not leave an empty object behind.
+
+If the user adds an unrelated sibling under a parent that Token Station materialized, disconnect removes only Token Station's fields and keeps the sibling. In that case the parent remains an object instead of returning to null.
+
+Records created by the earlier widened-parent implementation migrate to declared connector paths during a compatible metadata refresh. Disconnect can also verify and remove a legacy record without deleting a user-added sibling. The migration reconstructs the authenticated parent from managed leaves only, so it does not accept a changed managed value.
 
 ## Accessibility and Failure Handling
 
@@ -140,6 +148,9 @@ This change does not alter page layout or keyboard order. Connector errors must 
 15. Route-change tests prove that active owned metadata changes from a larger route to a smaller route without replacing the disconnect baseline.
 16. Scoped model-catalog tests reject Home-only and sibling-Agent models and update after a hot route reload.
 17. Hosted-tool receipt tests cover Web Search and at least one other provider-hosted tool category.
+18. Unknown-metadata refresh tests prove that Codex and Hermes remove stale managed limits without changing the disconnect baseline.
+19. Null-parent tests prove that Gemini companion files restore null exactly when empty and preserve user-added siblings without ownership drift.
+20. Legacy-ownership tests prove that a widened record narrows on refresh and can disconnect safely after a user adds an unrelated sibling.
 
 ## Implementation Status
 
@@ -152,7 +163,10 @@ Implementation and local validation are complete.
 - Managed metadata refresh uses the existing restore transaction. A regression test changes a managed route from 257,550 context tokens to 128,000, preserves the original baseline snapshot ID, and proves that disconnect restores the original null parents.
 - Agent model catalogs now follow the effective Home or Agent router. Duplicate model IDs use safe minimum limits and intersected capability evidence.
 - Automatic startup refresh skips incompatible or connector-mismatched installations. The frontend no longer mistakes the word `Connector` for a network connection failure.
-- `cargo test --workspace` passed. The Desktop Rust suite passed 265 tests and ignored one read-only environment probe. Both workspace and Desktop Clippy checks passed with warnings denied.
+- Codex and Hermes now remove stale managed limits when refreshed route metadata becomes unknown. Their original user values remain available through the encrypted disconnect baseline.
+- Ownership stays on declared connector paths. Empty materialized ancestors collapse back to null or absence, while user-added siblings remain intact and do not trigger false ownership drift.
+- Compatible refreshes migrate earlier widened-parent ownership records to declared paths after authenticated leaf verification. Legacy disconnects use the same verification and preserve unrelated siblings.
+- `cargo test --workspace` passed. The Desktop Rust library suite passed 268 tests and ignored one read-only environment probe. Desktop integration tests and both workspace and Desktop Clippy checks also passed.
 - The frontend passed 30 test files and 288 tests. The production frontend build passed with the existing large-chunk warning.
 - `scripts/install-local-desktop.sh` passed the bundled-plugin gate, release build, artifact audit, signature checks, exact installation, and launch checks for the local arm64 app.
 - Real App validation used the installed `/Applications/token-station.app`. After quit, reopen, and proxy start, revision 133 ran on `127.0.0.1:8787`. The global route and Agent pages loaded without a null-map error, false network banner, or other configuration banner. Claude Desktop and OpenCode appeared as connected.

@@ -150,6 +150,27 @@ impl Connector for CodexConnector {
         Ok(operations)
     }
 
+    fn refresh_patch_for_document(
+        &self,
+        _document: &ConfigDocument,
+        input: &ConnectInput<'_>,
+    ) -> Result<Vec<PatchOperation>, String> {
+        let mut operations = self.connect_patch(input)?;
+        if input.model_metadata.is_none() {
+            operations.push(PatchOperation {
+                operation: PatchKind::Remove,
+                path: path(&["model_context_window"]),
+                value: None,
+            });
+            operations.push(PatchOperation {
+                operation: PatchKind::Remove,
+                path: path(&["model_auto_compact_token_limit"]),
+                value: None,
+            });
+        }
+        Ok(operations)
+    }
+
     fn disconnect_patch(&self) -> Vec<PatchOperation> {
         self.owned_paths()
             .into_iter()

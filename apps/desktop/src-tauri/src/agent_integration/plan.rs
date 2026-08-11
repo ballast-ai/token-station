@@ -10,7 +10,8 @@ use super::config_codec::{
 };
 use super::connectors::{validate_patch_ownership, ConnectInput, Connector};
 use super::ownership::{
-    compute_owned_value_macs, ownership_matches, CompanionOwnership, OwnershipRecord,
+    compute_owned_value_macs, legacy_widened_ownership_matches, normalized_legacy_owned_paths,
+    ownership_matches, CompanionOwnership, OwnershipRecord,
 };
 use super::snapshot::SnapshotStore;
 use super::types::{
@@ -259,8 +260,8 @@ fn build_connection_or_refresh_plan(
     validate_patch_ownership(&operations, &declared_owned_paths)?;
     let reverse_operations = apply_patch_with_reverse(&mut document, &operations)?;
     let owned_paths = ownership.map_or_else(
-        || widened_owned_paths(&declared_owned_paths, &reverse_operations),
-        |record| record.owned_paths.clone(),
+        || declared_owned_paths.clone(),
+        |record| normalized_legacy_owned_paths(&record.owned_paths, &declared_owned_paths),
     );
     validate_owned_paths(&owned_paths)?;
     connector.validate_projected(&document, input)?;
@@ -835,20 +836,32 @@ fn build_owned_projection_plan(
         connector.format(),
         connector.label(),
     )?;
+    let declared_owned_paths = connector.owned_paths();
+    validate_owned_paths(&declared_owned_paths)?;
+    let projected_owned_paths =
+        normalized_legacy_owned_paths(&ownership.owned_paths, &declared_owned_paths);
+    validate_owned_paths(&projected_owned_paths)?;
     let matches_record = ownership_matches(ownership, &current_document, master_key)?;
     let matches_source =
         compute_owned_value_macs(&current_document, &ownership.owned_paths, master_key)?
             == compute_owned_value_macs(&source_document, &ownership.owned_paths, master_key)?;
-    if !matches_record && !matches_source {
+    let matches_legacy_widening = legacy_widened_ownership_matches(
+        ownership,
+        &current_document,
+        &source_document,
+        &declared_owned_paths,
+        master_key,
+    )?;
+    if !matches_record && !matches_source && !matches_legacy_widening {
         return Err("当前 owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
     }
     let original_semantic = semantic_json(&current_document)?;
     let (forward_operations, reverse_operations) =
-        projection_operations(&current_document, &source_document, &ownership.owned_paths)?;
+        projection_operations(&current_document, &source_document, &projected_owned_paths)?;
     project_owned_paths(
         &mut current_document,
         &source_document,
-        &ownership.owned_paths,
+        &projected_owned_paths,
     )?;
     let rendered = render_document(&current_document, connector.label())?;
     let reparsed = parse_rendered(&rendered, connector.format(), connector.label())?;
@@ -856,7 +869,7 @@ fn build_owned_projection_plan(
         &reparsed,
         &original_semantic,
         &reverse_operations,
-        &ownership.owned_paths,
+        &projected_owned_paths,
         connector.format(),
         connector.label(),
     )?;
@@ -897,7 +910,7 @@ fn build_owned_projection_plan(
             target_existed: current.existed,
             before_hash: before_hash.clone(),
             expected_after_hash: expected_after_hash.clone(),
-            owned_paths: ownership.owned_paths.clone(),
+            owned_paths: projected_owned_paths.clone(),
             changes,
             projection: ConnectorProjection {
                 schema_version: 1,
@@ -907,7 +920,7 @@ fn build_owned_projection_plan(
                     target_existed: current.existed,
                     before_hash: before_hash.clone(),
                     expected_after_hash: expected_after_hash.clone(),
-                    owned_paths: ownership.owned_paths.clone(),
+                    owned_paths: projected_owned_paths,
                     forward_changes: redact_restore_changes(&forward_operations, &sensitive_paths),
                     reverse_changes,
                     credential_bindings: credential_bindings(
@@ -1071,52 +1084,6 @@ fn validate_owned_paths(paths: &[ConfigPath]) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// Expand ownership to an ancestor that the connection had to materialize
-/// from an absent or null value. This lets disconnect restore that ancestor
-/// exactly. A later metadata refresh keeps the ownership paths already stored
-/// in the active record, so it cannot lose the original restoration scope.
-fn widened_owned_paths(
-    declared: &[ConfigPath],
-    reverse_operations: &[PatchOperation],
-) -> Vec<ConfigPath> {
-    let mut materialized = reverse_operations
-        .iter()
-        .filter(|operation| {
-            matches!(operation.operation, PatchKind::Remove | PatchKind::Replace)
-                && operation
-                    .value
-                    .as_ref()
-                    .is_none_or(serde_json::Value::is_null)
-                && declared.iter().any(|path| {
-                    operation.path.segments.len() < path.segments.len()
-                        && is_path_prefix(&operation.path, path)
-                })
-        })
-        .map(|operation| operation.path.clone())
-        .collect::<Vec<_>>();
-    materialized.sort_by_key(|path| path.segments.len());
-    materialized.dedup();
-    let materialized = materialized
-        .iter()
-        .filter(|path| {
-            !materialized
-                .iter()
-                .any(|other| other != *path && is_path_prefix(other, path))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let mut effective = materialized.clone();
-    effective.extend(
-        declared
-            .iter()
-            .filter(|path| !materialized.iter().any(|parent| is_path_prefix(parent, path)))
-            .cloned(),
-    );
-    effective.sort();
-    effective
 }
 
 fn redact_changes(

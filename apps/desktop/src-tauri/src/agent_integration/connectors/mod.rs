@@ -204,7 +204,7 @@ mod tests {
 
     use super::*;
     use crate::agent_integration::config_codec::{
-        apply_patch, parse_source_bytes, render_document, semantic_json,
+        apply_patch, parse_rendered, parse_source_bytes, render_document, semantic_json,
     };
     use crate::agent_integration::types::PatchKind;
 
@@ -724,6 +724,62 @@ mod tests {
             .unwrap();
         let hermes = semantic_json(&hermes).unwrap();
         assert_eq!(hermes["model"]["context_length"], json!(257_550));
+    }
+
+    #[test]
+    fn metadata_refresh_removes_stale_managed_limits_when_metadata_becomes_unknown() {
+        let codex_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/codex/v1",
+            token: Some("fixture-codex-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let mut codex = parse_rendered(
+            r#"model = "auto"
+model_provider = "tokenstation"
+model_context_window = 257550
+model_auto_compact_token_limit = 224782
+
+[model_providers.tokenstation]
+base_url = "http://127.0.0.1:8787/agents/codex/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "fixture-codex-key"
+"#,
+            DocumentFormat::Toml,
+            "Codex",
+        )
+        .unwrap();
+        let patch = CodexConnector
+            .refresh_patch_for_document(&codex, &codex_input)
+            .unwrap();
+        apply_patch(&mut codex, &patch).unwrap();
+        let codex = semantic_json(&codex).unwrap();
+        assert!(codex.get("model_context_window").is_none());
+        assert!(codex.get("model_auto_compact_token_limit").is_none());
+
+        let hermes_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/nous-hermes-agent/v1",
+            token: Some("fixture-hermes-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let mut hermes = parse_rendered(
+            "model:\n  default: auto\n  provider: custom\n  base_url: http://127.0.0.1:8787/agents/nous-hermes-agent/v1\n  api_key: fixture-hermes-key\n  api_mode: chat_completions\n  context_length: 257550\n",
+            DocumentFormat::Yaml,
+            "Hermes",
+        )
+        .unwrap();
+        let patch = HermesConnector
+            .refresh_patch_for_document(&hermes, &hermes_input)
+            .unwrap();
+        apply_patch(&mut hermes, &patch).unwrap();
+        assert!(
+            semantic_json(&hermes)
+                .unwrap()
+                .pointer("/model/context_length")
+                .is_none()
+        );
     }
 
     #[test]

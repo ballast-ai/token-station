@@ -294,13 +294,21 @@ pub fn compute_owned_value_macs(
     master_key: &Zeroizing<[u8; 32]>,
 ) -> Result<BTreeMap<String, String>, String> {
     let canonical = semantic_json(document)?;
+    compute_owned_value_macs_from_semantic(&canonical, owned_paths, master_key)
+}
+
+fn compute_owned_value_macs_from_semantic(
+    canonical: &serde_json::Value,
+    owned_paths: &[ConfigPath],
+    master_key: &Zeroizing<[u8; 32]>,
+) -> Result<BTreeMap<String, String>, String> {
     let key = hmac::Key::new(hmac::HMAC_SHA256, master_key.as_ref());
     let mut result = BTreeMap::new();
     for path in owned_paths {
         let mut message = Vec::new();
         message.extend_from_slice(b"token-station-owned-value-v1\0");
         encode_field(&mut message, path.to_string().as_bytes());
-        match json_value_at(&canonical, path) {
+        match json_value_at(canonical, path) {
             Some(value) => {
                 message.push(1);
                 let bytes =
@@ -315,6 +323,104 @@ pub fn compute_owned_value_macs(
         );
     }
     Ok(result)
+}
+
+pub fn legacy_widened_ownership_matches(
+    record: &OwnershipRecord,
+    current: &ConfigDocument,
+    baseline: &ConfigDocument,
+    declared_paths: &[ConfigPath],
+    master_key: &Zeroizing<[u8; 32]>,
+) -> Result<bool, String> {
+    if !is_legacy_widened_path_set(&record.owned_paths, declared_paths) {
+        return Ok(false);
+    }
+    let current = semantic_json(current)?;
+    let baseline = semantic_json(baseline)?;
+    for stored in &record.owned_paths {
+        if declared_paths
+            .iter()
+            .any(|declared| is_strict_prefix(stored, declared))
+            && json_value_at(&baseline, stored).is_some_and(|value| !value.is_null())
+        {
+            return Ok(false);
+        }
+    }
+
+    let mut managed = serde_json::json!({});
+    for path in declared_paths {
+        if let Some(value) = json_value_at(&current, path) {
+            set_json_value(&mut managed, path, value.clone())?;
+        }
+    }
+    Ok(compute_owned_value_macs_from_semantic(
+        &managed,
+        &record.owned_paths,
+        master_key,
+    )? == record.owned_value_macs)
+}
+
+pub fn normalized_legacy_owned_paths(
+    stored_paths: &[ConfigPath],
+    declared_paths: &[ConfigPath],
+) -> Vec<ConfigPath> {
+    if is_legacy_widened_path_set(stored_paths, declared_paths) {
+        declared_paths.to_vec()
+    } else {
+        stored_paths.to_vec()
+    }
+}
+
+fn is_legacy_widened_path_set(stored: &[ConfigPath], declared: &[ConfigPath]) -> bool {
+    stored != declared
+        && stored.iter().all(|stored_path| {
+            declared
+                .iter()
+                .any(|declared_path| is_prefix(stored_path, declared_path))
+        })
+        && declared.iter().all(|declared_path| {
+            stored
+                .iter()
+                .any(|stored_path| is_prefix(stored_path, declared_path))
+        })
+}
+
+fn is_prefix(prefix: &ConfigPath, path: &ConfigPath) -> bool {
+    prefix.segments.len() <= path.segments.len()
+        && prefix.segments == path.segments[..prefix.segments.len()]
+}
+
+fn is_strict_prefix(prefix: &ConfigPath, path: &ConfigPath) -> bool {
+    prefix.segments.len() < path.segments.len() && is_prefix(prefix, path)
+}
+
+fn set_json_value(
+    root: &mut serde_json::Value,
+    path: &ConfigPath,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let Some((leaf, parents)) = path.segments.split_last() else {
+        return Err("owned path cannot be empty".to_string());
+    };
+    let mut current = root;
+    for segment in parents {
+        if !current.is_object() {
+            *current = serde_json::json!({});
+        }
+        current = current
+            .as_object_mut()
+            .expect("object was materialized")
+            .entry(segment.clone())
+            .or_insert_with(|| serde_json::json!({}));
+    }
+    if !current.is_object() {
+        *current = serde_json::json!({});
+    }
+    current
+        .as_object_mut()
+        .expect("object was materialized")
+        .insert(leaf.clone(), value);
+    Ok(())
 }
 
 pub fn ownership_matches(
