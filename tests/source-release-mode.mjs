@@ -11,6 +11,7 @@ const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "u
 for (const workflow of [
   ".github/workflows/release.yml",
   ".github/workflows/desktop-release.yml",
+  ".github/workflows/linux-desktop.yml",
 ]) {
   const contents = read(workflow);
   assert.match(contents, /TOKEN_STATION_FORMAL_ARTIFACTS_ENABLED/);
