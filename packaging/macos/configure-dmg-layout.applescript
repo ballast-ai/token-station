@@ -2,9 +2,9 @@ on positionText(labelText, itemPosition)
 	return labelText & "=" & (item 1 of itemPosition as text) & "," & (item 2 of itemPosition as text)
 end positionText
 
-on closeWindow(targetDisk)
+on closeWindow(targetFolder)
 	tell application "Finder"
-		if exists container window of targetDisk then close container window of targetDisk
+		if exists container window of targetFolder then close container window of targetFolder
 	end tell
 end closeWindow
 
@@ -16,15 +16,15 @@ on run arguments
 	set mountAlias to POSIX file mountPath as alias
 
 	tell application "Finder"
-		set targetDisk to disk of mountAlias
+		set targetFolder to folder mountAlias
 
 		if operationName is "close" then
-			my closeWindow(targetDisk)
+			my closeWindow(targetFolder)
 			return "closed"
 		end if
 
-		open targetDisk
-		set targetWindow to container window of targetDisk
+		open targetFolder
+		set targetWindow to container window of targetFolder
 
 		if operationName is "configure" then
 			-- Keep the primary app-to-Applications relationship from the v1.1.2 DMG.
@@ -43,22 +43,22 @@ on run arguments
 				set text size to 14
 				set shows icon preview to true
 			end tell
-			update targetDisk without registering applications
-			my closeWindow(targetDisk)
-			set targetDisk to disk of (POSIX file mountPath as alias)
-			open targetDisk
-			set targetWindow to container window of targetDisk
+			update targetFolder without registering applications
+			my closeWindow(targetFolder)
+			set targetFolder to folder (POSIX file mountPath as alias)
+			open targetFolder
+			set targetWindow to container window of targetFolder
 
-			set position of item "token-station.app" of targetDisk to {310, 170}
-			set position of item "Applications" of targetDisk to {610, 170}
-			set position of item "安装 Token Station.command" of targetDisk to {100, 440}
-			set position of item "安装前必读.md" of targetDisk to {280, 440}
-			if exists item "构建来源.txt" of targetDisk then set position of item "构建来源.txt" of targetDisk to {460, 440}
-			if exists item "未签名测试版.txt" of targetDisk then set position of item "未签名测试版.txt" of targetDisk to {640, 440}
-			set position of item "AGENTS.md" of targetDisk to {820, 440}
+			set position of item "token-station.app" of targetFolder to {310, 170}
+			set position of item "Applications" of targetFolder to {610, 170}
+			set position of item "安装 Token Station.command" of targetFolder to {100, 440}
+			set position of item "安装前必读.md" of targetFolder to {280, 440}
+			if exists item "构建来源.txt" of targetFolder then set position of item "构建来源.txt" of targetFolder to {460, 440}
+			if exists item "未签名测试版.txt" of targetFolder then set position of item "未签名测试版.txt" of targetFolder to {640, 440}
+			set position of item "AGENTS.md" of targetFolder to {820, 440}
 
-			update targetDisk without registering applications
-			my closeWindow(targetDisk)
+			update targetFolder without registering applications
+			my closeWindow(targetFolder)
 			return "configured"
 		end if
 
@@ -79,15 +79,15 @@ on run arguments
 				"statusbar=" & (statusbar visible of targetWindow as text), ¬
 				"pathbar=" & (pathbar visible of targetWindow as text), ¬
 				"sidebar_width=" & sidebar width of targetWindow, ¬
-				my positionText("app", position of item "token-station.app" of targetDisk), ¬
-				my positionText("applications", position of item "Applications" of targetDisk), ¬
-				my positionText("installer", position of item "安装 Token Station.command" of targetDisk), ¬
-				my positionText("readme", position of item "安装前必读.md" of targetDisk)}
-			if exists item "构建来源.txt" of targetDisk then set end of resultLines to my positionText("provenance", position of item "构建来源.txt" of targetDisk)
-			if exists item "未签名测试版.txt" of targetDisk then set end of resultLines to my positionText("warning", position of item "未签名测试版.txt" of targetDisk)
-			set end of resultLines to my positionText("agent_rules", position of item "AGENTS.md" of targetDisk)
+				my positionText("app", position of item "token-station.app" of targetFolder), ¬
+				my positionText("applications", position of item "Applications" of targetFolder), ¬
+				my positionText("installer", position of item "安装 Token Station.command" of targetFolder), ¬
+				my positionText("readme", position of item "安装前必读.md" of targetFolder)}
+			if exists item "构建来源.txt" of targetFolder then set end of resultLines to my positionText("provenance", position of item "构建来源.txt" of targetFolder)
+			if exists item "未签名测试版.txt" of targetFolder then set end of resultLines to my positionText("warning", position of item "未签名测试版.txt" of targetFolder)
+			set end of resultLines to my positionText("agent_rules", position of item "AGENTS.md" of targetFolder)
 
-			my closeWindow(targetDisk)
+			my closeWindow(targetFolder)
 			set previousDelimiters to AppleScript's text item delimiters
 			set AppleScript's text item delimiters to linefeed
 			set resultText to resultLines as text
@@ -95,7 +95,7 @@ on run arguments
 			return resultText
 		end if
 
-		my closeWindow(targetDisk)
+		my closeWindow(targetFolder)
 		error "不支持的 DMG 布局操作：" & operationName
 	end tell
 end run

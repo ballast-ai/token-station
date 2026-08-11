@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,7 +34,7 @@ assert.match(packager, /-format UDRW/);
 assert.match(packager, /configure-dmg-layout\.applescript/);
 assert.match(packager, /\.DS_Store/);
 assert.match(packager, /\/bin\/rm -rf -- "\$layout_mount_point\/\.fseventsd"/);
-assert.match(packager, /layout_mounted=true[\s\S]*\/bin\/rm -rf -- "\$layout_mount_point\/\.fseventsd"[\s\S]*osascript .* configure/);
+assert.match(packager, /base64 -D[\s\S]*finder_layout_template[\s\S]*stage\/\.DS_Store/);
 assert.match(packager, /hdiutil convert[\s\S]*-format UDZO/);
 
 const auditor = read("scripts/audit-macos-dmg.sh");
@@ -48,6 +49,7 @@ assert.match(auditor, /configure-dmg-layout\.applescript[\s\S]*inspect/);
 assert.match(auditor, /\.fseventsd/);
 
 const finderLayout = read("packaging/macos/configure-dmg-layout.applescript");
+assert.match(finderLayout, /folder mountAlias/);
 assert.match(finderLayout, /current view to icon view/);
 assert.match(finderLayout, /arrangement to not arranged/);
 assert.match(finderLayout, /icon size to 128/);
@@ -57,6 +59,16 @@ assert.match(finderLayout, /position of item "token-station\.app" .* to \{310, 1
 assert.match(finderLayout, /position of item "Applications" .* to \{610, 170\}/);
 assert.match(finderLayout, /if exists item "构建来源\.txt"/);
 assert.match(finderLayout, /if exists item "未签名测试版\.txt"/);
+
+const finderLayoutTemplate = Buffer.from(
+  read("packaging/macos/dmg-layout.dsstore.base64").replace(/\s/g, ""),
+  "base64",
+);
+assert.equal(finderLayoutTemplate.subarray(4, 8).toString("ascii"), "Bud1");
+assert.equal(
+  crypto.createHash("sha256").update(finderLayoutTemplate).digest("hex"),
+  "bd345bfc5b70ac1d47fa48c620d04d085b22cbe453dc0ed3542cad0403cc3f38",
+);
 
 const installer = read("packaging/macos/安装 Token Station.command");
 assert.match(installer, /UNSIGNED_TEST_MARKER/);

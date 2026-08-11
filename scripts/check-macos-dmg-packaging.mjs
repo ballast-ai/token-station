@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,7 @@ const requiredFiles = [
   "packaging/macos/安装 Token Station.command",
   "packaging/macos/AGENTS.md",
   "packaging/macos/configure-dmg-layout.applescript",
+  "packaging/macos/dmg-layout.dsstore.base64",
   "scripts/package-macos-dmg.sh",
   "scripts/audit-macos-dmg.sh",
 ];
@@ -140,7 +142,7 @@ if (packager) {
     ["Finder 布局配置", /configure-dmg-layout\.applescript/],
     ["Finder 元数据落盘检查", /\.DS_Store/],
     ["清理临时 FSEvents 目录", /\/bin\/rm -rf -- "\$layout_mount_point\/\.fseventsd"/],
-    ["Finder 布局前清理临时目录", /layout_mounted=true[\s\S]*\/bin\/rm -rf -- "\$layout_mount_point\/\.fseventsd"[\s\S]*osascript .* configure/],
+    ["解码受控 Finder 布局模板", /base64 -D[\s\S]*finder_layout_template[\s\S]*stage\/\.DS_Store/],
     ["只读压缩输出", /hdiutil convert[\s\S]*-format UDZO/],
   ];
   for (const [label, pattern] of requiredPackagerPatterns) {
@@ -151,6 +153,19 @@ if (packager) {
   }
   if (/hdiutil create[^\n]*"\$output_path"/.test(packager)) {
     failures.push(`${packagerPath} 不能在正式输出路径上直接创建未审计 DMG`);
+  }
+}
+
+const finderLayoutTemplatePath = "packaging/macos/dmg-layout.dsstore.base64";
+const finderLayoutTemplate = read(finderLayoutTemplatePath);
+if (finderLayoutTemplate) {
+  const decodedTemplate = Buffer.from(finderLayoutTemplate.replace(/\s/g, ""), "base64");
+  if (decodedTemplate.subarray(4, 8).toString("ascii") !== "Bud1") {
+    failures.push(`${finderLayoutTemplatePath} 不是有效的 Finder .DS_Store 模板`);
+  }
+  const templateDigest = crypto.createHash("sha256").update(decodedTemplate).digest("hex");
+  if (templateDigest !== "bd345bfc5b70ac1d47fa48c620d04d085b22cbe453dc0ed3542cad0403cc3f38") {
+    failures.push(`${finderLayoutTemplatePath} 与已验收布局不一致`);
   }
 }
 
@@ -186,6 +201,7 @@ if (finderLayout) {
   const requiredFinderLayoutPatterns = [
     ["配置模式", /configure/],
     ["审计模式", /inspect/],
+    ["普通目录与挂载根目录兼容", /folder mountAlias/],
     ["图标视图", /current view to icon view/],
     ["关闭自动排列", /arrangement to not arranged/],
     ["沿用 v1.1.2 图标尺寸", /icon size to 128/],
