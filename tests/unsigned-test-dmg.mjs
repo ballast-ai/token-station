@@ -32,6 +32,7 @@ assert.match(packager, /stapler staple/);
 assert.match(packager, /-format UDRW/);
 assert.match(packager, /configure-dmg-layout\.applescript/);
 assert.match(packager, /\.DS_Store/);
+assert.match(packager, /\/bin\/rm -rf -- "\$layout_mount_point\/\.fseventsd"/);
 assert.match(packager, /hdiutil convert[\s\S]*-format UDZO/);
 
 const auditor = read("scripts/audit-macos-dmg.sh");
@@ -43,6 +44,7 @@ assert.match(auditor, new RegExp(provenanceName));
 assert.match(auditor, /stapler validate/);
 assert.match(auditor, /mounted_ds_store/);
 assert.match(auditor, /configure-dmg-layout\.applescript[\s\S]*inspect/);
+assert.match(auditor, /\.fseventsd/);
 
 const finderLayout = read("packaging/macos/configure-dmg-layout.applescript");
 assert.match(finderLayout, /current view to icon view/);
