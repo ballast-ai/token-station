@@ -63,6 +63,8 @@ readonly mounted_installer="$mount_point/安装 Token Station.command"
 readonly mounted_agent_rules="$mount_point/AGENTS.md"
 readonly mounted_unsigned_test_marker="$mount_point/未签名测试版.txt"
 readonly mounted_provenance="$mount_point/构建来源.txt"
+readonly mounted_ds_store="$mount_point/.DS_Store"
+readonly finder_layout_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/packaging/macos/configure-dmg-layout.applescript"
 
 for required_path in "$mounted_app" "$mounted_applications" "$mounted_readme" "$mounted_installer" "$mounted_agent_rules"; do
   [[ -e "$required_path" || -L "$required_path" ]] || {
@@ -85,12 +87,50 @@ if [[ "$unsigned_test" == "true" ]]; then
     '安装 Token Station.command' \
     AGENTS.md \
     '未签名测试版.txt' \
-    '构建来源.txt' | LC_ALL=C sort)
+    '构建来源.txt' \
+    .DS_Store | LC_ALL=C sort)
   [[ "$actual_entries" == "$expected_entries" ]] || {
     echo "测试 DMG 根目录包含多余或缺失的文件。" >&2
     exit 1
   }
 fi
+
+[[ -s "$mounted_ds_store" ]] || {
+  echo "DMG 没有保存 Finder 拖拽布局，打开后会变成散乱的自动排列。" >&2
+  exit 1
+}
+finder_layout_lines=( \
+  'window=920x600' \
+  'view=icon view' \
+  'icon_size=128' \
+  'arrangement=not arranged' \
+  'toolbar=false' \
+  'statusbar=false' \
+  'pathbar=false' \
+  'sidebar_width=0' \
+  'app=310,170' \
+  'applications=610,170' \
+  'installer=100,440' \
+  'readme=280,440')
+if [[ "$unsigned_test" == "true" ]]; then
+  finder_layout_lines+=( \
+    'provenance=460,440' \
+    'warning=640,440')
+fi
+finder_layout_lines+=('agent_rules=820,440')
+expected_finder_layout=$(printf '%s\n' "${finder_layout_lines[@]}")
+if ! actual_finder_layout=$(osascript "$finder_layout_script" inspect "$mount_point"); then
+  echo "Finder 无法读取 DMG 的拖拽布局，请确认 Finder 可以正常启动后重试。" >&2
+  exit 1
+fi
+[[ "$actual_finder_layout" == "$expected_finder_layout" ]] || {
+  echo "DMG 的 Finder 布局与发布模板不一致。" >&2
+  echo "期望布局：" >&2
+  printf '%s\n' "$expected_finder_layout" >&2
+  echo "实际布局：" >&2
+  printf '%s\n' "$actual_finder_layout" >&2
+  exit 1
+}
 
 [[ -L "$mounted_applications" && "$(readlink "$mounted_applications")" == "/Applications" ]] || {
   echo "DMG 中的 Applications 不是指向 /Applications 的快捷方式。" >&2

@@ -50,6 +50,7 @@ readonly installer="$root/packaging/macos/安装 Token Station.command"
 readonly agent_rules="$root/packaging/macos/AGENTS.md"
 readonly formal_readme="$root/packaging/macos/安装前必读.md"
 readonly unsigned_test_readme="$root/packaging/macos/未签名测试版安装前必读.md"
+readonly finder_layout_script="$root/packaging/macos/configure-dmg-layout.applescript"
 readme="$formal_readme"
 packaging_source_commit=""
 tag_commit=""
@@ -131,7 +132,16 @@ temporary_dmg="$publish_stage/$(basename "$output_path")"
 readonly temporary_dmg
 temporary_checksum="$publish_stage/$(basename "$checksum_path")"
 readonly temporary_checksum
+writable_dmg="$publish_stage/token-station-layout-writable.dmg"
+readonly writable_dmg
+layout_mount_point="$publish_stage/mount"
+readonly layout_mount_point
+layout_mounted=false
 cleanup() {
+  if [[ "$layout_mounted" == "true" ]]; then
+    osascript "$finder_layout_script" close "$layout_mount_point" >/dev/null 2>&1 || true
+    hdiutil detach "$layout_mount_point" >/dev/null 2>&1 || true
+  fi
   /bin/rm -rf -- "$stage"
   /bin/rm -rf -- "$publish_stage"
 }
@@ -152,7 +162,47 @@ if [[ "$unsigned_test" == "true" ]]; then
     >"$stage/构建来源.txt"
 fi
 
-hdiutil create -volname "$volume_name" -srcfolder "$stage" -format UDZO "$temporary_dmg"
+hdiutil create \
+  -volname "$volume_name" \
+  -srcfolder "$stage" \
+  -fs HFS+ \
+  -format UDRW \
+  "$writable_dmg"
+/bin/mkdir "$layout_mount_point"
+hdiutil attach \
+  "$writable_dmg" \
+  -readwrite \
+  -noverify \
+  -noautoopen \
+  -mountpoint "$layout_mount_point" \
+  >/dev/null
+layout_mounted=true
+
+if ! osascript "$finder_layout_script" configure "$layout_mount_point" >/dev/null; then
+  echo "Finder 没能写入 DMG 拖拽布局，请确认 Finder 可以正常启动后重试。" >&2
+  exit 1
+fi
+for _ in {1..50}; do
+  [[ -s "$layout_mount_point/.DS_Store" ]] && break
+  sleep 0.2
+done
+[[ -s "$layout_mount_point/.DS_Store" ]] || {
+  echo "DMG 的 Finder 布局没有保存下来，已停止生成发布文件。" >&2
+  exit 1
+}
+/bin/sync
+if ! hdiutil detach "$layout_mount_point" >/dev/null; then
+  echo "DMG 布局已经生成，但暂存镜像无法安全卸载，请关闭相关 Finder 窗口后重试。" >&2
+  exit 1
+fi
+layout_mounted=false
+
+hdiutil convert \
+  "$writable_dmg" \
+  -format UDZO \
+  -imagekey zlib-level=9 \
+  -o "$temporary_dmg" \
+  >/dev/null
 if [[ "$unsigned_test" == "true" ]]; then
   "$root/scripts/audit-macos-dmg.sh" \
     --unsigned-test \
