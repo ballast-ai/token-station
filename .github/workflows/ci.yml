@@ -214,6 +214,10 @@ jobs:
             plugins/official/agent-gemini
             plugins/official/provider-openai-compatible
             crates/plugin-runtime/tests/guests/test-provider
+      - name: Fetch the locked scaffold dependency set
+        run: >-
+          cargo fetch --locked --target wasm32-wasip2
+          --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
       - run: >-
           cargo llvm-cov --workspace --coverage-host-only --summary-only
           --fail-under-lines 80
@@ -461,6 +465,7 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - run: node scripts/check-ci-msi-trigger-policy.mjs
+      - run: node scripts/check-ci-scaffold-prefetch.mjs
       - run: node scripts/check-rustsec-exceptions.mjs
       - run: >-
           cargo audit -D unsound
