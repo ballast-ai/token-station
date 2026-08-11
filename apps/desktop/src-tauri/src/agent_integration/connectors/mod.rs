@@ -15,10 +15,37 @@ pub use openclaw::OpenClawConnector;
 pub use opencode::OpenCodeConnector;
 pub use workbuddy::WorkBuddyConnector;
 
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AgentModelCost {
+    pub input: f64,
+    pub output: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
+}
+
+impl AgentModelCost {
+    pub fn is_valid(&self) -> bool {
+        [Some(self.input), Some(self.output), self.cache_read, self.cache_write]
+            .into_iter()
+            .flatten()
+            .all(|rate| rate.is_finite() && (0.0..=9_000_000_000.0).contains(&rate))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct AgentModelMetadata {
+    pub context: u32,
+    pub output: u32,
+    pub cost: Option<AgentModelCost>,
+}
+
 pub struct ConnectInput<'a> {
     pub base_url: &'a str,
     pub token: Option<&'a str>,
     pub adapter_ready: bool,
+    pub model_metadata: Option<&'a AgentModelMetadata>,
 }
 
 /// A second configuration file that must commit with a Connector's primary
@@ -221,6 +248,7 @@ mod tests {
             base_url: "http://127.0.0.1:8787/agents/gemini-cli",
             token: Some("vk-gemini-sensitive"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let baseline =
             parse_source_bytes(Some(source), connector.format(), connector.label()).unwrap();
@@ -268,6 +296,7 @@ mod tests {
             base_url: "http://127.0.0.1:8787/agents/gemini-cli",
             token: Some("fixture-virtual-key"),
             adapter_ready: true,
+            model_metadata: None,
         };
 
         let companions = find_connector("gemini-cli-v1")
@@ -321,6 +350,7 @@ mod tests {
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
             token: Some("fixture-workbuddy-key"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let mut document =
             parse_source_bytes(Some(source), connector.format(), connector.label()).unwrap();
@@ -385,6 +415,7 @@ mod tests {
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
             token: Some("fixture-workbuddy-key"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let mut document =
             parse_source_bytes(Some(source), connector.format(), connector.label()).unwrap();
@@ -417,14 +448,36 @@ mod tests {
             base_url: "http://127.0.0.1:8787/agents/opencode/v1",
             token: Some("fixture-virtual-key"),
             adapter_ready: true,
+            model_metadata: Some(&AgentModelMetadata {
+                context: 257_550,
+                output: 32_768,
+                cost: Some(AgentModelCost {
+                    input: 0.2,
+                    output: 0.6,
+                    cache_read: Some(0.04),
+                    cache_write: None,
+                }),
+            }),
         };
-        let mut document = parse_source_bytes(None, connector.format(), connector.label()).unwrap();
+        let mut document = parse_source_bytes(
+            Some(br#"{"model":"tokenstation/auto","provider":{"tokenstation":null}}"#),
+            connector.format(),
+            connector.label(),
+        )
+        .unwrap();
         apply_patch(&mut document, &connector.connect_patch(&input).unwrap()).unwrap();
         connector.validate_projected(&document, &input).unwrap();
 
         let projected = crate::agent_integration::config_codec::semantic_json(&document).unwrap();
+        assert_eq!(projected["model"], json!("tokenstation/auto"));
+        assert!(projected["provider"]["tokenstation"].is_object());
         let model = &projected["provider"]["tokenstation"]["models"]["auto"];
         assert_eq!(model["attachment"], json!(true));
+        assert_eq!(model["limit"], json!({"context": 257550, "output": 32768}));
+        assert_eq!(
+            model["cost"],
+            json!({"input": 0.2, "output": 0.6, "cache_read": 0.04})
+        );
         assert_eq!(
             model["modalities"],
             json!({
@@ -482,6 +535,7 @@ mod tests {
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-secret"),
             adapter_ready: true,
+            model_metadata: None,
         };
 
         for (connector, existing, unowned_marker, invalid_shape, expected_error) in fixtures {
@@ -530,21 +584,25 @@ mod tests {
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-virtual-key"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let wrong = ConnectInput {
             base_url: "http://127.0.0.1:9999/v1",
             token: Some("wrong-key"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let not_ready = ConnectInput {
             base_url: good.base_url,
             token: good.token,
             adapter_ready: false,
+            model_metadata: None,
         };
         let missing_token = ConnectInput {
             base_url: good.base_url,
             token: None,
             adapter_ready: true,
+            model_metadata: None,
         };
         let connectors: [&dyn Connector; 6] = [
             &ClaudeCodeConnector,
@@ -630,6 +688,7 @@ unknown = "preserved"
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("fixture-codex-virtual-key"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let baseline = parse_source_bytes(Some(source), DocumentFormat::Toml, "Codex").unwrap();
         let mut document = parse_source_bytes(Some(source), DocumentFormat::Toml, "Codex").unwrap();
@@ -668,6 +727,7 @@ unknown = "preserved"
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-openclaw-secret"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let baseline = parse_source_bytes(Some(source), DocumentFormat::Json5, "OpenClaw").unwrap();
         let mut connected =
@@ -719,6 +779,7 @@ unknown = "preserved"
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-hermes-secret"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let baseline = parse_source_bytes(Some(source), DocumentFormat::Yaml, "Hermes").unwrap();
         let mut connected =

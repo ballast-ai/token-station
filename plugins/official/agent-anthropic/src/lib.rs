@@ -439,22 +439,19 @@ fn parse_tools(body: &Value) -> Result<Vec<ToolDef>, String> {
                 .get("description")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            // A user-defined tool carries no `type` (classic API) or
-            // `type == "custom"`, described by a JSON `input_schema`. Anthropic's
-            // server tools (web_search, web_fetch, code_execution, tool_search,
-            // mcp, advisor) and its client-executed schema tools (bash,
-            // text_editor, computer, memory) share this array but carry a
-            // versioned `type` and an Anthropic-defined schema instead of
-            // `input_schema`. Following CC Switch, translate every tool to a
-            // Canonical function tool so the model can call it — client-executed
-            // tools then run in the client exactly as before, rather than being
-            // dropped or refused. A user tool keeps its strict `input_schema`
-            // requirement (a plain tool with no schema is malformed); a
-            // vendor-typed tool defaults to an empty schema when it declares none.
-            let is_user_tool = matches!(
-                tool.get("type").and_then(Value::as_str),
-                None | Some("custom")
-            );
+            // Server tools execute inside an Anthropic-native provider and have
+            // result, citation and usage semantics that Canonical IR cannot
+            // represent. Refuse them before routing instead of presenting an
+            // empty-schema function with no executor. Anthropic's client tools
+            // still become functions because Claude Code executes those calls.
+            let tool_type = tool.get("type").and_then(Value::as_str);
+            if tool_type.is_some_and(is_anthropic_server_tool) {
+                return Err(capability(format!(
+                    "Anthropic server tool `{}` requires an anthropic-native provider; the translated route cannot execute it",
+                    tool_type.unwrap_or_default()
+                )));
+            }
+            let is_user_tool = matches!(tool_type, None | Some("custom"));
             let parameters = if is_user_tool {
                 tool.get("input_schema")
                     .cloned()
@@ -471,6 +468,19 @@ fn parse_tools(body: &Value) -> Result<Vec<ToolDef>, String> {
             })
         })
         .collect()
+}
+
+fn is_anthropic_server_tool(tool_type: &str) -> bool {
+    [
+        "web_search_",
+        "web_fetch_",
+        "code_execution_",
+        "tool_search_",
+        "mcp_",
+        "advisor_",
+    ]
+    .iter()
+    .any(|prefix| tool_type.starts_with(prefix))
 }
 
 /// Maps Anthropic `output_config.effort` onto the provider-neutral

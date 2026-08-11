@@ -2522,6 +2522,55 @@ fn an_anthropic_message_round_trips_through_the_same_provider_pipeline() {
 }
 
 #[test]
+fn translated_anthropic_server_tool_fails_before_upstream_with_receipt_reason() {
+    let mock = MockUpstream::start(Vec::new());
+    let key = key_file("anthropic-server-tool-capability", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, body) = post_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": "find current information"}],
+            "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(status, 400, "body={body}");
+    let error: Value = serde_json::from_str(&body).expect("Anthropic error JSON");
+    assert_eq!(error["error"]["type"], json!("invalid_request_error"));
+    assert!(body.contains("anthropic-native"), "body={body}");
+    assert_eq!(
+        mock.hits(),
+        0,
+        "unsupported server tools stop before upstream"
+    );
+
+    settle();
+    let (status, _, body) = admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    assert_eq!(status, 200, "body={body}");
+    let receipts: Value = serde_json::from_str(&body).expect("receipts are JSON");
+    assert_eq!(
+        receipts[0]["attempt_records"].as_array().map(Vec::len),
+        Some(0)
+    );
+    let conversion = receipts[0]["conversion_reports"]
+        .as_array()
+        .and_then(|reports| reports.first())
+        .expect("failed inbound conversion is recorded");
+    assert_eq!(conversion["stage"], json!("inbound_normalize"));
+    assert_eq!(
+        conversion["reason_code"],
+        json!("provider_tool_unsupported")
+    );
+    assert_eq!(conversion["reason_detail"], json!("web_search"));
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn claude_desktop_adaptive_thinking_reaches_the_translated_provider() {
     let upstream_answer = json!({
         "id": "chatcmpl-adaptive",

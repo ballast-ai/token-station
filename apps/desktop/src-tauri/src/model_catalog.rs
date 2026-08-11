@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, ProviderEndpoint};
 
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 const CACHE_FILE: &str = "model-catalog-cache.json";
 const MAX_CACHE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
@@ -58,9 +58,27 @@ pub(crate) struct CatalogModelView {
     pub(crate) tool: CapabilityState,
     pub(crate) vision: CapabilityState,
     pub(crate) json_schema: CapabilityState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cost: Option<CatalogCostView>,
     pub(crate) source: CatalogSource,
     pub(crate) last_seen_ms: Option<u64>,
     pub(crate) catalog_state: CatalogState,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub(crate) struct CatalogCostView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) input: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) output: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cache_read: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cache_write: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -194,6 +212,9 @@ fn unknown_catalog_model(
         tool: CapabilityState::Unknown,
         vision: CapabilityState::Unknown,
         json_schema: CapabilityState::Unknown,
+        context_window: None,
+        max_output_tokens: None,
+        cost: None,
         source,
         last_seen_ms,
         catalog_state,
@@ -241,6 +262,15 @@ fn merge_live_catalog(
         }
         if live_model.json_schema != CapabilityState::Unknown {
             record.json_schema = live_model.json_schema;
+        }
+        if live_model.context_window.is_some() {
+            record.context_window = live_model.context_window;
+        }
+        if live_model.max_output_tokens.is_some() {
+            record.max_output_tokens = live_model.max_output_tokens;
+        }
+        if live_model.cost.is_some() {
+            record.cost = live_model.cost.clone();
         }
         catalog.push(record);
     }
@@ -398,11 +428,25 @@ fn parse_models(document: &Value) -> Result<Vec<CatalogModelView>, String> {
             return Err(format!("模型 ID 超过 {MAX_MODEL_ID_BYTES} 字节上限"));
         }
         let vision = explicit_image_input_state(item);
+        let context_window = bounded_u32(item.get("context_window"))
+            .or_else(|| bounded_u32(item.pointer("/limit/context")));
+        let max_output_tokens = bounded_u32(item.get("max_output_tokens"))
+            .or_else(|| bounded_u32(item.pointer("/limit/output")));
+        let cost = catalog_cost(item.get("cost"));
         models
             .entry(model.to_owned())
             .and_modify(|existing| {
                 if vision != CapabilityState::Unknown {
                     existing.vision = vision;
+                }
+                if context_window.is_some() {
+                    existing.context_window = context_window;
+                }
+                if max_output_tokens.is_some() {
+                    existing.max_output_tokens = max_output_tokens;
+                }
+                if cost.is_some() {
+                    existing.cost = cost.clone();
                 }
             })
             .or_insert_with(|| CatalogModelView {
@@ -410,6 +454,9 @@ fn parse_models(document: &Value) -> Result<Vec<CatalogModelView>, String> {
                 tool: CapabilityState::Unknown,
                 vision,
                 json_schema: CapabilityState::Unknown,
+                context_window,
+                max_output_tokens,
+                cost,
                 source: CatalogSource::Live,
                 last_seen_ms: None,
                 catalog_state: CatalogState::Active,
@@ -421,6 +468,33 @@ fn parse_models(document: &Value) -> Result<Vec<CatalogModelView>, String> {
         }
     }
     Ok(models.into_values().collect())
+}
+
+fn bounded_u32(value: Option<&Value>) -> Option<u32> {
+    let raw = value?.as_u64()?;
+    let value = u32::try_from(raw).ok()?;
+    (value > 0).then_some(value)
+}
+
+fn catalog_cost(value: Option<&Value>) -> Option<CatalogCostView> {
+    let object = value?.as_object()?;
+    let rate = |name: &str| {
+        object
+            .get(name)
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 9_000_000_000.0)
+    };
+    let cost = CatalogCostView {
+        input: rate("input"),
+        output: rate("output"),
+        cache_read: rate("cache_read"),
+        cache_write: rate("cache_write"),
+    };
+    (cost.input.is_some()
+        || cost.output.is_some()
+        || cost.cache_read.is_some()
+        || cost.cache_write.is_some())
+    .then_some(cost)
 }
 
 fn explicit_image_input_state(model: &Value) -> CapabilityState {
@@ -616,12 +690,42 @@ pub(crate) fn catalog_for_provider(
                 model.tool = capability.tool_state();
                 model.vision = capability.vision_state();
                 model.json_schema = capability.json_schema_state();
+                if capability.context_window > 0 {
+                    model.context_window = Some(capability.context_window);
+                }
+                if let Some(value) = capability
+                    .extensions
+                    .get("max_output_tokens")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .filter(|value| *value > 0)
+                {
+                    model.max_output_tokens = Some(value);
+                }
+                if let Some(value) = capability
+                    .extensions
+                    .get("catalog_cost")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+                {
+                    model.cost = Some(value);
+                }
             })
             .or_insert_with(|| CatalogModelView {
                 model: capability.model.clone(),
                 tool: capability.tool_state(),
                 vision: capability.vision_state(),
                 json_schema: capability.json_schema_state(),
+                context_window: (capability.context_window > 0).then_some(capability.context_window),
+                max_output_tokens: capability
+                    .extensions
+                    .get("max_output_tokens")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .filter(|value| *value > 0),
+                cost: capability
+                    .extensions
+                    .get("catalog_cost")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
                 source: CatalogSource::Configured,
                 last_seen_ms: None,
                 catalog_state: CatalogState::Active,
@@ -805,6 +909,45 @@ mod tests {
         assert_eq!(models[0].vision, CapabilityState::Unsupported);
         assert_eq!(models[1].model, "z-model");
         assert_eq!(models[1].vision, CapabilityState::Verified);
+    }
+
+    #[test]
+    fn wecoding_model_directory_preserves_limits_and_known_cost_fields() {
+        let models = parse_models(&json!({
+            "data": [{
+                "id": "glm-5.2",
+                "context_window": 257550,
+                "max_output_tokens": 32768,
+                "limit": {"context": 257550, "output": 32768},
+                "cost": {"cache_read": 0.04, "input": 0.2, "output": 0.6, "think": 0.8}
+            }]
+        }))
+        .expect("Wecoding model metadata parses");
+
+        let model = &models[0];
+        assert_eq!(model.context_window, Some(257_550));
+        assert_eq!(model.max_output_tokens, Some(32_768));
+        assert_eq!(model.cost.as_ref().and_then(|cost| cost.input), Some(0.2));
+        assert_eq!(model.cost.as_ref().and_then(|cost| cost.output), Some(0.6));
+        assert_eq!(model.cost.as_ref().and_then(|cost| cost.cache_read), Some(0.04));
+        assert_eq!(model.cost.as_ref().and_then(|cost| cost.cache_write), None);
+    }
+
+    #[test]
+    fn invalid_or_zero_model_limits_are_left_unknown() {
+        let models = parse_models(&json!({
+            "data": [{
+                "id": "unsafe",
+                "context_window": 0,
+                "max_output_tokens": 4294967296_u64,
+                "cost": {"input": -1, "output": "secret"}
+            }]
+        }))
+        .expect("invalid optional metadata does not reject the catalog");
+
+        assert_eq!(models[0].context_window, None);
+        assert_eq!(models[0].max_output_tokens, None);
+        assert_eq!(models[0].cost, None);
     }
 
     #[test]

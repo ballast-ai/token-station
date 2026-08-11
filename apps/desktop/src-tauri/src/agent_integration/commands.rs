@@ -20,7 +20,10 @@ use zeroize::Zeroizing;
 
 use super::compatibility::{evaluate_discovery, CatalogSource, CompatibilityCatalog};
 use super::config_codec::{apply_patch, parse_source_bytes, render_document, DocumentFormat};
-use super::connectors::{builtin_connectors, find_connector, ConnectInput, Connector};
+use super::connectors::{
+    AgentModelCost, AgentModelMetadata, ConnectInput, Connector, builtin_connectors,
+    find_connector,
+};
 use super::discovery::DiscoveryScanner;
 use super::drift::analyze_drift;
 use super::ownership::{FileOwnershipStore, OwnershipStore};
@@ -286,6 +289,7 @@ pub struct AgentProxyRuntime {
     connector_base_urls: BTreeMap<String, String>,
     connector_adapter_ready: BTreeMap<String, bool>,
     virtual_key: Zeroizing<String>,
+    model_metadata: Option<AgentModelMetadata>,
 }
 
 impl AgentProxyRuntime {
@@ -294,6 +298,7 @@ impl AgentProxyRuntime {
         gateway_origin: &str,
         virtual_key: String,
         adapter_readiness: BTreeMap<String, bool>,
+        model_metadata: Option<AgentModelMetadata>,
     ) -> Self {
         let mut connector_base_urls = BTreeMap::new();
         let mut connector_adapter_ready = BTreeMap::new();
@@ -318,6 +323,7 @@ impl AgentProxyRuntime {
             connector_base_urls,
             connector_adapter_ready,
             virtual_key: Zeroizing::new(virtual_key),
+            model_metadata,
         }
     }
 
@@ -356,6 +362,11 @@ impl AgentProxyRuntime {
             hash_field(&mut hash, connector_id.as_bytes());
             hash.update([u8::from(*ready)]);
         }
+        if let Some(metadata) = &self.model_metadata {
+            let serialized = serde_json::to_vec(metadata)
+                .expect("Agent model metadata is always serializable");
+            hash_field(&mut hash, &serialized);
+        }
         hash.finalize().into()
     }
 
@@ -377,8 +388,100 @@ impl AgentProxyRuntime {
                 .get(connector_id)
                 .copied()
                 .unwrap_or(false),
+            model_metadata: (connector.agent_id() == "opencode")
+                .then_some(self.model_metadata.as_ref())
+                .flatten(),
         })
     }
+}
+
+fn opencode_model_metadata(
+    config: &token_station_cli::config::ClientConfig,
+) -> Result<Option<AgentModelMetadata>, String> {
+    use token_station_router_core::RoutingMode;
+
+    let router = config
+        .custom_router_for_agent("opencode")?
+        .unwrap_or_else(|| config.router.clone());
+    let mut candidates = BTreeSet::new();
+    if router.routing_mode == RoutingMode::QuotaFirst && !router.quota_accounts.is_empty() {
+        candidates.extend(router.quota_accounts.iter().cloned());
+    } else if router.routing_mode == RoutingMode::QuotaFirst {
+        for (upstream, entry) in &config.upstreams {
+            let reference = token_station_router_core::UpstreamRef::new(upstream.clone())
+                .map_err(|error| error.to_string())?;
+            candidates.extend(entry.models.iter().map(|capability| {
+                token_station_router_core::UpstreamModel::new(
+                    reference.clone(),
+                    capability.model.clone(),
+                )
+            }));
+        }
+    } else {
+        candidates.extend(router.pools.values().flatten().cloned());
+    }
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let mut context = u32::MAX;
+    let mut output = u32::MAX;
+    let mut costs = Vec::new();
+    for candidate in &candidates {
+        let capability = config
+            .upstreams
+            .get(candidate.upstream.as_str())
+            .and_then(|upstream| {
+                upstream
+                    .models
+                    .iter()
+                    .find(|capability| capability.model == candidate.model)
+            });
+        let Some(capability) = capability else {
+            return Ok(None);
+        };
+        let Some(max_output) = capability
+            .extensions
+            .get("max_output_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0)
+        else {
+            return Ok(None);
+        };
+        if capability.context_window == 0 {
+            return Ok(None);
+        }
+        context = context.min(capability.context_window);
+        output = output.min(max_output);
+
+        let catalog_cost = capability
+            .extensions
+            .get("catalog_cost")
+            .and_then(|value| serde_json::from_value::<AgentModelCost>(value.clone()).ok())
+            .filter(AgentModelCost::is_valid);
+        let configured_cost = config.pricing.models.get(&candidate.model).map(|price| {
+            let dollars = |micros: u64| micros as f64 / 1_000_000.0;
+            AgentModelCost {
+                input: dollars(price.input_per_mtok),
+                output: dollars(price.output_per_mtok),
+                cache_read: Some(dollars(price.cache_read_per_mtok)),
+                cache_write: Some(dollars(price.cache_write_per_mtok)),
+            }
+        });
+        costs.push(catalog_cost.or(configured_cost));
+    }
+
+    let cost = costs.first().cloned().flatten().filter(|first| {
+        costs
+            .iter()
+            .all(|candidate| candidate.as_ref() == Some(first))
+    });
+    Ok(Some(AgentModelMetadata {
+        context,
+        output,
+        cost,
+    }))
 }
 
 pub struct AgentCommandState {
@@ -1643,6 +1746,9 @@ pub(crate) fn runtime_from_app(
             )
         })
         .collect();
+    let config = inner.materialize().map_err(AgentCommandError::internal)?;
+    let model_metadata = opencode_model_metadata(&config)
+        .map_err(AgentCommandError::internal)?;
     Ok(AgentProxyRuntime::new(
         serve.instance_id.ok_or_else(|| {
             AgentCommandError::boundary("proxy_not_running", "代理运行实例身份不可用")
@@ -1652,6 +1758,7 @@ pub(crate) fn runtime_from_app(
             .virtual_key
             .unwrap_or_else(|| "token-station-no-auth".to_string()),
         adapter_readiness,
+        model_metadata,
     ))
 }
 
@@ -2144,6 +2251,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787",
                 token: Some(secret),
                 adapter_ready: true,
+                model_metadata: None,
             },
             1,
             None,
@@ -2163,7 +2271,47 @@ mod tests {
             "http://127.0.0.1:8787",
             token.to_string(),
             adapter_readiness,
+            None,
         )
+    }
+
+    #[test]
+    fn opencode_projection_uses_safe_limits_and_only_uniform_costs() {
+        let root = scratch("opencode-model-metadata");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        for (name, context, output) in [
+            ("provider_a", 257_550, 32_768),
+            ("provider_b", 128_000, 16_384),
+        ] {
+            draft["upstreams"][name] = json!({
+                "provider": "openai-compatible",
+                "base_url": format!("https://{name}.example/v1"),
+                "models": [{
+                    "model": "glm-5.2",
+                    "context_window": context,
+                    "max_output_tokens": output,
+                    "catalog_cost": {"input": 0.2, "output": 0.6, "cache_read": 0.04}
+                }]
+            });
+        }
+        draft["router"]["pools"] = json!({
+            "tier_high": [{"upstream": "provider_a", "model": "glm-5.2"}],
+            "tier_low": [{"upstream": "provider_b", "model": "glm-5.2"}]
+        });
+        draft["router"]["default_pool"] = json!("tier_low");
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft.clone()).unwrap();
+
+        let metadata = opencode_model_metadata(&config).unwrap().unwrap();
+        assert_eq!(metadata.context, 128_000);
+        assert_eq!(metadata.output, 16_384);
+        assert_eq!(metadata.cost.as_ref().map(|cost| cost.input), Some(0.2));
+
+        draft["upstreams"]["provider_b"]["models"][0]["catalog_cost"]["output"] =
+            json!(0.7);
+        let mixed: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+        assert_eq!(opencode_model_metadata(&mixed).unwrap().unwrap().cost, None);
     }
 
     fn running_app_with_adapters(
@@ -3004,6 +3152,7 @@ mod tests {
             "http://127.0.0.1:8787",
             "vk-readiness-view".to_string(),
             adapter_readiness,
+            None,
         );
 
         let views = state.views(&snapshot, Some(&runtime)).unwrap();
