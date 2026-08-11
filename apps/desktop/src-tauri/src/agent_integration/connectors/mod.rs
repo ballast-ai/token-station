@@ -27,10 +27,15 @@ pub struct AgentModelCost {
 
 impl AgentModelCost {
     pub fn is_valid(&self) -> bool {
-        [Some(self.input), Some(self.output), self.cache_read, self.cache_write]
-            .into_iter()
-            .flatten()
-            .all(|rate| rate.is_finite() && (0.0..=9_000_000_000.0).contains(&rate))
+        [
+            Some(self.input),
+            Some(self.output),
+            self.cache_read,
+            self.cache_write,
+        ]
+        .into_iter()
+        .flatten()
+        .all(|rate| rate.is_finite() && (0.0..=9_000_000_000.0).contains(&rate))
     }
 }
 
@@ -38,6 +43,9 @@ impl AgentModelCost {
 pub struct AgentModelMetadata {
     pub context: u32,
     pub output: u32,
+    pub vision: bool,
+    pub tools: bool,
+    pub reasoning: bool,
     pub cost: Option<AgentModelCost>,
 }
 
@@ -102,6 +110,9 @@ pub trait Connector: Sync {
     fn sensitive_paths(&self) -> Vec<ConfigPath> {
         Vec::new()
     }
+    fn projects_model_metadata(&self) -> bool {
+        false
+    }
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String>;
     fn validate_source(&self, document: &ConfigDocument) -> Result<(), String>;
     fn connect_patch(&self, input: &ConnectInput<'_>) -> Result<Vec<PatchOperation>, String>;
@@ -111,6 +122,16 @@ pub trait Connector: Sync {
         input: &ConnectInput<'_>,
     ) -> Result<Vec<PatchOperation>, String> {
         self.connect_patch(input)
+    }
+    fn validate_refresh_source(&self, document: &ConfigDocument) -> Result<(), String> {
+        self.validate_source(document)
+    }
+    fn refresh_patch_for_document(
+        &self,
+        document: &ConfigDocument,
+        input: &ConnectInput<'_>,
+    ) -> Result<Vec<PatchOperation>, String> {
+        self.connect_patch_for_document(document, input)
     }
     fn companion_projections(
         &self,
@@ -339,6 +360,47 @@ mod tests {
     }
 
     #[test]
+    fn gemini_connection_recovers_null_optional_auth_containers() {
+        let root = std::env::temp_dir().join(format!(
+            "token-station-gemini-null-companion-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let primary = root.join(".env");
+        let settings = root.join("settings.json");
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/gemini-cli",
+            token: Some("fixture-virtual-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+
+        for source in [
+            br#"{"security":null,"keep":true}"#.as_slice(),
+            br#"{"security":{"auth":null},"keep":true}"#.as_slice(),
+        ] {
+            std::fs::write(&settings, source).unwrap();
+            let companions = find_connector("gemini-cli-v1")
+                .unwrap()
+                .companion_projections(&primary, &input)
+                .expect("null optional auth containers recover");
+            let projected = parse_source_bytes(
+                Some(companions[0].projected_bytes.as_slice()),
+                DocumentFormat::Json,
+                companions[0].label,
+            )
+            .unwrap();
+            let semantic = semantic_json(&projected).unwrap();
+            assert_eq!(
+                semantic["security"]["auth"]["selectedType"],
+                json!("gemini-api-key")
+            );
+            assert_eq!(semantic["keep"], json!(true));
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn workbuddy_connector_preserves_unrelated_models_on_connect_and_force_disconnect() {
         let connector = find_connector("workbuddy-v1").expect("WorkBuddy connector is registered");
         let source = br#"{
@@ -406,6 +468,39 @@ mod tests {
     }
 
     #[test]
+    fn workbuddy_connector_recovers_null_optional_model_arrays() {
+        let connector = find_connector("workbuddy-v1").expect("WorkBuddy connector is registered");
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
+            token: Some("fixture-workbuddy-key"),
+            adapter_ready: true,
+            model_metadata: Some(&AgentModelMetadata {
+                context: 257_550,
+                output: 32_768,
+                vision: true,
+                tools: true,
+                reasoning: true,
+                cost: None,
+            }),
+        };
+        let mut document = parse_source_bytes(
+            Some(br#"{"models":null,"availableModels":null,"keep":true}"#),
+            connector.format(),
+            connector.label(),
+        )
+        .unwrap();
+        let patch = connector
+            .connect_patch_for_document(&document, &input)
+            .expect("null optional arrays are empty collections");
+        apply_patch(&mut document, &patch).unwrap();
+        connector.validate_projected(&document, &input).unwrap();
+        let semantic = semantic_json(&document).unwrap();
+        assert_eq!(semantic["keep"], json!(true));
+        assert_eq!(semantic["models"][0]["maxInputTokens"], json!(257_550));
+        assert_eq!(semantic["models"][0]["maxOutputTokens"], json!(32_768));
+    }
+
+    #[test]
     fn workbuddy_connector_supports_native_top_level_model_array() {
         let connector = find_connector("workbuddy-v1").expect("WorkBuddy connector is registered");
         let source = br#"[
@@ -430,6 +525,31 @@ mod tests {
         assert_eq!(connected[0]["id"], json!("user-model"));
         assert_eq!(connected[1]["id"], json!("tokenstation-auto"));
 
+        let metadata = AgentModelMetadata {
+            context: 257_550,
+            output: 32_768,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let refresh_input = ConnectInput {
+            base_url: input.base_url,
+            token: input.token,
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let refresh = connector
+            .refresh_patch_for_document(&document, &refresh_input)
+            .expect("a managed native-array model can refresh in place");
+        apply_patch(&mut document, &refresh).unwrap();
+        connector
+            .validate_projected(&document, &refresh_input)
+            .unwrap();
+        let refreshed = semantic_json(&document).unwrap();
+        assert_eq!(refreshed[1]["maxInputTokens"], json!(257_550));
+        assert_eq!(refreshed[1]["maxOutputTokens"], json!(32_768));
+
         let disconnect = connector.disconnect_patch_for_document(&document).unwrap();
         validate_patch_ownership(&disconnect, &connector.owned_paths()).unwrap();
         apply_patch(&mut document, &disconnect).unwrap();
@@ -451,6 +571,9 @@ mod tests {
             model_metadata: Some(&AgentModelMetadata {
                 context: 257_550,
                 output: 32_768,
+                vision: true,
+                tools: true,
+                reasoning: true,
                 cost: Some(AgentModelCost {
                     input: 0.2,
                     output: 0.6,
@@ -496,6 +619,191 @@ mod tests {
             connector.validate_projected(&stale, &input).is_err(),
             "a legacy text-only projection must require a safe reconnect"
         );
+    }
+
+    #[test]
+    fn metadata_is_projected_into_supported_agent_native_schemas() {
+        let metadata = AgentModelMetadata {
+            context: 257_550,
+            output: 32_768,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: Some(AgentModelCost {
+                input: 0.2,
+                output: 0.6,
+                cache_read: Some(0.04),
+                cache_write: None,
+            }),
+        };
+
+        let codex_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/codex/v1",
+            token: Some("fixture-codex-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut codex = parse_source_bytes(None, DocumentFormat::Toml, "Codex").unwrap();
+        apply_patch(
+            &mut codex,
+            &CodexConnector.connect_patch(&codex_input).unwrap(),
+        )
+        .unwrap();
+        CodexConnector
+            .validate_projected(&codex, &codex_input)
+            .unwrap();
+        let codex = semantic_json(&codex).unwrap();
+        assert_eq!(codex["model_context_window"], json!(257_550));
+        assert_eq!(
+            codex["model_auto_compact_token_limit"],
+            json!(257_550 - 32_768)
+        );
+
+        let openclaw_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/openclaw/v1",
+            token: Some("fixture-openclaw-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut openclaw = parse_source_bytes(None, DocumentFormat::Json5, "OpenClaw").unwrap();
+        apply_patch(
+            &mut openclaw,
+            &OpenClawConnector.connect_patch(&openclaw_input).unwrap(),
+        )
+        .unwrap();
+        OpenClawConnector
+            .validate_projected(&openclaw, &openclaw_input)
+            .unwrap();
+        let openclaw = semantic_json(&openclaw).unwrap();
+        let model = &openclaw["models"]["providers"]["tokenstation"]["models"][0];
+        assert_eq!(model["contextWindow"], json!(257_550));
+        assert_eq!(model["maxTokens"], json!(32_768));
+        assert_eq!(
+            model["cost"],
+            json!({"input":0.2,"output":0.6,"cacheRead":0.04})
+        );
+        assert_eq!(model["input"], json!(["text", "image"]));
+        assert_ne!(model["cost"]["input"], json!(0));
+
+        let workbuddy_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
+            token: Some("fixture-workbuddy-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut workbuddy =
+            parse_source_bytes(Some(br#"[]"#), DocumentFormat::Json, "WorkBuddy").unwrap();
+        let patch = WorkBuddyConnector
+            .connect_patch_for_document(&workbuddy, &workbuddy_input)
+            .unwrap();
+        apply_patch(&mut workbuddy, &patch).unwrap();
+        WorkBuddyConnector
+            .validate_projected(&workbuddy, &workbuddy_input)
+            .unwrap();
+        let workbuddy = semantic_json(&workbuddy).unwrap();
+        assert_eq!(workbuddy[0]["maxInputTokens"], json!(257_550));
+        assert_eq!(workbuddy[0]["maxOutputTokens"], json!(32_768));
+        assert_eq!(workbuddy[0]["supportsImages"], json!(true));
+        assert_eq!(workbuddy[0]["supportsToolCall"], json!(true));
+        assert_eq!(workbuddy[0]["supportsReasoning"], json!(true));
+
+        let hermes_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/nous-hermes-agent/v1",
+            token: Some("fixture-hermes-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut hermes = parse_source_bytes(None, DocumentFormat::Yaml, "Hermes").unwrap();
+        apply_patch(
+            &mut hermes,
+            &HermesConnector.connect_patch(&hermes_input).unwrap(),
+        )
+        .unwrap();
+        HermesConnector
+            .validate_projected(&hermes, &hermes_input)
+            .unwrap();
+        let hermes = semantic_json(&hermes).unwrap();
+        assert_eq!(hermes["model"]["context_length"], json!(257_550));
+    }
+
+    #[test]
+    fn image_support_fails_closed_for_text_only_or_unknown_routes() {
+        let metadata = AgentModelMetadata {
+            context: 128_000,
+            output: 16_384,
+            vision: false,
+            tools: false,
+            reasoning: false,
+            cost: None,
+        };
+        let opencode_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/opencode/v1",
+            token: Some("fixture-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut opencode = parse_source_bytes(None, DocumentFormat::Json, "OpenCode").unwrap();
+        apply_patch(
+            &mut opencode,
+            &OpenCodeConnector.connect_patch(&opencode_input).unwrap(),
+        )
+        .unwrap();
+        let opencode = semantic_json(&opencode).unwrap();
+        let model = &opencode["provider"]["tokenstation"]["models"]["auto"];
+        assert_eq!(model["attachment"], json!(false));
+        assert_eq!(model["modalities"]["input"], json!(["text"]));
+
+        let workbuddy_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
+            token: Some("fixture-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut workbuddy = parse_source_bytes(None, DocumentFormat::Json, "WorkBuddy").unwrap();
+        apply_patch(
+            &mut workbuddy,
+            &WorkBuddyConnector.connect_patch(&workbuddy_input).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            semantic_json(&workbuddy).unwrap()["models"][0]["supportsImages"],
+            json!(false)
+        );
+        let workbuddy = semantic_json(&workbuddy).unwrap();
+        assert_eq!(workbuddy["models"][0]["supportsToolCall"], json!(false));
+        assert_eq!(workbuddy["models"][0]["supportsReasoning"], json!(false));
+        assert!(workbuddy["models"][0].get("reasoning").is_none());
+    }
+
+    #[test]
+    fn connectors_recover_only_null_optional_object_containers() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/v1",
+            token: Some("fixture-secret"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let fixtures: [(&dyn Connector, &[u8]); 4] = [
+            (&ClaudeCodeConnector, br#"{"env":null,"keep":true}"#),
+            (&OpenCodeConnector, br#"{"provider":null,"keep":true}"#),
+            (&HermesConnector, b"model: null\nkeep: true\n"),
+            (
+                &OpenClawConnector,
+                br#"{models:null,agents:null,keep:true}"#,
+            ),
+        ];
+
+        for (connector, source) in fixtures {
+            let mut document =
+                parse_source_bytes(Some(source), connector.format(), connector.label()).unwrap();
+            connector
+                .validate_source(&document)
+                .expect("an optional null container is equivalent to absence");
+            let patch = connector.connect_patch(&input).unwrap();
+            apply_patch(&mut document, &patch).unwrap();
+            connector.validate_projected(&document, &input).unwrap();
+            assert_eq!(semantic_json(&document).unwrap()["keep"], json!(true));
+        }
     }
 
     #[test]

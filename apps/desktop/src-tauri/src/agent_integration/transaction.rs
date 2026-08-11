@@ -1356,13 +1356,13 @@ mod tests {
     use super::*;
     use crate::agent_integration::config_codec::DocumentFormat;
     use crate::agent_integration::connectors::{
-        find_connector, ClaudeCodeConnector, ClaudeDesktopConnector, ConnectInput, HermesConnector,
-        OpenClawConnector,
+        find_connector, AgentModelMetadata, ClaudeCodeConnector, ClaudeDesktopConnector,
+        ConnectInput, HermesConnector, OpenClawConnector,
     };
     use crate::agent_integration::ownership::FileOwnershipStore;
     use crate::agent_integration::plan::{
-        build_connection_plan, build_disconnect_plan, build_snapshot_restore_plan,
-        read_config_source, ConfigSource,
+        build_connection_plan, build_disconnect_plan, build_metadata_refresh_plan,
+        build_snapshot_restore_plan, read_config_source, ConfigSource,
     };
     use crate::agent_integration::snapshot::{
         DecryptedSnapshot, FileSnapshotStore, MasterKeyStore, SnapshotCreateResult,
@@ -2024,6 +2024,153 @@ mod tests {
             TransactionStage::Ownership | TransactionStage::Confirmation
         ));
         assert_eq!(std::fs::read(&legacy_backup).unwrap(), legacy_marker);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn metadata_refresh_updates_owned_values_and_preserves_disconnect_baseline() {
+        let root = scratch("metadata-refresh");
+        let target = root.join("openclaw.json");
+        let initial = br#"{"unowned":"keep","models":null,"agents":null}"#;
+        write_initial(&target, initial);
+        let first_metadata = AgentModelMetadata {
+            context: 257_550,
+            output: 32_768,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let source = read_config_source(&target).unwrap();
+        let connection = build_connection_plan(
+            &OpenClawConnector,
+            &openclaw_discovery(&target),
+            &openclaw_verified(),
+            &target,
+            &source,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/v1",
+                token: Some("vk-refresh"),
+                adapter_ready: true,
+                model_metadata: Some(&first_metadata),
+            },
+            1,
+            None,
+            1_000,
+            "81".repeat(16),
+        )
+        .unwrap();
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        engine
+            .apply_connection(
+                &connection,
+                &confirmation(&connection),
+                &admission(),
+                1_002,
+            )
+            .unwrap();
+        let ownership_key = OwnershipKey {
+            agent_id: "openclaw".to_string(),
+            installation_path: "/opt/openclaw".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let first_ownership = ownership.load(&ownership_key).unwrap().unwrap();
+        let baseline_snapshot_id = first_ownership.baseline_snapshot_id.clone();
+
+        let refreshed_metadata = AgentModelMetadata {
+            context: 128_000,
+            output: 8_192,
+            vision: false,
+            tools: false,
+            reasoning: false,
+            cost: None,
+        };
+        let current = read_config_source(&target).unwrap();
+        let refresh = build_metadata_refresh_plan(
+            &OpenClawConnector,
+            &openclaw_discovery(&target),
+            &openclaw_verified(),
+            &target,
+            &current,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/v1",
+                token: Some("vk-refresh"),
+                adapter_ready: true,
+                model_metadata: Some(&refreshed_metadata),
+            },
+            &first_ownership,
+            1,
+            None,
+            1_003,
+            "82".repeat(16),
+        )
+        .unwrap();
+        engine
+            .apply_snapshot_restore(
+                &refresh,
+                &confirmation_at(&refresh, 1_003),
+                &admission(),
+                1_004,
+            )
+            .unwrap();
+        let refreshed: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        let model = &refreshed["models"]["providers"]["tokenstation"]["models"][0];
+        assert_eq!(model["contextWindow"], 128_000);
+        assert_eq!(model["maxTokens"], 8_192);
+        assert_eq!(model["input"], serde_json::json!(["text"]));
+        let refreshed_ownership = ownership.load(&ownership_key).unwrap().unwrap();
+        assert_eq!(refreshed_ownership.revision, 2);
+        assert_eq!(refreshed_ownership.baseline_snapshot_id, baseline_snapshot_id);
+
+        let baseline = snapshots
+            .load(&refreshed_ownership.baseline_snapshot_id)
+            .unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let current = read_config_source(&target).unwrap();
+        let disconnect = build_disconnect_plan(
+            &OpenClawConnector,
+            &openclaw_discovery(&target),
+            &openclaw_verified(),
+            &target,
+            &current,
+            &refreshed_ownership,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            1_005,
+            "83".repeat(16),
+        )
+        .unwrap();
+        engine
+            .apply_disconnect(
+                &disconnect,
+                &confirmation_at(&disconnect, 1_005),
+                &admission(),
+                1_006,
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&target).unwrap()).unwrap(),
+            serde_json::from_slice::<Value>(initial).unwrap()
+        );
+        assert!(ownership.load(&ownership_key).unwrap().is_none());
         std::fs::remove_dir_all(root).ok();
     }
 

@@ -95,17 +95,13 @@ pub fn apply_patch_with_reverse(
     for operation in operations {
         let before = semantic_json(document)?;
         let previous = json_value_at(&before, &operation.path).cloned();
-        let created_parent = created_nested_parent(&before, operation);
+        let parent_reverse = materialized_parent_reverse(&before, operation);
         apply_patch(document, std::slice::from_ref(operation))?;
         if operation.operation == PatchKind::Test {
             continue;
         }
-        if let Some(path) = created_parent {
-            reverse.push(PatchOperation {
-                operation: PatchKind::Remove,
-                path,
-                value: None,
-            });
+        if let Some(operation) = parent_reverse {
+            reverse.push(operation);
         }
         reverse.push(PatchOperation {
             operation: if previous.is_some() {
@@ -121,19 +117,41 @@ pub fn apply_patch_with_reverse(
     Ok(reverse)
 }
 
-/// Returns the deepest parent that an add/replace operation will create.
-/// Reversing each leaf independently otherwise leaves an empty nested table
-/// behind, which differs from a baseline where the owned subtree was absent.
-fn created_nested_parent(before: &Value, operation: &PatchOperation) -> Option<ConfigPath> {
+/// Returns the first absent or null parent that an add/replace operation will
+/// materialize. Reversing that parent restores absence or null exactly instead
+/// of leaving an empty object behind.
+fn materialized_parent_reverse(
+    before: &Value,
+    operation: &PatchOperation,
+) -> Option<PatchOperation> {
     if !matches!(operation.operation, PatchKind::Add | PatchKind::Replace)
         || operation.path.segments.len() < 2
     {
         return None;
     }
-    let path = ConfigPath {
-        segments: operation.path.segments[..operation.path.segments.len() - 1].to_vec(),
-    };
-    json_value_at(before, &path).is_none().then_some(path)
+    for length in 1..operation.path.segments.len() {
+        let path = ConfigPath {
+            segments: operation.path.segments[..length].to_vec(),
+        };
+        match json_value_at(before, &path) {
+            None => {
+                return Some(PatchOperation {
+                    operation: PatchKind::Remove,
+                    path,
+                    value: None,
+                });
+            }
+            Some(Value::Null) => {
+                return Some(PatchOperation {
+                    operation: PatchKind::Replace,
+                    path,
+                    value: Some(Value::Null),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    None
 }
 
 /// Copy only declared owned subtrees from a baseline document into the
@@ -354,6 +372,9 @@ fn json5_set_value(
     let Some((segment, remaining)) = segments.split_first() else {
         return Err("JSON5 patch 路径不能为空".to_string());
     };
+    if matches!(current, JSONValue::Null) && replacement.is_some() {
+        *current = json5_empty_object();
+    }
     let JSONValue::JSONObject {
         key_value_pairs, ..
     } = current
@@ -507,10 +528,16 @@ fn apply_json_operation(root: &mut Value, operation: &PatchOperation) -> Result<
     match operation.operation {
         PatchKind::Add | PatchKind::Replace => {
             for segment in parents {
+                if cursor.is_null() {
+                    *cursor = json!({});
+                }
                 let object = cursor
                     .as_object_mut()
                     .ok_or_else(|| format!("配置路径 '{}' 的父级不是对象", operation.path))?;
                 cursor = object.entry(segment.clone()).or_insert_with(|| json!({}));
+            }
+            if cursor.is_null() {
+                *cursor = json!({});
             }
             let object = cursor
                 .as_object_mut()
@@ -670,6 +697,23 @@ fn insert_missing_yaml_scalar(
         if root_line_end.is_none() {
             if let Some(rest) = without_newline.strip_prefix(&root_prefix) {
                 let suffix = rest.trim();
+                let comment_start = yaml_inline_comment_start(suffix);
+                let value = comment_start
+                    .map_or(suffix, |index| &suffix[..index])
+                    .trim();
+                if matches!(value, "null" | "Null" | "NULL" | "~") {
+                    let comment = comment_start
+                        .map(|index| suffix[index..].trim())
+                        .filter(|comment| !comment.is_empty());
+                    let parent = comment.map_or_else(
+                        || format!("{root}:\n"),
+                        |comment| format!("{root}: {comment}\n"),
+                    );
+                    let replacement = format!("{parent}  {child}: {scalar}\n");
+                    let mut updated = rendered.to_string();
+                    updated.replace_range(offset..offset + line.len(), &replacement);
+                    return Ok(updated);
+                }
                 if !suffix.is_empty() && !suffix.starts_with('#') {
                     return Err(format!("配置路径 '{}' 的父级必须使用 YAML 块映射", path));
                 }
@@ -732,6 +776,17 @@ fn replace_existing_yaml_scalar(
     path: &ConfigPath,
     value: &Value,
 ) -> Result<String, String> {
+    if let [root] = path.segments.as_slice() {
+        if !is_plain_yaml_key(root) {
+            return Err(format!("配置路径 '{}' 包含不安全的 YAML 键", path));
+        }
+        let scalar = yaml_scalar(value, path)?;
+        let (start, end, comment) = yaml_root_block(rendered, root, path)?;
+        let comment = comment.map_or_else(String::new, |value| format!(" {value}"));
+        let mut updated = rendered.to_string();
+        updated.replace_range(start..end, &format!("{root}: {scalar}{comment}\n"));
+        return Ok(updated);
+    }
     let [root, child] = path.segments.as_slice() else {
         return Err(format!(
             "配置路径 '{}' 暂不支持安全地替换 YAML 嵌套字段",
@@ -849,6 +904,15 @@ fn yaml_inline_comment_start(value_and_comment: &str) -> Option<usize> {
 }
 
 fn remove_existing_yaml_scalar(rendered: &str, path: &ConfigPath) -> Result<String, String> {
+    if let [root] = path.segments.as_slice() {
+        if !is_plain_yaml_key(root) {
+            return Err(format!("配置路径 '{}' 包含不安全的 YAML 键", path));
+        }
+        let (start, end, _) = yaml_root_block(rendered, root, path)?;
+        let mut updated = rendered.to_string();
+        updated.replace_range(start..end, "");
+        return Ok(updated);
+    }
     let [root, child] = path.segments.as_slice() else {
         return Err(format!(
             "配置路径 '{}' 暂不支持安全地移除 YAML 嵌套字段",
@@ -907,6 +971,44 @@ fn remove_existing_yaml_scalar(rendered: &str, path: &ConfigPath) -> Result<Stri
     let mut updated = rendered.to_string();
     updated.replace_range(start..end, "");
     Ok(updated)
+}
+
+fn yaml_root_block(
+    rendered: &str,
+    root: &str,
+    path: &ConfigPath,
+) -> Result<(usize, usize, Option<String>), String> {
+    let root_prefix = format!("{root}:");
+    let lines = rendered
+        .split_inclusive('\n')
+        .scan(0usize, |cursor, line| {
+            let offset = *cursor;
+            *cursor += line.len();
+            Some((offset, line))
+        })
+        .collect::<Vec<_>>();
+    for (index, (offset, line)) in lines.iter().enumerate() {
+        let without_newline = line.trim_end_matches(['\r', '\n']);
+        if without_newline.starts_with([' ', '\t']) {
+            continue;
+        }
+        let Some(rest) = without_newline.strip_prefix(&root_prefix) else {
+            continue;
+        };
+        let suffix = rest.trim();
+        let comment = yaml_inline_comment_start(suffix)
+            .map(|comment_start| suffix[comment_start..].trim().to_string());
+        let mut end = offset + line.len();
+        for (next_offset, next_line) in lines.iter().skip(index + 1) {
+            let next = next_line.trim_end_matches(['\r', '\n']);
+            if !next.is_empty() && !next.starts_with([' ', '\t']) {
+                break;
+            }
+            end = next_offset + next_line.len();
+        }
+        return Ok((*offset, end, comment));
+    }
+    Err(format!("配置路径 '{}' 不是可安全替换的 YAML 根字段", path))
 }
 
 fn validate_yaml_rendered(rendered: &str, label: &str) -> Result<(), String> {
@@ -1537,6 +1639,51 @@ mod tests {
     }
 
     #[test]
+    fn json_and_json5_replace_materialize_null_ancestors_but_reject_other_scalars() {
+        let patch = [operation(
+            PatchKind::Replace,
+            &["provider", "tokenstation"],
+            Some(json!({"baseURL": "http://127.0.0.1:8787/v1"})),
+        )];
+
+        let mut json = ConfigDocument::Json(json!({"provider": null, "keep": true}));
+        let reverse = apply_patch_with_reverse(&mut json, &patch)
+            .expect("null JSON parent is an empty optional container");
+        assert_eq!(
+            semantic_json(&json).unwrap(),
+            json!({
+                "provider": {"tokenstation": {"baseURL": "http://127.0.0.1:8787/v1"}},
+                "keep": true
+            })
+        );
+        apply_patch(&mut json, &reverse).expect("JSON reverse restores the null parent");
+        assert_eq!(semantic_json(&json).unwrap(), json!({"provider": null, "keep": true}));
+
+        let mut json5 = parse_rendered(
+            "{ provider: null, keep: true }",
+            DocumentFormat::Json5,
+            "fixture",
+        )
+        .unwrap();
+        let reverse = apply_patch_with_reverse(&mut json5, &patch)
+            .expect("null JSON5 parent is materialized");
+        assert_eq!(
+            semantic_json(&json5).unwrap()["provider"]["tokenstation"]["baseURL"],
+            json!("http://127.0.0.1:8787/v1")
+        );
+        assert_eq!(semantic_json(&json5).unwrap()["keep"], json!(true));
+        apply_patch(&mut json5, &reverse).expect("JSON5 reverse restores the null parent");
+        assert_eq!(semantic_json(&json5).unwrap()["provider"], Value::Null);
+
+        for invalid in [json!({"provider": "keep"}), json!({"provider": []})] {
+            let mut document = ConfigDocument::Json(invalid);
+            assert!(apply_patch(&mut document, &patch)
+                .expect_err("non-null non-object ancestors remain invalid")
+                .contains("父级不是对象"));
+        }
+    }
+
+    #[test]
     fn toml_patch_can_restore_a_provider_table_from_a_structured_reverse_value() {
         let mut document = ConfigDocument::Toml(Box::new(Document::new()));
         apply_patch(
@@ -1877,6 +2024,33 @@ display:
             .err()
             .expect("invalid YAML fails closed");
         assert!(!error.contains(marker), "{error}");
+    }
+
+    #[test]
+    fn yaml_patch_materializes_an_explicit_null_parent_only() {
+        let patch = [operation(
+            PatchKind::Replace,
+            &["model", "provider"],
+            Some(json!("custom")),
+        )];
+        for source in [
+            "model: null\nkeep: true\n",
+            "model: ~ # empty\nkeep: true\n",
+        ] {
+            let mut document = parse_rendered(source, DocumentFormat::Yaml, "Hermes").unwrap();
+            let reverse = apply_patch_with_reverse(&mut document, &patch)
+                .expect("an explicit YAML null can become a map");
+            let semantic = semantic_json(&document).unwrap();
+            assert_eq!(semantic["model"]["provider"], json!("custom"));
+            assert_eq!(semantic["keep"], json!(true));
+            apply_patch(&mut document, &reverse).expect("YAML reverse restores null");
+            assert_eq!(semantic_json(&document).unwrap()["model"], Value::Null);
+        }
+
+        let mut invalid = parse_rendered("model: keep\n", DocumentFormat::Yaml, "Hermes").unwrap();
+        assert!(apply_patch(&mut invalid, &patch)
+            .expect_err("a non-null scalar parent remains invalid")
+            .contains("父级必须使用 YAML 块映射"));
     }
 
     #[test]

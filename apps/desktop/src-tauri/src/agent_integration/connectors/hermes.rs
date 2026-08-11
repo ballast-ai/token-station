@@ -11,6 +11,7 @@ const PROVIDER_PATH: &[&str] = &["model", "provider"];
 const BASE_URL_PATH: &[&str] = &["model", "base_url"];
 const API_KEY_PATH: &[&str] = &["model", "api_key"];
 const API_MODE_PATH: &[&str] = &["model", "api_mode"];
+const CONTEXT_LENGTH_PATH: &[&str] = &["model", "context_length"];
 
 pub struct HermesConnector;
 pub(super) static CONNECTOR: HermesConnector = HermesConnector;
@@ -28,7 +29,14 @@ static CAPABILITIES: ConnectorCapabilities = ConnectorCapabilities {
     ],
     config_format: DocumentFormat::Yaml,
     config_path_template: "${HOME}/.hermes/config.yaml",
-    owned_fields: &["model.default", "model.provider", "model.base_url", "model.api_key", "model.api_mode"],
+    owned_fields: &[
+        "model.default",
+        "model.provider",
+        "model.base_url",
+        "model.api_key",
+        "model.api_mode",
+        "model.context_length",
+    ],
     requires_virtual_key: true,
     restart_required: false,
 };
@@ -68,10 +76,15 @@ impl Connector for HermesConnector {
             BASE_URL_PATH,
             API_KEY_PATH,
             API_MODE_PATH,
+            CONTEXT_LENGTH_PATH,
         ]
         .into_iter()
         .map(path)
-        .collect()
+            .collect()
+    }
+
+    fn projects_model_metadata(&self) -> bool {
+        true
     }
 
     fn sensitive_paths(&self) -> Vec<ConfigPath> {
@@ -93,7 +106,10 @@ impl Connector for HermesConnector {
 
     fn validate_source(&self, document: &ConfigDocument) -> Result<(), String> {
         let root = semantic_json(document)?;
-        if root.get("model").is_some_and(|value| !value.is_object()) {
+        if root
+            .get("model")
+            .is_some_and(|value| !value.is_object() && !value.is_null())
+        {
             return Err("Hermes config.yaml 的 model 必须是对象".to_string());
         }
         Ok(())
@@ -103,7 +119,7 @@ impl Connector for HermesConnector {
         let token = input
             .token
             .ok_or_else(|| "Hermes 接入缺少虚拟 Key".to_string())?;
-        Ok([
+        let mut operations = [
             (DEFAULT_PATH, json!("auto")),
             (PROVIDER_PATH, json!("custom")),
             (BASE_URL_PATH, json!(input.base_url)),
@@ -116,7 +132,15 @@ impl Connector for HermesConnector {
             path: path(segments),
             value: Some(value),
         })
-        .collect())
+        .collect::<Vec<_>>();
+        if let Some(metadata) = input.model_metadata {
+            operations.push(PatchOperation {
+                operation: PatchKind::Replace,
+                path: path(CONTEXT_LENGTH_PATH),
+                value: Some(json!(metadata.context)),
+            });
+        }
+        Ok(operations)
     }
 
     fn disconnect_patch(&self) -> Vec<PatchOperation> {
@@ -145,17 +169,24 @@ impl Connector for HermesConnector {
             && root.pointer("/model/base_url") == Some(&json!(input.base_url))
             && root.pointer("/model/api_key") == Some(&json!(token))
             && root.pointer("/model/api_mode") == Some(&json!("chat_completions"));
-        if valid {
-            Ok(())
-        } else {
-            Err("Hermes 写入前复验失败".to_string())
+        if !valid {
+            return Err("Hermes 写入前复验失败".to_string());
         }
+        if let Some(metadata) = input.model_metadata {
+            if root.pointer("/model/context_length") != Some(&json!(metadata.context)) {
+                return Err("Hermes 写入前复验上下文窗口失败".to_string());
+            }
+        }
+        Ok(())
     }
 
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
+        let metadata = input.model_metadata.map_or("模型限制未知，未写入猜测值", |_| {
+            "已同步安全上下文窗口"
+        });
         format!(
-            "Hermes 已通过 chat_completions 指向 {}；配置已进入加密快照和 ownership 管理。",
-            input.base_url
+            "Hermes 已通过 chat_completions 指向 {}；{}；配置已进入加密快照和 ownership 管理。",
+            input.base_url, metadata
         )
     }
 }

@@ -57,6 +57,17 @@ describe("humanizeAppError", () => {
     );
   });
 
+  it("does not mistake a Connector metadata failure for a network failure", () => {
+    const raw = "Agent model metadata refresh failed for Connector workbuddy-v1";
+
+    expect(humanizeAppError(raw, "en")).toBe(
+      "The proxy is running, but Token Station could not refresh one managed Agent configuration. Open the Agent page, rescan, and repair that Agent before using its route.",
+    );
+    expect(humanizeAppError(raw, "zh-CN")).toBe(
+      "代理已经运行，但一个已接管 Agent 的模型元数据刷新失败。请打开 Agent 页面重新扫描，并修复该 Agent 后再使用它的路由。",
+    );
+  });
+
   it("does not expose an unknown backend string", () => {
     const raw = "secret internal transaction detail /Users/example/config.json";
 

@@ -152,6 +152,64 @@ pub fn build_connection_plan(
     now_ms: u64,
     operation_id: String,
 ) -> Result<PreparedChangePlan, String> {
+    build_connection_or_refresh_plan(
+        connector,
+        discovery,
+        compatibility,
+        target_path,
+        source,
+        input,
+        None,
+        compatibility_sequence,
+        compatibility_expires_at_ms,
+        now_ms,
+        operation_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_metadata_refresh_plan(
+    connector: &dyn Connector,
+    discovery: &DiscoveryRecord,
+    compatibility: &CompatibilityDecision,
+    target_path: &Path,
+    source: &ConfigSource,
+    input: &ConnectInput<'_>,
+    ownership: &OwnershipRecord,
+    compatibility_sequence: u64,
+    compatibility_expires_at_ms: Option<u64>,
+    now_ms: u64,
+    operation_id: String,
+) -> Result<PreparedChangePlan, String> {
+    build_connection_or_refresh_plan(
+        connector,
+        discovery,
+        compatibility,
+        target_path,
+        source,
+        input,
+        Some(ownership),
+        compatibility_sequence,
+        compatibility_expires_at_ms,
+        now_ms,
+        operation_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_connection_or_refresh_plan(
+    connector: &dyn Connector,
+    discovery: &DiscoveryRecord,
+    compatibility: &CompatibilityDecision,
+    target_path: &Path,
+    source: &ConfigSource,
+    input: &ConnectInput<'_>,
+    ownership: Option<&OwnershipRecord>,
+    compatibility_sequence: u64,
+    compatibility_expires_at_ms: Option<u64>,
+    now_ms: u64,
+    operation_id: String,
+) -> Result<PreparedChangePlan, String> {
     if !connector.supports_platform(discovery.environment) {
         return Err(format!(
             "Connector '{}' 不支持当前平台 {:?}",
@@ -169,6 +227,15 @@ pub fn build_connection_plan(
         now_ms,
         &operation_id,
     )?;
+    if let Some(ownership) = ownership {
+        if ownership.agent_id != connector.agent_id()
+            || ownership.connector_id != connector.connector_id()
+            || ownership.installation_path != discovery.canonical_path
+            || ownership.target_config_path != strict_path_text(target_path)?
+        {
+            return Err("metadata refresh ownership does not match the selected connector".to_string());
+        }
+    }
     connector.validate_preconditions(input)?;
 
     let mut document = parse_source_bytes(
@@ -176,13 +243,26 @@ pub fn build_connection_plan(
         connector.format(),
         connector.label(),
     )?;
-    connector.validate_source(&document)?;
+    if ownership.is_some() {
+        connector.validate_refresh_source(&document)?;
+    } else {
+        connector.validate_source(&document)?;
+    }
     let baseline_semantic = semantic_json(&document)?;
-    let operations = connector.connect_patch_for_document(&document, input)?;
-    let owned_paths = connector.owned_paths();
-    validate_owned_paths(&owned_paths)?;
-    validate_patch_ownership(&operations, &owned_paths)?;
+    let operations = if ownership.is_some() {
+        connector.refresh_patch_for_document(&document, input)?
+    } else {
+        connector.connect_patch_for_document(&document, input)?
+    };
+    let declared_owned_paths = connector.owned_paths();
+    validate_owned_paths(&declared_owned_paths)?;
+    validate_patch_ownership(&operations, &declared_owned_paths)?;
     let reverse_operations = apply_patch_with_reverse(&mut document, &operations)?;
+    let owned_paths = ownership.map_or_else(
+        || widened_owned_paths(&declared_owned_paths, &reverse_operations),
+        |record| record.owned_paths.clone(),
+    );
+    validate_owned_paths(&owned_paths)?;
     connector.validate_projected(&document, input)?;
     let rendered = render_document(&document, connector.label())?;
     let reparsed = parse_rendered(&rendered, connector.format(), connector.label())?;
@@ -338,7 +418,11 @@ pub fn build_connection_plan(
         view: ConfigChangePlan {
             schema_version: PLAN_SCHEMA_VERSION,
             operation_id,
-            intent: PlanIntent::Connect,
+            intent: if ownership.is_some() {
+                PlanIntent::Restore
+            } else {
+                PlanIntent::Connect
+            },
             agent_id: connector.agent_id().to_string(),
             installation_path: discovery.canonical_path.clone(),
             target_config_path: strict_path_text(target_path)?.to_string(),
@@ -364,7 +448,10 @@ pub fn build_connection_plan(
         projected_bytes: Zeroizing::new(projected_bytes),
         format: connector.format(),
         label: connector.label(),
-        ownership: None,
+        ownership: ownership.map(|record| PlanOwnershipBinding {
+            record: record.clone(),
+            disposition: OwnershipDisposition::Update,
+        }),
         companions,
     })
 }
@@ -986,6 +1073,52 @@ fn validate_owned_paths(paths: &[ConfigPath]) -> Result<(), String> {
     Ok(())
 }
 
+/// Expand ownership to an ancestor that the connection had to materialize
+/// from an absent or null value. This lets disconnect restore that ancestor
+/// exactly. A later metadata refresh keeps the ownership paths already stored
+/// in the active record, so it cannot lose the original restoration scope.
+fn widened_owned_paths(
+    declared: &[ConfigPath],
+    reverse_operations: &[PatchOperation],
+) -> Vec<ConfigPath> {
+    let mut materialized = reverse_operations
+        .iter()
+        .filter(|operation| {
+            matches!(operation.operation, PatchKind::Remove | PatchKind::Replace)
+                && operation
+                    .value
+                    .as_ref()
+                    .is_none_or(serde_json::Value::is_null)
+                && declared.iter().any(|path| {
+                    operation.path.segments.len() < path.segments.len()
+                        && is_path_prefix(&operation.path, path)
+                })
+        })
+        .map(|operation| operation.path.clone())
+        .collect::<Vec<_>>();
+    materialized.sort_by_key(|path| path.segments.len());
+    materialized.dedup();
+    let materialized = materialized
+        .iter()
+        .filter(|path| {
+            !materialized
+                .iter()
+                .any(|other| other != *path && is_path_prefix(other, path))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut effective = materialized.clone();
+    effective.extend(
+        declared
+            .iter()
+            .filter(|path| !materialized.iter().any(|parent| is_path_prefix(parent, path)))
+            .cloned(),
+    );
+    effective.sort();
+    effective
+}
+
 fn redact_changes(
     operations: &[PatchOperation],
     sensitive_paths: &[ConfigPath],
@@ -1350,7 +1483,7 @@ mod tests {
             .reverse_changes
             .iter()
             .any(|change| change.operation == PatchKind::Remove
-                && change.path.segments == ["model_providers", "tokenstation"]));
+                && change.path.segments == ["model_providers"]));
     }
 
     #[test]

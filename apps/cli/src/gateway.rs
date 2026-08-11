@@ -971,6 +971,20 @@ fn annotate_conversion_failure(record: &mut RequestRecord, error: &ErrorEnvelope
             ConversionReasonCode::ProviderToolUnsupported,
             Some(ConversionReasonDetail::WebSearch),
         )
+    } else if [
+        "file_search",
+        "code_interpreter",
+        "image_generation",
+        "computer_use_preview",
+        "mcp",
+    ]
+    .iter()
+    .any(|tool| message.contains(tool))
+    {
+        (
+            ConversionReasonCode::ProviderToolUnsupported,
+            Some(ConversionReasonDetail::OtherToolType),
+        )
     } else if message.contains("tool type") {
         (
             ConversionReasonCode::UnsupportedToolType,
@@ -1200,10 +1214,10 @@ fn restore_configured_capability_evidence(
         reported.context_window = saved.context_window;
     }
     for key in ["max_output_tokens", "catalog_cost"] {
-        if !reported.extensions.contains_key(key) {
-            if let Some(value) = saved.extensions.get(key) {
-                reported.extensions.insert(key.to_owned(), value.clone());
-            }
+        if !reported.extensions.contains_key(key)
+            && let Some(value) = saved.extensions.get(key)
+        {
+            reported.extensions.insert(key.to_owned(), value.clone());
         }
     }
     reported
@@ -1218,6 +1232,17 @@ fn catalog_model_document(
         "id": capability.model,
         "object": "model",
         "owned_by": owner,
+    });
+    let image_input = capability.vision_state().is_supported();
+    document["capabilities"] = json!({
+        "image_input": image_input,
+        "input_modalities": if image_input { json!(["text", "image"]) } else { json!(["text"]) },
+        "output_modalities": ["text"],
+        "tool_call": capability.tool_state().is_supported(),
+    });
+    document["modalities"] = json!({
+        "input": if image_input { json!(["text", "image"]) } else { json!(["text"]) },
+        "output": ["text"],
     });
     if capability.context_window > 0 {
         document["context_window"] = json!(capability.context_window);
@@ -1237,22 +1262,161 @@ fn catalog_model_document(
             });
         }
     }
-    if let Some(cost) = capability
+    if let Some(cost) = model_cost_document(capability, pricing) {
+        document["cost"] = cost;
+    }
+    document
+}
+
+fn model_cost_document(
+    capability: &ModelCapability,
+    pricing: &crate::pricing::PriceTable,
+) -> Option<Value> {
+    capability
         .extensions
         .get("catalog_cost")
         .and_then(sanitized_catalog_cost)
-    {
-        document["cost"] = cost;
-    } else if let Some(price) = pricing.models.get(&capability.model) {
-        let dollars = |micros: u64| micros as f64 / 1_000_000.0;
-        document["cost"] = json!({
-            "input": dollars(price.input_per_mtok),
-            "output": dollars(price.output_per_mtok),
-            "cache_read": dollars(price.cache_read_per_mtok),
-            "cache_write": dollars(price.cache_write_per_mtok),
-        });
+        .or_else(|| {
+            pricing.models.get(&capability.model).map(|price| {
+                // Price display is decimal USD per million tokens; sub-cent rounding is acceptable here.
+                #[allow(clippy::cast_precision_loss)]
+                let dollars = |micros: u64| micros as f64 / 1_000_000.0;
+                json!({
+                    "input": dollars(price.input_per_mtok),
+                    "output": dollars(price.output_per_mtok),
+                    "cache_read": dollars(price.cache_read_per_mtok),
+                    "cache_write": dollars(price.cache_write_per_mtok),
+                })
+            })
+        })
+}
+
+fn router_catalog_targets(router: &Router) -> Option<BTreeSet<UpstreamModel>> {
+    let config = router.config();
+    if config.routing_mode == RoutingMode::QuotaFirst {
+        return (!config.quota_accounts.is_empty())
+            .then(|| config.quota_accounts.iter().cloned().collect());
     }
-    document
+    Some(config.pools.values().flatten().cloned().collect())
+}
+
+fn uniform_model_owner<'a>(
+    targets_and_capabilities: &[(&'a UpstreamModel, &ModelCapability)],
+) -> &'a str {
+    targets_and_capabilities
+        .first()
+        .map(|(target, _)| target.upstream.as_str())
+        .filter(|first| {
+            targets_and_capabilities
+                .iter()
+                .all(|(target, _)| target.upstream.as_str() == *first)
+        })
+        .unwrap_or("token-station")
+}
+
+fn scoped_models_document(
+    catalog: &[(UpstreamModel, ModelCapability)],
+    router: &Router,
+    pricing: &crate::pricing::PriceTable,
+) -> String {
+    let targets = router_catalog_targets(router);
+    let mut grouped = BTreeMap::<String, Vec<(&UpstreamModel, &ModelCapability)>>::new();
+    for (target, capability) in catalog {
+        if targets
+            .as_ref()
+            .is_none_or(|targets| targets.contains(target))
+        {
+            grouped
+                .entry(capability.model.clone())
+                .or_default()
+                .push((target, capability));
+        }
+    }
+
+    let mut data = Vec::with_capacity(grouped.len());
+    for targets_and_capabilities in grouped.into_values() {
+        let capabilities = targets_and_capabilities
+            .iter()
+            .map(|(_, capability)| *capability)
+            .collect::<Vec<_>>();
+        let owner = uniform_model_owner(&targets_and_capabilities);
+        let mut merged = capabilities[0].clone();
+        merged.context_window = capabilities
+            .iter()
+            .map(|capability| capability.context_window)
+            .min()
+            .filter(|value| *value > 0)
+            .unwrap_or(0);
+        merged.tool = capabilities
+            .iter()
+            .all(|capability| capability.tool_state().is_supported());
+        merged.tool_state = Some(if merged.tool {
+            CapabilityState::Declared
+        } else {
+            CapabilityState::Unsupported
+        });
+        merged.vision = capabilities
+            .iter()
+            .all(|capability| capability.vision_state().is_supported());
+        merged.vision_state = Some(if merged.vision {
+            CapabilityState::Declared
+        } else {
+            CapabilityState::Unsupported
+        });
+        merged.supported_parameters = capabilities.iter().skip(1).fold(
+            merged.supported_parameters.clone(),
+            |current, capability| {
+                current
+                    .intersection(&capability.supported_parameters)
+                    .cloned()
+                    .collect()
+            },
+        );
+
+        let outputs = capabilities
+            .iter()
+            .map(|capability| {
+                capability
+                    .extensions
+                    .get("max_output_tokens")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .filter(|value| *value > 0)
+            })
+            .collect::<Vec<_>>();
+        if let Some(output) = outputs
+            .iter()
+            .copied()
+            .collect::<Option<Vec<_>>>()
+            .and_then(|values| values.into_iter().min())
+        {
+            merged
+                .extensions
+                .insert("max_output_tokens".to_owned(), json!(output));
+        } else {
+            merged.extensions.remove("max_output_tokens");
+        }
+
+        let costs = capabilities
+            .iter()
+            .map(|capability| model_cost_document(capability, pricing))
+            .collect::<Vec<_>>();
+        if let Some(cost) = costs.first().cloned().flatten().filter(|first| {
+            costs
+                .iter()
+                .all(|candidate| candidate.as_ref() == Some(first))
+        }) {
+            merged.extensions.insert("catalog_cost".to_owned(), cost);
+        } else {
+            merged.extensions.remove("catalog_cost");
+        }
+        data.push(catalog_model_document(
+            owner,
+            &merged,
+            &crate::pricing::PriceTable::default(),
+        ));
+    }
+    json!({"object": "list", "data": data}).to_string()
 }
 
 fn sanitized_catalog_cost(value: &Value) -> Option<Value> {
@@ -1338,8 +1502,6 @@ pub struct Gateway {
     secrets: SecretStore,
     egress: EgressPolicy,
     recorder: Arc<dyn Recorder>,
-    /// `/v1/models`, rendered once: it changes only with the config.
-    models_document: String,
 }
 
 /// A finished non-streaming exchange, ready to be an HTTP response.
@@ -1700,8 +1862,6 @@ impl Gateway {
 
         let mut upstreams = BTreeMap::new();
         let mut catalog = Vec::new();
-        let mut models_document: Vec<Value> = Vec::new();
-        let mut seen_models = std::collections::BTreeSet::new();
 
         for (name, entry) in &config.upstreams {
             let plugin = Arc::clone(
@@ -1736,9 +1896,6 @@ impl Gateway {
                     UpstreamModel::new(reference.clone(), capability.model.clone()),
                     capability.clone(),
                 ));
-                if seen_models.insert(capability.model.clone()) {
-                    models_document.push(catalog_model_document(name, capability, &config.pricing));
-                }
             }
 
             upstreams.insert(
@@ -1786,7 +1943,6 @@ impl Gateway {
             secrets: SecretStore::from_config(config, &config.data.dir),
             egress: EgressPolicy::new(config.egress.clone()),
             recorder,
-            models_document: json!({ "object": "list", "data": models_document }).to_string(),
         })
     }
 
@@ -1796,12 +1952,18 @@ impl Gateway {
     /// virtual model it can discover without mistaking an upstream model for a
     /// Claude model. Unknown namespaces fail closed instead of inheriting Home.
     #[must_use]
-    pub fn models_for(&self, agent_id: Option<&str>) -> Option<&str> {
-        match agent_id {
-            Some(agent_id) if !self.supported_agent_ids.contains(agent_id) => None,
-            Some("claude-desktop") => Some(CLAUDE_DESKTOP_MODELS_DOCUMENT),
-            None | Some(_) => Some(&self.models_document),
+    pub fn models_for(&self, agent_id: Option<&str>) -> Option<String> {
+        if agent_id.is_some_and(|agent_id| !self.supported_agent_ids.contains(agent_id)) {
+            return None;
         }
+        if agent_id == Some("claude-desktop") {
+            return Some(CLAUDE_DESKTOP_MODELS_DOCUMENT.to_owned());
+        }
+        let routers = self.agent_routers.read().ok()?;
+        let router = agent_id
+            .and_then(|agent_id| routers.get(agent_id).map(Arc::as_ref))
+            .unwrap_or(self.home_router.as_ref());
+        Some(scoped_models_document(&self.catalog, router, &self.pricing))
     }
 
     /// Upper bound for blocking request workers. The async server acquires a
@@ -5054,8 +5216,8 @@ mod request_receipt_tests {
     fn models_document_preserves_discovered_limits_and_cost() {
         let capability: ModelCapability = serde_json::from_value(serde_json::json!({
             "model": "glm-5.2",
-            "context_window": 257550,
-            "max_output_tokens": 32768,
+            "context_window": 257_550,
+            "max_output_tokens": 32_768,
             "catalog_cost": {"input": 0.2, "output": 0.6, "cache_read": 0.04}
         }))
         .unwrap();
@@ -5065,11 +5227,11 @@ mod request_receipt_tests {
             &capability,
             &crate::pricing::PriceTable::default(),
         );
-        assert_eq!(document["context_window"], serde_json::json!(257550));
-        assert_eq!(document["max_output_tokens"], serde_json::json!(32768));
+        assert_eq!(document["context_window"], serde_json::json!(257_550));
+        assert_eq!(document["max_output_tokens"], serde_json::json!(32_768));
         assert_eq!(
             document["limit"],
-            serde_json::json!({"context": 257550, "output": 32768})
+            serde_json::json!({"context": 257_550, "output": 32_768})
         );
         assert_eq!(
             document["cost"],
