@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const requiredFiles = [
   "packaging/macos/安装前必读.md",
+  "packaging/macos/未签名测试版安装前必读.md",
   "packaging/macos/安装 Token Station.command",
   "packaging/macos/AGENTS.md",
   "scripts/package-macos-dmg.sh",
@@ -40,7 +41,7 @@ if (installer) {
   const requiredInstallerPatterns = [
     ["固定 bundle id", /EXPECTED_BUNDLE_ID=["']com\.tokenstation\.desktop["']/],
     ["固定安装目标", /DEST_APP=["']\/Applications\/token-station\.app["']/],
-    ["源 App 签名检查", /codesign --verify --deep --strict ["']?\$SOURCE_APP/],
+    ["源 App 签名检查", /verify_app ["']\$SOURCE_APP["']/],
     ["源 App Gatekeeper 检查", /spctl --assess --type execute .*\$SOURCE_APP/],
     ["明确 y 或 Y 确认", /\[yY\]/],
     ["管理员密码说明", /密码.*不会显示|不会显示.*密码/],
@@ -51,6 +52,8 @@ if (installer) {
     ["精确移除 quarantine", /xattr -dr com\.apple\.quarantine ["']?\$DEST_APP/],
     ["安装后重新验签", /verify_installed_app/],
     ["启动 App", /open ["']?\$DEST_APP/],
+    ["未签名测试标记", /UNSIGNED_TEST_MARKER=/],
+    ["未签名测试风险提示", /未签名、未经 Apple 公证/],
   ];
   for (const [label, pattern] of requiredInstallerPatterns) {
     if (!pattern.test(installer)) failures.push(`${installerPath} 缺少${label}`);
@@ -65,6 +68,17 @@ if (installer) {
   }
   if (/spctl\s+--master-disable/.test(installer)) {
     failures.push(`${installerPath} 不能关闭 Gatekeeper`);
+  }
+}
+
+const unsignedTestReadmePath = "packaging/macos/未签名测试版安装前必读.md";
+const unsignedTestReadme = read(unsignedTestReadmePath);
+if (unsignedTestReadme) {
+  for (const phrase of ["未签名", "未经 Apple 公证", "仅供测试", "SHA-256", "UNSIGNED-UNNOTARIZED.dmg"]) {
+    if (!unsignedTestReadme.includes(phrase)) failures.push(`${unsignedTestReadmePath} 缺少“${phrase}”说明`);
+  }
+  if (/已完成 Developer ID 签名和 Apple 公证/.test(unsignedTestReadme)) {
+    failures.push(`${unsignedTestReadmePath} 不能声称测试 DMG 已签名公证`);
   }
 }
 
@@ -115,6 +129,12 @@ if (packager) {
     ["票据装订", /stapler staple/],
     ["临时 DMG 隔离", /temporary_dmg=/],
     ["通过审计后再无覆盖发布", /audit-macos-dmg\.sh[\s\S]*\/bin\/mv -n "\$temporary_dmg" "\$output_path"/],
+    ["显式未签名测试模式", /--unsigned-test/],
+    ["测试 DMG 警告文件名", /UNSIGNED-UNNOTARIZED/],
+    ["App 源码提交", /--app-source-commit/],
+    ["打包源码提交", /packaging_source_commit/],
+    ["测试包可见警告", /未签名测试版\.txt/],
+    ["测试包构建来源", /构建来源\.txt/],
   ];
   for (const [label, pattern] of requiredPackagerPatterns) {
     if (!pattern.test(packager)) failures.push(`${packagerPath} 缺少${label}`);
@@ -140,6 +160,10 @@ if (auditor) {
     ["票据检查", /stapler validate/],
     ["版本检查", /CFBundleShortVersionString/],
     ["架构检查", /lipo -archs/],
+    ["未签名测试审计", /--unsigned-test/],
+    ["ad-hoc App 检查", /Signature=adhoc/],
+    ["测试包警告检查", /未签名测试版\.txt/],
+    ["测试包来源检查", /构建来源\.txt/],
   ];
   for (const [label, pattern] of requiredAuditPatterns) {
     if (!pattern.test(auditor)) failures.push(`${auditorPath} 缺少${label}`);
