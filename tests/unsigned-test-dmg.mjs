@@ -33,6 +33,7 @@ assert.match(packager, /-format UDRW/);
 assert.match(packager, /configure-dmg-layout\.applescript/);
 assert.match(packager, /\.DS_Store/);
 assert.match(packager, /\/bin\/rm -rf -- "\$layout_mount_point\/\.fseventsd"/);
+assert.match(packager, /layout_mounted=true[\s\S]*\/bin\/rm -rf -- "\$layout_mount_point\/\.fseventsd"[\s\S]*osascript .* configure/);
 assert.match(packager, /hdiutil convert[\s\S]*-format UDZO/);
 
 const auditor = read("scripts/audit-macos-dmg.sh");
