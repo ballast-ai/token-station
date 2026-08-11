@@ -43,5 +43,10 @@ assert.match(
   /- run: node scripts\/check-ci-msi-trigger-policy\.mjs/,
   "regular CI must execute this policy check",
 );
+assert.match(
+  workflow,
+  /- run: node scripts\/check-ci-review-trigger-policy\.mjs/,
+  "regular CI must execute the review trigger policy check",
+);
 
 console.log("Windows MSI trigger policy: PASS");

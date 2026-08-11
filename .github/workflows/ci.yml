@@ -153,6 +153,10 @@ jobs:
 
   msrv:
     name: Rust 1.95 minimum-version check
+    # Stable Rust is the PR compatibility gate. Check the minimum supported
+    # compiler after merge or by manual dispatch to avoid another full build
+    # on every review.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -223,8 +227,10 @@ jobs:
           --fail-under-lines 80
 
   desktop-coverage:
-    # Keep the full Desktop Rust and Agent Integration coverage gates pre-merge.
-    # Branch pushes repeat the same check against the exact committed revision.
+    # Coverage instruments and repeats the complete desktop Rust test suite.
+    # Keep it on post-merge/manual CI because desktop-rust already provides the
+    # functional PR gate.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -464,6 +470,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.20.2
+      - run: node scripts/check-ci-review-trigger-policy.mjs
       - run: node scripts/check-ci-msi-trigger-policy.mjs
       - run: node scripts/check-ci-scaffold-prefetch.mjs
       - run: node scripts/check-rustsec-exceptions.mjs
