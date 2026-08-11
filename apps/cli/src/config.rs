@@ -18,7 +18,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use token_station_protocol::{ModelCapability, ProviderEndpoint};
 use token_station_router_core::{
     ConfigSource, RouterConfig, RoutingMode, UpstreamModel, UpstreamRef,
@@ -45,10 +45,18 @@ pub struct ClientConfig {
     pub router: RouterConfig,
     /// Optional per-Agent three-tier overrides. An absent entry inherits the
     /// home router, keeping every pre-Agent-routes configuration compatible.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_to_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub agent_routes: BTreeMap<String, AgentRouteConfig>,
     /// Named reusable three-tier routes that multiple Agents can mount.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_to_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub profiles: BTreeMap<String, AgentTierRoutes>,
     /// Where the request log and metrics store live. Optional; defaults apply.
     #[serde(default)]
@@ -66,12 +74,24 @@ pub struct ClientConfig {
     pub pricing: crate::pricing::PriceTable,
     /// Display-only per-Agent spend and expiry thresholds. These values are
     /// intentionally absent from gateway admission/routing decisions.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_to_default",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub agent_budgets: BTreeMap<String, crate::budget::AgentBudget>,
     /// Explicit outbound network policy. Defaults to direct and never reads
     /// ambient proxy environment variables.
     #[serde(default)]
     pub egress: EgressConfig,
+}
+
+fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

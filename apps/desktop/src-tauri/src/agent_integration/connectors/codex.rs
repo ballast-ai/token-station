@@ -229,6 +229,7 @@ mod tests {
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("local-virtual-key"),
             adapter_ready: true,
+            model_metadata: None,
         };
 
         let operations = CodexConnector.connect_patch(&input).unwrap();

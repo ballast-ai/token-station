@@ -2969,13 +2969,16 @@ fn apply_discovered_model_capabilities(
         .filter(|models| models.is_array())
         .cloned()
         .ok_or_else(|| format!("供应商 `{name}` 的模型配置无效"))?;
-    let facts: std::collections::BTreeMap<&str, CapabilityState> = catalog
+    let facts: std::collections::BTreeMap<&str, &model_catalog::CatalogModelView> = catalog
         .iter()
         .filter(|model| model.catalog_state == model_catalog::CatalogState::Active)
-        .filter_map(|model| {
-            (model.vision != CapabilityState::Unknown)
-                .then_some((model.model.as_str(), model.vision))
+        .filter(|model| {
+            model.vision != CapabilityState::Unknown
+                || model.context_window.is_some()
+                || model.max_output_tokens.is_some()
+                || model.cost.is_some()
         })
+        .map(|model| (model.model.as_str(), model))
         .collect();
     if facts.is_empty() {
         return Ok(false);
@@ -2991,20 +2994,42 @@ fn apply_discovered_model_capabilities(
         let Some(model) = capability["model"].as_str() else {
             continue;
         };
-        let Some(state) = facts.get(model).copied() else {
+        let Some(fact) = facts.get(model).copied() else {
             continue;
         };
-        let (supported, serialized) = match state {
-            CapabilityState::Verified => (true, "verified"),
-            CapabilityState::Unsupported => (false, "unsupported"),
-            CapabilityState::Declared | CapabilityState::Unknown => continue,
-        };
-        if capability["vision"].as_bool() != Some(supported)
-            || capability["vision_state"].as_str() != Some(serialized)
-        {
-            capability["vision"] = json!(supported);
-            capability["vision_state"] = json!(serialized);
-            changed = true;
+        match fact.vision {
+            CapabilityState::Verified | CapabilityState::Unsupported => {
+                let supported = fact.vision == CapabilityState::Verified;
+                let serialized = if supported { "verified" } else { "unsupported" };
+                if capability["vision"].as_bool() != Some(supported)
+                    || capability["vision_state"].as_str() != Some(serialized)
+                {
+                    capability["vision"] = json!(supported);
+                    capability["vision_state"] = json!(serialized);
+                    changed = true;
+                }
+            }
+            CapabilityState::Declared | CapabilityState::Unknown => {}
+        }
+        if let Some(context_window) = fact.context_window {
+            if capability["context_window"].as_u64() != Some(u64::from(context_window)) {
+                capability["context_window"] = json!(context_window);
+                changed = true;
+            }
+        }
+        if let Some(max_output_tokens) = fact.max_output_tokens {
+            if capability["max_output_tokens"].as_u64() != Some(u64::from(max_output_tokens)) {
+                capability["max_output_tokens"] = json!(max_output_tokens);
+                changed = true;
+            }
+        }
+        if let Some(cost) = &fact.cost {
+            let serialized = serde_json::to_value(cost)
+                .map_err(|error| format!("序列化模型价格失败：{error}"))?;
+            if capability["catalog_cost"] != serialized {
+                capability["catalog_cost"] = serialized;
+                changed = true;
+            }
         }
     }
     if !changed {
@@ -5998,6 +6023,31 @@ mod tests {
     }
 
     #[test]
+    fn loading_legacy_null_optional_maps_recovers_without_read_only_lockout() {
+        let root = scratch_home("null-optional-routing-maps");
+        let path = root.join("token-station.json");
+        let mut source = template_for_test(&root);
+        source["agent_routes"] = Value::Null;
+        source["profiles"] = Value::Null;
+        source["agent_budgets"] = Value::Null;
+        std::fs::write(&path, serde_json::to_vec(&source).unwrap()).unwrap();
+
+        let (draft, saved, error) = load_draft_state(
+            &path,
+            &root.join("token-station-data"),
+            &root.join("plugins"),
+        );
+
+        assert_eq!(error, None);
+        assert!(saved.get("agent_routes").is_none());
+        assert!(saved.get("profiles").is_none());
+        assert!(saved.get("agent_budgets").is_none());
+        serde_json::from_value::<ClientConfig>(draft)
+            .expect("legacy null optional maps recover to empty maps");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn a_desktop_legacy_zero_concurrency_config_loads_writable_without_rewriting_source() {
         let root = scratch_home("legacy-zero-concurrency");
         let path = root.join("token-station.json");
@@ -6096,6 +6146,14 @@ mod tests {
                 tool: CapabilityState::Unknown,
                 vision: CapabilityState::Verified,
                 json_schema: CapabilityState::Unknown,
+                context_window: Some(257_550),
+                max_output_tokens: Some(32_768),
+                cost: Some(model_catalog::CatalogCostView {
+                    input: Some(0.2),
+                    output: Some(0.6),
+                    cache_read: Some(0.04),
+                    cache_write: None,
+                }),
                 source: model_catalog::CatalogSource::Live,
                 last_seen_ms: Some(42),
                 catalog_state: model_catalog::CatalogState::Active,
@@ -6105,6 +6163,9 @@ mod tests {
                 tool: CapabilityState::Unknown,
                 vision: CapabilityState::Unsupported,
                 json_schema: CapabilityState::Unknown,
+                context_window: None,
+                max_output_tokens: None,
+                cost: None,
                 source: model_catalog::CatalogSource::Live,
                 last_seen_ms: Some(42),
                 catalog_state: model_catalog::CatalogState::Active,
@@ -6121,6 +6182,12 @@ mod tests {
             .unwrap();
         assert_eq!(models[0]["vision"], json!(true));
         assert_eq!(models[0]["vision_state"], json!("verified"));
+        assert_eq!(models[0]["context_window"], json!(257550));
+        assert_eq!(models[0]["max_output_tokens"], json!(32768));
+        assert_eq!(
+            models[0]["catalog_cost"],
+            json!({"input": 0.2, "output": 0.6, "cache_read": 0.04})
+        );
         assert_eq!(models[1]["vision"], json!(false));
         assert_eq!(models[1]["vision_state"], json!("unsupported"));
         std::fs::remove_dir_all(root).ok();
@@ -7750,7 +7817,7 @@ mod tests {
         crate::agent_integration::safe_fs::write_atomic_private(
             &catalog_path,
             &serde_json::to_vec_pretty(&json!({
-                "version": 2,
+                "version": 3,
                 "providers": {
                     "local": {
                         "base_url": "http://127.0.0.1:11434/v1",

@@ -1,4 +1,5 @@
 import type { Language } from "./components/LanguageProvider";
+import type { ReceiptConversionView, ReceiptView } from "./api";
 
 export interface HumanError {
   layer: string;
@@ -55,6 +56,57 @@ export function humanizeErrorCode(
         message: `Unclassified error code: ${code}`,
         suggestion: "Copy the request ID and inspect the local logs.",
       });
+}
+
+function localConversionMessage(
+  conversion: ReceiptConversionView,
+  language: Language,
+): HumanError {
+  const chinese = language === "zh-CN";
+  const reason = conversion.reason_code;
+  const detail = conversion.reason_detail;
+  const cause = (() => {
+    if (reason === "invalid_json") return chinese ? "请求 JSON 无法解析。" : "The request JSON could not be parsed.";
+    if (reason === "provider_tool_unsupported" && detail === "web_search") {
+      return chinese
+        ? "当前翻译链路不能执行 Anthropic 服务端 WebSearch。"
+        : "The translated route cannot execute Anthropic server-side WebSearch.";
+    }
+    if (reason === "unsupported_tool_type") return chinese ? "请求包含不支持的工具类型。" : "The request contains an unsupported tool type.";
+    if (reason === "structured_output") return chinese ? "当前链路不能保留请求的结构化输出语义。" : "The route cannot preserve the requested structured-output semantics.";
+    if (reason === "unsupported_media") return chinese ? "当前链路不支持请求中的媒体类型。" : "The route does not support a media type in the request.";
+    if (reason === "invalid_protocol_shape") return chinese ? "请求字段缺失或结构不符合所选协议。" : "Required fields are missing or the request shape does not match the selected protocol.";
+    return chinese ? "请求无法转换为 Token Station 的内部格式。" : "The request could not be converted to Token Station's internal format.";
+  })();
+  return chinese
+    ? {
+        layer: "本地请求转换",
+        message: `${cause} 请求尚未发往上游。`,
+        suggestion: reason === "provider_tool_unsupported"
+          ? "改用真正支持 Anthropic 服务端工具的原生 Provider，或关闭该服务端工具。"
+          : "检查 Agent 请求协议和必填字段，然后重试。",
+      }
+    : {
+        layer: "Local request conversion",
+        message: `${cause} The request was not sent upstream.`,
+        suggestion: reason === "provider_tool_unsupported"
+          ? "Use a native provider that supports Anthropic server tools, or disable that server tool."
+          : "Check the Agent protocol and required fields, then retry.",
+      };
+}
+
+export function humanizeReceiptError(
+  receipt: ReceiptView,
+  language: Language = "en",
+): HumanError | null {
+  const failedInbound = receipt.conversion_reports.find(
+    (conversion) => conversion.stage === "inbound_normalize" && !conversion.succeeded,
+  );
+  const noUpstreamAttempt = receipt.attempts === 0 && receipt.attempt_records.length === 0;
+  if (failedInbound && noUpstreamAttempt && receipt.decision == null) {
+    return localConversionMessage(failedInbound, language);
+  }
+  return humanizeErrorCode(receipt.error_code, language);
 }
 
 interface LocalizedAppError {

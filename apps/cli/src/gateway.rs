@@ -1196,7 +1196,85 @@ fn restore_configured_capability_evidence(
     if reported.json_schema_state.is_none() && saved.json_schema_state.is_some() {
         reported.json_schema_state = saved.json_schema_state;
     }
+    if reported.context_window == 0 {
+        reported.context_window = saved.context_window;
+    }
+    for key in ["max_output_tokens", "catalog_cost"] {
+        if !reported.extensions.contains_key(key) {
+            if let Some(value) = saved.extensions.get(key) {
+                reported.extensions.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
     reported
+}
+
+fn catalog_model_document(
+    owner: &str,
+    capability: &ModelCapability,
+    pricing: &crate::pricing::PriceTable,
+) -> Value {
+    let mut document = json!({
+        "id": capability.model,
+        "object": "model",
+        "owned_by": owner,
+    });
+    if capability.context_window > 0 {
+        document["context_window"] = json!(capability.context_window);
+    }
+    if let Some(max_output_tokens) = capability
+        .extensions
+        .get("max_output_tokens")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+    {
+        document["max_output_tokens"] = json!(max_output_tokens);
+        if capability.context_window > 0 {
+            document["limit"] = json!({
+                "context": capability.context_window,
+                "output": max_output_tokens,
+            });
+        }
+    }
+    if let Some(cost) = capability
+        .extensions
+        .get("catalog_cost")
+        .and_then(sanitized_catalog_cost)
+    {
+        document["cost"] = cost;
+    } else if let Some(price) = pricing.models.get(&capability.model) {
+        let dollars = |micros: u64| micros as f64 / 1_000_000.0;
+        document["cost"] = json!({
+            "input": dollars(price.input_per_mtok),
+            "output": dollars(price.output_per_mtok),
+            "cache_read": dollars(price.cache_read_per_mtok),
+            "cache_write": dollars(price.cache_write_per_mtok),
+        });
+    }
+    document
+}
+
+fn sanitized_catalog_cost(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let rate = |name: &str| {
+        object
+            .get(name)
+            .and_then(Value::as_f64)
+            .filter(|rate| rate.is_finite() && (0.0..=9_000_000_000.0).contains(rate))
+    };
+    let mut output = serde_json::Map::new();
+    for (name, value) in [
+        ("input", rate("input")),
+        ("output", rate("output")),
+        ("cache_read", rate("cache_read")),
+        ("cache_write", rate("cache_write")),
+    ] {
+        if let Some(value) = value.and_then(serde_json::Number::from_f64) {
+            output.insert(name.to_owned(), Value::Number(value));
+        }
+    }
+    (!output.is_empty()).then_some(Value::Object(output))
 }
 
 fn retain_free_fallbacks(decision: &mut Decision, free_upstreams: &BTreeSet<String>) {
@@ -1659,11 +1737,7 @@ impl Gateway {
                     capability.clone(),
                 ));
                 if seen_models.insert(capability.model.clone()) {
-                    models_document.push(json!({
-                        "id": capability.model,
-                        "object": "model",
-                        "owned_by": name,
-                    }));
+                    models_document.push(catalog_model_document(name, capability, &config.pricing));
                 }
             }
 
@@ -4963,17 +5037,45 @@ mod free_fallback_tests {
 #[cfg(test)]
 mod request_receipt_tests {
     use super::{
-        annotate_conversion_failure, begin_record, record_actual_attempt_target, record_conversion,
-        record_conversion_cancelled, record_route_decision, tag_transport,
+        annotate_conversion_failure, begin_record, catalog_model_document,
+        record_actual_attempt_target, record_conversion, record_conversion_cancelled,
+        record_route_decision, tag_transport,
     };
     use token_station_metrics::{
         ConversionOutcome, ConversionReasonCode, ConversionReasonDetail, ConversionStage,
         RequestPathKind,
     };
-    use token_station_protocol::{ErrorCode, ErrorEnvelope};
+    use token_station_protocol::{ErrorCode, ErrorEnvelope, ModelCapability};
     use token_station_router_core::{
         DecidedBy, Decision, RequestFeatures, UpstreamModel, UpstreamRef,
     };
+
+    #[test]
+    fn models_document_preserves_discovered_limits_and_cost() {
+        let capability: ModelCapability = serde_json::from_value(serde_json::json!({
+            "model": "glm-5.2",
+            "context_window": 257550,
+            "max_output_tokens": 32768,
+            "catalog_cost": {"input": 0.2, "output": 0.6, "cache_read": 0.04}
+        }))
+        .unwrap();
+
+        let document = catalog_model_document(
+            "wecoding",
+            &capability,
+            &crate::pricing::PriceTable::default(),
+        );
+        assert_eq!(document["context_window"], serde_json::json!(257550));
+        assert_eq!(document["max_output_tokens"], serde_json::json!(32768));
+        assert_eq!(
+            document["limit"],
+            serde_json::json!({"context": 257550, "output": 32768})
+        );
+        assert_eq!(
+            document["cost"],
+            serde_json::json!({"input": 0.2, "output": 0.6, "cache_read": 0.04})
+        );
+    }
 
     #[test]
     fn request_ids_are_random_fixed_width_and_scope_is_bound_at_arrival() {
