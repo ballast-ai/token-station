@@ -724,9 +724,11 @@ impl AgentCommandState {
         }
         let snapshot = self.perform_scan()?;
         let mut refreshed = 0;
-        for record in snapshot.records.iter().filter(|record| {
-            agent_id.is_none_or(|selected| record.agent_id == selected)
-        }) {
+        for record in snapshot
+            .records
+            .iter()
+            .filter(|record| agent_id.is_none_or(|selected| record.agent_id == selected))
+        {
             let descriptor = self
                 .registry
                 .descriptors()

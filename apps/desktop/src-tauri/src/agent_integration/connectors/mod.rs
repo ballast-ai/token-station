@@ -590,6 +590,9 @@ mod tests {
         .unwrap();
         apply_patch(&mut document, &connector.connect_patch(&input).unwrap()).unwrap();
         connector.validate_projected(&document, &input).unwrap();
+        assert!(connector
+            .success_message(&input)
+            .contains("已同步上下文、输出上限和统一价格"));
 
         let projected = crate::agent_integration::config_codec::semantic_json(&document).unwrap();
         assert_eq!(projected["model"], json!("tokenstation/auto"));
@@ -652,6 +655,9 @@ mod tests {
         CodexConnector
             .validate_projected(&codex, &codex_input)
             .unwrap();
+        assert!(CodexConnector
+            .success_message(&codex_input)
+            .contains("已同步安全上下文窗口和自动压缩阈值"));
         let codex = semantic_json(&codex).unwrap();
         assert_eq!(codex["model_context_window"], json!(257_550));
         assert_eq!(
@@ -674,6 +680,9 @@ mod tests {
         OpenClawConnector
             .validate_projected(&openclaw, &openclaw_input)
             .unwrap();
+        assert!(OpenClawConnector
+            .success_message(&openclaw_input)
+            .contains("已同步安全模型限制和一致价格"));
         let openclaw = semantic_json(&openclaw).unwrap();
         let model = &openclaw["models"]["providers"]["tokenstation"]["models"][0];
         assert_eq!(model["contextWindow"], json!(257_550));
@@ -700,6 +709,9 @@ mod tests {
         WorkBuddyConnector
             .validate_projected(&workbuddy, &workbuddy_input)
             .unwrap();
+        assert!(WorkBuddyConnector
+            .success_message(&workbuddy_input)
+            .contains("已同步上下文和最大输出限制"));
         let workbuddy = semantic_json(&workbuddy).unwrap();
         assert_eq!(workbuddy[0]["maxInputTokens"], json!(257_550));
         assert_eq!(workbuddy[0]["maxOutputTokens"], json!(32_768));
@@ -722,6 +734,9 @@ mod tests {
         HermesConnector
             .validate_projected(&hermes, &hermes_input)
             .unwrap();
+        assert!(HermesConnector
+            .success_message(&hermes_input)
+            .contains("已同步安全上下文窗口"));
         let hermes = semantic_json(&hermes).unwrap();
         assert_eq!(hermes["model"]["context_length"], json!(257_550));
     }
@@ -774,12 +789,10 @@ experimental_bearer_token = "fixture-codex-key"
             .refresh_patch_for_document(&hermes, &hermes_input)
             .unwrap();
         apply_patch(&mut hermes, &patch).unwrap();
-        assert!(
-            semantic_json(&hermes)
-                .unwrap()
-                .pointer("/model/context_length")
-                .is_none()
-        );
+        assert!(semantic_json(&hermes)
+            .unwrap()
+            .pointer("/model/context_length")
+            .is_none());
     }
 
     #[test]
@@ -1004,6 +1017,17 @@ experimental_bearer_token = "fixture-codex-key"
                 .owned_paths()
                 .iter()
                 .any(|owned| { sensitive.segments.starts_with(&owned.segments) })));
+            assert_eq!(
+                connector.projects_model_metadata(),
+                connector.connector_id() != "claude-code-v1"
+            );
+            assert_eq!(
+                connector.legacy_companion_format(
+                    Path::new("/fixture/config"),
+                    Path::new("/fixture/companion")
+                ),
+                None
+            );
             assert!(connector.validate_preconditions(&not_ready).is_err());
             assert!(connector.validate_preconditions(&good).is_ok());
             if connector.capabilities().requires_virtual_key {

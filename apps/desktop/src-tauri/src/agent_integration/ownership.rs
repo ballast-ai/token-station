@@ -353,11 +353,10 @@ pub fn legacy_widened_ownership_matches(
             set_json_value(&mut managed, path, value.clone())?;
         }
     }
-    Ok(compute_owned_value_macs_from_semantic(
-        &managed,
-        &record.owned_paths,
-        master_key,
-    )? == record.owned_value_macs)
+    Ok(
+        compute_owned_value_macs_from_semantic(&managed, &record.owned_paths, master_key)?
+            == record.owned_value_macs,
+    )
 }
 
 pub fn normalized_legacy_owned_paths(

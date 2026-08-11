@@ -234,7 +234,9 @@ fn build_connection_or_refresh_plan(
             || ownership.installation_path != discovery.canonical_path
             || ownership.target_config_path != strict_path_text(target_path)?
         {
-            return Err("metadata refresh ownership does not match the selected connector".to_string());
+            return Err(
+                "metadata refresh ownership does not match the selected connector".to_string(),
+            );
         }
     }
     connector.validate_preconditions(input)?;
