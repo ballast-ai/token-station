@@ -41,37 +41,52 @@ jobs:
       # built by a test subprocess with its own target directory.
       - uses: ./.github/actions/setup-rust
         with:
-          components: >-
-            ${{ github.event_name == 'pull_request'
-                && 'rustfmt, clippy'
-                || 'rustfmt, clippy, llvm-tools-preview' }}
+          components: rustfmt, clippy
           workspaces: |
             .
             crates/plugin-runtime/tests/guests/test-provider
-      - if: github.event_name != 'pull_request'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov@0.8.7
       - name: Fetch the locked scaffold dependency set
         run: >-
           cargo fetch --locked --target wasm32-wasip2
           --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
       - run: scripts/check-rust-format.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # Pull requests run the suite directly. Branch pushes run the same suite
-      # under llvm-cov instrumentation and enforce the coverage floor. This was
-      # a separate rust-coverage job, which meant every push compiled and ran
-      # the entire workspace twice.
-      - if: github.event_name == 'pull_request'
-        run: cargo test --workspace
-      - if: github.event_name != 'pull_request'
-        run: >-
-          cargo llvm-cov --workspace --coverage-host-only --summary-only
-          --fail-under-lines 80
+      - run: cargo test --workspace
       # Keep the existing local rustdoc -D warnings gate enforceable in CI.
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # Coverage stays in its own job rather than folding into `rust`. An
+  # instrumented build writes a second full target tree (target/llvm-cov-target)
+  # next to the ordinary one, and a hosted runner does not have the disk for
+  # both: merging them fails at link time with "No space left on device".
+  rust-coverage:
+    # The PR already runs the complete Rust test suite in `rust`. Coverage
+    # instruments and repeats that suite, so keep it as a post-merge/manual
+    # quality gate instead of doubling every PR's slowest workload.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: llvm-tools-preview
+          workspaces: |
+            .
+            crates/plugin-runtime/tests/guests/test-provider
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7
+      - name: Fetch the locked scaffold dependency set
+        run: >-
+          cargo fetch --locked --target wasm32-wasip2
+          --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
+      - run: >-
+          cargo llvm-cov --workspace --coverage-host-only --summary-only
+          --fail-under-lines 80
 
   desktop-rust:
     runs-on: ubuntu-latest
@@ -81,7 +96,31 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          components: rustfmt, clippy, llvm-tools-preview
+          components: rustfmt, clippy
+          workspaces: apps/desktop/src-tauri
+          system-deps: tauri
+      - name: Prepare official plugins for desktop gateway tests
+        run: scripts/prepare-desktop-test-plugins.sh
+      - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - run: cargo doc --manifest-path apps/desktop/src-tauri/Cargo.toml --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # Kept separate from desktop-rust for the same disk reason as rust-coverage:
+  # the instrumented target tree does not fit alongside the ordinary one.
+  desktop-coverage:
+    # Keep the full Desktop Rust and Agent Integration coverage gates pre-merge.
+    # Branch pushes repeat the same check against the exact committed revision.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: llvm-tools-preview
           workspaces: apps/desktop/src-tauri
           system-deps: tauri
       - uses: actions/setup-node@v4
@@ -92,11 +131,6 @@ jobs:
           tool: cargo-llvm-cov@0.8.7
       - name: Prepare official plugins for desktop gateway tests
         run: scripts/prepare-desktop-test-plugins.sh
-      - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
-      - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
-      # llvm-cov runs the test suite, so a separate `cargo test` step would only
-      # compile and run everything a second time. The coverage gates stay
-      # pre-merge, which is what the desktop-coverage job existed to guarantee.
       - run: >-
           cargo llvm-cov --manifest-path apps/desktop/src-tauri/Cargo.toml
           --lcov --output-path apps/desktop/src-tauri/target/desktop-agent.lcov
@@ -113,9 +147,6 @@ jobs:
           node scripts/check-coverage-thresholds.mjs
           apps/desktop/src-tauri/target/desktop-agent.lcov
           apps/desktop/src-tauri/src/agent_integration 90
-      - run: cargo doc --manifest-path apps/desktop/src-tauri/Cargo.toml --no-deps
-        env:
-          RUSTDOCFLAGS: -D warnings
 
   # License allowlists, RustSec advisories, and dependency sources for both the
   # root workspace and the desktop app, from their respective deny.toml files.

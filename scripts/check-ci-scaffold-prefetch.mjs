@@ -30,13 +30,12 @@ const prefetch = [
 ];
 
 // Every job that exercises the offline scaffold must fetch its locked
-// dependencies first. `rust` covers both paths: pull requests run the suite
-// directly, branch pushes run the same suite under llvm-cov instrumentation.
-// Windows repeats the workspace suite from the platform workflow, where the
-// Windows and macOS gates live — they are not part of basic CI.
+// dependencies first. Windows repeats the workspace suite from the platform
+// workflow, where the Windows and macOS gates live — they are not part of
+// basic CI.
 for (const [workflowName, jobName, testCommand] of [
   ["ci", "rust", "cargo test --workspace"],
-  ["ci", "rust", "cargo llvm-cov --workspace"],
+  ["ci", "rust-coverage", "cargo llvm-cov --workspace"],
   ["platform", "windows-rust", "cargo test --workspace"],
 ]) {
   const body = jobBody(workflowName, jobName).replace(/\s+/g, " ");
