@@ -184,7 +184,7 @@ case "$host_os" in
     # Windows artifacts are, so there is no signing/notarization setup here. The
     # build host needs the Tauri Linux system dependencies (webkit2gtk-4.1,
     # libgtk-3, libayatana-appindicator, librsvg2, and — for AppImage — the
-    # bundler tooling); see the Linux adaptation design under docs/design.
+    # bundler tooling).
     ;;
   *)
     echo "desktop release packaging is supported on macOS, Windows, and Linux" >&2
