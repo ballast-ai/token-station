@@ -1,0 +1,94 @@
+name: Set up Rust
+description: >-
+  Rust toolchain, shared cargo cache, and per-platform build prerequisites.
+  Collapses the toolchain / rust-cache / apt / Defender boilerplate that was
+  repeated verbatim across every Rust job.
+
+inputs:
+  components:
+    description: Extra rustup components, e.g. "rustfmt, clippy".
+    required: false
+    default: ''
+  targets:
+    description: >-
+      Extra compilation targets. plugin-runtime tests compile tests/guests/*
+      into real WASM components, so wasm32-wasip2 is the default.
+    required: false
+    default: wasm32-wasip2
+  workspaces:
+    description: Swatinem/rust-cache workspaces, one per line.
+    required: false
+    default: '.'
+  plugins-cache:
+    description: >-
+      Whether to add the five official plugins to the cache scope. They are
+      standalone crates excluded from the workspace and built by test
+      subprocesses with their own target directories, so each must be listed
+      explicitly or none of them hit the cache.
+    required: false
+    default: 'true'
+  system-deps:
+    description: Linux system dependency tier — none / keyring / tauri.
+    required: false
+    default: keyring
+
+runs:
+  using: composite
+  steps:
+    # The Linux keyring backend (secret-service) needs D-Bus headers at build
+    # time; Tauri additionally needs webkit / appindicator / rsvg.
+    - if: runner.os == 'Linux' && inputs.system-deps != 'none'
+      shell: bash
+      env:
+        SYSTEM_DEPS: ${{ inputs.system-deps }}
+      run: |
+        packages='libdbus-1-dev pkg-config'
+        if [ "$SYSTEM_DEPS" = 'tauri' ]; then
+          packages="libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf $packages"
+        fi
+        sudo apt-get update
+        # shellcheck disable=SC2086  # the package list must word-split
+        sudo apt-get install -y $packages
+
+    # Defender scans the many small Rust incremental files individually;
+    # excluding the workspace typically shortens builds by 20-40%.
+    - if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+        Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+
+    # The plugin paths live here and nowhere else: adding an official plugin is
+    # a one-line change that every Rust job picks up at once.
+    - id: scope
+      shell: bash
+      env:
+        WORKSPACES: ${{ inputs.workspaces }}
+        PLUGINS_CACHE: ${{ inputs.plugins-cache }}
+      run: |
+        {
+          echo 'value<<WORKSPACES_EOF'
+          printf '%s\n' "$WORKSPACES"
+          if [ "$PLUGINS_CACHE" = 'true' ]; then
+            printf 'plugins/official/%s\n' \
+              agent-anthropic \
+              agent-openai \
+              agent-openai-responses \
+              agent-gemini \
+              provider-openai-compatible
+          fi
+          echo WORKSPACES_EOF
+        } >> "$GITHUB_OUTPUT"
+
+    # A clean wasmtime+tokio+sqlite build takes about seven minutes; caching
+    # removes most of that cost.
+    - uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+        workspaces: ${{ steps.scope.outputs.value }}

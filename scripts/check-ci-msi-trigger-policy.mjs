@@ -5,24 +5,30 @@ import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const root = resolve(scriptDir, "..");
-const workflowPath = resolve(root, ".github/workflows/ci.yml");
-const workflow = await readFile(workflowPath, "utf8");
+
+// The MSI lifecycle job lives in the platform workflow: Windows and macOS
+// gates are not part of basic CI. The policy this file enforces is about *when*
+// the installer lifecycle may run, not about which file declares it.
+const platformPath = resolve(root, ".github/workflows/platform.yml");
+const platform = await readFile(platformPath, "utf8");
+const ciPath = resolve(root, ".github/workflows/ci.yml");
+const ci = await readFile(ciPath, "utf8");
 
 assert.match(
-  workflow,
+  platform,
   /\n  release:\n    types:\n      - published\n/,
-  "CI must listen for published Release events",
+  "the platform workflow must listen for published Release events",
 );
 assert.match(
-  workflow,
+  platform,
   /\n  workflow_dispatch:\s*\n/,
-  "CI must support manual pre-publication validation",
+  "the platform workflow must support manual pre-publication validation",
 );
 
-const windowsMsi = workflow.match(
+const windowsMsi = platform.match(
   /\n  windows-msi:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]+:\n|$)/,
 )?.[0];
-assert.ok(windowsMsi, "CI must define the windows-msi job");
+assert.ok(windowsMsi, "the platform workflow must define the windows-msi job");
 
 const compactCondition = windowsMsi
   .match(/    if: >-\n([\s\S]*?)\n    runs-on:/)?.[1]
@@ -38,10 +44,20 @@ assert.equal(
   false,
   "ordinary pull requests must not run the MSI lifecycle",
 );
+
+// The installer filter the condition above depends on must actually exist.
 assert.match(
-  workflow,
+  platform,
+  /\n  changes:\n/,
+  "the platform workflow must define the changes job the MSI condition reads",
+);
+
+// Basic CI has to keep executing this policy check, or the assertions above
+// never run on a pull request.
+assert.match(
+  ci,
   /- run: node scripts\/check-ci-msi-trigger-policy\.mjs/,
-  "regular CI must execute this policy check",
+  "basic CI must execute this policy check",
 );
 
 console.log("Windows MSI trigger policy: PASS");

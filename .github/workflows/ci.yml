@@ -1,5 +1,13 @@
 name: CI
 
+# Basic CI. Everything here runs on ubuntu-latest (1x billing): Rust core and
+# desktop backend fmt / clippy / test / doc, dependency supply-chain audits,
+# MSRV, release-behavior gates, and the frontend suite. This is the layer every
+# pull request runs, and where the large majority of problems surface.
+#
+# Windows and macOS gates are deliberately NOT part of basic CI — see
+# platform.yml. They largely repeat the checks below at 2x / 10x runner cost,
+# so they run after a change reaches develop / main rather than on every PR.
 on:
   pull_request:
     paths-ignore:
@@ -12,9 +20,6 @@ on:
     paths-ignore:
       - '**.md'
       - 'LICENSE'
-  release:
-    types:
-      - published
   workflow_dispatch:
 
 # A new push to the same PR makes every result from the older commit obsolete.
@@ -28,93 +33,45 @@ permissions:
   contents: read
 
 jobs:
-  # Determine whether this change touches the desktop app or installer. Query
-  # PR files with gh without checking out code or adding another third-party
-  # action; this repository deliberately limits supply-chain dependencies.
-  # Non-PR events always return true and leave scheduling to windows-msi.
-  changes:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      installer: ${{ steps.filter.outputs.installer }}
-    steps:
-      - id: filter
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "installer=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files?per_page=100" \
-            --paginate --jq '.[].filename' > changed-files.txt
-          if grep -qE '^(apps/desktop/|scripts/(build-desktop\.sh|test-windows-msi\.ps1|check-windows-release-config\.mjs)$)' changed-files.txt; then
-            echo "installer=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "installer=false" >> "$GITHUB_OUTPUT"
-          fi
-
   rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # The Linux keyring backend (secret-service) needs D-Bus headers at build time.
-      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      # test-provider is a standalone crate excluded from the workspace and
+      # built by a test subprocess with its own target directory.
+      - uses: ./.github/actions/setup-rust
         with:
-          components: rustfmt, clippy
-          # plugin-runtime tests compile tests/guests/* into real WASM components.
-          targets: wasm32-wasip2
-      # A clean wasmtime+tokio+sqlite build takes about seven minutes; caching
-      # removes most of that cost. The five WASM guests are standalone crates
-      # excluded from the workspace and built by test subprocesses with their
-      # own target directories, so each one must be listed explicitly.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+          components: >-
+            ${{ github.event_name == 'pull_request'
+                && 'rustfmt, clippy'
+                || 'rustfmt, clippy, llvm-tools-preview' }}
           workspaces: |
             .
-            plugins/official/agent-anthropic
-            plugins/official/agent-openai
-            plugins/official/agent-openai-responses
-            plugins/official/agent-gemini
-            plugins/official/provider-openai-compatible
             crates/plugin-runtime/tests/guests/test-provider
+      - if: github.event_name != 'pull_request'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7
       - name: Fetch the locked scaffold dependency set
         run: >-
           cargo fetch --locked --target wasm32-wasip2
           --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
       - run: scripts/check-rust-format.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # Pull requests run the suite directly. Branch pushes run the same suite
+      # under llvm-cov instrumentation and enforce the coverage floor. This was
+      # a separate rust-coverage job, which meant every push compiled and ran
+      # the entire workspace twice.
+      - if: github.event_name == 'pull_request'
+        run: cargo test --workspace
+      - if: github.event_name != 'pull_request'
+        run: >-
+          cargo llvm-cov --workspace --coverage-host-only --summary-only
+          --fail-under-lines 80
       # Keep the existing local rustdoc -D warnings gate enforceable in CI.
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
-
-  # Enforce license allowlists, RustSec advisories, and dependency sources from deny.toml.
-  deny:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
-
-  # Run audit separately despite advisory overlap with deny. It reads only
-  # Cargo.lock, remains useful if deny cannot build its graph, and reports a
-  # clearer independent failure signal.
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-audit
-      - run: cargo audit
 
   desktop-rust:
     runs-on: ubuntu-latest
@@ -122,34 +79,109 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install Tauri Linux system dependencies
-        run: >-
-          sudo apt-get update && sudo apt-get install -y
-          libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-          libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust
         with:
-          components: rustfmt, clippy
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@v2
+          components: rustfmt, clippy, llvm-tools-preview
+          workspaces: apps/desktop/src-tauri
+          system-deps: tauri
+      - uses: actions/setup-node@v4
         with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
-          workspaces: |
-            apps/desktop/src-tauri
-            plugins/official/agent-anthropic
-            plugins/official/agent-openai
-            plugins/official/agent-openai-responses
-            plugins/official/agent-gemini
-            plugins/official/provider-openai-compatible
+          node-version: 22.23.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7
       - name: Prepare official plugins for desktop gateway tests
         run: scripts/prepare-desktop-test-plugins.sh
       - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+      # llvm-cov runs the test suite, so a separate `cargo test` step would only
+      # compile and run everything a second time. The coverage gates stay
+      # pre-merge, which is what the desktop-coverage job existed to guarantee.
+      - run: >-
+          cargo llvm-cov --manifest-path apps/desktop/src-tauri/Cargo.toml
+          --lcov --output-path apps/desktop/src-tauri/target/desktop-agent.lcov
+      - name: Enforce desktop Rust line coverage
+        # The cross-platform command layer contains cfg-gated macOS/Windows paths
+        # that a Linux-only coverage job cannot execute. Ratchet the complete tree
+        # at its verified baseline while keeping the security-sensitive Agent
+        # integration module on the stricter 90% gate below.
+        run: >-
+          node scripts/check-coverage-thresholds.mjs
+          apps/desktop/src-tauri/target/desktop-agent.lcov
+          apps/desktop/src-tauri/src 86.3
+      - run: >-
+          node scripts/check-coverage-thresholds.mjs
+          apps/desktop/src-tauri/target/desktop-agent.lcov
+          apps/desktop/src-tauri/src/agent_integration 90
       - run: cargo doc --manifest-path apps/desktop/src-tauri/Cargo.toml --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # License allowlists, RustSec advisories, and dependency sources for both the
+  # root workspace and the desktop app, from their respective deny.toml files.
+  #
+  # This was three jobs (deny / audit / part of desktop-security), each booting
+  # a runner and installing the same tools. Installing once and running five
+  # checks is cheaper; `!cancelled()` on each step preserves the property that
+  # motivated splitting them — one failure never hides the others.
+  #
+  # audit is kept alongside deny despite the advisory overlap: it reads only
+  # Cargo.lock, so it still guards the tree when deny cannot build its graph.
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
+      - name: Root licenses, sources, and advisories
+        run: cargo deny check
+      - name: Root advisories from the lockfile alone
+        if: ${{ !cancelled() }}
+        run: cargo audit
+      - name: Desktop RustSec exception ledger
+        if: ${{ !cancelled() }}
+        run: node scripts/check-rustsec-exceptions.mjs
+      - name: Desktop advisories
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo audit -D unsound
+          --file apps/desktop/src-tauri/Cargo.lock
+          --ignore RUSTSEC-2024-0429
+      - name: Desktop licenses and sources
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml
+          --config apps/desktop/src-tauri/deny.toml check
+
+  # Release-behavior gates that need no Rust toolchain: workflow-shape policies,
+  # packaging checks, and the release-readiness assertions.
+  release-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+      - run: node scripts/check-ci-msi-trigger-policy.mjs
+      - run: node scripts/check-ci-scaffold-prefetch.mjs
+      - run: node scripts/check-macos-dmg-packaging.mjs
+      - run: node tests/release-assets.mjs
+      - run: node tests/release-readiness.mjs
+      - run: node tests/desktop-release-dependencies.mjs
+      - name: Check release version consistency
+        run: |
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          node scripts/check-release-readiness.mjs --version "$version"
+      - run: tests/build-desktop-verbosity.sh
+      - run: tests/desktop-updater-release.sh
 
   msrv:
     name: Rust 1.95 minimum-version check
@@ -183,304 +215,3 @@ jobs:
       - run: npm --prefix apps/desktop ci
       - run: npm --prefix apps/desktop run test:coverage
       - run: npm --prefix apps/desktop run build
-
-  rust-coverage:
-    # The PR already runs the complete Rust test suite in `rust`. Coverage
-    # instruments and repeats that suite, so keep it as a post-merge/manual
-    # quality gate instead of doubling every PR's slowest workload.
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-          targets: wasm32-wasip2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov@0.8.7
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
-          workspaces: |
-            .
-            plugins/official/agent-anthropic
-            plugins/official/agent-openai
-            plugins/official/agent-openai-responses
-            plugins/official/agent-gemini
-            plugins/official/provider-openai-compatible
-            crates/plugin-runtime/tests/guests/test-provider
-      - name: Fetch the locked scaffold dependency set
-        run: >-
-          cargo fetch --locked --target wasm32-wasip2
-          --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
-      - run: >-
-          cargo llvm-cov --workspace --coverage-host-only --summary-only
-          --fail-under-lines 80
-
-  desktop-coverage:
-    # Keep the full Desktop Rust and Agent Integration coverage gates pre-merge.
-    # Branch pushes repeat the same check against the exact committed revision.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Install Tauri Linux system dependencies
-        run: >-
-          sudo apt-get update && sudo apt-get install -y
-          libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-          libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-          targets: wasm32-wasip2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.23.1
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov@0.8.7
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
-          workspaces: |
-            apps/desktop/src-tauri
-            plugins/official/agent-anthropic
-            plugins/official/agent-openai
-            plugins/official/agent-openai-responses
-            plugins/official/agent-gemini
-            plugins/official/provider-openai-compatible
-      - name: Prepare official plugins for desktop gateway tests
-        run: scripts/prepare-desktop-test-plugins.sh
-      - run: >-
-          cargo llvm-cov --manifest-path apps/desktop/src-tauri/Cargo.toml
-          --lcov --output-path apps/desktop/src-tauri/target/desktop-agent.lcov
-      - name: Enforce desktop Rust line coverage
-        # The cross-platform command layer contains cfg-gated macOS/Windows paths
-        # that a Linux-only coverage job cannot execute. Ratchet the complete tree
-        # at its verified baseline while keeping the security-sensitive Agent
-        # integration module on the stricter 90% gate below.
-        run: >-
-          node scripts/check-coverage-thresholds.mjs
-          apps/desktop/src-tauri/target/desktop-agent.lcov
-          apps/desktop/src-tauri/src 86.3
-      - run: >-
-          node scripts/check-coverage-thresholds.mjs
-          apps/desktop/src-tauri/target/desktop-agent.lcov
-          apps/desktop/src-tauri/src/agent_integration 90
-
-  # This job does the one thing Linux cannot: compile the desktop app on a
-  # macOS host so #[cfg(target_os = "macos")] code is type-checked, including
-  # verified_workbuddy_bundle and its /usr/bin/codesign invocation.
-  #
-  # This used to be a macOS+Windows matrix that ran four selected tests. All
-  # four are host-independent: Platform::Macos/Windows is passed as an enum,
-  # while the transaction test injects FailBeforeReplaceWriter at
-  # AtomicWriteStage::Permission without touching a real DACL. They are plain
-  # #[test] cases with no cfg guard and are already covered by desktop-rust's
-  # full cargo test. Repeating them at 10x/2x runner cost added no coverage.
-  # windows-rust separately runs the full suite, including the repository's
-  # only #[cfg(windows)] test,
-  # ownership_store_hardens_a_legacy_regular_index_before_reading, which is
-  # genuinely Windows-only and was absent from the old selected list.
-  macos-compile-check:
-    name: macOS compile check
-    if: github.event_name != 'pull_request'
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
-          workspaces: apps/desktop/src-tauri
-      # --all-targets also compiles tests so broken macOS-specific test code is
-      # caught here instead of waiting for a release tag.
-      - run: >-
-          cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
-          --all-targets
-
-  windows-rust:
-    name: Windows full Rust and desktop gates
-    # The Linux rust job covers the same clippy/test suite for PRs. Avoid the 2x
-    # Windows rerun until a change reaches develop and needs the full platform gate.
-    if: github.event_name != 'pull_request'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      # Defender scans the many small Rust incremental files individually;
-      # excluding the workspace typically shortens builds by 20-40%.
-      - name: Exclude the workspace from Defender real-time scanning
-        shell: pwsh
-        run: |
-          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
-          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.23.1
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
-          workspaces: |
-            .
-            apps/desktop/src-tauri
-            plugins/official/agent-anthropic
-            plugins/official/agent-openai
-            plugins/official/agent-openai-responses
-            plugins/official/agent-gemini
-            plugins/official/provider-openai-compatible
-      - run: npm --prefix apps/desktop ci
-      - run: node scripts/check-windows-release-config.mjs
-      - name: Fetch the locked scaffold dependency set
-        run: >-
-          cargo fetch --locked --target wasm32-wasip2
-          --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-      - name: Prepare official plugins for desktop gateway tests
-        shell: bash
-        run: scripts/prepare-desktop-test-plugins.sh
-      - run: >-
-          cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml
-          --all-targets -- -D warnings
-      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-
-  windows-msi:
-    name: Windows x64 MSI real lifecycle
-    needs: [changes, windows-rust]
-    # This release-grade gate builds two installers and exercises the complete
-    # lifecycle. Run it for published releases and manual release validation,
-    # not for routine pushes or pull requests. Regular CI still covers behavior.
-    if: >-
-      !cancelled() &&
-      needs.changes.outputs.installer == 'true' &&
-      (github.event_name == 'release' ||
-       github.event_name == 'workflow_dispatch')
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      # Defender scans the many small Rust incremental files individually;
-      # excluding the workspace typically shortens builds by 20-40%.
-      - name: Exclude the workspace from Defender real-time scanning
-        shell: pwsh
-        run: |
-          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
-          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.23.1
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip2,x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
-          workspaces: |
-            apps/desktop/src-tauri
-            plugins/official/agent-anthropic
-            plugins/official/agent-openai
-            plugins/official/agent-openai-responses
-            plugins/official/agent-gemini
-            plugins/official/provider-openai-compatible
-      - run: npm --prefix apps/desktop ci
-      - run: node scripts/check-windows-release-config.mjs
-      - name: Build older MSI
-        shell: bash
-        run: >-
-          scripts/build-desktop.sh --local
-          --target x86_64-pc-windows-msvc --test-version 250.1.0
-      - name: Preserve older MSI
-        shell: pwsh
-        run: |
-          $msi = Get-ChildItem "apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi" |
-            Sort-Object LastWriteTimeUtc -Descending |
-            Select-Object -First 1
-          if ($null -eq $msi) { throw "older MSI was not produced" }
-          Copy-Item -LiteralPath $msi.FullName -Destination "$env:RUNNER_TEMP\token-station-older.msi"
-      - name: Build newer MSI
-        shell: bash
-        run: >-
-          scripts/build-desktop.sh --local
-          --target x86_64-pc-windows-msvc --test-version 250.2.0
-      - name: Preserve newer MSI
-        shell: pwsh
-        run: |
-          $msi = Get-ChildItem "apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi" |
-            Sort-Object LastWriteTimeUtc -Descending |
-            Select-Object -First 1
-          if ($null -eq $msi) { throw "newer MSI was not produced" }
-          Copy-Item -LiteralPath $msi.FullName -Destination "$env:RUNNER_TEMP\token-station-newer.msi"
-      - name: Install, start, upgrade, block downgrade, and uninstall
-        shell: pwsh
-        run: |
-          scripts/test-windows-msi.ps1 `
-            -OlderMsi "$env:RUNNER_TEMP\token-station-older.msi" `
-            -NewerMsi "$env:RUNNER_TEMP\token-station-newer.msi" `
-            -LogDirectory "$env:RUNNER_TEMP\token-station-msi-logs"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: token-station-windows-msi-lifecycle-logs
-          path: |
-            ${{ runner.temp }}/token-station-msi-logs/*.log
-            ${{ runner.temp }}/token-station-msi-logs/*-self-test.json
-          if-no-files-found: warn
-
-  desktop-security:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.23.1
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-audit@0.22.2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny@0.20.2
-      - run: node scripts/check-ci-msi-trigger-policy.mjs
-      - run: node scripts/check-ci-scaffold-prefetch.mjs
-      - run: node scripts/check-rustsec-exceptions.mjs
-      - run: node scripts/check-macos-dmg-packaging.mjs
-      - run: node tests/release-assets.mjs
-      - run: node tests/release-readiness.mjs
-      - run: node tests/desktop-release-dependencies.mjs
-      - name: Check release version consistency
-        run: |
-          version=$(node -p "require('./apps/desktop/package.json').version")
-          node scripts/check-release-readiness.mjs --version "$version"
-      - run: >-
-          cargo audit -D unsound
-          --file apps/desktop/src-tauri/Cargo.lock
-          --ignore RUSTSEC-2024-0429
-      - run: tests/build-desktop-verbosity.sh
-      - run: tests/desktop-updater-release.sh
-      - run: >-
-          cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml
-          --config apps/desktop/src-tauri/deny.toml check
