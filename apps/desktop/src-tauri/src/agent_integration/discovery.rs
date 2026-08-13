@@ -2018,6 +2018,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     struct ConcurrentProbe {
         active: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
@@ -2025,6 +2026,7 @@ mod tests {
         slow_first_was_overtaken: Arc<AtomicBool>,
     }
 
+    #[cfg(unix)]
     impl ProbeRunner for ConcurrentProbe {
         fn run(
             &self,
