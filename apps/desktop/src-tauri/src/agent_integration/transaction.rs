@@ -10,6 +10,8 @@ use super::ownership::{
     compute_owned_value_macs, legacy_widened_ownership_matches, ownership_matches,
     CompanionOwnership, OwnershipKey, OwnershipRecord, OwnershipStore,
 };
+#[cfg(test)]
+use super::plan::OWNED_VALUES_CHANGED;
 use super::plan::{
     file_revision_hash, read_config_source, ConfigSource, OwnershipDisposition, PreparedChangePlan,
 };
@@ -3885,7 +3887,7 @@ mod tests {
         )
         .err()
         .expect("owned value conflict requires a new explicit decision");
-        assert!(error.contains("owned paths"));
+        assert_eq!(error, OWNED_VALUES_CHANGED);
         assert_eq!(std::fs::read(&target).unwrap(), changed_bytes);
         assert_eq!(
             snapshots
@@ -3986,7 +3988,7 @@ mod tests {
         )
         .err()
         .expect("disconnect refuses a user-edited managed model");
-        assert!(disconnect_error.contains("owned paths"));
+        assert_eq!(disconnect_error, OWNED_VALUES_CHANGED);
 
         let refresh = build_metadata_refresh_plan(
             &WorkBuddyConnector,

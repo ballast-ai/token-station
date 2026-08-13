@@ -21,6 +21,9 @@ use super::types::{
     RedactedChange, SnapshotRecord,
 };
 
+pub const OWNED_VALUES_CHANGED: &str = "owned_values_changed";
+pub const COMPANION_OWNED_VALUES_CHANGED: &str = "companion_owned_values_changed";
+
 const PLAN_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_PLAN_TTL_MS: u64 = 5 * 60 * 1_000;
 const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
@@ -558,7 +561,7 @@ pub fn attach_disconnect_companions(
         let baseline_macs =
             compute_owned_value_macs(&baseline_document, &companion.owned_paths, master_key)?;
         if current_macs != companion.owned_value_macs && current_macs != baseline_macs {
-            return Err("companion owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
+            return Err(COMPANION_OWNED_VALUES_CHANGED.to_string());
         }
         let (forward_operations, reverse_operations) = projection_operations(
             &current_document,
@@ -681,7 +684,7 @@ pub fn attach_restore_companions(
         let source_macs =
             compute_owned_value_macs(&source_document, &companion.owned_paths, master_key)?;
         if current_macs != companion.owned_value_macs && current_macs != source_macs {
-            return Err("companion owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
+            return Err(COMPANION_OWNED_VALUES_CHANGED.to_string());
         }
         let (forward_operations, reverse_operations) =
             projection_operations(&current_document, &source_document, &companion.owned_paths)?;
@@ -855,7 +858,7 @@ fn build_owned_projection_plan(
         master_key,
     )?;
     if !matches_record && !matches_source && !matches_legacy_widening {
-        return Err("当前 owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
+        return Err(OWNED_VALUES_CHANGED.to_string());
     }
     let original_semantic = semantic_json(&current_document)?;
     let (forward_operations, reverse_operations) =
