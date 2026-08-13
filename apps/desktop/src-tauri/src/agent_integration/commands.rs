@@ -30,7 +30,7 @@ use super::plan::{
     attach_disconnect_companions, attach_restore_companions, build_connection_plan,
     build_disconnect_plan, build_metadata_refresh_plan, build_snapshot_restore_plan,
     companion_document_format, generate_operation_id, read_config_source, ConfigSource,
-    PreparedChangePlan,
+    PreparedChangePlan, COMPANION_OWNED_VALUES_CHANGED, OWNED_VALUES_CHANGED,
 };
 use super::registry::AgentRegistry;
 use super::snapshot::{FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, SnapshotStore};
@@ -183,6 +183,20 @@ impl AgentCommandError {
 
     fn internal(message: String) -> Self {
         Self::boundary("agent_operation_rejected", message)
+    }
+
+    fn plan(message: String) -> Self {
+        match message.as_str() {
+            OWNED_VALUES_CHANGED => Self::boundary(
+                OWNED_VALUES_CHANGED,
+                "受管配置已被其他工具修改；本次未写入，请重新扫描并确认",
+            ),
+            COMPANION_OWNED_VALUES_CHANGED => Self::boundary(
+                COMPANION_OWNED_VALUES_CHANGED,
+                "受管关联配置已被其他工具修改；本次未写入，请重新扫描并确认",
+            ),
+            _ => Self::internal(message),
+        }
     }
 }
 
@@ -1078,9 +1092,9 @@ impl AgentCommandState {
             self.clock.now_ms(),
             generate_operation_id().map_err(AgentCommandError::internal)?,
         )
-        .map_err(AgentCommandError::internal)?;
+        .map_err(AgentCommandError::plan)?;
         attach_disconnect_companions(&mut prepared, connector, &ownership, &self.snapshots, &key)
-            .map_err(AgentCommandError::internal)?;
+            .map_err(AgentCommandError::plan)?;
         self.issue_plan(prepared, &record, session_label, None)
     }
 
@@ -1431,7 +1445,7 @@ impl AgentCommandState {
             self.clock.now_ms(),
             generate_operation_id().map_err(AgentCommandError::internal)?,
         )
-        .map_err(AgentCommandError::internal)?;
+        .map_err(AgentCommandError::plan)?;
         attach_restore_companions(
             &mut prepared,
             connector,
@@ -1440,7 +1454,7 @@ impl AgentCommandState {
             &self.snapshots,
             &key,
         )
-        .map_err(AgentCommandError::internal)?;
+        .map_err(AgentCommandError::plan)?;
         self.issue_plan(prepared, &record, session_label, None)
     }
 
@@ -3951,4 +3965,15 @@ mod tests {
             .contains("vk-command-lifecycle"));
         std::fs::remove_dir_all(root).ok();
     }
+}
+#[test]
+fn owned_value_plan_conflicts_keep_stable_public_reason_codes() {
+    assert_eq!(
+        AgentCommandError::plan(OWNED_VALUES_CHANGED.to_string()).code,
+        OWNED_VALUES_CHANGED
+    );
+    assert_eq!(
+        AgentCommandError::plan(COMPANION_OWNED_VALUES_CHANGED.to_string()).code,
+        COMPANION_OWNED_VALUES_CHANGED
+    );
 }
