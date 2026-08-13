@@ -135,7 +135,7 @@ pub struct DecryptedSnapshot {
     pub exact_bytes: Zeroizing<Vec<u8>>,
 }
 
-pub trait SnapshotStore {
+pub trait SnapshotStore: Send + Sync {
     fn create(&self, request: SnapshotRequest<'_>) -> Result<SnapshotCreateResult, String>;
     fn load(&self, snapshot_id: &str) -> Result<DecryptedSnapshot, String>;
     fn list(&self, agent_id: &str, target_config_path: &str)

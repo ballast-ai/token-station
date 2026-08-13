@@ -2969,13 +2969,16 @@ fn apply_discovered_model_capabilities(
         .filter(|models| models.is_array())
         .cloned()
         .ok_or_else(|| format!("供应商 `{name}` 的模型配置无效"))?;
-    let facts: std::collections::BTreeMap<&str, CapabilityState> = catalog
+    let facts: std::collections::BTreeMap<&str, &model_catalog::CatalogModelView> = catalog
         .iter()
         .filter(|model| model.catalog_state == model_catalog::CatalogState::Active)
-        .filter_map(|model| {
-            (model.vision != CapabilityState::Unknown)
-                .then_some((model.model.as_str(), model.vision))
+        .filter(|model| {
+            model.vision != CapabilityState::Unknown
+                || model.context_window.is_some()
+                || model.max_output_tokens.is_some()
+                || model.cost.is_some()
         })
+        .map(|model| (model.model.as_str(), model))
         .collect();
     if facts.is_empty() {
         return Ok(false);
@@ -2991,20 +2994,42 @@ fn apply_discovered_model_capabilities(
         let Some(model) = capability["model"].as_str() else {
             continue;
         };
-        let Some(state) = facts.get(model).copied() else {
+        let Some(fact) = facts.get(model).copied() else {
             continue;
         };
-        let (supported, serialized) = match state {
-            CapabilityState::Verified => (true, "verified"),
-            CapabilityState::Unsupported => (false, "unsupported"),
-            CapabilityState::Declared | CapabilityState::Unknown => continue,
-        };
-        if capability["vision"].as_bool() != Some(supported)
-            || capability["vision_state"].as_str() != Some(serialized)
-        {
-            capability["vision"] = json!(supported);
-            capability["vision_state"] = json!(serialized);
-            changed = true;
+        match fact.vision {
+            CapabilityState::Verified | CapabilityState::Unsupported => {
+                let supported = fact.vision == CapabilityState::Verified;
+                let serialized = if supported { "verified" } else { "unsupported" };
+                if capability["vision"].as_bool() != Some(supported)
+                    || capability["vision_state"].as_str() != Some(serialized)
+                {
+                    capability["vision"] = json!(supported);
+                    capability["vision_state"] = json!(serialized);
+                    changed = true;
+                }
+            }
+            CapabilityState::Declared | CapabilityState::Unknown => {}
+        }
+        if let Some(context_window) = fact.context_window {
+            if capability["context_window"].as_u64() != Some(u64::from(context_window)) {
+                capability["context_window"] = json!(context_window);
+                changed = true;
+            }
+        }
+        if let Some(max_output_tokens) = fact.max_output_tokens {
+            if capability["max_output_tokens"].as_u64() != Some(u64::from(max_output_tokens)) {
+                capability["max_output_tokens"] = json!(max_output_tokens);
+                changed = true;
+            }
+        }
+        if let Some(cost) = &fact.cost {
+            let serialized = serde_json::to_value(cost)
+                .map_err(|error| format!("序列化模型价格失败：{error}"))?;
+            if capability["catalog_cost"] != serialized {
+                capability["catalog_cost"] = serialized;
+                changed = true;
+            }
         }
     }
     if !changed {
@@ -3641,28 +3666,39 @@ fn save_agent_routes(state: State<'_, AppStateManaged>) -> Result<StateView, Str
 #[tauri::command]
 fn restart_agent_route(
     state: State<'_, AppStateManaged>,
+    agents: State<'_, AgentCommandState>,
     agent_id: String,
 ) -> Result<StateView, String> {
-    let mut inner = state.0.lock().unwrap();
-    if !supported_agent_ids().contains(&agent_id) {
-        return Err(format!("未知 Agent：{agent_id}"));
-    }
-    // Persist the draft exactly as "save custom routing" does.
-    inner.promote_agent_route_drafts()?;
-    inner.save_draft()?;
-    inner.agent_route_drafts.clear();
+    let snapshot = {
+        let mut inner = state.0.lock().unwrap();
+        if !supported_agent_ids().contains(&agent_id) {
+            return Err(format!("未知 Agent：{agent_id}"));
+        }
+        // Persist the draft exactly as "save custom routing" does.
+        inner.promote_agent_route_drafts()?;
+        inner.save_draft()?;
+        inner.agent_route_drafts.clear();
 
-    // Materialize this one Agent's router from the saved config and hot-swap it
-    // on the running gateway. `None` ⇒ the Agent inherits Home, so the reload
-    // clears its per-Agent router.
-    let config = inner.materialize()?;
-    let router = config.custom_router_for_agent(&agent_id)?;
-    if let ServerLifecycle::Running { server, .. } = &inner.server {
-        server
-            .reload_agent_router(&agent_id, router)
-            .map_err(|error| format!("热重启 Agent 路由失败：{error}"))?;
+        // Materialize this one Agent's router from the saved config and hot-swap it
+        // on the running gateway. `None` means the Agent inherits Home, so the
+        // reload clears its per-Agent router.
+        let config = inner.materialize()?;
+        let router = config.custom_router_for_agent(&agent_id)?;
+        if let ServerLifecycle::Running { server, .. } = &inner.server {
+            server
+                .reload_agent_router(&agent_id, router)
+                .map_err(|error| format!("热重启 Agent 路由失败：{error}"))?;
+        }
+        inner.snapshot()
+    };
+    if let Ok(runtime) = runtime_from_app(state.inner()) {
+        agents
+            .refresh_model_metadata(Some(&agent_id), &runtime)
+            .map_err(|error| {
+                format!("Agent 路由已应用，但模型元数据刷新失败：{}", error.message)
+            })?;
     }
-    Ok(inner.snapshot())
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -3733,7 +3769,8 @@ fn complete_serve_start<R: Runtime>(
     };
     let mut discard = None;
     let mut retire = None;
-    let view = {
+    let mut published = false;
+    let mut view = {
         let state = app.state::<AppStateManaged>();
         let mut inner = state.0.lock().unwrap();
         let current = std::mem::replace(&mut inner.server, ServerLifecycle::Stopped { generation });
@@ -3746,11 +3783,14 @@ fn complete_serve_start<R: Runtime>(
                 },
                 Ok(prepared),
             ) if current == generation => match prepared.publish(revision) {
-                Ok(server) => ServerLifecycle::Running {
-                    generation,
-                    server,
-                    apply_error: None,
-                },
+                Ok(server) => {
+                    published = true;
+                    ServerLifecycle::Running {
+                        generation,
+                        server,
+                        apply_error: None,
+                    }
+                }
                 Err(failure) => ServerLifecycle::Failed {
                     generation,
                     listen,
@@ -3769,6 +3809,7 @@ fn complete_serve_start<R: Runtime>(
                 let same_listener = old.listen() == prepared.listen();
                 match prepared.publish(revision) {
                     Ok(server) => {
+                        published = true;
                         old.stop_accepting();
                         retire = Some(old);
                         ServerLifecycle::Running {
@@ -3884,6 +3925,29 @@ fn complete_serve_start<R: Runtime>(
         };
         Some(inner.serve_view())
     };
+    if published {
+        let app_state = app.state::<AppStateManaged>();
+        let agents = app.state::<AgentCommandState>();
+        if let Ok(runtime) = runtime_from_app(app_state.inner()) {
+            if let Err(error) = agents.refresh_model_metadata(None, &runtime) {
+                let mut inner = app_state.0.lock().unwrap();
+                if let ServerLifecycle::Running {
+                    generation: current,
+                    apply_error,
+                    ..
+                } = &mut inner.server
+                {
+                    if *current == generation {
+                        *apply_error = Some(format!(
+                            "代理已启动，但 Agent 模型元数据刷新失败：{}",
+                            error.message
+                        ));
+                        view = Some(inner.serve_view());
+                    }
+                }
+            }
+        }
+    }
     if let Some(prepared) = discard {
         prepared.discard();
     }
@@ -5998,6 +6062,31 @@ mod tests {
     }
 
     #[test]
+    fn loading_legacy_null_optional_maps_recovers_without_read_only_lockout() {
+        let root = scratch_home("null-optional-routing-maps");
+        let path = root.join("token-station.json");
+        let mut source = template_for_test(&root);
+        source["agent_routes"] = Value::Null;
+        source["profiles"] = Value::Null;
+        source["agent_budgets"] = Value::Null;
+        std::fs::write(&path, serde_json::to_vec(&source).unwrap()).unwrap();
+
+        let (draft, saved, error) = load_draft_state(
+            &path,
+            &root.join("token-station-data"),
+            &root.join("plugins"),
+        );
+
+        assert_eq!(error, None);
+        assert!(saved.get("agent_routes").is_none());
+        assert!(saved.get("profiles").is_none());
+        assert!(saved.get("agent_budgets").is_none());
+        serde_json::from_value::<ClientConfig>(draft)
+            .expect("legacy null optional maps recover to empty maps");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn a_desktop_legacy_zero_concurrency_config_loads_writable_without_rewriting_source() {
         let root = scratch_home("legacy-zero-concurrency");
         let path = root.join("token-station.json");
@@ -6096,6 +6185,14 @@ mod tests {
                 tool: CapabilityState::Unknown,
                 vision: CapabilityState::Verified,
                 json_schema: CapabilityState::Unknown,
+                context_window: Some(257_550),
+                max_output_tokens: Some(32_768),
+                cost: Some(model_catalog::CatalogCostView {
+                    input: Some(0.2),
+                    output: Some(0.6),
+                    cache_read: Some(0.04),
+                    cache_write: None,
+                }),
                 source: model_catalog::CatalogSource::Live,
                 last_seen_ms: Some(42),
                 catalog_state: model_catalog::CatalogState::Active,
@@ -6105,6 +6202,9 @@ mod tests {
                 tool: CapabilityState::Unknown,
                 vision: CapabilityState::Unsupported,
                 json_schema: CapabilityState::Unknown,
+                context_window: None,
+                max_output_tokens: None,
+                cost: None,
                 source: model_catalog::CatalogSource::Live,
                 last_seen_ms: Some(42),
                 catalog_state: model_catalog::CatalogState::Active,
@@ -6121,6 +6221,12 @@ mod tests {
             .unwrap();
         assert_eq!(models[0]["vision"], json!(true));
         assert_eq!(models[0]["vision_state"], json!("verified"));
+        assert_eq!(models[0]["context_window"], json!(257550));
+        assert_eq!(models[0]["max_output_tokens"], json!(32768));
+        assert_eq!(
+            models[0]["catalog_cost"],
+            json!({"input": 0.2, "output": 0.6, "cache_read": 0.04})
+        );
         assert_eq!(models[1]["vision"], json!(false));
         assert_eq!(models[1]["vision_state"], json!("unsupported"));
         std::fs::remove_dir_all(root).ok();
@@ -7750,7 +7856,7 @@ mod tests {
         crate::agent_integration::safe_fs::write_atomic_private(
             &catalog_path,
             &serde_json::to_vec_pretty(&json!({
-                "version": 2,
+                "version": 3,
                 "providers": {
                     "local": {
                         "base_url": "http://127.0.0.1:11434/v1",

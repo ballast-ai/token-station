@@ -97,7 +97,10 @@ impl Connector for ClaudeCodeConnector {
         let ConfigDocument::Json(root) = document else {
             return Err("Claude Code 连接器收到错误的配置格式".to_string());
         };
-        if root.get("env").is_none_or(serde_json::Value::is_object) {
+        if root
+            .get("env")
+            .is_none_or(|value| value.is_object() || value.is_null())
+        {
             Ok(())
         } else {
             Err("Claude Code settings.json 的 env 必须是对象".to_string())

@@ -1,15 +1,17 @@
 use std::collections::{BTreeSet, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
 use super::config_codec::{parse_source_bytes, ConfigDocument};
 use super::ownership::{
-    compute_owned_value_macs, ownership_matches, CompanionOwnership, OwnershipKey, OwnershipRecord,
-    OwnershipStore,
+    compute_owned_value_macs, legacy_widened_ownership_matches, ownership_matches,
+    CompanionOwnership, OwnershipKey, OwnershipRecord, OwnershipStore,
 };
+#[cfg(test)]
+use super::plan::OWNED_VALUES_CHANGED;
 use super::plan::{
     file_revision_hash, read_config_source, ConfigSource, OwnershipDisposition, PreparedChangePlan,
 };
@@ -341,6 +343,11 @@ pub struct TransactionEngine<'a> {
     writer: &'a dyn AtomicConfigWriter,
     verifier: &'a dyn PostWriteVerifier,
     clock: &'a dyn Clock,
+    coordinator: Arc<TransactionCoordinator>,
+}
+
+#[derive(Default)]
+pub struct TransactionCoordinator {
     consumed: Mutex<HashSet<String>>,
     operation_lock: Mutex<()>,
 }
@@ -355,6 +362,28 @@ impl<'a> TransactionEngine<'a> {
         verifier: &'a dyn PostWriteVerifier,
         clock: &'a dyn Clock,
     ) -> Self {
+        Self::with_coordinator(
+            snapshots,
+            ownership,
+            keys,
+            writer,
+            verifier,
+            clock,
+            Arc::new(TransactionCoordinator::default()),
+        )
+    }
+
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_coordinator(
+        snapshots: &'a dyn SnapshotStore,
+        ownership: &'a dyn OwnershipStore,
+        keys: &'a dyn MasterKeyStore,
+        writer: &'a dyn AtomicConfigWriter,
+        verifier: &'a dyn PostWriteVerifier,
+        clock: &'a dyn Clock,
+        coordinator: Arc<TransactionCoordinator>,
+    ) -> Self {
         Self {
             snapshots,
             ownership,
@@ -362,8 +391,7 @@ impl<'a> TransactionEngine<'a> {
             writer,
             verifier,
             clock,
-            consumed: Mutex::new(HashSet::new()),
-            operation_lock: Mutex::new(()),
+            coordinator,
         }
     }
 
@@ -427,10 +455,10 @@ impl<'a> TransactionEngine<'a> {
     ) -> Result<TransactionOutcome, TransactionFailure> {
         self.validate_confirmation(plan, confirmation, now_ms)?;
         self.validate_admission(plan, admission, now_ms)?;
-        let _operation_guard = self
-            .operation_lock
-            .lock()
-            .map_err(|_| failure(plan, TransactionStage::Revision, "operation_lock_poisoned"))?;
+        let _operation_guard =
+            self.coordinator.operation_lock.lock().map_err(|_| {
+                failure(plan, TransactionStage::Revision, "operation_lock_poisoned")
+            })?;
         let ownership_key = OwnershipKey {
             agent_id: plan.view.agent_id.clone(),
             installation_path: plan.view.installation_path.clone(),
@@ -551,7 +579,46 @@ impl<'a> TransactionEngine<'a> {
                     .map_err(|_| {
                         failure(plan, TransactionStage::Ownership, "ownership_check_failed")
                     })?;
-            if !matches_record && !matches_projection {
+            let matches_legacy_widening = if binding.record.owned_paths != plan.view.owned_paths {
+                let baseline = self
+                    .snapshots
+                    .load(&binding.record.baseline_snapshot_id)
+                    .map_err(|_| {
+                        failure(plan, TransactionStage::Ownership, "ownership_check_failed")
+                    })?;
+                if baseline.record.agent_id != binding.record.agent_id
+                    || baseline.record.target_config_path != binding.record.target_config_path
+                    || baseline.record.connector_id != binding.record.connector_id
+                {
+                    return Err(failure(
+                        plan,
+                        TransactionStage::Ownership,
+                        "ownership_check_failed",
+                    ));
+                }
+                let baseline_document = parse_source_bytes(
+                    baseline
+                        .record
+                        .original_existed
+                        .then_some(baseline.exact_bytes.as_slice()),
+                    plan.format,
+                    plan.label,
+                )
+                .map_err(|_| {
+                    failure(plan, TransactionStage::Ownership, "ownership_check_failed")
+                })?;
+                legacy_widened_ownership_matches(
+                    &binding.record,
+                    &document,
+                    &baseline_document,
+                    &plan.view.owned_paths,
+                    &key,
+                )
+                .map_err(|_| failure(plan, TransactionStage::Ownership, "ownership_check_failed"))?
+            } else {
+                false
+            };
+            if !matches_record && !matches_projection && !matches_legacy_widening {
                 return Err(failure(
                     plan,
                     TransactionStage::Ownership,
@@ -1054,6 +1121,7 @@ impl<'a> TransactionEngine<'a> {
                     let mut updated = binding.record.clone();
                     updated.last_transaction_snapshot_id = snapshot.record.snapshot_id.clone();
                     updated.managed_after_hash = plan.view.expected_after_hash.clone();
+                    updated.owned_paths = plan.view.owned_paths.clone();
                     updated.owned_value_macs = owned_value_macs;
                     let mut companion_missing = false;
                     for companion in &mut updated.companion_files {
@@ -1064,6 +1132,7 @@ impl<'a> TransactionEngine<'a> {
                                 projected.last_transaction_snapshot_id.clone();
                             companion.document_format = projected.document_format;
                             companion.managed_after_hash = projected.managed_after_hash.clone();
+                            companion.owned_paths = projected.owned_paths.clone();
                             companion.owned_value_macs = projected.owned_value_macs.clone();
                         } else {
                             companion_missing = true;
@@ -1190,7 +1259,7 @@ impl<'a> TransactionEngine<'a> {
     }
 
     fn consume(&self, plan: &PreparedChangePlan) -> Result<(), TransactionFailure> {
-        let mut consumed = self.consumed.lock().map_err(|_| {
+        let mut consumed = self.coordinator.consumed.lock().map_err(|_| {
             failure(
                 plan,
                 TransactionStage::Confirmation,
@@ -1348,7 +1417,8 @@ fn atomic_reason(stage: AtomicWriteStage) -> &'static str {
 mod tests {
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::Duration;
 
     use serde_json::Value;
     use zeroize::Zeroizing;
@@ -1356,21 +1426,21 @@ mod tests {
     use super::*;
     use crate::agent_integration::config_codec::DocumentFormat;
     use crate::agent_integration::connectors::{
-        find_connector, ClaudeCodeConnector, ClaudeDesktopConnector, ConnectInput, HermesConnector,
-        OpenClawConnector,
+        find_connector, AgentModelMetadata, ClaudeCodeConnector, ClaudeDesktopConnector,
+        ConnectInput, HermesConnector, OpenClawConnector, WorkBuddyConnector,
     };
     use crate::agent_integration::ownership::FileOwnershipStore;
     use crate::agent_integration::plan::{
-        build_connection_plan, build_disconnect_plan, build_snapshot_restore_plan,
-        read_config_source, ConfigSource,
+        build_connection_plan, build_disconnect_plan, build_metadata_refresh_plan,
+        build_snapshot_restore_plan, read_config_source, ConfigSource,
     };
     use crate::agent_integration::snapshot::{
         DecryptedSnapshot, FileSnapshotStore, MasterKeyStore, SnapshotCreateResult,
     };
     use crate::agent_integration::types::SnapshotRecord;
     use crate::agent_integration::types::{
-        AllowedAction, BinarySource, CompatibilityDecision, Diagnostic, DiscoveryEvidence,
-        DiscoveryRecord, DiscoverySource, Platform, ReasonCode,
+        AllowedAction, BinarySource, CompatibilityDecision, ConfigPath, Diagnostic,
+        DiscoveryEvidence, DiscoveryRecord, DiscoverySource, Platform, ReasonCode,
     };
 
     struct TestKeys {
@@ -1580,6 +1650,82 @@ mod tests {
         }
     }
 
+    struct BlockingWriter {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl AtomicConfigWriter for BlockingWriter {
+        fn replace(
+            &self,
+            target: &Path,
+            bytes: &[u8],
+            permissions: Option<u32>,
+            owner: Option<&str>,
+            expected_current_hash: &str,
+            normalize_new_owner: bool,
+        ) -> Result<(), AtomicWriteFailure> {
+            self.entered.send(()).expect("test observer remains open");
+            self.release
+                .lock()
+                .expect("release lock remains usable")
+                .recv()
+                .expect("test releases the blocked writer");
+            FsAtomicConfigWriter.replace(
+                target,
+                bytes,
+                permissions,
+                owner,
+                expected_current_hash,
+                normalize_new_owner,
+            )
+        }
+
+        fn remove(
+            &self,
+            target: &Path,
+            expected_current_hash: &str,
+            normalize_new_owner: bool,
+        ) -> Result<(), AtomicWriteFailure> {
+            FsAtomicConfigWriter.remove(target, expected_current_hash, normalize_new_owner)
+        }
+    }
+
+    struct ObservedWriter {
+        entered: mpsc::Sender<()>,
+    }
+
+    impl AtomicConfigWriter for ObservedWriter {
+        fn replace(
+            &self,
+            target: &Path,
+            bytes: &[u8],
+            permissions: Option<u32>,
+            owner: Option<&str>,
+            expected_current_hash: &str,
+            normalize_new_owner: bool,
+        ) -> Result<(), AtomicWriteFailure> {
+            self.entered.send(()).expect("test observer remains open");
+            FsAtomicConfigWriter.replace(
+                target,
+                bytes,
+                permissions,
+                owner,
+                expected_current_hash,
+                normalize_new_owner,
+            )
+        }
+
+        fn remove(
+            &self,
+            target: &Path,
+            expected_current_hash: &str,
+            normalize_new_owner: bool,
+        ) -> Result<(), AtomicWriteFailure> {
+            FsAtomicConfigWriter.remove(target, expected_current_hash, normalize_new_owner)
+        }
+    }
+
     fn scratch(label: &str) -> PathBuf {
         let mut random = [0_u8; 8];
         getrandom::fill(&mut random).unwrap();
@@ -1678,6 +1824,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787/agents/gemini-cli",
                 token: Some(secret),
                 adapter_ready: true,
+                model_metadata: None,
             },
             1,
             None,
@@ -1698,6 +1845,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787/agents/claude-desktop",
                 token: Some(secret),
                 adapter_ready: true,
+                model_metadata: None,
             },
             1,
             None,
@@ -1745,6 +1893,23 @@ mod tests {
             connector_id: Some("openclaw-v1".to_string()),
             allowed_actions: BTreeSet::from([AllowedAction::PreviewConnect]),
         }
+    }
+
+    fn workbuddy_discovery(target: &Path) -> DiscoveryRecord {
+        let mut record = discovery(target);
+        record.agent_id = "workbuddy".to_string();
+        record.executable_path = "/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy".to_string();
+        record.canonical_path = record.executable_path.clone();
+        record
+    }
+
+    fn workbuddy_verified() -> CompatibilityDecision {
+        let mut decision = verified();
+        decision.agent_id = "workbuddy".to_string();
+        decision.installation_path =
+            Some("/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy".to_string());
+        decision.connector_id = Some("workbuddy-v1".to_string());
+        decision
     }
 
     fn hermes_discovery(target: &Path) -> DiscoveryRecord {
@@ -1799,6 +1964,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some(secret),
                 adapter_ready: true,
+                model_metadata: None,
             },
             1,
             None,
@@ -1820,6 +1986,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some(secret),
                 adapter_ready: true,
+                model_metadata: None,
             },
             1,
             None,
@@ -1841,6 +2008,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787",
                 token: Some(secret),
                 adapter_ready: true,
+                model_metadata: None,
             },
             1,
             None,
@@ -1877,6 +2045,91 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
+    }
+
+    #[test]
+    fn shared_coordinator_serializes_distinct_transaction_engines() {
+        let root = scratch("shared-coordinator");
+        let first_target = root.join("first.json");
+        let second_target = root.join("second.json");
+        write_initial(&first_target, br#"{"first":true}"#);
+        write_initial(&second_target, br#"{"second":true}"#);
+        let first_plan = prepare(&first_target, "vk-first");
+        let mut second_plan = prepare(&second_target, "vk-second");
+        second_plan.view.operation_id = "cd".repeat(16);
+
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership = FileOwnershipStore::new(root.join("ownership"));
+        let coordinator = Arc::new(TransactionCoordinator::default());
+        let (first_entered_tx, first_entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first_writer = BlockingWriter {
+            entered: first_entered_tx,
+            release: Mutex::new(release_rx),
+        };
+        let (second_entered_tx, second_entered_rx) = mpsc::channel();
+        let second_writer = ObservedWriter {
+            entered: second_entered_tx,
+        };
+        let first_engine = TransactionEngine::with_coordinator(
+            &snapshots,
+            &ownership,
+            keys.as_ref(),
+            &first_writer,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+            Arc::clone(&coordinator),
+        );
+        let second_engine = TransactionEngine::with_coordinator(
+            &snapshots,
+            &ownership,
+            keys.as_ref(),
+            &second_writer,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+            coordinator,
+        );
+
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                first_engine.apply_connection(
+                    &first_plan,
+                    &confirmation(&first_plan),
+                    &admission(),
+                    1_002,
+                )
+            });
+            first_entered_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("the first transaction reaches its write stage");
+
+            let second = scope.spawn(|| {
+                second_engine.apply_connection(
+                    &second_plan,
+                    &confirmation(&second_plan),
+                    &admission(),
+                    1_002,
+                )
+            });
+            assert!(
+                second_entered_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .is_err(),
+                "the second engine must remain outside the write stage"
+            );
+            release_tx.send(()).expect("the first writer is waiting");
+            first.join().expect("first worker does not panic").unwrap();
+            second
+                .join()
+                .expect("second worker does not panic")
+                .unwrap();
+            second_entered_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("the second transaction writes after the first commits");
+        });
+
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -2019,6 +2272,305 @@ mod tests {
             TransactionStage::Ownership | TransactionStage::Confirmation
         ));
         assert_eq!(std::fs::read(&legacy_backup).unwrap(), legacy_marker);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn metadata_refresh_updates_owned_values_and_preserves_disconnect_baseline() {
+        let root = scratch("metadata-refresh");
+        let target = root.join("openclaw.json");
+        let initial = br#"{"unowned":"keep","models":null,"agents":null}"#;
+        write_initial(&target, initial);
+        let first_metadata = AgentModelMetadata {
+            context: 257_550,
+            output: 32_768,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let source = read_config_source(&target).unwrap();
+        let connection = build_connection_plan(
+            &OpenClawConnector,
+            &openclaw_discovery(&target),
+            &openclaw_verified(),
+            &target,
+            &source,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/v1",
+                token: Some("vk-refresh"),
+                adapter_ready: true,
+                model_metadata: Some(&first_metadata),
+            },
+            1,
+            None,
+            1_000,
+            "81".repeat(16),
+        )
+        .unwrap();
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        engine
+            .apply_connection(&connection, &confirmation(&connection), &admission(), 1_002)
+            .unwrap();
+        let ownership_key = OwnershipKey {
+            agent_id: "openclaw".to_string(),
+            installation_path: "/opt/openclaw".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let mut first_ownership = ownership.load(&ownership_key).unwrap().unwrap();
+        let baseline_snapshot_id = first_ownership.baseline_snapshot_id.clone();
+        let managed_source = read_config_source(&target).unwrap();
+        let managed_document = parse_source_bytes(
+            Some(managed_source.exact_bytes.as_slice()),
+            DocumentFormat::Json5,
+            "OpenClaw",
+        )
+        .unwrap();
+        let legacy_paths = vec![
+            ConfigPath {
+                segments: vec!["agents".to_string()],
+            },
+            ConfigPath {
+                segments: vec!["models".to_string()],
+            },
+        ];
+        first_ownership.owned_paths = legacy_paths.clone();
+        first_ownership.owned_value_macs =
+            compute_owned_value_macs(&managed_document, &legacy_paths, &keys.load().unwrap())
+                .unwrap();
+        let revision = first_ownership.revision;
+        let first_ownership = ownership.commit(first_ownership, Some(revision)).unwrap();
+
+        let refreshed_metadata = AgentModelMetadata {
+            context: 128_000,
+            output: 8_192,
+            vision: false,
+            tools: false,
+            reasoning: false,
+            cost: None,
+        };
+        let current = read_config_source(&target).unwrap();
+        let refresh = build_metadata_refresh_plan(
+            &OpenClawConnector,
+            &openclaw_discovery(&target),
+            &openclaw_verified(),
+            &target,
+            &current,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/v1",
+                token: Some("vk-refresh"),
+                adapter_ready: true,
+                model_metadata: Some(&refreshed_metadata),
+            },
+            &first_ownership,
+            1,
+            None,
+            1_003,
+            "82".repeat(16),
+        )
+        .unwrap();
+        engine
+            .apply_snapshot_restore(
+                &refresh,
+                &confirmation_at(&refresh, 1_003),
+                &admission(),
+                1_004,
+            )
+            .unwrap();
+        let refreshed: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        let model = &refreshed["models"]["providers"]["tokenstation"]["models"][0];
+        assert_eq!(model["contextWindow"], 128_000);
+        assert_eq!(model["maxTokens"], 8_192);
+        assert_eq!(model["input"], serde_json::json!(["text"]));
+        let refreshed_ownership = ownership.load(&ownership_key).unwrap().unwrap();
+        assert_eq!(refreshed_ownership.revision, 3);
+        assert_eq!(
+            refreshed_ownership.baseline_snapshot_id,
+            baseline_snapshot_id
+        );
+        assert!(refreshed_ownership
+            .owned_paths
+            .iter()
+            .all(|path| path.segments != ["models"] && path.segments != ["agents"]));
+
+        let baseline = snapshots
+            .load(&refreshed_ownership.baseline_snapshot_id)
+            .unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let current = read_config_source(&target).unwrap();
+        let disconnect = build_disconnect_plan(
+            &OpenClawConnector,
+            &openclaw_discovery(&target),
+            &openclaw_verified(),
+            &target,
+            &current,
+            &refreshed_ownership,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            1_005,
+            "83".repeat(16),
+        )
+        .unwrap();
+        engine
+            .apply_disconnect(
+                &disconnect,
+                &confirmation_at(&disconnect, 1_005),
+                &admission(),
+                1_006,
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&target).unwrap()).unwrap(),
+            serde_json::from_slice::<Value>(initial).unwrap()
+        );
+        assert!(ownership.load(&ownership_key).unwrap().is_none());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn disconnect_preserves_user_siblings_under_a_materialized_null_parent() {
+        let root = scratch("materialized-parent-sibling");
+        let target = root.join("openclaw.json");
+        write_initial(
+            &target,
+            br#"{"unowned":"keep","models":null,"agents":null}"#,
+        );
+        let metadata = AgentModelMetadata {
+            context: 128_000,
+            output: 8_192,
+            vision: false,
+            tools: false,
+            reasoning: false,
+            cost: None,
+        };
+        let source = read_config_source(&target).unwrap();
+        let connection = build_connection_plan(
+            &OpenClawConnector,
+            &openclaw_discovery(&target),
+            &openclaw_verified(),
+            &target,
+            &source,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/v1",
+                token: Some("vk-sibling"),
+                adapter_ready: true,
+                model_metadata: Some(&metadata),
+            },
+            1,
+            None,
+            1_000,
+            "91".repeat(16),
+        )
+        .unwrap();
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        engine
+            .apply_connection(&connection, &confirmation(&connection), &admission(), 1_002)
+            .unwrap();
+        let ownership_key = OwnershipKey {
+            agent_id: "openclaw".to_string(),
+            installation_path: "/opt/openclaw".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let mut record = ownership.load(&ownership_key).unwrap().unwrap();
+        assert!(record
+            .owned_paths
+            .iter()
+            .all(|path| path.segments != ["models"] && path.segments != ["agents"]));
+
+        let managed_source = read_config_source(&target).unwrap();
+        let managed_document = parse_source_bytes(
+            Some(managed_source.exact_bytes.as_slice()),
+            DocumentFormat::Json5,
+            "OpenClaw",
+        )
+        .unwrap();
+        let legacy_paths = vec![
+            ConfigPath {
+                segments: vec!["agents".to_string()],
+            },
+            ConfigPath {
+                segments: vec!["models".to_string()],
+            },
+        ];
+        record.owned_paths = legacy_paths.clone();
+        record.owned_value_macs =
+            compute_owned_value_macs(&managed_document, &legacy_paths, &keys.load().unwrap())
+                .unwrap();
+        let revision = record.revision;
+        let record = ownership.commit(record, Some(revision)).unwrap();
+
+        let mut edited: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        edited["models"]["userSetting"] = serde_json::json!({"keep": true});
+        std::fs::write(&target, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
+
+        let baseline = snapshots.load(&record.baseline_snapshot_id).unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let current = read_config_source(&target).unwrap();
+        let disconnect = build_disconnect_plan(
+            &OpenClawConnector,
+            &openclaw_discovery(&target),
+            &openclaw_verified(),
+            &target,
+            &current,
+            &record,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            1_003,
+            "92".repeat(16),
+        )
+        .expect("an unrelated sibling must not cause ownership drift");
+        engine
+            .apply_disconnect(
+                &disconnect,
+                &confirmation_at(&disconnect, 1_003),
+                &admission(),
+                1_004,
+            )
+            .unwrap();
+        let disconnected: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(disconnected["models"]["userSetting"]["keep"], true);
+        assert!(disconnected["models"]["providers"]
+            .get("tokenstation")
+            .is_none());
+        assert_eq!(disconnected["agents"], Value::Null);
+        assert_eq!(disconnected["unowned"], "keep");
+        assert!(ownership.load(&ownership_key).unwrap().is_none());
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -3335,7 +3887,7 @@ mod tests {
         )
         .err()
         .expect("owned value conflict requires a new explicit decision");
-        assert!(error.contains("owned paths"));
+        assert_eq!(error, OWNED_VALUES_CHANGED);
         assert_eq!(std::fs::read(&target).unwrap(), changed_bytes);
         assert_eq!(
             snapshots
@@ -3344,6 +3896,256 @@ mod tests {
                 .len(),
             snapshot_count
         );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn workbuddy_native_array_refresh_and_disconnect_fail_closed_after_user_edit() {
+        let root = scratch("workbuddy-native-array-conflict");
+        let target = root.join("models.json");
+        write_initial(&target, br#"[]"#);
+        let metadata = AgentModelMetadata {
+            context: 257_550,
+            output: 32_768,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let connect_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
+            token: Some("managed-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let connect = build_connection_plan(
+            &WorkBuddyConnector,
+            &workbuddy_discovery(&target),
+            &workbuddy_verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &connect_input,
+            1,
+            None,
+            1_000,
+            "a1".repeat(16),
+        )
+        .unwrap();
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership_store = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership_store,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        engine
+            .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
+            .unwrap();
+
+        let ownership_key = OwnershipKey {
+            agent_id: "workbuddy".to_string(),
+            installation_path: workbuddy_discovery(&target).canonical_path,
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let baseline = snapshots.load(&ownership.baseline_snapshot_id).unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let mut changed: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        changed[0]["apiKey"] = serde_json::json!("user-key");
+        changed[0]["url"] = serde_json::json!("https://user.example/v1/chat/completions");
+        changed[0]["maxInputTokens"] = serde_json::json!(8_192);
+        let changed_bytes = serde_json::to_vec_pretty(&changed).unwrap();
+        std::fs::write(&target, &changed_bytes).unwrap();
+        let snapshot_count = snapshots
+            .list("workbuddy", target.to_str().unwrap())
+            .unwrap()
+            .len();
+        let current = read_config_source(&target).unwrap();
+
+        let disconnect_error = build_disconnect_plan(
+            &WorkBuddyConnector,
+            &workbuddy_discovery(&target),
+            &workbuddy_verified(),
+            &target,
+            &current,
+            &ownership,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            2_000,
+            "a2".repeat(16),
+        )
+        .err()
+        .expect("disconnect refuses a user-edited managed model");
+        assert_eq!(disconnect_error, OWNED_VALUES_CHANGED);
+
+        let refresh = build_metadata_refresh_plan(
+            &WorkBuddyConnector,
+            &workbuddy_discovery(&target),
+            &workbuddy_verified(),
+            &target,
+            &current,
+            &connect_input,
+            &ownership,
+            1,
+            None,
+            2_000,
+            "a3".repeat(16),
+        )
+        .unwrap();
+        let refresh_error = engine
+            .apply_snapshot_restore(
+                &refresh,
+                &confirmation_at(&refresh, 2_001),
+                &admission(),
+                2_002,
+            )
+            .expect_err("refresh refuses a user-edited managed model");
+        assert_eq!(refresh_error.reason_code, "owned_values_changed");
+        assert_eq!(std::fs::read(&target).unwrap(), changed_bytes);
+        assert_eq!(
+            snapshots
+                .list("workbuddy", target.to_str().unwrap())
+                .unwrap()
+                .len(),
+            snapshot_count
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn workbuddy_native_array_refresh_and_disconnect_preserve_user_models() {
+        let root = scratch("workbuddy-native-array-user-model");
+        let target = root.join("models.json");
+        write_initial(&target, br#"[]"#);
+        let metadata = AgentModelMetadata {
+            context: 257_550,
+            output: 32_768,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let connect_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
+            token: Some("managed-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let connect = build_connection_plan(
+            &WorkBuddyConnector,
+            &workbuddy_discovery(&target),
+            &workbuddy_verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &connect_input,
+            1,
+            None,
+            1_000,
+            "b1".repeat(16),
+        )
+        .unwrap();
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership_store = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership_store,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        engine
+            .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
+            .unwrap();
+
+        let ownership_key = OwnershipKey {
+            agent_id: "workbuddy".to_string(),
+            installation_path: workbuddy_discovery(&target).canonical_path,
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let mut edited: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        edited.as_array_mut().unwrap().push(serde_json::json!({
+            "id": "user-model",
+            "url": "https://user.example/v1/chat/completions",
+            "apiKey": "user-owned-key"
+        }));
+        std::fs::write(&target, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
+
+        let refresh = build_metadata_refresh_plan(
+            &WorkBuddyConnector,
+            &workbuddy_discovery(&target),
+            &workbuddy_verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &connect_input,
+            &ownership,
+            1,
+            None,
+            2_000,
+            "b2".repeat(16),
+        )
+        .unwrap();
+        engine
+            .apply_snapshot_restore(
+                &refresh,
+                &confirmation_at(&refresh, 2_001),
+                &admission(),
+                2_002,
+            )
+            .expect("an unrelated user model must not cause ownership drift");
+        let refreshed_ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let baseline = snapshots
+            .load(&refreshed_ownership.baseline_snapshot_id)
+            .unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let disconnect = build_disconnect_plan(
+            &WorkBuddyConnector,
+            &workbuddy_discovery(&target),
+            &workbuddy_verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &refreshed_ownership,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            3_000,
+            "b3".repeat(16),
+        )
+        .unwrap();
+        engine
+            .apply_disconnect(
+                &disconnect,
+                &confirmation_at(&disconnect, 3_001),
+                &admission(),
+                3_002,
+            )
+            .unwrap();
+
+        let disconnected: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(disconnected.as_array().unwrap().len(), 1);
+        assert_eq!(disconnected[0]["id"], "user-model");
+        assert_eq!(disconnected[0]["apiKey"], "user-owned-key");
         std::fs::remove_dir_all(root).ok();
     }
 

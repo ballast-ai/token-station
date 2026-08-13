@@ -66,6 +66,10 @@ impl Connector for OpenCodeConnector {
         vec![path(&["provider", "tokenstation", "options", "apiKey"])]
     }
 
+    fn projects_model_metadata(&self) -> bool {
+        true
+    }
+
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String> {
         if !input.adapter_ready {
             return Err(
@@ -86,7 +90,7 @@ impl Connector for OpenCodeConnector {
         };
         if root
             .get("provider")
-            .is_none_or(serde_json::Value::is_object)
+            .is_none_or(|value| value.is_object() || value.is_null())
         {
             Ok(())
         } else {
@@ -98,6 +102,24 @@ impl Connector for OpenCodeConnector {
         let token = input
             .token
             .ok_or_else(|| "OpenCode 接入缺少虚拟 Key".to_string())?;
+        let vision = input.model_metadata.is_some_and(|metadata| metadata.vision);
+        let mut model = json!({
+            "name": "auto (智能路由)",
+            "attachment": vision,
+            "modalities": {
+                "input": if vision { json!(["text", "image"]) } else { json!(["text"]) },
+                "output": ["text"]
+            }
+        });
+        if let Some(metadata) = input.model_metadata {
+            if let Some((context, output)) = metadata.safe_limits() {
+                model["limit"] = json!({"context": context, "output": output});
+            }
+            if let Some(cost) = &metadata.cost {
+                model["cost"] = serde_json::to_value(cost)
+                    .map_err(|error| format!("OpenCode 模型价格序列化失败：{error}"))?;
+            }
+        }
         Ok(vec![PatchOperation {
             operation: PatchKind::Replace,
             path: path(&["provider", "tokenstation"]),
@@ -106,14 +128,7 @@ impl Connector for OpenCodeConnector {
                 "name": "token-station",
                 "options": { "baseURL": input.base_url, "apiKey": token },
                 "models": {
-                    "auto": {
-                        "name": "auto (智能路由)",
-                        "attachment": true,
-                        "modalities": {
-                            "input": ["text", "image"],
-                            "output": ["text"]
-                        }
-                    }
+                    "auto": model
                 }
             })),
         }])
@@ -140,14 +155,32 @@ impl Connector for OpenCodeConnector {
         let token = input
             .token
             .ok_or_else(|| "OpenCode 接入缺少虚拟 Key".to_string())?;
+        let metadata_valid = input.model_metadata.is_none_or(|metadata| {
+            let model = &provider["models"]["auto"];
+            let limits_valid = metadata.safe_limits().map_or_else(
+                || model.get("limit").is_none(),
+                |(context, output)| model["limit"] == json!({"context": context, "output": output}),
+            );
+            limits_valid && metadata.cost.as_ref().map_or_else(
+                    || provider["models"]["auto"].get("cost").is_none(),
+                    |cost| provider["models"]["auto"]["cost"] == json!(cost),
+                )
+        });
+        let vision = input.model_metadata.is_some_and(|metadata| metadata.vision);
+        let expected_input = if vision {
+            json!(["text", "image"])
+        } else {
+            json!(["text"])
+        };
         let valid = provider["npm"] == json!("@ai-sdk/openai-compatible")
             && provider["name"] == json!("token-station")
             && provider["models"]["auto"]["name"] == json!("auto (智能路由)")
-            && provider["models"]["auto"]["attachment"] == json!(true)
-            && provider["models"]["auto"]["modalities"]["input"] == json!(["text", "image"])
+            && provider["models"]["auto"]["attachment"] == json!(vision)
+            && provider["models"]["auto"]["modalities"]["input"] == expected_input
             && provider["models"]["auto"]["modalities"]["output"] == json!(["text"])
             && provider["options"]["baseURL"] == json!(input.base_url)
-            && provider["options"]["apiKey"] == json!(token);
+            && provider["options"]["apiKey"] == json!(token)
+            && metadata_valid;
         if valid {
             Ok(())
         } else {
@@ -155,9 +188,15 @@ impl Connector for OpenCodeConnector {
         }
     }
 
-    fn success_message(&self, _input: &ConnectInput<'_>) -> String {
-        "opencode 已加入 token-station provider(~/.config/opencode/opencode.json,已备份)。\
-         在 opencode 里选模型 tokenstation/auto 即可。"
-            .to_string()
+    fn success_message(&self, input: &ConnectInput<'_>) -> String {
+        let metadata = match input.model_metadata {
+            Some(value) if value.cost.is_some() => "已同步上下文、输出上限和统一价格。",
+            Some(_) => "已同步安全的上下文和输出上限；候选价格不一致或未知，未写入虚假价格。",
+            None => "当前路由缺少完整模型上限，未猜测上下文和价格；请先刷新 Provider 模型目录。",
+        };
+        format!(
+            "opencode 已加入 token-station provider(~/.config/opencode/opencode.json,已备份)。\
+             在 opencode 里选模型 tokenstation/auto 即可。{metadata}"
+        )
     }
 }

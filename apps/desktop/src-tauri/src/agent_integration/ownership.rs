@@ -6,7 +6,7 @@ use ring::hmac;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use super::config_codec::{semantic_json, ConfigDocument, DocumentFormat};
+use super::config_codec::{semantic_json, semantic_value_at, ConfigDocument, DocumentFormat};
 #[cfg(not(windows))]
 use super::safe_fs::verify_private_file;
 use super::safe_fs::{ensure_private_dir, write_atomic_private};
@@ -70,7 +70,7 @@ impl OwnershipRecord {
     }
 }
 
-pub trait OwnershipStore {
+pub trait OwnershipStore: Send + Sync {
     fn load(&self, key: &OwnershipKey) -> Result<Option<OwnershipRecord>, String>;
     fn list_agent_installation(
         &self,
@@ -294,17 +294,25 @@ pub fn compute_owned_value_macs(
     master_key: &Zeroizing<[u8; 32]>,
 ) -> Result<BTreeMap<String, String>, String> {
     let canonical = semantic_json(document)?;
+    compute_owned_value_macs_from_semantic(&canonical, owned_paths, master_key)
+}
+
+fn compute_owned_value_macs_from_semantic(
+    canonical: &serde_json::Value,
+    owned_paths: &[ConfigPath],
+    master_key: &Zeroizing<[u8; 32]>,
+) -> Result<BTreeMap<String, String>, String> {
     let key = hmac::Key::new(hmac::HMAC_SHA256, master_key.as_ref());
     let mut result = BTreeMap::new();
     for path in owned_paths {
         let mut message = Vec::new();
         message.extend_from_slice(b"token-station-owned-value-v1\0");
         encode_field(&mut message, path.to_string().as_bytes());
-        match json_value_at(&canonical, path) {
+        match semantic_value_for_mac(canonical, path) {
             Some(value) => {
                 message.push(1);
-                let bytes =
-                    serde_json::to_vec(value).map_err(|_| "序列化 owned value 失败".to_string())?;
+                let bytes = serde_json::to_vec(&value)
+                    .map_err(|_| "序列化 owned value 失败".to_string())?;
                 encode_field(&mut message, &bytes);
             }
             None => message.push(0),
@@ -317,6 +325,136 @@ pub fn compute_owned_value_macs(
     Ok(result)
 }
 
+fn semantic_value_for_mac(
+    root: &serde_json::Value,
+    path: &ConfigPath,
+) -> Option<serde_json::Value> {
+    let value = semantic_value_at(root, path)?;
+    if path.segments == ["models"] {
+        if let Some(models) = value.as_array() {
+            return Some(serde_json::Value::Array(
+                models
+                    .iter()
+                    .filter(|model| {
+                        model.get("id").and_then(serde_json::Value::as_str)
+                            == Some("tokenstation-auto")
+                    })
+                    .cloned()
+                    .collect(),
+            ));
+        }
+    }
+    if path.segments == ["availableModels"] {
+        if let Some(models) = value.as_array() {
+            return Some(serde_json::Value::Array(
+                models
+                    .iter()
+                    .filter(|model| model.as_str() == Some("tokenstation-auto"))
+                    .cloned()
+                    .collect(),
+            ));
+        }
+    }
+    Some(value.clone())
+}
+
+pub fn legacy_widened_ownership_matches(
+    record: &OwnershipRecord,
+    current: &ConfigDocument,
+    baseline: &ConfigDocument,
+    declared_paths: &[ConfigPath],
+    master_key: &Zeroizing<[u8; 32]>,
+) -> Result<bool, String> {
+    if !is_legacy_widened_path_set(&record.owned_paths, declared_paths) {
+        return Ok(false);
+    }
+    let current = semantic_json(current)?;
+    let baseline = semantic_json(baseline)?;
+    for stored in &record.owned_paths {
+        if declared_paths
+            .iter()
+            .any(|declared| is_strict_prefix(stored, declared))
+            && semantic_value_at(&baseline, stored).is_some_and(|value| !value.is_null())
+        {
+            return Ok(false);
+        }
+    }
+
+    let mut managed = serde_json::json!({});
+    for path in declared_paths {
+        if let Some(value) = semantic_value_at(&current, path) {
+            set_json_value(&mut managed, path, value.clone())?;
+        }
+    }
+    Ok(
+        compute_owned_value_macs_from_semantic(&managed, &record.owned_paths, master_key)?
+            == record.owned_value_macs,
+    )
+}
+
+pub fn normalized_legacy_owned_paths(
+    stored_paths: &[ConfigPath],
+    declared_paths: &[ConfigPath],
+) -> Vec<ConfigPath> {
+    if is_legacy_widened_path_set(stored_paths, declared_paths) {
+        declared_paths.to_vec()
+    } else {
+        stored_paths.to_vec()
+    }
+}
+
+fn is_legacy_widened_path_set(stored: &[ConfigPath], declared: &[ConfigPath]) -> bool {
+    stored != declared
+        && stored.iter().all(|stored_path| {
+            declared
+                .iter()
+                .any(|declared_path| is_prefix(stored_path, declared_path))
+        })
+        && declared.iter().all(|declared_path| {
+            stored
+                .iter()
+                .any(|stored_path| is_prefix(stored_path, declared_path))
+        })
+}
+
+fn is_prefix(prefix: &ConfigPath, path: &ConfigPath) -> bool {
+    prefix.segments.len() <= path.segments.len()
+        && prefix.segments == path.segments[..prefix.segments.len()]
+}
+
+fn is_strict_prefix(prefix: &ConfigPath, path: &ConfigPath) -> bool {
+    prefix.segments.len() < path.segments.len() && is_prefix(prefix, path)
+}
+
+fn set_json_value(
+    root: &mut serde_json::Value,
+    path: &ConfigPath,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let Some((leaf, parents)) = path.segments.split_last() else {
+        return Err("owned path cannot be empty".to_string());
+    };
+    let mut current = root;
+    for segment in parents {
+        if !current.is_object() {
+            *current = serde_json::json!({});
+        }
+        current = current
+            .as_object_mut()
+            .expect("object was materialized")
+            .entry(segment.clone())
+            .or_insert_with(|| serde_json::json!({}));
+    }
+    if !current.is_object() {
+        *current = serde_json::json!({});
+    }
+    current
+        .as_object_mut()
+        .expect("object was materialized")
+        .insert(leaf.clone(), value);
+    Ok(())
+}
+
 pub fn ownership_matches(
     record: &OwnershipRecord,
     document: &ConfigDocument,
@@ -326,17 +464,6 @@ pub fn ownership_matches(
         compute_owned_value_macs(document, &record.owned_paths, master_key)?
             == record.owned_value_macs,
     )
-}
-
-fn json_value_at<'a>(
-    root: &'a serde_json::Value,
-    path: &ConfigPath,
-) -> Option<&'a serde_json::Value> {
-    let mut current = root;
-    for segment in &path.segments {
-        current = current.as_object()?.get(segment)?;
-    }
-    Some(current)
 }
 
 fn encode_field(output: &mut Vec<u8>, value: &[u8]) {
@@ -455,6 +582,46 @@ mod tests {
         );
         assert!(ownership_matches(&record, &unowned_changed, &key).unwrap());
         assert!(!ownership_matches(&record, &owned_changed, &key).unwrap());
+    }
+
+    #[test]
+    fn ownership_binds_workbuddy_native_array_model_values() {
+        let key = Zeroizing::new([7_u8; 32]);
+        let owned = vec![path(&["models"]), path(&["availableModels"])];
+        let original = ConfigDocument::Json(json!([{
+            "id": "tokenstation-auto",
+            "url": "http://127.0.0.1:8787/agents/workbuddy/v1/chat/completions",
+            "apiKey": "managed-key",
+            "maxInputTokens": 257550
+        }]));
+        let original_macs = compute_owned_value_macs(&original, &owned, &key).unwrap();
+
+        for changed in [
+            json!([{
+                "id": "tokenstation-auto",
+                "url": "http://127.0.0.1:8787/agents/workbuddy/v1/chat/completions",
+                "apiKey": "user-key",
+                "maxInputTokens": 257550
+            }]),
+            json!([{
+                "id": "tokenstation-auto",
+                "url": "https://user.example/v1/chat/completions",
+                "apiKey": "managed-key",
+                "maxInputTokens": 257550
+            }]),
+            json!([{
+                "id": "tokenstation-auto",
+                "url": "http://127.0.0.1:8787/agents/workbuddy/v1/chat/completions",
+                "apiKey": "managed-key",
+                "maxInputTokens": 8192
+            }]),
+        ] {
+            let document = ConfigDocument::Json(changed);
+            assert_ne!(
+                compute_owned_value_macs(&document, &owned, &key).unwrap(),
+                original_macs
+            );
+        }
     }
 
     #[test]

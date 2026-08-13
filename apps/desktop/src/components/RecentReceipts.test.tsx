@@ -376,6 +376,64 @@ describe("RecentReceipts", () => {
     expect(within(row).getByRole("button", { name: "已复制" })).toBeInTheDocument();
   });
 
+  it("本地入站转换失败时明确说明请求尚未发往上游", async () => {
+    vi.mocked(getRecentReceipts).mockResolvedValue([receipt(1, {
+      status: 400,
+      error_code: "invalid_request",
+      attempts: 0,
+      routing: null,
+      decision: null,
+      attempt_records: [],
+      conversion_reports: [{
+        ordinal: 1,
+        stage: "inbound_normalize",
+        source_protocol: "anthropic-messages",
+        target_protocol: "canonical-chat",
+        succeeded: false,
+        outcome: "failed",
+        error_code: "invalid_request",
+        reason_code: "invalid_protocol_shape",
+        reason_detail: "request_body",
+      }],
+    })]);
+    const user = userEvent.setup();
+    render(<RecentReceipts />);
+
+    const row = (await screen.findAllByTestId("receipt-row"))[0] as HTMLDetailsElement;
+    await user.click(row.querySelector("summary")!);
+
+    const diagnosis = within(row).getByLabelText("错误诊断");
+    expect(diagnosis).toHaveTextContent("本地请求转换");
+    expect(diagnosis).toHaveTextContent("尚未发往上游");
+    expect(diagnosis).not.toHaveTextContent("上游拒绝");
+    expect(within(row).getByLabelText("决策记录")).toHaveTextContent("入站转换阶段");
+    expect(within(row).getByLabelText("上游尝试记录")).toHaveTextContent("未发往上游");
+  });
+
+  it("发生真实上游尝试的 400 仍诊断为上游拒绝", async () => {
+    vi.mocked(getRecentReceipts).mockResolvedValue([receipt(1, {
+      status: 400,
+      error_code: "invalid_request",
+      attempts: 1,
+      attempt_records: [{
+        ordinal: 1,
+        upstream: "provider-final",
+        model: "model-final",
+        latency_ms: 45,
+        http_status: 400,
+        error_code: "invalid_request",
+        stream_outcome: "failed_before_output",
+        fallback_allowed: false,
+      }],
+    })]);
+    const user = userEvent.setup();
+    render(<RecentReceipts />);
+
+    const row = (await screen.findAllByTestId("receipt-row"))[0] as HTMLDetailsElement;
+    await user.click(row.querySelector("summary")!);
+    expect(within(row).getByLabelText("错误诊断")).toHaveTextContent("上游拒绝处理");
+  });
+
   it("覆盖 loading、error 与空态", async () => {
     let resolve!: (value: ReceiptView[]) => void;
     vi.mocked(getRecentReceipts).mockReturnValue(new Promise((done) => { resolve = done; }));

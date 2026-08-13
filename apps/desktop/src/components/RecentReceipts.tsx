@@ -6,7 +6,7 @@ import {
   type ReceiptRouteView,
   type ReceiptView,
 } from "../api";
-import { humanizeAppError, humanizeErrorCode } from "../errors";
+import { humanizeAppError, humanizeReceiptError } from "../errors";
 import { useLocalizedCopy } from "./LanguageProvider";
 
 const MAX_RECEIPTS = 5;
@@ -121,7 +121,12 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
   const { language, copy } = useLocalizedCopy();
   const attempts = receipt.attempt_records ?? [];
   const conversions = receipt.conversion_reports ?? [];
-  const diagnosis = humanizeErrorCode(receipt.error_code, language);
+  const diagnosis = humanizeReceiptError(receipt, language);
+  const stoppedDuringInbound = receipt.decision == null
+    && receipt.attempt_records.length === 0
+    && receipt.conversion_reports.some(
+      (conversion) => conversion.stage === "inbound_normalize" && !conversion.succeeded,
+    );
   return (
     <div className="receipt-timeline">
       {diagnosis && (
@@ -154,7 +159,12 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
             </div>
           </div>
         ) : (
-          <p className="receipt-section-empty">{copy("No decision record", "没有决策记录")}</p>
+          <p className="receipt-section-empty">{stoppedDuringInbound
+            ? copy(
+              "The request stopped during local inbound conversion, before routing.",
+              "请求在本地入站转换阶段停止，尚未进入路由。",
+            )
+            : copy("No decision record", "没有决策记录")}</p>
         )}
       </section>
 
@@ -177,7 +187,12 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
               </small>
             </div>
           </div>
-        )) : <p className="receipt-section-empty">{copy("No upstream attempts", "没有真实上游尝试")}</p>}
+        )) : <p className="receipt-section-empty">{stoppedDuringInbound
+          ? copy(
+            "The request was not sent upstream because local conversion failed.",
+            "本地转换失败，请求未发往上游。",
+          )
+          : copy("No upstream attempts", "没有真实上游尝试")}</p>}
       </section>
 
       <section aria-label={copy("Protocol conversion records", "协议转换记录")}>

@@ -1,4 +1,5 @@
 import type { Language } from "./components/LanguageProvider";
+import type { ReceiptConversionView, ReceiptView } from "./api";
 
 export interface HumanError {
   layer: string;
@@ -55,6 +56,59 @@ export function humanizeErrorCode(
         message: `Unclassified error code: ${code}`,
         suggestion: "Copy the request ID and inspect the local logs.",
       });
+}
+
+function localConversionMessage(
+  conversion: ReceiptConversionView,
+  language: Language,
+): HumanError {
+  const chinese = language === "zh-CN";
+  const reason = conversion.reason_code;
+  const detail = conversion.reason_detail;
+  const cause = (() => {
+    if (reason === "invalid_json") return chinese ? "请求 JSON 无法解析。" : "The request JSON could not be parsed.";
+    if (reason === "provider_tool_unsupported") return chinese
+      ? detail === "web_search"
+        ? "当前翻译链路不能执行服务端 WebSearch。"
+        : "当前翻译链路不能执行请求中的供应商托管工具。"
+      : detail === "web_search"
+        ? "The translated route cannot execute provider-hosted Web Search."
+        : "The translated route cannot execute the requested provider-hosted tool.";
+    if (reason === "unsupported_tool_type") return chinese ? "请求包含不支持的工具类型。" : "The request contains an unsupported tool type.";
+    if (reason === "structured_output") return chinese ? "当前链路不能保留请求的结构化输出语义。" : "The route cannot preserve the requested structured-output semantics.";
+    if (reason === "unsupported_media") return chinese ? "当前链路不支持请求中的媒体类型。" : "The route does not support a media type in the request.";
+    if (reason === "invalid_protocol_shape") return chinese ? "请求字段缺失或结构不符合所选协议。" : "Required fields are missing or the request shape does not match the selected protocol.";
+    return chinese ? "请求无法转换为 Token Station 的内部格式。" : "The request could not be converted to Token Station's internal format.";
+  })();
+  return chinese
+    ? {
+        layer: "本地请求转换",
+        message: `${cause} 请求尚未发往上游。`,
+        suggestion: reason === "provider_tool_unsupported"
+          ? "改用真正支持该托管工具的原生 Provider，或关闭该工具。"
+          : "检查 Agent 请求协议和必填字段，然后重试。",
+      }
+    : {
+        layer: "Local request conversion",
+        message: `${cause} The request was not sent upstream.`,
+        suggestion: reason === "provider_tool_unsupported"
+          ? "Use a native provider that supports the hosted tool, or disable that tool."
+          : "Check the Agent protocol and required fields, then retry.",
+      };
+}
+
+export function humanizeReceiptError(
+  receipt: ReceiptView,
+  language: Language = "en",
+): HumanError | null {
+  const failedInbound = receipt.conversion_reports.find(
+    (conversion) => conversion.stage === "inbound_normalize" && !conversion.succeeded,
+  );
+  const noUpstreamAttempt = receipt.attempts === 0 && receipt.attempt_records.length === 0;
+  if (failedInbound && noUpstreamAttempt && receipt.decision == null) {
+    return localConversionMessage(failedInbound, language);
+  }
+  return humanizeErrorCode(receipt.error_code, language);
 }
 
 interface LocalizedAppError {
@@ -143,12 +197,17 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     zh: "无法打开外部页面。请检查网址和默认浏览器，然后重试。",
   },
   {
+    matches: /Agent .*model metadata refresh failed|Agent 模型元数据刷新失败/i,
+    en: "The proxy is running, but Token Station could not refresh one managed Agent configuration. Open the Agent page, rescan, and repair that Agent before using its route.",
+    zh: "代理已经运行，但一个已接管 Agent 的模型元数据刷新失败。请打开 Agent 页面重新扫描，并修复该 Agent 后再使用它的路由。",
+  },
+  {
     matches: /timed? ?out|timeout|超时/i,
     en: "The operation took too long and was stopped. Check the network connection, then try again.",
     zh: "操作等待时间过长，已停止。请检查网络连接，然后重试。",
   },
   {
-    matches: /network|connect(?:ion)?|dns|tls|certificate|request failed|网络|连接失败|证书/i,
+    matches: /network|\bconnect(?:ion)?\b|dns|tls|certificate|request failed|网络|连接失败|证书/i,
     en: "Token Station could not reach the service. Check the network, Base URL, and proxy settings, then try again.",
     zh: "Token Station 无法连接到服务。请检查网络、Base URL 和代理设置，然后重试。",
   },

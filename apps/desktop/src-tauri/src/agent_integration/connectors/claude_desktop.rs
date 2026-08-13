@@ -344,6 +344,7 @@ mod tests {
                     base_url: "http://127.0.0.1:8787/agents/claude-desktop",
                     token: Some("vk-test"),
                     adapter_ready: true,
+                    model_metadata: None,
                 },
             )
             .expect("projections build");
@@ -391,6 +392,7 @@ mod tests {
             base_url: "http://127.0.0.1:8787/agents/claude-desktop",
             token: Some("vk-test"),
             adapter_ready: false,
+            model_metadata: None,
         };
         assert!(CONNECTOR
             .validate_preconditions(&adapter_unavailable)
@@ -401,6 +403,7 @@ mod tests {
             base_url: adapter_unavailable.base_url,
             token: None,
             adapter_ready: true,
+            model_metadata: None,
         };
         assert_eq!(
             CONNECTOR

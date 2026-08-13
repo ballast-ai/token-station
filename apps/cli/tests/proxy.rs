@@ -388,6 +388,7 @@ struct Proxy {
     data_dir: PathBuf,
     virtual_key: String,
     control: server::ServerControl,
+    gateway: Arc<Gateway>,
 }
 
 /// Starts the whole server against `upstream`, auth on — the default posture.
@@ -486,7 +487,7 @@ fn spawn_proxy(config: &ClientConfig) -> Proxy {
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
     assert!(created, "each test gets a fresh data dir");
     let state = server::AppState::new(
-        gateway,
+        Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
         Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
@@ -517,6 +518,7 @@ fn spawn_proxy(config: &ClientConfig) -> Proxy {
         data_dir,
         virtual_key,
         control,
+        gateway,
     }
 }
 
@@ -626,7 +628,7 @@ fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Pat
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
     assert!(created);
     let state = server::AppState::new(
-        gateway,
+        Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
         Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
@@ -654,6 +656,7 @@ fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Pat
         data_dir,
         virtual_key,
         control,
+        gateway,
     }
 }
 
@@ -1693,28 +1696,38 @@ fn scoped_models_auth_and_unknown_namespaces_fail_closed() {
             .build(),
     );
 
-    let models = agent
-        .get(format!("{}/agents/opencode/v1/models", proxy.url))
-        .header("authorization", &format!("Bearer {}", proxy.virtual_key))
-        .call()
-        .expect("namespaced models answers");
-    assert_eq!(models.status().as_u16(), 200);
-    let models: Value = serde_json::from_str(
-        &models
-            .into_body()
-            .read_to_string()
-            .expect("OpenCode models body reads"),
-    )
-    .expect("OpenCode models body is JSON");
-    let ids = models["data"]
-        .as_array()
-        .expect("models data is an array")
-        .iter()
-        .map(|model| model["id"].as_str().expect("model id"))
-        .collect::<std::collections::BTreeSet<_>>();
+    let model_ids = |path: &str| {
+        let models = agent
+            .get(format!("{}{}", proxy.url, path))
+            .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+            .call()
+            .expect("models endpoint answers");
+        assert_eq!(models.status().as_u16(), 200);
+        let models: Value = serde_json::from_str(
+            &models
+                .into_body()
+                .read_to_string()
+                .expect("models body reads"),
+        )
+        .expect("models body is JSON");
+        models["data"]
+            .as_array()
+            .expect("models data is an array")
+            .iter()
+            .map(|model| model["id"].as_str().expect("model id").to_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
     assert_eq!(
-        ids,
-        std::collections::BTreeSet::from(["agent-model", "home-model"])
+        model_ids("/agents/opencode/v1/models"),
+        std::collections::BTreeSet::from(["home-model".to_owned()])
+    );
+    assert_eq!(
+        model_ids("/agents/codex/v1/models"),
+        std::collections::BTreeSet::from(["agent-model".to_owned()])
+    );
+    assert_eq!(
+        model_ids("/v1/models"),
+        std::collections::BTreeSet::from(["home-model".to_owned()])
     );
 
     let wrong_key = agent
@@ -1753,6 +1766,75 @@ fn scoped_models_auth_and_unknown_namespaces_fail_closed() {
     assert_eq!(status, 404, "{body}");
     assert_eq!(home.hits(), 0);
     assert_eq!(custom.hits(), 0);
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn scoped_models_switch_on_the_next_request_after_router_reload() {
+    let answer = json!({
+        "id": "chatcmpl-unused",
+        "model": "home-model",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "unused" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    });
+    let home = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let custom = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("scoped-model-reload", "sk-test-key-abc");
+    let proxy = start_scoped_proxy(&home, &custom, &key);
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    let model_ids = || {
+        let response = agent
+            .get(format!("{}/agents/opencode/v1/models", proxy.url))
+            .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+            .call()
+            .expect("scoped model discovery answers");
+        assert_eq!(response.status().as_u16(), 200);
+        let document: Value = serde_json::from_str(
+            &response
+                .into_body()
+                .read_to_string()
+                .expect("model discovery body reads"),
+        )
+        .expect("model discovery body is JSON");
+        document["data"]
+            .as_array()
+            .expect("model data is an array")
+            .iter()
+            .map(|model| model["id"].as_str().expect("model id").to_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    assert_eq!(
+        model_ids(),
+        std::collections::BTreeSet::from(["home-model".to_owned()])
+    );
+    let replacement = serde_json::from_value(json!({
+        "version": 1,
+        "pools": {
+            "tier_high": [{"upstream": "agent_upstream", "model": "agent-model"}],
+            "tier_mid": [{"upstream": "agent_upstream", "model": "agent-model"}],
+            "tier_low": [{"upstream": "agent_upstream", "model": "agent-model"}]
+        },
+        "default_pool": "tier_low"
+    }))
+    .expect("replacement Agent router parses");
+    proxy
+        .gateway
+        .reload_agent_router("opencode", Some(replacement))
+        .expect("Agent router reloads");
+    assert_eq!(
+        model_ids(),
+        std::collections::BTreeSet::from(["agent-model".to_owned()])
+    );
 
     std::fs::remove_file(key).ok();
 }
@@ -2522,6 +2604,153 @@ fn an_anthropic_message_round_trips_through_the_same_provider_pipeline() {
 }
 
 #[test]
+fn translated_anthropic_server_tool_fails_before_upstream_with_receipt_reason() {
+    let mock = MockUpstream::start(Vec::new());
+    let key = key_file("anthropic-server-tool-capability", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, body) = post_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": "find current information"}],
+            "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(status, 400, "body={body}");
+    let error: Value = serde_json::from_str(&body).expect("Anthropic error JSON");
+    assert_eq!(error["error"]["type"], json!("invalid_request_error"));
+    assert!(body.contains("anthropic-native"), "body={body}");
+    assert_eq!(
+        mock.hits(),
+        0,
+        "unsupported server tools stop before upstream"
+    );
+
+    settle();
+    let (status, _, body) = admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    assert_eq!(status, 200, "body={body}");
+    let receipts: Value = serde_json::from_str(&body).expect("receipts are JSON");
+    assert_eq!(
+        receipts[0]["attempt_records"].as_array().map(Vec::len),
+        Some(0)
+    );
+    let conversion = receipts[0]["conversion_reports"]
+        .as_array()
+        .and_then(|reports| reports.first())
+        .expect("failed inbound conversion is recorded");
+    assert_eq!(conversion["stage"], json!("inbound_normalize"));
+    assert_eq!(
+        conversion["reason_code"],
+        json!("provider_tool_unsupported")
+    );
+    assert_eq!(conversion["reason_detail"], json!("web_search"));
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn translated_responses_hosted_tool_fails_before_upstream_with_receipt_reason() {
+    let mock = MockUpstream::start(Vec::new());
+    let key = key_file("responses-hosted-tool-capability", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-openai-responses");
+
+    for (tool, expected_detail) in [
+        ("web_search", "web_search"),
+        ("file_search", "other_tool_type"),
+    ] {
+        let (status, body) = post_scoped(
+            &proxy,
+            "/agents/codex/v1/responses",
+            &json!({
+                "model": "auto",
+                "input": "use a provider-hosted tool",
+                "tools": [{"type": tool}]
+            }),
+            &proxy.virtual_key,
+            false,
+        );
+
+        assert_eq!(status, 400, "body={body}");
+        assert!(body.contains(tool), "body={body}");
+        assert_eq!(
+            mock.hits(),
+            0,
+            "unsupported hosted tools stop before upstream"
+        );
+
+        settle();
+        let (status, _, body) =
+            admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+        assert_eq!(status, 200, "body={body}");
+        let receipts: Value = serde_json::from_str(&body).expect("receipts are JSON");
+        assert_eq!(
+            receipts[0]["attempt_records"].as_array().map(Vec::len),
+            Some(0)
+        );
+        let conversion = receipts[0]["conversion_reports"]
+            .as_array()
+            .and_then(|reports| reports.first())
+            .expect("failed inbound conversion is recorded");
+        assert_eq!(conversion["stage"], json!("inbound_normalize"));
+        assert_eq!(
+            conversion["reason_code"],
+            json!("provider_tool_unsupported")
+        );
+        assert_eq!(conversion["reason_detail"], json!(expected_detail));
+    }
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn claude_desktop_adaptive_thinking_reaches_the_translated_provider() {
+    let upstream_answer = json!({
+        "id": "chatcmpl-adaptive",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "ready"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("claude-desktop-adaptive-thinking", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, body) = post_scoped(
+        &proxy,
+        "/agents/claude-desktop/v1/messages",
+        &json!({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 128,
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "high"},
+            "messages": [{"role": "user", "content": "check the route"}]
+        }),
+        &proxy.virtual_key,
+        true,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    let seen = mock.seen();
+    assert_eq!(
+        seen.len(),
+        1,
+        "adaptive thinking must reach the upstream once"
+    );
+    assert_eq!(seen[0].path, "/v1/chat/completions");
+    assert_eq!(seen[0].body["reasoning_effort"], json!("high"));
+    assert!(seen[0].body.get("anthropic_thinking").is_none());
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn anthropic_enabled_thinking_is_refused_before_upstream() {
     let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
     let key = key_file("anthropic-enabled-thinking", "sk-test-key-abc");
@@ -2548,6 +2777,33 @@ fn anthropic_enabled_thinking_is_refused_before_upstream() {
             .is_some_and(|message| message.contains("thinking type enabled"))
     );
     assert_eq!(mock.hits(), 0, "enabled thinking is refused before routing");
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn anthropic_adaptive_thinking_without_claude_desktop_scope_is_refused() {
+    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
+    let key = key_file("anthropic-unscoped-adaptive-thinking", "sk-test-key-abc");
+    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+
+    let (status, _, body) = send_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 128,
+            "thinking": {"type": "adaptive"},
+            "messages": [{"role": "user", "content": "think before answering"}]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(
+        mock.hits(),
+        0,
+        "unscoped adaptive thinking stays fail-closed"
+    );
 
     std::fs::remove_file(key).ok();
 }
@@ -3744,7 +4000,7 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
     let (virtual_key, _) =
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
     let state = server::AppState::new(
-        gateway,
+        Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
         Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
@@ -3773,6 +4029,7 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
         data_dir,
         virtual_key,
         control,
+        gateway,
     }
 }
 
@@ -3834,7 +4091,7 @@ fn start_quota_proxy_two(
     let (virtual_key, _) =
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
     let state = server::AppState::new(
-        gateway,
+        Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
         Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
@@ -3862,6 +4119,7 @@ fn start_quota_proxy_two(
         data_dir,
         virtual_key,
         control,
+        gateway,
     }
 }
 
@@ -4040,7 +4298,7 @@ fn start_proxy_many(upstream: &MockUpstream, count: usize, key_file: &Path) -> P
     let (virtual_key, _) =
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
     let state = server::AppState::new(
-        gateway,
+        Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
         Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
@@ -4068,6 +4326,7 @@ fn start_proxy_many(upstream: &MockUpstream, count: usize, key_file: &Path) -> P
         data_dir,
         virtual_key,
         control,
+        gateway,
     }
 }
 

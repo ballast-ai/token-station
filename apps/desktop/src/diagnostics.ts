@@ -9,12 +9,13 @@ function bounded(value: string, limit: number): string {
   return `${value.slice(0, Math.max(0, limit - 12))}…[truncated]`;
 }
 
-function redact(value: string): string {
+export function redactDiagnosticText(value: string): string {
   return value
     .replace(/\bBearer\s+[a-z0-9._~+/-]{3,}/gi, "Bearer [REDACTED]")
     .replace(/\b(?:sk|pk)[-_][a-z0-9_-]{4,}/gi, "[REDACTED]")
     .replace(/\bAIza[0-9A-Za-z_-]{12,}/g, "[REDACTED]")
-    .replace(/((?:api[_-]?key|access[_-]?token|token|password|secret|authorization)\s*[:=]\s*["']?)[^"'\s,;}]{3,}/gi, "$1[REDACTED]");
+    .replace(/((?:api[_-]?key|access[_-]?token|token|password|secret|authorization)\s*[:=]\s*["']?)[^"'\s,;}]{3,}/gi, "$1[REDACTED]")
+    .replace(/(["']?(?:request[_-]?body|body|prompt|content|input|tool[_-]?input|toolInput|arguments|query|search[_-]?(?:term|query))["']?\s*[:=]\s*)[\s\S]*/gi, "$1[REDACTED]");
 }
 
 function errorFields(value: unknown): { message: string; stack: string | null } {
@@ -40,10 +41,10 @@ export function diagnosticInput(
   const { message, stack } = errorFields(value);
   return {
     kind,
-    message: bounded(redact(message), MESSAGE_LIMIT),
-    stack: stack ? bounded(redact(stack), STACK_LIMIT) : null,
+    message: bounded(redactDiagnosticText(message), MESSAGE_LIMIT),
+    stack: stack ? bounded(redactDiagnosticText(stack), STACK_LIMIT) : null,
     component_stack: componentStack
-      ? bounded(redact(componentStack), COMPONENT_LIMIT)
+      ? bounded(redactDiagnosticText(componentStack), COMPONENT_LIMIT)
       : null,
   };
 }
