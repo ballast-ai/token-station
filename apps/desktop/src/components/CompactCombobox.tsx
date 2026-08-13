@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import { useLocalizedCopy } from "./LanguageProvider";
 
@@ -13,6 +14,7 @@ export interface CompactComboboxOption {
   value: string;
   label: string;
   hint?: string;
+  icon?: ReactNode;
 }
 
 interface CompactComboboxProps {
@@ -203,10 +205,11 @@ export default function CompactCombobox({
           if (event.key === "Escape") close(true);
         }}
       >
-        <span className={selected ? "" : "placeholder-copy"}>
-          {selected?.label ?? placeholder ?? copy("Select", "请选择")}
+        <span className={`compact-combobox-value ${selected ? "" : "placeholder-copy"}`}>
+          {selected?.icon && <span className="compact-combobox-icon" aria-hidden="true">{selected.icon}</span>}
+          <span>{selected?.label ?? placeholder ?? copy("Select", "请选择")}</span>
         </span>
-        <svg viewBox="0 0 16 16" aria-hidden="true">
+        <svg className="compact-combobox-chevron" viewBox="0 0 16 16" aria-hidden="true">
           <path d="m4 6 4 4 4-4" />
         </svg>
       </button>
@@ -288,9 +291,12 @@ export default function CompactCombobox({
                   }
                 }}
               >
-                <span>
-                  <strong>{option.label}</strong>
-                  {option.hint && <small>{option.hint}</small>}
+                <span className="compact-combobox-option-content">
+                  {option.icon && <span className="compact-combobox-icon" aria-hidden="true">{option.icon}</span>}
+                  <span>
+                    <strong>{option.label}</strong>
+                    {option.hint && <small>{option.hint}</small>}
+                  </span>
                 </span>
                 {option.value === value && (
                   <svg className="compact-combobox-check" viewBox="0 0 18 18" aria-hidden="true">

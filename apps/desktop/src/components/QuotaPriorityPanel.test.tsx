@@ -11,6 +11,7 @@ const oneDayMs = 24 * 60 * 60 * 1000;
 const providers: ProviderView[] = [
   {
     name: "deepseek",
+    brand_id: "deepseek",
     provider: "openai-compatible",
     base_url: "https://api.deepseek.com/v1",
     models: ["deepseek-v4-flash"],
@@ -38,12 +39,52 @@ function renderPanel(overrides: Partial<ComponentProps<typeof QuotaPriorityPanel
       {...overrides}
     />,
   );
-  const planSection = screen.getByText("额度计划(可选)").closest(".quota-plan-section") as HTMLElement | null;
+  const planSection = screen.getByText("额度计划（可选）").closest(".quota-plan-section") as HTMLElement | null;
   if (!planSection) throw new Error("quota plan section is missing");
   return { onSavePlan, planSection };
 }
 
 describe("QuotaPriorityPanel quota plans", () => {
+  it("用两句易读文案说明本地估算边界", () => {
+    const { planSection } = renderPanel();
+    expect(planSection).toHaveTextContent(
+      "填写供应商的额度上限和刷新周期后，Token Station 会在本机估算剩余额度。",
+    );
+    expect(planSection).toHaveTextContent("若供应商会自动上报额度，则无需填写。");
+  });
+
+  it("shows provider brands in quota provider controls", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    const trigger = screen.getByRole("combobox", { name: "账户 1 供应商" });
+    expect(trigger.querySelector('[data-provider-brand="deepseek"]')).toBeInTheDocument();
+    await user.click(trigger);
+    expect(screen.getByRole("option", { name: "deepseek" })
+      .querySelector('[data-provider-brand="deepseek"]')).toBeInTheDocument();
+  });
+
+  it("额度下拉框不用自定义 deepseek 名称冒充官方品牌", async () => {
+    const user = userEvent.setup();
+    renderPanel({
+      providers: [{
+        name: "deepseek",
+        brand_id: null,
+        provider: "openai-compatible",
+        base_url: "https://custom.example/v1",
+        models: ["deepseek-v4-flash"],
+        has_auth: true,
+      }],
+    });
+
+    const trigger = screen.getByRole("combobox", { name: "账户 1 供应商" });
+    expect(trigger.querySelector('[data-provider-brand="deepseek"]')).toBeNull();
+    expect(trigger.querySelector(".brand-fallback")).toHaveTextContent("D");
+    await user.click(trigger);
+    const option = screen.getByRole("option", { name: "deepseek" });
+    expect(option.querySelector('[data-provider-brand="deepseek"]')).toBeNull();
+    expect(option.querySelector(".brand-fallback")).toHaveTextContent("D");
+  });
+
   it("exposes quota configuration and its real apply action to onboarding", () => {
     renderPanel();
 

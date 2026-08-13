@@ -1,12 +1,13 @@
-import { Gauge, Layers3 } from "lucide-react";
+import { Gauge, Layers3, Target } from "lucide-react";
+import type { RoutingMode } from "../api";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
 
 interface RoutingModeSelectorProps {
-  value: "tiered" | "quota_first";
+  value: RoutingMode;
   disabled?: boolean;
   agent?: boolean;
-  onValueChange: (value: "tiered" | "quota_first") => void;
+  onValueChange: (value: RoutingMode) => void;
 }
 
 export default function RoutingModeSelector({
@@ -31,17 +32,21 @@ export default function RoutingModeSelector({
         <div>
           <h2>{copy("Choose how requests are assigned", "选择请求如何分配")}</h2>
           <p>{copy(
-            "Switch between task-complexity tiers and provider quota priority.",
-            "在按任务复杂度分档与按供应商额度优先之间切换。",
+            "Choose one exact target, task-complexity tiers, or provider quota priority.",
+            "可固定一个目标，也可按任务复杂度或供应商额度分配。",
           )}</p>
         </div>
       </div>
       <Tabs
         className="routing-mode-tabs"
         value={value}
-        onValueChange={(next) => onValueChange(next as "tiered" | "quota_first")}
+        onValueChange={(next) => onValueChange(next as RoutingMode)}
       >
         <TabsList aria-label={label}>
+          <TabsTrigger value="direct" aria-label={copy("Direct routing", "单独路由")} disabled={disabled}>
+            <Target />
+            <span><strong>{copy("Direct routing", "单独路由")}</strong><small>{copy("One exact provider and model", "固定一个供应商和模型")}</small></span>
+          </TabsTrigger>
           <TabsTrigger value="tiered" aria-label={copy("Smart tiers", "智能分档")} disabled={disabled}>
             <Layers3 />
             <span><strong>{copy("Smart tiers", "智能分档")}</strong><small>{copy("Match model to task", "按任务复杂度选模型")}</small></span>

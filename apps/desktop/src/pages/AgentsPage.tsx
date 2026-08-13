@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
-import { RefreshCw } from "lucide-react";
 import type { AgentUiMetadataView, AgentView } from "../api";
 import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy } from "../components/LanguageProvider";
+import TokenStationMark from "../components/TokenStationMark";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
@@ -12,8 +12,8 @@ interface AgentsPageProps {
   registry: AgentUiMetadataView[];
   agents: AgentView[];
   selectedAgentId?: string;
-  scanBusy: boolean;
-  onRescan: () => void;
+  homeSelected: boolean;
+  onOpenHome: () => void;
   onOpenAgent: (agentId: string) => void;
   children: ReactNode;
 }
@@ -40,8 +40,8 @@ export default function AgentsPage({
   registry,
   agents,
   selectedAgentId,
-  scanBusy,
-  onRescan,
+  homeSelected,
+  onOpenHome,
   onOpenAgent,
   children,
 }: AgentsPageProps) {
@@ -52,19 +52,9 @@ export default function AgentsPage({
       <header className="overview-heading">
         <div>
           <span className="page-eyebrow">AGENT FLEET</span>
-          <h1>{copy("Agents", "Agent 管理")}</h1>
-          <p>{copy("Choose an Agent on the left, then manage connection and routing on the right.", "在左侧选择 Agent，在右侧管理接入和独立路由。")}</p>
+          <h1>{copy("Home", "主页")}</h1>
+          <p>{copy("Choose global routing or a detected Agent, then configure it on the right.", "选择全局路由或启动时发现的 Agent，在右侧完成配置。")}</p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          data-onboarding-target="agent-rescan"
-          onClick={onRescan}
-          disabled={scanBusy}
-        >
-          <RefreshCw className={scanBusy ? "is-spinning" : ""} />
-          {scanBusy ? copy("Scanning…", "扫描中…") : copy("Rescan", "重新扫描")}
-        </Button>
       </header>
 
       <div className="agent-master-detail">
@@ -87,6 +77,22 @@ export default function AgentsPage({
                 className="agent-master-nav"
                 aria-label={copy("Agent list", "Agent 列表")}
               >
+                <Button
+                  className="agent-master-item agent-master-home"
+                  variant="ghost"
+                  type="button"
+                  aria-label={copy("Global routing", "全局路由")}
+                  title={copy("Global routing · fixed first row", "全局路由 · 固定首行")}
+                  aria-current={homeSelected ? "page" : undefined}
+                  data-onboarding-target="routing"
+                  onClick={onOpenHome}
+                >
+                  <span className="agent-master-icon global-route-mark" aria-hidden="true">
+                    <TokenStationMark size={36} />
+                  </span>
+                  <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由")}</strong><small>{copy("Local default", "本机默认")}</small></span>
+                  <Badge variant={homeSelected ? "default" : "outline"}>{copy("Default", "默认")}</Badge>
+                </Button>
                 {registry.map((metadata) => {
                   const agent = agents.find((candidate) => candidate.metadata.agent_id === metadata.agent_id);
                   const selected = metadata.agent_id === selectedAgentId;
@@ -98,13 +104,14 @@ export default function AgentsPage({
                       type="button"
                       aria-label={metadata.display_name}
                       title={`${metadata.display_name} · ${statusCopy(agent?.status, copy)}`}
+                      data-onboarding-target="agent-entry"
                       aria-current={selected ? "page" : undefined}
                       onClick={() => onOpenAgent(metadata.agent_id)}
                     >
                       <span className="agent-master-icon" aria-hidden="true">
                         <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={40} />
                       </span>
-                      <span><strong>{metadata.display_name}</strong><small>{metadata.agent_id}</small></span>
+                      <span className="agent-master-copy"><strong>{metadata.display_name}</strong><small>{metadata.agent_id}</small></span>
                       <Badge variant={agent?.status === "CONNECTED" ? "default" : "outline"}>{navStatusCopy(agent?.status, copy)}</Badge>
                     </Button>
                   );
@@ -114,7 +121,7 @@ export default function AgentsPage({
           </CardContent>
         </Card>
 
-        <section className="agent-master-content" aria-label={copy("Selected Agent configuration", "当前 Agent 配置")}>
+        <section className="agent-master-content" aria-label={copy("Selected Home configuration", "当前主页配置")}>
           {children}
         </section>
       </div>

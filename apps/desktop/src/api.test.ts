@@ -19,6 +19,7 @@ import {
   getPriceTable,
   getRecentReceipts,
   getRuntimeState,
+  getCachedAgentViews,
   getRouterTable,
   getState,
   getStats,
@@ -38,6 +39,7 @@ import {
   saveConfig,
   saveAgentRoutes,
   scanAgents,
+  ensureServeRunning,
   serveStart,
   serveStop,
   setAdminEndpoint,
@@ -47,9 +49,12 @@ import {
   setModelPrice,
   suggestModelPrice,
   setAgentTier,
+  setDirectRoute,
+  setRoutingMode,
   setTier,
   testProvider,
   setProviderModelVision,
+  setProviderModelLimits,
   updateProviderModels,
   removeAgentBudget,
   removeModelPrice,
@@ -107,6 +112,33 @@ describe("structured Agent IPC", () => {
   it("scans without renderer-controlled arguments", async () => {
     await scanAgents();
     expect(invokeMock).toHaveBeenCalledWith("scan_agents");
+  });
+
+  it("refreshes only the cached startup Agent set", async () => {
+    await getCachedAgentViews();
+    expect(invokeMock).toHaveBeenCalledWith("get_cached_agent_views");
+  });
+
+  it("waits for one reachable proxy generation before connecting an Agent", async () => {
+    await ensureServeRunning();
+    expect(invokeMock).toHaveBeenCalledWith("ensure_serve_running");
+  });
+
+  it("applies an exact direct target without exposing display order", async () => {
+    await setDirectRoute("openai", "gpt-5.6", "codex");
+    expect(invokeMock).toHaveBeenCalledWith("set_direct_route", {
+      upstream: "openai",
+      model: "gpt-5.6",
+      agentId: "codex",
+    });
+  });
+
+  it("sets the direct routing mode through the existing mode command", async () => {
+    await setRoutingMode("direct");
+    expect(invokeMock).toHaveBeenCalledWith("set_routing_mode", {
+      mode: "direct",
+      agentId: null,
+    });
   });
 
   it.each([
@@ -282,6 +314,7 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
     ["discover models", () => discoverProviderModels("p", "https://p/v1", null), "discover_provider_models", { name: "p", baseUrl: "https://p/v1", apiKey: null }],
     ["test provider", () => testProvider("p"), "test_provider", { name: "p" }],
     ["declare model vision", () => setProviderModelVision("p", "m", true), "set_provider_model_vision", { name: "p", model: "m", supported: true }],
+    ["set model limits", () => setProviderModelLimits("p", "m", 128000, 32768), "set_provider_model_limits", { name: "p", model: "m", contextWindow: 128000, maxOutputTokens: 32768 }],
     ["update models", () => updateProviderModels("p", ["a", "b"]), "update_provider_models", { name: "p", models: ["a", "b"] }],
     ["set tier", () => setTier("high", "p", "m"), "set_tier", { slot: "high", upstream: "p", model: "m" }],
     ["set Agent route mode", () => setAgentRouteMode("codex", "custom"), "set_agent_route_mode", { agentId: "codex", mode: "custom" }],

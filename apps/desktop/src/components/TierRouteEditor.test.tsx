@@ -7,6 +7,7 @@ import TierRouteEditor from "./TierRouteEditor";
 const providers: ProviderView[] = [
   {
     name: "deepseek",
+    brand_id: "deepseek",
     provider: "openai-compatible",
     base_url: "https://api.deepseek.com/v1",
     models: ["deepseek-v4-pro", "deepseek-v4-flash"],
@@ -14,6 +15,7 @@ const providers: ProviderView[] = [
   },
   {
     name: "openai",
+    brand_id: "openai",
     provider: "openai",
     base_url: "https://api.openai.com/v1",
     models: ["gpt-5.5", "gpt-5.5-mini"],
@@ -35,6 +37,50 @@ const tiers: Record<TierSlot, TierView> = {
 };
 
 describe("TierRouteEditor", () => {
+  it("shows provider brands in the selected control and dropdown options", async () => {
+    const user = userEvent.setup();
+    render(
+      <TierRouteEditor tiers={tiers} providers={providers} onTierChange={vi.fn()} />,
+    );
+
+    const trigger = screen.getByLabelText("上档供应商");
+    expect(trigger.querySelector('[data-provider-brand="deepseek"]')).toBeInTheDocument();
+    await user.click(trigger);
+    expect(screen.getByRole("option", { name: "openai" })
+      .querySelector('[data-provider-brand="openai"]')).toBeInTheDocument();
+  });
+
+  it("下拉框中自定义 openai 只显示首字母而不伪装官方图标", async () => {
+    const user = userEvent.setup();
+    const customProviders: ProviderView[] = [{
+      name: "openai",
+      brand_id: null,
+      provider: "openai-compatible",
+      base_url: "https://custom.example/v1",
+      models: ["custom-model"],
+      has_auth: true,
+    }];
+    render(
+      <TierRouteEditor
+        tiers={{
+          high: { upstream: "openai", model: "custom-model" },
+          mid: { upstream: null, model: null },
+          low: { upstream: null, model: null },
+        }}
+        providers={customProviders}
+        onTierChange={vi.fn()}
+      />,
+    );
+
+    const trigger = screen.getByLabelText("上档供应商");
+    expect(trigger.querySelector('[data-provider-brand="openai"]')).toBeNull();
+    expect(trigger.querySelector(".brand-fallback")).toHaveTextContent("O");
+    await user.click(trigger);
+    const option = screen.getByRole("option", { name: "openai" });
+    expect(option.querySelector('[data-provider-brand="openai"]')).toBeNull();
+    expect(option.querySelector(".brand-fallback")).toHaveTextContent("O");
+  });
+
   it("renders the existing three-tier structure with accessible controls", () => {
     render(
       <TierRouteEditor tiers={tiers} providers={providers} onTierChange={vi.fn()} />,
@@ -85,7 +131,7 @@ describe("TierRouteEditor", () => {
     );
 
     await user.click(screen.getByLabelText("上档供应商"));
-    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
+    expect(screen.getAllByRole("option").map((option) => option.getAttribute("title"))).toEqual([
       "deepseek",
       "未选择",
       "openai",
@@ -94,7 +140,7 @@ describe("TierRouteEditor", () => {
 
     await user.keyboard("{Escape}");
     await user.click(screen.getByLabelText("中档供应商"));
-    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
+    expect(screen.getAllByRole("option").map((option) => option.getAttribute("title"))).toEqual([
       "openai",
       "未选择",
       "deepseek",

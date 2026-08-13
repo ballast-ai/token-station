@@ -19,6 +19,7 @@ import {
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { humanizeAppError } from "../errors";
+import { useErrorToast } from "../components/ErrorToast";
 
 function requiresFreshUpdateCheck(message: string): boolean {
   return message.includes("update_version_changed:")
@@ -50,6 +51,7 @@ function AboutContent({
   onOpenFirstRunGuide?: () => void;
 }) {
   const { copy, language, t } = useLanguage();
+  const { showError } = useErrorToast();
   const [update, setUpdate] = useState<DesktopUpdateView | null>(null);
   const [busy, setBusy] = useState<"" | "checking" | "installing" | "restarting">("");
   const [err, setErr] = useState("");
@@ -66,12 +68,19 @@ function AboutContent({
     }).then((stop) => {
       if (disposed) stop();
       else unlisten = stop;
+    }).catch((caught) => {
+      if (!disposed) {
+        showError(
+          humanizeAppError(caught, language),
+          "desktop-update-progress-listener",
+        );
+      }
     });
     return () => {
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [language, showError]);
 
   const check = async () => {
     setBusy("checking");
@@ -80,7 +89,7 @@ function AboutContent({
     try {
       setUpdate(await checkDesktopUpdate());
     } catch (e) {
-      setErr(humanizeAppError(e, language));
+      showError(humanizeAppError(e, language), "desktop-update-check");
     } finally {
       setBusy("");
     }
@@ -114,16 +123,26 @@ function AboutContent({
       if (requiresFreshUpdateCheck(rawMessage)) {
         setUpdate((current) => invalidateUpdateCandidate(current, rawMessage));
       } else {
-        setErr(message);
+        showError(message, "desktop-update-install");
       }
       setBusy("");
     }
   };
 
-  const copyReleaseUrl = (url: string) => {
-    navigator.clipboard.writeText(url);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+  const copyReleaseUrl = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1_500);
+    } catch {
+      showError(
+        copy(
+          "Could not copy the release link. Check the system clipboard permission and try again.",
+          "无法复制发布链接。请检查系统剪贴板权限，然后重试。",
+        ),
+        "copy-release-url",
+      );
+    }
   };
 
   return (
@@ -162,7 +181,7 @@ function AboutContent({
           {update.release_url && (
             <span className="inline-url">
               <span className="mono">{update.release_url}</span>
-              <Button variant="outline" size="sm" onClick={() => copyReleaseUrl(update.release_url)}>
+              <Button variant="outline" size="sm" onClick={() => void copyReleaseUrl(update.release_url)}>
                 {copied ? t("about.copied") : t("about.copyLink")}
               </Button>
             </span>

@@ -14,6 +14,7 @@ import {
 import { diagnosticInput, redactDiagnosticText } from "../diagnostics";
 import { humanizeAppError } from "../errors";
 import { useLocalizedCopy } from "./LanguageProvider";
+import TokenStationMark from "./TokenStationMark";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -167,7 +168,7 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
   return (
     <main className="recovery-shell">
       <section className="recovery-card" aria-live="polite">
-        <div className="recovery-mark" aria-hidden="true">TS</div>
+        <TokenStationMark className="recovery-mark" size={42} />
         <div>
           <p className="eyebrow">{copy(
             "READ-ONLY · LOCAL · NO AUTOMATIC UPLOAD",

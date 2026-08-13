@@ -1,7 +1,9 @@
 import { useState } from "react";
 import {
+  type DirectRouteTarget,
   type ProviderView,
   type QuotaAccount,
+  type RoutingMode,
   type TierSlot,
   type TierView,
 } from "../api";
@@ -10,14 +12,17 @@ import TierKeywords from "../components/TierKeywords";
 import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import RoutingModeSelector from "../components/RoutingModeSelector";
+import DirectRoutePanel from "../components/DirectRoutePanel";
 
 interface HomePageProps {
   providers: ProviderView[];
   tiers: Record<TierSlot, TierView>;
   keywords: Record<TierSlot, string[]>;
   profiles: string[];
-  routingMode: "tiered" | "quota_first";
-  onSetRoutingMode: (mode: "tiered" | "quota_first") => void;
+  routingMode: RoutingMode;
+  directTarget?: DirectRouteTarget | null;
+  onSetRoutingMode: (mode: RoutingMode) => void;
+  onApplyDirect: (upstream: string, model: string) => void;
   quotaAccounts: QuotaAccount[];
   onSaveQuota: (accounts: QuotaAccount[]) => void;
   onSaveQuotaPlan: (
@@ -41,6 +46,7 @@ interface HomePageProps {
   onRemoveKeyword: (slot: TierSlot, keyword: string) => void;
   onSave: () => void;
   onApplyAll: () => void;
+  embedded?: boolean;
 }
 
 export default function HomePage({
@@ -49,7 +55,9 @@ export default function HomePage({
   keywords,
   profiles,
   routingMode,
+  directTarget,
   onSetRoutingMode,
+  onApplyDirect,
   quotaAccounts,
   onSaveQuota,
   onSaveQuotaPlan,
@@ -68,6 +76,7 @@ export default function HomePage({
   onRemoveKeyword,
   onSave,
   onApplyAll,
+  embedded = false,
 }: HomePageProps) {
   const { copy } = useLocalizedCopy();
   const tierConfigured: Record<TierSlot, boolean> = {
@@ -107,10 +116,12 @@ export default function HomePage({
     <div className="page-stack home-page">
       <header className="page-title-row">
         <div>
-          <h1>{copy("Global routing", "全局路由")}</h1>
+          {embedded
+            ? <h2>{copy("Global routing", "全局路由")}</h2>
+            : <h1>{copy("Global routing", "全局路由")}</h1>}
           <p>{copy(
-            "These three tiers are the default for every Agent. Individual routes only override their Agent.",
-            "这套三档配置是所有 Agent 的默认值。独立路由只覆盖对应 Agent。",
+            "This is the default route for every Agent. Agent-specific routes override only that Agent.",
+            "这是所有 Agent 的默认路由。Agent 自定义路由只覆盖它自身。",
           )}</p>
         </div>
       </header>
@@ -121,7 +132,15 @@ export default function HomePage({
         onValueChange={onSetRoutingMode}
       />
 
-      {routingMode === "quota_first" ? (
+      {routingMode === "direct" ? (
+        <DirectRoutePanel
+          providers={providers}
+          target={directTarget}
+          busy={busy}
+          applying={applying}
+          onApply={onApplyDirect}
+        />
+      ) : routingMode === "quota_first" ? (
         <QuotaPriorityPanel
           providers={providers}
           accounts={quotaAccounts}
@@ -197,24 +216,25 @@ export default function HomePage({
               {copy("Cancel", "取消")}
             </button>
           </div>
-          {profiles.length > 0 && (
-            <div className="profile-list" aria-label={copy("Saved profiles", "已有策略组")}>
-              {profiles.map((profile) => (
-                <span key={profile}>
-                  {profile}
-                  <button
-                    type="button"
-                    aria-label={copy(`Delete profile ${profile}`, `删除策略组 ${profile}`)}
-                    disabled={busy || profileBusy}
-                    onClick={() => void removeProfile(profile)}
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
         </div>}
+
+        {profiles.length > 0 && (
+          <div className="profile-list profile-list-visible" aria-label={copy("Saved profiles", "已有策略组")}>
+            {profiles.map((profile) => (
+              <span key={profile}>
+                {profile}
+                <button
+                  type="button"
+                  aria-label={copy(`Delete profile ${profile}`, `删除策略组 ${profile}`)}
+                  disabled={busy || profileBusy}
+                  onClick={() => void removeProfile(profile)}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
 
         <footer className="panel-foot route-actions">
           <div className="route-status-copy">

@@ -12,6 +12,9 @@ const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "u
 const filename = "token-station_1.1.3_aarch64_UNSIGNED-UNNOTARIZED.dmg";
 const markerName = "未签名测试版.txt";
 const provenanceName = "构建来源.txt";
+const terminalCommandName = "终端启动命令.txt";
+const terminalCommand =
+  'sudo xattr -dr com.apple.quarantine "/Applications/token-station.app" && open "/Applications/token-station.app"';
 
 const desktopBuilder = read("scripts/build-desktop.sh");
 assert.match(desktopBuilder, /rustc --print sysroot/);
@@ -28,6 +31,16 @@ assert.match(packager, /--app-source-commit/);
 assert.match(packager, /packaging_source_commit/);
 assert.match(packager, new RegExp(markerName));
 assert.match(packager, new RegExp(provenanceName));
+assert.match(packager, new RegExp(terminalCommandName));
+assert.match(
+  packager,
+  /if \[\[ "\$unsigned_test" == "true" \]\]; then[\s\S]*\/bin\/cp "\$unsigned_terminal_command" "\$stage\/终端启动命令\.txt"/,
+);
+assert.match(packager, /finder_layout_template="\$formal_finder_layout_template"/);
+assert.match(
+  packager,
+  /if \[\[ "\$unsigned_test" == "true" \]\]; then[\s\S]*finder_layout_template="\$unsigned_finder_layout_template"/,
+);
 assert.match(packager, /notarytool submit/);
 assert.match(packager, /stapler staple/);
 assert.match(packager, /-format UDRW/);
@@ -42,6 +55,8 @@ assert.match(auditor, /UNSIGNED-UNNOTARIZED/);
 assert.match(auditor, /Signature=adhoc/);
 assert.match(auditor, new RegExp(markerName));
 assert.match(auditor, new RegExp(provenanceName));
+assert.match(auditor, new RegExp(terminalCommandName));
+assert.match(auditor, /正式 DMG 不得包含终端 Gatekeeper 绕过入口/);
 assert.match(auditor, /stapler validate/);
 assert.match(auditor, /mounted_ds_store/);
 assert.match(auditor, /configure-dmg-layout\.applescript[\s\S]*inspect/);
@@ -58,16 +73,43 @@ assert.match(finderLayout, /position of item "token-station\.app" .* to \{310, 1
 assert.match(finderLayout, /position of item "Applications" .* to \{610, 170\}/);
 assert.match(finderLayout, /if exists item "构建来源\.txt"/);
 assert.match(finderLayout, /if exists item "未签名测试版\.txt"/);
+assert.match(finderLayout, /if exists item "终端启动命令\.txt"/);
+assert.match(finderLayout, /set bounds to \{100, 100, 1180, 700\}/);
+assert.match(finderLayout, /position of item "终端启动命令\.txt" .* to \{460, 440\}/);
 
-const finderLayoutTemplate = Buffer.from(
-  read("packaging/macos/dmg-layout.dsstore.base64").replace(/\s/g, ""),
-  "base64",
-);
-assert.equal(finderLayoutTemplate.subarray(4, 8).toString("ascii"), "Bud1");
-assert.equal(
-  crypto.createHash("sha256").update(finderLayoutTemplate).digest("hex"),
-  "bd345bfc5b70ac1d47fa48c620d04d085b22cbe453dc0ed3542cad0403cc3f38",
-);
+const terminalCommandGuide = read("packaging/macos/终端启动命令.txt");
+for (const phrase of [
+  "Token Station 官方 GitHub Releases",
+  "先把 token-station.app 拖到 Applications",
+  "管理员密码",
+  "不会显示字符",
+]) {
+  assert.ok(terminalCommandGuide.includes(phrase), `终端命令说明缺少“${phrase}”`);
+}
+const executableLines = terminalCommandGuide
+  .split(/\r?\n/)
+  .filter((line) => line.startsWith("sudo "));
+assert.deepEqual(executableLines, [terminalCommand]);
+assert.doesNotMatch(terminalCommandGuide, /spctl\s+--master-disable/);
+assert.doesNotMatch(terminalCommandGuide, /xattr[^\n]*(?:\/Applications[\s"']|~\/|\$HOME)/);
+
+for (const [relativePath, expectedDigest] of [
+  [
+    "packaging/macos/dmg-layout.dsstore.base64",
+    "bd345bfc5b70ac1d47fa48c620d04d085b22cbe453dc0ed3542cad0403cc3f38",
+  ],
+  [
+    "packaging/macos/dmg-layout-unsigned.dsstore.base64",
+    "0c644b5a00c78eb44be4095fc3060bc76224e4f2d87f1c7b7c36a940f8268537",
+  ],
+]) {
+  const finderLayoutTemplate = Buffer.from(read(relativePath).replace(/\s/g, ""), "base64");
+  assert.equal(finderLayoutTemplate.subarray(4, 8).toString("ascii"), "Bud1");
+  assert.equal(
+    crypto.createHash("sha256").update(finderLayoutTemplate).digest("hex"),
+    expectedDigest,
+  );
+}
 
 const installer = read("packaging/macos/安装 Token Station.command");
 assert.match(installer, /UNSIGNED_TEST_MARKER/);

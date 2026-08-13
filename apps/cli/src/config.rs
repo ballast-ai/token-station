@@ -1,9 +1,10 @@
 //! The local client's configuration: one JSON file describing the server, the
 //! plugins, the upstreams, and the routing table.
 //!
-//! The routing section is `router-core`'s `RouterConfig`, embedded verbatim —
-//! the shape, its validation and its failure semantics live in that crate,
-//! where neither the client nor the server gateway can fork them.
+//! The `router` section remains `router-core`'s protected `RouterConfig`.
+//! Token Station's host-only `routing` section may select an additional mode;
+//! the client validates and compiles that mode into an ordinary core router
+//! document before the gateway constructs a `Router`.
 //!
 //! # What is never in this file
 //!
@@ -21,12 +22,53 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize};
 use token_station_protocol::{ModelCapability, ProviderEndpoint};
 use token_station_router_core::{
-    ConfigSource, RouterConfig, RoutingMode, UpstreamModel, UpstreamRef,
+    ConfigSource, RecoveryPolicy, RouterConfig, RoutingMode as CoreRoutingMode, UpstreamModel,
+    UpstreamRef,
 };
 
 const TIER_HIGH: &str = "tier_high";
 const TIER_MID: &str = "tier_mid";
 const TIER_LOW: &str = "tier_low";
+const DIRECT_POOL: &str = "direct";
+
+/// The host-level routing philosophies exposed by Token Station. Direct is
+/// compiled into an ordinary one-member router-core tier so the protected core
+/// contract remains two-state and independently reusable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingMode {
+    #[default]
+    Tiered,
+    QuotaFirst,
+    Direct,
+}
+
+impl From<CoreRoutingMode> for RoutingMode {
+    fn from(mode: CoreRoutingMode) -> Self {
+        match mode {
+            CoreRoutingMode::Tiered => Self::Tiered,
+            CoreRoutingMode::QuotaFirst => Self::QuotaFirst,
+        }
+    }
+}
+
+/// Optional host-owned routing state. Its absence preserves the historical
+/// behavior encoded in `router.routing_mode` byte-for-byte.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostRoutingConfig {
+    pub mode: RoutingMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_target: Option<UpstreamModel>,
+}
+
+fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 /// The whole client configuration file.
 ///
@@ -43,6 +85,10 @@ pub struct ClientConfig {
     /// use, validated to the same credential-proof shape by `UpstreamRef`.
     pub upstreams: BTreeMap<String, UpstreamConfig>,
     pub router: RouterConfig,
+    /// Host-level routing state. Old configurations omit it and continue to
+    /// derive their mode from the embedded router-core document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<HostRoutingConfig>,
     /// Optional per-Agent three-tier overrides. An absent entry inherits the
     /// home router, keeping every pre-Agent-routes configuration compatible.
     #[serde(
@@ -84,14 +130,6 @@ pub struct ClientConfig {
     /// ambient proxy environment variables.
     #[serde(default)]
     pub egress: EgressConfig,
-}
-
-fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de> + Default,
-{
-    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,14 +305,18 @@ pub struct AgentRouteConfig {
     pub custom_route: Option<AgentTierRoutes>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    /// Per-Agent override of the top-level routing philosophy (tiered vs
-    /// quota-first). Independent of `mode`, which only picks the *tier source*
-    /// (home / custom / profile). `None` inherits the home router's
-    /// [`RouterConfig::routing_mode`], so an Agent that never touched the toggle
-    /// tracks the Home default. Set explicitly, it pins that Agent regardless of
-    /// later Home changes — this is what makes each Agent switch independently.
+    /// Per-Agent override of the top-level routing philosophy. Independent of
+    /// `mode`, which only picks the *tier source* (home / custom / profile).
+    /// `None` inherits the home router's
+    /// effective host mode, so an Agent that never touched the toggle tracks the
+    /// Home default. Set explicitly, it pins that Agent regardless of later Home
+    /// changes — this is what makes each Agent switch independently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_mode: Option<RoutingMode>,
+    /// Per-Agent direct target. `None` inherits the Home direct target; this is
+    /// consulted only when the effective routing mode is direct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_target: Option<UpstreamModel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -543,6 +585,39 @@ pub struct AuthConfig {
 }
 
 impl ClientConfig {
+    /// Deserializes one JSON source and applies the same legacy field
+    /// normalization as [`Self::load`], but deliberately does not run semantic
+    /// validation. Recovery callers may use this narrow seam to repair known
+    /// dangling references before calling [`Self::validate`]; ordinary callers
+    /// should use [`Self::load`]. Unknown fields and invalid value types still
+    /// fail during deserialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns Serde's structural error when the JSON cannot be represented as
+    /// a [`ClientConfig`].
+    pub fn parse_with_load_migrations(source: &str) -> Result<Self, serde_json::Error> {
+        let mut config: Self = serde_json::from_str(source)?;
+        config.apply_load_migrations();
+        Ok(config)
+    }
+
+    fn apply_load_migrations(&mut self) {
+        // Early v1 files persisted `0` as the documented "unlimited" default.
+        // Loading maps that legacy representation to today's finite defaults;
+        // `save` remains strict and still rejects newly constructed zero limits.
+        let defaults = crate::admission::Limits::default();
+        if self.concurrency.global == 0 {
+            self.concurrency.global = defaults.global;
+        }
+        if self.concurrency.per_agent == 0 {
+            self.concurrency.per_agent = defaults.per_agent;
+        }
+        if self.concurrency.per_provider == 0 {
+            self.concurrency.per_provider = defaults.per_provider;
+        }
+    }
+
     #[must_use]
     pub fn is_valid_agent_id(agent_id: &str) -> bool {
         !agent_id.is_empty()
@@ -553,6 +628,63 @@ impl ClientConfig {
             && agent_id
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    }
+
+    /// The Home routing mode after applying the optional host-level override.
+    /// Historical configs have no override and derive this from router-core.
+    #[must_use]
+    pub fn effective_home_routing_mode(&self) -> RoutingMode {
+        self.routing
+            .as_ref()
+            .map_or_else(|| self.router.routing_mode.into(), |routing| routing.mode)
+    }
+
+    /// The Home Direct target available for Home itself or Agent inheritance.
+    #[must_use]
+    pub fn effective_home_direct_target(&self) -> Option<&UpstreamModel> {
+        self.routing
+            .as_ref()
+            .and_then(|routing| routing.direct_target.as_ref())
+    }
+
+    /// Compiles the host-level Home mode into the protected two-state
+    /// router-core contract consumed by the Gateway.
+    ///
+    /// # Errors
+    ///
+    /// Direct mode without an applied target is refused.
+    pub fn home_router_config(&self) -> Result<RouterConfig, String> {
+        Self::compile_router_config(
+            self.router.clone(),
+            self.effective_home_routing_mode(),
+            self.effective_home_direct_target().cloned(),
+            "Home",
+        )
+    }
+
+    fn compile_router_config(
+        mut router: RouterConfig,
+        mode: RoutingMode,
+        direct_target: Option<UpstreamModel>,
+        owner: &str,
+    ) -> Result<RouterConfig, String> {
+        match mode {
+            RoutingMode::Tiered => router.routing_mode = CoreRoutingMode::Tiered,
+            RoutingMode::QuotaFirst => router.routing_mode = CoreRoutingMode::QuotaFirst,
+            RoutingMode::Direct => {
+                let target = direct_target
+                    .ok_or_else(|| format!("{owner} direct routing requires direct_target"))?;
+                router.pools = BTreeMap::from([(DIRECT_POOL.to_owned(), vec![target])]);
+                router.rules.clear();
+                router.hint_routes.clear();
+                router.heuristic = None;
+                DIRECT_POOL.clone_into(&mut router.default_pool);
+                router.honor_exact_model = false;
+                router.recovery = RecoveryPolicy::Strict;
+                router.routing_mode = CoreRoutingMode::Tiered;
+            }
+        }
+        Ok(router)
     }
 
     /// Returns a validated custom router document for `agent_id`, or `None`
@@ -569,9 +701,9 @@ impl ClientConfig {
         let Some(route) = self.agent_routes.get(agent_id) else {
             return Ok(None);
         };
-        // The tier source (home / custom / profile) is one axis; the routing
-        // philosophy (tiered / quota-first) is a second, independent one. Build
-        // the tier base first, then stamp the effective mode over it.
+        // The tier source (home / custom / profile) is one axis; the host-level
+        // routing philosophy is a second, independent one. Build the raw tier
+        // base first, then compile the effective mode into router-core.
         let tier_base: Option<RouterConfig> = match route.mode {
             AgentRouteMode::Inherit => None,
             AgentRouteMode::Custom => Some(
@@ -596,15 +728,28 @@ impl ClientConfig {
                 )
             }
         };
-        let effective_mode = route.routing_mode.unwrap_or(self.router.routing_mode);
-        // Pure inheritance on both axes → no per-Agent router; the home router
-        // serves it directly (keeps the fast path and the config minimal).
-        if tier_base.is_none() && effective_mode == self.router.routing_mode {
+        let home_mode = self.effective_home_routing_mode();
+        let home_direct_target = self.effective_home_direct_target();
+        let effective_mode = route.routing_mode.unwrap_or(home_mode);
+        let effective_direct_target = route
+            .direct_target
+            .clone()
+            .or_else(|| home_direct_target.cloned());
+        let direct_target_differs = effective_mode == RoutingMode::Direct
+            && effective_direct_target.as_ref() != home_direct_target;
+        // Pure inheritance on every effective axis → no per-Agent router; the
+        // home router serves it directly (keeps the fast path and config small).
+        if tier_base.is_none() && effective_mode == home_mode && !direct_target_differs {
             return Ok(None);
         }
-        let mut router = tier_base.unwrap_or_else(|| self.router.clone());
-        router.routing_mode = effective_mode;
-        Ok(Some(router))
+        let router = tier_base.unwrap_or_else(|| self.router.clone());
+        Self::compile_router_config(
+            router,
+            effective_mode,
+            effective_direct_target,
+            &format!("Agent `{agent_id}`"),
+        )
+        .map(Some)
     }
 
     fn validate_agent_tiers(&self, owner: &str, tiers: &AgentTierRoutes) -> Result<(), String> {
@@ -631,6 +776,98 @@ impl ClientConfig {
         Ok(())
     }
 
+    fn validate_direct_target(&self, owner: &str, target: &UpstreamModel) -> Result<(), String> {
+        let upstream = self
+            .upstreams
+            .get(target.upstream.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "{owner} routes to upstream `{}`, which is not configured",
+                    target.upstream
+                )
+            })?;
+        if !upstream
+            .models
+            .iter()
+            .any(|capability| capability.model == target.model)
+        {
+            return Err(format!(
+                "{owner} routes to model `{}` not declared by upstream `{}`",
+                target.model, target.upstream
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_home_router_references(&self) -> Result<(), String> {
+        // Router::new validates the table's internal coherence; this checks its
+        // references against the configured upstream/model catalog.
+        for (pool, members) in &self.router.pools {
+            for member in members {
+                if !self.upstreams.contains_key(member.upstream.as_str()) {
+                    return Err(format!(
+                        "pool `{pool}` routes to upstream `{}`, which is not configured",
+                        member.upstream
+                    ));
+                }
+            }
+        }
+        if let Some(target) = self.effective_home_direct_target() {
+            self.validate_direct_target("Home direct route", target)?;
+        }
+        if self.effective_home_routing_mode() == RoutingMode::Direct
+            && self.effective_home_direct_target().is_none()
+        {
+            return Err("Home direct routing requires direct_target".to_owned());
+        }
+        Ok(())
+    }
+
+    fn validate_agent_routes(&self) -> Result<(), String> {
+        for (agent_id, route) in &self.agent_routes {
+            if !Self::is_valid_agent_id(agent_id) {
+                return Err(format!("invalid Agent route id `{agent_id}`"));
+            }
+            if route.mode == AgentRouteMode::Custom && route.custom_route.is_none() {
+                return Err(format!(
+                    "Agent `{agent_id}` custom mode requires custom_route"
+                ));
+            }
+            if route.mode == AgentRouteMode::Profile {
+                let profile = route
+                    .profile
+                    .as_deref()
+                    .ok_or_else(|| format!("Agent `{agent_id}` profile mode requires a profile"))?;
+                if !self.profiles.contains_key(profile) {
+                    return Err(format!(
+                        "Agent `{agent_id}` mounts unknown profile `{profile}`"
+                    ));
+                }
+            }
+            if let Some(tiers) = &route.custom_route {
+                self.validate_agent_tiers(&format!("Agent `{agent_id}`"), tiers)?;
+            }
+            if let Some(target) = &route.direct_target {
+                self.validate_direct_target(&format!("Agent `{agent_id}` direct route"), target)?;
+            }
+            let effective_mode = route
+                .routing_mode
+                .unwrap_or_else(|| self.effective_home_routing_mode());
+            if effective_mode == RoutingMode::Direct
+                && route
+                    .direct_target
+                    .as_ref()
+                    .or_else(|| self.effective_home_direct_target())
+                    .is_none()
+            {
+                return Err(format!(
+                    "Agent `{agent_id}` direct routing requires direct_target"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Reads and structurally validates a configuration file.
     ///
     /// Routability of the embedded router section is *not* checked here — that
@@ -646,23 +883,10 @@ impl ClientConfig {
             path: path.to_path_buf(),
             detail: error.to_string(),
         })?;
-        let mut config: Self = serde_json::from_str(&source).map_err(|error| ConfigError {
+        let config = Self::parse_with_load_migrations(&source).map_err(|error| ConfigError {
             path: path.to_path_buf(),
             detail: error.to_string(),
         })?;
-        // Early v1 files persisted `0` as the documented "unlimited" default.
-        // Loading maps that legacy representation to today's finite defaults;
-        // `save` remains strict and still rejects newly constructed zero limits.
-        let defaults = crate::admission::Limits::default();
-        if config.concurrency.global == 0 {
-            config.concurrency.global = defaults.global;
-        }
-        if config.concurrency.per_agent == 0 {
-            config.concurrency.per_agent = defaults.per_agent;
-        }
-        if config.concurrency.per_provider == 0 {
-            config.concurrency.per_provider = defaults.per_provider;
-        }
         config.validate().map_err(|detail| ConfigError {
             path: path.to_path_buf(),
             detail,
@@ -755,6 +979,17 @@ impl ClientConfig {
                     ));
                 }
             }
+            for capability in &upstream.models {
+                if capability.max_output_tokens > 0
+                    && capability.context_window > 0
+                    && capability.max_output_tokens > capability.context_window
+                {
+                    return Err(format!(
+                        "upstream `{name}` model `{}` max_output_tokens must not exceed context_window",
+                        capability.model
+                    ));
+                }
+            }
         }
 
         self.egress.proxy_parts()?;
@@ -768,44 +1003,9 @@ impl ClientConfig {
                 .map_err(|error| format!("Agent `{agent_id}` budget: {error}"))?;
         }
 
-        // Every pool member must name a configured upstream. Router::new
-        // validates the table's internal coherence; this is the cross-check
-        // against the world outside the table.
-        for (pool, members) in &self.router.pools {
-            for member in members {
-                if !self.upstreams.contains_key(member.upstream.as_str()) {
-                    return Err(format!(
-                        "pool `{pool}` routes to upstream `{}`, which is not configured",
-                        member.upstream
-                    ));
-                }
-            }
-        }
+        self.validate_home_router_references()?;
 
-        for (agent_id, route) in &self.agent_routes {
-            if !Self::is_valid_agent_id(agent_id) {
-                return Err(format!("invalid Agent route id `{agent_id}`"));
-            }
-            if route.mode == AgentRouteMode::Custom && route.custom_route.is_none() {
-                return Err(format!(
-                    "Agent `{agent_id}` custom mode requires custom_route"
-                ));
-            }
-            if route.mode == AgentRouteMode::Profile {
-                let profile = route
-                    .profile
-                    .as_deref()
-                    .ok_or_else(|| format!("Agent `{agent_id}` profile mode requires a profile"))?;
-                if !self.profiles.contains_key(profile) {
-                    return Err(format!(
-                        "Agent `{agent_id}` mounts unknown profile `{profile}`"
-                    ));
-                }
-            }
-            if let Some(tiers) = &route.custom_route {
-                self.validate_agent_tiers(&format!("Agent `{agent_id}`"), tiers)?;
-            }
-        }
+        self.validate_agent_routes()?;
 
         for (name, tiers) in &self.profiles {
             if name.trim().is_empty()
@@ -869,13 +1069,19 @@ impl ConfigSource for FileRouterSource {
     type Error = ConfigError;
 
     fn load(&self) -> Result<RouterConfig, ConfigError> {
-        ClientConfig::load(&self.path).map(|config| config.router)
+        let config = ClientConfig::load(&self.path)?;
+        config.home_router_config().map_err(|detail| ConfigError {
+            path: self.path.clone(),
+            detail,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AccessTier, ApiDialect, ClientConfig, EgressConfig, EgressMode, UpstreamConfig};
+    use super::{
+        AccessTier, ApiDialect, ClientConfig, EgressConfig, EgressMode, RoutingMode, UpstreamConfig,
+    };
     use std::fs;
     use std::path::PathBuf;
 
@@ -1104,11 +1310,94 @@ mod tests {
     #[test]
     fn agent_routes_are_optional_and_empty_routes_do_not_serialize() {
         let config: ClientConfig = serde_json::from_value(example()).expect("example parses");
+        assert!(config.routing.is_none());
         assert!(config.agent_routes.is_empty());
         assert!(config.profiles.is_empty());
         let encoded = serde_json::to_value(config).expect("config serializes");
+        assert!(encoded.get("routing").is_none());
         assert!(encoded.get("agent_routes").is_none());
         assert!(encoded.get("profiles").is_none());
+    }
+
+    #[test]
+    fn model_output_limit_must_fit_inside_its_context_window() {
+        let mut value = example();
+        value["upstreams"]["openai_personal"]["models"][0]["context_window"] =
+            serde_json::json!(8_192);
+        value["upstreams"]["openai_personal"]["models"][0]["max_output_tokens"] =
+            serde_json::json!(16_384);
+        let config: ClientConfig = serde_json::from_value(value).unwrap();
+
+        assert!(config.validate().unwrap_err().contains("max_output_tokens"));
+    }
+
+    #[test]
+    fn legacy_null_optional_maps_each_load_as_empty() {
+        let mut failures = Vec::new();
+        for field in ["agent_routes", "profiles", "agent_budgets"] {
+            let mut value = example();
+            value[field] = serde_json::Value::Null;
+            let path = scratch(&format!("legacy-null-{field}"), &value.to_string());
+
+            let loaded = ClientConfig::load(&path);
+            fs::remove_file(&path).ok();
+            match loaded {
+                Ok(config) => {
+                    assert!(config.agent_routes.is_empty());
+                    assert!(config.profiles.is_empty());
+                    assert!(config.agent_budgets.is_empty());
+                }
+                Err(error) => failures.push(format!("`{field}: null`: {error}")),
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn legacy_null_optional_maps_load_without_rewrite_and_save_by_omission() {
+        let mut value = example();
+        for field in ["agent_routes", "profiles", "agent_budgets"] {
+            value[field] = serde_json::Value::Null;
+        }
+        let original = serde_json::to_vec(&value).expect("legacy fixture serializes");
+        let source = scratch(
+            "legacy-null-optional-maps",
+            std::str::from_utf8(&original).expect("JSON is UTF-8"),
+        );
+
+        let config = ClientConfig::load(&source)
+            .expect("all legacy optional null maps load together as empty maps");
+        assert_eq!(
+            fs::read(&source).expect("legacy source remains readable"),
+            original
+        );
+
+        let destination = source.with_extension("saved.json");
+        config
+            .save(&destination)
+            .expect("the normalized config saves");
+        let saved: serde_json::Value = serde_json::from_slice(
+            &fs::read(&destination).expect("the saved config remains readable"),
+        )
+        .expect("the saved config remains JSON");
+        for field in ["agent_routes", "profiles", "agent_budgets"] {
+            assert!(saved.get(field).is_none(), "empty `{field}` stays omitted");
+        }
+        fs::remove_file(source).ok();
+        fs::remove_file(destination).ok();
+    }
+
+    #[test]
+    fn legacy_null_required_upstreams_remains_a_structural_error() {
+        let mut value = example();
+        value["upstreams"] = serde_json::Value::Null;
+        let path = scratch("legacy-null-required-upstreams", &value.to_string());
+
+        let loaded = ClientConfig::load(&path);
+        fs::remove_file(path).ok();
+        let error = loaded.expect_err("a required map must not default from null");
+
+        assert!(error.to_string().contains("expected a map"), "{error}");
     }
 
     #[test]
@@ -1233,6 +1522,262 @@ mod tests {
                 .custom_router_for_agent("claude-code")
                 .expect("known Agent")
                 .is_none()
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn top_level_direct_compiles_to_a_strict_single_member_core_router() {
+        let mut value = example();
+        value["routing"] = serde_json::json!({
+            "mode": "direct",
+            "direct_target": {
+                "upstream": "openai_personal",
+                "model": "gpt-5.5"
+            }
+        });
+        value["router"]["local_only"] = serde_json::json!(true);
+        value["router"]["allow_cloud_fallback"] = serde_json::json!(true);
+        value["router"]["assumed_context_window"] = serde_json::json!(12_345);
+        let path = scratch("host-direct-compile", &value.to_string());
+        let config = ClientConfig::load(&path).expect("host Direct configuration validates");
+
+        let compiled = config
+            .home_router_config()
+            .expect("Home Direct compiles to router-core");
+        let sourced =
+            token_station_router_core::ConfigSource::load(&super::FileRouterSource::new(&path))
+                .expect("FileRouterSource returns the compiled Home router");
+
+        assert_eq!(sourced, compiled);
+
+        assert_eq!(
+            (
+                compiled.routing_mode,
+                compiled.pools,
+                compiled.rules,
+                compiled.hint_routes,
+                compiled.heuristic,
+                compiled.default_pool,
+                compiled.honor_exact_model,
+                compiled.recovery,
+                compiled.local_only,
+                compiled.allow_cloud_fallback,
+                compiled.assumed_context_window,
+            ),
+            (
+                token_station_router_core::RoutingMode::Tiered,
+                std::collections::BTreeMap::from([(
+                    "direct".to_owned(),
+                    vec![token_station_router_core::UpstreamModel::new(
+                        token_station_router_core::UpstreamRef::new("openai_personal").unwrap(),
+                        "gpt-5.5",
+                    )],
+                )]),
+                Vec::new(),
+                Vec::new(),
+                None,
+                "direct".to_owned(),
+                false,
+                token_station_router_core::RecoveryPolicy::Strict,
+                true,
+                true,
+                12_345,
+            )
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn home_direct_without_a_target_fails_load_save_and_gateway_construction() {
+        let mut value = example();
+        value["routing"] = serde_json::json!({"mode": "direct"});
+        let load_path = scratch("host-direct-missing", &value.to_string());
+        let load_error = ClientConfig::load(&load_path).expect_err("load must fail closed");
+
+        let config: ClientConfig =
+            serde_json::from_value(value).expect("structural parsing precedes semantic validation");
+        let save_path = std::env::temp_dir().join(format!(
+            "token-station-cfg-{}-host-direct-invalid-save.json",
+            std::process::id()
+        ));
+        fs::remove_file(&save_path).ok();
+        let save_error = config.save(&save_path).expect_err("save must fail closed");
+        let Err(gateway_error) = crate::gateway::Gateway::new(
+            &config,
+            std::sync::Arc::new(token_station_metrics::NoopRecorder),
+        ) else {
+            panic!("Gateway must fail closed");
+        };
+
+        assert_eq!(
+            (
+                load_error.to_string().contains("requires direct_target"),
+                save_error.to_string().contains("requires direct_target"),
+                gateway_error.contains("requires direct_target"),
+                save_path.exists(),
+            ),
+            (true, true, true, false)
+        );
+        fs::remove_file(load_path).ok();
+    }
+
+    #[test]
+    fn legacy_core_modes_remain_effective_without_top_level_routing() {
+        for (wire, expected) in [
+            ("tiered", RoutingMode::Tiered),
+            ("quota_first", RoutingMode::QuotaFirst),
+        ] {
+            let mut value = example();
+            value["router"]["routing_mode"] = serde_json::json!(wire);
+            let config: ClientConfig = serde_json::from_value(value).expect("legacy config parses");
+
+            assert_eq!(
+                (
+                    config.routing.as_ref(),
+                    config.effective_home_routing_mode(),
+                    config.home_router_config().unwrap().routing_mode,
+                ),
+                (
+                    None,
+                    expected,
+                    match expected {
+                        RoutingMode::Tiered => token_station_router_core::RoutingMode::Tiered,
+                        RoutingMode::QuotaFirst => {
+                            token_station_router_core::RoutingMode::QuotaFirst
+                        }
+                        RoutingMode::Direct => unreachable!(),
+                    },
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn per_agent_direct_target_overrides_home_without_affecting_other_agents() {
+        let mut value = example();
+        value["routing"] = serde_json::json!({
+            "mode": "tiered",
+            "direct_target": {
+                "upstream": "openai_personal",
+                "model": "gpt-5.5"
+            }
+        });
+        value["agent_routes"] = serde_json::json!({
+            "codex": {
+                "mode": "inherit",
+                "routing_mode": "direct",
+                "direct_target": {
+                    "upstream": "ollama_local",
+                    "model": "llama3.3"
+                }
+            },
+            "opencode": { "mode": "inherit", "routing_mode": "direct" }
+        });
+        let path = scratch("per-agent-direct", &value.to_string());
+        let config = ClientConfig::load(&path).expect("direct targets validate");
+
+        let codex = config
+            .custom_router_for_agent("codex")
+            .unwrap()
+            .expect("direct override materializes a router");
+        let opencode = config
+            .custom_router_for_agent("opencode")
+            .unwrap()
+            .expect("direct mode override materializes a router");
+
+        assert_eq!(
+            (
+                codex.pools["direct"][0].clone(),
+                opencode.pools["direct"][0].clone(),
+                config
+                    .effective_home_direct_target()
+                    .expect("Home target remains configured")
+                    .clone(),
+            ),
+            (
+                token_station_router_core::UpstreamModel::new(
+                    token_station_router_core::UpstreamRef::new("ollama_local").unwrap(),
+                    "llama3.3",
+                ),
+                token_station_router_core::UpstreamModel::new(
+                    token_station_router_core::UpstreamRef::new("openai_personal").unwrap(),
+                    "gpt-5.5",
+                ),
+                token_station_router_core::UpstreamModel::new(
+                    token_station_router_core::UpstreamRef::new("openai_personal").unwrap(),
+                    "gpt-5.5",
+                ),
+            )
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn home_direct_target_must_reference_a_configured_upstream() {
+        let mut value = example();
+        value["routing"] = serde_json::json!({
+            "mode": "tiered",
+            "direct_target": {
+                "upstream": "nowhere",
+                "model": "gpt-5.5"
+            }
+        });
+        let path = scratch("home-direct-upstream", &value.to_string());
+
+        let error = ClientConfig::load(&path).expect_err("unknown direct upstream is refused");
+
+        assert!(
+            error.to_string().contains(
+                "Home direct route routes to upstream `nowhere`, which is not configured"
+            ),
+            "{error}"
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn agent_direct_target_must_reference_a_declared_model() {
+        let mut value = example();
+        value["agent_routes"] = serde_json::json!({
+            "codex": {
+                "mode": "inherit",
+                "direct_target": {
+                    "upstream": "openai_personal",
+                    "model": "missing-model"
+                }
+            }
+        });
+        let path = scratch("agent-direct-model", &value.to_string());
+
+        let error = ClientConfig::load(&path).expect_err("unknown direct model is refused");
+
+        assert!(
+            error.to_string().contains(
+                "Agent `codex` direct route routes to model `missing-model` not declared by upstream `openai_personal`"
+            ),
+            "{error}"
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn agent_direct_without_an_agent_or_home_target_fails_closed() {
+        let mut value = example();
+        value["agent_routes"] = serde_json::json!({
+            "codex": { "mode": "inherit", "routing_mode": "direct" }
+        });
+        let path = scratch("agent-direct-missing", &value.to_string());
+        let load_error = ClientConfig::load(&path).expect_err("Agent load must fail closed");
+        let config: ClientConfig =
+            serde_json::from_value(value).expect("shape parses before semantic validation");
+        let compile_error = config
+            .custom_router_for_agent("codex")
+            .expect_err("Agent router compilation must fail closed");
+
+        assert!(
+            load_error.to_string().contains("requires direct_target")
+                && compile_error.contains("requires direct_target")
         );
         fs::remove_file(path).ok();
     }

@@ -1,4 +1,5 @@
 import type { ProviderView, TierSlot, TierView } from "../api";
+import { ProviderIcon } from "../brandIcons";
 import CompactCombobox, { type CompactComboboxOption } from "./CompactCombobox";
 import { useLocalizedCopy } from "./LanguageProvider";
 
@@ -50,6 +51,11 @@ export default function TierRouteEditor({
           ? [{
               value: tier.upstream,
               label: providerMissing ? `${tier.upstream}${staleSuffix}` : tier.upstream,
+              icon: <ProviderIcon
+                id={provider?.brand_id}
+                label={tier.upstream}
+                size={20}
+              />,
               hint: providerMissing
                 ? copy("Deleted", "已删除")
                 : provider?.access_tier === "free"
@@ -65,6 +71,7 @@ export default function TierRouteEditor({
             .map((candidate) => ({
               value: candidate.name,
               label: candidate.name,
+              icon: <ProviderIcon id={candidate.brand_id} label={candidate.name} size={20} />,
               hint: candidate.access_tier === "free" ? copy("Free", "免费") : undefined,
             })),
         ];

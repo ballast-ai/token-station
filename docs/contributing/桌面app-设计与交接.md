@@ -1,7 +1,7 @@
 # 桌面 app 设计与交接
 
 - 部件:`apps/desktop`（Tauri + React 桌面客户端）
-- 状态:v1 能力子页面 + 多入站编排 + 三类 Agent 接入已落地
+- 状态:合并主页 + 三种宿主路由 + 多入站编排 + 内置 Agent 接入已落地
 - 读者:要维护 / 扩展这个桌面 app 的人。先读 [架构总览.md](架构总览.md) 了解内核。
 
 Agent 接入的用户操作、配置改写、请求链路、恢复与扩展方法见
@@ -15,8 +15,10 @@ token-station 的内核是一个本地回环 LLM 代理二进制（`apps/cli`）
 替代品,而是**套在同一套内核上的一层 GUI**:把「加供应商 → 配路由 → 起代理 →
 接 agent」这条链路做成可点的界面,面向不想碰命令行的使用者。
 
-**北极星是自动智能路由**——按请求复杂度把每个请求路由到「够用的最便宜档」,不降质
-省 token。GUI 的主界面因此是**三档路由面板**,不做手动切换。
+GUI 的核心任务是把“选择路由 → 启动本机代理 → 接入 Agent”放在同一主页。路由有三种
+宿主模式：Direct 固定一组明确目标；Tiered 按请求复杂度选择上中下档；Quota-first
+按额度窗口选择账户。Direct 在 CLI 宿主层编译成单成员 core 路由，不修改冻结的
+`crates/router-core/**`，也不绕过能力、local-only 或健康门禁。
 
 关键设计约束:**GUI 不重写任何路由 / 网关 / 协议逻辑。** Tauri 后端把
 `token-station-cli` 当**库**直接调（复用 `Gateway` / `server::serve` /
@@ -30,8 +32,8 @@ token-station 的内核是一个本地回环 LLM 代理二进制（`apps/cli`）
 ```
 ┌─────────────────────────── 桌面 app ───────────────────────────┐
 │  前端 React + TS + Vite（apps/desktop/src）                     │
-│    App.tsx           顶栏 + 6 个 tab 的壳                        │
-│    pages/*.tsx       路由表 / 用量 / 插件 / 设置 / 关于           │
+│    App.tsx           启动门禁 + 四项顶栏 + 合并主页                │
+│    pages/*.tsx       主页 / 供应商 / 用量 / 设置 / Logo 概览       │
 │    api.ts            invoke<T>(command) 的类型化封装             │
 │        │  Tauri IPC（invoke ↔ #[tauri::command]）               │
 │  后端 Rust（apps/desktop/src-tauri/src/lib.rs）                 │
@@ -55,7 +57,21 @@ token-station 的内核是一个本地回环 LLM 代理二进制（`apps/cli`）
 
 ---
 
-## 3. 主界面:三档路由面板
+## 3. 主界面：Agent 与路由合并主页
+
+应用取得 State 后先渲染稳定的主页启动壳，同时等待 Registry 与本进程唯一一次 Agent 展示
+扫描。扫描期间只说明正在核对安装位置、版本和本地配置，不展示缓存 Agent、空列表或首次
+引导；成功后再原子发布本次发现结果，失败则保留持久错误和重新进入操作。Discovery 对不同
+Agent 使用最多 3 个动态 worker，二进制哈希只在短暂查询缓存时持锁，同一路径使用
+single-flight；输出仍按 Agent 和 canonical path 稳定排序。左栏第一行固定为“全局路由”，
+其后只列该次启动发现且未被用户隐藏的 Agent；运行期状态变化通过缓存快照叠加，不重新执行
+会改变成员集合的展示扫描。接入事务内部仍保留路径、版本、指纹与安装实例复核。
+
+路由模式第一项为 Direct。每个供应商一行，模型只来自该供应商已管理的模型集合；行选择
+与模型草稿只有在点击“应用”后才写入 target。拖拽顺序只保存在前端偏好中，不进入 pools、
+quota accounts 或任何数据面决策。代理停止时一键接入先执行 ensure-ready，再 plan/apply。
+
+### 3.1 智能分档
 
 界面上/中/下三档,每档 =（供应商下拉 + 模型下拉）。这三档映射到内核的三个
 `router.pools` 键:`tier_high` / `tier_mid` / `tier_low`（见 `lib.rs` 常量
@@ -73,18 +89,17 @@ token-station 的内核是一个本地回环 LLM 代理二进制（`apps/cli`）
 
 ---
 
-## 4. v1 全能力子页面（6 tab）
+## 4. 顶层页面
 
-主页之外,把 CLI 的能力搬成子页面,全部接**真实内核 API**、不碰护城河:
+顶层导航只有四项；原概览由左上角 Token Station 品牌按钮打开：
 
 | tab | 接的内核 | 说明 |
 |---|---|---|
-| **主页** | `pools` + heuristic | 三档路由面板 + 供应商增删 |
-| **路由表** | 纯读 `draft.router` | 四层可视化:规则 → 提示 → 启发式分档 → 默认兜底;第 3 层把三档解成「分数≥X → 池 → 供应商·模型」 |
-| **用量** | `stats::collect` | 只读本地 SQLite;总览卡 + 按 upstream/model/pool/status 分组 + 时间窗;库没建给引导（不当错误） |
-| **插件** | `PluginRegistry::discover` + `render_list()` | 与 CLI `plugin list` 同源的等宽清单 + 插件目录 / 入站适配器 / 方言 |
-| **设置** | `server.auth` / `data.metrics` 两开关 | 能物化就落盘;**改这两项对运行中的 serve 不生效,需重启代理**（界面已提示）|
-| **关于** | `upgrade::check` | 匿名版本检查（内核唯一合法外联）;只比对 + 给发布页链接,**不自替换二进制** |
+| **主页** | host routing + Agent Connector | 固定全局路由行、启动发现 Agent、Direct/Tiered/Quota-first 与接入/恢复。 |
+| **供应商** | upstreams / catalog / secrets | 供应商生命周期、管理模型、价格与品牌图标。 |
+| **用量** | `stats::collect` + receipts | 本地统计与请求回执；不包含 prompt/response。 |
+| **设置** | settings / plugins / about | 运行设置、Agent 显示偏好、插件、更新检查与关于。 |
+| **Logo 概览** | 只读 State + stats | 原概览逻辑；不作为顶层菜单，横屏保持居中内容宽度。 |
 
 隐私红线在这里也守住:用量页读的指标库**结构上装不下 prompt**（列都是数字 / 闭合
 枚举 / 运营者配的名字）。
@@ -96,11 +111,13 @@ token-station 的内核是一个本地回环 LLM 代理二进制（`apps/cli`）
 | command | 作用 |
 |---|---|
 | `get_state` | 快照:providers / tiers / serve / config_error / settings |
+| `set_routing_mode` / `set_direct_route` | 选择宿主路由模式，并只在显式应用时保存 Direct target |
 | `add_provider` / `remove_provider` | 增删上游；有 Key 时写入本地私有凭证文件 |
 | `set_tier` | 设/清某一档 (供应商, 模型)，触发 `rebuild_routing` |
 | `save_config` | 校验 + 原子写盘（校验不过不写） |
 | `serve_start` / `serve_stop` | 起停后台 serve runtime;起时按 `server.auth` 生成/复用虚拟 Key |
-| `scan_agents` / `plan_agent_connection` / `apply_agent_plan` | 只读发现、生成有界计划并事务接入；当前 UI 在一次点击内连续调用（见 §7） |
+| `scan_agents` / `get_cached_agent_views` | 每次进程启动一次展示发现；后者只重算缓存快照运行态，不做 discovery |
+| `ensure_serve_running` / `plan_agent_connection` / `apply_agent_plan` | 等待同一代理 generation 可达，再生成有界计划并事务接入；plan/apply 各自保留安全复核 |
 | `plan_agent_disconnect` | 预览断开，只恢复 owned paths |
 | `list_agent_snapshots` / `plan_snapshot_restore` / `apply_snapshot_restore` | 列出加密快照、预览并事务恢复 |
 | `set_settings` | 切 auth / metrics 开关 |

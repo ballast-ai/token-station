@@ -11,6 +11,7 @@ import PageBackButton from "../components/PageBackButton";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { englishProviderName } from "../providerCopy";
 import { humanizeAppError } from "../errors";
+import { useErrorToast } from "../components/ErrorToast";
 
 interface FreeProviderConfigPageProps {
   preset: FreeProviderPresetView;
@@ -29,6 +30,7 @@ export default function FreeProviderConfigPage({
   onBusyChange,
 }: FreeProviderConfigPageProps) {
   const { copy } = useLocalizedCopy();
+  const { showError } = useErrorToast();
   const providerName = copy(englishProviderName(preset.id, preset.label), preset.label);
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
@@ -58,7 +60,10 @@ export default function FreeProviderConfigPage({
     try {
       await openUrl(url);
     } catch (caught) {
-      setError(humanizeAppError({ code: "open_external_failed", detail: caught }));
+      showError(
+        humanizeAppError({ code: "open_external_failed", detail: caught }),
+        `free-provider-open:${url}`,
+      );
     }
   };
 
@@ -87,7 +92,7 @@ export default function FreeProviderConfigPage({
         ),
       );
     } catch (caught) {
-      setError(humanizeAppError(caught));
+      showError(humanizeAppError(caught), `free-provider-save:${preset.id}`);
     } finally {
       setSaving(false);
       onBusyChange(false);

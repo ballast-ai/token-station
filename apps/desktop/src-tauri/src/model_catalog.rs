@@ -428,10 +428,12 @@ fn parse_models(document: &Value) -> Result<Vec<CatalogModelView>, String> {
             return Err(format!("模型 ID 超过 {MAX_MODEL_ID_BYTES} 字节上限"));
         }
         let vision = explicit_image_input_state(item);
-        let context_window = bounded_u32(item.get("context_window"))
-            .or_else(|| bounded_u32(item.pointer("/limit/context")));
-        let max_output_tokens = bounded_u32(item.get("max_output_tokens"))
-            .or_else(|| bounded_u32(item.pointer("/limit/output")));
+        let context_window = bounded_u32(item.pointer("/limit/context"))
+            .or_else(|| bounded_u32(item.get("context_window")))
+            .or_else(|| bounded_u32(item.get("context_length")));
+        let max_output_tokens = bounded_u32(item.pointer("/limit/output"))
+            .or_else(|| bounded_u32(item.get("max_output_tokens")))
+            .filter(|output| context_window.is_none_or(|context| *output <= context));
         let cost = catalog_cost(item.get("cost"));
         models
             .entry(model.to_owned())
@@ -484,6 +486,12 @@ fn catalog_cost(value: Option<&Value>) -> Option<CatalogCostView> {
             .and_then(Value::as_f64)
             .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 9_000_000_000.0)
     };
+    if ["input", "output", "cache_read", "cache_write"]
+        .into_iter()
+        .any(|name| object.contains_key(name) && rate(name).is_none())
+    {
+        return None;
+    }
     let cost = CatalogCostView {
         input: rate("input"),
         output: rate("output"),
@@ -497,6 +505,7 @@ fn explicit_image_input_state(model: &Value) -> CapabilityState {
     if let Some(supported) = model
         .get("supportsImage")
         .or_else(|| model.get("supports_image"))
+        .or_else(|| model.get("supports_image_in"))
         .or_else(|| model.get("vision"))
         .and_then(Value::as_bool)
     {
@@ -947,6 +956,44 @@ mod tests {
 
         assert_eq!(models[0].context_window, None);
         assert_eq!(models[0].max_output_tokens, None);
+        assert_eq!(models[0].cost, None);
+    }
+
+    #[test]
+    fn kimi_model_directory_reads_documented_context_length_without_inventing_output() {
+        let models = parse_models(&json!({
+            "object": "list",
+            "data": [{
+                "id": "kimi-k3",
+                "context_length": 1_048_576,
+                "supports_image_in": true
+            }]
+        }))
+        .expect("Kimi-compatible metadata parses");
+
+        assert_eq!(models[0].context_window, Some(1_048_576));
+        assert_eq!(models[0].max_output_tokens, None);
+    }
+
+    #[test]
+    fn nested_limits_win_and_invalid_present_optional_prices_reject_the_cost() {
+        let models = parse_models(&json!({
+            "data": [{
+                "id": "precedence",
+                "context_window": 64_000,
+                "max_output_tokens": 8_000,
+                "limit": {"context": 128_000, "output": 32_000},
+                "cost": {
+                    "input": 0.2,
+                    "output": 0.6,
+                    "cache_read": "not-a-number"
+                }
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(models[0].context_window, Some(128_000));
+        assert_eq!(models[0].max_output_tokens, Some(32_000));
         assert_eq!(models[0].cost, None);
     }
 

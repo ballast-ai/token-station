@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from "../components/ui/select";
 import { Switch } from "../components/ui/switch";
+import { useErrorToast } from "../components/ErrorToast";
 
 function settingsFailure(caught: unknown): { field: string; message: string } {
   if (caught && typeof caught === "object") {
@@ -39,6 +40,7 @@ function SettingsContent({
   onSaved: (s: StateView) => void;
 }) {
   const { t } = useLanguage();
+  const { showError, showSuccess } = useErrorToast();
   const [auth, setAuth] = useState(settings.auth);
   const [metrics, setMetrics] = useState(settings.metrics);
   const [egressMode, setEgressMode] = useState(settings.egress_mode);
@@ -48,7 +50,6 @@ function SettingsContent({
   const [proxySlot, setProxySlot] = useState(settings.egress_auth_slot);
   const [err, setErr] = useState("");
   const [errorField, setErrorField] = useState("");
-  const [ok, setOk] = useState("");
   const [egressView, setEgressView] = useState<EgressView | null>(null);
   const proxyUrlRef = useRef<HTMLInputElement>(null);
 
@@ -68,7 +69,6 @@ function SettingsContent({
   const save = async () => {
     setErr("");
     setErrorField("");
-    setOk("");
     try {
       const s = await setSettings(auth, metrics, {
         egress_mode: egressMode,
@@ -78,13 +78,18 @@ function SettingsContent({
         egress_auth_slot: proxySlot.trim(),
       });
       onSaved(s);
-      setOk(serveRunning ? t("general.savedRestart") : t("general.saved"));
+      showSuccess(
+        serveRunning ? t("general.savedRestart") : t("general.saved"),
+        "settings-save",
+      );
     } catch (e) {
       const failure = settingsFailure(e);
-      setErr(failure.message);
-      setErrorField(failure.field);
       if (failure.field === "egress_proxy_url") {
+        setErr(failure.message);
+        setErrorField(failure.field);
         requestAnimationFrame(() => proxyUrlRef.current?.focus());
+      } else {
+        showError(failure.message, "settings-save");
       }
     }
   };
@@ -96,9 +101,6 @@ function SettingsContent({
         <p className="sub">{t("general.description")}</p>
       </CardHeader>
       <CardContent className="settings-card-content">
-
-      {err && <div className="banner err" role="alert">{err}</div>}
-      {ok && <div className="banner ok">{ok}</div>}
 
       <div className="setting-row setting-toggle-row">
         <span id="settings-auth-label" className="setting-toggle-copy">
@@ -146,7 +148,7 @@ function SettingsContent({
                 placeholder={egressMode === "http" ? "http://proxy.company:8080" : "socks5h://127.0.0.1:1080"}
               />
               {errorField === "egress_proxy_url" && (
-                <small id="egress-proxy-url-error" className="error-text">{err}</small>
+                <small id="egress-proxy-url-error" className="error-text" role="alert">{err}</small>
               )}
             </label>
             <label>{t("general.noProxy")}<Input aria-label={t("general.noProxy")} value={noProxy} onChange={(event) => setNoProxy(event.target.value)} placeholder="localhost, *.corp.internal" /></label>

@@ -68,7 +68,9 @@ Token Station 不会把 YAML 反序列化后整份重写。lossless CST 只修�
 - 接入后用户对未拥有字段的修改。
 
 以下情况写入前直接拒绝：非法 YAML、多个 YAML document、重复键、merge key、非对象根、
-`model` 不是对象、owned path 父级类型冲突。错误信息不回显原配置行或虚拟 Key。
+`model` 是字符串/数组/非空 flow mapping 或含 anchor/tag/alias，以及其他 owned path 父级类型
+冲突。`model:`、`model: null`、`model: ~` 和 `model: {}` 是安全空表示，新版 Token Station
+会保留注释并展开为块映射，不再要求用户手工修文件。错误信息不回显原配置行或虚拟 Key。
 
 ## 4. 写入和断开
 
@@ -79,7 +81,8 @@ Token Station 不会把 YAML 反序列化后整份重写。lossless CST 只修�
 加密快照 → revision 复验 → 同目录原子替换 → YAML 重解析 → Connector 自检 → ownership 提交
 ```
 
-点击“一键接入”即代表同意写入。“恢复官方配置并断开”只移除五个 owned paths。owned
+点击“一键接入”即代表同意写入。“恢复官方配置并断开”只移除五个 owned paths，并在写盘前
+验证删除结果仍可再次接入。owned
 values 被其他工具修改后，旧计划会因 revision/ownership 冲突失效，必须重新扫描。历史 `.bak` 只读
 展示，不覆盖、不删除、不自动恢复。
 

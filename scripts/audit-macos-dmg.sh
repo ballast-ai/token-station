@@ -68,6 +68,7 @@ readonly mounted_installer="$mount_point/安装 Token Station.command"
 readonly mounted_agent_rules="$mount_point/AGENTS.md"
 readonly mounted_unsigned_test_marker="$mount_point/未签名测试版.txt"
 readonly mounted_provenance="$mount_point/构建来源.txt"
+readonly mounted_terminal_command="$mount_point/终端启动命令.txt"
 readonly mounted_ds_store="$mount_point/.DS_Store"
 readonly finder_layout_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/packaging/macos/configure-dmg-layout.applescript"
 
@@ -78,7 +79,7 @@ for required_path in "$mounted_app" "$mounted_applications" "$mounted_readme" "$
   }
 done
 if [[ "$unsigned_test" == "true" ]]; then
-  for required_path in "$mounted_unsigned_test_marker" "$mounted_provenance"; do
+  for required_path in "$mounted_unsigned_test_marker" "$mounted_provenance" "$mounted_terminal_command"; do
     [[ -f "$required_path" ]] || {
       echo "测试 DMG 缺少根目录警告或构建来源：$(basename "$required_path")" >&2
       exit 1
@@ -93,9 +94,19 @@ if [[ "$unsigned_test" == "true" ]]; then
     AGENTS.md \
     '未签名测试版.txt' \
     '构建来源.txt' \
+    '终端启动命令.txt' \
     .DS_Store | LC_ALL=C sort)
   [[ "$actual_entries" == "$expected_entries" ]] || {
     echo "测试 DMG 根目录包含多余或缺失的文件。" >&2
+    echo "期望文件：" >&2
+    printf '%s\n' "$expected_entries" >&2
+    echo "实际文件：" >&2
+    printf '%s\n' "$actual_entries" >&2
+    exit 1
+  }
+else
+  [[ ! -e "$mounted_terminal_command" ]] || {
+    echo "正式 DMG 不得包含终端 Gatekeeper 绕过入口。" >&2
     exit 1
   }
 fi
@@ -105,24 +116,32 @@ fi
   exit 1
 }
 finder_layout_lines=( \
-  'window=920x600' \
+  "$([[ "$unsigned_test" == "true" ]] && echo 'window=1080x600' || echo 'window=920x600')" \
   'view=icon view' \
   'icon_size=128' \
   'arrangement=not arranged' \
   'toolbar=false' \
   'statusbar=false' \
   'pathbar=false' \
-  'sidebar_width=0' \
-  'app=310,170' \
-  'applications=610,170' \
-  'installer=100,440' \
-  'readme=280,440')
+  'sidebar_width=0')
 if [[ "$unsigned_test" == "true" ]]; then
   finder_layout_lines+=( \
-    'provenance=460,440' \
-    'warning=640,440')
+    'app=360,170' \
+    'applications=720,170' \
+    'installer=100,440' \
+    'readme=280,440' \
+    'terminal_command=460,440' \
+    'provenance=640,440' \
+    'warning=820,440' \
+    'agent_rules=1000,440')
+else
+  finder_layout_lines+=( \
+    'app=310,170' \
+    'applications=610,170' \
+    'installer=100,440' \
+    'readme=280,440' \
+    'agent_rules=820,440')
 fi
-finder_layout_lines+=('agent_rules=820,440')
 expected_finder_layout=$(printf '%s\n' "${finder_layout_lines[@]}")
 if ! actual_finder_layout=$(osascript "$finder_layout_script" inspect "$mount_point"); then
   echo "Finder 无法读取 DMG 的拖拽布局，请确认 Finder 可以正常启动后重试。" >&2
@@ -207,6 +226,30 @@ if [[ "$unsigned_test" == "true" ]]; then
     echo "构建来源没有记录完整提交。" >&2
     exit 1
   }
+  readonly expected_terminal_command='sudo xattr -dr com.apple.quarantine "/Applications/token-station.app" && open "/Applications/token-station.app"'
+  actual_terminal_command=$(/usr/bin/grep '^sudo ' "$mounted_terminal_command" || true)
+  [[ "$actual_terminal_command" == "$expected_terminal_command" ]] || {
+    echo "终端启动命令不是只针对 canonical Token Station 的预期命令。" >&2
+    exit 1
+  }
+  [[ "$(/usr/bin/grep -c '^sudo ' "$mounted_terminal_command")" == "1" ]] || {
+    echo "终端启动说明必须只提供一条可执行命令。" >&2
+    exit 1
+  }
+  for phrase in 'Token Station 官方 GitHub Releases' '先把 token-station.app 拖到 Applications' '管理员密码' '不会显示字符'; do
+    /usr/bin/grep -Fq "$phrase" "$mounted_terminal_command" || {
+      echo "终端启动说明缺少安全提示：$phrase" >&2
+      exit 1
+    }
+  done
+  if /usr/bin/grep -Eq 'spctl[[:space:]]+--master-disable' "$mounted_terminal_command"; then
+    echo "终端启动说明包含关闭 Gatekeeper 的命令。" >&2
+    exit 1
+  fi
+  /bin/zsh -n -c "$actual_terminal_command" || {
+    echo "终端启动命令无法通过 zsh 语法检查。" >&2
+    exit 1
+  }
 else
   codesign --verify --strict "$dmg_path" || {
     echo "DMG 自身的代码签名验证失败。" >&2
@@ -230,7 +273,11 @@ else
   }
 fi
 
-if /usr/bin/grep -Eq 'spctl[[:space:]]+--master-disable' "$mounted_readme" "$mounted_installer"; then
+gatekeeper_documents=("$mounted_readme" "$mounted_installer")
+if [[ "$unsigned_test" == "true" ]]; then
+  gatekeeper_documents+=("$mounted_terminal_command")
+fi
+if /usr/bin/grep -Eq 'spctl[[:space:]]+--master-disable' "${gatekeeper_documents[@]}"; then
   echo "安装说明或脚本包含关闭 Gatekeeper 的命令。" >&2
   exit 1
 fi

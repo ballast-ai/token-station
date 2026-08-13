@@ -122,6 +122,56 @@ interface LocalizedAppMessage {
   zh: string;
 }
 
+function modelContractGuidance(error: unknown): LocalizedAppMessage | null {
+  if (!error || typeof error !== "object") return null;
+  const value = error as { code?: unknown; target?: unknown };
+  const code = typeof value.code === "string" ? value.code : "";
+  const target = typeof value.target === "string" && value.target.length <= 256
+    ? `\`${value.target}\``
+    : null;
+  const subject = target ?? "the selected model";
+  const zhSubject = target ?? "当前模型";
+  const guidance: Record<string, LocalizedAppMessage> = {
+    agent_runtime_transition: {
+      en: "The proxy is switching runtime instances. Wait for the transition to finish; OpenCode readiness will then be checked again.",
+      zh: "代理正在切换运行实例。请等待切换完成，届时将重新检查 OpenCode 接入条件。",
+    },
+    model_contract_exact_routing_unsupported: {
+      en: "OpenCode's fixed model is incompatible with exact-model routing. Switch this Agent to tiered, quota-first, or direct routing.",
+      zh: "OpenCode 固定模型与精确模型路由不兼容。请将该 Agent 切换为分层、额度优先或单独路由。",
+    },
+    model_contract_invalid_route: {
+      en: "The OpenCode route is invalid. Repair and save the route configuration before connecting.",
+      zh: "OpenCode 路由配置无效。请修复并保存路由配置后再接入。",
+    },
+    model_contract_no_reachable_model: {
+      en: "The current OpenCode route has no reachable model. Add a reachable provider and model, then save the route.",
+      zh: "OpenCode 当前路由没有可达模型。请添加可达的供应商和模型，然后保存路由。",
+    },
+    model_contract_unknown_provider: {
+      en: `The OpenCode route references unknown provider ${subject}. Repair the route or restore that provider.`,
+      zh: `OpenCode 路由引用了未知供应商 ${zhSubject}。请修复路由或恢复该供应商。`,
+    },
+    model_contract_unknown_model: {
+      en: `The OpenCode route references unknown model ${subject}. Repair the route or add that model.`,
+      zh: `OpenCode 路由引用了未知模型 ${zhSubject}。请修复路由或添加该模型。`,
+    },
+    model_contract_missing_context_window: {
+      en: `Model ${subject} has no context-window limit. Complete this model's limits in Providers, then restart the proxy.`,
+      zh: `模型 ${zhSubject} 缺少上下文上限。请前往供应商页面完善该模型限制，然后重启代理。`,
+    },
+    model_contract_missing_max_output_tokens: {
+      en: `Model ${subject} has no maximum output token limit. Complete this model's limits in Providers, then restart the proxy.`,
+      zh: `模型 ${zhSubject} 缺少最大输出 Token 上限。请前往供应商页面完善该模型限制，然后重启代理。`,
+    },
+    model_contract_invalid_limits: {
+      en: `Model ${subject} has invalid token limits. Set maximum output below its context window, then restart the proxy.`,
+      zh: `模型 ${zhSubject} 的 Token 上限无效。请将最大输出设为小于上下文上限，然后重启代理。`,
+    },
+  };
+  return guidance[code] ?? null;
+}
+
 function routerConfigGuidance(raw: string): LocalizedAppMessage | null {
   const emptyPool = raw.match(/pool `([^`\r\n]{1,128})` has no members/i);
   if (emptyPool) {
@@ -337,9 +387,11 @@ function selectedAppLanguage(language?: Language): Language {
 
 export function humanizeAppError(error: unknown, language?: Language): string {
   const raw = appErrorText(error);
+  const modelGuidance = modelContractGuidance(error);
   const routerGuidance = routerConfigGuidance(raw);
   const guidance = APP_ERROR_GUIDANCE.find((item) => item.matches.test(raw));
   const chinese = selectedAppLanguage(language) === "zh-CN";
+  if (modelGuidance) return chinese ? modelGuidance.zh : modelGuidance.en;
   if (routerGuidance) return chinese ? routerGuidance.zh : routerGuidance.en;
   if (guidance) return chinese ? guidance.zh : guidance.en;
   return chinese

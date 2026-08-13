@@ -134,8 +134,10 @@ Connector 使用 `toml_edit` 保留非归属表、字段和注释，写入 Respo
 `/provider/tokenstation`，其他 Provider 和顶层字段保留。只有 `agent-openai` 就绪时
 才能接入。
 
-所有 Connector 都先解析源配置并验证父级结构。配置不存在时可从空对象/空文档生成；无效
-UTF-8、无效 JSON/TOML 或 owned path 父级类型错误时，在快照和写入前拒绝。
+所有 Connector 都先解析源配置并验证父级结构。配置不存在时可从空对象/空文档生成；owned
+path 的严格祖先若是精确 `null`，连接计划可在内存中提升为空对象再写入，字符串、数组或其他
+歧义类型仍在快照和写入前拒绝。正常恢复会把 snapshot 中原有的 `null` 结构还原；强制断开
+写盘前还会用同一 Connector 执行一次无网络、无真实凭据的重接复验。
 
 ### OpenClaw
 
@@ -151,6 +153,10 @@ Connector 使用 round-trip AST 保留注释、尾逗号和未知字段，并复
 `model.base_url`、`model.api_key` 和 `model.api_mode`。Connector 固定 `provider: custom`、
 `api_mode: chat_completions`，使用 lossless YAML 编辑器保留根注释和未知字段，并拒绝重复键、
 merge key、多文档或 flow/deep-path 歧义写入。
+
+YAML 的 `model:`、`model: null`、`model: ~` 与 `model: {}` 都属于可证明安全的空祖先，连接
+计划会保留注释和相邻字段后展开为块映射。字符串、数组、非空 flow mapping、anchor、tag 与
+alias 不会被自动改写。
 
 ### WorkBuddy
 

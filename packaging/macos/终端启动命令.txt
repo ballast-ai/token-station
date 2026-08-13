@@ -1,0 +1,12 @@
+Token Station 终端启动命令
+
+仅当这个 DMG 来自 Token Station 官方 GitHub Releases，并且你已核对同页 SHA-256 时继续。
+
+1. 先把 token-station.app 拖到 Applications。如果提示已有同名 App，请选择“替换”，不要保留名为“token-station 2”的副本。
+2. 打开“终端”，复制并执行下面完整的一行命令。
+3. 终端要求管理员密码时，请输入当前 Mac 的管理员密码。输入过程中不会显示字符，这是正常现象。
+4. 只有移除 Token Station 的隔离属性成功后，命令才会启动 App；失败时请保留终端错误信息。
+
+sudo xattr -dr com.apple.quarantine "/Applications/token-station.app" && open "/Applications/token-station.app"
+
+这条命令只处理 /Applications/token-station.app，不会关闭 Gatekeeper，也不会修改 SIP。

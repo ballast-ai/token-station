@@ -419,6 +419,13 @@ impl Guest for OpenAiClient {
                 "prompt_tokens": response.usage.input_tokens,
                 "completion_tokens": response.usage.output_tokens,
                 "total_tokens": response.usage.total(),
+                "prompt_tokens_details": {
+                    "cached_tokens": response.usage.cache_read_tokens,
+                    "cache_write_tokens": response.usage.cache_write_tokens,
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": response.usage.reasoning_tokens,
+                },
             },
         }))
     }
@@ -461,8 +468,15 @@ impl Guest for OpenAiClient {
                 )
             }
             StreamEvent::Usage { usage } => format!(
-                "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{}}}}}\n\n",
-                usage.input_tokens, usage.output_tokens
+                "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{},\
+                 \"total_tokens\":{},\"prompt_tokens_details\":{{\"cached_tokens\":{},\
+                 \"cache_write_tokens\":{}}},\"completion_tokens_details\":{{\"reasoning_tokens\":{}}}}}}}\n\n",
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.total(),
+                usage.cache_read_tokens,
+                usage.cache_write_tokens,
+                usage.reasoning_tokens
             ),
             // 0.3.0: reasoning deltas ride the openai-compat
             // `delta.reasoning_content` slot; the signature fragment has no
@@ -570,6 +584,70 @@ mod tests {
         assert!(normalized.get("input").is_none());
         assert!(normalized.get("previous_response_id").is_none());
         assert!(normalized.get("store").is_none());
+    }
+
+    #[test]
+    fn non_stream_usage_preserves_cache_and_reasoning_details() {
+        let response = json!({
+            "id": "chatcmpl-usage",
+            "model": "routed-model",
+            "choices": [],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_tokens": 60,
+                "cache_write_tokens": 10,
+                "reasoning_tokens": 5
+            }
+        });
+
+        let rendered = OpenAiClient::render_response(response.to_string(), String::new())
+            .expect("canonical response renders");
+        let rendered: Value = serde_json::from_str(&rendered).expect("OpenAI response is JSON");
+
+        assert_eq!(
+            rendered["usage"],
+            json!({
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+                "prompt_tokens_details": {
+                    "cached_tokens": 60,
+                    "cache_write_tokens": 10
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": 5
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn stream_usage_preserves_cache_and_reasoning_details() {
+        let event = json!({
+            "type": "usage",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_tokens": 60,
+                "cache_write_tokens": 10,
+                "reasoning_tokens": 5
+            }
+        });
+
+        let rendered = OpenAiClient::render_stream_event(event.to_string(), String::new())
+            .expect("canonical usage event renders");
+        let rendered: Value = serde_json::from_str(&rendered).expect("stream wrapper is JSON");
+
+        assert_eq!(
+            rendered["data"],
+            json!(concat!(
+                "data: {\"choices\":[],\"usage\":{",
+                "\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":120,",
+                "\"prompt_tokens_details\":{\"cached_tokens\":60,\"cache_write_tokens\":10},",
+                "\"completion_tokens_details\":{\"reasoning_tokens\":5}}}\n\n"
+            ))
+        );
     }
 }
 

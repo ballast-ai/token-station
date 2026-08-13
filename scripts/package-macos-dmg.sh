@@ -50,8 +50,11 @@ readonly installer="$root/packaging/macos/安装 Token Station.command"
 readonly agent_rules="$root/packaging/macos/AGENTS.md"
 readonly formal_readme="$root/packaging/macos/安装前必读.md"
 readonly unsigned_test_readme="$root/packaging/macos/未签名测试版安装前必读.md"
-readonly finder_layout_template="$root/packaging/macos/dmg-layout.dsstore.base64"
+readonly unsigned_terminal_command="$root/packaging/macos/终端启动命令.txt"
+readonly formal_finder_layout_template="$root/packaging/macos/dmg-layout.dsstore.base64"
+readonly unsigned_finder_layout_template="$root/packaging/macos/dmg-layout-unsigned.dsstore.base64"
 readme="$formal_readme"
+finder_layout_template="$formal_finder_layout_template"
 packaging_source_commit=""
 tag_commit=""
 
@@ -84,6 +87,7 @@ if [[ "$unsigned_test" == "true" ]]; then
     exit 1
   fi
   readme="$unsigned_test_readme"
+  finder_layout_template="$unsigned_finder_layout_template"
 else
   [[ -n "$signing_identity" && "$signing_identity" != "-" ]] || {
     echo "正式 DMG 必须提供非 ad-hoc 签名身份。" >&2
@@ -147,6 +151,7 @@ ln -s /Applications "$stage/Applications"
 /bin/chmod 755 "$stage/安装 Token Station.command"
 /bin/cp "$agent_rules" "$stage/AGENTS.md"
 if [[ "$unsigned_test" == "true" ]]; then
+  /bin/cp "$unsigned_terminal_command" "$stage/终端启动命令.txt"
   printf '%s\n' \
     '警告：此 DMG 未签名、未经 Apple 公证，仅供测试。安装前请先阅读“安装前必读.md”并核对 SHA-256。' \
     >"$stage/未签名测试版.txt"

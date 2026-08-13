@@ -27,6 +27,7 @@ on run arguments
 		set targetWindow to container window of targetFolder
 
 		if operationName is "configure" then
+			set hasTerminalCommand to exists item "终端启动命令.txt" of targetFolder
 			-- Keep the primary app-to-Applications relationship from the v1.1.2 DMG.
 			tell targetWindow
 				set current view to icon view
@@ -34,7 +35,11 @@ on run arguments
 				set statusbar visible to false
 				set pathbar visible to false
 				set sidebar width to 0
-				set bounds to {100, 100, 1020, 700}
+				if hasTerminalCommand then
+					set bounds to {100, 100, 1180, 700}
+				else
+					set bounds to {100, 100, 1020, 700}
+				end if
 			end tell
 			set targetViewOptions to the icon view options of targetWindow
 			tell targetViewOptions
@@ -49,13 +54,24 @@ on run arguments
 			open targetFolder
 			set targetWindow to container window of targetFolder
 
-			set position of item "token-station.app" of targetFolder to {310, 170}
-			set position of item "Applications" of targetFolder to {610, 170}
-			set position of item "安装 Token Station.command" of targetFolder to {100, 440}
-			set position of item "安装前必读.md" of targetFolder to {280, 440}
-			if exists item "构建来源.txt" of targetFolder then set position of item "构建来源.txt" of targetFolder to {460, 440}
-			if exists item "未签名测试版.txt" of targetFolder then set position of item "未签名测试版.txt" of targetFolder to {640, 440}
-			set position of item "AGENTS.md" of targetFolder to {820, 440}
+			if hasTerminalCommand then
+				set position of item "token-station.app" of targetFolder to {360, 170}
+				set position of item "Applications" of targetFolder to {720, 170}
+				set position of item "安装 Token Station.command" of targetFolder to {100, 440}
+				set position of item "安装前必读.md" of targetFolder to {280, 440}
+				if exists item "终端启动命令.txt" of targetFolder then set position of item "终端启动命令.txt" of targetFolder to {460, 440}
+				if exists item "构建来源.txt" of targetFolder then set position of item "构建来源.txt" of targetFolder to {640, 440}
+				if exists item "未签名测试版.txt" of targetFolder then set position of item "未签名测试版.txt" of targetFolder to {820, 440}
+				set position of item "AGENTS.md" of targetFolder to {1000, 440}
+			else
+				set position of item "token-station.app" of targetFolder to {310, 170}
+				set position of item "Applications" of targetFolder to {610, 170}
+				set position of item "安装 Token Station.command" of targetFolder to {100, 440}
+				set position of item "安装前必读.md" of targetFolder to {280, 440}
+				if exists item "构建来源.txt" of targetFolder then set position of item "构建来源.txt" of targetFolder to {460, 440}
+				if exists item "未签名测试版.txt" of targetFolder then set position of item "未签名测试版.txt" of targetFolder to {640, 440}
+				set position of item "AGENTS.md" of targetFolder to {820, 440}
+			end if
 
 			update targetFolder without registering applications
 			my closeWindow(targetFolder)
@@ -83,6 +99,7 @@ on run arguments
 				my positionText("applications", position of item "Applications" of targetFolder), ¬
 				my positionText("installer", position of item "安装 Token Station.command" of targetFolder), ¬
 				my positionText("readme", position of item "安装前必读.md" of targetFolder)}
+			if exists item "终端启动命令.txt" of targetFolder then set end of resultLines to my positionText("terminal_command", position of item "终端启动命令.txt" of targetFolder)
 			if exists item "构建来源.txt" of targetFolder then set end of resultLines to my positionText("provenance", position of item "构建来源.txt" of targetFolder)
 			if exists item "未签名测试版.txt" of targetFolder then set end of resultLines to my positionText("warning", position of item "未签名测试版.txt" of targetFolder)
 			set end of resultLines to my positionText("agent_rules", position of item "AGENTS.md" of targetFolder)

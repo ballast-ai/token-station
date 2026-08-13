@@ -16,6 +16,7 @@ import { useTheme, type Theme } from "../components/ThemeProvider";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Switch } from "../components/ui/switch";
+import { useErrorToast } from "../components/ErrorToast";
 import About from "./About";
 import Settings from "./Settings";
 
@@ -43,7 +44,8 @@ const SECTIONS: Array<{
 ];
 
 function VirtualKeyCard({ serve }: { serve: ServeView }) {
-  const { t } = useLanguage();
+  const { copy: localizedCopy, t } = useLanguage();
+  const { showError } = useErrorToast();
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState(false);
   const revealTimer = useRef<number | null>(null);
@@ -62,9 +64,19 @@ function VirtualKeyCard({ serve }: { serve: ServeView }) {
 
   const copy = async () => {
     if (!key) return;
-    await navigator.clipboard.writeText(key);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1_500);
+    try {
+      await navigator.clipboard.writeText(key);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1_500);
+    } catch {
+      showError(
+        localizedCopy(
+          "Could not copy the virtual API key. Check the system clipboard permission and try again.",
+          "无法复制虚拟 API Key。请检查系统剪贴板权限，然后重试。",
+        ),
+        "copy-virtual-key",
+      );
+    }
   };
 
   return (

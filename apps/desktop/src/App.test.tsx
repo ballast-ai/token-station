@@ -194,6 +194,18 @@ function defaultAdmittedClaude(): AgentView {
   return value;
 }
 
+const detectedAgentsFixture: AgentView[] = supportedRegistryFixture.map((metadata, index) => {
+  const detected = structuredClone(scannedClaude);
+  detected.metadata = metadata;
+  detected.installations[0].discovery.agent_id = metadata.agent_id;
+  detected.installations[0].discovery.executable_path = `/opt/${metadata.agent_id}`;
+  detected.installations[0].discovery.canonical_path = `/opt/${metadata.agent_id}`;
+  detected.installations[0].compatibility.agent_id = metadata.agent_id;
+  detected.installations[0].compatibility.installation_path = `/opt/${metadata.agent_id}`;
+  detected.catalog_sequence = index + 1;
+  return detected;
+});
+
 function projectionPlan(
   operationId: string,
   confirmationToken: string,
@@ -220,13 +232,14 @@ function navigation() {
 }
 
 async function openRouting(user: ReturnType<typeof userEvent.setup>) {
-  await user.click((await screen.findByRole("navigation", { name: /主导航|Main navigation/ })).querySelector<HTMLButtonElement>('button[aria-label="路由"], button[aria-label="Routing"]')!);
+  await user.click((await screen.findByRole("navigation", { name: /主导航|Main navigation/ })).querySelector<HTMLButtonElement>('button[aria-label="主页"], button[aria-label="Home"]')!);
+  await user.click(await screen.findByRole("button", { name: /全局路由|Global routing/ }));
   await screen.findByRole("heading", { name: /全局路由|Global routing/ });
 }
 
 async function openAgents(user: ReturnType<typeof userEvent.setup>) {
-  await user.click((await screen.findByRole("navigation", { name: /主导航|Main navigation/ })).querySelector<HTMLButtonElement>('button[aria-label="Agent"], button[aria-label="Agents"]')!);
-  await screen.findByRole("heading", { name: /Agent 管理|Agents/ });
+  await user.click((await screen.findByRole("navigation", { name: /主导航|Main navigation/ })).querySelector<HTMLButtonElement>('button[aria-label="主页"], button[aria-label="Home"]')!);
+  await screen.findByRole("heading", { name: /主页|Home/ });
 }
 
 async function openAgent(user: ReturnType<typeof userEvent.setup>, name: string) {
@@ -252,8 +265,11 @@ beforeEach(() => {
   const initial = stateFixture();
   invokeMock.mockImplementation(async (command) => {
     if (command === "get_state") return initial;
+    // App polls runtime state every 500 ms. Keep the default mock complete so
+    // slower coverage runners do not turn an unrelated test into a poll error.
+    if (command === "get_runtime_state") return initial.serve;
     if (command === "list_agent_registry") return registryFixture;
-    if (command === "scan_agents") return [];
+    if (command === "scan_agents") return detectedAgentsFixture;
     if (command === "get_request_receipts") return { items: [], total: 0, page: 1, page_size: 20 };
     throw new Error(`unexpected IPC command: ${command}`);
   });
@@ -417,7 +433,7 @@ it("spotlights routing controls and advances only when the requested revision is
   render(<App />);
   const entryCoachmark = await screen.findByRole("dialog", { name: "打开路由配置" });
   expect(entryCoachmark).toHaveTextContent("配置路由 · 1/4");
-  const routingNav = screen.getByRole("button", { name: "路由" });
+  const routingNav = screen.getByRole("button", { name: "全局路由" });
   expect(routingNav).toHaveAttribute("data-onboarding-active", "true");
   await user.click(routingNav);
 
@@ -436,7 +452,9 @@ it("spotlights routing controls and advances only when the requested revision is
   expect(saveAndApply).toHaveAttribute("data-onboarding-active", "true");
   await user.click(saveAndApply);
 
-  expect(await screen.findByText("正在应用配置…")).toBeInTheDocument();
+  expect(await within(screen.getByTestId("error-toast-viewport")).findByText("正在应用配置…"))
+    .toBeInTheDocument();
+  expect(document.querySelector(".global-banner")).toBeNull();
   expect(screen.getByRole("dialog", { name: "保存并应用路由" })).toBeInTheDocument();
   act(() => emitServe?.(serveFixture({
     phase: "running",
@@ -461,7 +479,7 @@ it("spotlights routing controls and advances only when the requested revision is
     running_revision: 2,
   })));
 
-  expect(await screen.findByRole("heading", { name: "Agent 管理" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
   expect(await screen.findByRole("dialog", { name: "未检测到可接入 Agent" })).toBeInTheDocument();
 });
 
@@ -513,7 +531,7 @@ it("pins each route teaching target and restores main scrolling when paused", as
 
   render(<App />);
   await screen.findByRole("dialog", { name: "打开路由配置" });
-  await user.click(screen.getByRole("button", { name: "路由" }));
+  await user.click(screen.getByRole("button", { name: "全局路由" }));
 
   const workspace = document.querySelector<HTMLElement>(".station-content");
   expect(workspace).not.toBeNull();
@@ -602,7 +620,7 @@ it("does not treat a running but unconfigured route as onboarding-complete", asy
   expect(screen.queryByRole("dialog", { name: "打开 Agent 管理" })).toBeNull();
 });
 
-it("resumes at Agent and can finish honestly when no installation is detected", async () => {
+it("启动未扫到 Agent 时可直接完成基础设置并回到主页", async () => {
   window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
   const user = userEvent.setup();
   const provider = {
@@ -639,144 +657,20 @@ it("resumes at Agent and can finish honestly when no installation is detected", 
 
   render(<App />);
 
-  const entryCoachmark = await screen.findByRole("dialog", { name: "打开 Agent 管理" });
-  expect(entryCoachmark).toHaveTextContent("接入 Agent · 1/3");
-  const agentNav = screen.getByRole("button", { name: "Agent" });
-  expect(agentNav).toHaveAttribute("data-onboarding-active", "true");
-  await user.click(agentNav);
-
-  expect(await screen.findByRole("heading", { name: "Agent 管理" })).toBeInTheDocument();
   const emptyCoachmark = await screen.findByRole("dialog", { name: "未检测到可接入 Agent" });
-  const rescan = screen.getByRole("button", { name: "重新扫描" });
-  expect(rescan).toHaveAttribute("data-onboarding-active", "true");
-  await user.click(rescan);
-  await waitFor(() => expect(
-    invokeMock.mock.calls.filter(([command]) => command === "scan_agents"),
-  ).toHaveLength(2));
+  expect(screen.queryByRole("button", { name: "重新扫描" })).toBeNull();
+  expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
   await user.click(within(emptyCoachmark).getByRole("button", { name: "暂不接入，完成设置" }));
 
   expect(await screen.findByRole("dialog", { name: "基础设置完成" })).toBeInTheDocument();
   expect(screen.getByText("供应商和路由已就绪，Agent 尚未接入。"))
     .toBeInTheDocument();
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(FIRST_RUN_GUIDE_VERSION);
-  await user.click(screen.getByRole("button", { name: "返回概览" }));
-  expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "返回主页" }));
+  expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
 });
 
-it("does not allow skipping an Agent after a failed scan", async () => {
-  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
-  const user = userEvent.setup();
-  const provider = {
-    name: "openai",
-    provider: "openai-compatible",
-    base_url: "https://api.openai.com/v1",
-    models: ["gpt-5.1"],
-    has_auth: true,
-  };
-  const ready = stateFixture({
-    providers: [provider],
-    tiers: {
-      high: { upstream: "openai", model: "gpt-5.1" },
-      mid: { upstream: "openai", model: "gpt-5.1" },
-      low: { upstream: "openai", model: "gpt-5.1" },
-    },
-    draft_revision: 1,
-    saved_revision: 1,
-    config_dirty: false,
-    config_error: null,
-    serve: serveFixture({
-      phase: "running",
-      app_runtime: "running",
-      listener_reachable: true,
-      running_revision: 1,
-    }),
-  });
-  let scans = 0;
-  invokeMock.mockImplementation(async (command) => {
-    if (command === "get_state") return ready;
-    if (command === "list_agent_registry") return registryFixture;
-    if (command === "scan_agents") {
-      scans += 1;
-      if (scans === 2) throw new Error("scanner offline");
-      return [];
-    }
-    throw new Error(`unexpected IPC command: ${command}`);
-  });
-
-  render(<App />);
-  await screen.findByRole("dialog", { name: "打开 Agent 管理" });
-  await user.click(screen.getByRole("button", { name: "Agent" }));
-
-  const emptyCoachmark = await screen.findByRole("dialog", { name: "未检测到可接入 Agent" });
-  const rescan = screen.getByRole("button", { name: "重新扫描" });
-  expect(within(emptyCoachmark).getByRole("button", { name: "暂不接入，完成设置" }))
-    .toBeInTheDocument();
-
-  await user.click(rescan);
-  await waitFor(() => expect(scans).toBe(2));
-  expect(await screen.findByText(
-    "操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。",
-  )).toBeInTheDocument();
-  expect(within(emptyCoachmark).queryByRole("button", { name: "暂不接入，完成设置" }))
-    .toBeNull();
-
-  await user.click(rescan);
-  await waitFor(() => expect(scans).toBe(3));
-  expect(within(emptyCoachmark).getByRole("button", { name: "暂不接入，完成设置" }))
-    .toBeInTheDocument();
-});
-
-it("continues from rescan to Agent selection when an installation appears", async () => {
-  window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
-  const user = userEvent.setup();
-  const provider = {
-    name: "openai",
-    provider: "openai-compatible",
-    base_url: "https://api.openai.com/v1",
-    models: ["gpt-5.1"],
-    has_auth: true,
-  };
-  const ready = stateFixture({
-    providers: [provider],
-    tiers: {
-      high: { upstream: "openai", model: "gpt-5.1" },
-      mid: { upstream: "openai", model: "gpt-5.1" },
-      low: { upstream: "openai", model: "gpt-5.1" },
-    },
-    draft_revision: 1,
-    saved_revision: 1,
-    serve: serveFixture({
-      phase: "running",
-      app_runtime: "running",
-      listener_reachable: true,
-      running_revision: 1,
-    }),
-  });
-  let scans = 0;
-  invokeMock.mockImplementation(async (command) => {
-    if (command === "get_state") return ready;
-    if (command === "list_agent_registry") return registryFixture;
-    if (command === "scan_agents") {
-      scans += 1;
-      return scans === 1 ? [] : [scannedClaude];
-    }
-    throw new Error(`unexpected IPC command: ${command}`);
-  });
-
-  render(<App />);
-  await screen.findByRole("dialog", { name: "打开 Agent 管理" });
-  await user.click(screen.getByRole("button", { name: "Agent" }));
-  await screen.findByRole("dialog", { name: "未检测到可接入 Agent" });
-  await user.click(screen.getByRole("button", { name: "重新扫描" }));
-
-  expect(await screen.findByRole("dialog", { name: "选择一个 Agent" })).toBeInTheDocument();
-  expect(screen.getByRole("region", { name: "Agent 选择列表" }))
-    .toHaveAttribute("data-onboarding-active", "true");
-  expect(screen.getByRole("navigation", { name: "Agent 列表" }))
-    .not.toHaveAttribute("data-onboarding-active");
-});
-
-it("finishes only after an Agent rescan reports CONNECTED", async () => {
+it("一键接入后只通过缓存状态刷新确认 CONNECTED", async () => {
   window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
   const user = userEvent.setup();
   const provider = {
@@ -804,10 +698,9 @@ it("finishes only after an Agent rescan reports CONNECTED", async () => {
       virtual_key: "vk-test",
     }),
   });
-  let connected = false;
-  let resolveConnectedScan: ((agents: AgentView[]) => void) | undefined;
-  const connectedScan = new Promise<AgentView[]>((resolve) => {
-    resolveConnectedScan = resolve;
+  let resolveConnectedCache: ((agents: AgentView[]) => void) | undefined;
+  const connectedCache = new Promise<AgentView[]>((resolve) => {
+    resolveConnectedCache = resolve;
   });
   const connectedAgent = structuredClone(scannedClaude);
   connectedAgent.status = "CONNECTED";
@@ -817,13 +710,11 @@ it("finishes only after an Agent rescan reports CONNECTED", async () => {
   invokeMock.mockImplementation(async (command) => {
     if (command === "get_state") return ready;
     if (command === "list_agent_registry") return registryFixture;
-    if (command === "scan_agents") {
-      if (!connected) return [scannedClaude];
-      return connectedScan;
-    }
+    if (command === "scan_agents") return [scannedClaude];
+    if (command === "ensure_serve_running") return ready;
+    if (command === "get_cached_agent_views") return connectedCache;
     if (command === "plan_agent_connection") return projectionPlan("op-onboarding", "token-onboarding");
     if (command === "apply_agent_plan") {
-      connected = true;
       return { operation_id: "op-onboarding", maintenance_warning: null };
     }
     throw new Error(`unexpected IPC command: ${command}`);
@@ -831,7 +722,7 @@ it("finishes only after an Agent rescan reports CONNECTED", async () => {
 
   render(<App />);
   await screen.findByRole("dialog", { name: "打开 Agent 管理" });
-  await user.click(screen.getByRole("button", { name: "Agent" }));
+  await user.click(screen.getByRole("button", { name: "Claude Code" }));
 
   await screen.findByRole("dialog", { name: "选择一个 Agent" });
   expect(screen.getByRole("region", { name: "Agent 选择列表" }))
@@ -849,7 +740,7 @@ it("finishes only after an Agent rescan reports CONNECTED", async () => {
     { operationId: "op-onboarding", confirmationToken: "token-onboarding" },
   ));
   expect(screen.queryByRole("dialog", { name: "首次设置完成" })).toBeNull();
-  resolveConnectedScan?.([connectedAgent]);
+  resolveConnectedCache?.([connectedAgent]);
   expect(await screen.findByRole("dialog", { name: "首次设置完成" })).toBeInTheDocument();
   expect(screen.getByText("供应商、路由和 Agent 均已就绪，Token Station 现在可以接管模型请求。"))
     .toBeInTheDocument();
@@ -901,7 +792,7 @@ it("requires an exact installation choice before connecting a multi-installation
 
   render(<App />);
   await screen.findByRole("dialog", { name: "打开 Agent 管理" });
-  await user.click(screen.getByRole("button", { name: "Agent" }));
+  await user.click(screen.getByRole("button", { name: "Claude Code" }));
   await screen.findByRole("dialog", { name: "选择一个 Agent" });
   await user.click(screen.getByRole("button", { name: "Claude Code" }));
 
@@ -962,10 +853,10 @@ it("shows an already-complete summary without asking for repeated setup", async 
   render(<App />);
 
   expect(await screen.findByRole("dialog", { name: "首次设置已完成" })).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "返回概览" }));
+  await user.click(screen.getByRole("button", { name: "返回主页" }));
 
   expect(screen.queryByRole("dialog")).toBeNull();
-  expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(FIRST_RUN_GUIDE_VERSION);
 });
 
@@ -982,7 +873,7 @@ it("persists a skipped guide and does not show it on the next App session", asyn
   );
   firstSession.unmount();
   render(<App />);
-  await screen.findByRole("heading", { name: "概览" });
+  await screen.findByRole("heading", { name: "主页" });
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
@@ -996,7 +887,7 @@ it("reopens the guide from the About page without clearing the dismissed version
   await user.click(screen.getByRole("button", { name: "重新查看新手引导" }));
 
   expect(await screen.findByRole("dialog", { name: "添加你的第一个供应商" })).toBeInTheDocument();
-  expect(screen.getByRole("heading", { name: "概览" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "主页" })).toBeInTheDocument();
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(
     FIRST_RUN_GUIDE_VERSION,
   );
@@ -1023,7 +914,7 @@ it("treats Escape as a pause, restores focus, and offers setup next session", as
     .toBeInTheDocument();
 });
 
-it("renders a supported virtual Agent entirely from registry metadata", async () => {
+it("不显示仅存在于注册表但启动扫描未发现安装的 Agent", async () => {
   const user = userEvent.setup();
   invokeMock.mockImplementation(async (command) => {
     if (command === "get_state") return stateFixture();
@@ -1034,29 +925,291 @@ it("renders a supported virtual Agent entirely from registry metadata", async ()
 
   render(<App />);
   await openAgents(user);
-  expect(screen.getByRole("button", { name: "Virtual Agent" })).toHaveAttribute("title", "Virtual Agent · 未检测");
-  expect(screen.getByText("V")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Virtual Agent" })).toBeNull();
 });
 
 describe("desktop station navigation", () => {
-  it("opens on Overview and exposes the six primary desktop destinations", async () => {
+  it("等启动扫描完成后一次性显示合并主页与已发现 Agent", async () => {
+    window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_eventName, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    let resolveScan!: (agents: AgentView[]) => void;
+    const startupScan = new Promise<AgentView[]>((resolve) => {
+      resolveScan = resolve;
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return startupScan;
+      if (command === "get_runtime_state") return serveFixture();
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    const startupStatus = await screen.findByRole("status", { name: "正在检查本机 Agent" });
+    expect(startupStatus).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("heading", { name: "主页" })).toBeInTheDocument();
+    expect(screen.getByText("全局路由")).toBeInTheDocument();
+    const startupNavigation = within(screen.getByLabelText("主导航"));
+    for (const name of ["主页", "供应商", "用量", "设置"]) {
+      expect(startupNavigation.getByRole("button", { name })).toBeDisabled();
+    }
+    expect(screen.getByRole("button", { name: "切换颜色主题" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "添加你的第一个供应商" })).toBeNull();
+    expect(screen.queryByTestId("agent-runtime-connection")).toBeNull();
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
+    await waitFor(() => expect(emitServe).toBeTypeOf("function"));
+    act(() => emitServe?.(serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 0,
+      instance_id: "startup-instance",
+    })));
+    expect(screen.getByText("代理运行中")).toBeInTheDocument();
+
+    await act(async () => resolveScan([scannedClaude]));
+
+    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+    const nav = within(screen.getByLabelText("主导航"));
+    expect(nav.getAllByRole("button").map((item) => item.getAttribute("aria-label"))).toEqual([
+      "主页",
+      "供应商",
+      "用量",
+      "设置",
+    ]);
+    expect(screen.getByRole("button", { name: "全局路由" })).toHaveAttribute("aria-current", "page");
+    const globalRouteButton = screen.getByRole("button", { name: "全局路由" });
+    expect(globalRouteButton.querySelector('[data-testid="token-station-mark"]')).toBeInTheDocument();
+    expect(globalRouteButton.querySelector(".agent-master-copy")).toBeInTheDocument();
+    expect(within(globalRouteButton).queryByText("TS")).toBeNull();
+    expect(screen.getByRole("button", { name: "Claude Code" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Codex" })).toBeNull();
+    expect(screen.getByText("代理运行中")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-runtime-connection")).toHaveTextContent("0 / 1 个已接管");
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
+    expect(await screen.findByRole("dialog", { name: "添加你的第一个供应商" })).toBeInTheDocument();
+  });
+
+  it("serve 事件早于 get_state 返回时保留最新运行代次并只扫描一次", async () => {
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_eventName, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    let resolveState!: (state: StateView) => void;
+    const pendingState = new Promise<StateView>((resolve) => {
+      resolveState = resolve;
+    });
+    const latestRuntime = serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 9,
+      instance_id: "runtime-latest",
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return pendingState;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [scannedClaude];
+      if (command === "get_cached_agent_views") return [scannedClaude];
+      if (command === "get_runtime_state") return latestRuntime;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await waitFor(() => expect(emitServe).toBeTypeOf("function"));
+    act(() => emitServe?.(latestRuntime));
+
+    await act(async () => resolveState(stateFixture({
+      serve: serveFixture({
+        phase: "running",
+        app_runtime: "running",
+        listener_reachable: true,
+        running_revision: 1,
+        instance_id: "runtime-stale-state",
+      }),
+    })));
+
+    expect(await screen.findByText("代理运行中")).toBeInTheDocument();
+    expect(screen.getByText("rev 9")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Claude Code" })).toBeInTheDocument();
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
+
+    // Repeating the latest instance must not look like a replacement. A truly
+    // newer instance does refresh the cached Agent overlay exactly once.
+    act(() => emitServe?.(latestRuntime));
+    expect(invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"))
+      .toHaveLength(0);
+    act(() => emitServe?.({ ...latestRuntime, instance_id: "runtime-replacement" }));
+    await waitFor(() => expect(
+      invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"),
+    ).toHaveLength(1));
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
+  });
+
+  it("启动扫描失败时保留主页壳并提供明确的重新进入操作", async () => {
+    window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") throw new Error("agent discovery failed");
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
+    const startupStatus = await screen.findByRole("status", { name: "无法检查本机 Agent" });
+    expect(startupStatus).toHaveAttribute("aria-busy", "false");
+    expect(screen.getByRole("heading", { name: "主页" })).toBeInTheDocument();
+    expect(screen.getByText("启动检查未完成，当前不会把失败结果当作空 Agent 列表。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新进入 Token Station" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "添加你的第一个供应商" })).toBeNull();
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
+  });
+
+  it("启动扫描成功为空时进入正常主页而不是失败状态", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "全局路由" })).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: /检查本机 Agent/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "重新进入 Token Station" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
+  });
+
+  it("默认进入主页，顶栏只保留四个入口且 Logo 打开概览", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
     const nav = within(screen.getByLabelText("主导航"));
-    for (const name of ["概览", "路由", "Agent", "供应商", "用量", "设置"]) {
+    for (const name of ["主页", "供应商", "用量", "设置"]) {
       expect(nav.getByRole("button", { name })).toBeInTheDocument();
     }
+    expect(nav.queryByRole("button", { name: "概览" })).toBeNull();
+    expect(nav.queryByRole("button", { name: "路由" })).toBeNull();
+    expect(nav.queryByRole("button", { name: "Agent" })).toBeNull();
     expect(nav.queryByRole("button", { name: "日志" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Token Station 概览" }));
+    expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
     const revisionChain = screen.getByTestId("revision-chain");
     expect(revisionChain).toHaveAccessibleName("已保存 revision 0；待应用；未运行");
     expect(screen.getByLabelText("系统摘要")).not.toContainElement(revisionChain);
-    expect(screen.getByRole("region", { name: "当前路由快照" })).toContainElement(revisionChain);
+    const snapshot = screen.getByRole("region", { name: "当前路由快照" });
+    expect(snapshot).toContainElement(revisionChain);
+    for (const tier of ["上档", "中档", "下档"]) {
+      expect(within(snapshot).getByText(tier)).toBeInTheDocument();
+    }
+    expect(within(snapshot).queryByText("单独路由")).toBeNull();
+    expect(within(snapshot).queryByText("额度优先")).toBeNull();
     expect(await screen.findByText(/成功率 91\.7% · P95 320ms/)).toBeInTheDocument();
     expect(getStatsMock).toHaveBeenCalledWith("24h", null);
   });
 
+  it("概览的单独路由快照展示已应用目标而不是三档", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture({
+        routing_mode: "direct",
+        direct_target: { upstream: "team-openai", model: "gpt-5.6" },
+      });
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Token Station 概览" }));
+    const snapshot = screen.getByRole("region", { name: "当前路由快照" });
+
+    expect(within(snapshot).getByText("单独路由")).toBeInTheDocument();
+    expect(within(snapshot).getByText("gpt-5.6")).toBeInTheDocument();
+    expect(within(snapshot).getByText("team-openai")).toBeInTheDocument();
+    expect(within(snapshot).queryByText("上档")).toBeNull();
+    expect(within(snapshot).queryByText("未配置")).toBeNull();
+  });
+
+  it("概览的单独路由目标缺失时明确提示待选择", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture({
+        routing_mode: "direct",
+        direct_target: null,
+      });
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Token Station 概览" }));
+    const snapshot = screen.getByRole("region", { name: "当前路由快照" });
+    expect(within(snapshot).getByText("待选择供应商")).toBeInTheDocument();
+    expect(within(snapshot).getByText("待选择模型")).toBeInTheDocument();
+  });
+
+  it("概览的额度优先快照展示账户数与实际目标", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture({
+        routing_mode: "quota_first",
+        quota_accounts: [
+          { upstream: "deepseek", model: "deepseek-chat" },
+          { upstream: "team-openai", model: "gpt-5.6" },
+        ],
+      });
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Token Station 概览" }));
+    const snapshot = screen.getByRole("region", { name: "当前路由快照" });
+    expect(within(snapshot).getByText("额度优先")).toBeInTheDocument();
+    expect(within(snapshot).getByText("2 个账户")).toBeInTheDocument();
+    expect(within(snapshot).getByText("deepseek/deepseek-chat · team-openai/gpt-5.6"))
+      .toBeInTheDocument();
+    expect(within(snapshot).queryByText("上档")).toBeNull();
+  });
+
+  it("将操作错误放入左下可关闭 toast，不替换当前主页", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "serve_start") throw new Error("proxy start failed");
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /启动代理/ }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.parentElement).toHaveClass("error-toast-viewport");
+    expect(screen.getByRole("heading", { name: "主页" })).toBeInTheDocument();
+    await user.click(within(alert).getByRole("button", { name: "关闭提示" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("makes cost the primary Overview metric and keeps only shortcut navigation", async () => {
+    const user = userEvent.setup();
     getStatsMock.mockResolvedValueOnce({
       ...statsFixture,
       total: {
@@ -1068,6 +1221,9 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
+
+    await screen.findByRole("heading", { name: "主页" });
+    await user.click(screen.getByRole("button", { name: "Token Station 概览" }));
 
     const systemSummary = await screen.findByRole("region", { name: "系统摘要" });
     const costLabel = await within(systemSummary).findByText("今日成本");
@@ -1104,16 +1260,20 @@ describe("desktop station navigation", () => {
     await openAgents(user);
     const agentNavigation = screen.getByRole("navigation", { name: "Agent 列表" });
     const claudeCodeButton = within(agentNavigation).getByRole("button", { name: "Claude Code" });
-    expect(claudeCodeButton).toHaveAttribute("aria-current", "page");
+    expect(within(agentNavigation).getByRole("button", { name: "全局路由" }))
+      .toHaveAttribute("aria-current", "page");
+    expect(claudeCodeButton).not.toHaveAttribute("aria-current");
     const centeredBrand = claudeCodeButton.querySelector('[data-agent-brand="claude-code"]');
     expect(centeredBrand).toBeInTheDocument();
     expect(centeredBrand?.querySelector("svg")).toBeInTheDocument();
     expect(claudeCodeButton.querySelector('[style*="background"]')).toBeNull();
-    expect(screen.getByRole("heading", { name: "Claude Code", level: 2 })).toBeInTheDocument();
+    await user.click(claudeCodeButton);
+    expect(await screen.findByRole("heading", { name: "Claude Code", level: 2 })).toBeInTheDocument();
 
-    await user.click(within(agentNavigation).getByRole("button", { name: "Codex" }));
+    const updatedAgentNavigation = screen.getByRole("navigation", { name: "Agent 列表" });
+    await user.click(within(updatedAgentNavigation).getByRole("button", { name: "Codex" }));
     expect(await screen.findByRole("heading", { name: "Codex", level: 2 })).toBeInTheDocument();
-    expect(within(agentNavigation).getByRole("button", { name: "Codex" })).toHaveAttribute("aria-current", "page");
+    expect(within(screen.getByRole("navigation", { name: "Agent 列表" })).getByRole("button", { name: "Codex" })).toHaveAttribute("aria-current", "page");
   });
 
   it("changes the selected Agent routing strategy from the detail workspace", async () => {
@@ -1122,7 +1282,7 @@ describe("desktop station navigation", () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return initial;
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return [scannedClaude];
       if (command === "set_routing_mode") return {
         ...initial,
         agent_routes: {
@@ -1134,7 +1294,7 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
-    await openAgents(user);
+    await openAgent(user, "Claude Code");
     const strategyTabs = screen.getByRole("tablist", { name: "Agent 路由策略" });
     await user.click(within(strategyTabs).getByRole("tab", { name: "额度优先" }));
 
@@ -1148,7 +1308,7 @@ describe("desktop station navigation", () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return initial;
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return detectedAgentsFixture;
       if (command === "set_routing_mode") return { ...initial, routing_mode: "quota_first" };
       throw new Error(`unexpected IPC command: ${command}`);
     });
@@ -1248,10 +1408,19 @@ describe("desktop station navigation", () => {
     render(<App />);
     await openRouting(user);
     await user.click(await screen.findByRole("button", { name: "保存并应用" }));
-    expect(await screen.findByText("正在应用配置…")).toBeInTheDocument();
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("正在应用配置…"))
+      .toBeInTheDocument();
+    expect(document.querySelector(".global-banner")).toBeNull();
     act(() => emitServe?.(terminal));
 
-    await waitFor(() => expect(screen.queryByText("正在应用配置…")).toBeNull());
+    if (expectedError) {
+      await waitFor(() => expect(
+        within(screen.getByTestId("error-toast-viewport")).queryByText("正在应用配置…"),
+      ).toBeNull());
+    } else {
+      expect(within(screen.getByTestId("error-toast-viewport")).getByText("正在应用配置…"))
+        .toBeInTheDocument();
+    }
     expect(screen.queryByText(/配置已应用/)).toBeNull();
     if (expectedError) {
       expect(screen.getByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
@@ -1283,7 +1452,9 @@ describe("desktop station navigation", () => {
     render(<App />);
     await openRouting(user);
     await user.click(await screen.findByRole("button", { name: "保存并应用" }));
-    expect(await screen.findByText("正在应用配置…")).toBeInTheDocument();
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("正在应用配置…"))
+      .toBeInTheDocument();
+    expect(document.querySelector(".global-banner")).toBeNull();
     act(() => emitServe?.(serveFixture({
       phase: "running",
       app_runtime: "running",
@@ -1291,7 +1462,8 @@ describe("desktop station navigation", () => {
       running_revision: 2,
     })));
 
-    expect(await screen.findByText("配置已应用 · revision 2")).toBeInTheDocument();
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("配置已应用 · revision 2"))
+      .toBeInTheDocument();
   });
 
   it("keeps waiting when a stale runtime poll arrives before the requested revision", async () => {
@@ -1319,14 +1491,17 @@ describe("desktop station navigation", () => {
     render(<App />);
     await openRouting(user);
     await user.click(await screen.findByRole("button", { name: "保存并应用" }));
-    expect(await screen.findByText("正在应用配置…")).toBeInTheDocument();
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("正在应用配置…"))
+      .toBeInTheDocument();
+    expect(document.querySelector(".global-banner")).toBeNull();
     act(() => emitServe?.(serveFixture({
       phase: "running",
       app_runtime: "running",
       listener_reachable: true,
       running_revision: 1,
     })));
-    await waitFor(() => expect(screen.queryByText("正在应用配置…")).toBeNull());
+    expect(within(screen.getByTestId("error-toast-viewport")).getByText("正在应用配置…"))
+      .toBeInTheDocument();
     expect(screen.queryByText(/配置已应用/)).toBeNull();
 
     act(() => emitServe?.(serveFixture({
@@ -1335,7 +1510,8 @@ describe("desktop station navigation", () => {
       listener_reachable: true,
       running_revision: 2,
     })));
-    expect(await screen.findByText("配置已应用 · revision 2")).toBeInTheDocument();
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("配置已应用 · revision 2"))
+      .toBeInTheDocument();
   });
 
   it("does not treat an ordinary first proxy startup as a completed configuration apply", async () => {
@@ -1352,12 +1528,15 @@ describe("desktop station navigation", () => {
         });
       }
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return detectedAgentsFixture;
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
     render(<App />);
-    expect(await screen.findByText("正在应用配置…")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+    expect(within(screen.getByTestId("error-toast-viewport")).queryByText("正在应用配置…"))
+      .toBeNull();
+    expect(document.querySelector(".global-banner")).toBeNull();
     act(() => emitServe?.(serveFixture({
       phase: "running",
       app_runtime: "running",
@@ -1405,10 +1584,27 @@ describe("desktop station navigation", () => {
     );
   });
 
-  it("rescans once the runtime becomes ready after a not-ready first load", async () => {
-    // The gateway is not ready when the app opens, so load() initially reports a
-    // not-ready runtime and managed Agents incorrectly appear to need repair.
-    // Rescan when polling reports ready so cards match the real state.
+  it("运行态轮询连续失败时用稳定错误弹窗去重", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "get_runtime_state") throw new Error("runtime poll failed");
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+    await waitFor(() => expect(
+      invokeMock.mock.calls.filter(([command]) => command === "get_runtime_state").length,
+    ).toBeGreaterThanOrEqual(2), { timeout: 1_800 });
+
+    const alerts = within(screen.getByTestId("error-toast-viewport")).getAllByRole("alert");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toHaveTextContent("操作未能完成");
+  });
+
+  it("运行时从未就绪转为就绪时只刷新缓存且不重复扫描", async () => {
     const notReady = stateFixture({
       serve: serveFixture({
         phase: "starting",
@@ -1421,7 +1617,8 @@ describe("desktop station navigation", () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return notReady;
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return [scannedClaude];
+      if (command === "get_cached_agent_views") return [scannedClaude];
       if (command === "get_runtime_state") {
         return serveFixture({
           phase: "running",
@@ -1435,19 +1632,15 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
-    // The first scan comes from load() while runtime is not ready.
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1));
-    // The 500 ms poll marks runtime ready, and the transition triggers a rescan.
-    await waitFor(
-      () => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2),
-      { timeout: 1_500 },
-    );
-    // Runtime remains ready afterward, so no additional rescan occurs.
-    await waitFor(() => expect(screen.getByTestId("agent-runtime-connection")).toBeInTheDocument());
-    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2);
+    expect(await screen.findByRole("button", { name: /运行中.*停止/ })).toBeInTheDocument();
+    await waitFor(() => expect(
+      invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"),
+    ).toHaveLength(1));
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
   });
 
-  it("rescans when a new serving instance replaces the old one without a readiness gap", async () => {
+  it("运行实例替换时仍保持启动扫描只调用一次", async () => {
     const oldRuntime = stateFixture({
       serve: serveFixture({
         phase: "running",
@@ -1460,7 +1653,8 @@ describe("desktop station navigation", () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return oldRuntime;
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return [scannedClaude];
+      if (command === "get_cached_agent_views") return [scannedClaude];
       if (command === "get_runtime_state") {
         return serveFixture({
           phase: "running",
@@ -1477,16 +1671,54 @@ describe("desktop station navigation", () => {
     await waitFor(() => expect(
       invokeMock.mock.calls.filter(([command]) => command === "scan_agents"),
     ).toHaveLength(1));
-    await waitFor(
-      () => expect(
-        invokeMock.mock.calls.filter(([command]) => command === "scan_agents"),
-      ).toHaveLength(2),
-      { timeout: 1_500 },
-    );
-    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2);
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_runtime_state"));
+    await waitFor(() => expect(
+      invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"),
+    ).toHaveLength(1));
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
   });
 
-  it("renders supported Agents and the manually configured Cursor entry in ui_order", async () => {
+  it("代理停止后用缓存清除启动时的已接入态且不重新扫描", async () => {
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_eventName, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    const running = stateFixture({
+      serve: serveFixture({
+        phase: "running",
+        app_runtime: "running",
+        listener_reachable: true,
+        instance_id: "runtime-a",
+      }),
+    });
+    const connected = structuredClone(scannedClaude);
+    connected.status = "CONNECTED";
+    connected.installations[0].managed = true;
+    connected.installations[0].connected = true;
+    connected.installations[0].compatibility.status = "CONNECTED";
+    const disconnected = structuredClone(scannedClaude);
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return running;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [connected];
+      if (command === "get_cached_agent_views") return [disconnected];
+      if (command === "get_runtime_state") return running.serve;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    const agentButton = await screen.findByRole("button", { name: "Claude Code" });
+    expect(agentButton).toHaveAttribute("title", "Claude Code · 已接入");
+
+    act(() => emitServe?.(serveFixture()));
+    await waitFor(() => expect(agentButton).toHaveAttribute("title", "Claude Code · 可接入"));
+    expect(invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"))
+      .toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
+  });
+
+  it("只按启动扫描结果排列 Agent，页面内不提供重扫", async () => {
     const user = userEvent.setup();
     render(<App />);
     await openAgents(user);
@@ -1505,16 +1737,15 @@ describe("desktop station navigation", () => {
 
     await user.click(screen.getByRole("button", { name: "Codex" }));
     expect(await screen.findByRole("heading", { name: "Codex" })).toBeInTheDocument();
-    await user.click(navigation().getByRole("button", { name: "Agent" }));
+    await user.click(navigation().getByRole("button", { name: "主页" }));
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
-    await user.click(screen.getByRole("button", { name: "重新扫描" }));
-    await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2));
+    expect(screen.queryByRole("button", { name: "重新扫描" })).toBeNull();
   });
 
   it("lets the user hide and restore a sidebar Agent from Settings without rescanning", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByRole("heading", { name: "概览" });
+    await screen.findByRole("heading", { name: "主页" });
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1));
 
     await openAgentVisibility(user);
@@ -1554,7 +1785,7 @@ describe("desktop station navigation", () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
   });
 
-  it("restores hidden Agent preferences after remount while newly registered Agents remain visible", async () => {
+  it("restores hidden Agent preferences after remount while newly detected Agents remain visible", async () => {
     const user = userEvent.setup();
     const first = render(<App />);
     await openAgentVisibility(user);
@@ -1564,10 +1795,16 @@ describe("desktop station navigation", () => {
     );
     first.unmount();
 
+    const detectedVirtual = structuredClone(scannedClaude);
+    detectedVirtual.metadata = registryWithVirtualSupportedAgent[
+      registryWithVirtualSupportedAgent.length - 1
+    ];
+    detectedVirtual.installations[0].discovery.agent_id = "virtual-agent";
+    detectedVirtual.installations[0].compatibility.agent_id = "virtual-agent";
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryWithVirtualSupportedAgent;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return [...detectedAgentsFixture, detectedVirtual];
       throw new Error(`unexpected IPC command: ${command}`);
     });
     render(<App />);
@@ -1666,9 +1903,16 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("switch", { name: "Codex", checked: true }));
 
     expect(screen.getByRole("switch", { name: "Codex", checked: false })).toBeInTheDocument();
+    await waitFor(
+      () => expect(invokeMock).toHaveBeenCalledWith("get_runtime_state"),
+      { timeout: 1_000 },
+    );
+    expect(within(screen.getByTestId("error-toast-viewport")).getByRole("alert"))
+      .toHaveTextContent("Agent 显示已在本次会话生效，但无法保存到下次启动。");
+    expect(document.querySelector(".settings-hub .banner.err")).toBeNull();
   });
 
-  it("keeps a hidden Agent closed when returning to Overview", async () => {
+  it("keeps a hidden Agent closed and returns to Home", async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -1676,9 +1920,9 @@ describe("desktop station navigation", () => {
 
     await openAgentVisibility(user);
     await user.click(screen.getByRole("switch", { name: "Codex", checked: true }));
-    await user.click(navigation().getByRole("button", { name: "概览" }));
+    await user.click(navigation().getByRole("button", { name: "主页" }));
 
-    expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Codex" })).toBeNull();
   });
 
@@ -1713,7 +1957,7 @@ describe("desktop station navigation", () => {
     for (const name of agentNavigationNames) {
       expect(screen.queryByRole("button", { name })).toBeNull();
     }
-    expect(navigation().getByRole("button", { name: "概览" })).toBeInTheDocument();
+    expect(navigation().getByRole("button", { name: "主页" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "用量" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(`0 / ${agentIds.length} 已显示`);
@@ -1721,99 +1965,6 @@ describe("desktop station navigation", () => {
 
     await user.click(screen.getByRole("switch", { name: "Claude Code", checked: false }));
     expect(screen.getByRole("status")).toHaveTextContent(`1 / ${agentIds.length} 已显示`);
-  });
-
-  it("silently ignores a backend scan already in progress", async () => {
-    const user = userEvent.setup();
-    let scans = 0;
-    invokeMock.mockImplementation(async (command) => {
-      if (command === "get_state") return stateFixture();
-      if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") {
-        scans += 1;
-        if (scans === 1) return [];
-        throw { message: "Agent 扫描正在进行", code: "scan_in_progress" };
-      }
-      throw new Error(`unexpected IPC command: ${command}`);
-    });
-
-    render(<App />);
-    await waitFor(() => expect(scans).toBe(1));
-    await openAgents(user);
-    await user.click(screen.getByRole("button", { name: "重新扫描" }));
-    await waitFor(() => expect(scans).toBe(2));
-
-    expect(screen.queryByText(/Agent 扫描正在进行/)).toBeNull();
-    expect(screen.getByRole("button", { name: "重新扫描" })).toBeEnabled();
-  });
-
-  it("queues an overlapping rescan and only commits the newest generation", async () => {
-    const user = userEvent.setup();
-    let resolveSlow!: (agents: AgentView[]) => void;
-    let resolveNewest!: (agents: AgentView[]) => void;
-    const slow = new Promise<AgentView[]>((resolve) => { resolveSlow = resolve; });
-    const newestScan = new Promise<AgentView[]>((resolve) => { resolveNewest = resolve; });
-    let scans = 0;
-    invokeMock.mockImplementation(async (command) => {
-      if (command === "get_state") {
-        return stateFixture({
-          serve: serveFixture({
-            phase: "running", app_runtime: "running", listener_reachable: true,
-            running_revision: 1, instance_id: "instance-overlap", virtual_key: "vk-overlap",
-          }),
-        });
-      }
-      if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") {
-        scans += 1;
-        if (scans === 1) return [scannedClaude];
-        return scans === 2 ? slow : newestScan;
-      }
-      if (command === "plan_agent_connection") {
-        return projectionPlan("op-overlap", "token-overlap");
-      }
-      if (command === "apply_agent_plan") {
-        return { operation_id: "op-overlap", maintenance_warning: null };
-      }
-      throw new Error(`unexpected IPC command: ${command}`);
-    });
-
-    render(<App />);
-    await waitFor(() => expect(scans).toBe(1));
-    await openAgents(user);
-    await user.click(screen.getByRole("button", { name: "重新扫描" }));
-    await waitFor(() => expect(scans).toBe(2));
-    await user.click(screen.getByRole("button", { name: "Claude Code" }));
-    await user.click(screen.getByRole("button", { name: "一键接入" }));
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
-      "apply_agent_plan",
-      { operationId: "op-overlap", confirmationToken: "token-overlap" },
-    ));
-    expect(scans).toBe(2);
-
-    resolveSlow([scannedClaude]);
-    await waitFor(() => expect(scans).toBe(3));
-    const newest = structuredClone(scannedClaude);
-    const versionTen = structuredClone(scannedClaude.installations[0]);
-    versionTen.discovery.executable_path = "/opt/claude-10";
-    versionTen.discovery.canonical_path = "/opt/claude-10";
-    versionTen.discovery.version_raw = "10.0.0";
-    versionTen.discovery.version_normalized = "10.0.0";
-    versionTen.compatibility.installation_path = "/opt/claude-10";
-    const versionEleven = structuredClone(versionTen);
-    versionEleven.discovery.executable_path = "/opt/claude-11";
-    versionEleven.discovery.canonical_path = "/opt/claude-11";
-    versionEleven.discovery.version_raw = "11.0.0";
-    versionEleven.discovery.version_normalized = "11.0.0";
-    versionEleven.compatibility.installation_path = "/opt/claude-11";
-    newest.installations = [versionTen, versionEleven];
-    newest.status = "MULTIPLE_INSTALLATIONS";
-    resolveNewest([newest]);
-
-    await user.click(await screen.findByRole("button", { name: /选择安装/ }));
-    expect(screen.getByRole("option", { name: "claude-10 · v10.0.0" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "claude-11 · v11.0.0" })).toBeInTheDocument();
-    expect(screen.queryByText("9.9.9")).toBeNull();
   });
 
   it("keeps usage independent and exposes only user-facing categories inside Settings", async () => {
@@ -1827,7 +1978,7 @@ describe("desktop station navigation", () => {
       throw new Error(`unexpected IPC command: ${command}`);
     });
     render(<App />);
-    await screen.findByRole("heading", { name: "概览" });
+    await screen.findByRole("heading", { name: "主页" });
 
     await user.click(screen.getByRole("button", { name: "用量" }));
     expect(await screen.findByRole("heading", { name: "用量统计" })).toBeInTheDocument();
@@ -1846,8 +1997,8 @@ describe("desktop station navigation", () => {
 
     await user.click(navigation().getByRole("button", { name: "用量" }));
     expect(await screen.findByRole("heading", { name: "用量统计" })).toBeInTheDocument();
-    await user.click(navigation().getByRole("button", { name: "概览" }));
-    expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
+    await user.click(navigation().getByRole("button", { name: "主页" }));
+    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
   });
 
   it("renders the primary desktop surface in English by default", async () => {
@@ -1855,7 +2006,7 @@ describe("desktop station navigation", () => {
     window.localStorage.removeItem(LANGUAGE_STORAGE_KEY);
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Home" })).toBeInTheDocument();
     await openRouting(user);
     expect(screen.getByRole("heading", { name: "Smart routing" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save and apply" })).toBeInTheDocument();
@@ -1904,8 +2055,8 @@ describe("desktop station navigation", () => {
     )).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length} / ${agentIds.length} 已显示`);
     expect(screen.getByRole("group", { name: "Agent 显示选项" })).toBeInTheDocument();
-    await user.click(navigation().getByRole("button", { name: "概览" }));
-    expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
+    await user.click(navigation().getByRole("button", { name: "主页" }));
+    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
     expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("zh-CN");
     expect(document.documentElement).toHaveAttribute("lang", "zh-CN");
   });
@@ -1919,7 +2070,7 @@ describe("desktop station navigation", () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return detectedAgentsFixture;
       if (command === "serve_start") return running;
       if (command === "serve_stop") return stateFixture();
       throw new Error(`unexpected IPC command: ${command}`);
@@ -1927,6 +2078,9 @@ describe("desktop station navigation", () => {
     render(<App />);
     await user.click(await screen.findByRole("button", { name: /启动/ }));
     expect(await screen.findByText("代理运行中")).toBeInTheDocument();
+    const feedback = screen.getByTestId("error-toast-viewport");
+    expect(within(feedback).getByRole("status")).toHaveTextContent("代理已启动");
+    expect(document.querySelector(".global-banner")).toBeNull();
     expect(screen.queryByText("vk-test-secret")).toBeNull();
     await user.click(screen.getByRole("button", { name: "设置" }));
     expect(screen.getByLabelText("虚拟 API Key")).toHaveTextContent("••••");
@@ -1937,6 +2091,46 @@ describe("desktop station navigation", () => {
     expect(screen.getByText("vk-test-secret")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /停止/ }));
     expect(await screen.findByRole("button", { name: /启动/ })).toBeInTheDocument();
+    expect(within(feedback).getByRole("status")).toHaveTextContent("代理已停止");
+    expect(document.querySelector(".global-banner")).toBeNull();
+  });
+
+  it("keeps an explicit proxy-start progress toast in the bottom-left until runtime is reachable", async () => {
+    const user = userEvent.setup();
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_eventName, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    const starting = stateFixture({
+      serve: serveFixture({ phase: "starting" }),
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "serve_start") return starting;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /启动/ }));
+
+    const feedback = screen.getByTestId("error-toast-viewport");
+    expect(within(feedback).getByRole("status")).toHaveTextContent("正在启动代理…");
+    expect(document.querySelector(".global-banner")).toBeNull();
+    expect(screen.queryByText("正在应用配置…")).toBeNull();
+
+    act(() => emitServe?.(serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 1,
+      instance_id: "runtime-ready",
+    })));
+
+    expect(await within(feedback).findByText("代理已启动")).toBeInTheDocument();
+    expect(document.querySelector(".global-banner")).toBeNull();
   });
 
   it("applies the home route to all Agents with a dedicated command", async () => {
@@ -1951,7 +2145,8 @@ describe("desktop station navigation", () => {
     await openRouting(user);
     await user.click(await screen.findByRole("button", { name: "应用到全部 Agent" }));
     expect(invokeMock).toHaveBeenCalledWith("apply_home_route_to_all_agents");
-    expect(await screen.findByText("全部 Agent 已恢复跟随主页")).toBeInTheDocument();
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("全部 Agent 已恢复跟随主页"))
+      .toBeInTheDocument();
   });
 
   it("lets one Agent switch to an independent route using the same tier selects", async () => {
@@ -1961,7 +2156,7 @@ describe("desktop station navigation", () => {
     invokeMock.mockImplementation(async (command, args) => {
       if (command === "get_state") return current;
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return detectedAgentsFixture;
       if (command === "set_agent_route_mode") {
         const { agentId, mode } = args as { agentId: string; mode: "inherit" | "custom" };
         current = { ...current, agent_routes: { ...current.agent_routes, [agentId]: { ...current.agent_routes[agentId], mode } } };
@@ -1972,7 +2167,7 @@ describe("desktop station navigation", () => {
     });
     render(<App />);
     await openAgent(user, "Codex");
-    await user.click(screen.getByRole("radio", { name: "独立路由" }));
+    await user.click(screen.getByRole("radio", { name: "自定义三档" }));
     await user.click(screen.getByLabelText("上档供应商"));
     await user.click(screen.getByRole("option", { name: "deepseek" }));
     expect(invokeMock).toHaveBeenCalledWith("set_agent_tier", {
@@ -1989,7 +2184,7 @@ describe("desktop station navigation", () => {
     invokeMock.mockImplementation(async (command, args) => {
       if (command === "get_state") return current;
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return detectedAgentsFixture;
       if (command === "set_agent_route_mode") {
         const { agentId, mode } = args as { agentId: string; mode: "inherit" | "custom" };
         current = {
@@ -2012,17 +2207,17 @@ describe("desktop station navigation", () => {
     render(<App />);
 
     await openAgent(user, "Codex");
-    await user.click(screen.getByRole("radio", { name: "独立路由" }));
+    await user.click(screen.getByRole("radio", { name: "自定义三档" }));
     expect(screen.getByText("有一个路由尚未配置完整。请同时选择供应商和模型，然后重新保存。")).toBeInTheDocument();
 
-    await user.click(navigation().getByRole("button", { name: "路由" }));
+    await user.click(navigation().getByRole("button", { name: "主页" }));
 
     expect(await screen.findByRole("heading", { name: "全局路由" })).toBeInTheDocument();
     expect(screen.queryByText(/配置结构不合法/)).toBeNull();
     expect(invokeMock).not.toHaveBeenCalledWith("save_agent_routes");
 
     await openAgent(user, "Codex");
-    expect(screen.getByRole("radio", { name: "独立路由" })).toHaveAttribute(
+    expect(screen.getByRole("radio", { name: "自定义三档" })).toHaveAttribute(
       "aria-checked",
       "true",
     );
@@ -2041,7 +2236,7 @@ describe("desktop station navigation", () => {
     invokeMock.mockImplementation(async (command, args) => {
       if (command === "get_state") return current;
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return detectedAgentsFixture;
       if (command === "save_home_route_as_profile") {
         current = { ...current, profiles: [(args as { name: string }).name], config_dirty: true, draft_revision: 1 };
         return current;
@@ -2067,13 +2262,40 @@ describe("desktop station navigation", () => {
     await user.type(await screen.findByLabelText("策略组名称"), "日常开发");
     await user.click(screen.getByRole("button", { name: "保存策略" }));
     expect(invokeMock).toHaveBeenCalledWith("save_home_route_as_profile", { name: "日常开发" });
-    expect(await screen.findByText("策略组“日常开发”已加入草稿，请保存并应用。")).toBeInTheDocument();
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("策略组“日常开发”已加入草稿，请保存并应用。"))
+      .toBeInTheDocument();
 
     await openAgent(user, "Codex");
     await user.click(screen.getByRole("radio", { name: "挂载策略组" }));
     expect(invokeMock).toHaveBeenCalledWith("mount_agent_profile", { agentId: "codex", profile: "日常开发" });
-    expect(await screen.findByText("已挂载策略组「日常开发」· 尚待保存并应用")).toBeInTheDocument();
-    expect(screen.getByLabelText("当前策略组")).toHaveValue("日常开发");
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("已挂载策略组「日常开发」· 尚待保存并应用"))
+      .toBeInTheDocument();
+    expect(screen.getByLabelText("当前策略组")).toHaveTextContent("日常开发");
+  });
+
+  it("在主页公开管理区删除未挂载策略组", async () => {
+    const user = userEvent.setup();
+    let current = stateFixture({ profiles: ["已停用"] });
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "get_state") return current;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [];
+      if (command === "delete_profile") {
+        expect(args).toEqual({ name: "已停用" });
+        current = { ...current, profiles: [] };
+        return current;
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await openRouting(user);
+    await user.click(screen.getByRole("button", { name: "删除策略组 已停用" }));
+
+    expect(invokeMock).toHaveBeenCalledWith("delete_profile", { name: "已停用" });
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("策略组“已停用”已从草稿删除，请保存并应用。"))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "删除策略组 已停用" })).toBeNull();
   });
 
   it("serializes profile mutations with the rest of the home route commands", async () => {
@@ -2104,7 +2326,8 @@ describe("desktop station navigation", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("serve_start");
 
     finishSave?.({ ...current, profiles: ["并发保护"] });
-    expect(await screen.findByText("策略组“并发保护”已加入草稿，请保存并应用。")).toBeInTheDocument();
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("策略组“并发保护”已加入草稿，请保存并应用。"))
+      .toBeInTheDocument();
   });
 
   it("opens Add Provider as a separate page and returns to the source page after saving", async () => {
@@ -2119,7 +2342,7 @@ describe("desktop station navigation", () => {
         };
       }
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return detectedAgentsFixture;
       throw new Error(`unexpected IPC command: ${command}`);
     });
     render(<App />);
@@ -2133,7 +2356,8 @@ describe("desktop station navigation", () => {
     await user.type(screen.getByLabelText("API Key"), "secret-test");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "OpenCode" })).toBeInTheDocument();
-    expect(screen.getByText("供应商已添加")).toBeInTheDocument();
+    expect(within(screen.getByTestId("error-toast-viewport")).getByText("供应商已添加"))
+      .toBeInTheDocument();
   });
 
   it("uses one provider catalog for regular and free APIs and restores the selected mode", async () => {
@@ -2192,14 +2416,83 @@ describe("desktop station navigation", () => {
     expect(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" })).toBeInTheDocument();
   });
 
+  it("ensure 后 plan 失败仍只刷新缓存覆盖且不重新扫描", async () => {
+    const user = userEvent.setup();
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_eventName, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    const stopped = stateFixture();
+    const running = stateFixture({
+      serve: serveFixture({
+        phase: "running",
+        app_runtime: "running",
+        listener_reachable: true,
+        running_revision: 1,
+        instance_id: "instance-after-ensure",
+      }),
+    });
+    let scans = 0;
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stopped;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") {
+        scans += 1;
+        return [scannedClaude];
+      }
+      if (command === "ensure_serve_running") {
+        emitServe?.(running.serve);
+        return running;
+      }
+      if (command === "plan_agent_connection") throw new Error("plan failed");
+      if (command === "get_cached_agent_views") return [scannedClaude];
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await waitFor(() => expect(scans).toBe(1));
+    await openAgent(user, "Claude Code");
+    await user.click(await screen.findByRole("button", { name: "一键接入" }));
+    await waitFor(() => expect(
+      invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"),
+    ).toHaveLength(1));
+
+    expect(invokeMock.mock.calls
+      .map(([command]) => command)
+      .filter((command) => [
+        "ensure_serve_running",
+        "plan_agent_connection",
+        "apply_agent_plan",
+        "get_cached_agent_views",
+      ].includes(command)))
+      .toEqual([
+        "ensure_serve_running",
+        "plan_agent_connection",
+        "get_cached_agent_views",
+      ]);
+    expect(scans).toBe(1);
+  });
+
   it("applies the Connector plan directly on 一键接入", async () => {
     const user = userEvent.setup();
+    let emitServe: ((serve: ServeView) => void) | undefined;
+    listenMock.mockImplementation(async (_eventName, handler) => {
+      emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
+      return () => undefined;
+    });
+    const stopped = stateFixture();
     const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
     let scans = 0;
     invokeMock.mockImplementation(async (command) => {
-      if (command === "get_state") return running;
+      if (command === "get_state") return stopped;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") { scans += 1; return [scannedClaude]; }
+      if (command === "ensure_serve_running") {
+        emitServe?.(running.serve);
+        return running;
+      }
+      if (command === "get_cached_agent_views") return [scannedClaude];
       if (command === "plan_agent_connection") return {
         operation_id: "op-1",
         confirmation_token: "token-1",
@@ -2227,8 +2520,25 @@ describe("desktop station navigation", () => {
     }));
     // There is no separate write-confirmation step; apply immediately after planning.
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("apply_agent_plan", { operationId: "op-1", confirmationToken: "token-1" }));
-    expect(await screen.findByText("Agent 已接入")).toBeInTheDocument();
-    expect(scans).toBe(2);
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("Agent 已接入"))
+      .toBeInTheDocument();
+    expect(scans).toBe(1);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"))
+      .toHaveLength(1);
+    expect(invokeMock.mock.calls
+      .map(([command]) => command)
+      .filter((command) => [
+        "ensure_serve_running",
+        "plan_agent_connection",
+        "apply_agent_plan",
+        "get_cached_agent_views",
+      ].includes(command)))
+      .toEqual([
+        "ensure_serve_running",
+        "plan_agent_connection",
+        "apply_agent_plan",
+        "get_cached_agent_views",
+      ]);
   });
 
   it("applies directly for an admitted state", async () => {
@@ -2239,6 +2549,8 @@ describe("desktop station navigation", () => {
       if (command === "get_state") return running;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [admitted];
+      if (command === "ensure_serve_running") return running;
+      if (command === "get_cached_agent_views") return [admitted];
       if (command === "plan_agent_connection") return projectionPlan("op-admitted", "token-admitted");
       if (command === "apply_agent_plan") return { operation_id: "op-admitted", maintenance_warning: null };
       throw new Error(`unexpected IPC command: ${command}`);
@@ -2271,7 +2583,14 @@ describe("desktop station navigation", () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [connected];
+      if (command === "scan_agents") return [
+        connected,
+        detectedAgentsFixture.find((agent) => agent.metadata.agent_id === "opencode")!,
+      ];
+      if (command === "get_cached_agent_views") return [
+        connected,
+        detectedAgentsFixture.find((agent) => agent.metadata.agent_id === "opencode")!,
+      ];
       if (command === "get_agent_drift") return [];
       if (command === "force_forget_agent") return null;
       throw new Error(`unexpected IPC command: ${command}`);
@@ -2286,10 +2605,13 @@ describe("desktop station navigation", () => {
       installationPath: "/opt/claude",
     }));
     expect(invokeMock).not.toHaveBeenCalledWith("plan_agent_disconnect", expect.anything());
-    expect(await screen.findByText("已恢复官方配置并断开。")).toBeInTheDocument();
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("已恢复官方配置并断开。"))
+      .toBeInTheDocument();
 
     await openAgent(user, "OpenCode");
-    expect(screen.queryByText("已恢复官方配置并断开。")).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("error-toast-viewport")).getByText("已恢复官方配置并断开。"))
+      .toBeInTheDocument();
+    expect(document.querySelector(".agent-route-page > .banner.ok")).toBeNull();
   });
 
   it("selects an exact installation and plans against its path", async () => {
@@ -2314,6 +2636,8 @@ describe("desktop station navigation", () => {
       if (command === "get_state") return running;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [multipleClaude];
+      if (command === "ensure_serve_running") return running;
+      if (command === "get_cached_agent_views") return [multipleClaude];
       if (command === "plan_agent_connection") return projectionPlan("op-2", "token-2");
       if (command === "apply_agent_plan") return { operation_id: "op-2", maintenance_warning: null };
       throw new Error(`unexpected IPC command: ${command}`);
@@ -2327,10 +2651,10 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("option", { name: "claude.exe · v10.0.0" }));
     expect(screen.queryByRole("listbox")).toBeNull();
     await user.click(screen.getByRole("button", { name: "一键接入" }));
-    expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
       installationPath: secondInstallation.discovery.canonical_path,
       expectedVersion: "10.0.0",
-    });
+    }));
   });
 });

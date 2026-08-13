@@ -8,6 +8,7 @@ import {
 } from "../api";
 import { humanizeAppError, humanizeReceiptError } from "../errors";
 import { useLocalizedCopy } from "./LanguageProvider";
+import { useErrorToast } from "./ErrorToast";
 
 const MAX_RECEIPTS = 5;
 const AUTO_REFRESH_MS = 10_000;
@@ -220,10 +221,22 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
 
 function CopyRequestId({ requestId }: { requestId: string }) {
   const { copy } = useLocalizedCopy();
+  const { showError } = useErrorToast();
   const [copied, setCopied] = useState(false);
   const copyRequestId = async () => {
-    await navigator.clipboard?.writeText(requestId);
-    setCopied(true);
+    try {
+      if (!navigator.clipboard) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(requestId);
+      setCopied(true);
+    } catch {
+      showError(
+        copy(
+          "Could not copy the request ID. Check the system clipboard permission and try again.",
+          "无法复制请求 ID。请检查系统剪贴板权限，然后重试。",
+        ),
+        `copy-request-id:${requestId}`,
+      );
+    }
   };
   return (
     <button type="button" className="btn ghost tiny receipt-copy" onClick={() => void copyRequestId()}>
@@ -247,6 +260,7 @@ function RefreshIcon() {
 
 export default function RecentReceipts() {
   const { language, copy } = useLocalizedCopy();
+  const { showError } = useErrorToast();
   const [receipts, setReceipts] = useState<ReceiptView[] | null>(null);
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
@@ -281,7 +295,11 @@ export default function RecentReceipts() {
         setLastUpdatedAt(Date.now());
       }
     } catch (caught) {
-      if (mounted.current) setError(humanizeAppError(caught));
+      if (mounted.current) {
+        const message = humanizeAppError(caught);
+        if (background) showError(message, "recent-receipts-refresh");
+        else setError(message);
+      }
     } finally {
       inFlight.current = false;
       if (
@@ -300,7 +318,7 @@ export default function RecentReceipts() {
         if (mounted.current) setRefreshing(false);
       }
     }
-  }, []);
+  }, [showError]);
   latestLoader.current = loadReceipts;
 
   useEffect(() => {
@@ -387,14 +405,6 @@ export default function RecentReceipts() {
         <div className="receipt-state error-text" role="alert">
           {copy(`Failed to load request receipts: ${error}`, `请求回执读取失败：${error}`)}
         </div>
-      )}
-      {error && receipts !== null && (
-        <p className="receipt-refresh-error error-text" role="status">
-          {copy(
-            `Refresh failed; showing the last successful data: ${error}`,
-            `更新失败，当前显示上次数据：${error}`,
-          )}
-        </p>
       )}
       {receipts?.length === 0 && (
         <div className="empty-state">

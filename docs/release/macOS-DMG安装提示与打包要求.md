@@ -16,6 +16,8 @@ Token Station 的未公证 macOS 构建可能被 Gatekeeper 阻止首次启动�
 4. `安装 Token Station.command`
 5. `AGENTS.md`
 
+未签名、未经 Apple 公证的测试 DMG 还必须包含 `终端启动命令.txt`。该文件用于让用户在把 App 拖入 Applications 后复制一条只针对 `/Applications/token-station.app` 的命令；正式签名和公证版本不得保留这个绕过入口。
+
 DMG 内的 `AGENTS.md` 必须要求自动化 Agent 先阅读 `安装前必读.md`，并重复本文的安全红线。文件名应直接可见，不能藏在 App bundle 内部或多层目录里。
 
 ## 3. 禁止全局关闭 Gatekeeper
@@ -61,6 +63,7 @@ sudo xattr -dr com.apple.quarantine /Applications/token-station.app
 - 脚本只安装并放行 Token Station，不会关闭系统全局安全检查。
 - 不运行脚本时，可以把 App 拖入 Applications，然后右键点击 App，选择“打开”，并在 macOS 提示中再次点击“打开”。
 - 如果右键打开仍失败，可以执行只针对 Token Station 的 `xattr` 命令。
+- 未签名测试 DMG 中的 `终端启动命令.txt` 必须把 `xattr` 与 `open` 通过 `&&` 串成唯一一条可复制命令，并明确可信来源、Applications 安装前提和管理员密码无回显说明。
 - 只有从可信发布页面下载的 DMG 才可以输入管理员密码；来源不明时必须停止。
 
 不要把“关闭 Gatekeeper”和“关闭 SIP”写成同一件事。不要告诉用户执行全局安全降级后再点击“打开”。
@@ -86,6 +89,7 @@ Agent 看到本文件后，只能把它当作未来发布约束。用户没有�
 7. 复制、签名验证或启动失败时，旧版本可以恢复。
 8. 在一台具有 quarantine 标记的测试环境中完成真实首次启动验证。
 9. 最终 DMG 的文件名、版本号、架构和校验值与发布页面一致。
+10. 未签名测试 DMG 包含可见的 `终端启动命令.txt`，其命令只作用于 canonical App；正式 DMG 不包含该文件。
 
 任何一项失败，都不能把 DMG 标记为可发布。失败发生在哪一步，发布记录就必须如实写明哪一步。
 

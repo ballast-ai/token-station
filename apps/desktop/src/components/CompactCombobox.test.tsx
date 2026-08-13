@@ -11,6 +11,24 @@ const OPTIONS = [
 ];
 
 describe("CompactCombobox", () => {
+  it("shows an optional leading icon in both the selected trigger and menu option", async () => {
+    const user = userEvent.setup();
+    const options = [{
+      value: "openai",
+      label: "openai",
+      icon: <span data-testid="openai-brand" aria-hidden="true">O</span>,
+    }];
+    render(
+      <CompactCombobox ariaLabel="供应商" value="openai" options={options} onChange={vi.fn()} />,
+    );
+
+    expect(screen.getByRole("combobox", { name: "供应商" }))
+      .toContainElement(screen.getByTestId("openai-brand"));
+    await user.click(screen.getByRole("combobox", { name: "供应商" }));
+    expect(screen.getAllByTestId("openai-brand")).toHaveLength(2);
+    expect(screen.getByRole("option", { name: "openai" })).toHaveTextContent("openai");
+  });
+
   it("exposes the open menu as an onboarding floating layer", async () => {
     const user = userEvent.setup();
     render(

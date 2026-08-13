@@ -22,7 +22,7 @@ pub struct AddUpstream<'a> {
     pub name: &'a str,
     pub provider: &'a str,
     pub base_url: &'a str,
-    /// `<model>[,tool][,vision][,json-schema][,ctx=N]`, one per `--model`.
+    /// `<model>[,tool][,vision][,json-schema][,ctx=N][,out=N]`, one per `--model`.
     pub models: &'a [String],
     /// `keyring` | `env:<VAR>` | `file:<PATH>`; absent for open upstreams.
     pub auth: Option<&'a str>,
@@ -395,7 +395,7 @@ fn draft_path(config_path: &Path) -> Result<PathBuf, String> {
     Ok(config_path.with_file_name(format!("{file_name}.draft")))
 }
 
-/// `<model>[,tool][,vision][,json-schema][,ctx=N]` — a closed vocabulary, so a
+/// `<model>[,tool][,vision][,json-schema][,ctx=N][,out=N]` — a closed vocabulary, so a
 /// typo is a refusal that lists it, not a capability that silently reads as
 /// unsupported.
 fn parse_model_spec(raw: &str) -> Result<ModelCapability, String> {
@@ -428,10 +428,14 @@ fn parse_model_spec(raw: &str) -> Result<ModelCapability, String> {
                     capability.context_window = window.parse().map_err(|_| {
                         format!("model spec `{raw}`: `{token}` is not `ctx=<tokens>`")
                     })?;
+                } else if let Some(output) = token.strip_prefix("out=") {
+                    capability.max_output_tokens = output.parse().map_err(|_| {
+                        format!("model spec `{raw}`: `{token}` is not `out=<tokens>`")
+                    })?;
                 } else {
                     return Err(format!(
                         "model spec `{raw}`: unknown capability `{token}`; known: tool, vision, \
-                         json-schema, ctx=<tokens>"
+                         json-schema, ctx=<tokens>, out=<tokens>"
                     ));
                 }
             }
@@ -532,7 +536,7 @@ mod tests {
     #[test]
     fn an_added_upstream_lands_in_config_and_its_pool() {
         let mut config = example();
-        let models = vec!["m1,tool,ctx=8192".to_owned()];
+        let models = vec!["m1,tool,ctx=8192,out=2048".to_owned()];
         let spec = AddUpstream {
             pool: Some("cheap"),
             auth: Some("env:EXAMPLE_KEY"),
@@ -546,6 +550,7 @@ mod tests {
         assert_eq!(added.models[0].model, "m1");
         assert!(added.models[0].tool_state().is_supported());
         assert_eq!(added.models[0].context_window, 8192);
+        assert_eq!(added.models[0].max_output_tokens, 2048);
         assert_eq!(
             added.auth.as_ref().expect("auth").env.as_deref(),
             Some("EXAMPLE_KEY")

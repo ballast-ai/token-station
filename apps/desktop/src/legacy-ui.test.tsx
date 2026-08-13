@@ -15,12 +15,14 @@ import {
   previewProviderRemoval,
   setSettings,
   setProviderModelVision,
+  setProviderModelLimits,
   testProvider,
   updateProviderModels,
 } from "./api";
 import ModelPicker from "./components/ModelPicker";
 import ProviderModelManager from "./components/ProviderModelManager";
 import ProviderList from "./components/ProviderList";
+import { ErrorToastProvider } from "./components/ErrorToast";
 import About from "./pages/About";
 import Plugins from "./pages/Plugins";
 import RouterTable from "./pages/RouterTable";
@@ -47,6 +49,7 @@ vi.mock("./api", async (loadOriginal) => {
     previewProviderRemoval: vi.fn(),
     setSettings: vi.fn(),
     setProviderModelVision: vi.fn(),
+    setProviderModelLimits: vi.fn(),
     testProvider: vi.fn(),
     updateProviderModels: vi.fn(),
   };
@@ -316,7 +319,11 @@ describe("settings and update actions", () => {
     vi.mocked(setSettings).mockResolvedValue(state);
     const onSaved = vi.fn();
     const user = userEvent.setup();
-    render(<Settings settings={settings} serveRunning onSaved={onSaved} />);
+    render(
+      <ErrorToastProvider>
+        <Settings settings={settings} serveRunning onSaved={onSaved} />
+      </ErrorToastProvider>,
+    );
     await user.click(screen.getByRole("switch", { name: /虚拟 Key 鉴权/ }));
     expect(screen.getByText(/需重启代理/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存" }));
@@ -328,7 +335,11 @@ describe("settings and update actions", () => {
       egress_auth_slot: "",
     }));
     expect(onSaved).toHaveBeenCalledWith(state);
-    expect(screen.getByText("已保存 · 重启代理后生效")).toBeInTheDocument();
+    const viewport = screen.getByTestId("error-toast-viewport");
+    expect(await within(viewport).findByRole("status"))
+      .toHaveTextContent("已保存 · 重启代理后生效");
+    expect(screen.queryByText("已保存 · 重启代理后生效", { selector: ".settings-card .banner" }))
+      .toBeNull();
   });
 
   it("configures an HTTP egress route with no_proxy and a credential slot", async () => {
@@ -354,10 +365,18 @@ describe("settings and update actions", () => {
   it("shows settings save failures", async () => {
     vi.mocked(setSettings).mockRejectedValue(new Error("settings denied"));
     const user = userEvent.setup();
-    render(<Settings settings={settings} serveRunning={false} onSaved={vi.fn()} />);
+    render(
+      <ErrorToastProvider>
+        <Settings settings={settings} serveRunning={false} onSaved={vi.fn()} />
+      </ErrorToastProvider>,
+    );
     await user.click(screen.getByRole("switch", { name: /本地指标/ }));
     await user.click(screen.getByRole("button", { name: "保存" }));
-    expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
+    const viewport = screen.getByTestId("error-toast-viewport");
+    expect(await within(viewport).findByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。"))
+      .toBeInTheDocument();
+    expect(screen.queryByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。", { selector: ".settings-card .banner" }))
+      .toBeNull();
   });
 
   it("focuses and describes the proxy URL for a structured settings error", async () => {
@@ -374,7 +393,10 @@ describe("settings and update actions", () => {
     await user.type(proxyUrl, "ftp://invalid.example");
     await user.click(screen.getByRole("button", { name: "保存" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("地址格式不正确。请输入完整的 HTTP、HTTPS 或 SOCKS5 地址，然后重试。");
+    expect(await screen.findByRole("alert"))
+      .toHaveTextContent("地址格式不正确。请输入完整的 HTTP、HTTPS 或 SOCKS5 地址，然后重试。");
+    expect(screen.queryByText("地址格式不正确。请输入完整的 HTTP、HTTPS 或 SOCKS5 地址，然后重试。", { selector: ".settings-card .banner" }))
+      .toBeNull();
     await waitFor(() => expect(proxyUrl).toHaveFocus());
     expect(proxyUrl).toHaveAttribute("aria-invalid", "true");
     expect(proxyUrl).toHaveAccessibleDescription("地址格式不正确。请输入完整的 HTTP、HTTPS 或 SOCKS5 地址，然后重试。");
@@ -400,9 +422,15 @@ describe("settings and update actions", () => {
   it("shows update check failures", async () => {
     vi.mocked(checkDesktopUpdate).mockRejectedValue(new Error("upgrade down"));
     const user = userEvent.setup();
-    render(<About desktopVersion="0.1.0" coreVersion="0.2.0" />);
+    render(
+      <ErrorToastProvider>
+        <About desktopVersion="0.1.0" coreVersion="0.2.0" />
+      </ErrorToastProvider>,
+    );
     await user.click(screen.getByRole("button", { name: "检查更新" }));
-    expect(await screen.findByText("Token Station 无法检查更新。请检查网络连接，稍后重试。")).toBeInTheDocument();
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText(
+      "Token Station 无法检查更新。请检查网络连接，稍后重试。",
+    )).toBeInTheDocument();
   });
 
   it("shows an unpublished release as a normal result instead of a GitHub 404", async () => {
@@ -525,7 +553,7 @@ describe("model selection and provider model management", () => {
     });
     const onSaved = vi.fn();
     const user = userEvent.setup();
-    render(<ProviderModelManager provider={provider} serveRunning onSaved={onSaved} />);
+    render(<ErrorToastProvider><ProviderModelManager provider={provider} serveRunning onSaved={onSaved} /></ErrorToastProvider>);
     expect(await screen.findByText(/150 tokens · 估算成本 1\.2500/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "刷新模型" }));
     const discovered = await screen.findByRole("button", { name: /new/ });
@@ -537,11 +565,38 @@ describe("model selection and provider model management", () => {
     await user.click(screen.getByRole("button", { name: "保存模型" }));
     await waitFor(() => expect(updateProviderModels).toHaveBeenCalledWith("openai", ["old", "new"]));
     expect(onSaved).toHaveBeenCalledWith(state);
+    expect(within(screen.getByTestId("error-toast-viewport")).getByText("已保存 2 个模型"))
+      .toBeInTheDocument();
+    expect(document.querySelector(".provider-model-manager .banner.ok")).toBeNull();
     await user.click(screen.getByRole("button", { name: "刷新模型" }));
     expect(await screen.findByText("暂时无法获取最新的供应商数据。请保留当前设置，稍后再次刷新。")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存模型" }));
     expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
     expect(within(screen.getByText(/代理运行中/).parentElement!).getByRole("button")).toBeEnabled();
+  });
+
+  it("keeps provider endpoint resolution failures accessibly linked for provider names with spaces", async () => {
+    const provider: ProviderView = {
+      name: "深度 seek 供应商", provider: "openai", base_url: "https://api.example/v1",
+      models: ["gpt-test"], has_auth: true,
+    };
+    vi.mocked(previewProviderEndpoints).mockRejectedValueOnce(new Error("invalid endpoint"));
+
+    render(
+      <ErrorToastProvider>
+        <ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />
+      </ErrorToastProvider>,
+    );
+
+    const baseUrl = screen.getByRole("textbox", { name: "编辑 Base URL" });
+    const endpointAlert = await screen.findByRole("alert");
+    expect(endpointAlert).toHaveTextContent("操作未能完成");
+    expect(endpointAlert.id).not.toMatch(/\s/);
+    expect(baseUrl).toHaveAttribute("aria-describedby", endpointAlert.id);
+    expect(baseUrl).toHaveAttribute("aria-invalid", "true");
+    expect(baseUrl).toHaveAccessibleDescription(/操作未能完成/);
+    expect(screen.getByRole("button", { name: "保存基本信息" })).toBeDisabled();
+    expect(within(screen.getByTestId("error-toast-viewport")).queryByRole("alert")).toBeNull();
   });
 
   it("localizes a Chinese model-catalog warning in English mode", async () => {
@@ -565,6 +620,30 @@ describe("model selection and provider model management", () => {
       "The latest provider data is unavailable. Keep the current settings and try refreshing again later.",
     )).toBeInTheDocument();
     expect(screen.queryByText(/模型目录请求失败/)).not.toBeInTheDocument();
+  });
+
+  it("目录无权访问时明确显示内置预设而不是实时同步", async () => {
+    const provider: ProviderView = {
+      name: "kimi", provider: "openai-compatible", base_url: "https://api.moonshot.cn/v1",
+      models: ["kimi-k3"], has_auth: true,
+      model_capabilities: [{
+        model: "kimi-k3", tool: "declared", vision: "unknown", json_schema: "declared",
+        context_window: 1048576, max_output_tokens: 131072,
+        context_window_source: "builtin_preset", max_output_tokens_source: "builtin_preset",
+      }],
+    };
+    vi.mocked(discoverProviderModels).mockResolvedValue({
+      models: [], source: "preset", fetched_at_ms: null,
+      warning: "Key 无效，或当前账号没有读取模型目录的权限",
+      capabilities_updated: true,
+    });
+
+    const user = userEvent.setup();
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "刷新模型" }));
+
+    expect(await screen.findByText("使用内置预设")).toBeInTheDocument();
+    expect(screen.queryByText(/已同步/)).not.toBeInTheDocument();
   });
 
   it("未定价 Provider 显示成本未知而不是零成本", async () => {
@@ -634,6 +713,71 @@ describe("model selection and provider model management", () => {
       expect(setProviderModelVision).toHaveBeenCalledWith("matrix", "model-a", true),
     );
     expect(onSaved).toHaveBeenCalledWith(state);
+  });
+
+  it("allows a user to complete missing model limits and rejects output above context", async () => {
+    const provider: ProviderView = {
+      name: "kimi",
+      provider: "openai-compatible",
+      base_url: "https://api.moonshot.cn/v1",
+      models: ["kimi-k3"],
+      model_capabilities: [{
+        model: "kimi-k3",
+        tool: "declared",
+        vision: "unknown",
+        json_schema: "declared",
+        context_window: 1048576,
+        max_output_tokens: 131072,
+        context_window_source: "builtin_preset",
+        max_output_tokens_source: "builtin_preset",
+      }],
+      has_auth: true,
+    };
+    vi.mocked(setProviderModelLimits).mockResolvedValue(state);
+    const onSaved = vi.fn();
+    const user = userEvent.setup();
+
+    render(
+      <ErrorToastProvider>
+        <ProviderModelManager provider={provider} serveRunning onSaved={onSaved} />
+      </ErrorToastProvider>,
+    );
+
+    expect(screen.getByText("限制来源 · 内置预设（非实时值）")).toBeInTheDocument();
+    expect(screen.queryByText("该模型元数据缺少最大输出上限")).not.toBeInTheDocument();
+    const output = screen.getByRole("spinbutton", { name: "kimi-k3 最大输出 Token" });
+    await user.clear(output);
+    await user.type(output, "1048577");
+    await user.click(screen.getByRole("button", { name: "保存 kimi-k3 模型限制" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("最大输出 Token 不能大于上下文上限");
+    expect(setProviderModelLimits).not.toHaveBeenCalled();
+
+    await user.clear(output);
+    await user.type(output, "32768");
+    await user.click(screen.getByRole("button", { name: "保存 kimi-k3 模型限制" }));
+    await waitFor(() => expect(setProviderModelLimits).toHaveBeenCalledWith(
+      "kimi",
+      "kimi-k3",
+      1048576,
+      32768,
+    ));
+    expect(onSaved).toHaveBeenCalledWith(state);
+    expect(within(screen.getByTestId("error-toast-viewport")).getByText(
+      "已保存模型限制；重启代理后生效",
+    )).toBeInTheDocument();
+  });
+
+  it("目录中未配置的模型不提供必然失败的限制保存入口", () => {
+    const provider: ProviderView = {
+      name: "catalog-only", provider: "openai-compatible", base_url: "https://api.example/v1",
+      models: ["configured"], has_auth: true,
+      catalog: [{ model: "catalog-only-model", tool: "unknown", vision: "unknown", json_schema: "unknown", source: "live", last_seen_ms: 1, catalog_state: "active" }],
+    };
+
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+
+    expect(screen.queryByRole("button", { name: "保存 catalog-only-model 模型限制" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/catalog-only-model.*OpenCode/)).not.toBeInTheDocument();
   });
 
   it("保留已下架模型并展示本次目录差异", async () => {
@@ -784,6 +928,61 @@ describe("model selection and provider model management", () => {
 });
 
 describe("provider deletion lifecycle", () => {
+  it("供应商管理列表复用稳定品牌图标", () => {
+    render(
+      <ProviderList
+        providers={[{
+          name: "team-openai",
+          brand_id: "openai",
+          provider: "openai",
+          base_url: "https://api.openai.com/v1",
+          models: ["gpt-5.6"],
+          has_auth: true,
+        }]}
+        deletedProviders={[]}
+        recoveryError={null}
+        serveRunning={false}
+        busy={false}
+        onRemove={vi.fn()}
+        onRestore={vi.fn()}
+        onStateChange={vi.fn()}
+      />,
+    );
+
+    expect(document.querySelector('[data-provider-brand="openai"]')).toBeInTheDocument();
+    expect(document.querySelector(".provider-monogram")?.getAttribute("aria-hidden")).toBe("true");
+    expect(screen.getByText("team-openai")).toBeInTheDocument();
+  });
+
+  it("供应商管理不根据自定义 deepseek 名称伪造官方品牌", () => {
+    render(
+      <ProviderList
+        providers={[{
+          name: "deepseek",
+          brand_id: null,
+          provider: "openai-compatible",
+          base_url: "https://custom.example/v1",
+          models: ["custom-model"],
+          has_auth: true,
+        }]}
+        deletedProviders={[]}
+        recoveryError={null}
+        serveRunning={false}
+        busy={false}
+        onRemove={vi.fn()}
+        onRestore={vi.fn()}
+        onStateChange={vi.fn()}
+      />,
+    );
+
+    const providerCard = screen.getByText("deepseek").closest(".provider-card");
+    if (!providerCard) throw new Error("custom provider card missing");
+    expect(providerCard.querySelector('[data-provider-brand="deepseek"]')).toBeNull();
+    expect(within(providerCard as HTMLElement).getByText("D", { selector: ".brand-fallback" }))
+      .toBeInTheDocument();
+    expect(providerCard.querySelector('[data-provider-artwork="fallback"]')).toBeInTheDocument();
+  });
+
   it("does not expose a raw provider recovery error in English mode", () => {
     window.localStorage.setItem("token-station-language", "en");
     render(

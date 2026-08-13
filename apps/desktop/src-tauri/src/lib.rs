@@ -12,6 +12,7 @@
 
 pub mod agent_integration;
 mod config_state;
+mod desktop_shell;
 pub mod desktop_update;
 mod free_provider_catalog;
 mod model_catalog;
@@ -32,7 +33,9 @@ use tauri_plugin_updater::UpdaterExt;
 use zeroize::Zeroizing;
 
 use token_station_cli::budget::{AgentBudget, BudgetStatus};
-use token_station_cli::config::{ClientConfig, EgressConfig, PluginsConfig};
+use token_station_cli::config::{
+    ClientConfig, EgressConfig, PluginsConfig, RoutingMode as HostRoutingMode,
+};
 use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, StageStatus};
 use token_station_cli::plugins::{PluginRegistry, Receipts};
 use token_station_cli::pricing::{ModelPrice, PriceTable};
@@ -43,12 +46,13 @@ use token_station_cli::{
 };
 use token_station_metrics::ReceiptView;
 use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, ProviderEndpoint};
-use token_station_router_core::UpstreamRef;
+use token_station_router_core::{UpstreamModel, UpstreamRef};
 
 use agent_integration::commands::{
     apply_agent_plan, apply_snapshot_restore, configure_cursor_provider, force_forget_agent,
-    get_agent_drift, list_agent_registry, list_agent_snapshots, plan_agent_connection,
-    plan_agent_disconnect, plan_snapshot_restore, runtime_from_app, scan_agents, AgentCommandState,
+    get_agent_drift, get_cached_agent_views, list_agent_registry, list_agent_snapshots,
+    plan_agent_connection, plan_agent_disconnect, plan_snapshot_restore, runtime_from_app,
+    scan_agents, AgentCommandState,
 };
 use agent_integration::registry::AgentRegistry;
 use agent_integration::types::AdmissionStatus;
@@ -268,8 +272,9 @@ pub struct AgentIntegrationPaths {
     pub ownership_root: PathBuf,
 }
 
-/// New-config template. Empty upstreams and pools are invalid ClientConfig but a
-/// valid draft until the user configures one tier. Tauri injects runtime directories.
+/// New-config template. Empty upstreams and an unset Direct target form a valid
+/// editing draft until the user chooses a provider-model pair. Tauri injects
+/// runtime directories.
 fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value {
     let pricing = serde_json::to_value(PriceTable::builtin())
         .expect("the built-in price table always serializes");
@@ -284,8 +289,12 @@ fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value 
         },
         "upstreams": {},
         "pricing": pricing,
+        "routing": {
+            "mode": "direct"
+        },
         "router": {
             "version": 1,
+            "routing_mode": "tiered",
             "pools": {},
             "rules": [],
             "hint_routes": [],
@@ -361,6 +370,10 @@ fn collect_installed_self_test() -> Result<Value, String> {
             "model": "installed-self-test"
         }]);
         draft["router"]["default_pool"] = json!("installed_self_test");
+        draft["routing"]["direct_target"] = json!({
+            "upstream": "installed_self_test",
+            "model": "installed-self-test"
+        });
         let config: ClientConfig = serde_json::from_value(draft)
             .map_err(|error| format!("self-test configuration: {error}"))?;
         config
@@ -573,6 +586,7 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
                     model["json_schema"] = json!(true);
                 }
             }
+            apply_builtin_model_limits_to_upstream(upstream);
         }
     }
 
@@ -626,8 +640,55 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
             }
         }
 
+        fn prune_dangling_direct_target(
+            target: &mut Value,
+            valid: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+            preserve_explicit_empty: bool,
+        ) {
+            if !target.is_object() {
+                return;
+            }
+            prune_dangling_tier(target, valid);
+            if target["upstream"].is_null() && !preserve_explicit_empty {
+                *target = Value::Null;
+            }
+        }
+
+        if let Some(routing) = draft.get_mut("routing").and_then(Value::as_object_mut) {
+            if let Some(target) = routing.get_mut("direct_target") {
+                prune_dangling_direct_target(target, &valid, false);
+            }
+        }
+        if let Some(router) = draft.get_mut("router").and_then(Value::as_object_mut) {
+            if let Some(accounts) = router
+                .get_mut("quota_accounts")
+                .and_then(Value::as_array_mut)
+            {
+                accounts.retain(|account| {
+                    let Some(upstream) = account["upstream"].as_str() else {
+                        return false;
+                    };
+                    let Some(model) = account["model"].as_str() else {
+                        return false;
+                    };
+                    valid
+                        .get(upstream)
+                        .is_some_and(|models| models.contains(model))
+                });
+            }
+        }
+
         if let Some(agent_routes) = draft.get_mut("agent_routes").and_then(Value::as_object_mut) {
             for route in agent_routes.values_mut() {
+                if let Some(target) = route
+                    .as_object_mut()
+                    .and_then(|route| route.get_mut("direct_target"))
+                {
+                    // Keep an explicit empty object as a tombstone. `null`
+                    // means "inherit Home" for an Agent, which would silently
+                    // route traffic to a different target after deletion.
+                    prune_dangling_direct_target(target, &valid, true);
+                }
                 for slot in ["high", "mid", "low"] {
                     if route["custom_route"][slot].is_object() {
                         prune_dangling_tier(&mut route["custom_route"][slot], &valid);
@@ -647,6 +708,103 @@ fn prepare_desktop_draft(mut draft: Value, config_dir: &std::path::Path) -> Valu
     }
 
     draft
+}
+
+/// Validate a structurally sound configuration after removing only the known
+/// stale provider/model references that the desktop editor can repair safely.
+///
+/// The returned configuration is an audit projection only: Direct modes whose
+/// target was just removed are temporarily treated as Tiered so every unrelated
+/// semantic constraint can still run. The projection is never shown, saved, or
+/// served. The real draft keeps Direct selected with an empty target and remains
+/// dirty until the operator chooses a replacement.
+fn validate_dangling_route_recovery(config: &ClientConfig) -> Result<(), String> {
+    let mut audit = config.clone();
+    let valid: BTreeMap<String, BTreeSet<String>> = audit
+        .upstreams
+        .iter()
+        .map(|(name, upstream)| {
+            let models = upstream
+                .models
+                .iter()
+                .map(|capability| capability.model.clone())
+                .collect();
+            (name.clone(), models)
+        })
+        .collect();
+    let target_exists = |target: &UpstreamModel| {
+        valid
+            .get(target.upstream.as_str())
+            .is_some_and(|models| models.contains(&target.model))
+    };
+
+    let mut repaired_references = 0_usize;
+    let mut home_target_removed = false;
+    if let Some(routing) = audit.routing.as_mut() {
+        if routing
+            .direct_target
+            .as_ref()
+            .is_some_and(|target| !target_exists(target))
+        {
+            routing.direct_target = None;
+            home_target_removed = true;
+            repaired_references += 1;
+        }
+    }
+
+    let quota_before = audit.router.quota_accounts.len();
+    audit
+        .router
+        .quota_accounts
+        .retain(|target| target_exists(target));
+    repaired_references += quota_before - audit.router.quota_accounts.len();
+
+    let mut agent_targets_removed = BTreeSet::new();
+    for (agent_id, route) in &mut audit.agent_routes {
+        if route
+            .direct_target
+            .as_ref()
+            .is_some_and(|target| !target_exists(target))
+        {
+            route.direct_target = None;
+            agent_targets_removed.insert(agent_id.clone());
+            repaired_references += 1;
+        }
+    }
+
+    if repaired_references == 0 {
+        return Err("配置不包含可安全清理的悬空 Direct 或额度路由引用".to_owned());
+    }
+
+    // A target that was present but became stale is an editable selection, not
+    // permission to accept a Direct configuration that was already missing its
+    // required target. Only suppress the derivative missing-target error when
+    // this exact recovery removed the target.
+    if home_target_removed && audit.effective_home_routing_mode() == HostRoutingMode::Direct {
+        let routing = audit
+            .routing
+            .as_mut()
+            .expect("only top-level routing can encode host Direct mode");
+        routing.mode = HostRoutingMode::Tiered;
+    }
+    let home_mode = audit.effective_home_routing_mode();
+    let home_target = audit.effective_home_direct_target().cloned();
+    for (agent_id, route) in &mut audit.agent_routes {
+        let effective_mode = route.routing_mode.unwrap_or(home_mode);
+        let has_effective_target = route
+            .direct_target
+            .as_ref()
+            .or(home_target.as_ref())
+            .is_some();
+        if effective_mode == HostRoutingMode::Direct
+            && !has_effective_target
+            && (home_target_removed || agent_targets_removed.contains(agent_id))
+        {
+            route.routing_mode = Some(HostRoutingMode::Tiered);
+        }
+    }
+
+    audit.validate()
 }
 
 /// Existing configs must pass complete CLI loading, defaulting, and structural
@@ -684,6 +842,28 @@ fn load_draft_state(
             )
         }
         Err(error) => {
+            let recovered = std::fs::read_to_string(config_path)
+                .map_err(|read_error| read_error.to_string())
+                .and_then(|source| {
+                    ClientConfig::parse_with_load_migrations(&source)
+                        .map_err(|parse_error| parse_error.to_string())
+                })
+                .and_then(|config| {
+                    validate_dangling_route_recovery(&config)?;
+                    Ok(config)
+                });
+            if let Ok(config) = recovered {
+                let saved = serde_json::to_value(config).expect("ClientConfig always serializes");
+                let config_dir = config_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
+                return (
+                    prepare_desktop_draft(saved.clone(), config_dir),
+                    saved,
+                    None,
+                );
+            }
+
             let draft = template(data_dir, plugins_dir);
             (
                 draft.clone(),
@@ -723,6 +903,7 @@ fn default_weights() -> Value {
 #[derive(Serialize)]
 struct ProviderView {
     name: String,
+    brand_id: Option<&'static str>,
     provider: String,
     base_url: String,
     models: Vec<String>,
@@ -738,6 +919,89 @@ struct ProviderView {
     /// The declared quota plan (window + limit + unit) used for local estimation
     /// in quota-first mode, if the user set one. `None` ⇒ non-windowed / metered.
     quota_plan: Option<QuotaPlanView>,
+}
+
+const PROVIDER_BRANDS_BY_BASE_URL: &[(&str, &str)] = &[
+    ("https://api.openai.com/v1", "openai"),
+    ("https://api.anthropic.com/v1", "anthropic"),
+    (
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "gemini",
+    ),
+    ("https://api.deepseek.com/v1", "deepseek"),
+    ("https://open.bigmodel.cn/api/paas/v4", "glm_cn"),
+    ("https://api.z.ai/api/paas/v4", "glm"),
+    ("https://api.z.ai/api/coding/paas/v4", "glm_coding"),
+    ("https://api.moonshot.cn/v1", "kimi"),
+    ("https://api.moonshot.ai/v1", "kimi_global"),
+    ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen"),
+    (
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "qwen_singapore",
+    ),
+    (
+        "https://dashscope-us.aliyuncs.com/compatible-mode/v1",
+        "qwen_us",
+    ),
+    ("https://api.minimaxi.com/v1", "minimax_cn"),
+    ("https://api.minimax.io/v1", "minimax_global"),
+    ("https://api.groq.com/openai/v1", "groq"),
+    ("https://integrate.api.nvidia.com/v1", "nvidia_nim"),
+    ("https://api.mistral.ai/v1", "mistral"),
+    ("https://api.x.ai/v1", "xai"),
+    ("https://ark.cn-beijing.volces.com/api/v3", "volcengine_ark"),
+    (
+        "https://ark.cn-beijing.volces.com/api/coding/v3",
+        "volcengine_ark_coding",
+    ),
+    (
+        "https://ark.ap-southeast.bytepluses.com/api/v3",
+        "byteplus_ark",
+    ),
+    (
+        "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+        "byteplus_ark_coding",
+    ),
+    ("https://api.siliconflow.cn/v1", "siliconflow"),
+    ("https://api.siliconflow.com/v1", "siliconflow_global"),
+    ("https://api.together.ai/v1", "together"),
+    ("https://api.fireworks.ai/inference/v1", "fireworks"),
+    ("https://api.deepinfra.com/v1/openai", "deepinfra"),
+    ("https://api.cerebras.ai/v1", "cerebras"),
+    ("https://api.sambanova.ai/v1", "sambanova"),
+    ("https://api.cohere.ai/compatibility/v1", "cohere"),
+    ("https://models.github.ai/inference", "github_models"),
+    ("https://qianfan.baidubce.com/v2", "qianfan"),
+    ("https://api.hunyuan.cloud.tencent.com/v1", "hunyuan"),
+    ("https://api.stepfun.com/v1", "stepfun"),
+    ("https://api.stepfun.com/step_plan/v1", "stepfun_plan"),
+    ("https://api.xiaomimimo.com/v1", "xiaomi_mimo"),
+    ("https://api.perplexity.ai", "perplexity"),
+    ("https://api.novita.ai/v3/openai", "novita"),
+    ("https://api.hyperbolic.xyz/v1", "hyperbolic"),
+    ("https://api.studio.nebius.com/v1", "nebius"),
+    ("http://127.0.0.1:11434/v1", "ollama"),
+    ("http://localhost:11434/v1", "ollama"),
+    ("https://openrouter.ai/api/v1", "openrouter"),
+];
+
+fn provider_brand_id(
+    upstream_name: &str,
+    base_url: &str,
+    access_tier: &str,
+) -> Option<&'static str> {
+    let normalized = base_url.trim().trim_end_matches('/');
+    if access_tier == "free" {
+        if let Some(preset) = free_provider_catalog::presets().iter().find(|preset| {
+            preset.upstream_name == upstream_name
+                && preset.base_url.trim_end_matches('/') == normalized
+        }) {
+            return Some(preset.id);
+        }
+    }
+    PROVIDER_BRANDS_BY_BASE_URL
+        .iter()
+        .find_map(|(known_url, brand_id)| (*known_url == normalized).then_some(*brand_id))
 }
 
 /// A provider's declared quota plan, flattened to its primary reset window for
@@ -756,6 +1020,12 @@ struct ModelCapabilityView {
     tool: CapabilityState,
     vision: CapabilityState,
     json_schema: CapabilityState,
+    context_window: u32,
+    max_output_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens_source: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -809,6 +1079,13 @@ struct AgentRouteView {
     /// otherwise the Home default. Drives the per-Agent top-bar toggle and which
     /// page body (three-tier vs quota-first) the Agent renders.
     routing_mode: String,
+    direct_target: Option<DirectTargetView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct DirectTargetView {
+    upstream: String,
+    model: Option<String>,
 }
 
 /// One account (upstream + model) in the quota-first rotation, in priority
@@ -870,8 +1147,9 @@ struct StateView {
     local_only: bool,
     /// Whether local_only can use cloud fallback when no local target is available; false is strict local routing.
     allow_cloud_fallback: bool,
-    /// Routing mode: tiered intelligent routing by default, or quota_first.
+    /// Routing mode: direct, tiered intelligent routing, or quota_first.
     routing_mode: String,
+    direct_target: Option<DirectTargetView>,
     /// Globally shared quota-first rotation accounts, provider plus model, in priority order.
     quota_accounts: Vec<QuotaAccountView>,
     serve: ServeView,
@@ -1202,10 +1480,24 @@ impl AppInner {
                             tool,
                             vision,
                             json_schema,
+                            context_window: capability.context_window,
+                            max_output_tokens: capability.max_output_tokens,
+                            context_window_source: model_limit_source(
+                                capability,
+                                CONTEXT_WINDOW_SOURCE_KEY,
+                            ),
+                            max_output_tokens_source: model_limit_source(
+                                capability,
+                                MAX_OUTPUT_TOKENS_SOURCE_KEY,
+                            ),
                         }
                     })
                     .collect();
                 let base_url = up["base_url"].as_str().unwrap_or_default().to_string();
+                let access_tier = up
+                    .get("access_tier")
+                    .and_then(Value::as_str)
+                    .unwrap_or("paid");
                 let (catalog_revision, catalog) = model_catalog::catalog_for_provider(
                     &self.data_dir(),
                     name,
@@ -1214,6 +1506,7 @@ impl AppInner {
                 );
                 ProviderView {
                     name: name.clone(),
+                    brand_id: provider_brand_id(name, &base_url, access_tier),
                     provider: up["provider"].as_str().unwrap_or_default().to_string(),
                     base_url,
                     models,
@@ -1237,11 +1530,7 @@ impl AppInner {
                         .unwrap_or_default()
                         .to_owned(),
                     local: up.get("local").and_then(Value::as_bool).unwrap_or(false),
-                    access_tier: up
-                        .get("access_tier")
-                        .and_then(Value::as_str)
-                        .unwrap_or("paid")
-                        .to_owned(),
+                    access_tier: access_tier.to_owned(),
                     quota_plan: up["quota_plan"]["windows"][0].as_object().map(|window| {
                         QuotaPlanView {
                             len_ms: window["len_ms"].as_u64().unwrap_or(0),
@@ -1460,9 +1749,7 @@ impl AppInner {
     }
 
     fn agent_routes_view(&self) -> std::collections::BTreeMap<String, AgentRouteView> {
-        let home_mode = self.draft["router"]["routing_mode"]
-            .as_str()
-            .unwrap_or("tiered");
+        let home_mode = self.home_routing_mode();
         supported_agent_ids()
             .into_iter()
             .map(|agent_id| {
@@ -1475,7 +1762,14 @@ impl AppInner {
                     .into_iter()
                     .map(|slot| (slot.to_string(), self.agent_tier(&agent_id, slot)))
                     .collect();
-                let config_error = if mode == "custom" || mode == "profile" {
+                let direct_target = self.agent_direct_target_view(&agent_id);
+                let direct_target_incomplete = direct_target
+                    .as_ref()
+                    .and_then(|target| target.model.as_ref())
+                    .is_none();
+                let config_error = if routing_mode == "direct" && direct_target_incomplete {
+                    Some(format!("Agent `{agent_id}` 的单独路由缺少供应商和模型"))
+                } else if mode == "custom" || mode == "profile" {
                     ["high", "mid", "low"].into_iter().find_map(|slot| {
                         let tier = self.agent_tier(&agent_id, slot);
                         (tier.upstream.is_none() || tier.model.is_none())
@@ -1492,10 +1786,38 @@ impl AppInner {
                         config_error,
                         profile: self.agent_profile(&agent_id),
                         routing_mode,
+                        direct_target,
                     },
                 )
             })
             .collect()
+    }
+
+    fn direct_target_view(value: &Value) -> Option<DirectTargetView> {
+        Some(DirectTargetView {
+            upstream: value["upstream"].as_str()?.to_owned(),
+            model: value["model"].as_str().map(str::to_owned),
+        })
+    }
+
+    fn home_direct_target_view(&self) -> Option<DirectTargetView> {
+        Self::direct_target_view(&self.draft["routing"]["direct_target"])
+    }
+
+    fn home_routing_mode(&self) -> &str {
+        self.draft["routing"]["mode"]
+            .as_str()
+            .or_else(|| self.draft["router"]["routing_mode"].as_str())
+            .unwrap_or("tiered")
+    }
+
+    fn agent_direct_target_view(&self, agent_id: &str) -> Option<DirectTargetView> {
+        let target = &self.draft["agent_routes"][agent_id]["direct_target"];
+        if target.is_object() {
+            Self::direct_target_view(target)
+        } else {
+            self.home_direct_target_view()
+        }
     }
 
     fn quota_accounts_view(&self) -> Vec<QuotaAccountView> {
@@ -1700,10 +2022,8 @@ impl AppInner {
             allow_cloud_fallback: self.draft["router"]["allow_cloud_fallback"]
                 .as_bool()
                 .unwrap_or(false),
-            routing_mode: self.draft["router"]["routing_mode"]
-                .as_str()
-                .unwrap_or("tiered")
-                .to_string(),
+            routing_mode: self.home_routing_mode().to_string(),
+            direct_target: self.home_direct_target_view(),
             quota_accounts: self.quota_accounts_view(),
             serve: self.serve_view(),
             draft_revision: self.config_state.draft_revision(),
@@ -1922,10 +2242,14 @@ impl AppInner {
                 inner.draft["agent_routes"] = json!({});
             }
             for (agent_id, route) in &routes {
-                inner.draft["agent_routes"][agent_id] = json!({
-                    "mode": "custom",
-                    "custom_route": route,
-                });
+                if !inner.draft["agent_routes"][agent_id].is_object() {
+                    inner.draft["agent_routes"][agent_id] = json!({});
+                }
+                if let Some(agent_route) = inner.draft["agent_routes"][agent_id].as_object_mut() {
+                    agent_route.remove("profile");
+                }
+                inner.draft["agent_routes"][agent_id]["mode"] = json!("custom");
+                inner.draft["agent_routes"][agent_id]["custom_route"] = route.clone();
             }
             Ok(())
         })
@@ -1940,6 +2264,8 @@ impl AppInner {
         }
         if let Some(route) = self.draft["agent_routes"][agent_id].as_object_mut() {
             route.remove("profile");
+            route.remove("routing_mode");
+            route.remove("direct_target");
         }
         self.draft["agent_routes"][agent_id]["mode"] = json!("inherit");
     }
@@ -2134,6 +2460,7 @@ fn get_state(state: State<'_, AppStateManaged>) -> StateView {
 
 #[tauri::command]
 fn get_runtime_state(
+    app: AppHandle,
     state: State<'_, AppStateManaged>,
     agents: State<'_, AgentCommandState>,
 ) -> ServeView {
@@ -2143,19 +2470,24 @@ fn get_runtime_state(
     // running_revision/instance_id.
     for _ in 0..3 {
         let Ok(runtime) = runtime_from_app(state.inner()) else {
-            return state.0.lock().unwrap().serve_view();
+            let view = state.0.lock().unwrap().serve_view();
+            desktop_shell::update_proxy_menu(&app);
+            return view;
         };
         let identity = runtime.instance_id().to_owned();
         let agent_connected = agents.any_connected_to(&runtime).unwrap_or(false);
         let mut view = state.0.lock().unwrap().serve_view();
         if view.instance_id.as_deref() == Some(identity.as_str()) {
             view.agent_connected = agent_connected;
+            desktop_shell::update_proxy_menu(&app);
             return view;
         }
     }
     // Continuous handoffs are rare; if all snapshots raced, return a truthful
     // current runtime view with the conservative independent Agent fact.
-    state.0.lock().unwrap().serve_view()
+    let view = state.0.lock().unwrap().serve_view();
+    desktop_shell::update_proxy_menu(&app);
+    view
 }
 
 /// Preview the provider URL selected by each inbound protocol before saving.
@@ -2448,6 +2780,130 @@ fn known_context_window(model: &str) -> u64 {
     128_000
 }
 
+const CONTEXT_WINDOW_SOURCE_KEY: &str = "x-token-station-context-window-source";
+const MAX_OUTPUT_TOKENS_SOURCE_KEY: &str = "x-token-station-max-output-tokens-source";
+const LIMIT_SOURCE_PROVIDER: &str = "provider";
+const LIMIT_SOURCE_BUILTIN_PRESET: &str = "builtin_preset";
+const LIMIT_SOURCE_OPERATOR: &str = "operator";
+const LIMIT_SOURCE_HEURISTIC: &str = "heuristic";
+
+#[derive(Clone, Copy)]
+struct BuiltinModelLimits {
+    context_window: u32,
+    max_output_tokens: u32,
+}
+
+fn builtin_model_limits(base_url: &str, model: &str) -> Option<BuiltinModelLimits> {
+    let endpoint = base_url.trim().trim_end_matches('/');
+    if !matches!(
+        endpoint,
+        "https://api.moonshot.cn/v1" | "https://api.moonshot.ai/v1"
+    ) {
+        return None;
+    }
+    match model {
+        "kimi-k2.6" => Some(BuiltinModelLimits {
+            context_window: 262_144,
+            max_output_tokens: 262_144,
+        }),
+        "kimi-k3" => Some(BuiltinModelLimits {
+            context_window: 1_048_576,
+            max_output_tokens: 131_072,
+        }),
+        _ => None,
+    }
+}
+
+fn model_limit_source(capability: &ModelCapability, key: &str) -> Option<String> {
+    capability
+        .extensions
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|source| {
+            matches!(
+                *source,
+                LIMIT_SOURCE_PROVIDER
+                    | LIMIT_SOURCE_BUILTIN_PRESET
+                    | LIMIT_SOURCE_OPERATOR
+                    | LIMIT_SOURCE_HEURISTIC
+            )
+        })
+        .map(str::to_owned)
+}
+
+fn json_limit_source<'a>(capability: &'a Value, key: &str) -> Option<&'a str> {
+    capability.get(key).and_then(Value::as_str)
+}
+
+fn source_is_default(source: Option<&str>) -> bool {
+    matches!(
+        source,
+        Some(LIMIT_SOURCE_BUILTIN_PRESET | LIMIT_SOURCE_HEURISTIC)
+    )
+}
+
+fn apply_builtin_model_limits_to_upstream(upstream: &mut Value) -> bool {
+    let base_url = upstream["base_url"].as_str().unwrap_or_default().to_owned();
+    let Some(models) = upstream["models"].as_array_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    for capability in models {
+        let Some(model) = capability["model"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(preset) = builtin_model_limits(&base_url, &model) else {
+            continue;
+        };
+        let context = capability["context_window"].as_u64().unwrap_or_default();
+        let output = capability["max_output_tokens"].as_u64().unwrap_or_default();
+        let context_source =
+            json_limit_source(capability, CONTEXT_WINDOW_SOURCE_KEY).map(str::to_owned);
+        let output_source =
+            json_limit_source(capability, MAX_OUTPUT_TOKENS_SOURCE_KEY).map(str::to_owned);
+        let legacy_heuristic = output == 0
+            && output_source.is_none()
+            && context == known_context_window(&model)
+            && context_source
+                .as_deref()
+                .is_none_or(|source| source == LIMIT_SOURCE_HEURISTIC);
+
+        if (context == 0 || legacy_heuristic || source_is_default(context_source.as_deref()))
+            && (context != u64::from(preset.context_window)
+                || context_source.as_deref() != Some(LIMIT_SOURCE_BUILTIN_PRESET))
+        {
+            capability["context_window"] = json!(preset.context_window);
+            capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_BUILTIN_PRESET);
+            changed = true;
+        }
+
+        let effective_context = capability["context_window"].as_u64().unwrap_or_default();
+        if (output == 0 || source_is_default(output_source.as_deref()))
+            && u64::from(preset.max_output_tokens) <= effective_context
+            && (output != u64::from(preset.max_output_tokens)
+                || output_source.as_deref() != Some(LIMIT_SOURCE_BUILTIN_PRESET))
+        {
+            capability["max_output_tokens"] = json!(preset.max_output_tokens);
+            capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_BUILTIN_PRESET);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn provider_uses_builtin_model_limits(upstream: &Value) -> bool {
+    upstream["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|capability| {
+            json_limit_source(capability, CONTEXT_WINDOW_SOURCE_KEY)
+                == Some(LIMIT_SOURCE_BUILTIN_PRESET)
+                || json_limit_source(capability, MAX_OUTPUT_TOKENS_SOURCE_KEY)
+                    == Some(LIMIT_SOURCE_BUILTIN_PRESET)
+        })
+}
+
 /// Add an OpenAI-compatible upstream provider, storing its key in the system keychain when present.
 #[tauri::command]
 fn add_provider(
@@ -2525,7 +2981,7 @@ fn add_provider_impl(
         .iter()
         .filter(|m| !m.trim().is_empty())
         .map(|m| {
-            json!({
+            let mut capability = json!({
                 // OpenAI Chat Completions includes tools and structured output,
                 // and catalog entries are compatible chat providers, so declare
                 // support by default. Leaving these unknown would fail closed and
@@ -2539,7 +2995,15 @@ fn add_provider_impl(
                 "vision_state": "unknown",
                 "json_schema_state": "declared",
                 "context_window": known_context_window(m)
-            })
+            });
+            capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_HEURISTIC);
+            if let Some(preset) = builtin_model_limits(&base_url, m) {
+                capability["context_window"] = json!(preset.context_window);
+                capability["max_output_tokens"] = json!(preset.max_output_tokens);
+                capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_BUILTIN_PRESET);
+                capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_BUILTIN_PRESET);
+            }
+            capability
         })
         .collect();
     if model_objs.is_empty() {
@@ -2634,17 +3098,18 @@ fn set_local_routing(
     Ok(inner.snapshot())
 }
 
-/// Switch between tiered (difficulty-based) and quota-first (allowance-draining)
-/// routing. The two are mutually exclusive top-level modes; the config carries
-/// only `quota_first` explicitly (tiered is the serde default, so it is cleared
-/// rather than written, keeping the document minimal).
+/// Switch between direct, tiered (difficulty-based), and quota-first
+/// (allowance-draining) routing. Agent overrides are always explicit. The
+/// top-level host routing contract is authoritative; keep the embedded
+/// core router in quota-first only for quota mode; Direct is compiled from the
+/// host target and therefore keeps the embedded router in tiered mode.
 #[tauri::command]
 fn set_routing_mode(
     state: State<'_, AppStateManaged>,
     mode: String,
     agent_id: Option<String>,
 ) -> Result<StateView, String> {
-    if mode != "tiered" && mode != "quota_first" {
+    if mode != "tiered" && mode != "direct" && mode != "quota_first" {
         return Err(format!("未知路由模式：{mode}"));
     }
     let mut inner = state.0.lock().unwrap();
@@ -2672,15 +3137,69 @@ fn set_routing_mode(
         return Ok(inner.snapshot());
     }
 
-    let previous = inner.draft["router"].clone();
-    if mode == "quota_first" {
-        inner.draft["router"]["routing_mode"] = json!("quota_first");
-    } else if let Some(router) = inner.draft["router"].as_object_mut() {
-        router.remove("routing_mode");
+    let previous_routing = inner.draft.get("routing").cloned();
+    let previous_router = inner.draft["router"].clone();
+    if !inner.draft["routing"].is_object() {
+        inner.draft["routing"] = json!({});
     }
+    inner.draft["routing"]["mode"] = json!(mode);
+    inner.draft["router"]["routing_mode"] = json!(if mode == "quota_first" {
+        "quota_first"
+    } else {
+        "tiered"
+    });
     if let Err(error) = inner.observe_draft() {
-        inner.draft["router"] = previous;
+        inner.draft["router"] = previous_router;
+        if let Some(previous_routing) = previous_routing {
+            inner.draft["routing"] = previous_routing;
+        } else if let Some(draft) = inner.draft.as_object_mut() {
+            draft.remove("routing");
+        }
         return Err(error);
+    }
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+fn set_direct_route(
+    state: State<'_, AppStateManaged>,
+    upstream: String,
+    model: String,
+    agent_id: Option<String>,
+) -> Result<StateView, String> {
+    let upstream = upstream.trim();
+    let model = model.trim();
+    let mut inner = state.0.lock().unwrap();
+    inner.ensure_editable()?;
+    inner.validate_route_target(upstream, model)?;
+
+    if let Some(agent_id) = agent_id {
+        ensure_known_agent_id(&agent_id)?;
+        let previous = inner.draft["agent_routes"][&agent_id].clone();
+        if !inner.draft["agent_routes"][&agent_id].is_object() {
+            inner.draft["agent_routes"][&agent_id] = json!({ "mode": "inherit" });
+        }
+        inner.draft["agent_routes"][&agent_id]["direct_target"] =
+            json!({ "upstream": upstream, "model": model });
+        if let Err(error) = inner.observe_draft() {
+            inner.draft["agent_routes"][&agent_id] = previous;
+            return Err(error);
+        }
+    } else {
+        let previous = inner.draft.get("routing").cloned();
+        if !inner.draft["routing"].is_object() {
+            let mode = inner.home_routing_mode().to_owned();
+            inner.draft["routing"] = json!({ "mode": mode });
+        }
+        inner.draft["routing"]["direct_target"] = json!({ "upstream": upstream, "model": model });
+        if let Err(error) = inner.observe_draft() {
+            if let Some(previous) = previous {
+                inner.draft["routing"] = previous;
+            } else if let Some(draft) = inner.draft.as_object_mut() {
+                draft.remove("routing");
+            }
+            return Err(error);
+        }
     }
     Ok(inner.snapshot())
 }
@@ -2864,14 +3383,21 @@ fn edit_provider_impl(
     if credential_source.is_some_and(|source| source != "store") && api_key.is_some() {
         return Err("env/file 凭据只保存引用，不能同时提交 API Key 明文".to_owned());
     }
+    let previous_auth = previous.get("auth").filter(|value| !value.is_null());
+    let auth_changed = auth
+        .as_ref()
+        .is_some_and(|next| next.as_ref() != previous_auth);
     let identity_changed = previous["base_url"].as_str() != Some(base_url.as_str())
         || api_key.is_some()
-        || auth.is_some();
+        || auth_changed;
+    let previous_pricing = inner.draft["pricing"].clone();
+    let previous_state = inner.config_state.clone();
     if identity_changed {
         // A URL or credential change may select a different Provider account.
         // Invalidate first: losing derived cache on a later rollback is safe;
         // presenting the old account's catalog as trusted is not.
         model_catalog::remove_provider(&inner.data_dir(), &name)?;
+        clear_provider_scoped_prices(&mut inner, &name)?;
     }
     inner.draft["upstreams"][&name]["base_url"] = json!(base_url);
     if let Some(auth) = auth {
@@ -2890,6 +3416,8 @@ fn edit_provider_impl(
     }
     if let Err(error) = inner.observe_draft() {
         inner.draft["upstreams"][&name] = previous;
+        inner.draft["pricing"] = previous_pricing;
+        inner.config_state = previous_state;
         return Err(error);
     }
     if let Some(key) = api_key {
@@ -2897,6 +3425,8 @@ fn edit_provider_impl(
             secrets::store_set(&inner.data_dir(), &name, "provider_api_key", &key)
         {
             inner.draft["upstreams"][&name] = previous;
+            inner.draft["pricing"] = previous_pricing;
+            inner.config_state = previous_state;
             return match inner.observe_draft() {
                 Ok(()) => Err(key_error),
                 Err(rollback_error) => Err(format!(
@@ -2953,6 +3483,22 @@ fn prepare_discovery_credential(
     Ok(DiscoveryCredential::Explicit(None))
 }
 
+fn catalog_cost_to_model_price(cost: &model_catalog::CatalogCostView) -> Option<ModelPrice> {
+    fn micros(value: f64) -> Option<u64> {
+        let scaled = value * 1_000_000.0;
+        (scaled.is_finite() && scaled >= 0.0 && scaled <= u64::MAX as f64)
+            .then(|| scaled.round() as u64)
+    }
+
+    Some(ModelPrice {
+        input_per_mtok: micros(cost.input?)?,
+        output_per_mtok: micros(cost.output?)?,
+        cache_read_per_mtok: cost.cache_read.and_then(micros).unwrap_or(0),
+        cache_write_per_mtok: cost.cache_write.and_then(micros).unwrap_or(0),
+        reasoning_per_mtok: None,
+    })
+}
+
 /// Fetch the provider's current model catalog on a blocking worker without
 /// blocking the Tauri UI. When using a saved key, require the request URL to
 /// match provider configuration so credentials cannot be forwarded elsewhere.
@@ -2980,12 +3526,36 @@ fn apply_discovered_model_capabilities(
         })
         .map(|model| (model.model.as_str(), model))
         .collect();
-    if facts.is_empty() {
-        return Ok(false);
-    }
-
     inner.ensure_editable()?;
     let previous_state = inner.config_state.clone();
+    let previous_pricing = inner.draft["pricing"].clone();
+    let mut next_pricing = draft_price_table(inner)?;
+    let mut pricing_changed = false;
+    let selected_models: std::collections::BTreeSet<String> = upstream["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|capability| capability["model"].as_str().map(str::to_owned))
+        .collect();
+    for (model, fact) in &facts {
+        if !selected_models.contains(*model) {
+            continue;
+        }
+        let Some(price) = fact.cost.as_ref().and_then(catalog_cost_to_model_price) else {
+            continue;
+        };
+        let scoped_model = format!("{name}/{model}");
+        // Supplier catalogs are useful defaults, but the versioned pricing
+        // editor is operator-owned. Without per-entry provenance we cannot
+        // distinguish a previous catalog value from an explicit edit, so a
+        // refresh may fill an unknown scoped price but must never overwrite an
+        // existing one.
+        if next_pricing.models.contains_key(&scoped_model) {
+            continue;
+        }
+        next_pricing = next_pricing.next_with_model(&scoped_model, price)?;
+        pricing_changed = true;
+    }
     let models = inner.draft["upstreams"][name]["models"]
         .as_array_mut()
         .ok_or_else(|| format!("供应商 `{name}` 的模型配置无效"))?;
@@ -2994,13 +3564,12 @@ fn apply_discovered_model_capabilities(
         let Some(model) = capability["model"].as_str() else {
             continue;
         };
-        let Some(fact) = facts.get(model).copied() else {
-            continue;
-        };
-        match fact.vision {
-            CapabilityState::Verified | CapabilityState::Unsupported => {
-                let supported = fact.vision == CapabilityState::Verified;
-                let serialized = if supported { "verified" } else { "unsupported" };
+        if let Some(fact) = facts.get(model).copied() {
+            if let Some((supported, serialized)) = match fact.vision {
+                CapabilityState::Verified => Some((true, "verified")),
+                CapabilityState::Unsupported => Some((false, "unsupported")),
+                CapabilityState::Declared | CapabilityState::Unknown => None,
+            } {
                 if capability["vision"].as_bool() != Some(supported)
                     || capability["vision_state"].as_str() != Some(serialized)
                 {
@@ -3009,36 +3578,74 @@ fn apply_discovered_model_capabilities(
                     changed = true;
                 }
             }
-            CapabilityState::Declared | CapabilityState::Unknown => {}
-        }
-        if let Some(context_window) = fact.context_window {
-            if capability["context_window"].as_u64() != Some(u64::from(context_window)) {
-                capability["context_window"] = json!(context_window);
+            if let Some(context) = fact.context_window {
+                let source = json_limit_source(capability, CONTEXT_WINDOW_SOURCE_KEY);
+                if (capability["context_window"].as_u64().unwrap_or_default() == 0
+                    || source_is_default(source))
+                    && (capability["context_window"].as_u64() != Some(u64::from(context))
+                        || source != Some(LIMIT_SOURCE_PROVIDER))
+                {
+                    capability["context_window"] = json!(context);
+                    capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_PROVIDER);
+                    changed = true;
+                }
+            }
+            let effective_context = capability["context_window"].as_u64().unwrap_or_default();
+            let configured_output = capability["max_output_tokens"].as_u64().unwrap_or_default();
+            if configured_output > effective_context
+                && source_is_default(json_limit_source(capability, MAX_OUTPUT_TOKENS_SOURCE_KEY))
+            {
+                capability
+                    .as_object_mut()
+                    .expect("model capability is an object")
+                    .remove("max_output_tokens");
+                capability
+                    .as_object_mut()
+                    .expect("model capability is an object")
+                    .remove(MAX_OUTPUT_TOKENS_SOURCE_KEY);
                 changed = true;
             }
-        }
-        if let Some(max_output_tokens) = fact.max_output_tokens {
-            if capability["max_output_tokens"].as_u64() != Some(u64::from(max_output_tokens)) {
-                capability["max_output_tokens"] = json!(max_output_tokens);
-                changed = true;
+            if let Some(output) = fact.max_output_tokens {
+                let source = json_limit_source(capability, MAX_OUTPUT_TOKENS_SOURCE_KEY);
+                if capability["max_output_tokens"].as_u64().unwrap_or_default() == 0
+                    || source_is_default(source)
+                {
+                    let effective_context = capability["context_window"]
+                        .as_u64()
+                        .and_then(|value| u32::try_from(value).ok());
+                    if effective_context.is_some_and(|context| output <= context)
+                        && (capability["max_output_tokens"].as_u64() != Some(u64::from(output))
+                            || source != Some(LIMIT_SOURCE_PROVIDER))
+                    {
+                        capability["max_output_tokens"] = json!(output);
+                        capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_PROVIDER);
+                        changed = true;
+                    }
+                }
             }
-        }
-        if let Some(cost) = &fact.cost {
-            let serialized = serde_json::to_value(cost)
-                .map_err(|error| format!("序列化模型价格失败：{error}"))?;
-            if capability["catalog_cost"] != serialized {
-                capability["catalog_cost"] = serialized;
-                changed = true;
+            if let Some(cost) = &fact.cost {
+                let serialized = serde_json::to_value(cost)
+                    .map_err(|error| format!("序列化模型价格失败：{error}"))?;
+                if capability["catalog_cost"] != serialized {
+                    capability["catalog_cost"] = serialized;
+                    changed = true;
+                }
             }
         }
     }
-    if !changed {
+    changed |= apply_builtin_model_limits_to_upstream(&mut inner.draft["upstreams"][name]);
+    if !changed && !pricing_changed {
         return Ok(false);
+    }
+    if pricing_changed {
+        inner.draft["pricing"] =
+            serde_json::to_value(next_pricing).map_err(|error| error.to_string())?;
     }
 
     let save = inner.observe_draft().and_then(|()| inner.save_draft());
     if let Err(error) = save {
         inner.draft["upstreams"][name]["models"] = previous;
+        inner.draft["pricing"] = previous_pricing;
         inner.config_state = previous_state;
         return Err(format!("保存模型目录能力失败：{error}"));
     }
@@ -3097,6 +3704,13 @@ async fn discover_provider_models(
     let mut inner = state.0.lock().unwrap();
     result.capabilities_updated =
         apply_discovered_model_capabilities(&mut inner, &name, &result.catalog)?;
+    if result.source == "none"
+        && inner.draft["upstreams"]
+            .get(&name)
+            .is_some_and(provider_uses_builtin_model_limits)
+    {
+        result.source = "preset".to_owned();
+    }
     Ok(result)
 }
 
@@ -3214,6 +3828,75 @@ fn replace_provider_models(
         .get(name)
         .and_then(Value::as_object)
         .ok_or_else(|| format!("供应商 `{name}` 不存在"))?;
+    let base_url = upstream
+        .get("base_url")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let configured_capabilities: Vec<ModelCapability> = upstream
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|model| serde_json::from_value(model.clone()).ok())
+        .collect();
+    let (_, discovered_catalog) = model_catalog::catalog_for_provider(
+        &inner.data_dir(),
+        name,
+        &base_url,
+        &configured_capabilities,
+    );
+    let discovered_by_model: std::collections::BTreeMap<&str, &model_catalog::CatalogModelView> =
+        discovered_catalog
+            .iter()
+            .filter(|entry| entry.catalog_state == model_catalog::CatalogState::Active)
+            .map(|entry| (entry.model.as_str(), entry))
+            .collect();
+    let discovered_prices: Vec<(String, ModelPrice)> = normalized
+        .iter()
+        .filter_map(|model| {
+            discovered_by_model
+                .get(model.as_str())
+                .and_then(|entry| entry.cost.as_ref())
+                .and_then(catalog_cost_to_model_price)
+                .map(|price| (format!("{name}/{model}"), price))
+        })
+        .collect();
+    let removed_reference = |target: &Value| {
+        target["upstream"].as_str() == Some(name)
+            && target["model"]
+                .as_str()
+                .is_some_and(|model| !normalized.iter().any(|candidate| candidate == model))
+    };
+    let mut direct_and_quota_blocked = Vec::new();
+    if removed_reference(&inner.draft["routing"]["direct_target"]) {
+        direct_and_quota_blocked.push("主页/单独路由".to_owned());
+    }
+    for (index, account) in inner.draft["router"]["quota_accounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        if removed_reference(account) {
+            direct_and_quota_blocked.push(format!("主页/额度优先#{}", index + 1));
+        }
+    }
+    if let Some(agent_routes) = inner.draft["agent_routes"].as_object() {
+        for (agent_id, route) in agent_routes {
+            if removed_reference(&route["direct_target"]) {
+                direct_and_quota_blocked.push(format!("Agent/{agent_id}/单独路由"));
+            }
+        }
+    }
+    direct_and_quota_blocked.sort();
+    direct_and_quota_blocked.dedup();
+    if !direct_and_quota_blocked.is_empty() {
+        return Err(format!(
+            "不能移除 {} 正在使用的模型，请先调整对应路由",
+            direct_and_quota_blocked.join("、")
+        ));
+    }
     let blocked: Vec<&str> = [(TIER_HIGH, "上档"), (TIER_MID, "中档"), (TIER_LOW, "下档")]
         .into_iter()
         .filter_map(|(pool, label)| {
@@ -3310,7 +3993,7 @@ fn replace_provider_models(
         .into_iter()
         .map(|model| {
             existing.get(&model).cloned().unwrap_or_else(|| {
-                json!({
+                let mut capability = json!({
                     // As in add_provider, OpenAI-compatible chat declares tools and structured output by default.
                     "model": model,
                     "tool": true,
@@ -3320,7 +4003,34 @@ fn replace_provider_models(
                     "vision_state": "unknown",
                     "json_schema_state": "declared",
                     "context_window": known_context_window(&model)
-                })
+                });
+                if let Some(preset) = builtin_model_limits(&base_url, &model) {
+                    capability["context_window"] = json!(preset.context_window);
+                    capability["max_output_tokens"] = json!(preset.max_output_tokens);
+                    capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_BUILTIN_PRESET);
+                    capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_BUILTIN_PRESET);
+                }
+                if let Some(discovered) = discovered_by_model.get(model.as_str()) {
+                    if let Some(context) = discovered.context_window {
+                        capability["context_window"] = json!(context);
+                        capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_PROVIDER);
+                    }
+                    if let Some(output) = discovered.max_output_tokens {
+                        capability["max_output_tokens"] = json!(output);
+                        capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_PROVIDER);
+                    }
+                    if discovered.vision != CapabilityState::Unknown {
+                        let supported = discovered.vision.is_supported();
+                        capability["vision"] = json!(supported);
+                        capability["vision_state"] = json!(match discovered.vision {
+                            CapabilityState::Verified => "verified",
+                            CapabilityState::Declared => "declared",
+                            CapabilityState::Unsupported => "unsupported",
+                            CapabilityState::Unknown => "unknown",
+                        });
+                    }
+                }
+                capability
             })
         })
         .collect();
@@ -3332,10 +4042,33 @@ fn replace_provider_models(
         .cloned()
         .ok_or_else(|| format!("供应商 `{name}` 不存在或模型配置无效"))?;
     let previous_state = inner.config_state.clone();
+    let previous_pricing = inner.draft["pricing"].clone();
+    let next_pricing = if discovered_prices.is_empty() {
+        None
+    } else {
+        let mut pricing = draft_price_table(inner)?;
+        let mut changed = false;
+        for (model, price) in discovered_prices {
+            // Model selection may fill a previously unknown supplier-scoped
+            // price, but cannot replace an operator-owned versioned value.
+            if pricing.models.contains_key(&model) {
+                continue;
+            }
+            pricing = pricing.next_with_model(&model, price)?;
+            changed = true;
+        }
+        changed
+            .then(|| serde_json::to_value(pricing).map_err(|error| error.to_string()))
+            .transpose()?
+    };
     inner.draft["upstreams"][name]["models"] = json!(model_objects);
+    if let Some(pricing) = next_pricing {
+        inner.draft["pricing"] = pricing;
+    }
     let save = inner.observe_draft().and_then(|()| inner.save_draft());
     if let Err(error) = save {
         inner.draft["upstreams"][name]["models"] = previous;
+        inner.draft["pricing"] = previous_pricing;
         inner.config_state = previous_state;
         return Err(format!("保存供应商模型失败：{error}"));
     }
@@ -3405,8 +4138,90 @@ fn set_provider_model_vision(
     Ok(inner.snapshot())
 }
 
+fn replace_provider_model_limits(
+    inner: &mut AppInner,
+    name: &str,
+    model: &str,
+    context_window: u32,
+    max_output_tokens: u32,
+) -> Result<(), String> {
+    inner.ensure_editable()?;
+    let name = name.trim();
+    let model = model.trim();
+    if name.is_empty() || model.is_empty() {
+        return Err("供应商和模型 ID 不能为空".to_owned());
+    }
+    if context_window == 0 || max_output_tokens == 0 {
+        return Err("上下文上限和最大输出 Token 必须大于 0".to_owned());
+    }
+    if max_output_tokens > context_window {
+        return Err("最大输出 Token 不能大于上下文上限".to_owned());
+    }
+    ensure_generic_provider_mutation_allowed(inner, name)?;
+
+    let previous = inner.draft["upstreams"]
+        .get(name)
+        .and_then(|upstream| upstream.get("models"))
+        .filter(|models| models.is_array())
+        .cloned()
+        .ok_or_else(|| format!("供应商 `{name}` 不存在或模型配置无效"))?;
+    let previous_state = inner.config_state.clone();
+    let models = inner.draft["upstreams"][name]["models"]
+        .as_array_mut()
+        .ok_or_else(|| format!("供应商 `{name}` 不存在或模型配置无效"))?;
+    let capability = models
+        .iter_mut()
+        .find(|candidate| candidate["model"].as_str() == Some(model))
+        .ok_or_else(|| format!("供应商 `{name}` 未配置模型 `{model}`"))?;
+    capability["context_window"] = json!(context_window);
+    capability["max_output_tokens"] = json!(max_output_tokens);
+    capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_OPERATOR);
+    capability[MAX_OUTPUT_TOKENS_SOURCE_KEY] = json!(LIMIT_SOURCE_OPERATOR);
+
+    let save = inner.observe_draft().and_then(|()| inner.save_draft());
+    if let Err(error) = save {
+        inner.draft["upstreams"][name]["models"] = previous;
+        inner.config_state = previous_state;
+        return Err(format!("保存模型限制失败：{error}"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_provider_model_limits(
+    state: State<'_, AppStateManaged>,
+    name: String,
+    model: String,
+    context_window: u32,
+    max_output_tokens: u32,
+) -> Result<StateView, String> {
+    let mut inner = state.0.lock().unwrap();
+    replace_provider_model_limits(&mut inner, &name, &model, context_window, max_output_tokens)?;
+    Ok(inner.snapshot())
+}
+
 fn provider_references(inner: &AppInner, name: &str) -> Vec<String> {
     let mut references = Vec::new();
+    if inner.draft["routing"]["direct_target"]["upstream"].as_str() == Some(name) {
+        references.push("主页/单独路由".to_owned());
+    }
+    for (index, account) in inner.draft["router"]["quota_accounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        if account["upstream"].as_str() == Some(name) {
+            references.push(format!("主页/额度优先#{}", index + 1));
+        }
+    }
+    if let Some(agent_routes) = inner.draft["agent_routes"].as_object() {
+        for (agent_id, route) in agent_routes {
+            if route["direct_target"]["upstream"].as_str() == Some(name) {
+                references.push(format!("Agent/{agent_id}/单独路由"));
+            }
+        }
+    }
     for (pool, label) in [
         (TIER_HIGH, "主页/上档"),
         (TIER_MID, "主页/中档"),
@@ -3674,20 +4489,49 @@ fn restart_agent_route(
         if !supported_agent_ids().contains(&agent_id) {
             return Err(format!("未知 Agent：{agent_id}"));
         }
-        // Persist the draft exactly as "save custom routing" does.
-        inner.promote_agent_route_drafts()?;
-        inner.save_draft()?;
-        inner.agent_route_drafts.clear();
-
-        // Materialize this one Agent's router from the saved config and hot-swap it
-        // on the running gateway. `None` means the Agent inherits Home, so the
-        // reload clears its per-Agent router.
+        if matches!(
+            inner.server,
+            ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. }
+        ) {
+            return Err("apply_in_progress: 配置正在应用，请完成后再保存 Agent 路由".to_owned());
+        }
+        let applying_direct = inner.draft["agent_routes"][&agent_id]["routing_mode"]
+            .as_str()
+            .unwrap_or_else(|| inner.home_routing_mode())
+            == "direct";
+        // Tier editor drafts are a separate axis from Direct routing. Applying a
+        // Direct target must neither validate nor silently commit an incomplete
+        // hidden tier draft; keep it in memory for when the operator switches back.
+        if !applying_direct {
+            inner.promote_agent_route_drafts()?;
+        }
+        // Prepare every fallible hot-reload step before persisting. A successful
+        // config save must never be followed by a recoverable router-build failure,
+        // which would split the durable route from the running Gateway.
         let config = inner.materialize()?;
         let router = config.custom_router_for_agent(&agent_id)?;
-        if let ServerLifecycle::Running { server, .. } = &inner.server {
-            server
-                .reload_agent_router(&agent_id, router)
-                .map_err(|error| format!("热重启 Agent 路由失败：{error}"))?;
+        let prepared = match &inner.server {
+            ServerLifecycle::Running { server, .. } => Some(
+                server
+                    .prepare_agent_router_reload(&agent_id, router)
+                    .map_err(|error| format!("热重启 Agent 路由失败：{error}"))?,
+            ),
+            ServerLifecycle::Stopped { .. }
+            | ServerLifecycle::Failed { .. }
+            | ServerLifecycle::Stopping { .. } => None,
+            ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. } => {
+                unreachable!("transitional lifecycles were rejected before editing")
+            }
+        };
+
+        inner.save_draft()?;
+        if !applying_direct {
+            inner.agent_route_drafts.clear();
+        }
+        if let (Some(prepared), ServerLifecycle::Running { server, .. }) =
+            (prepared, &mut inner.server)
+        {
+            server.install_prevalidated_agent_router(prepared);
         }
         inner.snapshot()
     };
@@ -3720,10 +4564,12 @@ fn apply_home_route_to_all_agents(state: State<'_, AppStateManaged>) -> Result<S
 fn save_config(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
-    if inner.draft["router"]["pools"]
-        .as_object()
-        .map(|p| p.is_empty())
-        .unwrap_or(true)
+    let tiered = inner.home_routing_mode() == "tiered";
+    if tiered
+        && inner.draft["router"]["pools"]
+            .as_object()
+            .map(|p| p.is_empty())
+            .unwrap_or(true)
     {
         return Err("请至少配置一档(供应商 + 模型)再保存".into());
     }
@@ -3732,7 +4578,108 @@ fn save_config(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
 }
 
 fn emit_serve_state<R: Runtime>(app: &AppHandle<R>, view: &ServeView) {
+    desktop_shell::update_proxy_menu(app);
     let _ = app.emit(SERVE_STATE_CHANGED_EVENT, view.clone());
+}
+
+#[cfg(target_os = "macos")]
+fn publish_status_menu_start_error<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &AppStateManaged,
+    error: String,
+) {
+    let view = {
+        let mut inner = state.0.lock().unwrap();
+        if matches!(
+            inner.server,
+            ServerLifecycle::Stopped { .. } | ServerLifecycle::Failed { .. }
+        ) {
+            let generation = inner.server.generation();
+            let listen = inner
+                .draft
+                .pointer("/server/listen")
+                .and_then(Value::as_str)
+                .unwrap_or("127.0.0.1:8787")
+                .to_owned();
+            inner.server = ServerLifecycle::Failed {
+                generation,
+                listen,
+                error,
+            };
+        }
+        inner.serve_view()
+    };
+    emit_serve_state(app, &view);
+    desktop_shell::restore_main_window(app);
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn desktop_shell_applying_phase(
+    task_alive: bool,
+    accepting: bool,
+) -> desktop_shell::ProxyMenuPhase {
+    if task_alive && accepting {
+        desktop_shell::ProxyMenuPhase::Applying
+    } else {
+        desktop_shell::ProxyMenuPhase::Switching
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn desktop_shell_snapshot(inner: &AppInner) -> desktop_shell::ProxyMenuSnapshot {
+    let generation = inner.server.generation();
+    let (phase, listen) = match &inner.server {
+        ServerLifecycle::Stopped { .. } => (
+            desktop_shell::ProxyMenuPhase::Stopped,
+            inner.draft["server"]["listen"]
+                .as_str()
+                .unwrap_or("127.0.0.1:8787"),
+        ),
+        ServerLifecycle::Starting { listen, .. } => {
+            (desktop_shell::ProxyMenuPhase::Starting, listen.as_str())
+        }
+        ServerLifecycle::Applying { old, .. } => (
+            desktop_shell_applying_phase(old.is_task_alive(), old.is_accepting()),
+            old.listen(),
+        ),
+        ServerLifecycle::Stopping { listen, .. } => {
+            (desktop_shell::ProxyMenuPhase::Stopping, listen.as_str())
+        }
+        ServerLifecycle::Running { server, .. } if server.is_task_alive() => {
+            (desktop_shell::ProxyMenuPhase::Running, server.listen())
+        }
+        ServerLifecycle::Running { server, .. } => {
+            (desktop_shell::ProxyMenuPhase::Failed, server.listen())
+        }
+        ServerLifecycle::Failed { listen, .. } => {
+            (desktop_shell::ProxyMenuPhase::Failed, listen.as_str())
+        }
+    };
+    desktop_shell::ProxyMenuSnapshot::new(generation, phase, listen)
+}
+
+fn lifecycle_proxy_action(server: &ServerLifecycle) -> desktop_shell::ProxyMenuAction {
+    match server {
+        ServerLifecycle::Stopped { .. } | ServerLifecycle::Failed { .. } => {
+            desktop_shell::ProxyMenuAction::Start
+        }
+        ServerLifecycle::Running { server, .. } if server.is_task_alive() => {
+            desktop_shell::ProxyMenuAction::Stop
+        }
+        ServerLifecycle::Running { .. } => desktop_shell::ProxyMenuAction::Start,
+        ServerLifecycle::Starting { .. }
+        | ServerLifecycle::Applying { .. }
+        | ServerLifecycle::Stopping { .. } => desktop_shell::ProxyMenuAction::None,
+    }
+}
+
+fn menu_action_expectation_matches(
+    expected_generation: u64,
+    current_generation: u64,
+    requested: desktop_shell::ProxyMenuAction,
+    current: desktop_shell::ProxyMenuAction,
+) -> bool {
+    expected_generation == current_generation && requested == current
 }
 
 fn complete_serve_start<R: Runtime>(
@@ -3758,6 +4705,12 @@ fn complete_serve_start<R: Runtime>(
             _ => None,
         }
     });
+    if resume_listen.is_some() {
+        // Publish the listener handoff immediately. Candidate bind retries can
+        // last almost one second, so the periodic refresh alone could leave a
+        // stale checked “still running” item visible for the whole outage.
+        desktop_shell::update_proxy_menu(app);
+    }
     let result = result.and_then(PreparedServer::bind);
     // A failed candidate bind must restore the old listener, but that retry is
     // equally forbidden under the global lock. The reserved socket is only
@@ -3959,17 +4912,28 @@ fn complete_serve_start<R: Runtime>(
     }
 }
 
-fn begin_serve_start<R, F>(
+fn begin_serve_start_inner<R, F>(
     app: AppHandle<R>,
     state: &AppStateManaged,
+    expected_stopped_generation: Option<u64>,
     prepare: F,
-) -> Result<StateView, String>
+) -> Result<Option<StateView>, String>
 where
     R: Runtime,
     F: FnOnce(ClientConfig) -> Result<PreparedServer, StartFailure> + Send + 'static,
 {
     let (config, generation, snapshot, serve_view) = {
         let mut inner = state.0.lock().unwrap();
+        if let Some(expected) = expected_stopped_generation {
+            if !menu_action_expectation_matches(
+                expected,
+                inner.server.generation(),
+                desktop_shell::ProxyMenuAction::Start,
+                lifecycle_proxy_action(&inner.server),
+            ) {
+                return Ok(None);
+            }
+        }
         inner.ensure_editable()?;
         match &inner.server {
             ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. } => {
@@ -4012,21 +4976,226 @@ where
 
     emit_serve_state(&app, &serve_view);
     let completion_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let result = tauri::async_runtime::spawn_blocking(move || prepare(config))
-            .await
-            .unwrap_or_else(|error| Err(StartFailure::new("startup_task", error)));
-        let _ = tauri::async_runtime::spawn_blocking(move || {
-            complete_serve_start(&completion_app, generation, result);
-        })
-        .await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let result =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prepare(config))) {
+                Ok(result) => result,
+                Err(_) => Err(StartFailure::new("startup_task", "后台启动任务异常退出")),
+            };
+        complete_serve_start(&completion_app, generation, result);
     });
-    Ok(snapshot)
+    Ok(Some(snapshot))
+}
+
+fn begin_serve_start<R, F>(
+    app: AppHandle<R>,
+    state: &AppStateManaged,
+    prepare: F,
+) -> Result<StateView, String>
+where
+    R: Runtime,
+    F: FnOnce(ClientConfig) -> Result<PreparedServer, StartFailure> + Send + 'static,
+{
+    begin_serve_start_inner(app, state, None, prepare)
+        .map(|snapshot| snapshot.expect("unconditional proxy start cannot be rejected as stale"))
+}
+
+#[cfg(target_os = "macos")]
+fn begin_serve_start_if_generation<R, F>(
+    app: AppHandle<R>,
+    state: &AppStateManaged,
+    expected_generation: u64,
+    prepare: F,
+) -> Result<bool, String>
+where
+    R: Runtime,
+    F: FnOnce(ClientConfig) -> Result<PreparedServer, StartFailure> + Send + 'static,
+{
+    begin_serve_start_inner(app, state, Some(expected_generation), prepare)
+        .map(|snapshot| snapshot.is_some())
 }
 
 #[tauri::command]
 fn serve_start(app: AppHandle, state: State<'_, AppStateManaged>) -> Result<StateView, String> {
     begin_serve_start(app, state.inner(), prepare_server)
+}
+
+async fn ensure_serve_running_with<R, F>(
+    app: AppHandle<R>,
+    state: &AppStateManaged,
+    prepare: F,
+    timeout: Duration,
+) -> Result<StateView, String>
+where
+    R: Runtime,
+    F: FnOnce(ClientConfig) -> Result<PreparedServer, StartFailure> + Send + 'static,
+{
+    enum EnsureAction {
+        Ready(Box<StateView>),
+        Wait {
+            generation: u64,
+            fail_on_apply_error: bool,
+        },
+        Start {
+            generation: u64,
+        },
+    }
+
+    let action = {
+        let inner = state.0.lock().unwrap();
+        match &inner.server {
+            ServerLifecycle::Running { server, .. }
+                if server.is_task_alive() && server.listener_reachable() =>
+            {
+                EnsureAction::Ready(Box::new(inner.snapshot()))
+            }
+            ServerLifecycle::Running { server, .. } if !server.is_task_alive() => {
+                return Err(
+                    "ensure_serve_running_start_failed: 代理任务已退出，请先停止后重试".to_owned(),
+                );
+            }
+            ServerLifecycle::Running { generation, .. }
+            | ServerLifecycle::Starting { generation, .. } => EnsureAction::Wait {
+                generation: *generation,
+                fail_on_apply_error: false,
+            },
+            ServerLifecycle::Applying { generation, .. } => EnsureAction::Wait {
+                generation: *generation,
+                fail_on_apply_error: true,
+            },
+            ServerLifecycle::Stopped { generation }
+            | ServerLifecycle::Failed { generation, .. } => EnsureAction::Start {
+                generation: generation
+                    .checked_add(1)
+                    .ok_or_else(|| "代理启动 generation 已耗尽，请重启 App".to_owned())?,
+            },
+            ServerLifecycle::Stopping { .. } => {
+                return Err("ensure_serve_running_stopping: 代理正在停止，请稍后重试".to_owned());
+            }
+        }
+    };
+
+    let (expected_generation, fail_on_apply_error) = match action {
+        EnsureAction::Ready(view) => return Ok(*view),
+        EnsureAction::Wait {
+            generation,
+            fail_on_apply_error,
+        } => (generation, fail_on_apply_error),
+        EnsureAction::Start { generation } => {
+            if let Err(error) = begin_serve_start(app.clone(), state, prepare) {
+                let joined_existing_start = {
+                    let inner = state.0.lock().unwrap();
+                    inner.server.generation() == generation
+                        && matches!(
+                            inner.server,
+                            ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. }
+                        )
+                };
+                if !joined_existing_start {
+                    return Err(error);
+                }
+            }
+            (generation, false)
+        }
+    };
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        enum WaitObservation {
+            Complete(Box<Result<StateView, String>>),
+            Probe(String),
+            Pending,
+        }
+
+        let observation = {
+            let inner = state.0.lock().unwrap();
+            let actual_generation = inner.server.generation();
+            if actual_generation != expected_generation {
+                WaitObservation::Complete(Box::new(Err(format!(
+                    "ensure_serve_running_interrupted: 启动目标 generation {expected_generation} 已被 {actual_generation} 取代"
+                ))))
+            } else {
+                match &inner.server {
+                    ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. } => {
+                        WaitObservation::Pending
+                    }
+                    ServerLifecycle::Running {
+                        server,
+                        apply_error,
+                        ..
+                    } => {
+                        if !server.is_task_alive() {
+                            WaitObservation::Complete(Box::new(Err(
+                                "ensure_serve_running_start_failed: 代理任务已退出".to_owned(),
+                            )))
+                        } else if fail_on_apply_error && apply_error.is_some() {
+                            WaitObservation::Complete(Box::new(Err(format!(
+                                "ensure_serve_running_start_failed: {}",
+                                apply_error.as_deref().unwrap_or("代理应用失败")
+                            ))))
+                        } else {
+                            WaitObservation::Probe(server.listen().to_owned())
+                        }
+                    }
+                    ServerLifecycle::Failed { error, .. } => WaitObservation::Complete(Box::new(
+                        Err(format!("ensure_serve_running_start_failed: {error}")),
+                    )),
+                    ServerLifecycle::Stopped { .. } => WaitObservation::Complete(Box::new(Err(
+                        "ensure_serve_running_interrupted: 代理启动被停止".to_owned(),
+                    ))),
+                    ServerLifecycle::Stopping { .. } => WaitObservation::Complete(Box::new(Err(
+                        "ensure_serve_running_stopping: 代理正在停止，请稍后重试".to_owned(),
+                    ))),
+                }
+            }
+        };
+
+        match observation {
+            WaitObservation::Complete(outcome) => return *outcome,
+            WaitObservation::Probe(listen) => {
+                let reachable = match listen.parse::<std::net::SocketAddr>() {
+                    Ok(address) => tokio::time::timeout(
+                        Duration::from_millis(200),
+                        tokio::net::TcpStream::connect(address),
+                    )
+                    .await
+                    .is_ok_and(|result| result.is_ok()),
+                    Err(_) => false,
+                };
+                if reachable {
+                    let inner = state.0.lock().unwrap();
+                    if inner.server.generation() == expected_generation {
+                        if let ServerLifecycle::Running {
+                            server,
+                            apply_error,
+                            ..
+                        } = &inner.server
+                        {
+                            if server.listen() == listen
+                                && server.is_task_alive()
+                                && (!fail_on_apply_error || apply_error.is_none())
+                            {
+                                return Ok(inner.snapshot());
+                            }
+                        }
+                    }
+                }
+            }
+            WaitObservation::Pending => {}
+        }
+        if Instant::now() >= deadline {
+            return Err("ensure_serve_running_timeout: 等待代理启动并可达超时".to_owned());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tauri::command]
+async fn ensure_serve_running(
+    app: AppHandle,
+    state: State<'_, AppStateManaged>,
+) -> Result<StateView, String> {
+    ensure_serve_running_with(app, state.inner(), prepare_server, Duration::from_secs(30)).await
 }
 
 fn complete_serve_stop<R: Runtime>(app: &AppHandle<R>, generation: u64) {
@@ -4049,9 +5218,23 @@ fn complete_serve_stop<R: Runtime>(app: &AppHandle<R>, generation: u64) {
     }
 }
 
-fn begin_serve_stop<R: Runtime>(app: AppHandle<R>, state: &AppStateManaged) -> StateView {
+fn begin_serve_stop_inner<R: Runtime>(
+    app: AppHandle<R>,
+    state: &AppStateManaged,
+    expected_running_generation: Option<u64>,
+) -> Option<StateView> {
     let (generation, snapshot, serve_view, running) = {
         let mut inner = state.0.lock().unwrap();
+        if let Some(expected) = expected_running_generation {
+            if !menu_action_expectation_matches(
+                expected,
+                inner.server.generation(),
+                desktop_shell::ProxyMenuAction::Stop,
+                lifecycle_proxy_action(&inner.server),
+            ) {
+                return None;
+            }
+        }
         let generation = inner.server.generation();
         let current = std::mem::replace(&mut inner.server, ServerLifecycle::Stopped { generation });
         let mut running = None;
@@ -4104,7 +5287,21 @@ fn begin_serve_stop<R: Runtime>(app: AppHandle<R>, state: &AppStateManaged) -> S
             complete_serve_stop(&completion_app, generation);
         });
     }
-    snapshot
+    Some(snapshot)
+}
+
+fn begin_serve_stop<R: Runtime>(app: AppHandle<R>, state: &AppStateManaged) -> StateView {
+    begin_serve_stop_inner(app, state, None)
+        .expect("unconditional proxy stop cannot be rejected as stale")
+}
+
+#[cfg(target_os = "macos")]
+fn begin_serve_stop_if_generation<R: Runtime>(
+    app: AppHandle<R>,
+    state: &AppStateManaged,
+    expected_generation: u64,
+) -> Option<StateView> {
+    begin_serve_stop_inner(app, state, Some(expected_generation))
 }
 
 #[tauri::command]
@@ -4349,6 +5546,28 @@ fn draft_price_table(inner: &AppInner) -> Result<PriceTable, String> {
         .transpose()
         .map_err(|error| format!("定价表配置不合法：{error}"))
         .map(Option::unwrap_or_default)
+}
+
+/// Remove catalog-derived prices bound to one Provider identity in a single
+/// table revision. A Base URL or credential change may select another account;
+/// carrying the old account's scoped prices across that boundary would make
+/// both settlement and Agent `Spent` metadata factually wrong.
+fn clear_provider_scoped_prices(inner: &mut AppInner, name: &str) -> Result<bool, String> {
+    let mut pricing = draft_price_table(inner)?;
+    let prefix = format!("{name}/");
+    let before = pricing.models.len();
+    pricing
+        .models
+        .retain(|model, _| !model.starts_with(&prefix));
+    if pricing.models.len() == before {
+        return Ok(false);
+    }
+    pricing.version = pricing
+        .version
+        .checked_add(1)
+        .ok_or_else(|| "pricing version exhausted; start a new configuration".to_owned())?;
+    inner.draft["pricing"] = serde_json::to_value(pricing).map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -4994,9 +6213,10 @@ fn open_recovery_folder(paths: State<'_, DesktopPaths>) -> Result<String, String
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .on_window_event(desktop_shell::handle_window_event)
         .setup(|app| {
             let desktop_paths = DesktopPaths::from_app_roots(
                 app.path().app_config_dir()?,
@@ -5019,6 +6239,19 @@ pub fn run() {
             app.manage(DesktopUpdateOperation::default());
             if recovery::inspect_recovery_state(&desktop_paths.data_dir).mode == RecoveryMode::Safe
             {
+                #[cfg(target_os = "macos")]
+                desktop_shell::install(
+                    app.handle(),
+                    desktop_shell::ProxyMenuMode::RecoverySafe,
+                    |_app| {
+                        desktop_shell::ProxyMenuSnapshot::new(
+                            0,
+                            desktop_shell::ProxyMenuPhase::Stopped,
+                            "不可用（恢复安全模式不读取配置）",
+                        )
+                    },
+                    |_app, _action, _expected_generation| {},
+                )?;
                 return Ok(());
             }
 
@@ -5050,7 +6283,74 @@ pub fn run() {
             ) {
                 eprintln!("历史未知成本回填失败：{error}");
             }
+            #[cfg(target_os = "macos")]
+            let read_only = inner.load_error.is_some();
             app.manage(AppStateManaged(Mutex::new(inner)));
+            #[cfg(target_os = "macos")]
+            desktop_shell::install(
+                app.handle(),
+                if read_only {
+                    desktop_shell::ProxyMenuMode::ConfigReadOnly
+                } else {
+                    desktop_shell::ProxyMenuMode::Normal
+                },
+                |app| {
+                    let state = app.state::<AppStateManaged>();
+                    let inner = state.0.lock().unwrap();
+                    desktop_shell_snapshot(&inner)
+                },
+                |app, action, expected_generation| {
+                    let Some(state) = app.try_state::<AppStateManaged>() else {
+                        return;
+                    };
+                    match action {
+                        desktop_shell::ProxyMenuAction::Start => {
+                            match begin_serve_start_if_generation(
+                                app.clone(),
+                                state.inner(),
+                                expected_generation,
+                                prepare_server,
+                            ) {
+                                Ok(true) => {}
+                                Ok(false) => desktop_shell::update_proxy_menu(app),
+                                Err(error) => {
+                                    publish_status_menu_start_error(app, state.inner(), error);
+                                }
+                            }
+                        }
+                        desktop_shell::ProxyMenuAction::Stop => {
+                            if begin_serve_stop_if_generation(
+                                app.clone(),
+                                state.inner(),
+                                expected_generation,
+                            )
+                            .is_none()
+                            {
+                                desktop_shell::update_proxy_menu(app);
+                            }
+                        }
+                        desktop_shell::ProxyMenuAction::None => {}
+                    }
+                },
+            )?;
+
+            #[cfg(target_os = "macos")]
+            {
+                // Native state must remain truthful even when the WebView is
+                // hidden or its JavaScript timers are throttled. Each request
+                // is resolved against the authoritative supervisor only when
+                // its main-thread refresh executes.
+                let status_app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        if status_app.try_state::<AppStateManaged>().is_none() {
+                            break;
+                        }
+                        desktop_shell::update_proxy_menu(&status_app);
+                    }
+                });
+            }
 
             let paths = AgentIntegrationPaths {
                 snapshot_root: desktop_paths.agent_data_root.join("snapshots"),
@@ -5074,6 +6374,7 @@ pub fn run() {
             add_provider_with_credential,
             set_local_routing,
             set_routing_mode,
+            set_direct_route,
             set_quota_accounts,
             set_quota_plan,
             get_quota_snapshot,
@@ -5082,6 +6383,7 @@ pub fn run() {
             discover_provider_models,
             test_provider,
             set_provider_model_vision,
+            set_provider_model_limits,
             update_provider_models,
             preview_provider_removal,
             remove_provider,
@@ -5099,9 +6401,11 @@ pub fn run() {
             restart_agent_route,
             apply_home_route_to_all_agents,
             serve_start,
+            ensure_serve_running,
             serve_stop,
             list_agent_registry,
             scan_agents,
+            get_cached_agent_views,
             plan_agent_connection,
             configure_cursor_provider,
             apply_agent_plan,
@@ -5133,8 +6437,22 @@ pub fn run() {
             export_recovery_bundle,
             open_recovery_folder,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|app, event| {
+        #[cfg(not(target_os = "macos"))]
+        let _ = (app, &event);
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen {
+            has_visible_windows,
+            ..
+        } = event
+        {
+            if !has_visible_windows {
+                desktop_shell::restore_main_window(app);
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -5168,6 +6486,9 @@ mod tests {
             std::path::Path::new("/tmp/token-station-data"),
             std::path::Path::new("/tmp/plugins"),
         );
+        assert_eq!(source["routing"]["mode"], json!("direct"));
+        assert_eq!(source["router"]["routing_mode"], json!("tiered"));
+        assert!(source["router"].get("direct_target").is_none());
         assert!(source.get("agent_routes").is_none());
         assert!(source.get("profiles").is_none());
 
@@ -5209,6 +6530,33 @@ mod tests {
                         == free_provider_catalog::OveragePolicy::UserMustEnableGuard
                 })
         }));
+    }
+
+    #[test]
+    fn provider_brand_id_uses_curated_identity_and_not_the_editable_upstream_name() {
+        assert_eq!(
+            provider_brand_id("renamed-account", "https://api.deepseek.com/v1", "paid"),
+            Some("deepseek")
+        );
+        assert_eq!(
+            provider_brand_id("nvidia_free", "https://integrate.api.nvidia.com/v1", "free"),
+            Some("nvidia")
+        );
+        assert_eq!(
+            provider_brand_id("deepseek", "https://proxy.example.test/v1", "paid"),
+            None,
+            "a custom endpoint must not inherit a logo from its editable name"
+        );
+        let root = scratch_home("provider-brand-view");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["renamed-account"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.deepseek.com/v1",
+            "models": [{"model": "deepseek-chat"}]
+        });
+        let view = AppInner::new(root.join("token-station.json"), draft, None).snapshot();
+        assert_eq!(view.providers[0].brand_id, Some("deepseek"));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -5387,9 +6735,21 @@ mod tests {
         let draft = json!({
             "plugins": {"agents": desktop_agents()},
             "upstreams": { "live": { "models": [{ "model": "keep" }] } },
+            "routing": {
+                "mode": "direct",
+                "direct_target": { "upstream": "live", "model": "dropped" }
+            },
+            "router": {
+                "quota_accounts": [
+                    { "upstream": "gone", "model": "whatever" },
+                    { "upstream": "live", "model": "keep" },
+                    { "upstream": "live", "model": "dropped" }
+                ]
+            },
             "agent_routes": {
                 "opencode": {
                     "mode": "custom",
+                    "direct_target": { "upstream": "gone", "model": "whatever" },
                     "custom_route": {
                         "high": { "upstream": "gone", "model": "whatever" },
                         "mid": { "upstream": "live", "model": "dropped" },
@@ -5424,6 +6784,16 @@ mod tests {
         assert_eq!(profile["mid"]["model"], json!("keep"));
         assert_eq!(profile["low"]["upstream"], json!("live"));
         assert!(profile["low"]["model"].is_null());
+        assert_eq!(out["routing"]["direct_target"]["upstream"], json!("live"));
+        assert!(out["routing"]["direct_target"]["model"].is_null());
+        assert!(out["router"].get("direct_target").is_none());
+        assert!(out["agent_routes"]["opencode"]["direct_target"].is_object());
+        assert!(out["agent_routes"]["opencode"]["direct_target"]["upstream"].is_null());
+        assert!(out["agent_routes"]["opencode"]["direct_target"]["model"].is_null());
+        assert_eq!(
+            out["router"]["quota_accounts"],
+            json!([{ "upstream": "live", "model": "keep" }])
+        );
     }
 
     #[test]
@@ -5440,6 +6810,80 @@ mod tests {
         assert_eq!(known_context_window("deepseek-v4-pro"), 128_000);
         assert_eq!(known_context_window("glm-4.6"), 128_000);
         assert_eq!(known_context_window("some-obscure-model"), 128_000);
+    }
+
+    #[test]
+    fn desktop_preparation_backfills_exact_kimi_models_from_builtin_limits() {
+        let draft = json!({
+            "upstreams": {
+                "kimi": {
+                    "provider": "openai-compatible",
+                    "base_url": "https://api.moonshot.cn/v1/",
+                    "models": [
+                        {"model": "kimi-k2.6", "context_window": 128000},
+                        {"model": "kimi-k3", "context_window": 128000}
+                    ]
+                }
+            }
+        });
+
+        let prepared = prepare_desktop_draft(draft, std::path::Path::new("/tmp"));
+        let models = prepared["upstreams"]["kimi"]["models"].as_array().unwrap();
+        assert_eq!(models[0]["context_window"], json!(262_144));
+        assert_eq!(models[0]["max_output_tokens"], json!(262_144));
+        assert_eq!(
+            models[0]["x-token-station-context-window-source"],
+            json!("builtin_preset")
+        );
+        assert_eq!(models[1]["context_window"], json!(1_048_576));
+        assert_eq!(models[1]["max_output_tokens"], json!(131_072));
+        assert_eq!(
+            models[1]["x-token-station-max-output-tokens-source"],
+            json!("builtin_preset")
+        );
+    }
+
+    #[test]
+    fn builtin_limits_do_not_match_unofficial_endpoints_similar_ids_or_operator_values() {
+        let draft = json!({
+            "upstreams": {
+                "gateway": {
+                    "provider": "openai-compatible",
+                    "base_url": "https://gateway.example/v1",
+                    "models": [{"model": "kimi-k3", "context_window": 128000}]
+                },
+                "kimi": {
+                    "provider": "openai-compatible",
+                    "base_url": "https://api.moonshot.cn/v1",
+                    "models": [
+                        {"model": "kimi-k3-preview", "context_window": 128000},
+                        {
+                            "model": "kimi-k3",
+                            "context_window": 64000,
+                            "max_output_tokens": 8000,
+                            "x-token-station-context-window-source": "operator",
+                            "x-token-station-max-output-tokens-source": "operator"
+                        }
+                    ]
+                }
+            }
+        });
+
+        let prepared = prepare_desktop_draft(draft, std::path::Path::new("/tmp"));
+        assert!(prepared["upstreams"]["gateway"]["models"][0]
+            .get("max_output_tokens")
+            .is_none());
+        assert!(prepared["upstreams"]["kimi"]["models"][0]
+            .get("max_output_tokens")
+            .is_none());
+        assert_eq!(
+            prepared["upstreams"]["kimi"]["models"][1]["context_window"],
+            json!(64_000)
+        );
+        assert_eq!(
+            prepared["upstreams"]["kimi"]["models"][1]["max_output_tokens"],
+            json!(8_000)
+        );
     }
 
     #[test]
@@ -5506,14 +6950,57 @@ mod tests {
     }
 
     fn template_for_test(root: &std::path::Path) -> Value {
-        template(&root.join("token-station-data"), &root.join("plugins"))
+        let mut draft = template(&root.join("token-station-data"), &root.join("plugins"));
+        draft
+            .as_object_mut()
+            .expect("config fixture is an object")
+            .remove("routing");
+        draft
     }
 
     fn gateway_template_for_test(root: &std::path::Path) -> Value {
         let plugins_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
             .join("plugins-dist");
-        template(&root.join("token-station-data"), &plugins_dir)
+        let mut draft = template(&root.join("token-station-data"), &plugins_dir);
+        draft
+            .as_object_mut()
+            .expect("config fixture is an object")
+            .remove("routing");
+        draft
+    }
+
+    fn published_agent_route_fixture(root: &std::path::Path) -> (Value, RunningServer) {
+        let mut draft = gateway_template_for_test(root);
+        draft["server"]["listen"] = json!("127.0.0.1:0");
+        draft["server"]["auth"] = json!(false);
+        draft["data"]["metrics"] = json!(false);
+        draft["upstreams"]["local"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "models": [{"model": "small"}]
+        });
+        draft["router"]["pools"] = json!({
+            TIER_LOW: [{"upstream": "local", "model": "small"}]
+        });
+        draft["router"]["default_pool"] = json!(TIER_LOW);
+        let config: ClientConfig = serde_json::from_value(draft.clone()).unwrap();
+        let running = prepare_server(config)
+            .unwrap()
+            .bind()
+            .unwrap()
+            .publish(7)
+            .unwrap();
+        (draft, running)
+    }
+
+    fn manage_test_agent_state<R: Runtime>(app: &tauri::App<R>, root: &std::path::Path) {
+        let paths = AgentIntegrationPaths {
+            snapshot_root: root.join("agent-data/snapshots"),
+            ownership_root: root.join("agent-data/ownership"),
+        };
+        assert!(app.manage(paths.clone()));
+        assert!(app.manage(AgentCommandState::new(paths).expect("Agent command state initializes")));
     }
 
     fn serve_model_catalog(
@@ -5699,6 +7186,54 @@ mod tests {
     }
 
     #[test]
+    fn desktop_shell_distinguishes_live_application_from_listener_handoff() {
+        assert_eq!(
+            desktop_shell_applying_phase(true, true),
+            desktop_shell::ProxyMenuPhase::Applying
+        );
+        assert_eq!(
+            desktop_shell_applying_phase(true, false),
+            desktop_shell::ProxyMenuPhase::Switching
+        );
+        assert_eq!(
+            desktop_shell_applying_phase(false, true),
+            desktop_shell::ProxyMenuPhase::Switching
+        );
+        assert_eq!(
+            desktop_shell_applying_phase(false, false),
+            desktop_shell::ProxyMenuPhase::Switching
+        );
+    }
+
+    #[test]
+    fn status_menu_actions_require_the_same_generation_and_lifecycle_action() {
+        assert!(menu_action_expectation_matches(
+            7,
+            7,
+            desktop_shell::ProxyMenuAction::Start,
+            desktop_shell::ProxyMenuAction::Start,
+        ));
+        assert!(menu_action_expectation_matches(
+            7,
+            7,
+            desktop_shell::ProxyMenuAction::Stop,
+            desktop_shell::ProxyMenuAction::Stop,
+        ));
+        assert!(!menu_action_expectation_matches(
+            7,
+            8,
+            desktop_shell::ProxyMenuAction::Start,
+            desktop_shell::ProxyMenuAction::Start,
+        ));
+        assert!(!menu_action_expectation_matches(
+            7,
+            7,
+            desktop_shell::ProxyMenuAction::Start,
+            desktop_shell::ProxyMenuAction::Stop,
+        ));
+    }
+
+    #[test]
     fn the_desktop_template_enables_every_supported_inbound_protocol() {
         let root = PathBuf::from("/tmp/token-station-desktop-test");
         let draft = template_for_test(&root);
@@ -5804,7 +7339,7 @@ mod tests {
         const CATALOG: &str = r#"{"data":[{"id":"model-b"},{"id":"model-a"}]}"#;
 
         let root = scratch_home("discovery-isolation");
-        let data_dir = root.join("data");
+        let data_dir = root.join("token-station-data");
         let config_path = root.join("token-station.json");
         let (base_url, server) = serve_model_catalog(vec![
             (200, CATALOG),
@@ -5831,6 +7366,13 @@ mod tests {
             draft,
             None,
         )))));
+        let agent_paths = AgentIntegrationPaths {
+            snapshot_root: root.join("agent-data/snapshots"),
+            ownership_root: root.join("agent-data/ownership"),
+        };
+        assert!(app.manage(agent_paths.clone()));
+        assert!(app
+            .manage(AgentCommandState::new(agent_paths).expect("Agent command state initializes")));
         let initial_state = get_state(app.state());
         assert_eq!(initial_state.draft_revision, initial_state.saved_revision);
         assert!(!initial_state.config_dirty);
@@ -6032,6 +7574,172 @@ mod tests {
     }
 
     #[test]
+    fn dangling_direct_and_quota_references_load_as_an_editable_dirty_draft() {
+        let root = scratch_home("dangling-direct-startup-repair");
+        let path = root.join("token-station.json");
+        let mut source = template_for_test(&root);
+        source["upstreams"]["live"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "keep"}]
+        });
+        source["routing"] = json!({
+            "mode": "direct",
+            "direct_target": {"upstream": "live", "model": "dropped"}
+        });
+        source["router"]["quota_accounts"] = json!([
+            {"upstream": "gone", "model": "missing"},
+            {"upstream": "live", "model": "keep"},
+            {"upstream": "live", "model": "dropped"}
+        ]);
+        source["agent_routes"] = json!({
+            "codex": {
+                "mode": "inherit",
+                "routing_mode": "direct",
+                "direct_target": {"upstream": "gone", "model": "missing"}
+            }
+        });
+        // The recovery path must apply the exact same legacy load migration as
+        // ClientConfig::load before auditing the known dangling references.
+        source["concurrency"] = json!({
+            "global": 0,
+            "per_agent": 0,
+            "per_provider": 0
+        });
+        let original = serde_json::to_vec(&source).expect("dangling fixture serializes");
+        std::fs::write(&path, &original).expect("dangling fixture writes");
+
+        let (draft, saved, load_error) = load_draft_state(
+            &path,
+            &root.join("token-station-data"),
+            &root.join("plugins"),
+        );
+
+        assert_eq!(load_error, None);
+        assert_eq!(draft["routing"]["mode"], json!("direct"));
+        assert_eq!(draft["routing"]["direct_target"]["upstream"], json!("live"));
+        assert!(draft["routing"]["direct_target"]["model"].is_null());
+        assert!(draft["agent_routes"]["codex"]["direct_target"].is_object());
+        assert!(draft["agent_routes"]["codex"]["direct_target"]["upstream"].is_null());
+        assert!(draft["agent_routes"]["codex"]["direct_target"]["model"].is_null());
+        assert_eq!(
+            draft["router"]["quota_accounts"],
+            json!([{"upstream": "live", "model": "keep"}])
+        );
+        for field in ["global", "per_agent", "per_provider"] {
+            assert!(draft["concurrency"][field].as_u64().unwrap_or_default() > 0);
+            assert!(saved["concurrency"][field].as_u64().unwrap_or_default() > 0);
+        }
+        assert_eq!(
+            saved["routing"]["direct_target"],
+            json!({"upstream": "live", "model": "dropped"})
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("startup repair never rewrites source"),
+            original
+        );
+
+        let inner = AppInner::new_with_saved(path, draft, saved, load_error);
+        assert!(inner.ensure_editable().is_ok());
+        assert!(inner.config_state.is_dirty());
+        assert!(inner.materialize().is_err());
+        let wire = serde_json::to_value(inner.snapshot()).expect("StateView serializes");
+        assert_eq!(
+            wire["direct_target"],
+            json!({"upstream": "live", "model": null})
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn dangling_agent_direct_target_never_silently_inherits_a_valid_home_target() {
+        let root = scratch_home("dangling-agent-direct-does-not-inherit-home");
+        let path = root.join("token-station.json");
+        let mut source = template_for_test(&root);
+        source["upstreams"]["live"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "keep"}]
+        });
+        source["routing"] = json!({
+            "mode": "direct",
+            "direct_target": {"upstream": "live", "model": "keep"}
+        });
+        source["agent_routes"] = json!({
+            "codex": {
+                "mode": "inherit",
+                "routing_mode": "direct",
+                "direct_target": {"upstream": "gone", "model": "missing"}
+            }
+        });
+        let original = serde_json::to_vec(&source).expect("dangling fixture serializes");
+        std::fs::write(&path, &original).expect("dangling fixture writes");
+
+        let (draft, saved, load_error) = load_draft_state(
+            &path,
+            &root.join("token-station-data"),
+            &root.join("plugins"),
+        );
+
+        assert_eq!(load_error, None);
+        assert!(draft["agent_routes"]["codex"]["direct_target"].is_object());
+        assert!(draft["agent_routes"]["codex"]["direct_target"]["upstream"].is_null());
+        assert!(draft["agent_routes"]["codex"]["direct_target"]["model"].is_null());
+        let inner = AppInner::new_with_saved(path.clone(), draft, saved, load_error);
+        let view = inner.snapshot();
+        assert_eq!(
+            view.direct_target.as_ref().unwrap().model.as_deref(),
+            Some("keep")
+        );
+        assert!(view.agent_routes["codex"].direct_target.is_none());
+        assert!(view.agent_routes["codex"].config_error.is_some());
+        let wire = serde_json::to_value(&view).expect("StateView serializes");
+        assert_eq!(
+            wire["direct_target"],
+            json!({"upstream": "live", "model": "keep"})
+        );
+        assert!(wire["agent_routes"]["codex"]["direct_target"].is_null());
+        assert_eq!(
+            std::fs::read(&path).expect("startup repair remains zero-write"),
+            original
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn dangling_direct_recovery_keeps_unrelated_semantic_damage_read_only() {
+        let root = scratch_home("dangling-direct-with-unrelated-damage");
+        let path = root.join("token-station.json");
+        let mut source = template_for_test(&root);
+        source["server"]["listen"] = json!("0.0.0.0:8787");
+        source["upstreams"]["live"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "keep"}]
+        });
+        source["routing"] = json!({
+            "mode": "direct",
+            "direct_target": {"upstream": "live", "model": "dropped"}
+        });
+        let original = serde_json::to_vec(&source).expect("damaged fixture serializes");
+        std::fs::write(&path, &original).expect("damaged fixture writes");
+
+        let (_draft, _saved, load_error) = load_draft_state(
+            &path,
+            &root.join("token-station-data"),
+            &root.join("plugins"),
+        );
+
+        let error = load_error.expect("unrelated semantic damage remains protected");
+        assert!(error.contains("只读保护"), "{error}");
+        assert_eq!(
+            std::fs::read(&path).expect("damaged source remains untouched"),
+            original
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn loading_config_without_agent_routes_or_profiles_stays_materializable() {
         let root = scratch_home("omitted-routing-maps");
         let path = root.join("token-station.json");
@@ -6167,6 +7875,65 @@ mod tests {
     }
 
     #[test]
+    fn provider_model_limits_require_a_positive_output_within_context_and_persist_atomically() {
+        let root = scratch_home("model-limits");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{
+                "model": "bounded-model",
+                "tool": true,
+                "context_window": 128000
+            }]
+        });
+        let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+        let before = inner.draft.clone();
+
+        let error =
+            replace_provider_model_limits(&mut inner, "provider", "bounded-model", 128_000, 0)
+                .expect_err("a missing maximum output remains unproven");
+        assert!(error.contains("大于 0"), "{error}");
+        assert_eq!(inner.draft, before);
+
+        let error = replace_provider_model_limits(
+            &mut inner,
+            "provider",
+            "bounded-model",
+            128_000,
+            128_001,
+        )
+        .expect_err("output cannot exceed the context window");
+        assert!(error.contains("不能大于"), "{error}");
+        assert_eq!(inner.draft, before);
+
+        replace_provider_model_limits(&mut inner, "provider", "bounded-model", 128_000, 32_768)
+            .expect("operator-confirmed limits persist");
+        let model = &inner.draft["upstreams"]["provider"]["models"][0];
+        assert_eq!(model["context_window"], json!(128_000));
+        assert_eq!(model["max_output_tokens"], json!(32_768));
+        assert_eq!(
+            model[CONTEXT_WINDOW_SOURCE_KEY],
+            json!(LIMIT_SOURCE_OPERATOR)
+        );
+        assert_eq!(
+            model[MAX_OUTPUT_TOKENS_SOURCE_KEY],
+            json!(LIMIT_SOURCE_OPERATOR)
+        );
+        assert_eq!(model["tool"], json!(true));
+
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("token-station.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved["upstreams"]["provider"]["models"][0]["max_output_tokens"],
+            json!(32_768)
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn trusted_catalog_vision_facts_update_configured_models() {
         let root = scratch_home("catalog-vision");
         let mut draft = template_for_test(&root);
@@ -6221,7 +7988,11 @@ mod tests {
             .unwrap();
         assert_eq!(models[0]["vision"], json!(true));
         assert_eq!(models[0]["vision_state"], json!("verified"));
-        assert_eq!(models[0]["context_window"], json!(257550));
+        assert_eq!(
+            models[0]["context_window"],
+            json!(128000),
+            "a non-zero legacy value without a default source remains operator-owned"
+        );
         assert_eq!(models[0]["max_output_tokens"], json!(32768));
         assert_eq!(
             models[0]["catalog_cost"],
@@ -6229,6 +8000,152 @@ mod tests {
         );
         assert_eq!(models[1]["vision"], json!(false));
         assert_eq!(models[1]["vision_state"], json!("unsupported"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn catalog_output_larger_than_the_existing_context_is_ignored() {
+        let root = scratch_home("catalog-invalid-output");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "bounded", "context_window": 32000}]
+        });
+        let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+        let catalog = vec![model_catalog::CatalogModelView {
+            model: "bounded".to_owned(),
+            tool: CapabilityState::Unknown,
+            vision: CapabilityState::Unknown,
+            json_schema: CapabilityState::Unknown,
+            context_window: None,
+            max_output_tokens: Some(64_000),
+            cost: None,
+            source: model_catalog::CatalogSource::Live,
+            last_seen_ms: Some(42),
+            catalog_state: model_catalog::CatalogState::Active,
+        }];
+
+        assert!(!apply_discovered_model_capabilities(&mut inner, "provider", &catalog).unwrap());
+        assert!(inner.draft["upstreams"]["provider"]["models"][0]
+            .get("max_output_tokens")
+            .is_none());
+        inner
+            .materialize()
+            .expect("catalog refresh keeps the draft valid");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn provider_context_replaces_preset_and_clears_an_incompatible_preset_output() {
+        let root = scratch_home("catalog-provider-over-preset");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["kimi"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.moonshot.cn/v1",
+            "models": [{
+                "model": "kimi-k3",
+                "context_window": 1048576,
+                "max_output_tokens": 131072,
+                "x-token-station-context-window-source": "builtin_preset",
+                "x-token-station-max-output-tokens-source": "builtin_preset"
+            }]
+        });
+        let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+        let catalog = vec![model_catalog::CatalogModelView {
+            model: "kimi-k3".to_owned(),
+            tool: CapabilityState::Unknown,
+            vision: CapabilityState::Unknown,
+            json_schema: CapabilityState::Unknown,
+            context_window: Some(64_000),
+            max_output_tokens: None,
+            cost: None,
+            source: model_catalog::CatalogSource::Live,
+            last_seen_ms: Some(42),
+            catalog_state: model_catalog::CatalogState::Active,
+        }];
+
+        assert!(apply_discovered_model_capabilities(&mut inner, "kimi", &catalog).unwrap());
+        let model = &inner.draft["upstreams"]["kimi"]["models"][0];
+        assert_eq!(model["context_window"], json!(64_000));
+        assert_eq!(
+            model["x-token-station-context-window-source"],
+            json!("provider")
+        );
+        assert!(model.get("max_output_tokens").is_none());
+        assert!(model
+            .get("x-token-station-max-output-tokens-source")
+            .is_none());
+        inner
+            .materialize()
+            .expect("conflicting metadata remains valid");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn catalog_refresh_fills_unknown_metadata_without_overwriting_operator_values() {
+        let root = scratch_home("catalog-metadata-ownership");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [
+                {"model": "operator-owned", "context_window": 64000, "max_output_tokens": 8000},
+                {"model": "unknown", "context_window": 0}
+            ]
+        });
+        draft["pricing"] = json!({
+            "version": 4,
+            "models": {
+                "provider/operator-owned": {
+                    "input_per_mtok": 900000,
+                    "output_per_mtok": 1800000
+                }
+            }
+        });
+        let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+        let catalog_cost = model_catalog::CatalogCostView {
+            input: Some(0.2),
+            output: Some(0.6),
+            cache_read: None,
+            cache_write: None,
+        };
+        let catalog_price = catalog_cost_to_model_price(&catalog_cost).unwrap();
+        let catalog = ["operator-owned", "unknown"]
+            .into_iter()
+            .map(|model| model_catalog::CatalogModelView {
+                model: model.to_owned(),
+                tool: CapabilityState::Unknown,
+                vision: CapabilityState::Unknown,
+                json_schema: CapabilityState::Unknown,
+                context_window: Some(128_000),
+                max_output_tokens: Some(32_000),
+                cost: Some(catalog_cost.clone()),
+                source: model_catalog::CatalogSource::Live,
+                last_seen_ms: Some(42),
+                catalog_state: model_catalog::CatalogState::Active,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(apply_discovered_model_capabilities(&mut inner, "provider", &catalog).unwrap());
+
+        let models = inner.draft["upstreams"]["provider"]["models"]
+            .as_array()
+            .unwrap();
+        assert_eq!(models[0]["context_window"], json!(64_000));
+        assert_eq!(models[0]["max_output_tokens"], json!(8_000));
+        assert_eq!(models[1]["context_window"], json!(128_000));
+        assert_eq!(models[1]["max_output_tokens"], json!(32_000));
+        let pricing = draft_price_table(&inner).unwrap();
+        assert_eq!(
+            pricing.version, 5,
+            "only the previously unknown price is added"
+        );
+        assert_eq!(
+            pricing.models["provider/operator-owned"].input_per_mtok,
+            900_000
+        );
+        assert_eq!(pricing.models["provider/unknown"], catalog_price);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -6276,10 +8193,70 @@ mod tests {
             .unwrap();
         assert_eq!(retained["tool"], json!(false));
         assert_eq!(retained["context_window"], json!(8192));
+        let preset = models
+            .iter()
+            .find(|model| model["model"] == json!("kimi-k2.6"))
+            .unwrap();
+        assert_eq!(preset["context_window"], json!(262_144));
+        assert_eq!(preset["max_output_tokens"], json!(262_144));
+        assert_eq!(
+            preset[MAX_OUTPUT_TOKENS_SOURCE_KEY],
+            json!(LIMIT_SOURCE_BUILTIN_PRESET)
+        );
         assert!(std::fs::read_to_string(&inner.config_path)
             .unwrap()
             .contains("kimi-k2.6"));
 
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn provider_mutations_protect_home_agent_direct_and_quota_references() {
+        let root = scratch_home("provider-direct-quota-references");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [
+                {"model": "home-direct"},
+                {"model": "agent-direct"},
+                {"model": "quota"},
+                {"model": "keep"}
+            ]
+        });
+        draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": {"upstream": "provider", "model": "home-direct"}
+        });
+        draft["router"]["quota_accounts"] = json!([{"upstream": "provider", "model": "quota"}]);
+        draft["agent_routes"]["codex"] = json!({
+            "mode": "inherit",
+            "direct_target": {"upstream": "provider", "model": "agent-direct"}
+        });
+        let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+
+        let references = provider_references(&inner, "provider");
+        assert!(
+            references.contains(&"主页/单独路由".to_owned()),
+            "{references:?}"
+        );
+        assert!(
+            references.contains(&"Agent/codex/单独路由".to_owned()),
+            "{references:?}"
+        );
+        assert!(
+            references.contains(&"主页/额度优先#1".to_owned()),
+            "{references:?}"
+        );
+
+        let before = inner.draft.clone();
+        let error = replace_provider_models(&mut inner, "provider", vec!["keep".to_owned()])
+            .expect_err("every direct and quota target protects its model");
+        assert!(
+            error.contains("单独路由") && error.contains("额度优先"),
+            "{error}"
+        );
+        assert_eq!(inner.draft, before);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -6907,6 +8884,52 @@ mod tests {
     }
 
     #[test]
+    fn restoring_one_agent_to_home_clears_every_routing_override() {
+        let root = scratch_home("agent-restore-clears-routing-overrides");
+        let config_path = root.join("token-station.json");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "home"}, {"model": "agent"}]
+        });
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            config_path.clone(),
+            draft,
+            None,
+        )))));
+        set_direct_route(app.state(), "provider".to_owned(), "home".to_owned(), None).unwrap();
+        set_direct_route(
+            app.state(),
+            "provider".to_owned(),
+            "agent".to_owned(),
+            Some("codex".to_owned()),
+        )
+        .unwrap();
+        set_routing_mode(app.state(), "direct".to_owned(), Some("codex".to_owned())).unwrap();
+
+        let restored =
+            set_agent_route_mode(app.state(), "codex".to_owned(), "inherit".to_owned()).unwrap();
+
+        assert_eq!(restored.agent_routes["codex"].routing_mode, "tiered");
+        assert_eq!(
+            restored.agent_routes["codex"]
+                .direct_target
+                .as_ref()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("home")
+        );
+        save_agent_routes(app.state()).unwrap();
+        let saved = ClientConfig::load(&config_path).unwrap();
+        assert!(saved.agent_routes["codex"].routing_mode.is_none());
+        assert!(saved.agent_routes["codex"].direct_target.is_none());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn returning_an_incomplete_agent_draft_to_inherit_cannot_poison_home_config() {
         let root = scratch_home("agent-route-incomplete");
         let mut inner = AppInner::new(
@@ -6942,6 +8965,310 @@ mod tests {
     }
 
     #[test]
+    fn applying_direct_agent_route_ignores_and_preserves_incomplete_tier_draft() {
+        let root = scratch_home("agent-direct-with-incomplete-tier-draft");
+        let config_path = root.join("token-station.json");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "direct"}, {"model": "tier"}]
+        });
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            config_path.clone(),
+            draft,
+            None,
+        )))));
+        manage_test_agent_state(&app, &root);
+
+        set_agent_route_mode(app.state(), "codex".to_owned(), "custom".to_owned()).unwrap();
+        set_agent_tier(
+            app.state(),
+            "codex".to_owned(),
+            "high".to_owned(),
+            Some("provider".to_owned()),
+            Some("tier".to_owned()),
+        )
+        .unwrap();
+        set_direct_route(
+            app.state(),
+            "provider".to_owned(),
+            "direct".to_owned(),
+            Some("codex".to_owned()),
+        )
+        .unwrap();
+        set_routing_mode(app.state(), "direct".to_owned(), Some("codex".to_owned())).unwrap();
+
+        let applied = restart_agent_route(app.state(), app.state(), "codex".to_owned())
+            .expect("Direct apply must not promote an unrelated incomplete tier draft");
+
+        assert_eq!(applied.agent_routes["codex"].routing_mode, "direct");
+        assert_eq!(
+            applied.agent_routes["codex"]
+                .direct_target
+                .as_ref()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("direct")
+        );
+        let saved = ClientConfig::load(&config_path).expect("applied Direct route persists");
+        let saved_route = &saved.agent_routes["codex"];
+        assert_eq!(saved_route.routing_mode, Some(HostRoutingMode::Direct));
+        assert_eq!(saved_route.direct_target.as_ref().unwrap().model, "direct");
+        assert!(saved_route.custom_route.is_none());
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            let tier_draft = &inner.agent_route_drafts["codex"];
+            assert_eq!(tier_draft["high"].model.as_deref(), Some("tier"));
+            assert!(tier_draft["mid"].model.is_none());
+            assert!(tier_draft["low"].model.is_none());
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn restarting_one_agent_route_rejects_an_apply_already_in_progress_before_saving() {
+        let root = scratch_home("agent-route-during-apply");
+        let config_path = root.join("token-station.json");
+        let mut draft = gateway_template_for_test(&root);
+        draft["server"]["listen"] = json!("127.0.0.1:0");
+        draft["server"]["auth"] = json!(false);
+        draft["data"]["metrics"] = json!(false);
+        draft["upstreams"]["local"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "models": [{"model": "small"}]
+        });
+        draft["router"]["pools"] = json!({
+            TIER_LOW: [{"upstream": "local", "model": "small"}]
+        });
+        draft["router"]["default_pool"] = json!(TIER_LOW);
+        let config: ClientConfig = serde_json::from_value(draft.clone()).unwrap();
+        let running = prepare_server(config)
+            .unwrap()
+            .bind()
+            .unwrap()
+            .publish(7)
+            .unwrap();
+        let mut inner = AppInner::new(config_path.clone(), draft, None);
+        inner.server = ServerLifecycle::Applying {
+            generation: 8,
+            revision: 2,
+            old: running,
+        };
+        let saved_before = inner.config_state.saved_revision();
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        manage_test_agent_state(&app, &root);
+
+        let error = match restart_agent_route(app.state(), app.state(), "opencode".to_owned()) {
+            Ok(_) => panic!("an already frozen apply cannot accept another Agent route revision"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("apply_in_progress"), "{error}");
+        let state = app.state::<AppStateManaged>();
+        let mut inner = state.0.lock().unwrap();
+        assert_eq!(inner.config_state.saved_revision(), saved_before);
+        let lifecycle = std::mem::replace(
+            &mut inner.server,
+            ServerLifecycle::Stopped { generation: 9 },
+        );
+        drop(inner);
+        let ServerLifecycle::Applying { old, .. } = lifecycle else {
+            panic!("the rejected command must leave the applying runtime in place");
+        };
+        old.drain_and_shutdown();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn restarting_one_agent_route_rejects_draft_only_targets_before_saving() {
+        let root = scratch_home("agent-route-draft-only-target");
+        let config_path = root.join("token-station.json");
+        let (serving_draft, running) = published_agent_route_fixture(&root);
+        let serving_config: ClientConfig = serde_json::from_value(serving_draft.clone()).unwrap();
+        serving_config.save(&config_path).unwrap();
+        let persisted_before = std::fs::read(&config_path).unwrap();
+        let mut latest_draft = serving_draft.clone();
+        latest_draft["upstreams"]["draft_only"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://draft-only.example/v1",
+            "models": [{"model": "new-model"}]
+        });
+        latest_draft["agent_routes"]["opencode"] = json!({
+            "mode": "inherit",
+            "routing_mode": "direct",
+            "direct_target": {"upstream": "draft_only", "model": "new-model"}
+        });
+        let mut inner =
+            AppInner::new_with_saved(config_path.clone(), latest_draft, serving_draft, None);
+        inner.server = ServerLifecycle::Running {
+            generation: 7,
+            server: running,
+            apply_error: None,
+        };
+        let saved_before = inner.config_state.saved_revision();
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        manage_test_agent_state(&app, &root);
+
+        let outcome = restart_agent_route(app.state(), app.state(), "opencode".to_owned());
+        let state = app.state::<AppStateManaged>();
+        let mut inner = state.0.lock().unwrap();
+        let saved_after = inner.config_state.saved_revision();
+        let override_after = match &inner.server {
+            ServerLifecycle::Running { server, .. } => server
+                .agent_router_override("opencode")
+                .map(|router| router.cloned()),
+            _ => panic!("a rejected Agent route must leave the proxy running"),
+        };
+        let lifecycle = std::mem::replace(
+            &mut inner.server,
+            ServerLifecycle::Stopped { generation: 8 },
+        );
+        drop(inner);
+        let ServerLifecycle::Running { server, .. } = lifecycle else {
+            unreachable!()
+        };
+        server.drain_and_shutdown();
+
+        let error = match outcome {
+            Err(error) => error,
+            Ok(_) => panic!("a draft-only target cannot be installed into the old Gateway"),
+        };
+        assert!(error.contains("draft_only/new-model"), "{error}");
+        assert!(error.contains("全量应用"), "{error}");
+        assert_eq!(saved_after, saved_before);
+        assert_eq!(std::fs::read(&config_path).unwrap(), persisted_before);
+        assert_eq!(override_after, None);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn restarting_one_agent_route_prepares_the_router_before_saving() {
+        let root = scratch_home("agent-route-invalid-router");
+        let config_path = root.join("token-station.json");
+        let (serving_draft, running) = published_agent_route_fixture(&root);
+        let serving_config: ClientConfig = serde_json::from_value(serving_draft.clone()).unwrap();
+        serving_config.save(&config_path).unwrap();
+        let persisted_before = std::fs::read(&config_path).unwrap();
+        let mut latest_draft = serving_draft.clone();
+        latest_draft["router"]["assumed_context_window"] = json!(0);
+        latest_draft["agent_routes"]["opencode"] = json!({
+            "mode": "inherit",
+            "routing_mode": "direct",
+            "direct_target": {"upstream": "local", "model": "small"}
+        });
+        let mut inner =
+            AppInner::new_with_saved(config_path.clone(), latest_draft, serving_draft, None);
+        inner.server = ServerLifecycle::Running {
+            generation: 7,
+            server: running,
+            apply_error: None,
+        };
+        let saved_before = inner.config_state.saved_revision();
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        manage_test_agent_state(&app, &root);
+
+        let outcome = restart_agent_route(app.state(), app.state(), "opencode".to_owned());
+        let state = app.state::<AppStateManaged>();
+        let mut inner = state.0.lock().unwrap();
+        let saved_after = inner.config_state.saved_revision();
+        let override_after = match &inner.server {
+            ServerLifecycle::Running { server, .. } => server
+                .agent_router_override("opencode")
+                .map(|router| router.cloned()),
+            _ => panic!("an invalid Agent router must leave the proxy running"),
+        };
+        let lifecycle = std::mem::replace(
+            &mut inner.server,
+            ServerLifecycle::Stopped { generation: 8 },
+        );
+        drop(inner);
+        let ServerLifecycle::Running { server, .. } = lifecycle else {
+            unreachable!()
+        };
+        server.drain_and_shutdown();
+
+        let error = match outcome {
+            Err(error) => error,
+            Ok(_) => panic!("an invalid router must fail during the prepare phase"),
+        };
+        assert!(error.contains("assumed_context_window"), "{error}");
+        assert_eq!(saved_after, saved_before);
+        assert_eq!(std::fs::read(&config_path).unwrap(), persisted_before);
+        assert_eq!(override_after, None);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn restarting_one_agent_route_commits_and_installs_one_prevalidated_plan() {
+        let root = scratch_home("agent-route-prevalidated-success");
+        let config_path = root.join("token-station.json");
+        let (serving_draft, running) = published_agent_route_fixture(&root);
+        let serving_config: ClientConfig = serde_json::from_value(serving_draft.clone()).unwrap();
+        serving_config.save(&config_path).unwrap();
+        let mut latest_draft = serving_draft.clone();
+        latest_draft["agent_routes"]["opencode"] = json!({
+            "mode": "inherit",
+            "routing_mode": "direct",
+            "direct_target": {"upstream": "local", "model": "small"}
+        });
+        let mut inner =
+            AppInner::new_with_saved(config_path.clone(), latest_draft, serving_draft, None);
+        inner.server = ServerLifecycle::Running {
+            generation: 7,
+            server: running,
+            apply_error: None,
+        };
+        let saved_before = inner.config_state.saved_revision();
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        manage_test_agent_state(&app, &root);
+
+        let applied = restart_agent_route(app.state(), app.state(), "opencode".to_owned())
+            .expect("a target in the serving snapshot can be prepared, saved, and installed");
+        let state = app.state::<AppStateManaged>();
+        let mut inner = state.0.lock().unwrap();
+        assert!(inner.config_state.saved_revision() > saved_before);
+        let installed = match &inner.server {
+            ServerLifecycle::Running { server, .. } => server
+                .agent_router_override("opencode")
+                .and_then(|router| router)
+                .cloned()
+                .expect("the committed router is recorded on the running instance"),
+            _ => panic!("the successful Agent reload must leave the proxy running"),
+        };
+        let persisted = ClientConfig::load(&config_path).unwrap();
+        assert_eq!(
+            Some(installed),
+            persisted.custom_router_for_agent("opencode").unwrap()
+        );
+        assert_eq!(
+            applied.agent_routes["opencode"]
+                .direct_target
+                .as_ref()
+                .and_then(|target| target.model.as_deref()),
+            Some("small")
+        );
+        let lifecycle = std::mem::replace(
+            &mut inner.server,
+            ServerLifecycle::Stopped { generation: 8 },
+        );
+        drop(inner);
+        let ServerLifecycle::Running { server, .. } = lifecycle else {
+            unreachable!()
+        };
+        server.drain_and_shutdown();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn agent_route_commands_save_one_profile_and_apply_home_without_deleting_its_draft() {
         let root = scratch_home("agent-route-commands");
         let mut inner = AppInner::new(
@@ -6966,13 +9293,31 @@ mod tests {
             set_agent_route_mode(app.state(), "codex".to_string(), "custom".to_string()).unwrap();
         assert_eq!(custom.agent_routes["codex"].mode, "custom");
         save_agent_routes(app.state()).unwrap();
+        for agent_id in ["codex", "opencode"] {
+            set_direct_route(
+                app.state(),
+                "provider".to_owned(),
+                "model".to_owned(),
+                Some(agent_id.to_owned()),
+            )
+            .unwrap();
+            set_routing_mode(app.state(), "direct".to_owned(), Some(agent_id.to_owned())).unwrap();
+        }
         let inherited = apply_home_route_to_all_agents(app.state()).unwrap();
         assert!(inherited
             .agent_routes
             .values()
             .all(|profile| profile.mode == "inherit"));
+        assert!(inherited
+            .agent_routes
+            .values()
+            .all(|route| route.routing_mode == "tiered" && route.direct_target.is_none()));
         let saved = ClientConfig::load(&root.join("token-station.json")).unwrap();
         assert!(saved.agent_routes["codex"].custom_route.is_some());
+        for agent_id in ["codex", "opencode"] {
+            assert!(saved.agent_routes[agent_id].routing_mode.is_none());
+            assert!(saved.agent_routes[agent_id].direct_target.is_none());
+        }
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -7112,6 +9457,295 @@ mod tests {
     }
 
     #[test]
+    fn ensure_serve_running_starts_a_stopped_proxy_and_waits_until_reachable() {
+        let root = scratch_home("ensure-stopped");
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            gateway_template_for_test(&root),
+            None,
+        );
+        inner.draft["server"]["listen"] = json!("127.0.0.1:0");
+        inner.draft["server"]["auth"] = json!(false);
+        inner.draft["data"]["metrics"] = json!(false);
+        inner.draft["upstreams"]["local"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "models": [{"model": "small"}]
+        });
+        inner
+            .set_tier_value(TIER_LOW, Some("local".into()), Some("small".into()))
+            .unwrap();
+        let app = tauri::test::mock_app();
+        manage_test_agent_state(&app, &root);
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+
+        let ready = tauri::async_runtime::block_on(ensure_serve_running_with(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            prepare_server,
+            Duration::from_secs(30),
+        ))
+        .unwrap();
+
+        assert_eq!(ready.serve.phase, ServePhase::Running);
+        assert_eq!(ready.serve.app_runtime, AppRuntime::Running);
+        assert!(ready.serve.listener_reachable);
+        let instance_id = ready.serve.instance_id.clone();
+        let running_revision = ready.serve.running_revision;
+        let prepare_calls = Arc::new(AtomicUsize::new(0));
+        let calls_in_prepare = Arc::clone(&prepare_calls);
+        let idempotent = tauri::async_runtime::block_on(ensure_serve_running_with(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            move |_config| {
+                calls_in_prepare.fetch_add(1, Ordering::SeqCst);
+                Err(StartFailure::new("duplicate", "must not restart"))
+            },
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+        assert_eq!(idempotent.serve.instance_id, instance_id);
+        assert_eq!(idempotent.serve.running_revision, running_revision);
+        assert_eq!(prepare_calls.load(Ordering::SeqCst), 0);
+        begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+        wait_for_serve_phase(&app, ServePhase::Stopped);
+
+        {
+            let state = app.state::<AppStateManaged>();
+            state.0.lock().unwrap().server = ServerLifecycle::Failed {
+                generation: 9,
+                listen: "127.0.0.1:0".to_owned(),
+                error: "previous fixture failure".to_owned(),
+            };
+        }
+        let recovered = tauri::async_runtime::block_on(ensure_serve_running_with(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            prepare_server,
+            Duration::from_secs(30),
+        ))
+        .unwrap();
+        assert!(recovered.serve.listener_reachable);
+        begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+        wait_for_serve_phase(&app, ServePhase::Stopped);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn ensure_serve_running_joins_starting_and_rejects_a_failed_apply() {
+        let root = scratch_home("ensure-join");
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            gateway_template_for_test(&root),
+            None,
+        );
+        inner.draft["server"]["listen"] = json!("127.0.0.1:0");
+        inner.draft["server"]["auth"] = json!(false);
+        inner.draft["data"]["metrics"] = json!(false);
+        inner.draft["upstreams"]["local"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "models": [{"model": "small"}]
+        });
+        inner
+            .set_tier_value(TIER_LOW, Some("local".into()), Some("small".into()))
+            .unwrap();
+        // This test owns the Starting/Applying join contract. Build the real
+        // Gateway before its bounded lifecycle window so parallel Wasm cold
+        // starts cannot turn a join assertion into a machine-speed benchmark.
+        let prepared = prepare_server(inner.materialize().unwrap()).unwrap();
+        let app = tauri::test::mock_app();
+        manage_test_agent_state(&app, &root);
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            move |_config| {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(prepared)
+            },
+        )
+        .unwrap();
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fixture is Starting");
+        let (joined, ()) = tauri::async_runtime::block_on(async {
+            tokio::join! {
+                biased;
+                ensure_serve_running_with(
+                    app.handle().clone(),
+                    app.state::<AppStateManaged>().inner(),
+                    |_config| panic!("joining Starting must not prepare another runtime"),
+                    Duration::from_secs(30),
+                ),
+                async move { release_tx.send(()).unwrap() },
+            }
+        });
+        let joined = joined.unwrap();
+        assert!(joined.serve.listener_reachable);
+
+        let (apply_started_tx, apply_started_rx) = mpsc::channel();
+        let (apply_release_tx, apply_release_rx) = mpsc::channel();
+        begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            move |_config| {
+                apply_started_tx.send(()).unwrap();
+                apply_release_rx.recv().unwrap();
+                Err(StartFailure::new("apply_fixture", "candidate rejected"))
+            },
+        )
+        .unwrap();
+        apply_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fixture is Applying");
+        let (outcome, ()) = tauri::async_runtime::block_on(async {
+            tokio::join! {
+                biased;
+                ensure_serve_running_with(
+                    app.handle().clone(),
+                    app.state::<AppStateManaged>().inner(),
+                    |_config| panic!("joining Applying must not prepare another runtime"),
+                    Duration::from_secs(2),
+                ),
+                async move { apply_release_tx.send(()).unwrap() },
+            }
+        });
+        let error = match outcome {
+            Ok(_) => {
+                panic!("a failed apply must not authorize Agent connection through the old runtime")
+            }
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("ensure_serve_running_start_failed"),
+            "{error}"
+        );
+        assert!(error.contains("apply_fixture"), "{error}");
+
+        begin_serve_stop(app.handle().clone(), app.state::<AppStateManaged>().inner());
+        wait_for_serve_phase(&app, ServePhase::Stopped);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn ensure_serve_running_fails_closed_for_stopping_timeout_failure_and_generation_change() {
+        let root = scratch_home("ensure-failures");
+        let app = tauri::test::mock_app();
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
+        inner.server = ServerLifecycle::Stopping {
+            generation: 4,
+            listen: "127.0.0.1:8787".to_owned(),
+            draining: true,
+        };
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        let stopping = match tauri::async_runtime::block_on(ensure_serve_running_with(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            |_config| panic!("Stopping must fail before preparation"),
+            Duration::from_millis(50),
+        )) {
+            Ok(_) => panic!("Stopping is not automatically reversed"),
+            Err(error) => error,
+        };
+        assert!(
+            stopping.contains("ensure_serve_running_stopping"),
+            "{stopping}"
+        );
+
+        {
+            let state = app.state::<AppStateManaged>();
+            state.0.lock().unwrap().server = ServerLifecycle::Starting {
+                generation: 5,
+                listen: "127.0.0.1:8787".to_owned(),
+                revision: 1,
+            };
+        }
+        let timeout = match tauri::async_runtime::block_on(ensure_serve_running_with(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            |_config| panic!("joining Starting must not prepare"),
+            Duration::from_millis(30),
+        )) {
+            Ok(_) => panic!("an unfinished generation is bounded"),
+            Err(error) => error,
+        };
+        assert!(
+            timeout.contains("ensure_serve_running_timeout"),
+            "{timeout}"
+        );
+
+        {
+            let state = app.state::<AppStateManaged>();
+            state.0.lock().unwrap().server = ServerLifecycle::Starting {
+                generation: 6,
+                listen: "127.0.0.1:8787".to_owned(),
+                revision: 2,
+            };
+        }
+        let fail_app = app.handle().clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            fail_app.state::<AppStateManaged>().0.lock().unwrap().server =
+                ServerLifecycle::Failed {
+                    generation: 6,
+                    listen: "127.0.0.1:8787".to_owned(),
+                    error: "fixture failed".to_owned(),
+                };
+        });
+        let failed = match tauri::async_runtime::block_on(ensure_serve_running_with(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            |_config| panic!("joining Starting must not prepare"),
+            Duration::from_secs(1),
+        )) {
+            Ok(_) => panic!("the lifecycle failure is returned"),
+            Err(error) => error,
+        };
+        assert!(failed.contains("fixture failed"), "{failed}");
+
+        {
+            let state = app.state::<AppStateManaged>();
+            state.0.lock().unwrap().server = ServerLifecycle::Starting {
+                generation: 7,
+                listen: "127.0.0.1:8787".to_owned(),
+                revision: 3,
+            };
+        }
+        let replace_app = app.handle().clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            replace_app
+                .state::<AppStateManaged>()
+                .0
+                .lock()
+                .unwrap()
+                .server = ServerLifecycle::Stopped { generation: 8 };
+        });
+        let interrupted = match tauri::async_runtime::block_on(ensure_serve_running_with(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            |_config| panic!("joining Starting must not prepare"),
+            Duration::from_secs(1),
+        )) {
+            Ok(_) => panic!("a replacement generation invalidates the wait"),
+            Err(error) => error,
+        };
+        assert!(
+            interrupted.contains("ensure_serve_running_interrupted"),
+            "{interrupted}"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn startup_preparation_is_single_flight_lock_free_and_cancellable() {
         let root = scratch_home("nonblocking-start");
         let mut inner = AppInner::new(
@@ -7196,6 +9830,20 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("gateway_init: fixture failure")));
+
+        let panicking = begin_serve_start(
+            app.handle().clone(),
+            app.state::<AppStateManaged>().inner(),
+            |_config| panic!("fixture preparation panic"),
+        )
+        .unwrap();
+        assert_eq!(panicking.serve.phase, ServePhase::Starting);
+        let panicked = wait_for_serve_phase(&app, ServePhase::Error);
+        assert!(panicked
+            .serve
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("startup_task: 后台启动任务异常退出")));
 
         let (retry_started_tx, retry_started_rx) = mpsc::channel();
         let (retry_release_tx, retry_release_rx) = mpsc::channel();
@@ -7301,6 +9949,7 @@ mod tests {
         }
         inner.observe_draft().unwrap();
         let app = tauri::test::mock_app();
+        manage_test_agent_state(&app, &root);
         assert!(app.manage(AppStateManaged(Mutex::new(inner))));
 
         begin_serve_start(
@@ -7634,12 +10283,97 @@ mod tests {
     }
 
     #[test]
+    fn changing_provider_identity_clears_only_that_providers_scoped_prices() {
+        let root = scratch_home("provider-identity-pricing");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://old.example/v1",
+            "models": [{"model": "shared", "context_window": 128000}]
+        });
+        draft["pricing"] = json!({
+            "version": 7,
+            "models": {
+                "fixture/shared": {"input_per_mtok": 200000, "output_per_mtok": 600000},
+                "other/shared": {"input_per_mtok": 900000, "output_per_mtok": 1200000},
+                "shared": {"input_per_mtok": 100000, "output_per_mtok": 300000}
+            }
+        });
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            draft,
+            None,
+        )))));
+
+        edit_provider(
+            app.state(),
+            "fixture".to_owned(),
+            "https://new.example/v1".to_owned(),
+            None,
+        )
+        .expect("a provider identity may be edited");
+
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
+        let pricing = draft_price_table(&inner).unwrap();
+        assert_eq!(pricing.version, 8);
+        assert!(!pricing.models.contains_key("fixture/shared"));
+        assert!(pricing.models.contains_key("other/shared"));
+        assert!(pricing.models.contains_key("shared"));
+        drop(inner);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn saving_unchanged_provider_credentials_preserves_scoped_price() {
+        let root = scratch_home("provider-identity-noop");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://same.example/v1",
+            "auth": {"slot": "provider_api_key", "env": "FIXTURE_API_KEY"},
+            "models": [{"model": "shared", "context_window": 128000}]
+        });
+        draft["pricing"] = json!({
+            "version": 7,
+            "models": {
+                "fixture/shared": {"input_per_mtok": 200000, "output_per_mtok": 600000}
+            }
+        });
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            draft,
+            None,
+        )))));
+        edit_provider_with_credential(
+            app.state(),
+            "fixture".to_owned(),
+            "https://same.example/v1".to_owned(),
+            None,
+            "env".to_owned(),
+            Some("FIXTURE_API_KEY".to_owned()),
+        )
+        .expect("submitting unchanged provider details is a no-op identity update");
+
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
+        let pricing = draft_price_table(&inner).unwrap();
+        assert_eq!(pricing.version, 7);
+        assert!(pricing.models.contains_key("fixture/shared"));
+        drop(inner);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn desktop_commands_cover_provider_routing_settings_server_and_read_only_views() {
         let root = scratch_home("command-lifecycle");
         let mut draft = gateway_template_for_test(&root);
         draft["data"]["dir"] = json!(root.join("data"));
         draft["server"]["listen"] = json!("127.0.0.1:0");
         let app = tauri::test::mock_app();
+        manage_test_agent_state(&app, &root);
         assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
             root.join("token-station.json"),
             draft,
@@ -8127,6 +10861,22 @@ mod tests {
     }
 
     #[test]
+    fn historical_home_mode_without_top_level_routing_remains_visible() {
+        let root = scratch_home("historical-home-routing-mode");
+        let mut draft = template_for_test(&root);
+        draft["router"]["routing_mode"] = json!("quota_first");
+
+        let view = AppInner::new(root.join("token-station.json"), draft, None).snapshot();
+
+        assert_eq!(view.routing_mode, "quota_first");
+        assert!(view
+            .agent_routes
+            .values()
+            .all(|route| route.routing_mode == "quota_first"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn routing_mode_switches_per_agent_without_touching_home_or_siblings() {
         let root = scratch_home("per-agent-routing-mode");
         let inner = AppInner::new(
@@ -8157,6 +10907,12 @@ mod tests {
                 .all(|r| r.routing_mode == "quota_first"),
             "un-overridden Agents follow the new Home default"
         );
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            assert_eq!(inner.draft["routing"]["mode"], json!("quota_first"));
+            assert_eq!(inner.draft["router"]["routing_mode"], json!("quota_first"));
+        }
 
         // Pin one Agent back to tiered while Home stays quota-first. Only that
         // Agent changes; Home and its siblings keep quota-first.
@@ -8194,6 +10950,12 @@ mod tests {
                 .all(|(_, r)| r.routing_mode == "tiered"),
             "un-pinned siblings track the tiered Home again"
         );
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            assert_eq!(inner.draft["routing"]["mode"], json!("tiered"));
+            assert_eq!(inner.draft["router"]["routing_mode"], json!("tiered"));
+        }
 
         // Switching the pinned Agent to quota-first writes the explicit value.
         let view = set_routing_mode(
@@ -8205,6 +10967,16 @@ mod tests {
         assert_eq!(view.agent_routes["codex"].routing_mode, "quota_first");
         assert_eq!(view.routing_mode, "tiered", "Home stays tiered");
 
+        let direct = set_routing_mode(app.state(), "direct".to_owned(), None).unwrap();
+        assert_eq!(direct.routing_mode, "direct");
+        assert_eq!(direct.agent_routes["codex"].routing_mode, "quota_first");
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            assert_eq!(inner.draft["routing"]["mode"], json!("direct"));
+            assert_eq!(inner.draft["router"]["routing_mode"], json!("tiered"));
+        }
+
         // Unknown Agent is rejected.
         assert!(set_routing_mode(
             app.state(),
@@ -8213,6 +10985,251 @@ mod tests {
         )
         .is_err());
 
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn direct_route_targets_are_validated_and_isolated_between_home_and_agents() {
+        let root = scratch_home("direct-route-targets");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "home"}, {"model": "agent"}]
+        });
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            draft,
+            None,
+        )))));
+
+        let home =
+            set_direct_route(app.state(), "provider".to_owned(), "home".to_owned(), None).unwrap();
+        let home_target = home.direct_target.expect("Home target is public state");
+        assert_eq!(
+            (home_target.upstream.as_str(), home_target.model.as_deref()),
+            ("provider", Some("home"))
+        );
+        assert!(home.agent_routes.values().all(|route| route
+            .direct_target
+            .as_ref()
+            .is_some_and(|target| target.model.as_deref() == Some("home"))));
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            assert_eq!(inner.draft["routing"]["mode"], json!("tiered"));
+            assert_eq!(
+                inner.draft["routing"]["direct_target"],
+                json!({"upstream": "provider", "model": "home"})
+            );
+            assert!(inner.draft["router"].get("direct_target").is_none());
+        }
+
+        let codex = set_direct_route(
+            app.state(),
+            "provider".to_owned(),
+            "agent".to_owned(),
+            Some("codex".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(
+            codex.direct_target.as_ref().unwrap().model.as_deref(),
+            Some("home")
+        );
+        assert_eq!(
+            codex.agent_routes["codex"]
+                .direct_target
+                .as_ref()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("agent")
+        );
+        assert_eq!(
+            codex.agent_routes["opencode"]
+                .direct_target
+                .as_ref()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("home")
+        );
+        {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            assert_eq!(
+                inner.draft["agent_routes"]["codex"]["direct_target"],
+                json!({"upstream": "provider", "model": "agent"})
+            );
+            assert_eq!(inner.draft["routing"]["direct_target"]["model"], "home");
+        }
+
+        let before_revision = codex.draft_revision;
+        let error = match set_direct_route(
+            app.state(),
+            "provider".to_owned(),
+            "missing".to_owned(),
+            Some("codex".to_owned()),
+        ) {
+            Ok(_) => panic!("an unmanaged model is rejected transactionally"),
+            Err(error) => error,
+        };
+        assert!(error.contains("未配置模型"), "{error}");
+        let unchanged = get_state(app.state());
+        assert_eq!(unchanged.draft_revision, before_revision);
+        assert_eq!(
+            unchanged.agent_routes["codex"]
+                .direct_target
+                .as_ref()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("agent")
+        );
+        assert!(!root.join("token-station.json").exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn an_explicit_incomplete_agent_direct_target_does_not_inherit_home() {
+        let root = scratch_home("agent-incomplete-direct-target");
+        let mut draft = template_for_test(&root);
+        draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": {"upstream": "provider", "model": "home"}
+        });
+        draft["agent_routes"]["codex"] = json!({
+            "mode": "inherit",
+            "direct_target": {"upstream": "provider", "model": null}
+        });
+
+        let view = AppInner::new(root.join("token-station.json"), draft, None).snapshot();
+
+        assert_eq!(
+            view.direct_target.as_ref().unwrap().model.as_deref(),
+            Some("home")
+        );
+        let wire = serde_json::to_value(&view).expect("StateView serializes");
+        assert_eq!(
+            wire["agent_routes"]["codex"]["direct_target"],
+            json!({"upstream": "provider", "model": null}),
+            "a known Agent provider must remain selected while its model is incomplete"
+        );
+        assert!(view.agent_routes["codex"].config_error.is_some());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn direct_config_saves_without_a_dummy_tier_pool() {
+        let root = scratch_home("direct-save");
+        let mut draft = template_for_test(&root);
+        draft["routing"] = json!({"mode": "direct"});
+        draft["router"]["routing_mode"] = json!("tiered");
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "selected"}]
+        });
+        draft["routing"]["direct_target"] = json!({"upstream": "provider", "model": "selected"});
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            draft,
+            None,
+        )))));
+
+        let saved = save_config(app.state()).expect("direct mode needs no synthetic tier pool");
+
+        assert_eq!(saved.routing_mode, "direct");
+        assert_eq!(
+            saved.direct_target.as_ref().unwrap().model.as_deref(),
+            Some("selected")
+        );
+        assert!(root.join("token-station.json").exists());
+        let persisted: Value = serde_json::from_slice(
+            &std::fs::read(root.join("token-station.json")).expect("saved config is readable"),
+        )
+        .expect("saved config remains JSON");
+        assert_eq!(persisted["routing"]["mode"], json!("direct"));
+        assert_eq!(persisted["router"]["routing_mode"], json!("tiered"));
+        assert!(persisted["router"].get("direct_target").is_none());
+        let config_path = root.join("token-station.json");
+        let (reloaded_draft, reloaded_saved, load_error) = load_draft_state(
+            &config_path,
+            &root.join("token-station-data"),
+            &root.join("plugins"),
+        );
+        assert!(load_error.is_none());
+        assert_eq!(reloaded_draft["routing"], persisted["routing"]);
+        let reloaded =
+            AppInner::new_with_saved(config_path, reloaded_draft, reloaded_saved, load_error)
+                .snapshot();
+        assert!(!reloaded.config_dirty);
+        assert_eq!(reloaded.routing_mode, "direct");
+        assert_eq!(
+            reloaded.direct_target.as_ref().unwrap().model.as_deref(),
+            Some("selected")
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn saving_agent_tier_edits_preserves_its_direct_target_and_routing_mode() {
+        let root = scratch_home("agent-direct-preserved");
+        let mut inner = AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        );
+        inner.draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://example.com/v1",
+            "models": [{"model": "selected"}]
+        });
+        for pool in [TIER_HIGH, TIER_MID, TIER_LOW] {
+            inner
+                .set_tier_value(
+                    pool,
+                    Some("provider".to_owned()),
+                    Some("selected".to_owned()),
+                )
+                .unwrap();
+        }
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        set_direct_route(
+            app.state(),
+            "provider".to_owned(),
+            "selected".to_owned(),
+            Some("codex".to_owned()),
+        )
+        .unwrap();
+        set_routing_mode(app.state(), "direct".to_owned(), Some("codex".to_owned())).unwrap();
+        set_agent_route_mode(app.state(), "codex".to_owned(), "custom".to_owned()).unwrap();
+        for slot in ["high", "mid", "low"] {
+            set_agent_tier(
+                app.state(),
+                "codex".to_owned(),
+                slot.to_owned(),
+                Some("provider".to_owned()),
+                Some("selected".to_owned()),
+            )
+            .unwrap();
+        }
+
+        let saved = save_agent_routes(app.state()).unwrap();
+
+        assert_eq!(saved.agent_routes["codex"].routing_mode, "direct");
+        assert_eq!(
+            saved.agent_routes["codex"]
+                .direct_target
+                .as_ref()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("selected")
+        );
         std::fs::remove_dir_all(root).ok();
     }
 

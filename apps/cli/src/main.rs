@@ -102,7 +102,7 @@ enum UpstreamCommand {
         /// Base URL. No credentials in it — refused otherwise.
         #[arg(long)]
         base_url: String,
-        /// Repeatable: `<model>[,tool][,vision][,json-schema][,ctx=N]`.
+        /// Repeatable: `<model>[,tool][,vision][,json-schema][,ctx=N][,out=N]`.
         #[arg(long = "model", required = true)]
         models: Vec<String>,
         /// Where the credential lives: `keyring` | `env:<VAR>` | `file:<PATH>`.
@@ -628,11 +628,9 @@ fn serve(config_path: &Path) -> Result<(), String> {
 
     // The `/admin/*` data plane answers from this snapshot of the running
     // config — taken here, before anything moves out of `config`.
-    let admin = std::sync::Arc::new(token_station_cli::admin::AdminContext {
-        data_dir: config.data.dir.clone(),
-        router: config.router.clone(),
-        plugins: config.plugins.clone(),
-    });
+    let admin = std::sync::Arc::new(token_station_cli::admin::AdminContext::from_config(
+        &config,
+    )?);
 
     // Authentication is on by default; the virtual key exists before the port does.
     let key = if config.server.auth {

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getRecentReceipts, type ReceiptFeaturesView, type ReceiptView } from "../api";
 import RecentReceipts from "./RecentReceipts";
+import { ErrorToastProvider } from "./ErrorToast";
 
 vi.mock("../api", async (loadOriginal) => {
   const original = await loadOriginal<typeof import("../api")>();
@@ -232,7 +233,7 @@ describe("RecentReceipts", () => {
       .mockResolvedValueOnce([receipt(1)])
       .mockRejectedValueOnce(new Error("database busy"))
       .mockResolvedValueOnce([receipt(2)]);
-    render(<RecentReceipts />);
+    render(<ErrorToastProvider><RecentReceipts /></ErrorToastProvider>);
 
     expect(await screen.findByText("provider-final/model-final")).toBeInTheDocument();
     const updatedAt = screen.getByTestId("receipt-updated-at");
@@ -241,7 +242,9 @@ describe("RecentReceipts", () => {
 
     await user.click(refreshButton);
 
-    expect(await screen.findByText(/更新失败，当前显示上次数据/)).toBeInTheDocument();
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByRole("alert"))
+      .toHaveTextContent("本地数据无法安全打开");
+    expect(screen.queryByText(/更新失败，当前显示上次数据/)).toBeNull();
     expect(screen.getByText("provider-final/model-final")).toBeInTheDocument();
     expect(screen.getByTestId("receipt-updated-at")).toHaveAttribute(
       "dateTime",
@@ -432,6 +435,34 @@ describe("RecentReceipts", () => {
     const row = (await screen.findAllByTestId("receipt-row"))[0] as HTMLDetailsElement;
     await user.click(row.querySelector("summary")!);
     expect(within(row).getByLabelText("错误诊断")).toHaveTextContent("上游拒绝处理");
+  });
+
+  it("复制请求 ID 失败时只在左下角提示且不误报已复制", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error("clipboard denied")) },
+    });
+    vi.mocked(getRecentReceipts).mockResolvedValue([receipt(1, {
+      status: 401,
+      error_code: "auth",
+    })]);
+    render(
+      <ErrorToastProvider>
+        <RecentReceipts />
+      </ErrorToastProvider>,
+    );
+
+    const row = (await screen.findAllByTestId("receipt-row"))[0] as HTMLDetailsElement;
+    await user.click(row.querySelector("summary")!);
+    await user.click(within(row).getByRole("button", { name: "复制请求 ID" }));
+
+    const message = "无法复制请求 ID。请检查系统剪贴板权限，然后重试。";
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByRole("alert"))
+      .toHaveTextContent(message);
+    expect(within(row).getByRole("button", { name: "复制请求 ID" })).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: "已复制" })).not.toBeInTheDocument();
+    expect(screen.queryByText(message, { selector: ".receipt-detail" })).not.toBeInTheDocument();
   });
 
   it("覆盖 loading、error 与空态", async () => {

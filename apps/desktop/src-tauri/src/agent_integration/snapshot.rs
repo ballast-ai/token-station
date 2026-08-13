@@ -431,7 +431,12 @@ impl<K: MasterKeyStore> SnapshotStore for FileSnapshotStore<K> {
             .find(|record| record.snapshot_id == snapshot_id)
             .ok_or_else(|| "快照不存在".to_string())?;
         record.pinned = pinned;
-        self.write_index(&index)
+        self.write_index(&index)?;
+        if pinned {
+            Ok(())
+        } else {
+            self.prune(&mut index)
+        }
     }
 }
 
@@ -821,6 +826,29 @@ mod tests {
             .iter()
             .any(|record| record.snapshot_id == pinned.snapshot_id));
         assert_eq!(records.iter().filter(|record| !record.pinned).count(), 5);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unpinning_a_snapshot_reapplies_the_unpinned_retention_limit() {
+        let root = scratch("unpin-retention");
+        let store = FileSnapshotStore::new(root.clone(), MemoryKeys::available());
+        let source = ConfigSource::existing(b"fixture".to_vec(), Some(0o600), None);
+        let pinned = store.create(request(&source, 0, true)).unwrap().record;
+        for created in 1..=5 {
+            store.create(request(&source, created, false)).unwrap();
+        }
+
+        store.set_pinned(&pinned.snapshot_id, false).unwrap();
+
+        let records = store
+            .list("claude-code", "/tmp/.claude/settings.json")
+            .unwrap();
+        assert_eq!(records.len(), RETAIN_UNPINNED_PER_TARGET);
+        assert!(records.iter().all(|record| !record.pinned));
+        assert!(!records
+            .iter()
+            .any(|record| record.snapshot_id == pinned.snapshot_id));
         std::fs::remove_dir_all(root).ok();
     }
 

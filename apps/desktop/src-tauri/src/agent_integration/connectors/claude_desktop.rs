@@ -277,6 +277,73 @@ impl Connector for ClaudeDesktopConnector {
             .collect()
     }
 
+    fn disconnect_companion_patch_for_document(
+        &self,
+        primary_target: &Path,
+        companion_target: &Path,
+        document: &ConfigDocument,
+        owned_paths: &[ConfigPath],
+    ) -> Result<Vec<PatchOperation>, String> {
+        let metadata_path = primary_target
+            .parent()
+            .ok_or_else(|| "Claude Desktop profile 路径缺少父目录".to_string())?
+            .join("_meta.json");
+        if companion_target != metadata_path {
+            return Ok(owned_paths
+                .iter()
+                .cloned()
+                .map(|path| PatchOperation {
+                    operation: PatchKind::Remove,
+                    path,
+                    value: None,
+                })
+                .collect());
+        }
+
+        let semantic = semantic_json(document)?;
+        let object = semantic
+            .as_object()
+            .ok_or_else(|| "Claude Desktop 3P profile metadata 必须是 JSON 对象".to_string())?;
+        let owns = |segments: &[&str]| {
+            owned_paths.iter().any(|owned| {
+                owned.segments
+                    == segments
+                        .iter()
+                        .map(|segment| (*segment).to_string())
+                        .collect::<Vec<_>>()
+            })
+        };
+        let mut operations = Vec::new();
+
+        if owns(&["appliedId"])
+            && object.get("appliedId").and_then(Value::as_str) == Some(PROFILE_ID)
+        {
+            operations.push(PatchOperation {
+                operation: PatchKind::Remove,
+                path: path(&["appliedId"]),
+                value: None,
+            });
+        }
+
+        if owns(&["entries"]) {
+            if let Some(entries) = object.get("entries") {
+                let entries = entries.as_array().ok_or_else(|| {
+                    "Claude Desktop 3P profile metadata 的 entries 必须是数组".to_string()
+                })?;
+                let filtered = entries
+                    .iter()
+                    .filter(|entry| entry.get("id").and_then(Value::as_str) != Some(PROFILE_ID))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if filtered.len() != entries.len() {
+                    operations.push(replace(path(&["entries"]), Value::Array(filtered)));
+                }
+            }
+        }
+
+        Ok(operations)
+    }
+
     fn validate_projected(
         &self,
         document: &ConfigDocument,

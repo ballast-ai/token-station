@@ -148,6 +148,6 @@ describe("AgentVisibilityPreferences", () => {
       throw new Error("storage denied");
     });
 
-    expect(() => writeHiddenAgentIds(new Set(["codex"]))).not.toThrow();
+    expect(writeHiddenAgentIds(new Set(["codex"]))).toBe(false);
   });
 });
