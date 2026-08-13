@@ -5109,9 +5109,11 @@ mod tests {
 
     #[test]
     fn every_non_codex_connector_completes_the_production_command_lifecycle() {
-        let root = scratch("non-codex-production-command-lifecycle");
-        for case in non_codex_lifecycle_cases(&root) {
-            let state = state(&format!("{}-production-lifecycle", case.label));
+        // Keep fixture roots compact: Claude Desktop's four-file layout plus
+        // atomic-write suffixes otherwise crosses classic Windows MAX_PATH.
+        let root = scratch("life");
+        for (index, case) in non_codex_lifecycle_cases(&root).into_iter().enumerate() {
+            let state = state(&format!("life-{index}"));
             seed_lifecycle_case(&case);
             let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
             install_scan(&state, catalog, vec![lifecycle_record(&case)]);
@@ -5167,9 +5169,9 @@ mod tests {
     #[test]
     fn concurrent_non_codex_connection_plans_leave_one_consistent_owner() {
         const CONTENDERS: usize = 8;
-        let root = scratch("non-codex-concurrent-connection-plans");
-        for case in non_codex_lifecycle_cases(&root) {
-            let state = state(&format!("{}-concurrent-lifecycle", case.label));
+        let root = scratch("race");
+        for (index, case) in non_codex_lifecycle_cases(&root).into_iter().enumerate() {
+            let state = state(&format!("race-{index}"));
             seed_lifecycle_case(&case);
             let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
             install_scan(&state, catalog, vec![lifecycle_record(&case)]);
@@ -5304,9 +5306,9 @@ mod tests {
             non_codex_lifecycle_cases(Path::new("unused")).len()
         );
 
-        let root = scratch("non-codex-production-lifecycle-stress");
-        for case in non_codex_lifecycle_cases(&root) {
-            let state = state(&format!("{}-lifecycle-stress", case.label));
+        let root = scratch("stress");
+        for (index, case) in non_codex_lifecycle_cases(&root).into_iter().enumerate() {
+            let state = state(&format!("stress-{index}"));
             seed_lifecycle_case(&case);
             let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
             install_scan(&state, catalog, vec![lifecycle_record(&case)]);

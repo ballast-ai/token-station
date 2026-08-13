@@ -2986,7 +2986,7 @@ mod tests {
             .projection
             .files
             .iter()
-            .find(|file| file.target_config_path == settings.to_string_lossy())
+            .find(|file| Path::new(&file.target_config_path) == settings)
             .expect("Gemini settings.json must be part of the real connection plan");
 
         assert!(companion.reverse_changes.iter().any(|change| {
