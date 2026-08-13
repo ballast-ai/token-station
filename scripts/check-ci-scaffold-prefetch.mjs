@@ -3,13 +3,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const workflow = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8");
 
-function jobBody(jobName) {
+const workflows = new Map(
+  ["ci", "platform"].map((name) => [
+    name,
+    fs.readFileSync(path.join(root, `.github/workflows/${name}.yml`), "utf8"),
+  ]),
+);
+
+function jobBody(workflowName, jobName) {
+  const workflow = workflows.get(workflowName);
   const startMarker = `  ${jobName}:\n`;
   const start = workflow.indexOf(startMarker);
   if (start === -1) {
-    throw new Error(`CI job '${jobName}' is missing.`);
+    throw new Error(`Job '${jobName}' is missing from ${workflowName}.yml.`);
   }
 
   const remaining = workflow.slice(start + startMarker.length);
@@ -22,21 +29,27 @@ const prefetch = [
   "--manifest-path plugins/official/provider-openai-compatible/Cargo.toml",
 ];
 
-for (const [jobName, testCommand] of [
-  ["rust", "cargo test --workspace"],
-  ["rust-coverage", "cargo llvm-cov --workspace"],
-  ["windows-rust", "cargo test --workspace"],
+// Every job that exercises the offline scaffold must fetch its locked
+// dependencies first. Windows repeats the workspace suite from the platform
+// workflow, where the Windows and macOS gates live — they are not part of
+// basic CI.
+for (const [workflowName, jobName, testCommand] of [
+  ["ci", "rust", "cargo test --workspace"],
+  ["ci", "rust-coverage", "cargo llvm-cov --workspace"],
+  ["platform", "windows-rust", "cargo test --workspace"],
 ]) {
-  const body = jobBody(jobName).replace(/\s+/g, " ");
+  const body = jobBody(workflowName, jobName).replace(/\s+/g, " ");
   const testIndex = body.indexOf(testCommand);
   if (testIndex === -1) {
-    throw new Error(`CI job '${jobName}' no longer runs '${testCommand}'.`);
+    throw new Error(
+      `Job '${jobName}' in ${workflowName}.yml no longer runs '${testCommand}'.`,
+    );
   }
 
   const prefetchIndexes = prefetch.map((fragment) => body.indexOf(fragment));
   if (prefetchIndexes.some((index) => index === -1 || index > testIndex)) {
     throw new Error(
-      `CI job '${jobName}' runs the offline scaffold test without first fetching its locked dependencies.`,
+      `Job '${jobName}' in ${workflowName}.yml runs the offline scaffold test without first fetching its locked dependencies.`,
     );
   }
 }

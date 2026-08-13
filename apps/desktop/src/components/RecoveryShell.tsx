@@ -11,7 +11,7 @@ import {
   type DesktopUpdateView,
   type RecoveryState,
 } from "../api";
-import { diagnosticInput } from "../diagnostics";
+import { diagnosticInput, redactDiagnosticText } from "../diagnostics";
 import { humanizeAppError } from "../errors";
 import { useLocalizedCopy } from "./LanguageProvider";
 import {
@@ -88,13 +88,13 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
     return () => { disposed = true; };
   }, [initialError, initialState]);
 
-  const diagnosticText = useMemo(() => JSON.stringify({
-    recovery: preview?.recovery ?? null,
-    frontend_events: preview?.frontend_events ?? [],
-    local_only: true,
-    redacted: true,
-    auto_upload: false,
-  }, null, 2), [preview]);
+  const diagnosticText = useMemo(() => redactDiagnosticText(JSON.stringify({
+      recovery: preview?.recovery ?? null,
+      frontend_events: preview?.frontend_events ?? [],
+      local_only: true,
+      redacted: true,
+      auto_upload: false,
+    }, null, 2)), [preview]);
 
   const run = async (name: string, action: () => Promise<string>) => {
     setBusy(name);

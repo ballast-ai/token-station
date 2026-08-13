@@ -490,11 +490,7 @@ fn catalog_cost(value: Option<&Value>) -> Option<CatalogCostView> {
         cache_read: rate("cache_read"),
         cache_write: rate("cache_write"),
     };
-    (cost.input.is_some()
-        || cost.output.is_some()
-        || cost.cache_read.is_some()
-        || cost.cache_write.is_some())
-    .then_some(cost)
+    (cost.input.is_some() && cost.output.is_some()).then_some(cost)
 }
 
 fn explicit_image_input_state(model: &Value) -> CapabilityState {
@@ -952,6 +948,38 @@ mod tests {
         assert_eq!(models[0].context_window, None);
         assert_eq!(models[0].max_output_tokens, None);
         assert_eq!(models[0].cost, None);
+    }
+
+    #[test]
+    fn partial_catalog_costs_remain_unknown_until_input_and_output_are_present() {
+        let models = parse_models(&json!({
+            "data": [
+                {"id": "input-only", "cost": {"input": 0.2}},
+                {"id": "output-only", "cost": {"output": 0.6}},
+                {"id": "cache-only", "cost": {"cache_read": 0.04}},
+                {"id": "complete", "cost": {"input": 0.2, "output": 0.6}},
+                {"id": "duplicate", "cost": {"input": 0.2}},
+                {"id": "duplicate", "cost": {"output": 0.6}}
+            ]
+        }))
+        .expect("partial costs do not reject the model directory");
+
+        for model in ["cache-only", "duplicate", "input-only", "output-only"] {
+            assert_eq!(
+                models.iter().find(|item| item.model == model).unwrap().cost,
+                None,
+                "{model} must not expose an incomplete price"
+            );
+        }
+        let complete = models
+            .iter()
+            .find(|item| item.model == "complete")
+            .unwrap()
+            .cost
+            .as_ref()
+            .unwrap();
+        assert_eq!(complete.input, Some(0.2));
+        assert_eq!(complete.output, Some(0.6));
     }
 
     #[test]

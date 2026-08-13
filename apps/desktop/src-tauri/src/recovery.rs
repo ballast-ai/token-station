@@ -43,6 +43,13 @@ static SECRET_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| 
                 .expect("valid URL credential regex"),
             "$1[REDACTED]@",
         ),
+        (
+            Regex::new(
+                r#"(?i)(["']?(?:request[_-]?body|body|prompt|content|input|tool[_-]?input|toolinput|arguments|query|search[_-]?(?:term|query))["']?\s*[:=]\s*)[^\r\n;]+"#,
+            )
+            .expect("valid content-field regex"),
+            "$1[REDACTED]",
+        ),
     ]
 });
 
@@ -488,7 +495,7 @@ mod tests {
             &log,
             FrontendDiagnosticInput {
                 kind: "window_error".to_string(),
-                message: "Authorization: Bearer secret-token sk-live-abcdef".to_string(),
+                message: "Authorization: Bearer secret-token sk-live-abcdef; body=private-body-text; tool_input=private-tool-value; search_term=private-search-value".to_string(),
                 stack: Some(format!("api_key=very-secret {}", "x".repeat(20_000))),
                 component_stack: None,
             },
@@ -496,6 +503,9 @@ mod tests {
         .unwrap();
         assert!(!record.message.contains("secret-token"));
         assert!(!record.message.contains("sk-live"));
+        assert!(!record.message.contains("private-body-text"));
+        assert!(!record.message.contains("private-tool-value"));
+        assert!(!record.message.contains("private-search-value"));
         assert!(record.stack.as_deref().unwrap().len() <= STACK_FIELD_LIMIT);
 
         std::fs::write(

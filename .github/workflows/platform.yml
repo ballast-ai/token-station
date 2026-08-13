@@ -1,0 +1,195 @@
+name: Platform Gates
+
+# Windows and macOS gates. These are deliberately NOT part of basic CI.
+#
+# ci.yml runs the full clippy / test / fmt / doc / audit / MSRV / frontend set
+# on Linux at 1x billing and catches the large majority of problems. Windows is
+# 2x and macOS is 10x, and what they run here overlaps heavily with that Linux
+# layer, so putting them on every pull request buys almost no extra coverage
+# while multiplying both the bill and the wait. They run once a change reaches
+# develop / main instead.
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+# These gates run on already-merged commits, so every result is worth keeping.
+concurrency:
+  group: platform-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Determine whether this change touches the desktop app or installer. Query
+  # PR files with gh without checking out code or adding another third-party
+  # action; this repository deliberately limits supply-chain dependencies.
+  # Non-PR events always return true and leave scheduling to windows-msi.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      installer: ${{ steps.filter.outputs.installer }}
+    steps:
+      - id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "installer=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files?per_page=100" \
+            --paginate --jq '.[].filename' > changed-files.txt
+          if grep -qE '^(apps/desktop/|scripts/(build-desktop\.sh|test-windows-msi\.ps1|check-windows-release-config\.mjs)$)' changed-files.txt; then
+            echo "installer=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "installer=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # This job does the one thing Linux cannot: compile the desktop app on a
+  # macOS host so #[cfg(target_os = "macos")] code is type-checked, including
+  # verified_workbuddy_bundle and its /usr/bin/codesign invocation.
+  #
+  # This used to be a macOS+Windows matrix that ran four selected tests. All
+  # four are host-independent: Platform::Macos/Windows is passed as an enum,
+  # while the transaction test injects FailBeforeReplaceWriter at
+  # AtomicWriteStage::Permission without touching a real DACL. They are plain
+  # #[test] cases with no cfg guard and are already covered by desktop-rust's
+  # full cargo test. Repeating them at 10x/2x runner cost added no coverage.
+  # windows-rust separately runs the full suite, including the repository's
+  # only #[cfg(windows)] test,
+  # ownership_store_hardens_a_legacy_regular_index_before_reading, which is
+  # genuinely Windows-only and was absent from the old selected list.
+  macos-compile-check:
+    name: macOS compile check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          targets: ''
+          workspaces: apps/desktop/src-tauri
+          plugins-cache: 'false'
+          system-deps: none
+      # --all-targets also compiles tests so broken macOS-specific test code is
+      # caught here instead of waiting for a release tag.
+      - run: >-
+          cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
+          --all-targets
+
+  windows-rust:
+    name: Windows full Rust and desktop gates
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt, clippy
+          workspaces: |
+            .
+            apps/desktop/src-tauri
+      - run: npm --prefix apps/desktop ci
+      - run: node scripts/check-windows-release-config.mjs
+      - name: Fetch the locked scaffold dependency set
+        run: >-
+          cargo fetch --locked --target wasm32-wasip2
+          --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - name: Prepare official plugins for desktop gateway tests
+        shell: bash
+        run: scripts/prepare-desktop-test-plugins.sh
+      - run: >-
+          cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml
+          --all-targets -- -D warnings
+      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+  windows-msi:
+    name: Windows x64 MSI real lifecycle
+    needs: [changes, windows-rust]
+    # This release-grade gate builds two installers and exercises the complete
+    # lifecycle. Run it for published releases and manual release validation,
+    # not for routine pushes or pull requests. Regular CI still covers behavior.
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.installer == 'true' &&
+      (github.event_name == 'release' ||
+       github.event_name == 'workflow_dispatch')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: ./.github/actions/setup-rust
+        with:
+          targets: wasm32-wasip2,x86_64-pc-windows-msvc
+          workspaces: apps/desktop/src-tauri
+      - run: npm --prefix apps/desktop ci
+      - run: node scripts/check-windows-release-config.mjs
+      - name: Build older MSI
+        shell: bash
+        run: >-
+          scripts/build-desktop.sh --local
+          --target x86_64-pc-windows-msvc --test-version 250.1.0
+      - name: Preserve older MSI
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi" |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if ($null -eq $msi) { throw "older MSI was not produced" }
+          Copy-Item -LiteralPath $msi.FullName -Destination "$env:RUNNER_TEMP\token-station-older.msi"
+      - name: Build newer MSI
+        shell: bash
+        run: >-
+          scripts/build-desktop.sh --local
+          --target x86_64-pc-windows-msvc --test-version 250.2.0
+      - name: Preserve newer MSI
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi" |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if ($null -eq $msi) { throw "newer MSI was not produced" }
+          Copy-Item -LiteralPath $msi.FullName -Destination "$env:RUNNER_TEMP\token-station-newer.msi"
+      - name: Install, start, upgrade, block downgrade, and uninstall
+        shell: pwsh
+        run: |
+          scripts/test-windows-msi.ps1 `
+            -OlderMsi "$env:RUNNER_TEMP\token-station-older.msi" `
+            -NewerMsi "$env:RUNNER_TEMP\token-station-newer.msi" `
+            -LogDirectory "$env:RUNNER_TEMP\token-station-msi-logs"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: token-station-windows-msi-lifecycle-logs
+          path: |
+            ${{ runner.temp }}/token-station-msi-logs/*.log
+            ${{ runner.temp }}/token-station-msi-logs/*-self-test.json
+          if-no-files-found: warn

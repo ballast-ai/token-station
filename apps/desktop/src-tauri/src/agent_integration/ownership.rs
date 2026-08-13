@@ -6,7 +6,7 @@ use ring::hmac;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use super::config_codec::{semantic_json, ConfigDocument, DocumentFormat};
+use super::config_codec::{semantic_json, semantic_value_at, ConfigDocument, DocumentFormat};
 #[cfg(not(windows))]
 use super::safe_fs::verify_private_file;
 use super::safe_fs::{ensure_private_dir, write_atomic_private};
@@ -70,7 +70,7 @@ impl OwnershipRecord {
     }
 }
 
-pub trait OwnershipStore {
+pub trait OwnershipStore: Send + Sync {
     fn load(&self, key: &OwnershipKey) -> Result<Option<OwnershipRecord>, String>;
     fn list_agent_installation(
         &self,
@@ -308,7 +308,7 @@ fn compute_owned_value_macs_from_semantic(
         let mut message = Vec::new();
         message.extend_from_slice(b"token-station-owned-value-v1\0");
         encode_field(&mut message, path.to_string().as_bytes());
-        match json_value_at(canonical, path) {
+        match semantic_value_at(canonical, path) {
             Some(value) => {
                 message.push(1);
                 let bytes =
@@ -341,7 +341,7 @@ pub fn legacy_widened_ownership_matches(
         if declared_paths
             .iter()
             .any(|declared| is_strict_prefix(stored, declared))
-            && json_value_at(&baseline, stored).is_some_and(|value| !value.is_null())
+            && semantic_value_at(&baseline, stored).is_some_and(|value| !value.is_null())
         {
             return Ok(false);
         }
@@ -349,7 +349,7 @@ pub fn legacy_widened_ownership_matches(
 
     let mut managed = serde_json::json!({});
     for path in declared_paths {
-        if let Some(value) = json_value_at(&current, path) {
+        if let Some(value) = semantic_value_at(&current, path) {
             set_json_value(&mut managed, path, value.clone())?;
         }
     }
@@ -431,17 +431,6 @@ pub fn ownership_matches(
         compute_owned_value_macs(document, &record.owned_paths, master_key)?
             == record.owned_value_macs,
     )
-}
-
-fn json_value_at<'a>(
-    root: &'a serde_json::Value,
-    path: &ConfigPath,
-) -> Option<&'a serde_json::Value> {
-    let mut current = root;
-    for segment in &path.segments {
-        current = current.as_object()?.get(segment)?;
-    }
-    Some(current)
 }
 
 fn encode_field(output: &mut Vec<u8>, value: &[u8]) {
@@ -560,6 +549,46 @@ mod tests {
         );
         assert!(ownership_matches(&record, &unowned_changed, &key).unwrap());
         assert!(!ownership_matches(&record, &owned_changed, &key).unwrap());
+    }
+
+    #[test]
+    fn ownership_binds_workbuddy_native_array_model_values() {
+        let key = Zeroizing::new([7_u8; 32]);
+        let owned = vec![path(&["models"]), path(&["availableModels"])];
+        let original = ConfigDocument::Json(json!([{
+            "id": "tokenstation-auto",
+            "url": "http://127.0.0.1:8787/agents/workbuddy/v1/chat/completions",
+            "apiKey": "managed-key",
+            "maxInputTokens": 257550
+        }]));
+        let original_macs = compute_owned_value_macs(&original, &owned, &key).unwrap();
+
+        for changed in [
+            json!([{
+                "id": "tokenstation-auto",
+                "url": "http://127.0.0.1:8787/agents/workbuddy/v1/chat/completions",
+                "apiKey": "user-key",
+                "maxInputTokens": 257550
+            }]),
+            json!([{
+                "id": "tokenstation-auto",
+                "url": "https://user.example/v1/chat/completions",
+                "apiKey": "managed-key",
+                "maxInputTokens": 257550
+            }]),
+            json!([{
+                "id": "tokenstation-auto",
+                "url": "http://127.0.0.1:8787/agents/workbuddy/v1/chat/completions",
+                "apiKey": "managed-key",
+                "maxInputTokens": 8192
+            }]),
+        ] {
+            let document = ConfigDocument::Json(changed);
+            assert_ne!(
+                compute_owned_value_macs(&document, &owned, &key).unwrap(),
+                original_macs
+            );
+        }
     }
 
     #[test]

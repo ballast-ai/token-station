@@ -182,7 +182,7 @@ npm --prefix apps/desktop run build
 
 ## Contributing
 
-Issues and focused pull requests are welcome. Read the contribution guide first. User-visible UI, interaction, state, contract, or release behavior changes require a design document under `docs/design/` before tests and implementation.
+Issues and focused pull requests are welcome. Read the contribution guide first. User-visible UI, interaction, state, contract, or release behavior changes require a design document before tests and implementation; design documents live in the private `token-station` repository.
 
 ## Project status
 

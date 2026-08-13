@@ -16,6 +16,19 @@ describe("frontend diagnostics", () => {
     expect(input.stack?.length).toBeLessThanOrEqual(12_000);
   });
 
+  it("removes request bodies, tool inputs, and search terms before persistence", () => {
+    const input = diagnosticInput(
+      "render_error",
+      new Error("body=private-body-text; tool_input=private-tool-value; search_term=private-search-value"),
+    );
+    const serialized = JSON.stringify(input);
+
+    expect(serialized).not.toContain("private-body-text");
+    expect(serialized).not.toContain("private-tool-value");
+    expect(serialized).not.toContain("private-search-value");
+    expect(serialized).toContain("[REDACTED]");
+  });
+
   it("persists window errors and rejected promises through the local backend", async () => {
     const uninstall = installGlobalDiagnostics();
     window.dispatchEvent(new ErrorEvent("error", { error: new Error("window boom"), message: "window boom" }));
