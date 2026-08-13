@@ -388,6 +388,7 @@ struct Proxy {
     data_dir: PathBuf,
     virtual_key: String,
     control: server::ServerControl,
+    gateway: Arc<Gateway>,
 }
 
 /// Starts the whole server against `upstream`, auth on — the default posture.
@@ -486,7 +487,7 @@ fn spawn_proxy(config: &ClientConfig) -> Proxy {
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
     assert!(created, "each test gets a fresh data dir");
     let state = server::AppState::new(
-        gateway,
+        Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
         Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
@@ -517,6 +518,7 @@ fn spawn_proxy(config: &ClientConfig) -> Proxy {
         data_dir,
         virtual_key,
         control,
+        gateway,
     }
 }
 
@@ -626,7 +628,7 @@ fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Pat
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
     assert!(created);
     let state = server::AppState::new(
-        gateway,
+        Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
         Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
@@ -654,6 +656,7 @@ fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Pat
         data_dir,
         virtual_key,
         control,
+        gateway,
     }
 }
 
@@ -1763,6 +1766,75 @@ fn scoped_models_auth_and_unknown_namespaces_fail_closed() {
     assert_eq!(status, 404, "{body}");
     assert_eq!(home.hits(), 0);
     assert_eq!(custom.hits(), 0);
+
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn scoped_models_switch_on_the_next_request_after_router_reload() {
+    let answer = json!({
+        "id": "chatcmpl-unused",
+        "model": "home-model",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "unused" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    });
+    let home = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let custom = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("scoped-model-reload", "sk-test-key-abc");
+    let proxy = start_scoped_proxy(&home, &custom, &key);
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    let model_ids = || {
+        let response = agent
+            .get(format!("{}/agents/opencode/v1/models", proxy.url))
+            .header("authorization", &format!("Bearer {}", proxy.virtual_key))
+            .call()
+            .expect("scoped model discovery answers");
+        assert_eq!(response.status().as_u16(), 200);
+        let document: Value = serde_json::from_str(
+            &response
+                .into_body()
+                .read_to_string()
+                .expect("model discovery body reads"),
+        )
+        .expect("model discovery body is JSON");
+        document["data"]
+            .as_array()
+            .expect("model data is an array")
+            .iter()
+            .map(|model| model["id"].as_str().expect("model id").to_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    assert_eq!(
+        model_ids(),
+        std::collections::BTreeSet::from(["home-model".to_owned()])
+    );
+    let replacement = serde_json::from_value(json!({
+        "version": 1,
+        "pools": {
+            "tier_high": [{"upstream": "agent_upstream", "model": "agent-model"}],
+            "tier_mid": [{"upstream": "agent_upstream", "model": "agent-model"}],
+            "tier_low": [{"upstream": "agent_upstream", "model": "agent-model"}]
+        },
+        "default_pool": "tier_low"
+    }))
+    .expect("replacement Agent router parses");
+    proxy
+        .gateway
+        .reload_agent_router("opencode", Some(replacement))
+        .expect("Agent router reloads");
+    assert_eq!(
+        model_ids(),
+        std::collections::BTreeSet::from(["agent-model".to_owned()])
+    );
 
     std::fs::remove_file(key).ok();
 }
@@ -3928,7 +4000,7 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
     let (virtual_key, _) =
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
     let state = server::AppState::new(
-        gateway,
+        Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
         Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
@@ -3957,6 +4029,7 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
         data_dir,
         virtual_key,
         control,
+        gateway,
     }
 }
 
@@ -4018,7 +4091,7 @@ fn start_quota_proxy_two(
     let (virtual_key, _) =
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
     let state = server::AppState::new(
-        gateway,
+        Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
         Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
@@ -4046,6 +4119,7 @@ fn start_quota_proxy_two(
         data_dir,
         virtual_key,
         control,
+        gateway,
     }
 }
 
@@ -4224,7 +4298,7 @@ fn start_proxy_many(upstream: &MockUpstream, count: usize, key_file: &Path) -> P
     let (virtual_key, _) =
         token_station_cli::virtual_key::load_or_create(&config.data.dir).expect("key creates");
     let state = server::AppState::new(
-        gateway,
+        Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
         Arc::new(token_station_cli::admin::AdminContext {
             data_dir: config.data.dir.clone(),
@@ -4252,6 +4326,7 @@ fn start_proxy_many(upstream: &MockUpstream, count: usize, key_file: &Path) -> P
         data_dir,
         virtual_key,
         control,
+        gateway,
     }
 }
 

@@ -36,8 +36,8 @@ use super::registry::AgentRegistry;
 use super::snapshot::{FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, SnapshotStore};
 use super::transaction::{
     Clock, ConfirmedOperation, FsAtomicConfigWriter, ParseOnlyVerifier, RecoveryStatus,
-    RuntimeAdmission, SystemClock, TransactionEngine, TransactionFailure, TransactionOutcome,
-    TransactionStage,
+    RuntimeAdmission, SystemClock, TransactionCoordinator, TransactionEngine, TransactionFailure,
+    TransactionOutcome, TransactionStage,
 };
 use super::types::{
     AgentDriftView, AgentUiMetadata, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan,
@@ -505,6 +505,7 @@ pub struct AgentCommandState {
     keys: Arc<dyn MasterKeyStore>,
     snapshots: FileSnapshotStore<Arc<dyn MasterKeyStore>>,
     ownership: FileOwnershipStore,
+    transaction_coordinator: Arc<TransactionCoordinator>,
     token_key: hmac::Key,
     session: Mutex<CommandSession>,
     scan_in_progress: AtomicBool,
@@ -621,6 +622,7 @@ impl AgentCommandState {
             keys,
             snapshots,
             ownership,
+            transaction_coordinator: Arc::new(TransactionCoordinator::default()),
             token_key: hmac::Key::new(hmac::HMAC_SHA256, &process_key),
             session: Mutex::new(CommandSession::default()),
             scan_in_progress: AtomicBool::new(false),
@@ -782,13 +784,14 @@ impl AgentCommandState {
                     compatibility_sequence: snapshot.catalog.sequence,
                     status: decision.status,
                 };
-                TransactionEngine::new(
+                TransactionEngine::with_coordinator(
                     &self.snapshots,
                     &self.ownership,
                     self.keys.as_ref(),
                     &FsAtomicConfigWriter,
                     &ParseOnlyVerifier,
                     &self.clock,
+                    Arc::clone(&self.transaction_coordinator),
                 )
                 .apply_snapshot_restore(&prepared, &confirmation, &admission, now_ms)
                 .map_err(AgentCommandError::from)?;
@@ -1632,13 +1635,14 @@ impl AgentCommandState {
             compatibility_sequence: sequence,
             status: decision.status,
         };
-        let engine = TransactionEngine::new(
+        let engine = TransactionEngine::with_coordinator(
             &self.snapshots,
             &self.ownership,
             self.keys.as_ref(),
             &FsAtomicConfigWriter,
             &ParseOnlyVerifier,
             &self.clock,
+            Arc::clone(&self.transaction_coordinator),
         );
         let result = match taken.prepared.view.intent {
             PlanIntent::Connect => engine.apply_connection(
@@ -2455,6 +2459,55 @@ mod tests {
         assert!(!mixed.vision);
         assert!(!mixed.tools);
         assert!(!mixed.reasoning);
+    }
+
+    #[test]
+    fn agent_projection_falls_back_to_complete_configured_price_for_partial_catalog_costs() {
+        let root = scratch("partial-catalog-price-fallback");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        for name in ["provider_a", "provider_b"] {
+            draft["upstreams"][name] = json!({
+                "provider": "openai-compatible",
+                "base_url": format!("https://{name}.example/v1"),
+                "models": [{
+                    "model": "glm-5.2",
+                    "tool": true,
+                    "vision": true,
+                    "context_window": 257550,
+                    "max_output_tokens": 32768,
+                    "catalog_cost": {"input": 99.0}
+                }]
+            });
+        }
+        draft["router"]["pools"] = json!({
+            "tier_low": [
+                {"upstream": "provider_a", "model": "glm-5.2"},
+                {"upstream": "provider_b", "model": "glm-5.2"}
+            ]
+        });
+        draft["router"]["default_pool"] = json!("tier_low");
+        draft["pricing"] = json!({
+            "version": 1,
+            "models": {
+                "glm-5.2": {
+                    "input_per_mtok": 200000,
+                    "output_per_mtok": 600000,
+                    "cache_read_per_mtok": 40000,
+                    "cache_write_per_mtok": 0
+                }
+            }
+        });
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        let metadata = agent_model_metadata(&config, "opencode").unwrap().unwrap();
+        let cost = metadata
+            .cost
+            .expect("the complete configured price is used");
+        assert_eq!(cost.input, 0.2);
+        assert_eq!(cost.output, 0.6);
+        assert_eq!(cost.cache_read, Some(0.04));
+        assert_eq!(cost.cache_write, Some(0.0));
     }
 
     fn running_app_with_adapters(

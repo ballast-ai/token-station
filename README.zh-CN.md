@@ -192,7 +192,7 @@ npm --prefix apps/desktop run build
 
 ## 参与贡献
 
-欢迎提交问题和边界清晰的 Pull Request。请先阅读[贡献流程](docs/contributing/贡献流程.md)。涉及用户可见界面、交互、状态、契约或发布行为的改动，必须先在 `docs/design/` 编写设计文档，再补测试和实现。
+欢迎提交问题和边界清晰的 Pull Request。请先阅读[贡献流程](docs/contributing/贡献流程.md)。涉及用户可见界面、交互、状态、契约或发布行为的改动，必须先编写设计文档，再补测试和实现；设计文档在私有文档仓 `token-station-doc`。
 
 ## 项目状态
 

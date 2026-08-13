@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
@@ -341,6 +341,11 @@ pub struct TransactionEngine<'a> {
     writer: &'a dyn AtomicConfigWriter,
     verifier: &'a dyn PostWriteVerifier,
     clock: &'a dyn Clock,
+    coordinator: Arc<TransactionCoordinator>,
+}
+
+#[derive(Default)]
+pub struct TransactionCoordinator {
     consumed: Mutex<HashSet<String>>,
     operation_lock: Mutex<()>,
 }
@@ -355,6 +360,28 @@ impl<'a> TransactionEngine<'a> {
         verifier: &'a dyn PostWriteVerifier,
         clock: &'a dyn Clock,
     ) -> Self {
+        Self::with_coordinator(
+            snapshots,
+            ownership,
+            keys,
+            writer,
+            verifier,
+            clock,
+            Arc::new(TransactionCoordinator::default()),
+        )
+    }
+
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_coordinator(
+        snapshots: &'a dyn SnapshotStore,
+        ownership: &'a dyn OwnershipStore,
+        keys: &'a dyn MasterKeyStore,
+        writer: &'a dyn AtomicConfigWriter,
+        verifier: &'a dyn PostWriteVerifier,
+        clock: &'a dyn Clock,
+        coordinator: Arc<TransactionCoordinator>,
+    ) -> Self {
         Self {
             snapshots,
             ownership,
@@ -362,8 +389,7 @@ impl<'a> TransactionEngine<'a> {
             writer,
             verifier,
             clock,
-            consumed: Mutex::new(HashSet::new()),
-            operation_lock: Mutex::new(()),
+            coordinator,
         }
     }
 
@@ -427,10 +453,10 @@ impl<'a> TransactionEngine<'a> {
     ) -> Result<TransactionOutcome, TransactionFailure> {
         self.validate_confirmation(plan, confirmation, now_ms)?;
         self.validate_admission(plan, admission, now_ms)?;
-        let _operation_guard = self
-            .operation_lock
-            .lock()
-            .map_err(|_| failure(plan, TransactionStage::Revision, "operation_lock_poisoned"))?;
+        let _operation_guard =
+            self.coordinator.operation_lock.lock().map_err(|_| {
+                failure(plan, TransactionStage::Revision, "operation_lock_poisoned")
+            })?;
         let ownership_key = OwnershipKey {
             agent_id: plan.view.agent_id.clone(),
             installation_path: plan.view.installation_path.clone(),
@@ -1231,7 +1257,7 @@ impl<'a> TransactionEngine<'a> {
     }
 
     fn consume(&self, plan: &PreparedChangePlan) -> Result<(), TransactionFailure> {
-        let mut consumed = self.consumed.lock().map_err(|_| {
+        let mut consumed = self.coordinator.consumed.lock().map_err(|_| {
             failure(
                 plan,
                 TransactionStage::Confirmation,
@@ -1389,7 +1415,8 @@ fn atomic_reason(stage: AtomicWriteStage) -> &'static str {
 mod tests {
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::Duration;
 
     use serde_json::Value;
     use zeroize::Zeroizing;
@@ -1398,7 +1425,7 @@ mod tests {
     use crate::agent_integration::config_codec::DocumentFormat;
     use crate::agent_integration::connectors::{
         find_connector, AgentModelMetadata, ClaudeCodeConnector, ClaudeDesktopConnector,
-        ConnectInput, HermesConnector, OpenClawConnector,
+        ConnectInput, HermesConnector, OpenClawConnector, WorkBuddyConnector,
     };
     use crate::agent_integration::ownership::FileOwnershipStore;
     use crate::agent_integration::plan::{
@@ -1621,6 +1648,82 @@ mod tests {
         }
     }
 
+    struct BlockingWriter {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl AtomicConfigWriter for BlockingWriter {
+        fn replace(
+            &self,
+            target: &Path,
+            bytes: &[u8],
+            permissions: Option<u32>,
+            owner: Option<&str>,
+            expected_current_hash: &str,
+            normalize_new_owner: bool,
+        ) -> Result<(), AtomicWriteFailure> {
+            self.entered.send(()).expect("test observer remains open");
+            self.release
+                .lock()
+                .expect("release lock remains usable")
+                .recv()
+                .expect("test releases the blocked writer");
+            FsAtomicConfigWriter.replace(
+                target,
+                bytes,
+                permissions,
+                owner,
+                expected_current_hash,
+                normalize_new_owner,
+            )
+        }
+
+        fn remove(
+            &self,
+            target: &Path,
+            expected_current_hash: &str,
+            normalize_new_owner: bool,
+        ) -> Result<(), AtomicWriteFailure> {
+            FsAtomicConfigWriter.remove(target, expected_current_hash, normalize_new_owner)
+        }
+    }
+
+    struct ObservedWriter {
+        entered: mpsc::Sender<()>,
+    }
+
+    impl AtomicConfigWriter for ObservedWriter {
+        fn replace(
+            &self,
+            target: &Path,
+            bytes: &[u8],
+            permissions: Option<u32>,
+            owner: Option<&str>,
+            expected_current_hash: &str,
+            normalize_new_owner: bool,
+        ) -> Result<(), AtomicWriteFailure> {
+            self.entered.send(()).expect("test observer remains open");
+            FsAtomicConfigWriter.replace(
+                target,
+                bytes,
+                permissions,
+                owner,
+                expected_current_hash,
+                normalize_new_owner,
+            )
+        }
+
+        fn remove(
+            &self,
+            target: &Path,
+            expected_current_hash: &str,
+            normalize_new_owner: bool,
+        ) -> Result<(), AtomicWriteFailure> {
+            FsAtomicConfigWriter.remove(target, expected_current_hash, normalize_new_owner)
+        }
+    }
+
     fn scratch(label: &str) -> PathBuf {
         let mut random = [0_u8; 8];
         getrandom::fill(&mut random).unwrap();
@@ -1790,6 +1893,23 @@ mod tests {
         }
     }
 
+    fn workbuddy_discovery(target: &Path) -> DiscoveryRecord {
+        let mut record = discovery(target);
+        record.agent_id = "workbuddy".to_string();
+        record.executable_path = "/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy".to_string();
+        record.canonical_path = record.executable_path.clone();
+        record
+    }
+
+    fn workbuddy_verified() -> CompatibilityDecision {
+        let mut decision = verified();
+        decision.agent_id = "workbuddy".to_string();
+        decision.installation_path =
+            Some("/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy".to_string());
+        decision.connector_id = Some("workbuddy-v1".to_string());
+        decision
+    }
+
     fn hermes_discovery(target: &Path) -> DiscoveryRecord {
         DiscoveryRecord {
             agent_id: "nous-hermes-agent".to_string(),
@@ -1923,6 +2043,91 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
+    }
+
+    #[test]
+    fn shared_coordinator_serializes_distinct_transaction_engines() {
+        let root = scratch("shared-coordinator");
+        let first_target = root.join("first.json");
+        let second_target = root.join("second.json");
+        write_initial(&first_target, br#"{"first":true}"#);
+        write_initial(&second_target, br#"{"second":true}"#);
+        let first_plan = prepare(&first_target, "vk-first");
+        let mut second_plan = prepare(&second_target, "vk-second");
+        second_plan.view.operation_id = "cd".repeat(16);
+
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership = FileOwnershipStore::new(root.join("ownership"));
+        let coordinator = Arc::new(TransactionCoordinator::default());
+        let (first_entered_tx, first_entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first_writer = BlockingWriter {
+            entered: first_entered_tx,
+            release: Mutex::new(release_rx),
+        };
+        let (second_entered_tx, second_entered_rx) = mpsc::channel();
+        let second_writer = ObservedWriter {
+            entered: second_entered_tx,
+        };
+        let first_engine = TransactionEngine::with_coordinator(
+            &snapshots,
+            &ownership,
+            keys.as_ref(),
+            &first_writer,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+            Arc::clone(&coordinator),
+        );
+        let second_engine = TransactionEngine::with_coordinator(
+            &snapshots,
+            &ownership,
+            keys.as_ref(),
+            &second_writer,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+            coordinator,
+        );
+
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                first_engine.apply_connection(
+                    &first_plan,
+                    &confirmation(&first_plan),
+                    &admission(),
+                    1_002,
+                )
+            });
+            first_entered_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("the first transaction reaches its write stage");
+
+            let second = scope.spawn(|| {
+                second_engine.apply_connection(
+                    &second_plan,
+                    &confirmation(&second_plan),
+                    &admission(),
+                    1_002,
+                )
+            });
+            assert!(
+                second_entered_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .is_err(),
+                "the second engine must remain outside the write stage"
+            );
+            release_tx.send(()).expect("the first writer is waiting");
+            first.join().expect("first worker does not panic").unwrap();
+            second
+                .join()
+                .expect("second worker does not panic")
+                .unwrap();
+            second_entered_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("the second transaction writes after the first commits");
+        });
+
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -3685,6 +3890,131 @@ mod tests {
         assert_eq!(
             snapshots
                 .list("claude-code", target.to_str().unwrap())
+                .unwrap()
+                .len(),
+            snapshot_count
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn workbuddy_native_array_refresh_and_disconnect_fail_closed_after_user_edit() {
+        let root = scratch("workbuddy-native-array-conflict");
+        let target = root.join("models.json");
+        write_initial(&target, br#"[]"#);
+        let metadata = AgentModelMetadata {
+            context: 257_550,
+            output: 32_768,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let connect_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
+            token: Some("managed-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let connect = build_connection_plan(
+            &WorkBuddyConnector,
+            &workbuddy_discovery(&target),
+            &workbuddy_verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &connect_input,
+            1,
+            None,
+            1_000,
+            "a1".repeat(16),
+        )
+        .unwrap();
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership_store = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership_store,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        engine
+            .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
+            .unwrap();
+
+        let ownership_key = OwnershipKey {
+            agent_id: "workbuddy".to_string(),
+            installation_path: workbuddy_discovery(&target).canonical_path,
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let baseline = snapshots.load(&ownership.baseline_snapshot_id).unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let mut changed: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        changed[0]["apiKey"] = serde_json::json!("user-key");
+        changed[0]["url"] = serde_json::json!("https://user.example/v1/chat/completions");
+        changed[0]["maxInputTokens"] = serde_json::json!(8_192);
+        let changed_bytes = serde_json::to_vec_pretty(&changed).unwrap();
+        std::fs::write(&target, &changed_bytes).unwrap();
+        let snapshot_count = snapshots
+            .list("workbuddy", target.to_str().unwrap())
+            .unwrap()
+            .len();
+        let current = read_config_source(&target).unwrap();
+
+        let disconnect_error = build_disconnect_plan(
+            &WorkBuddyConnector,
+            &workbuddy_discovery(&target),
+            &workbuddy_verified(),
+            &target,
+            &current,
+            &ownership,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            2_000,
+            "a2".repeat(16),
+        )
+        .err()
+        .expect("disconnect refuses a user-edited managed model");
+        assert!(disconnect_error.contains("owned paths"));
+
+        let refresh = build_metadata_refresh_plan(
+            &WorkBuddyConnector,
+            &workbuddy_discovery(&target),
+            &workbuddy_verified(),
+            &target,
+            &current,
+            &connect_input,
+            &ownership,
+            1,
+            None,
+            2_000,
+            "a3".repeat(16),
+        )
+        .unwrap();
+        let refresh_error = engine
+            .apply_snapshot_restore(
+                &refresh,
+                &confirmation_at(&refresh, 2_001),
+                &admission(),
+                2_002,
+            )
+            .expect_err("refresh refuses a user-edited managed model");
+        assert_eq!(refresh_error.reason_code, "owned_values_changed");
+        assert_eq!(std::fs::read(&target).unwrap(), changed_bytes);
+        assert_eq!(
+            snapshots
+                .list("workbuddy", target.to_str().unwrap())
                 .unwrap()
                 .len(),
             snapshot_count

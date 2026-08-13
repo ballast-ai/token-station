@@ -94,7 +94,7 @@ pub fn apply_patch_with_reverse(
     let mut reverse = Vec::with_capacity(operations.len());
     for operation in operations {
         let before = semantic_json(document)?;
-        let previous = json_value_at(&before, &operation.path).cloned();
+        let previous = semantic_value_at(&before, &operation.path).cloned();
         let parent_reverse = materialized_parent_reverse(&before, operation);
         apply_patch(document, std::slice::from_ref(operation))?;
         if operation.operation == PatchKind::Test {
@@ -133,7 +133,7 @@ fn materialized_parent_reverse(
         let path = ConfigPath {
             segments: operation.path.segments[..length].to_vec(),
         };
-        match json_value_at(before, &path) {
+        match semantic_value_at(before, &path) {
             None => {
                 return Some(PatchOperation {
                     operation: PatchKind::Remove,
@@ -165,7 +165,7 @@ pub fn project_owned_paths(
     match (current, baseline) {
         (ConfigDocument::Json(current), ConfigDocument::Json(baseline)) => {
             for path in owned_paths {
-                let value = json_value_at(baseline, path).cloned();
+                let value = semantic_value_at(baseline, path).cloned();
                 let operation = PatchOperation {
                     operation: if value.is_some() {
                         PatchKind::Replace
@@ -203,7 +203,7 @@ pub fn project_owned_paths(
         (ConfigDocument::Yaml(current), ConfigDocument::Yaml(baseline)) => {
             let baseline_semantic = strict_yaml_semantic(&baseline.rendered, "YAML 基线")?;
             for path in owned_paths {
-                let value = json_value_at(&baseline_semantic, path).cloned();
+                let value = semantic_value_at(&baseline_semantic, path).cloned();
                 let operation = PatchOperation {
                     operation: if value.is_some() {
                         PatchKind::Replace
@@ -541,7 +541,7 @@ fn json5_value_as_serde(value: &JSONValue) -> Result<Value, String> {
     json_five::from_str(&value.to_string()).map_err(|_| "JSON5 语义转换失败".to_string())
 }
 
-fn json_value_at<'a>(root: &'a Value, path: &ConfigPath) -> Option<&'a Value> {
+pub(crate) fn semantic_value_at<'a>(root: &'a Value, path: &ConfigPath) -> Option<&'a Value> {
     if root.is_array() && path.segments == ["models"] {
         return Some(root);
     }
@@ -736,7 +736,7 @@ fn apply_yaml_operation(
                 .value
                 .as_ref()
                 .ok_or_else(|| format!("配置路径 '{}' 缺少写入值", operation.path))?;
-            if json_value_at(&semantic, &operation.path).is_none() {
+            if semantic_value_at(&semantic, &operation.path).is_none() {
                 let rendered =
                     insert_missing_yaml_scalar(&document.rendered, &operation.path, value)?;
                 validate_yaml_rendered(&rendered, "YAML patch")?;
@@ -750,7 +750,7 @@ fn apply_yaml_operation(
             return Ok(());
         }
         PatchKind::Remove => {
-            if json_value_at(&semantic, &operation.path).is_some() {
+            if semantic_value_at(&semantic, &operation.path).is_some() {
                 let rendered = remove_existing_yaml_scalar(&document.rendered, &operation.path)?;
                 validate_yaml_rendered(&rendered, "YAML patch")?;
                 document.rendered = rendered;
@@ -759,7 +759,7 @@ fn apply_yaml_operation(
         }
         PatchKind::Test => {
             let semantic = strict_yaml_semantic(&document.rendered, "YAML test")?;
-            if json_value_at(&semantic, &operation.path) != operation.value.as_ref() {
+            if semantic_value_at(&semantic, &operation.path) != operation.value.as_ref() {
                 return Err(format!("配置路径 '{}' 的前置值已变化", operation.path));
             }
         }

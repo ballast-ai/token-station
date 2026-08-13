@@ -796,6 +796,33 @@ experimental_bearer_token = "fixture-codex-key"
     }
 
     #[test]
+    fn first_codex_connection_with_unknown_metadata_preserves_user_limits() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/codex/v1",
+            token: Some("fixture-codex-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let mut document = parse_rendered(
+            "model_context_window = 64000\nmodel_auto_compact_token_limit = 48000\n",
+            DocumentFormat::Toml,
+            "Codex",
+        )
+        .unwrap();
+
+        let patch = CodexConnector
+            .connect_patch_for_document(&document, &input)
+            .unwrap();
+        apply_patch(&mut document, &patch).unwrap();
+        CodexConnector
+            .validate_projected(&document, &input)
+            .unwrap();
+        let semantic = semantic_json(&document).unwrap();
+        assert_eq!(semantic["model_context_window"], json!(64_000));
+        assert_eq!(semantic["model_auto_compact_token_limit"], json!(48_000));
+    }
+
+    #[test]
     fn image_support_fails_closed_for_text_only_or_unknown_routes() {
         let metadata = AgentModelMetadata {
             context: 128_000,
