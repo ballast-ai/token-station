@@ -147,6 +147,31 @@ describe("RecoveryShell", () => {
     expect(writeText.mock.calls[0][0]).not.toContain("private-person");
   });
 
+  it("redacts content-like fields again before rendering the diagnostic preview", async () => {
+    vi.mocked(getRecoveryDiagnostics).mockResolvedValueOnce({
+      recovery: safeState,
+      frontend_events: [{
+        timestamp_ms: 1,
+        kind: "window_error",
+        message: "body=private-body-text; tool_input=private-tool-value; search_term=private-search-value",
+        stack: null,
+        component_stack: null,
+      }],
+      export_includes: ["脱敏诊断清单"],
+      local_only: true,
+      redacted: true,
+      auto_upload: false,
+    });
+
+    render(<RecoveryShell initialState={safeState} />);
+    const preview = await screen.findByText((_, element) =>
+      element?.tagName === "PRE" && Boolean(element.textContent?.includes("[REDACTED]")),
+    );
+    expect(preview.textContent).not.toContain("private-body-text");
+    expect(preview.textContent).not.toContain("private-tool-value");
+    expect(preview.textContent).not.toContain("private-search-value");
+  });
+
   it("turns a render crash into the same recovery surface and records it", async () => {
     render(<RecoveryShell initialState={{ ...safeState, mode: "normal", reason_code: null, message: null }} initialError={new Error("render boom")} />);
     expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();

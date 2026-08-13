@@ -75,6 +75,14 @@ export type CatalogSource = "live" | "cache" | "configured";
 export type CatalogState = "active" | "stale" | "removed";
 
 export interface CatalogModelView extends ModelCapabilityView {
+  context_window?: number | null;
+  max_output_tokens?: number | null;
+  cost?: {
+    input?: number | null;
+    output?: number | null;
+    cache_read?: number | null;
+    cache_write?: number | null;
+  } | null;
   source: CatalogSource;
   last_seen_ms: number | null;
   catalog_state: CatalogState;

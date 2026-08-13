@@ -10,7 +10,8 @@ use super::config_codec::{
 };
 use super::connectors::{validate_patch_ownership, ConnectInput, Connector};
 use super::ownership::{
-    compute_owned_value_macs, ownership_matches, CompanionOwnership, OwnershipRecord,
+    compute_owned_value_macs, legacy_widened_ownership_matches, normalized_legacy_owned_paths,
+    ownership_matches, CompanionOwnership, OwnershipRecord,
 };
 use super::snapshot::SnapshotStore;
 use super::types::{
@@ -19,6 +20,9 @@ use super::types::{
     CredentialSource, DiscoveryRecord, PatchKind, PatchOperation, PlanIntent, Platform,
     RedactedChange, SnapshotRecord,
 };
+
+pub const OWNED_VALUES_CHANGED: &str = "owned_values_changed";
+pub const COMPANION_OWNED_VALUES_CHANGED: &str = "companion_owned_values_changed";
 
 const PLAN_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_PLAN_TTL_MS: u64 = 5 * 60 * 1_000;
@@ -152,6 +156,64 @@ pub fn build_connection_plan(
     now_ms: u64,
     operation_id: String,
 ) -> Result<PreparedChangePlan, String> {
+    build_connection_or_refresh_plan(
+        connector,
+        discovery,
+        compatibility,
+        target_path,
+        source,
+        input,
+        None,
+        compatibility_sequence,
+        compatibility_expires_at_ms,
+        now_ms,
+        operation_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_metadata_refresh_plan(
+    connector: &dyn Connector,
+    discovery: &DiscoveryRecord,
+    compatibility: &CompatibilityDecision,
+    target_path: &Path,
+    source: &ConfigSource,
+    input: &ConnectInput<'_>,
+    ownership: &OwnershipRecord,
+    compatibility_sequence: u64,
+    compatibility_expires_at_ms: Option<u64>,
+    now_ms: u64,
+    operation_id: String,
+) -> Result<PreparedChangePlan, String> {
+    build_connection_or_refresh_plan(
+        connector,
+        discovery,
+        compatibility,
+        target_path,
+        source,
+        input,
+        Some(ownership),
+        compatibility_sequence,
+        compatibility_expires_at_ms,
+        now_ms,
+        operation_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_connection_or_refresh_plan(
+    connector: &dyn Connector,
+    discovery: &DiscoveryRecord,
+    compatibility: &CompatibilityDecision,
+    target_path: &Path,
+    source: &ConfigSource,
+    input: &ConnectInput<'_>,
+    ownership: Option<&OwnershipRecord>,
+    compatibility_sequence: u64,
+    compatibility_expires_at_ms: Option<u64>,
+    now_ms: u64,
+    operation_id: String,
+) -> Result<PreparedChangePlan, String> {
     if !connector.supports_platform(discovery.environment) {
         return Err(format!(
             "Connector '{}' 不支持当前平台 {:?}",
@@ -169,6 +231,17 @@ pub fn build_connection_plan(
         now_ms,
         &operation_id,
     )?;
+    if let Some(ownership) = ownership {
+        if ownership.agent_id != connector.agent_id()
+            || ownership.connector_id != connector.connector_id()
+            || ownership.installation_path != discovery.canonical_path
+            || ownership.target_config_path != strict_path_text(target_path)?
+        {
+            return Err(
+                "metadata refresh ownership does not match the selected connector".to_string(),
+            );
+        }
+    }
     connector.validate_preconditions(input)?;
 
     let mut document = parse_source_bytes(
@@ -176,17 +249,46 @@ pub fn build_connection_plan(
         connector.format(),
         connector.label(),
     )?;
-    connector.validate_source(&document)?;
+    if ownership.is_some() {
+        connector.validate_refresh_source(&document)?;
+    } else {
+        connector.validate_source(&document)?;
+    }
     let baseline_semantic = semantic_json(&document)?;
-    let operations = connector.connect_patch_for_document(&document, input)?;
-    let owned_paths = connector.owned_paths();
-    validate_owned_paths(&owned_paths)?;
-    validate_patch_ownership(&operations, &owned_paths)?;
+    let operations = if let Some(record) = ownership {
+        connector.refresh_patch_for_document(&document, input, &record.owned_paths)?
+    } else {
+        connector.connect_patch_for_document(&document, input)?
+    };
+    let declared_owned_paths = connector.owned_paths();
+    validate_owned_paths(&declared_owned_paths)?;
+    validate_patch_ownership(&operations, &declared_owned_paths)?;
     let reverse_operations = apply_patch_with_reverse(&mut document, &operations)?;
-    connector.validate_projected(&document, input)?;
+    let owned_paths = ownership.map_or_else(
+        || owned_paths_touched_by(&declared_owned_paths, &operations),
+        |record| {
+            let previous =
+                normalized_legacy_owned_paths(&record.owned_paths, &declared_owned_paths);
+            declared_owned_paths
+                .iter()
+                .filter(|path| previous.contains(path) || owned_path_is_touched(path, &operations))
+                .cloned()
+                .collect()
+        },
+    );
+    validate_owned_paths(&owned_paths)?;
+    if ownership.is_some() {
+        connector.validate_refresh_projected(&document, input, &owned_paths)?;
+    } else {
+        connector.validate_projected(&document, input)?;
+    }
     let rendered = render_document(&document, connector.label())?;
     let reparsed = parse_rendered(&rendered, connector.format(), connector.label())?;
-    connector.validate_projected(&reparsed, input)?;
+    if ownership.is_some() {
+        connector.validate_refresh_projected(&reparsed, input, &owned_paths)?;
+    } else {
+        connector.validate_projected(&reparsed, input)?;
+    }
     verify_reverse_projection(
         &reparsed,
         &baseline_semantic,
@@ -338,7 +440,11 @@ pub fn build_connection_plan(
         view: ConfigChangePlan {
             schema_version: PLAN_SCHEMA_VERSION,
             operation_id,
-            intent: PlanIntent::Connect,
+            intent: if ownership.is_some() {
+                PlanIntent::Restore
+            } else {
+                PlanIntent::Connect
+            },
             agent_id: connector.agent_id().to_string(),
             installation_path: discovery.canonical_path.clone(),
             target_config_path: strict_path_text(target_path)?.to_string(),
@@ -364,7 +470,10 @@ pub fn build_connection_plan(
         projected_bytes: Zeroizing::new(projected_bytes),
         format: connector.format(),
         label: connector.label(),
-        ownership: None,
+        ownership: ownership.map(|record| PlanOwnershipBinding {
+            record: record.clone(),
+            disposition: OwnershipDisposition::Update,
+        }),
         companions,
     })
 }
@@ -468,7 +577,7 @@ pub fn attach_disconnect_companions(
         let baseline_macs =
             compute_owned_value_macs(&baseline_document, &companion.owned_paths, master_key)?;
         if current_macs != companion.owned_value_macs && current_macs != baseline_macs {
-            return Err("companion owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
+            return Err(COMPANION_OWNED_VALUES_CHANGED.to_string());
         }
         let (forward_operations, reverse_operations) = projection_operations(
             &current_document,
@@ -591,7 +700,7 @@ pub fn attach_restore_companions(
         let source_macs =
             compute_owned_value_macs(&source_document, &companion.owned_paths, master_key)?;
         if current_macs != companion.owned_value_macs && current_macs != source_macs {
-            return Err("companion owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
+            return Err(COMPANION_OWNED_VALUES_CHANGED.to_string());
         }
         let (forward_operations, reverse_operations) =
             projection_operations(&current_document, &source_document, &companion.owned_paths)?;
@@ -748,20 +857,32 @@ fn build_owned_projection_plan(
         connector.format(),
         connector.label(),
     )?;
+    let declared_owned_paths = connector.owned_paths();
+    validate_owned_paths(&declared_owned_paths)?;
+    let projected_owned_paths =
+        normalized_legacy_owned_paths(&ownership.owned_paths, &declared_owned_paths);
+    validate_owned_paths(&projected_owned_paths)?;
     let matches_record = ownership_matches(ownership, &current_document, master_key)?;
     let matches_source =
         compute_owned_value_macs(&current_document, &ownership.owned_paths, master_key)?
             == compute_owned_value_macs(&source_document, &ownership.owned_paths, master_key)?;
-    if !matches_record && !matches_source {
-        return Err("当前 owned paths 已与 ownership 记录冲突，必须重新预览".to_string());
+    let matches_legacy_widening = legacy_widened_ownership_matches(
+        ownership,
+        &current_document,
+        &source_document,
+        &declared_owned_paths,
+        master_key,
+    )?;
+    if !matches_record && !matches_source && !matches_legacy_widening {
+        return Err(OWNED_VALUES_CHANGED.to_string());
     }
     let original_semantic = semantic_json(&current_document)?;
     let (forward_operations, reverse_operations) =
-        projection_operations(&current_document, &source_document, &ownership.owned_paths)?;
-    project_owned_paths(
+        projection_operations(&current_document, &source_document, &projected_owned_paths)?;
+    connector.project_owned_document(
         &mut current_document,
         &source_document,
-        &ownership.owned_paths,
+        &projected_owned_paths,
     )?;
     let rendered = render_document(&current_document, connector.label())?;
     let reparsed = parse_rendered(&rendered, connector.format(), connector.label())?;
@@ -769,7 +890,7 @@ fn build_owned_projection_plan(
         &reparsed,
         &original_semantic,
         &reverse_operations,
-        &ownership.owned_paths,
+        &projected_owned_paths,
         connector.format(),
         connector.label(),
     )?;
@@ -810,7 +931,7 @@ fn build_owned_projection_plan(
             target_existed: current.existed,
             before_hash: before_hash.clone(),
             expected_after_hash: expected_after_hash.clone(),
-            owned_paths: ownership.owned_paths.clone(),
+            owned_paths: projected_owned_paths.clone(),
             changes,
             projection: ConnectorProjection {
                 schema_version: 1,
@@ -820,7 +941,7 @@ fn build_owned_projection_plan(
                     target_existed: current.existed,
                     before_hash: before_hash.clone(),
                     expected_after_hash: expected_after_hash.clone(),
-                    owned_paths: ownership.owned_paths.clone(),
+                    owned_paths: projected_owned_paths,
                     forward_changes: redact_restore_changes(&forward_operations, &sensitive_paths),
                     reverse_changes,
                     credential_bindings: credential_bindings(
@@ -984,6 +1105,24 @@ fn validate_owned_paths(paths: &[ConfigPath]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn owned_paths_touched_by(
+    declared_paths: &[ConfigPath],
+    operations: &[PatchOperation],
+) -> Vec<ConfigPath> {
+    declared_paths
+        .iter()
+        .filter(|owned| owned_path_is_touched(owned, operations))
+        .cloned()
+        .collect()
+}
+
+fn owned_path_is_touched(owned: &ConfigPath, operations: &[PatchOperation]) -> bool {
+    operations.iter().any(|operation| {
+        operation.path.segments.len() >= owned.segments.len()
+            && operation.path.segments[..owned.segments.len()] == owned.segments
+    })
 }
 
 fn redact_changes(
@@ -1278,6 +1417,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787",
                 token: Some(secret),
                 adapter_ready: true,
+                model_metadata: None,
             },
             7,
             Some(20_000),
@@ -1336,6 +1476,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787/v1",
                 token: Some("fixture-codex-virtual-key"),
                 adapter_ready: true,
+                model_metadata: None,
             },
             1,
             None,
@@ -1348,7 +1489,136 @@ mod tests {
             .reverse_changes
             .iter()
             .any(|change| change.operation == PatchKind::Remove
-                && change.path.segments == ["model_providers", "tokenstation"]));
+                && change.path.segments == ["model_providers"]));
+    }
+
+    #[test]
+    fn codex_unknown_metadata_does_not_claim_user_limits() {
+        #[cfg(windows)]
+        let target = Path::new(r"C:\tmp\token-station-plan\config.toml");
+        #[cfg(not(windows))]
+        let target = Path::new("/tmp/token-station-plan/config.toml");
+        let mut codex_discovery = discovery(target);
+        codex_discovery.agent_id = "codex".to_string();
+        let mut codex_compatibility = verified();
+        codex_compatibility.agent_id = "codex".to_string();
+        codex_compatibility.connector_id = Some("codex-v1".to_string());
+        let source = ConfigSource::existing(
+            b"model_context_window = 64000\nmodel_auto_compact_token_limit = 48000\n".to_vec(),
+            Some(0o600),
+            None,
+        );
+
+        let prepared = build_connection_plan(
+            &CodexConnector,
+            &codex_discovery,
+            &codex_compatibility,
+            target,
+            &source,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/agents/codex/v1",
+                token: Some("fixture-codex-virtual-key"),
+                adapter_ready: true,
+                model_metadata: None,
+            },
+            1,
+            None,
+            10,
+            "16".repeat(16),
+        )
+        .unwrap();
+
+        assert!(!prepared.view.owned_paths.iter().any(|path| {
+            matches!(
+                path.segments.as_slice(),
+                [field] if field == "model_context_window" || field == "model_auto_compact_token_limit"
+            )
+        }));
+    }
+
+    #[test]
+    fn codex_unknown_metadata_refresh_preserves_unowned_user_limits() {
+        #[cfg(windows)]
+        let target = Path::new(r"C:\tmp\token-station-plan\config.toml");
+        #[cfg(not(windows))]
+        let target = Path::new("/tmp/token-station-plan/config.toml");
+        let mut codex_discovery = discovery(target);
+        codex_discovery.agent_id = "codex".to_string();
+        let mut codex_compatibility = verified();
+        codex_compatibility.agent_id = "codex".to_string();
+        codex_compatibility.connector_id = Some("codex-v1".to_string());
+        let source = ConfigSource::existing(
+            br#"model = "auto"
+model_provider = "tokenstation"
+model_context_window = 64000
+model_auto_compact_token_limit = 48000
+
+[model_providers.tokenstation]
+base_url = "http://127.0.0.1:8787/agents/codex/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "fixture-codex-virtual-key"
+"#
+            .to_vec(),
+            Some(0o600),
+            None,
+        );
+        let ownership = OwnershipRecord {
+            schema_version: 1,
+            revision: 1,
+            agent_id: "codex".to_string(),
+            installation_path: "/opt/claude".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+            connector_id: "codex-v1".to_string(),
+            baseline_snapshot_id: "01".repeat(16),
+            last_transaction_snapshot_id: "02".repeat(16),
+            before_hash: "a".repeat(64),
+            managed_after_hash: "b".repeat(64),
+            owned_paths: vec![
+                ConfigPath {
+                    segments: vec!["model".to_string()],
+                },
+                ConfigPath {
+                    segments: vec!["model_provider".to_string()],
+                },
+                ConfigPath {
+                    segments: vec!["model_providers".to_string(), "tokenstation".to_string()],
+                },
+            ],
+            owned_value_macs: std::collections::BTreeMap::new(),
+            companion_files: Vec::new(),
+            acquired_at_ms: 1,
+            updated_at_ms: 1,
+        };
+
+        let prepared = build_metadata_refresh_plan(
+            &CodexConnector,
+            &codex_discovery,
+            &codex_compatibility,
+            target,
+            &source,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/agents/codex/v1",
+                token: Some("fixture-codex-virtual-key"),
+                adapter_ready: true,
+                model_metadata: None,
+            },
+            &ownership,
+            1,
+            None,
+            10,
+            "17".repeat(16),
+        )
+        .unwrap();
+        let projected = parse_source_bytes(
+            Some(prepared.projected_bytes.as_slice()),
+            DocumentFormat::Toml,
+            "Codex",
+        )
+        .unwrap();
+        let projected = semantic_json(&projected).unwrap();
+        assert_eq!(projected["model_context_window"], json!(64_000));
+        assert_eq!(projected["model_auto_compact_token_limit"], json!(48_000));
     }
 
     #[test]
@@ -1395,6 +1665,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787",
                 token: Some("hidden"),
                 adapter_ready: true,
+                model_metadata: None,
             },
             1,
             None,
@@ -1421,6 +1692,7 @@ mod tests {
                     base_url: "http://127.0.0.1:8787",
                     token: Some("hidden"),
                     adapter_ready: true,
+                    model_metadata: None,
                 },
                 1,
                 None,
@@ -1444,6 +1716,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787",
                 token: Some("hidden"),
                 adapter_ready: true,
+                model_metadata: None,
             },
             1,
             None,

@@ -15,10 +15,52 @@ pub use openclaw::OpenClawConnector;
 pub use opencode::OpenCodeConnector;
 pub use workbuddy::WorkBuddyConnector;
 
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AgentModelCost {
+    pub input: f64,
+    pub output: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
+}
+
+impl AgentModelCost {
+    pub fn is_valid(&self) -> bool {
+        [
+            Some(self.input),
+            Some(self.output),
+            self.cache_read,
+            self.cache_write,
+        ]
+        .into_iter()
+        .flatten()
+        .all(|rate| rate.is_finite() && (0.0..=9_000_000_000.0).contains(&rate))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct AgentModelMetadata {
+    pub context: u32,
+    pub output: u32,
+    pub vision: bool,
+    pub tools: bool,
+    pub reasoning: bool,
+    pub cost: Option<AgentModelCost>,
+}
+
+impl AgentModelMetadata {
+    pub fn safe_limits(&self) -> Option<(u32, u32)> {
+        (self.context > 0 && self.output > 0 && self.output < self.context)
+            .then_some((self.context, self.output))
+    }
+}
+
 pub struct ConnectInput<'a> {
     pub base_url: &'a str,
     pub token: Option<&'a str>,
     pub adapter_ready: bool,
+    pub model_metadata: Option<&'a AgentModelMetadata>,
 }
 
 /// A second configuration file that must commit with a Connector's primary
@@ -75,6 +117,9 @@ pub trait Connector: Sync {
     fn sensitive_paths(&self) -> Vec<ConfigPath> {
         Vec::new()
     }
+    fn projects_model_metadata(&self) -> bool {
+        false
+    }
     fn validate_preconditions(&self, input: &ConnectInput<'_>) -> Result<(), String>;
     fn validate_source(&self, document: &ConfigDocument) -> Result<(), String>;
     fn connect_patch(&self, input: &ConnectInput<'_>) -> Result<Vec<PatchOperation>, String>;
@@ -84,6 +129,17 @@ pub trait Connector: Sync {
         input: &ConnectInput<'_>,
     ) -> Result<Vec<PatchOperation>, String> {
         self.connect_patch(input)
+    }
+    fn validate_refresh_source(&self, document: &ConfigDocument) -> Result<(), String> {
+        self.validate_source(document)
+    }
+    fn refresh_patch_for_document(
+        &self,
+        document: &ConfigDocument,
+        input: &ConnectInput<'_>,
+        _owned_paths: &[ConfigPath],
+    ) -> Result<Vec<PatchOperation>, String> {
+        self.connect_patch_for_document(document, input)
     }
     fn companion_projections(
         &self,
@@ -106,11 +162,27 @@ pub trait Connector: Sync {
     ) -> Result<Vec<PatchOperation>, String> {
         Ok(self.disconnect_patch())
     }
+    fn project_owned_document(
+        &self,
+        current: &mut ConfigDocument,
+        source: &ConfigDocument,
+        owned_paths: &[ConfigPath],
+    ) -> Result<(), String> {
+        crate::agent_integration::config_codec::project_owned_paths(current, source, owned_paths)
+    }
     fn validate_projected(
         &self,
         document: &ConfigDocument,
         input: &ConnectInput<'_>,
     ) -> Result<(), String>;
+    fn validate_refresh_projected(
+        &self,
+        document: &ConfigDocument,
+        input: &ConnectInput<'_>,
+        _owned_paths: &[ConfigPath],
+    ) -> Result<(), String> {
+        self.validate_projected(document, input)
+    }
     fn success_message(&self, input: &ConnectInput<'_>) -> String;
 }
 
@@ -156,7 +228,7 @@ mod tests {
 
     use super::*;
     use crate::agent_integration::config_codec::{
-        apply_patch, parse_source_bytes, render_document, semantic_json,
+        apply_patch, parse_rendered, parse_source_bytes, render_document, semantic_json,
     };
     use crate::agent_integration::types::PatchKind;
 
@@ -221,6 +293,7 @@ mod tests {
             base_url: "http://127.0.0.1:8787/agents/gemini-cli",
             token: Some("vk-gemini-sensitive"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let baseline =
             parse_source_bytes(Some(source), connector.format(), connector.label()).unwrap();
@@ -268,6 +341,7 @@ mod tests {
             base_url: "http://127.0.0.1:8787/agents/gemini-cli",
             token: Some("fixture-virtual-key"),
             adapter_ready: true,
+            model_metadata: None,
         };
 
         let companions = find_connector("gemini-cli-v1")
@@ -310,6 +384,47 @@ mod tests {
     }
 
     #[test]
+    fn gemini_connection_recovers_null_optional_auth_containers() {
+        let root = std::env::temp_dir().join(format!(
+            "token-station-gemini-null-companion-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let primary = root.join(".env");
+        let settings = root.join("settings.json");
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/gemini-cli",
+            token: Some("fixture-virtual-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+
+        for source in [
+            br#"{"security":null,"keep":true}"#.as_slice(),
+            br#"{"security":{"auth":null},"keep":true}"#.as_slice(),
+        ] {
+            std::fs::write(&settings, source).unwrap();
+            let companions = find_connector("gemini-cli-v1")
+                .unwrap()
+                .companion_projections(&primary, &input)
+                .expect("null optional auth containers recover");
+            let projected = parse_source_bytes(
+                Some(companions[0].projected_bytes.as_slice()),
+                DocumentFormat::Json,
+                companions[0].label,
+            )
+            .unwrap();
+            let semantic = semantic_json(&projected).unwrap();
+            assert_eq!(
+                semantic["security"]["auth"]["selectedType"],
+                json!("gemini-api-key")
+            );
+            assert_eq!(semantic["keep"], json!(true));
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn workbuddy_connector_preserves_unrelated_models_on_connect_and_force_disconnect() {
         let connector = find_connector("workbuddy-v1").expect("WorkBuddy connector is registered");
         let source = br#"{
@@ -321,6 +436,7 @@ mod tests {
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
             token: Some("fixture-workbuddy-key"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let mut document =
             parse_source_bytes(Some(source), connector.format(), connector.label()).unwrap();
@@ -376,6 +492,39 @@ mod tests {
     }
 
     #[test]
+    fn workbuddy_connector_recovers_null_optional_model_arrays() {
+        let connector = find_connector("workbuddy-v1").expect("WorkBuddy connector is registered");
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
+            token: Some("fixture-workbuddy-key"),
+            adapter_ready: true,
+            model_metadata: Some(&AgentModelMetadata {
+                context: 257_550,
+                output: 32_768,
+                vision: true,
+                tools: true,
+                reasoning: true,
+                cost: None,
+            }),
+        };
+        let mut document = parse_source_bytes(
+            Some(br#"{"models":null,"availableModels":null,"keep":true}"#),
+            connector.format(),
+            connector.label(),
+        )
+        .unwrap();
+        let patch = connector
+            .connect_patch_for_document(&document, &input)
+            .expect("null optional arrays are empty collections");
+        apply_patch(&mut document, &patch).unwrap();
+        connector.validate_projected(&document, &input).unwrap();
+        let semantic = semantic_json(&document).unwrap();
+        assert_eq!(semantic["keep"], json!(true));
+        assert_eq!(semantic["models"][0]["maxInputTokens"], json!(257_550));
+        assert_eq!(semantic["models"][0]["maxOutputTokens"], json!(32_768));
+    }
+
+    #[test]
     fn workbuddy_connector_supports_native_top_level_model_array() {
         let connector = find_connector("workbuddy-v1").expect("WorkBuddy connector is registered");
         let source = br#"[
@@ -385,6 +534,7 @@ mod tests {
             base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
             token: Some("fixture-workbuddy-key"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let mut document =
             parse_source_bytes(Some(source), connector.format(), connector.label()).unwrap();
@@ -398,6 +548,31 @@ mod tests {
         assert_eq!(connected.as_array().unwrap().len(), 2);
         assert_eq!(connected[0]["id"], json!("user-model"));
         assert_eq!(connected[1]["id"], json!("tokenstation-auto"));
+
+        let metadata = AgentModelMetadata {
+            context: 257_550,
+            output: 32_768,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let refresh_input = ConnectInput {
+            base_url: input.base_url,
+            token: input.token,
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let refresh = connector
+            .refresh_patch_for_document(&document, &refresh_input, &connector.owned_paths())
+            .expect("a managed native-array model can refresh in place");
+        apply_patch(&mut document, &refresh).unwrap();
+        connector
+            .validate_projected(&document, &refresh_input)
+            .unwrap();
+        let refreshed = semantic_json(&document).unwrap();
+        assert_eq!(refreshed[1]["maxInputTokens"], json!(257_550));
+        assert_eq!(refreshed[1]["maxOutputTokens"], json!(32_768));
 
         let disconnect = connector.disconnect_patch_for_document(&document).unwrap();
         validate_patch_ownership(&disconnect, &connector.owned_paths()).unwrap();
@@ -417,14 +592,42 @@ mod tests {
             base_url: "http://127.0.0.1:8787/agents/opencode/v1",
             token: Some("fixture-virtual-key"),
             adapter_ready: true,
+            model_metadata: Some(&AgentModelMetadata {
+                context: 257_550,
+                output: 32_768,
+                vision: true,
+                tools: true,
+                reasoning: true,
+                cost: Some(AgentModelCost {
+                    input: 0.2,
+                    output: 0.6,
+                    cache_read: Some(0.04),
+                    cache_write: None,
+                }),
+            }),
         };
-        let mut document = parse_source_bytes(None, connector.format(), connector.label()).unwrap();
+        let mut document = parse_source_bytes(
+            Some(br#"{"model":"tokenstation/auto","provider":{"tokenstation":null}}"#),
+            connector.format(),
+            connector.label(),
+        )
+        .unwrap();
         apply_patch(&mut document, &connector.connect_patch(&input).unwrap()).unwrap();
         connector.validate_projected(&document, &input).unwrap();
+        assert!(connector
+            .success_message(&input)
+            .contains("已同步上下文、输出上限和统一价格"));
 
         let projected = crate::agent_integration::config_codec::semantic_json(&document).unwrap();
+        assert_eq!(projected["model"], json!("tokenstation/auto"));
+        assert!(projected["provider"]["tokenstation"].is_object());
         let model = &projected["provider"]["tokenstation"]["models"]["auto"];
         assert_eq!(model["attachment"], json!(true));
+        assert_eq!(model["limit"], json!({"context": 257550, "output": 32768}));
+        assert_eq!(
+            model["cost"],
+            json!({"input": 0.2, "output": 0.6, "cache_read": 0.04})
+        );
         assert_eq!(
             model["modalities"],
             json!({
@@ -443,6 +646,359 @@ mod tests {
             connector.validate_projected(&stale, &input).is_err(),
             "a legacy text-only projection must require a safe reconnect"
         );
+    }
+
+    #[test]
+    fn metadata_is_projected_into_supported_agent_native_schemas() {
+        let metadata = AgentModelMetadata {
+            context: 257_550,
+            output: 32_768,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: Some(AgentModelCost {
+                input: 0.2,
+                output: 0.6,
+                cache_read: Some(0.04),
+                cache_write: None,
+            }),
+        };
+
+        let codex_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/codex/v1",
+            token: Some("fixture-codex-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut codex = parse_source_bytes(None, DocumentFormat::Toml, "Codex").unwrap();
+        apply_patch(
+            &mut codex,
+            &CodexConnector.connect_patch(&codex_input).unwrap(),
+        )
+        .unwrap();
+        CodexConnector
+            .validate_projected(&codex, &codex_input)
+            .unwrap();
+        assert!(CodexConnector
+            .success_message(&codex_input)
+            .contains("已同步安全上下文窗口和自动压缩阈值"));
+        let codex = semantic_json(&codex).unwrap();
+        assert_eq!(codex["model_context_window"], json!(257_550));
+        assert_eq!(
+            codex["model_auto_compact_token_limit"],
+            json!(257_550 - 32_768)
+        );
+
+        let openclaw_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/openclaw/v1",
+            token: Some("fixture-openclaw-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut openclaw = parse_source_bytes(None, DocumentFormat::Json5, "OpenClaw").unwrap();
+        apply_patch(
+            &mut openclaw,
+            &OpenClawConnector.connect_patch(&openclaw_input).unwrap(),
+        )
+        .unwrap();
+        OpenClawConnector
+            .validate_projected(&openclaw, &openclaw_input)
+            .unwrap();
+        assert!(OpenClawConnector
+            .success_message(&openclaw_input)
+            .contains("已同步安全模型限制和一致价格"));
+        let openclaw = semantic_json(&openclaw).unwrap();
+        let model = &openclaw["models"]["providers"]["tokenstation"]["models"][0];
+        assert_eq!(model["contextWindow"], json!(257_550));
+        assert_eq!(model["maxTokens"], json!(32_768));
+        assert_eq!(
+            model["cost"],
+            json!({"input":0.2,"output":0.6,"cacheRead":0.04})
+        );
+        assert_eq!(model["input"], json!(["text", "image"]));
+        assert_ne!(model["cost"]["input"], json!(0));
+
+        let workbuddy_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
+            token: Some("fixture-workbuddy-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut workbuddy =
+            parse_source_bytes(Some(br#"[]"#), DocumentFormat::Json, "WorkBuddy").unwrap();
+        let patch = WorkBuddyConnector
+            .connect_patch_for_document(&workbuddy, &workbuddy_input)
+            .unwrap();
+        apply_patch(&mut workbuddy, &patch).unwrap();
+        WorkBuddyConnector
+            .validate_projected(&workbuddy, &workbuddy_input)
+            .unwrap();
+        assert!(WorkBuddyConnector
+            .success_message(&workbuddy_input)
+            .contains("已同步上下文和最大输出限制"));
+        let workbuddy = semantic_json(&workbuddy).unwrap();
+        assert_eq!(workbuddy[0]["maxInputTokens"], json!(257_550));
+        assert_eq!(workbuddy[0]["maxOutputTokens"], json!(32_768));
+        assert_eq!(workbuddy[0]["supportsImages"], json!(true));
+        assert_eq!(workbuddy[0]["supportsToolCall"], json!(true));
+        assert_eq!(workbuddy[0]["supportsReasoning"], json!(true));
+
+        let hermes_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/nous-hermes-agent/v1",
+            token: Some("fixture-hermes-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut hermes = parse_source_bytes(None, DocumentFormat::Yaml, "Hermes").unwrap();
+        apply_patch(
+            &mut hermes,
+            &HermesConnector.connect_patch(&hermes_input).unwrap(),
+        )
+        .unwrap();
+        HermesConnector
+            .validate_projected(&hermes, &hermes_input)
+            .unwrap();
+        assert!(HermesConnector
+            .success_message(&hermes_input)
+            .contains("已同步安全上下文窗口"));
+        let hermes = semantic_json(&hermes).unwrap();
+        assert_eq!(hermes["model"]["context_length"], json!(257_550));
+    }
+
+    #[test]
+    fn partial_metadata_projects_capabilities_without_zero_limits() {
+        let metadata = AgentModelMetadata {
+            context: 0,
+            output: 0,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: Some(AgentModelCost {
+                input: 0.2,
+                output: 0.6,
+                cache_read: None,
+                cache_write: None,
+            }),
+        };
+
+        let opencode_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/opencode/v1",
+            token: Some("fixture-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut opencode = parse_source_bytes(None, DocumentFormat::Json, "OpenCode").unwrap();
+        apply_patch(
+            &mut opencode,
+            &OpenCodeConnector.connect_patch(&opencode_input).unwrap(),
+        )
+        .unwrap();
+        OpenCodeConnector
+            .validate_projected(&opencode, &opencode_input)
+            .unwrap();
+        let opencode = semantic_json(&opencode).unwrap();
+        let opencode_model = &opencode["provider"]["tokenstation"]["models"]["auto"];
+        assert_eq!(opencode_model["attachment"], json!(true));
+        assert_eq!(opencode_model["cost"]["output"], json!(0.6));
+        assert!(opencode_model.get("limit").is_none());
+
+        let workbuddy_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
+            token: Some("fixture-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut workbuddy = parse_source_bytes(None, DocumentFormat::Json, "WorkBuddy").unwrap();
+        let workbuddy_patch = WorkBuddyConnector
+            .connect_patch_for_document(&workbuddy, &workbuddy_input)
+            .unwrap();
+        apply_patch(&mut workbuddy, &workbuddy_patch).unwrap();
+        let workbuddy = semantic_json(&workbuddy).unwrap();
+        let workbuddy_model = &workbuddy["models"][0];
+        assert_eq!(workbuddy_model["supportsImages"], json!(true));
+        assert_eq!(workbuddy_model["supportsToolCall"], json!(true));
+        assert_eq!(workbuddy_model["supportsReasoning"], json!(true));
+        assert!(workbuddy_model.get("maxInputTokens").is_none());
+        assert!(workbuddy_model.get("maxOutputTokens").is_none());
+
+        for connector in [&CodexConnector as &dyn Connector, &HermesConnector] {
+            let input = ConnectInput {
+                base_url: "http://127.0.0.1:8787/v1",
+                token: Some("fixture-key"),
+                adapter_ready: true,
+                model_metadata: Some(&metadata),
+            };
+            let mut document =
+                parse_source_bytes(None, connector.format(), connector.label()).unwrap();
+            apply_patch(&mut document, &connector.connect_patch(&input).unwrap()).unwrap();
+            let projected = semantic_json(&document).unwrap();
+            assert!(projected.pointer("/model_context_window").is_none());
+            assert!(projected
+                .pointer("/model_auto_compact_token_limit")
+                .is_none());
+            assert!(projected.pointer("/model/context_length").is_none());
+        }
+    }
+
+    #[test]
+    fn metadata_refresh_removes_stale_managed_limits_when_metadata_becomes_unknown() {
+        let codex_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/codex/v1",
+            token: Some("fixture-codex-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let mut codex = parse_rendered(
+            r#"model = "auto"
+model_provider = "tokenstation"
+model_context_window = 257550
+model_auto_compact_token_limit = 224782
+
+[model_providers.tokenstation]
+base_url = "http://127.0.0.1:8787/agents/codex/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "fixture-codex-key"
+"#,
+            DocumentFormat::Toml,
+            "Codex",
+        )
+        .unwrap();
+        let patch = CodexConnector
+            .refresh_patch_for_document(&codex, &codex_input, &CodexConnector.owned_paths())
+            .unwrap();
+        apply_patch(&mut codex, &patch).unwrap();
+        let codex = semantic_json(&codex).unwrap();
+        assert!(codex.get("model_context_window").is_none());
+        assert!(codex.get("model_auto_compact_token_limit").is_none());
+
+        let hermes_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/nous-hermes-agent/v1",
+            token: Some("fixture-hermes-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let mut hermes = parse_rendered(
+            "model:\n  default: auto\n  provider: custom\n  base_url: http://127.0.0.1:8787/agents/nous-hermes-agent/v1\n  api_key: fixture-hermes-key\n  api_mode: chat_completions\n  context_length: 257550\n",
+            DocumentFormat::Yaml,
+            "Hermes",
+        )
+        .unwrap();
+        let patch = HermesConnector
+            .refresh_patch_for_document(&hermes, &hermes_input, &HermesConnector.owned_paths())
+            .unwrap();
+        apply_patch(&mut hermes, &patch).unwrap();
+        assert!(semantic_json(&hermes)
+            .unwrap()
+            .pointer("/model/context_length")
+            .is_none());
+    }
+
+    #[test]
+    fn first_codex_connection_with_unknown_metadata_preserves_user_limits() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/codex/v1",
+            token: Some("fixture-codex-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let mut document = parse_rendered(
+            "model_context_window = 64000\nmodel_auto_compact_token_limit = 48000\n",
+            DocumentFormat::Toml,
+            "Codex",
+        )
+        .unwrap();
+
+        let patch = CodexConnector
+            .connect_patch_for_document(&document, &input)
+            .unwrap();
+        apply_patch(&mut document, &patch).unwrap();
+        CodexConnector
+            .validate_projected(&document, &input)
+            .unwrap();
+        let semantic = semantic_json(&document).unwrap();
+        assert_eq!(semantic["model_context_window"], json!(64_000));
+        assert_eq!(semantic["model_auto_compact_token_limit"], json!(48_000));
+    }
+
+    #[test]
+    fn image_support_fails_closed_for_text_only_or_unknown_routes() {
+        let metadata = AgentModelMetadata {
+            context: 128_000,
+            output: 16_384,
+            vision: false,
+            tools: false,
+            reasoning: false,
+            cost: None,
+        };
+        let opencode_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/opencode/v1",
+            token: Some("fixture-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut opencode = parse_source_bytes(None, DocumentFormat::Json, "OpenCode").unwrap();
+        apply_patch(
+            &mut opencode,
+            &OpenCodeConnector.connect_patch(&opencode_input).unwrap(),
+        )
+        .unwrap();
+        let opencode = semantic_json(&opencode).unwrap();
+        let model = &opencode["provider"]["tokenstation"]["models"]["auto"];
+        assert_eq!(model["attachment"], json!(false));
+        assert_eq!(model["modalities"]["input"], json!(["text"]));
+
+        let workbuddy_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
+            token: Some("fixture-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut workbuddy = parse_source_bytes(None, DocumentFormat::Json, "WorkBuddy").unwrap();
+        apply_patch(
+            &mut workbuddy,
+            &WorkBuddyConnector.connect_patch(&workbuddy_input).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            semantic_json(&workbuddy).unwrap()["models"][0]["supportsImages"],
+            json!(false)
+        );
+        let workbuddy = semantic_json(&workbuddy).unwrap();
+        assert_eq!(workbuddy["models"][0]["supportsToolCall"], json!(false));
+        assert_eq!(workbuddy["models"][0]["supportsReasoning"], json!(false));
+        assert!(workbuddy["models"][0].get("reasoning").is_none());
+    }
+
+    #[test]
+    fn connectors_recover_only_null_optional_object_containers() {
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/v1",
+            token: Some("fixture-secret"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let fixtures: [(&dyn Connector, &[u8]); 4] = [
+            (&ClaudeCodeConnector, br#"{"env":null,"keep":true}"#),
+            (&OpenCodeConnector, br#"{"provider":null,"keep":true}"#),
+            (&HermesConnector, b"model: null\nkeep: true\n"),
+            (
+                &OpenClawConnector,
+                br#"{models:null,agents:null,keep:true}"#,
+            ),
+        ];
+
+        for (connector, source) in fixtures {
+            let mut document =
+                parse_source_bytes(Some(source), connector.format(), connector.label()).unwrap();
+            connector
+                .validate_source(&document)
+                .expect("an optional null container is equivalent to absence");
+            let patch = connector.connect_patch(&input).unwrap();
+            apply_patch(&mut document, &patch).unwrap();
+            connector.validate_projected(&document, &input).unwrap();
+            assert_eq!(semantic_json(&document).unwrap()["keep"], json!(true));
+        }
     }
 
     #[test]
@@ -482,6 +1038,7 @@ mod tests {
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-secret"),
             adapter_ready: true,
+            model_metadata: None,
         };
 
         for (connector, existing, unowned_marker, invalid_shape, expected_error) in fixtures {
@@ -530,21 +1087,25 @@ mod tests {
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-virtual-key"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let wrong = ConnectInput {
             base_url: "http://127.0.0.1:9999/v1",
             token: Some("wrong-key"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let not_ready = ConnectInput {
             base_url: good.base_url,
             token: good.token,
             adapter_ready: false,
+            model_metadata: None,
         };
         let missing_token = ConnectInput {
             base_url: good.base_url,
             token: None,
             adapter_ready: true,
+            model_metadata: None,
         };
         let connectors: [&dyn Connector; 6] = [
             &ClaudeCodeConnector,
@@ -582,6 +1143,17 @@ mod tests {
                 .owned_paths()
                 .iter()
                 .any(|owned| { sensitive.segments.starts_with(&owned.segments) })));
+            assert_eq!(
+                connector.projects_model_metadata(),
+                connector.connector_id() != "claude-code-v1"
+            );
+            assert_eq!(
+                connector.legacy_companion_format(
+                    Path::new("/fixture/config"),
+                    Path::new("/fixture/companion")
+                ),
+                None
+            );
             assert!(connector.validate_preconditions(&not_ready).is_err());
             assert!(connector.validate_preconditions(&good).is_ok());
             if connector.capabilities().requires_virtual_key {
@@ -630,6 +1202,7 @@ unknown = "preserved"
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
             token: Some("fixture-codex-virtual-key"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let baseline = parse_source_bytes(Some(source), DocumentFormat::Toml, "Codex").unwrap();
         let mut document = parse_source_bytes(Some(source), DocumentFormat::Toml, "Codex").unwrap();
@@ -668,6 +1241,7 @@ unknown = "preserved"
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-openclaw-secret"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let baseline = parse_source_bytes(Some(source), DocumentFormat::Json5, "OpenClaw").unwrap();
         let mut connected =
@@ -719,6 +1293,7 @@ unknown = "preserved"
             base_url: "http://127.0.0.1:8787/v1",
             token: Some("fixture-hermes-secret"),
             adapter_ready: true,
+            model_metadata: None,
         };
         let baseline = parse_source_bytes(Some(source), DocumentFormat::Yaml, "Hermes").unwrap();
         let mut connected =

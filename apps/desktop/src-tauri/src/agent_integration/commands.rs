@@ -20,21 +20,24 @@ use zeroize::Zeroizing;
 
 use super::compatibility::{evaluate_discovery, CatalogSource, CompatibilityCatalog};
 use super::config_codec::{apply_patch, parse_source_bytes, render_document, DocumentFormat};
-use super::connectors::{builtin_connectors, find_connector, ConnectInput, Connector};
+use super::connectors::{
+    builtin_connectors, find_connector, AgentModelCost, AgentModelMetadata, ConnectInput, Connector,
+};
 use super::discovery::DiscoveryScanner;
 use super::drift::analyze_drift;
 use super::ownership::{FileOwnershipStore, OwnershipStore};
 use super::plan::{
     attach_disconnect_companions, attach_restore_companions, build_connection_plan,
-    build_disconnect_plan, build_snapshot_restore_plan, companion_document_format,
-    generate_operation_id, read_config_source, ConfigSource, PreparedChangePlan,
+    build_disconnect_plan, build_metadata_refresh_plan, build_snapshot_restore_plan,
+    companion_document_format, generate_operation_id, read_config_source, ConfigSource,
+    PreparedChangePlan, COMPANION_OWNED_VALUES_CHANGED, OWNED_VALUES_CHANGED,
 };
 use super::registry::AgentRegistry;
 use super::snapshot::{FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, SnapshotStore};
 use super::transaction::{
     Clock, ConfirmedOperation, FsAtomicConfigWriter, ParseOnlyVerifier, RecoveryStatus,
-    RuntimeAdmission, SystemClock, TransactionEngine, TransactionFailure, TransactionOutcome,
-    TransactionStage,
+    RuntimeAdmission, SystemClock, TransactionCoordinator, TransactionEngine, TransactionFailure,
+    TransactionOutcome, TransactionStage,
 };
 use super::types::{
     AgentDriftView, AgentUiMetadata, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan,
@@ -181,6 +184,20 @@ impl AgentCommandError {
     fn internal(message: String) -> Self {
         Self::boundary("agent_operation_rejected", message)
     }
+
+    fn plan(message: String) -> Self {
+        match message.as_str() {
+            OWNED_VALUES_CHANGED => Self::boundary(
+                OWNED_VALUES_CHANGED,
+                "受管配置已被其他工具修改；本次未写入，请重新扫描并确认",
+            ),
+            COMPANION_OWNED_VALUES_CHANGED => Self::boundary(
+                COMPANION_OWNED_VALUES_CHANGED,
+                "受管关联配置已被其他工具修改；本次未写入，请重新扫描并确认",
+            ),
+            _ => Self::internal(message),
+        }
+    }
 }
 
 impl From<TransactionFailure> for AgentCommandError {
@@ -286,6 +303,7 @@ pub struct AgentProxyRuntime {
     connector_base_urls: BTreeMap<String, String>,
     connector_adapter_ready: BTreeMap<String, bool>,
     virtual_key: Zeroizing<String>,
+    model_metadata: BTreeMap<String, AgentModelMetadata>,
 }
 
 impl AgentProxyRuntime {
@@ -294,6 +312,7 @@ impl AgentProxyRuntime {
         gateway_origin: &str,
         virtual_key: String,
         adapter_readiness: BTreeMap<String, bool>,
+        model_metadata: BTreeMap<String, AgentModelMetadata>,
     ) -> Self {
         let mut connector_base_urls = BTreeMap::new();
         let mut connector_adapter_ready = BTreeMap::new();
@@ -318,6 +337,7 @@ impl AgentProxyRuntime {
             connector_base_urls,
             connector_adapter_ready,
             virtual_key: Zeroizing::new(virtual_key),
+            model_metadata,
         }
     }
 
@@ -356,6 +376,12 @@ impl AgentProxyRuntime {
             hash_field(&mut hash, connector_id.as_bytes());
             hash.update([u8::from(*ready)]);
         }
+        for (agent_id, metadata) in &self.model_metadata {
+            hash_field(&mut hash, agent_id.as_bytes());
+            let serialized =
+                serde_json::to_vec(metadata).expect("Agent model metadata is always serializable");
+            hash_field(&mut hash, &serialized);
+        }
         hash.finalize().into()
     }
 
@@ -377,8 +403,110 @@ impl AgentProxyRuntime {
                 .get(connector_id)
                 .copied()
                 .unwrap_or(false),
+            model_metadata: self.model_metadata.get(connector.agent_id()),
         })
     }
+}
+
+fn agent_model_metadata(
+    config: &token_station_cli::config::ClientConfig,
+    agent_id: &str,
+) -> Result<Option<AgentModelMetadata>, String> {
+    use token_station_router_core::RoutingMode;
+
+    let router = config
+        .custom_router_for_agent(agent_id)?
+        .unwrap_or_else(|| config.router.clone());
+    let mut candidates = BTreeSet::new();
+    if router.routing_mode == RoutingMode::QuotaFirst && !router.quota_accounts.is_empty() {
+        candidates.extend(router.quota_accounts.iter().cloned());
+    } else if router.routing_mode == RoutingMode::QuotaFirst {
+        for (upstream, entry) in &config.upstreams {
+            let reference = token_station_router_core::UpstreamRef::new(upstream.clone())
+                .map_err(|error| error.to_string())?;
+            candidates.extend(entry.models.iter().map(|capability| {
+                token_station_router_core::UpstreamModel::new(
+                    reference.clone(),
+                    capability.model.clone(),
+                )
+            }));
+        }
+    } else {
+        candidates.extend(router.pools.values().flatten().cloned());
+    }
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let mut context = Some(u32::MAX);
+    let mut output = Some(u32::MAX);
+    let mut vision = true;
+    let mut tools = true;
+    let mut reasoning = true;
+    let mut costs = Vec::new();
+    for candidate in &candidates {
+        let capability = config
+            .upstreams
+            .get(candidate.upstream.as_str())
+            .and_then(|upstream| {
+                upstream
+                    .models
+                    .iter()
+                    .find(|capability| capability.model == candidate.model)
+            });
+        let Some(capability) = capability else {
+            return Ok(None);
+        };
+        let max_output = capability
+            .extensions
+            .get("max_output_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0);
+        context = context.and_then(|current| {
+            (capability.context_window > 0).then_some(current.min(capability.context_window))
+        });
+        output = output.and_then(|current| max_output.map(|value| current.min(value)));
+        vision &= capability.vision_state().is_supported();
+        tools &= capability.tool_state().is_supported();
+        reasoning &= capability.supported_parameters.contains("reasoning_effort");
+
+        let catalog_cost = capability
+            .extensions
+            .get("catalog_cost")
+            .and_then(|value| serde_json::from_value::<AgentModelCost>(value.clone()).ok())
+            .filter(AgentModelCost::is_valid);
+        let configured_cost = config.pricing.models.get(&candidate.model).map(|price| {
+            // Price display is decimal USD per million tokens; sub-cent rounding is acceptable here.
+            #[allow(clippy::cast_precision_loss)]
+            let dollars = |micros: u64| micros as f64 / 1_000_000.0;
+            AgentModelCost {
+                input: dollars(price.input_per_mtok),
+                output: dollars(price.output_per_mtok),
+                cache_read: Some(dollars(price.cache_read_per_mtok)),
+                cache_write: Some(dollars(price.cache_write_per_mtok)),
+            }
+        });
+        costs.push(catalog_cost.or(configured_cost));
+    }
+
+    let cost = costs.first().cloned().flatten().filter(|first| {
+        costs
+            .iter()
+            .all(|candidate| candidate.as_ref() == Some(first))
+    });
+    let (context, output) = match (context, output) {
+        (Some(context), Some(output)) if output < context => (context, output),
+        _ => (0, 0),
+    };
+    Ok(Some(AgentModelMetadata {
+        context,
+        output,
+        vision,
+        tools,
+        reasoning,
+        cost,
+    }))
 }
 
 pub struct AgentCommandState {
@@ -388,6 +516,7 @@ pub struct AgentCommandState {
     keys: Arc<dyn MasterKeyStore>,
     snapshots: FileSnapshotStore<Arc<dyn MasterKeyStore>>,
     ownership: FileOwnershipStore,
+    transaction_coordinator: Arc<TransactionCoordinator>,
     token_key: hmac::Key,
     session: Mutex<CommandSession>,
     scan_in_progress: AtomicBool,
@@ -504,6 +633,7 @@ impl AgentCommandState {
             keys,
             snapshots,
             ownership,
+            transaction_coordinator: Arc::new(TransactionCoordinator::default()),
             token_key: hmac::Key::new(hmac::HMAC_SHA256, &process_key),
             session: Mutex::new(CommandSession::default()),
             scan_in_progress: AtomicBool::new(false),
@@ -591,6 +721,99 @@ impl AgentCommandState {
             .map_err(|_| AgentCommandError::boundary("state_poisoned", "Agent 会话状态不可用"))?
             .scan = Some(snapshot);
         Ok(())
+    }
+
+    /// Refresh route-derived model limits and capabilities in every managed
+    /// connector that projects them. The restore transaction updates the
+    /// active ownership revision but preserves the original disconnect
+    /// baseline snapshot.
+    pub(crate) fn refresh_model_metadata(
+        &self,
+        agent_id: Option<&str>,
+        runtime: &AgentProxyRuntime,
+    ) -> Result<usize, AgentCommandError> {
+        if let Some(agent_id) = agent_id {
+            validate_short_identifier(agent_id, "agent_id")?;
+        }
+        let snapshot = self.perform_scan()?;
+        let mut refreshed = 0;
+        for record in snapshot
+            .records
+            .iter()
+            .filter(|record| agent_id.is_none_or(|selected| record.agent_id == selected))
+        {
+            let descriptor = self
+                .registry
+                .descriptors()
+                .iter()
+                .find(|descriptor| descriptor.agent_id == record.agent_id)
+                .ok_or_else(|| AgentCommandError::boundary("unknown_agent", "未知 Agent"))?;
+            let decision = evaluate_discovery(&snapshot.catalog, descriptor, record);
+            let ownership = self
+                .ownership
+                .list_agent_installation(&record.agent_id, &record.canonical_path)
+                .map_err(AgentCommandError::internal)?;
+            for owned in ownership {
+                if decision.status != CompatibilityStatus::DetectedVerified
+                    || decision.connector_id.as_deref() != Some(owned.connector_id.as_str())
+                {
+                    continue;
+                }
+                let connector = connector_for(&owned.connector_id)?;
+                if !connector.projects_model_metadata() {
+                    continue;
+                }
+                let target = Path::new(&owned.target_config_path);
+                let source = read_config_source(target).map_err(AgentCommandError::internal)?;
+                let input = runtime.input_for(&owned.connector_id)?;
+                let now_ms = self.clock.now_ms();
+                let prepared = build_metadata_refresh_plan(
+                    connector,
+                    record,
+                    &decision,
+                    target,
+                    &source,
+                    &input,
+                    &owned,
+                    snapshot.catalog.sequence,
+                    snapshot.catalog.expires_at_ms,
+                    now_ms,
+                    generate_operation_id().map_err(AgentCommandError::internal)?,
+                )
+                .map_err(AgentCommandError::internal)?;
+                let confirmation = ConfirmedOperation {
+                    operation_id: prepared.view.operation_id.clone(),
+                    confirmed_at_ms: now_ms,
+                    confirmations: prepared
+                        .view
+                        .required_confirmations
+                        .iter()
+                        .copied()
+                        .collect(),
+                };
+                let admission = RuntimeAdmission {
+                    compatibility_sequence: snapshot.catalog.sequence,
+                    status: decision.status,
+                };
+                TransactionEngine::with_coordinator(
+                    &self.snapshots,
+                    &self.ownership,
+                    self.keys.as_ref(),
+                    &FsAtomicConfigWriter,
+                    &ParseOnlyVerifier,
+                    &self.clock,
+                    Arc::clone(&self.transaction_coordinator),
+                )
+                .apply_snapshot_restore(&prepared, &confirmation, &admission, now_ms)
+                .map_err(AgentCommandError::from)?;
+                refreshed += 1;
+            }
+        }
+        self.session
+            .lock()
+            .map_err(|_| AgentCommandError::boundary("state_poisoned", "Agent 会话状态不可用"))?
+            .scan = Some(snapshot);
+        Ok(refreshed)
     }
 
     fn views(
@@ -866,9 +1089,9 @@ impl AgentCommandState {
             self.clock.now_ms(),
             generate_operation_id().map_err(AgentCommandError::internal)?,
         )
-        .map_err(AgentCommandError::internal)?;
+        .map_err(AgentCommandError::plan)?;
         attach_disconnect_companions(&mut prepared, connector, &ownership, &self.snapshots, &key)
-            .map_err(AgentCommandError::internal)?;
+            .map_err(AgentCommandError::plan)?;
         self.issue_plan(prepared, &record, session_label, None)
     }
 
@@ -1219,7 +1442,7 @@ impl AgentCommandState {
             self.clock.now_ms(),
             generate_operation_id().map_err(AgentCommandError::internal)?,
         )
-        .map_err(AgentCommandError::internal)?;
+        .map_err(AgentCommandError::plan)?;
         attach_restore_companions(
             &mut prepared,
             connector,
@@ -1228,7 +1451,7 @@ impl AgentCommandState {
             &self.snapshots,
             &key,
         )
-        .map_err(AgentCommandError::internal)?;
+        .map_err(AgentCommandError::plan)?;
         self.issue_plan(prepared, &record, session_label, None)
     }
 
@@ -1423,13 +1646,14 @@ impl AgentCommandState {
             compatibility_sequence: sequence,
             status: decision.status,
         };
-        let engine = TransactionEngine::new(
+        let engine = TransactionEngine::with_coordinator(
             &self.snapshots,
             &self.ownership,
             self.keys.as_ref(),
             &FsAtomicConfigWriter,
             &ParseOnlyVerifier,
             &self.clock,
+            Arc::clone(&self.transaction_coordinator),
         );
         let result = match taken.prepared.view.intent {
             PlanIntent::Connect => engine.apply_connection(
@@ -1643,6 +1867,19 @@ pub(crate) fn runtime_from_app(
             )
         })
         .collect();
+    let config = inner.materialize().map_err(AgentCommandError::internal)?;
+    let mut model_metadata = BTreeMap::new();
+    for connector in builtin_connectors() {
+        let agent_id = connector.agent_id();
+        if model_metadata.contains_key(agent_id) {
+            continue;
+        }
+        if let Some(metadata) =
+            agent_model_metadata(&config, agent_id).map_err(AgentCommandError::internal)?
+        {
+            model_metadata.insert(agent_id.to_string(), metadata);
+        }
+    }
     Ok(AgentProxyRuntime::new(
         serve.instance_id.ok_or_else(|| {
             AgentCommandError::boundary("proxy_not_running", "代理运行实例身份不可用")
@@ -1652,6 +1889,7 @@ pub(crate) fn runtime_from_app(
             .virtual_key
             .unwrap_or_else(|| "token-station-no-auth".to_string()),
         adapter_readiness,
+        model_metadata,
     ))
 }
 
@@ -2144,6 +2382,7 @@ mod tests {
                 base_url: "http://127.0.0.1:8787",
                 token: Some(secret),
                 adapter_ready: true,
+                model_metadata: None,
             },
             1,
             None,
@@ -2163,7 +2402,156 @@ mod tests {
             "http://127.0.0.1:8787",
             token.to_string(),
             adapter_readiness,
+            BTreeMap::new(),
         )
+    }
+
+    #[test]
+    fn agent_projection_uses_each_effective_route_safe_limits_and_uniform_costs() {
+        let root = scratch("opencode-model-metadata");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        for (name, context, output) in [
+            ("provider_a", 257_550, 32_768),
+            ("provider_b", 128_000, 16_384),
+        ] {
+            draft["upstreams"][name] = json!({
+                "provider": "openai-compatible",
+                "base_url": format!("https://{name}.example/v1"),
+                "models": [{
+                    "model": "glm-5.2",
+                    "tool": true,
+                    "vision": true,
+                    "supported_parameters": ["reasoning_effort"],
+                    "context_window": context,
+                    "max_output_tokens": output,
+                    "catalog_cost": {"input": 0.2, "output": 0.6, "cache_read": 0.04}
+                }]
+            });
+        }
+        draft["router"]["pools"] = json!({
+            "tier_high": [{"upstream": "provider_a", "model": "glm-5.2"}],
+            "tier_low": [{"upstream": "provider_b", "model": "glm-5.2"}]
+        });
+        draft["router"]["default_pool"] = json!("tier_low");
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft.clone()).unwrap();
+
+        let metadata = agent_model_metadata(&config, "opencode").unwrap().unwrap();
+        assert_eq!(metadata.context, 128_000);
+        assert_eq!(metadata.output, 16_384);
+        assert!(metadata.vision);
+        assert!(metadata.tools);
+        assert!(metadata.reasoning);
+        assert_eq!(metadata.cost.as_ref().map(|cost| cost.input), Some(0.2));
+
+        draft["agent_routes"]["workbuddy"] = json!({
+            "mode": "custom",
+            "custom_route": {
+                "high": {"upstream": "provider_a", "model": "glm-5.2"},
+                "mid": {"upstream": "provider_a", "model": "glm-5.2"},
+                "low": {"upstream": "provider_a", "model": "glm-5.2"}
+            }
+        });
+        let workbuddy_config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft.clone()).unwrap();
+        let workbuddy = agent_model_metadata(&workbuddy_config, "workbuddy")
+            .unwrap()
+            .unwrap();
+        assert_eq!(workbuddy.context, 257_550);
+        assert_eq!(workbuddy.output, 32_768);
+
+        draft["upstreams"]["provider_b"]["models"][0]["catalog_cost"]["output"] = json!(0.7);
+        draft["upstreams"]["provider_b"]["models"][0]["vision"] = json!(false);
+        draft["upstreams"]["provider_b"]["models"][0]["tool"] = json!(false);
+        draft["upstreams"]["provider_b"]["models"][0]["supported_parameters"] = json!([]);
+        let mixed: token_station_cli::config::ClientConfig = serde_json::from_value(draft).unwrap();
+        let mixed = agent_model_metadata(&mixed, "opencode").unwrap().unwrap();
+        assert_eq!(mixed.cost, None);
+        assert!(!mixed.vision);
+        assert!(!mixed.tools);
+        assert!(!mixed.reasoning);
+    }
+
+    #[test]
+    fn agent_projection_falls_back_to_complete_configured_price_for_partial_catalog_costs() {
+        let root = scratch("partial-catalog-price-fallback");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        for name in ["provider_a", "provider_b"] {
+            draft["upstreams"][name] = json!({
+                "provider": "openai-compatible",
+                "base_url": format!("https://{name}.example/v1"),
+                "models": [{
+                    "model": "glm-5.2",
+                    "tool": true,
+                    "vision": true,
+                    "context_window": 257550,
+                    "max_output_tokens": 32768,
+                    "catalog_cost": {"input": 99.0}
+                }]
+            });
+        }
+        draft["router"]["pools"] = json!({
+            "tier_low": [
+                {"upstream": "provider_a", "model": "glm-5.2"},
+                {"upstream": "provider_b", "model": "glm-5.2"}
+            ]
+        });
+        draft["router"]["default_pool"] = json!("tier_low");
+        draft["pricing"] = json!({
+            "version": 1,
+            "models": {
+                "glm-5.2": {
+                    "input_per_mtok": 200000,
+                    "output_per_mtok": 600000,
+                    "cache_read_per_mtok": 40000,
+                    "cache_write_per_mtok": 0
+                }
+            }
+        });
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        let metadata = agent_model_metadata(&config, "opencode").unwrap().unwrap();
+        let cost = metadata
+            .cost
+            .expect("the complete configured price is used");
+        assert_eq!(cost.input, 0.2);
+        assert_eq!(cost.output, 0.6);
+        assert_eq!(cost.cache_read, Some(0.04));
+        assert_eq!(cost.cache_write, Some(0.0));
+    }
+
+    #[test]
+    fn incomplete_limits_do_not_discard_verified_capabilities_or_price() {
+        let root = scratch("partial-limits-keep-capabilities");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["upstreams"]["provider_a"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://provider-a.example/v1",
+            "models": [{
+                "model": "glm-5.2",
+                "tool": true,
+                "vision": true,
+                "supported_parameters": ["reasoning_effort"],
+                "context_window": 257550,
+                "catalog_cost": {"input": 0.2, "output": 0.6}
+            }]
+        });
+        draft["router"]["pools"] = json!({
+            "tier_low": [{"upstream": "provider_a", "model": "glm-5.2"}]
+        });
+        draft["router"]["default_pool"] = json!("tier_low");
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        let metadata = agent_model_metadata(&config, "opencode")
+            .unwrap()
+            .expect("independently verified metadata remains available");
+        assert_eq!(metadata.safe_limits(), None);
+        assert!(metadata.vision);
+        assert!(metadata.tools);
+        assert!(metadata.reasoning);
+        assert_eq!(metadata.cost.as_ref().map(|cost| cost.output), Some(0.6));
     }
 
     fn running_app_with_adapters(
@@ -3004,6 +3392,7 @@ mod tests {
             "http://127.0.0.1:8787",
             "vk-readiness-view".to_string(),
             adapter_readiness,
+            BTreeMap::new(),
         );
 
         let views = state.views(&snapshot, Some(&runtime)).unwrap();
@@ -3606,4 +3995,15 @@ mod tests {
             .contains("vk-command-lifecycle"));
         std::fs::remove_dir_all(root).ok();
     }
+}
+#[test]
+fn owned_value_plan_conflicts_keep_stable_public_reason_codes() {
+    assert_eq!(
+        AgentCommandError::plan(OWNED_VALUES_CHANGED.to_string()).code,
+        OWNED_VALUES_CHANGED
+    );
+    assert_eq!(
+        AgentCommandError::plan(COMPANION_OWNED_VALUES_CHANGED.to_string()).code,
+        COMPANION_OWNED_VALUES_CHANGED
+    );
 }

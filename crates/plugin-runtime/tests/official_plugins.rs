@@ -369,9 +369,8 @@ fn responses_builtin_tools_are_translated_to_functions() {
         ]
     );
 
-    // Hosted / custom / tool_search each become a callable function tool.
+    // Codex client tools remain callable through the translated provider.
     for (tools, expected) in [
-        (serde_json::json!([{"type": "web_search"}]), "web_search"),
         (
             serde_json::json!([{"type": "custom", "name": "grep"}]),
             "grep",
@@ -380,9 +379,31 @@ fn responses_builtin_tools_are_translated_to_functions() {
     ] {
         let req = plugin
             .normalize_inbound(&request(tools))
-            .expect("hosted/custom tools are translated");
+            .expect("client-executed tools are translated");
         assert_eq!(names(&req), vec![expected]);
     }
+
+    for hosted in [
+        "web_search",
+        "file_search",
+        "code_interpreter",
+        "image_generation",
+        "computer_use_preview",
+        "mcp",
+    ] {
+        let error = plugin
+            .normalize_inbound(&request(serde_json::json!([{"type": hosted}])))
+            .expect_err("provider-hosted tools require native execution semantics");
+        assert_eq!(error.code, ErrorCode::Capability);
+        assert!(error.message.contains(hosted), "{}", error.message);
+    }
+
+    let disabled_web_search = plugin
+        .normalize_inbound(&request(serde_json::json!([
+            {"type": "web_search", "external_web_access": false}
+        ])))
+        .expect("a disabled hosted-tool marker remains inert");
+    assert!(disabled_web_search.tools.is_empty());
 
     // A namespace flatten collision is a hard InvalidRequest, never a silent drop.
     let collision = plugin
@@ -793,13 +814,10 @@ fn chat_completions_structured_output_is_rejected_by_the_real_wasm() {
 }
 
 #[test]
-fn anthropic_vendor_tools_are_translated_to_function_tools() {
-    // Anthropic's server tools (web_search, code_execution, …) and its
-    // client-executed schema tools (bash, text_editor, computer, memory) carry a
-    // versioned `type` and an Anthropic-defined schema. Following CC Switch, they
-    // are translated to Canonical function tools so the model can call them —
-    // client-executed tools then run in the client — rather than being dropped or
-    // refused. User tools keep their strict input_schema requirement.
+fn anthropic_server_tools_are_refused_but_client_tools_remain_functions() {
+    // Canonical IR has no execution/result representation for Anthropic server
+    // tools. Refuse those before routing instead of pretending an empty-schema
+    // function is equivalent. Client-executed schema tools remain functions.
     let plugin = AgentPlugin::load(&runtime(), anthropic_agent_package()).expect("loads clean");
     let request = |tools: serde_json::Value| {
         envelope(
@@ -828,15 +846,24 @@ fn anthropic_vendor_tools_are_translated_to_function_tools() {
         .expect("type==custom is a user tool");
     assert_eq!(custom.tools[0].name, "grep");
 
+    for tool_type in [
+        "web_search_20250305",
+        "web_fetch_20250910",
+        "code_execution_20250522",
+        "tool_search_tool_regex_20251119",
+        "mcp_20250812",
+    ] {
+        let error = plugin
+            .normalize_inbound(&request(serde_json::json!([{
+                "type": tool_type,
+                "name": tool_type.split('_').next().unwrap()
+            }])))
+            .expect_err("server tools require native Anthropic passthrough");
+        assert_eq!(error.code, ErrorCode::Capability);
+        assert!(error.message.contains(tool_type));
+    }
+
     for (tools, expected) in [
-        (
-            serde_json::json!([{"type": "web_search_20250305", "name": "web_search"}]),
-            "web_search",
-        ),
-        (
-            serde_json::json!([{"type": "code_execution_20250522", "name": "code_execution"}]),
-            "code_execution",
-        ),
         (
             serde_json::json!([{"type": "bash_20250124", "name": "bash"}]),
             "bash",
@@ -852,7 +879,7 @@ fn anthropic_vendor_tools_are_translated_to_function_tools() {
     ] {
         let req = plugin
             .normalize_inbound(&request(tools))
-            .expect("vendor tools are translated to function tools");
+            .expect("client-executed tools are translated to function tools");
         assert_eq!(req.tools.len(), 1);
         assert_eq!(req.tools[0].name, expected);
     }

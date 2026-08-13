@@ -43,6 +43,13 @@ static SECRET_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| 
                 .expect("valid URL credential regex"),
             "$1[REDACTED]@",
         ),
+        (
+            Regex::new(
+                r#"(?is)(["']?(?:request[_-]?body|body|prompt|content|input|tool[_-]?input|toolinput|arguments|query|search[_-]?(?:term|query))["']?\s*[:=]\s*).*"#,
+            )
+            .expect("valid content-field regex"),
+            "$1[REDACTED]",
+        ),
     ]
 });
 
@@ -488,7 +495,7 @@ mod tests {
             &log,
             FrontendDiagnosticInput {
                 kind: "window_error".to_string(),
-                message: "Authorization: Bearer secret-token sk-live-abcdef".to_string(),
+                message: "Authorization: Bearer secret-token sk-live-abcdef; body=private-body-text; tool_input=private-tool-value; search_term=private-search-value".to_string(),
                 stack: Some(format!("api_key=very-secret {}", "x".repeat(20_000))),
                 component_stack: None,
             },
@@ -496,6 +503,9 @@ mod tests {
         .unwrap();
         assert!(!record.message.contains("secret-token"));
         assert!(!record.message.contains("sk-live"));
+        assert!(!record.message.contains("private-body-text"));
+        assert!(!record.message.contains("private-tool-value"));
+        assert!(!record.message.contains("private-search-value"));
         assert!(record.stack.as_deref().unwrap().len() <= STACK_FIELD_LIMIT);
 
         std::fs::write(
@@ -506,6 +516,33 @@ mod tests {
         let read = read_frontend_events(&log).unwrap();
         assert_eq!(read.len(), 1);
         assert!(!read[0].message.contains("raw-secret"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn diagnostics_redact_tool_input_across_semicolons_and_line_breaks() {
+        let root = scratch("multiline-redaction");
+        let log = root.join("frontend.jsonl");
+        let record = append_frontend_event(
+            &log,
+            FrontendDiagnosticInput {
+                kind: "window_error".to_string(),
+                message:
+                    "arguments={\"command\":\"echo private-a; curl private-b\nnext private-c\"}"
+                        .to_string(),
+                stack: None,
+                component_stack: None,
+            },
+        )
+        .unwrap();
+
+        assert!(!record.message.contains("private-a"));
+        assert!(!record.message.contains("private-b"));
+        assert!(!record.message.contains("private-c"));
+        let persisted = std::fs::read_to_string(&log).unwrap();
+        assert!(!persisted.contains("private-a"));
+        assert!(!persisted.contains("private-b"));
+        assert!(!persisted.contains("private-c"));
         std::fs::remove_dir_all(root).ok();
     }
 
