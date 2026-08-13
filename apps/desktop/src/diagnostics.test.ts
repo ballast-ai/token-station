@@ -29,6 +29,18 @@ describe("frontend diagnostics", () => {
     expect(serialized).toContain("[REDACTED]");
   });
 
+  it("does not expose tool input after semicolons or line breaks", () => {
+    const input = diagnosticInput(
+      "render_error",
+      new Error('arguments={"command":"echo private-a; curl private-b\nnext private-c"}'),
+    );
+    const serialized = JSON.stringify(input);
+
+    expect(serialized).not.toContain("private-a");
+    expect(serialized).not.toContain("private-b");
+    expect(serialized).not.toContain("private-c");
+  });
+
   it("persists window errors and rejected promises through the local backend", async () => {
     const uninstall = installGlobalDiagnostics();
     window.dispatchEvent(new ErrorEvent("error", { error: new Error("window boom"), message: "window boom" }));

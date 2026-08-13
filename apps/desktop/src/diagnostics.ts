@@ -15,7 +15,7 @@ export function redactDiagnosticText(value: string): string {
     .replace(/\b(?:sk|pk)[-_][a-z0-9_-]{4,}/gi, "[REDACTED]")
     .replace(/\bAIza[0-9A-Za-z_-]{12,}/g, "[REDACTED]")
     .replace(/((?:api[_-]?key|access[_-]?token|token|password|secret|authorization)\s*[:=]\s*["']?)[^"'\s,;}]{3,}/gi, "$1[REDACTED]")
-    .replace(/(["']?(?:request[_-]?body|body|prompt|content|input|tool[_-]?input|toolInput|arguments|query|search[_-]?(?:term|query))["']?\s*[:=]\s*)[^\r\n;]+/gi, "$1[REDACTED]");
+    .replace(/(["']?(?:request[_-]?body|body|prompt|content|input|tool[_-]?input|toolInput|arguments|query|search[_-]?(?:term|query))["']?\s*[:=]\s*)[\s\S]*/gi, "$1[REDACTED]");
 }
 
 function errorFields(value: unknown): { message: string; stack: string | null } {

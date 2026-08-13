@@ -438,8 +438,8 @@ fn agent_model_metadata(
         return Ok(None);
     }
 
-    let mut context = u32::MAX;
-    let mut output = u32::MAX;
+    let mut context = Some(u32::MAX);
+    let mut output = Some(u32::MAX);
     let mut vision = true;
     let mut tools = true;
     let mut reasoning = true;
@@ -457,20 +457,16 @@ fn agent_model_metadata(
         let Some(capability) = capability else {
             return Ok(None);
         };
-        let Some(max_output) = capability
+        let max_output = capability
             .extensions
             .get("max_output_tokens")
             .and_then(serde_json::Value::as_u64)
             .and_then(|value| u32::try_from(value).ok())
-            .filter(|value| *value > 0)
-        else {
-            return Ok(None);
-        };
-        if capability.context_window == 0 {
-            return Ok(None);
-        }
-        context = context.min(capability.context_window);
-        output = output.min(max_output);
+            .filter(|value| *value > 0);
+        context = context.and_then(|current| {
+            (capability.context_window > 0).then_some(current.min(capability.context_window))
+        });
+        output = output.and_then(|current| max_output.map(|value| current.min(value)));
         vision &= capability.vision_state().is_supported();
         tools &= capability.tool_state().is_supported();
         reasoning &= capability.supported_parameters.contains("reasoning_effort");
@@ -499,9 +495,10 @@ fn agent_model_metadata(
             .iter()
             .all(|candidate| candidate.as_ref() == Some(first))
     });
-    if output >= context {
-        return Ok(None);
-    }
+    let (context, output) = match (context, output) {
+        (Some(context), Some(output)) if output < context => (context, output),
+        _ => (0, 0),
+    };
     Ok(Some(AgentModelMetadata {
         context,
         output,
@@ -2522,6 +2519,39 @@ mod tests {
         assert_eq!(cost.output, 0.6);
         assert_eq!(cost.cache_read, Some(0.04));
         assert_eq!(cost.cache_write, Some(0.0));
+    }
+
+    #[test]
+    fn incomplete_limits_do_not_discard_verified_capabilities_or_price() {
+        let root = scratch("partial-limits-keep-capabilities");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["upstreams"]["provider_a"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://provider-a.example/v1",
+            "models": [{
+                "model": "glm-5.2",
+                "tool": true,
+                "vision": true,
+                "supported_parameters": ["reasoning_effort"],
+                "context_window": 257550,
+                "catalog_cost": {"input": 0.2, "output": 0.6}
+            }]
+        });
+        draft["router"]["pools"] = json!({
+            "tier_low": [{"upstream": "provider_a", "model": "glm-5.2"}]
+        });
+        draft["router"]["default_pool"] = json!("tier_low");
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        let metadata = agent_model_metadata(&config, "opencode")
+            .unwrap()
+            .expect("independently verified metadata remains available");
+        assert_eq!(metadata.safe_limits(), None);
+        assert!(metadata.vision);
+        assert!(metadata.tools);
+        assert!(metadata.reasoning);
+        assert_eq!(metadata.cost.as_ref().map(|cost| cost.output), Some(0.6));
     }
 
     fn running_app_with_adapters(

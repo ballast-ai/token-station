@@ -40,8 +40,10 @@ fn model_value(input: &ConnectInput<'_>) -> serde_json::Value {
         if metadata.vision {
             model["input"] = json!(["text", "image"]);
         }
-        model["contextWindow"] = json!(metadata.context);
-        model["maxTokens"] = json!(metadata.output);
+        if let Some((context, output)) = metadata.safe_limits() {
+            model["contextWindow"] = json!(context);
+            model["maxTokens"] = json!(output);
+        }
         if let Some(cost) = &metadata.cost {
             let mut projected = json!({
                 "input": cost.input,

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::{path, ConnectInput, Connector, ConnectorCapabilities};
+use super::{path, AgentModelMetadata, ConnectInput, Connector, ConnectorCapabilities};
 use crate::agent_integration::config_codec::{semantic_json, ConfigDocument, DocumentFormat};
 use crate::agent_integration::types::{ConfigPath, PatchKind, PatchOperation};
 
@@ -133,11 +133,11 @@ impl Connector for HermesConnector {
             value: Some(value),
         })
         .collect::<Vec<_>>();
-        if let Some(metadata) = input.model_metadata {
+        if let Some((context, _)) = input.model_metadata.and_then(AgentModelMetadata::safe_limits) {
             operations.push(PatchOperation {
                 operation: PatchKind::Replace,
                 path: path(CONTEXT_LENGTH_PATH),
-                value: Some(json!(metadata.context)),
+                value: Some(json!(context)),
             });
         }
         Ok(operations)
@@ -145,18 +145,48 @@ impl Connector for HermesConnector {
 
     fn refresh_patch_for_document(
         &self,
-        _document: &ConfigDocument,
+        document: &ConfigDocument,
         input: &ConnectInput<'_>,
+        owned_paths: &[ConfigPath],
     ) -> Result<Vec<PatchOperation>, String> {
         let mut operations = self.connect_patch(input)?;
-        if input.model_metadata.is_none() {
+        let context_path = path(CONTEXT_LENGTH_PATH);
+        let context_exists = semantic_json(document)?
+            .pointer("/model/context_length")
+            .is_some();
+        if input.model_metadata.and_then(AgentModelMetadata::safe_limits).is_some()
+            && !owned_paths.contains(&context_path)
+            && context_exists
+        {
+            operations.retain(|operation| operation.path != context_path);
+        } else if input.model_metadata.and_then(AgentModelMetadata::safe_limits).is_none()
+            && owned_paths.contains(&context_path)
+        {
             operations.push(PatchOperation {
                 operation: PatchKind::Remove,
-                path: path(CONTEXT_LENGTH_PATH),
+                path: context_path,
                 value: None,
             });
         }
         Ok(operations)
+    }
+
+    fn validate_refresh_projected(
+        &self,
+        document: &ConfigDocument,
+        input: &ConnectInput<'_>,
+        owned_paths: &[ConfigPath],
+    ) -> Result<(), String> {
+        let validation_input = ConnectInput {
+            base_url: input.base_url,
+            token: input.token,
+            adapter_ready: input.adapter_ready,
+            model_metadata: owned_paths
+                .contains(&path(CONTEXT_LENGTH_PATH))
+                .then_some(input.model_metadata)
+                .flatten(),
+        };
+        self.validate_projected(document, &validation_input)
     }
 
     fn disconnect_patch(&self) -> Vec<PatchOperation> {
@@ -188,8 +218,8 @@ impl Connector for HermesConnector {
         if !valid {
             return Err("Hermes 写入前复验失败".to_string());
         }
-        if let Some(metadata) = input.model_metadata {
-            if root.pointer("/model/context_length") != Some(&json!(metadata.context)) {
+        if let Some((context, _)) = input.model_metadata.and_then(AgentModelMetadata::safe_limits) {
+            if root.pointer("/model/context_length") != Some(&json!(context)) {
                 return Err("Hermes 写入前复验上下文窗口失败".to_string());
             }
         }
@@ -197,9 +227,15 @@ impl Connector for HermesConnector {
     }
 
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
-        let metadata = input.model_metadata.map_or("模型限制未知，未写入猜测值", |_| {
+        let metadata = if input
+            .model_metadata
+            .and_then(AgentModelMetadata::safe_limits)
+            .is_some()
+        {
             "已同步安全上下文窗口"
-        });
+        } else {
+            "模型限制未知，未写入猜测值"
+        };
         format!(
             "Hermes 已通过 chat_completions 指向 {}；{}；配置已进入加密快照和 ownership 管理。",
             input.base_url, metadata

@@ -112,10 +112,9 @@ impl Connector for OpenCodeConnector {
             }
         });
         if let Some(metadata) = input.model_metadata {
-            model["limit"] = json!({
-                "context": metadata.context,
-                "output": metadata.output,
-            });
+            if let Some((context, output)) = metadata.safe_limits() {
+                model["limit"] = json!({"context": context, "output": output});
+            }
             if let Some(cost) = &metadata.cost {
                 model["cost"] = serde_json::to_value(cost)
                     .map_err(|error| format!("OpenCode 模型价格序列化失败：{error}"))?;
@@ -157,9 +156,12 @@ impl Connector for OpenCodeConnector {
             .token
             .ok_or_else(|| "OpenCode 接入缺少虚拟 Key".to_string())?;
         let metadata_valid = input.model_metadata.is_none_or(|metadata| {
-            provider["models"]["auto"]["limit"]
-                == json!({"context": metadata.context, "output": metadata.output})
-                && metadata.cost.as_ref().map_or_else(
+            let model = &provider["models"]["auto"];
+            let limits_valid = metadata.safe_limits().map_or_else(
+                || model.get("limit").is_none(),
+                |(context, output)| model["limit"] == json!({"context": context, "output": output}),
+            );
+            limits_valid && metadata.cost.as_ref().map_or_else(
                     || provider["models"]["auto"].get("cost").is_none(),
                     |cost| provider["models"]["auto"]["cost"] == json!(cost),
                 )

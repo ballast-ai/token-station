@@ -4025,6 +4025,131 @@ mod tests {
     }
 
     #[test]
+    fn workbuddy_native_array_refresh_and_disconnect_preserve_user_models() {
+        let root = scratch("workbuddy-native-array-user-model");
+        let target = root.join("models.json");
+        write_initial(&target, br#"[]"#);
+        let metadata = AgentModelMetadata {
+            context: 257_550,
+            output: 32_768,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let connect_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
+            token: Some("managed-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let connect = build_connection_plan(
+            &WorkBuddyConnector,
+            &workbuddy_discovery(&target),
+            &workbuddy_verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &connect_input,
+            1,
+            None,
+            1_000,
+            "b1".repeat(16),
+        )
+        .unwrap();
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership_store = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership_store,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        engine
+            .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
+            .unwrap();
+
+        let ownership_key = OwnershipKey {
+            agent_id: "workbuddy".to_string(),
+            installation_path: workbuddy_discovery(&target).canonical_path,
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let mut edited: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        edited.as_array_mut().unwrap().push(serde_json::json!({
+            "id": "user-model",
+            "url": "https://user.example/v1/chat/completions",
+            "apiKey": "user-owned-key"
+        }));
+        std::fs::write(&target, serde_json::to_vec_pretty(&edited).unwrap()).unwrap();
+
+        let refresh = build_metadata_refresh_plan(
+            &WorkBuddyConnector,
+            &workbuddy_discovery(&target),
+            &workbuddy_verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &connect_input,
+            &ownership,
+            1,
+            None,
+            2_000,
+            "b2".repeat(16),
+        )
+        .unwrap();
+        engine
+            .apply_snapshot_restore(
+                &refresh,
+                &confirmation_at(&refresh, 2_001),
+                &admission(),
+                2_002,
+            )
+            .expect("an unrelated user model must not cause ownership drift");
+        let refreshed_ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let baseline = snapshots
+            .load(&refreshed_ownership.baseline_snapshot_id)
+            .unwrap();
+        let baseline_source = ConfigSource {
+            existed: baseline.record.original_existed,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let disconnect = build_disconnect_plan(
+            &WorkBuddyConnector,
+            &workbuddy_discovery(&target),
+            &workbuddy_verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &refreshed_ownership,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            3_000,
+            "b3".repeat(16),
+        )
+        .unwrap();
+        engine
+            .apply_disconnect(
+                &disconnect,
+                &confirmation_at(&disconnect, 3_001),
+                &admission(),
+                3_002,
+            )
+            .unwrap();
+
+        let disconnected: Value = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(disconnected.as_array().unwrap().len(), 1);
+        assert_eq!(disconnected[0]["id"], "user-model");
+        assert_eq!(disconnected[0]["apiKey"], "user-owned-key");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn blocked_compatibility_still_allows_bound_disconnect_recovery() {
         let root = scratch("blocked-disconnect");
         let target = root.join("settings.json");
