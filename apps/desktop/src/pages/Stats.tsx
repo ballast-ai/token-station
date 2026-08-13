@@ -16,6 +16,7 @@ import CompactCombobox from "../components/CompactCombobox";
 import UsageTrendChart, { type UsageTrendRange } from "../components/UsageTrendChart";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { humanizeAppError } from "../errors";
+import { useErrorToast } from "../components/ErrorToast";
 
 export function formatBudgetAmount(micros: number): string {
   if (micros === 0) return "0.00";
@@ -162,6 +163,7 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
 
 export default function Stats({ onBack, embedded = false }: { onBack?: () => void; embedded?: boolean }) {
   const { language, copy } = useLocalizedCopy();
+  const { showError, showSuccess } = useErrorToast();
   const sinceOptions = [
     { value: "24h", label: copy("Last 24 hours", "近 24 小时") },
     { value: "7d", label: copy("Last 7 days", "近 7 天") },
@@ -197,7 +199,6 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
   const [agents, setAgents] = useState<AgentUiMetadataView[]>([]);
   const [budgets, setBudgets] = useState<BudgetStatus[]>([]);
   const [budgetErr, setBudgetErr] = useState("");
-  const [budgetSaved, setBudgetSaved] = useState("");
   const [agentId, setAgentId] = useState("");
   const [limit, setLimit] = useState("10");
   const [warningPercent, setWarningPercent] = useState("80");
@@ -284,7 +285,11 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
         setModelFilter("");
       }
     } catch (error) {
-      if (dashboardMounted.current && generation === requestGeneration.current) setErr(humanizeAppError(error));
+      if (dashboardMounted.current && generation === requestGeneration.current) {
+        const message = humanizeAppError(error);
+        if (background || data) showError(message, "usage-dashboard-refresh");
+        else setErr(message);
+      }
     } finally {
       if (dashboardMounted.current && generation === requestGeneration.current) {
         setLoading(false);
@@ -298,7 +303,7 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
         });
       }
     }
-  }, [activeGroup, agentFilter, data, modelFilter, since, upstreamFilter]);
+  }, [activeGroup, agentFilter, data, modelFilter, showError, since, upstreamFilter]);
   latestDashboardLoader.current = loadDashboard;
 
   useEffect(() => {
@@ -316,7 +321,6 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
 
   const saveBudget = async () => {
     setBudgetErr("");
-    setBudgetSaved("");
     const limitValue = Number(limit);
     const limitMicros = Math.round(limitValue * 1_000_000);
     const warning = Number(warningPercent);
@@ -355,22 +359,24 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
       const statuses = await setAgentBudget(agentId, limitMicros, warning, startMs, endMs, expiryDays);
       setBudgets(statuses);
       loadForm(agentId, statuses);
-      setBudgetSaved(copy("Budget saved · Alerts only", "预算已保存 · 仅用于展示与预警"));
+      showSuccess(
+        copy("Budget saved · Alerts only", "预算已保存 · 仅用于展示与预警"),
+        `agent-budget-save:${agentId}`,
+      );
     } catch (error) {
-      setBudgetErr(humanizeAppError(error));
+      showError(humanizeAppError(error), `agent-budget-save:${agentId}`);
     }
   };
 
   const deleteBudget = async () => {
     setBudgetErr("");
-    setBudgetSaved("");
     try {
       const statuses = await removeAgentBudget(agentId);
       setBudgets(statuses);
       loadForm(agentId, statuses);
-      setBudgetSaved(copy("Budget deleted", "预算已删除"));
+      showSuccess(copy("Budget deleted", "预算已删除"), `agent-budget-remove:${agentId}`);
     } catch (error) {
-      setBudgetErr(humanizeAppError(error));
+      showError(humanizeAppError(error), `agent-budget-remove:${agentId}`);
     }
   };
 
@@ -672,7 +678,6 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
               </div>
             </div>
             {budgetErr && <div className="banner err">{budgetErr}</div>}
-            {budgetSaved && <div className="banner ok">{budgetSaved}</div>}
           </section>
           <PricingEditor />
         </div>

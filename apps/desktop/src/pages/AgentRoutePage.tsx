@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   applyAgentPlan,
   configureCursorProvider,
+  ensureServeRunning,
   forceForgetAgent,
   mountAgentProfile,
   planAgentConnection,
@@ -16,6 +17,7 @@ import {
   type AgentView,
   type ProviderView,
   type QuotaAccount,
+  type RoutingMode,
   type StateView,
   type TierSlot,
 } from "../api";
@@ -23,6 +25,16 @@ import TierRouteEditor from "../components/TierRouteEditor";
 import InstallationPicker from "../components/InstallationPicker";
 import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import RoutingModeSelector from "../components/RoutingModeSelector";
+import DirectRoutePanel from "../components/DirectRoutePanel";
+import { useErrorToast } from "../components/ErrorToast";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select";
 import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { humanizeAppError } from "../errors";
@@ -37,7 +49,8 @@ interface AgentRoutePageProps {
   serveRunning: boolean;
   applying: boolean;
   onStateChange: (state: StateView, message?: string) => void;
-  onRescan: () => void | Promise<void>;
+  onRefreshAgents: () => void | Promise<void>;
+  onConnectInFlightChange?: (inFlight: boolean) => void;
   onSaveQuota: (accounts: QuotaAccount[]) => void;
   onSaveQuotaPlan: (
     upstream: string,
@@ -46,7 +59,9 @@ interface AgentRoutePageProps {
     unit: "tokens" | "requests",
   ) => void;
   onViewQuotaUsage: () => void;
-  onSetRoutingMode?: (mode: "tiered" | "quota_first") => void;
+  onSetRoutingMode?: (mode: RoutingMode) => void;
+  onApplyDirect?: (upstream: string, model: string) => void | Promise<boolean>;
+  onDeleteProfile?: (name: string) => void | Promise<boolean>;
   onInstallationSelected?: () => void;
   embedded?: boolean;
 }
@@ -110,6 +125,27 @@ function statusCopy(
       ),
     };
   }
+  if (installation
+    && installation.compatibility.status !== "DETECTED_VERIFIED"
+    && !isExactMultiInstallSelection(agent, installation)) {
+    return {
+      tone: "danger",
+      label: copy("Unavailable", "暂不可接入"),
+      detail: humanizeAppError({
+        code: installation.compatibility.reason_code,
+        message: installation.compatibility.message,
+      }, language),
+    };
+  }
+  if (installation?.connection_issue) {
+    return {
+      tone: "danger",
+      label: installation.connection_issue.code === "agent_runtime_transition"
+        ? copy("Proxy transitioning", "代理切换中")
+        : copy("Route incomplete", "路由待完善"),
+      detail: humanizeAppError(installation.connection_issue, language),
+    };
+  }
   if (installation?.connected) {
     return {
       tone: "success",
@@ -144,16 +180,6 @@ function statusCopy(
       detail: copy("The exact installation is selected and ready to connect.", "已选择精确安装，可以一键接入。"),
     };
   }
-  if (installation && installation.compatibility.status !== "DETECTED_VERIFIED") {
-    return {
-      tone: "danger",
-      label: copy("Unavailable", "暂不可接入"),
-      detail: humanizeAppError({
-        code: installation.compatibility.reason_code,
-        message: installation.compatibility.message,
-      }, language),
-    };
-  }
   return {
     tone: "ready",
     label: copy("Ready", "可接入"),
@@ -184,19 +210,21 @@ export default function AgentRoutePage({
   serveRunning,
   applying,
   onStateChange,
-  onRescan,
+  onRefreshAgents,
+  onConnectInFlightChange,
   onSaveQuota,
   onSaveQuotaPlan,
   onViewQuotaUsage,
   onSetRoutingMode = () => {},
+  onApplyDirect = () => {},
+  onDeleteProfile = () => {},
   onInstallationSelected,
   embedded = false,
 }: AgentRoutePageProps) {
   const { copy, language } = useLocalizedCopy();
+  const { showError, showSuccess } = useErrorToast();
   const [selectedPath, setSelectedPath] = useState("");
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState("");
-  const [error, setError] = useState("");
   // Show configuration changes after the first connection, then persist dismissal in localStorage.
   const [connectDiff, setConnectDiff] = useState<ConfigPlanView | null>(null);
   const dismissConnectDiff = () => setConnectDiff(null);
@@ -216,29 +244,28 @@ export default function AgentRoutePage({
   const canConnect = Boolean(
     installation
       && installation.adapter_ready !== false
+      && !installation.connection_issue
       && installation.compatibility.reason_code !== "READ_ONLY_PREFLIGHT_FAILED"
       && (metadata.agent_id === "cursor"
         || ["DETECTED_VERIFIED", "CONNECTED"].includes(installation.compatibility.status)
         || isExactMultiInstallSelection(agent, installation)),
   );
-  const canOperate = managed ? Boolean(installation) : serveRunning && canConnect;
+  const canOperate = managed ? Boolean(installation) : canConnect;
 
   const runState = async (action: () => Promise<StateView>, message?: string) => {
     if (busy) return;
     setBusy(true);
-    setError("");
-    setNotice("");
     try {
       onStateChange(await action());
-      if (message) setNotice(message);
+      if (message) showSuccess(message, `agent-route-action:${metadata.agent_id}`);
     } catch (caught) {
       const message = errorText(caught);
-      setError(message.includes("cursor_running")
+      showError(message.includes("cursor_running")
         ? copy(
           "Cursor is still running. Enter the TS API in Cursor settings, or quit Cursor yourself and click Connect again. Token Station will not close it for you.",
           "Cursor 仍在运行。你可以在 Cursor 设置中填写 TS API，或者自己退出 Cursor 后再点一次一键接入。Token Station 不会强制关闭它。",
         )
-        : message);
+        : message, `agent-route-action:${metadata.agent_id}`);
     } finally {
       setBusy(false);
     }
@@ -248,14 +275,13 @@ export default function AgentRoutePage({
   // The post-connection diff card still appears once for transparency.
   const applyConnection = async () => {
     if (!installation || !canOperate || busy) return;
+    onConnectInFlightChange?.(true);
     setBusy(true);
-    setError("");
-    setNotice("");
     try {
+      onStateChange(await ensureServeRunning());
       if (metadata.agent_id === "cursor") {
         const message = await configureCursorProvider();
-        setNotice(message);
-        await onRescan();
+        showSuccess(message, `agent-connect:${metadata.agent_id}`);
         return;
       }
       const plan = await planAgentConnection(
@@ -266,23 +292,44 @@ export default function AgentRoutePage({
           : undefined,
       );
       await applyAgentPlan(plan.operation_id, plan.confirmation_token);
-      if (!localStorage.getItem(diffShownKey(metadata.agent_id))
-        && (plan.changes?.length || plan.human_diff)) {
-        localStorage.setItem(diffShownKey(metadata.agent_id), String(Date.now()));
-        setConnectDiff(plan);
+      if (plan.changes?.length || plan.human_diff) {
+        let shouldShowDiff = true;
+        try {
+          shouldShowDiff = !localStorage.getItem(diffShownKey(metadata.agent_id));
+          if (shouldShowDiff) {
+            localStorage.setItem(diffShownKey(metadata.agent_id), String(Date.now()));
+          }
+        } catch {
+          showError(
+            copy(
+              "The Agent connected, but Token Station could not remember whether the first-connection changes were shown.",
+              "Agent 已接入，但无法保存首次接入差异提示状态。",
+            ),
+            `agent-connect-diff-storage:${metadata.agent_id}`,
+          );
+        }
+        if (shouldShowDiff) setConnectDiff(plan);
       }
-      setNotice(copy("Agent connected.", "Agent 已接入"));
-      await onRescan();
+      showSuccess(
+        copy("Agent connected.", "Agent 已接入"),
+        `agent-connect:${metadata.agent_id}`,
+      );
     } catch (caught) {
       const message = errorText(caught);
-      setError(message.includes("cursor_running")
+      showError(message.includes("cursor_running")
         ? copy(
           "Cursor is still running. Enter the TS API in Cursor settings, or quit Cursor yourself and click Connect again. Token Station will not close it for you.",
           "Cursor 仍在运行。你可以在 Cursor 设置中填写 TS API，或者自己退出 Cursor 后再点一次一键接入。Token Station 不会强制关闭它。",
         )
-        : message);
+        : message, `agent-connect:${metadata.agent_id}`);
     } finally {
+      onConnectInFlightChange?.(false);
       setBusy(false);
+      try {
+        await onRefreshAgents();
+      } catch (caught) {
+        showError(errorText(caught), `agent-refresh:${metadata.agent_id}`);
+      }
     }
   };
 
@@ -293,18 +340,27 @@ export default function AgentRoutePage({
   const restoreOfficial = async () => {
     if (!installation || busy) return;
     setBusy(true);
-    setError("");
-    setNotice("");
+    let restored = false;
     try {
       await forceForgetAgent(metadata.agent_id, installation.discovery.canonical_path);
-      setNotice(copy(
-        "Restored the official configuration and disconnected.",
-        "已恢复官方配置并断开。",
-      ));
-      await onRescan();
+      restored = true;
+      showSuccess(
+        copy(
+          "Restored the official configuration and disconnected.",
+          "已恢复官方配置并断开。",
+        ),
+        `agent-restore-official:${metadata.agent_id}`,
+      );
     } catch (caught) {
-      setError(errorText(caught));
+      showError(errorText(caught), `agent-restore-official:${metadata.agent_id}`);
     } finally {
+      if (restored) {
+        try {
+          await onRefreshAgents();
+        } catch (caught) {
+          showError(errorText(caught), `agent-refresh:${metadata.agent_id}`);
+        }
+      }
       setBusy(false);
     }
   };
@@ -315,10 +371,13 @@ export default function AgentRoutePage({
 
   const mountProfile = async (profile = route.profile ?? profiles[0]) => {
     if (!profile) {
-      setError(copy(
-        "No routing profile is available. Save the home routing configuration as a profile first.",
-        "还没有可挂载的策略组，请先在主页将三档路由另存为策略组。",
-      ));
+      showError(
+        copy(
+          "No routing profile is available. Save the home routing configuration as a profile first.",
+          "还没有可挂载的策略组，请先在主页将三档路由另存为策略组。",
+        ),
+        `agent-profile:${metadata.agent_id}`,
+      );
       return;
     }
     await runState(
@@ -328,6 +387,16 @@ export default function AgentRoutePage({
         `已挂载策略组「${profile}」· 尚待保存并应用`,
       ),
     );
+  };
+
+  const removeCurrentProfile = async () => {
+    if (!route.profile || busy) return;
+    setBusy(true);
+    try {
+      await onDeleteProfile(route.profile);
+    } finally {
+      setBusy(false);
+    }
   };
 
   // Save and hot-restart only this Agent's route when the proxy is running; do not affect other Agents.
@@ -350,17 +419,18 @@ export default function AgentRoutePage({
   const restoreHome = async () => {
     if (busy) return;
     setBusy(true);
-    setError("");
-    setNotice("");
     try {
       await setAgentRouteMode(metadata.agent_id, "inherit");
       const next = await saveAgentRoutes();
       onStateChange(next);
-      setNotice(serveRunning
-        ? copy("Restored home routing · Restart the proxy to apply", "已恢复跟随主页 · 重启代理后生效")
-        : copy("Restored home routing", "已恢复跟随主页"));
+      showSuccess(
+        serveRunning
+          ? copy("Restored home routing · Restart the proxy to apply", "已恢复跟随主页 · 重启代理后生效")
+          : copy("Restored home routing", "已恢复跟随主页"),
+        `agent-restore-home:${metadata.agent_id}`,
+      );
     } catch (caught) {
-      setError(errorText(caught));
+      showError(errorText(caught), `agent-restore-home:${metadata.agent_id}`);
     } finally {
       setBusy(false);
     }
@@ -464,15 +534,6 @@ export default function AgentRoutePage({
           </section>
         );
       })()}
-
-
-      {!serveRunning && !managed && <div className="inline-note">{copy(
-        "Start the proxy before connecting an Agent. Routing can still be configured now.",
-        "请先启动代理，再接入 Agent。路由仍可先行配置。",
-      )}</div>}
-      {notice && <div className="banner ok">{notice}</div>}
-      {error && <div className="banner err">{error}</div>}
-
       <RoutingModeSelector
         value={route.routing_mode}
         disabled={busy}
@@ -480,7 +541,18 @@ export default function AgentRoutePage({
         onValueChange={onSetRoutingMode}
       />
 
-      {route.routing_mode === "quota_first" ? (
+      {route.routing_mode === "direct" ? (
+        <DirectRoutePanel
+          providers={providers}
+          target={route.direct_target ?? null}
+          busy={busy}
+          applying={applying}
+          agent
+          onApply={(upstream, model) => {
+            void onApplyDirect(upstream, model);
+          }}
+        />
+      ) : route.routing_mode === "quota_first" ? (
         <QuotaPriorityPanel
           providers={providers}
           accounts={quotaAccounts}
@@ -503,23 +575,43 @@ export default function AgentRoutePage({
           </div>
           <div className="mode-switch" role="radiogroup" aria-label={copy("Agent routing mode", "Agent 路由模式")}>
             <button type="button" role="radio" aria-checked={route.mode === "inherit"} className={route.mode === "inherit" ? "active" : ""} disabled={busy} onClick={() => void switchMode("inherit")}>{copy("Follow Home", "跟随主页")}</button>
-            <button type="button" role="radio" aria-checked={route.mode === "custom"} className={route.mode === "custom" ? "active" : ""} disabled={busy} onClick={() => void switchMode("custom")}>{copy("Custom routing", "独立路由")}</button>
+            <button type="button" role="radio" aria-checked={route.mode === "custom"} className={route.mode === "custom" ? "active" : ""} disabled={busy} onClick={() => void switchMode("custom")}>{copy("Custom tiers", "自定义三档")}</button>
             <button type="button" role="radio" aria-checked={route.mode === "profile"} className={route.mode === "profile" ? "active" : ""} disabled={busy} onClick={() => void mountProfile()}>{copy("Use profile", "挂载策略组")}</button>
           </div>
         </div>
 
         {route.mode === "profile" && (
-          <label className="profile-mount-select">
+          <div className="profile-mount-select">
             <span>{copy("Current profile", "当前策略组")}</span>
-            <select
-              className="select"
+            <div className="profile-mount-controls">
+            <Select
               value={route.profile ?? ""}
               disabled={busy}
-              onChange={(event) => void mountProfile(event.target.value)}
+              onValueChange={(profile) => void mountProfile(profile)}
             >
-              {profiles.map((profile) => <option key={profile} value={profile}>{profile}</option>)}
-            </select>
-          </label>
+              <SelectTrigger aria-label={copy("Current profile", "当前策略组")}>
+                <SelectValue placeholder={copy("Choose a profile", "选择策略组")} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {profiles.map((profile) => <SelectItem key={profile} value={profile}>{profile}</SelectItem>)}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <button
+              className="btn danger"
+              type="button"
+              disabled={busy || !route.profile}
+              aria-label={copy(
+                `Delete profile ${route.profile ?? ""}`,
+                `删除策略组 ${route.profile ?? ""}`,
+              )}
+              onClick={() => void removeCurrentProfile()}
+            >
+              {copy("Delete", "删除")}
+            </button>
+            </div>
+          </div>
         )}
 
         <TierRouteEditor

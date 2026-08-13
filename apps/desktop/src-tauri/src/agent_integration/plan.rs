@@ -1,11 +1,11 @@
 use std::path::{Component, Path};
 
-use serde_json::json;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use super::config_codec::{
-    apply_patch, apply_patch_with_reverse, parse_rendered, parse_source_bytes, project_owned_paths,
+    apply_patch, apply_patch_with_reverse, is_empty_owned_projection, parse_rendered,
+    parse_source_bytes, prepare_owned_paths_for_write_with_reverse, project_owned_paths,
     render_document, semantic_json, ConfigDocument, DocumentFormat,
 };
 use super::connectors::{validate_patch_ownership, ConnectInput, Connector};
@@ -344,8 +344,13 @@ fn build_connection_or_refresh_plan(
             companion.label,
         )?;
         let companion_baseline_semantic = semantic_json(&companion_document)?;
-        let reverse_operations =
+        let ancestor_reverse = prepare_owned_paths_for_write_with_reverse(
+            &mut companion_document,
+            &companion.owned_paths,
+        )?;
+        let mut reverse_operations =
             apply_patch_with_reverse(&mut companion_document, &companion.operations)?;
+        reverse_operations.extend(ancestor_reverse);
         let declared_projection = parse_rendered(
             std::str::from_utf8(companion.projected_bytes.as_slice())
                 .map_err(|_| "companion projected bytes 不是 UTF-8".to_string())?,
@@ -604,8 +609,11 @@ pub fn attach_disconnect_companions(
             document_format,
             connector.label(),
         )?;
+        let before_hash = file_revision_hash(target, &current)?;
+        let managed_revision_unchanged = before_hash == companion.managed_after_hash;
         let projected = if !baseline.record.original_existed
-            && semantic_json(&current_document)? == json!({})
+            && managed_revision_unchanged
+            && is_empty_owned_projection(&current_document, &companion.owned_paths)?
         {
             ConfigSource::missing()
         } else {
@@ -615,7 +623,6 @@ pub fn attach_disconnect_companions(
                 current.original_owner.clone(),
             )
         };
-        let before_hash = file_revision_hash(target, &current)?;
         let expected_after_hash = file_revision_hash(target, &projected)?;
         plan.view
             .related_config_paths
@@ -724,8 +731,11 @@ pub fn attach_restore_companions(
             document_format,
             connector.label(),
         )?;
+        let before_hash = file_revision_hash(target, &current)?;
+        let managed_revision_unchanged = before_hash == companion.managed_after_hash;
         let projected = if !source_snapshot.record.original_existed
-            && semantic_json(&current_document)? == json!({})
+            && managed_revision_unchanged
+            && is_empty_owned_projection(&current_document, &companion.owned_paths)?
         {
             ConfigSource::missing()
         } else {
@@ -895,8 +905,10 @@ fn build_owned_projection_plan(
         connector.label(),
     )?;
     let before_hash = file_revision_hash(target_path, current)?;
-    let remove_after_projection =
-        !source_snapshot.existed && semantic_json(&current_document)? == json!({});
+    let managed_revision_unchanged = before_hash == ownership.managed_after_hash;
+    let remove_after_projection = !source_snapshot.existed
+        && managed_revision_unchanged
+        && is_empty_owned_projection(&current_document, &ownership.owned_paths)?;
     let projected_bytes = rendered.into_bytes();
     let projected = if remove_after_projection {
         // A configuration which did not exist before connection must return
@@ -1345,6 +1357,8 @@ fn lower_hex(bytes: &[u8]) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
+    use serde_json::json;
+
     use super::*;
     use crate::agent_integration::connectors::{ClaudeCodeConnector, CodexConnector};
     use crate::agent_integration::types::{
@@ -1447,6 +1461,43 @@ mod tests {
         assert!(serialized.contains("local_virtual_key"));
         assert!(!serialized.contains("value"));
         assert_ne!(prepared.view.before_hash, prepared.view.expected_after_hash);
+    }
+
+    #[test]
+    fn connection_plan_reverse_restores_a_promoted_null_ancestor() {
+        #[cfg(windows)]
+        let target = Path::new(r"C:\tmp\token-station-plan\settings.json");
+        #[cfg(not(windows))]
+        let target = Path::new("/tmp/token-station-plan/settings.json");
+        let source =
+            ConfigSource::existing(br#"{"env":null,"keep":"user"}"#.to_vec(), Some(0o600), None);
+
+        let prepared = build_connection_plan(
+            &ClaudeCodeConnector,
+            &discovery(target),
+            &verified(),
+            target,
+            &source,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787",
+                token: Some("fixture-null-reverse-secret"),
+                adapter_ready: true,
+                model_metadata: None,
+            },
+            1,
+            None,
+            10,
+            "0a".repeat(16),
+        )
+        .unwrap();
+        let reverse = &prepared.view.projection.files[0].reverse_changes;
+
+        assert!(reverse.iter().any(|change| {
+            change.operation == PatchKind::Replace && change.path.segments == ["env"]
+        }));
+        assert!(serde_json::to_string(&prepared.view)
+            .unwrap()
+            .contains("/env"));
     }
 
     #[test]

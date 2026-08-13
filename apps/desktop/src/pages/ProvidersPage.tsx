@@ -10,7 +10,7 @@ interface ProvidersPageProps {
   busy: boolean;
   onRemove: (name: string) => void;
   onRestore: (name: string) => void;
-  onStateChange: (state: StateView, message: string) => void;
+  onStateChange: (state: StateView) => void;
 }
 
 export default function ProvidersPage(props: ProvidersPageProps) {

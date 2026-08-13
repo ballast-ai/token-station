@@ -79,4 +79,33 @@ describe("humanizeAppError", () => {
     );
     expect(humanizeAppError(raw, "en")).not.toContain("/Users/example");
   });
+
+  it("preserves the affected model in actionable OpenCode contract guidance", () => {
+    const error = {
+      code: "model_contract_missing_max_output_tokens",
+      message: "this display copy may change without changing the contract",
+      target: "kimi/kimi-k3",
+    };
+
+    expect(humanizeAppError(error, "zh-CN")).toBe(
+      "模型 `kimi/kimi-k3` 缺少最大输出 Token 上限。请前往供应商页面完善该模型限制，然后重启代理。",
+    );
+    expect(humanizeAppError(error, "en")).toBe(
+      "Model `kimi/kimi-k3` has no maximum output token limit. Complete this model's limits in Providers, then restart the proxy.",
+    );
+  });
+
+  it.each([
+    ["model_contract_exact_routing_unsupported", "OpenCode 固定模型与精确模型路由不兼容"],
+    ["model_contract_invalid_route", "OpenCode 路由配置无效"],
+    ["model_contract_no_reachable_model", "OpenCode 当前路由没有可达模型"],
+    ["model_contract_unknown_provider", "OpenCode 路由引用了未知供应商"],
+    ["model_contract_unknown_model", "OpenCode 路由引用了未知模型"],
+    ["model_contract_missing_context_window", "缺少上下文上限"],
+    ["model_contract_invalid_limits", "Token 上限无效"],
+    ["agent_runtime_transition", "代理正在切换运行实例"],
+  ])("按稳定错误码 %s 展示契约修复建议", (code, expected) => {
+    expect(humanizeAppError({ code, message: "unstable backend copy", target: "p/m" }, "zh-CN"))
+      .toContain(expected);
+  });
 });

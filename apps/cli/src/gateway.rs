@@ -1213,7 +1213,10 @@ fn restore_configured_capability_evidence(
     if reported.context_window == 0 {
         reported.context_window = saved.context_window;
     }
-    for key in ["max_output_tokens", "catalog_cost"] {
+    if reported.max_output_tokens == 0 {
+        reported.max_output_tokens = saved.max_output_tokens;
+    }
+    for key in ["catalog_cost"] {
         if !reported.extensions.contains_key(key)
             && let Some(value) = saved.extensions.get(key)
         {
@@ -1247,13 +1250,8 @@ fn catalog_model_document(
     if capability.context_window > 0 {
         document["context_window"] = json!(capability.context_window);
     }
-    if let Some(max_output_tokens) = capability
-        .extensions
-        .get("max_output_tokens")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value > 0)
-    {
+    if capability.max_output_tokens > 0 {
+        let max_output_tokens = capability.max_output_tokens;
         document["max_output_tokens"] = json!(max_output_tokens);
         if capability.context_window > 0 {
             document["limit"] = json!({
@@ -1277,18 +1275,38 @@ fn model_cost_document(
         .get("catalog_cost")
         .and_then(sanitized_catalog_cost)
         .or_else(|| {
-            pricing.models.get(&capability.model).map(|price| {
-                // Price display is decimal USD per million tokens; sub-cent rounding is acceptable here.
-                #[allow(clippy::cast_precision_loss)]
-                let dollars = |micros: u64| micros as f64 / 1_000_000.0;
-                json!({
-                    "input": dollars(price.input_per_mtok),
-                    "output": dollars(price.output_per_mtok),
-                    "cache_read": dollars(price.cache_read_per_mtok),
-                    "cache_write": dollars(price.cache_write_per_mtok),
-                })
-            })
+            pricing
+                .model_price(&capability.model)
+                .map(model_price_document)
         })
+}
+
+fn model_cost_document_for_upstream(
+    upstream: &str,
+    capability: &ModelCapability,
+    pricing: &crate::pricing::PriceTable,
+) -> Option<Value> {
+    capability
+        .extensions
+        .get("catalog_cost")
+        .and_then(sanitized_catalog_cost)
+        .or_else(|| {
+            pricing
+                .model_price_for_upstream(upstream, &capability.model)
+                .map(model_price_document)
+        })
+}
+
+fn model_price_document(price: &crate::pricing::ModelPrice) -> Value {
+    // Price display is decimal USD per million tokens; sub-cent rounding is acceptable here.
+    #[allow(clippy::cast_precision_loss)]
+    let dollars = |micros: u64| micros as f64 / 1_000_000.0;
+    json!({
+        "input": dollars(price.input_per_mtok),
+        "output": dollars(price.output_per_mtok),
+        "cache_read": dollars(price.cache_read_per_mtok),
+        "cache_write": dollars(price.cache_write_per_mtok),
+    })
 }
 
 fn router_catalog_targets(router: &Router) -> Option<BTreeSet<UpstreamModel>> {
@@ -1376,12 +1394,7 @@ fn scoped_models_document(
         let outputs = capabilities
             .iter()
             .map(|capability| {
-                capability
-                    .extensions
-                    .get("max_output_tokens")
-                    .and_then(Value::as_u64)
-                    .and_then(|value| u32::try_from(value).ok())
-                    .filter(|value| *value > 0)
+                (capability.max_output_tokens > 0).then_some(capability.max_output_tokens)
             })
             .collect::<Vec<_>>();
         if let Some(output) = outputs
@@ -1390,16 +1403,16 @@ fn scoped_models_document(
             .collect::<Option<Vec<_>>>()
             .and_then(|values| values.into_iter().min())
         {
-            merged
-                .extensions
-                .insert("max_output_tokens".to_owned(), json!(output));
+            merged.max_output_tokens = output;
         } else {
-            merged.extensions.remove("max_output_tokens");
+            merged.max_output_tokens = 0;
         }
 
-        let costs = capabilities
+        let costs = targets_and_capabilities
             .iter()
-            .map(|capability| model_cost_document(capability, pricing))
+            .map(|(target, capability)| {
+                model_cost_document_for_upstream(target.upstream.as_str(), capability, pricing)
+            })
             .collect::<Vec<_>>();
         if let Some(cost) = costs.first().cloned().flatten().filter(|first| {
             costs
@@ -1504,6 +1517,19 @@ pub struct Gateway {
     secrets: SecretStore,
     egress: EgressPolicy,
     recorder: Arc<dyn Recorder>,
+}
+
+/// An Agent router that has already passed every fallible construction step.
+///
+/// The fields are deliberately private: callers may only obtain this value
+/// through [`Gateway::prepare_agent_router_reload`] and may consume it exactly
+/// once through [`Gateway::install_prevalidated_agent_router`]. This separates
+/// fallible validation from the infallible in-memory swap used after another
+/// subsystem has committed its own transaction.
+#[must_use]
+pub struct PrevalidatedAgentRouter {
+    agent_id: String,
+    router: Option<Arc<Router>>,
 }
 
 /// A finished non-streaming exchange, ready to be an HTTP response.
@@ -1837,6 +1863,10 @@ impl Gateway {
     /// Never for a [`ClientConfig`] that came through [`ClientConfig::load`]:
     /// the `expect`s below restate what its validation already proved.
     pub fn new(config: &ClientConfig, recorder: Arc<dyn Recorder>) -> Result<Self, String> {
+        // Compile host routing before plugin or network setup. A Direct config
+        // without a target therefore fails closed even when its ClientConfig
+        // was constructed directly instead of loaded from disk.
+        let home_router_config = config.home_router_config()?;
         let runtime = PluginRuntime::new(token_station_plugin_runtime::RuntimeLimits::default())
             .map_err(|error| format!("wasm engine: {error}"))?;
 
@@ -1915,7 +1945,7 @@ impl Gateway {
         let quota_plans = Self::quota_plans_from(config);
 
         let home_router =
-            Arc::new(Router::new(config.router.clone()).map_err(|error| error.to_string())?);
+            Arc::new(Router::new(home_router_config).map_err(|error| error.to_string())?);
         let mut agent_routers = BTreeMap::new();
         for agent_id in config.agent_routes.keys() {
             if let Some(router) = config.custom_router_for_agent(agent_id)? {
@@ -1973,6 +2003,50 @@ impl Gateway {
     #[must_use]
     pub fn global_concurrency_limit(&self) -> usize {
         usize::try_from(self.admission.global_limit()).unwrap_or(usize::MAX)
+    }
+
+    /// Build a one-shot Agent router reload plan without changing the Gateway.
+    /// This is the only fallible stage, so hosts may prepare the plan before
+    /// committing their own durable configuration transaction.
+    ///
+    /// # Errors
+    ///
+    /// The router config is invalid (`Router::new` rejected it).
+    pub fn prepare_agent_router_reload(
+        agent_id: &str,
+        router: Option<RouterConfig>,
+    ) -> Result<PrevalidatedAgentRouter, String> {
+        let built = match router {
+            Some(config) => {
+                Some(Arc::new(Router::new(config).map_err(|error| {
+                    format!("Agent `{agent_id}` route: {error}")
+                })?))
+            }
+            None => None,
+        };
+        Ok(PrevalidatedAgentRouter {
+            agent_id: agent_id.to_owned(),
+            router: built,
+        })
+    }
+
+    /// Install a router produced by [`Self::prepare_agent_router_reload`]. Only
+    /// the next request to this Agent sees the change; in-flight requests and
+    /// every other Agent keep their existing `Arc<Router>`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `agent_routers` lock is poisoned (a prior holder panicked).
+    pub fn install_prevalidated_agent_router(&self, plan: PrevalidatedAgentRouter) {
+        let mut routers = self.agent_routers.write().expect("agent_routers lock");
+        match plan.router {
+            Some(router) => {
+                routers.insert(plan.agent_id, router);
+            }
+            None => {
+                routers.remove(&plan.agent_id);
+            }
+        }
     }
 
     /// Hot-swap one Agent's route without rebuilding the gateway. `router`
@@ -3149,8 +3223,9 @@ impl Gateway {
         let quota_mode = quota_now_ms.is_some();
 
         let candidates = self.candidates(std::time::Instant::now(), quota_now_ms);
-        let route = |request: &ChatRequest| {
-            if quota_mode {
+        let route = |request: &ChatRequest| match router.routing_mode() {
+            RoutingMode::Tiered => router.route(request, &hints, &candidates),
+            RoutingMode::QuotaFirst => {
                 let last = self
                     .quota
                     .lock()
@@ -3158,8 +3233,6 @@ impl Gateway {
                     .last_account(&session)
                     .cloned();
                 router.route_quota_first(request, &candidates, last.as_ref())
-            } else {
-                router.route(request, &hints, &candidates)
             }
         };
         let mut decision = match route(&request) {
@@ -3176,9 +3249,10 @@ impl Gateway {
             }
             Err(no_route) => return Err(route_error(&no_route)),
         };
-        // Free-provider fallback filtering is a tiered-mode feature; quota-mode
-        // fallbacks are the quota-ranked accounts and must not be pruned by it.
-        if !quota_mode {
+        // Free-provider fallback filtering is a tiered-mode feature. Direct has
+        // no fallbacks; quota fallbacks are ranked accounts and must not be
+        // pruned by it.
+        if router.routing_mode() == RoutingMode::Tiered {
             retain_free_fallbacks(&mut decision, &self.free_upstreams);
         }
         eprintln!(
@@ -3245,7 +3319,7 @@ impl Gateway {
 
     /// Quota-first preamble: whether quota mode is on (as `Some(now_ms)` with a
     /// single wall-clock read) and the conversation's affinity key. Returns
-    /// `(None, "")` in tiered mode so the caller pays nothing for it.
+    /// `(None, "")` outside quota-first mode so the caller pays nothing for it.
     fn quota_preamble(router: &Router, request: &ChatRequest) -> (Option<u64>, String) {
         if router.routing_mode() != RoutingMode::QuotaFirst {
             return (None, String::new());
@@ -3990,12 +4064,32 @@ impl Gateway {
             .unwrap_or(false);
 
         // Route a minimal request (model only) to learn which upstream would
-        // serve it; passthrough is a tiered, non-quota decision. A routing
-        // failure falls through so the normal path surfaces the real error.
+        // serve it. Quota-first needs the canonical path's lease/settlement
+        // state, so it deliberately falls through. A routing failure also falls
+        // through so the normal path surfaces the real error.
         let mut mini = ChatRequest::new(&model, Vec::new());
         mini.stream = stream;
+        // Preserve the one feature the router needs for its hard tool gate
+        // without parsing or rewriting Anthropic's native tool vocabulary.
+        // The fixed marker never leaves this routing probe; the original array
+        // (including server tools) remains structurally untouched in `body_value`.
+        if body_value
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|tools| !tools.is_empty())
+        {
+            mini.tools.push(ToolDef {
+                name: "anthropic_native_routing_probe".to_owned(),
+                description: None,
+                parameters: json!({}),
+            });
+        }
         let candidates = self.candidates(std::time::Instant::now(), None);
-        let Ok(decision) = router.route(&mini, &[], &candidates) else {
+        let decision_result = match router.routing_mode() {
+            RoutingMode::Tiered => router.route(&mini, &[], &candidates),
+            RoutingMode::QuotaFirst => return Ok(None),
+        };
+        let Ok(decision) = decision_result else {
             return Ok(None);
         };
         let Some(upstream) = self.upstreams.get(decision.chosen.upstream.as_str()) else {

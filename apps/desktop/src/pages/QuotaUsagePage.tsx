@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getQuotaSnapshot,
   type ProviderView,
@@ -9,6 +9,7 @@ import {
 import PageBackButton from "../components/PageBackButton";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { humanizeAppError } from "../errors";
+import { useErrorToast } from "../components/ErrorToast";
 
 interface QuotaUsagePageProps {
   providers: ProviderView[];
@@ -39,20 +40,26 @@ function formatDuration(ms: number): string {
 
 export default function QuotaUsagePage({ providers, onBack }: QuotaUsagePageProps) {
   const { copy } = useLocalizedCopy();
+  const { showError } = useErrorToast();
   const [snapshot, setSnapshot] = useState<QuotaSnapshot | null>(null);
+  const snapshotRef = useRef<QuotaSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
     try {
-      setSnapshot(await getQuotaSnapshot());
+      const next = await getQuotaSnapshot();
+      snapshotRef.current = next;
+      setSnapshot(next);
       setError(null);
     } catch (caught) {
-      setError(humanizeAppError(caught));
+      const message = humanizeAppError(caught);
+      if (snapshotRef.current) showError(message, "quota-usage-refresh");
+      else setError(message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [showError]);
 
   useEffect(() => {
     void refresh();

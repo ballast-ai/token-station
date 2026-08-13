@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -23,6 +23,7 @@ use super::types::{
 };
 
 const CONFIG_READ_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
+const REGISTRY_SCAN_WORKERS: usize = 3;
 const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const OUTPUT_READER_GRACE: Duration = Duration::from_millis(100);
 
@@ -687,13 +688,39 @@ impl<R: ProbeRunner> DiscoveryScanner<R> {
     }
 
     #[must_use]
-    pub fn scan_registry(&self, registry: &AgentRegistry) -> Vec<DiscoveryRecord> {
+    pub fn scan_registry(&self, registry: &AgentRegistry) -> Vec<DiscoveryRecord>
+    where
+        R: Sync,
+    {
         let scanned_at_ms = unix_time_ms();
-        let mut records: Vec<_> = registry
-            .descriptors()
-            .iter()
-            .flat_map(|descriptor| self.scan_descriptor_at(descriptor, scanned_at_ms))
-            .collect();
+        let descriptors = registry.descriptors();
+        let worker_count = REGISTRY_SCAN_WORKERS.min(descriptors.len());
+        let mut records = if worker_count == 0 {
+            Vec::new()
+        } else {
+            let next_descriptor = AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                (0..worker_count)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            let mut worker_records = Vec::new();
+                            loop {
+                                let index = next_descriptor.fetch_add(1, Ordering::Relaxed);
+                                let Some(descriptor) = descriptors.get(index) else {
+                                    break;
+                                };
+                                worker_records
+                                    .extend(self.scan_descriptor_at(descriptor, scanned_at_ms));
+                            }
+                            worker_records
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .flat_map(|worker| worker.join().expect("Agent scan worker must not panic"))
+                    .collect::<Vec<_>>()
+            })
+        };
         records.sort_by(|left, right| {
             left.agent_id
                 .cmp(&right.agent_id)
@@ -922,8 +949,65 @@ struct CachedBinaryHash {
 /// Most Agent actions trigger a full scan, and Agent binaries can be hundreds of
 /// megabytes. Without this cache every click recomputes SHA-256 and stalls debug
 /// builds for seconds. Unchanged binaries now require only stat calls.
-static BINARY_HASH_CACHE: LazyLock<Mutex<BTreeMap<PathBuf, CachedBinaryHash>>> =
-    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+#[derive(Default)]
+struct BinaryHashCache {
+    state: Mutex<BinaryHashCacheState>,
+    completed: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct BinaryHashCacheState {
+    entries: BTreeMap<PathBuf, CachedBinaryHash>,
+    in_flight: BTreeSet<PathBuf>,
+}
+
+struct BinaryHashOwner<'a> {
+    cache: &'a BinaryHashCache,
+    path: PathBuf,
+}
+
+impl BinaryHashOwner<'_> {
+    fn complete(
+        self,
+        modified_at_ms: Option<u64>,
+        size: u64,
+        hashed: Option<String>,
+    ) -> Option<String> {
+        let sha256 = hashed?;
+        let Ok(mut state) = self.cache.state.lock() else {
+            return Some(sha256);
+        };
+        if let Some(entry) = state.entries.get(&self.path) {
+            if entry.size == size && entry.modified_at_ms == modified_at_ms {
+                return Some(entry.sha256.clone());
+            }
+        }
+        state.entries.insert(
+            self.path.clone(),
+            CachedBinaryHash {
+                modified_at_ms,
+                size,
+                sha256: sha256.clone(),
+            },
+        );
+        Some(sha256)
+    }
+}
+
+impl Drop for BinaryHashOwner<'_> {
+    fn drop(&mut self) {
+        let mut state = self
+            .cache
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.in_flight.remove(&self.path);
+        drop(state);
+        self.cache.completed.notify_all();
+    }
+}
+
+static BINARY_HASH_CACHE: LazyLock<BinaryHashCache> = LazyLock::new(BinaryHashCache::default);
 
 fn binary_facts(path: &Path) -> (Option<u64>, Option<String>) {
     let metadata = std::fs::metadata(path).ok();
@@ -943,16 +1027,53 @@ fn cached_binary_sha256(
     modified_at_ms: Option<u64>,
     size: Option<u64>,
 ) -> Option<String> {
-    match BINARY_HASH_CACHE.lock() {
-        Ok(mut cache) => lookup_or_hash(&mut cache, path, modified_at_ms, size, hash_file),
-        // Do not crash on a poisoned lock; fall back to hashing the file.
-        Err(_) => hash_file(path).ok(),
+    cached_binary_sha256_with(&BINARY_HASH_CACHE, path, modified_at_ms, size, hash_file)
+}
+
+fn cached_binary_sha256_with(
+    cache: &BinaryHashCache,
+    path: &Path,
+    modified_at_ms: Option<u64>,
+    size: Option<u64>,
+    hasher: impl Fn(&Path) -> std::io::Result<String>,
+) -> Option<String> {
+    let Some(size) = size else {
+        return hasher(path).ok();
+    };
+    let key = path.to_path_buf();
+    loop {
+        let Ok(mut state) = cache.state.lock() else {
+            // A poisoned cache may contain a stale in-flight marker. Bypass it
+            // instead of risking a permanent wait; hashing remains correct.
+            return hasher(path).ok();
+        };
+        if let Some(entry) = state.entries.get(path) {
+            if entry.size == size && entry.modified_at_ms == modified_at_ms {
+                return Some(entry.sha256.clone());
+            }
+        }
+        if state.in_flight.insert(key.clone()) {
+            drop(state);
+            break;
+        }
+        match cache.completed.wait(state) {
+            Ok(state) => drop(state),
+            Err(error) => {
+                drop(error.into_inner());
+                return hasher(path).ok();
+            }
+        }
     }
+
+    let owner = BinaryHashOwner { cache, path: key };
+    let hashed = hasher(path).ok();
+    owner.complete(modified_at_ms, size, hashed)
 }
 
 /// Pure cache decision logic with an injected hasher for tests. Reuse entries
 /// when mtime and size match; otherwise recalculate and update. Do not cache when
 /// size is unavailable because the file is missing or unreadable.
+#[cfg(test)]
 fn lookup_or_hash(
     cache: &mut BTreeMap<PathBuf, CachedBinaryHash>,
     path: &Path,
@@ -1566,6 +1687,8 @@ mod tests {
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     use super::*;
 
@@ -1599,6 +1722,281 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 5);
     }
 
+    #[test]
+    fn binary_hash_cache_does_not_hold_its_global_lock_during_file_io() {
+        let cache = BinaryHashCache::default();
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+
+        std::thread::scope(|scope| {
+            for path in [Path::new("/bin/agent-a"), Path::new("/bin/agent-b")] {
+                let cache = &cache;
+                let active = &active;
+                let peak = &peak;
+                scope.spawn(move || {
+                    let result =
+                        cached_binary_sha256_with(cache, path, Some(100), Some(500), |_| {
+                            let active_now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(active_now, Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(80));
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            Ok("sha".to_string())
+                        });
+                    assert_eq!(result.as_deref(), Some("sha"));
+                });
+            }
+        });
+
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn binary_hash_cache_single_flights_the_same_file_identity() {
+        let cache = BinaryHashCache::default();
+        let calls = AtomicUsize::new(0);
+        let started = (Mutex::new(false), std::sync::Condvar::new());
+        let release = (Mutex::new(false), std::sync::Condvar::new());
+        let slow_hasher = |_: &Path| {
+            let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 1 {
+                let (started_lock, started_changed) = &started;
+                *started_lock.lock().unwrap() = true;
+                started_changed.notify_all();
+
+                let (release_lock, release_changed) = &release;
+                let mut released = release_lock.lock().unwrap();
+                while !*released {
+                    released = release_changed.wait(released).unwrap();
+                }
+            }
+            Ok::<_, std::io::Error>("shared-sha".to_string())
+        };
+
+        let hashes = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                cached_binary_sha256_with(
+                    &cache,
+                    Path::new("/bin/shared-agent"),
+                    Some(100),
+                    Some(500),
+                    slow_hasher,
+                )
+            });
+            let (started_lock, started_changed) = &started;
+            let mut first_started = started_lock.lock().unwrap();
+            while !*first_started {
+                first_started = started_changed.wait(first_started).unwrap();
+            }
+            drop(first_started);
+
+            let second = scope.spawn(|| {
+                cached_binary_sha256_with(
+                    &cache,
+                    Path::new("/bin/shared-agent"),
+                    Some(100),
+                    Some(500),
+                    slow_hasher,
+                )
+            });
+            let deadline = Instant::now() + Duration::from_millis(100);
+            while calls.load(Ordering::SeqCst) == 1 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+
+            let (release_lock, release_changed) = &release;
+            *release_lock.lock().unwrap() = true;
+            release_changed.notify_all();
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            hashes,
+            [
+                Some("shared-sha".to_string()),
+                Some("shared-sha".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn binary_hash_cache_never_hashes_the_same_path_concurrently_across_identity_changes() {
+        let cache = BinaryHashCache::default();
+        let calls = AtomicUsize::new(0);
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let started = (Mutex::new(false), std::sync::Condvar::new());
+        let release = (Mutex::new(false), std::sync::Condvar::new());
+        let controlled_hasher = |_: &Path| {
+            let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let active_now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(active_now, Ordering::SeqCst);
+            if call == 1 {
+                let (started_lock, started_changed) = &started;
+                *started_lock.lock().unwrap() = true;
+                started_changed.notify_all();
+
+                let (release_lock, release_changed) = &release;
+                let mut released = release_lock.lock().unwrap();
+                while !*released {
+                    released = release_changed.wait(released).unwrap();
+                }
+            }
+            active.fetch_sub(1, Ordering::SeqCst);
+            Ok::<_, std::io::Error>(format!("sha-{call}"))
+        };
+
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                cached_binary_sha256_with(
+                    &cache,
+                    Path::new("/bin/changing-agent"),
+                    Some(100),
+                    Some(500),
+                    controlled_hasher,
+                )
+            });
+            let (started_lock, started_changed) = &started;
+            let mut first_started = started_lock.lock().unwrap();
+            while !*first_started {
+                first_started = started_changed.wait(first_started).unwrap();
+            }
+            drop(first_started);
+
+            let second = scope.spawn(|| {
+                cached_binary_sha256_with(
+                    &cache,
+                    Path::new("/bin/changing-agent"),
+                    Some(200),
+                    Some(600),
+                    controlled_hasher,
+                )
+            });
+            let deadline = Instant::now() + Duration::from_millis(100);
+            while calls.load(Ordering::SeqCst) == 1 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+
+            let (release_lock, release_changed) = &release;
+            *release_lock.lock().unwrap() = true;
+            release_changed.notify_all();
+            assert_eq!(first.join().unwrap().as_deref(), Some("sha-1"));
+            assert_eq!(second.join().unwrap().as_deref(), Some("sha-2"));
+        });
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn binary_hash_cache_wakes_waiters_when_the_owner_hash_fails() {
+        let cache = BinaryHashCache::default();
+        let calls = AtomicUsize::new(0);
+        let started = (Mutex::new(false), std::sync::Condvar::new());
+        let release = (Mutex::new(false), std::sync::Condvar::new());
+        let recovering_hasher = |_: &Path| {
+            let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 1 {
+                let (started_lock, started_changed) = &started;
+                *started_lock.lock().unwrap() = true;
+                started_changed.notify_all();
+                let (release_lock, release_changed) = &release;
+                let mut released = release_lock.lock().unwrap();
+                while !*released {
+                    released = release_changed.wait(released).unwrap();
+                }
+                return Err(std::io::Error::other("controlled hash failure"));
+            }
+            Ok("recovered-sha".to_string())
+        };
+
+        let hashes = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                cached_binary_sha256_with(
+                    &cache,
+                    Path::new("/bin/recovering-agent"),
+                    Some(100),
+                    Some(500),
+                    recovering_hasher,
+                )
+            });
+            let (started_lock, started_changed) = &started;
+            let mut first_started = started_lock.lock().unwrap();
+            while !*first_started {
+                first_started = started_changed.wait(first_started).unwrap();
+            }
+            drop(first_started);
+            let second = scope.spawn(|| {
+                cached_binary_sha256_with(
+                    &cache,
+                    Path::new("/bin/recovering-agent"),
+                    Some(100),
+                    Some(500),
+                    recovering_hasher,
+                )
+            });
+
+            let (release_lock, release_changed) = &release;
+            *release_lock.lock().unwrap() = true;
+            release_changed.notify_all();
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(hashes, [None, Some("recovered-sha".to_string())]);
+    }
+
+    #[test]
+    fn binary_hash_cache_releases_waiters_without_swallowing_an_owner_panic() {
+        let cache = Arc::new(BinaryHashCache::default());
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let (owner_tx, owner_rx) = std::sync::mpsc::sync_channel(1);
+        let owner_cache = Arc::clone(&cache);
+        let owner = std::thread::spawn(move || {
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                cached_binary_sha256_with(
+                    &owner_cache,
+                    Path::new("/bin/panicking-agent"),
+                    Some(100),
+                    Some(500),
+                    |_| {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        panic!("controlled hasher panic");
+                    },
+                )
+            }))
+            .is_err();
+            owner_tx.send(panicked).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let (waiter_tx, waiter_rx) = std::sync::mpsc::sync_channel(1);
+        let waiter_cache = Arc::clone(&cache);
+        let waiter = std::thread::spawn(move || {
+            let hash = cached_binary_sha256_with(
+                &waiter_cache,
+                Path::new("/bin/panicking-agent"),
+                Some(100),
+                Some(500),
+                |_| Ok("after-panic".to_string()),
+            );
+            waiter_tx.send(hash).unwrap();
+        });
+
+        release_tx.send(()).unwrap();
+        assert!(owner_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        assert_eq!(
+            waiter_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("same-path waiter must not remain blocked after a panic"),
+            Some("after-panic".to_string())
+        );
+        owner.join().unwrap();
+        waiter.join().unwrap();
+    }
+
     #[cfg(unix)]
     struct FixedProbe;
 
@@ -1618,6 +2016,124 @@ mod tests {
                 diagnostics: Vec::new(),
             }
         }
+    }
+
+    struct ConcurrentProbe {
+        active: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        second_started: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        slow_first_was_overtaken: Arc<AtomicBool>,
+    }
+
+    impl ProbeRunner for ConcurrentProbe {
+        fn run(
+            &self,
+            executable: &Path,
+            _observed_entry: &Path,
+            _probe: &VersionProbe,
+            _environment: &ScanEnvironment,
+        ) -> ProbeOutcome {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            let agent_id = executable
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or_default();
+            if agent_id == "claude-desktop" {
+                let (started_lock, started_changed) = &*self.second_started;
+                *started_lock.lock().unwrap() = true;
+                started_changed.notify_all();
+            } else if agent_id == "claude-code" {
+                let (started_lock, started_changed) = &*self.second_started;
+                let started = started_lock.lock().unwrap();
+                let (started, _) = started_changed
+                    .wait_timeout_while(started, Duration::from_millis(300), |started| !*started)
+                    .unwrap();
+                if *started {
+                    self.slow_first_was_overtaken.store(true, Ordering::SeqCst);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            ProbeOutcome {
+                runnable: true,
+                version_raw: Some("tool 1.2.3".to_string()),
+                version_normalized: Some("1.2.3".to_string()),
+                diagnostics: Vec::new(),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_scan_overlaps_descriptor_probes_with_a_three_worker_limit_and_stable_output() {
+        let root = scratch("bounded-parallel-registry");
+        let source = AgentRegistry::builtin().unwrap();
+        let mut descriptors = source.descriptors().to_vec();
+        for descriptor in &mut descriptors {
+            let executable_path = root
+                .join("agents")
+                .join(&descriptor.agent_id)
+                .join(&descriptor.executable_candidates[0]);
+            executable(&executable_path);
+            descriptor.known_install_locations = BTreeMap::from([(
+                Platform::Macos,
+                vec![executable_path.to_string_lossy().into_owned()],
+            )]);
+            descriptor.config_locations.clear();
+        }
+        let registry = AgentRegistry::from_json(
+            &serde_json::json!({ "schema_version": 1, "agents": descriptors }).to_string(),
+        )
+        .unwrap();
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let slow_first_was_overtaken = Arc::new(AtomicBool::new(false));
+        let mut context = environment(&root);
+        context.path_entries.clear();
+        let scanner = DiscoveryScanner::new(
+            context,
+            ConcurrentProbe {
+                active,
+                peak: Arc::clone(&peak),
+                second_started: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+                slow_first_was_overtaken: Arc::clone(&slow_first_was_overtaken),
+            },
+        );
+
+        let records = scanner.scan_registry(&registry);
+
+        assert!(
+            peak.load(Ordering::SeqCst) > 1,
+            "descriptor probes must overlap"
+        );
+        assert!(
+            peak.load(Ordering::SeqCst) <= 3,
+            "descriptor probe concurrency must stay bounded"
+        );
+        assert!(
+            slow_first_was_overtaken.load(Ordering::SeqCst),
+            "an idle worker must dynamically claim the next descriptor"
+        );
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.agent_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "claude-code",
+                "claude-desktop",
+                "codex",
+                "cursor",
+                "gemini-cli",
+                "nous-hermes-agent",
+                "openclaw",
+                "opencode",
+                "workbuddy",
+            ]
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

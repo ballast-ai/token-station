@@ -11,9 +11,11 @@ const requiredFiles = [
   "packaging/macos/安装前必读.md",
   "packaging/macos/未签名测试版安装前必读.md",
   "packaging/macos/安装 Token Station.command",
+  "packaging/macos/终端启动命令.txt",
   "packaging/macos/AGENTS.md",
   "packaging/macos/configure-dmg-layout.applescript",
   "packaging/macos/dmg-layout.dsstore.base64",
+  "packaging/macos/dmg-layout-unsigned.dsstore.base64",
   "scripts/package-macos-dmg.sh",
   "scripts/audit-macos-dmg.sh",
 ];
@@ -104,6 +106,33 @@ if (readme) {
   }
 }
 
+const terminalCommandPath = "packaging/macos/终端启动命令.txt";
+const terminalCommandGuide = read(terminalCommandPath);
+if (terminalCommandGuide) {
+  for (const phrase of [
+    "Token Station 官方 GitHub Releases",
+    "先把 token-station.app 拖到 Applications",
+    "管理员密码",
+    "不会显示字符",
+  ]) {
+    if (!terminalCommandGuide.includes(phrase)) failures.push(`${terminalCommandPath} 缺少“${phrase}”说明`);
+  }
+  const expectedCommand =
+    'sudo xattr -dr com.apple.quarantine "/Applications/token-station.app" && open "/Applications/token-station.app"';
+  const executableLines = terminalCommandGuide
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("sudo "));
+  if (executableLines.length !== 1 || executableLines[0] !== expectedCommand) {
+    failures.push(`${terminalCommandPath} 必须只包含一条针对 canonical App 的可执行命令`);
+  }
+  if (/spctl\s+--master-disable/.test(terminalCommandGuide)) {
+    failures.push(`${terminalCommandPath} 不能关闭 Gatekeeper`);
+  }
+  if (/xattr[^\n]*(?:\/Applications[\s"']|~\/|\$HOME)/.test(terminalCommandGuide)) {
+    failures.push(`${terminalCommandPath} 不能扩大 quarantine 清理范围`);
+  }
+}
+
 const agentRulesPath = "packaging/macos/AGENTS.md";
 const agentRules = read(agentRulesPath);
 if (agentRules) {
@@ -138,6 +167,10 @@ if (packager) {
     ["打包源码提交", /packaging_source_commit/],
     ["测试包可见警告", /未签名测试版\.txt/],
     ["测试包构建来源", /构建来源\.txt/],
+    ["测试包终端启动命令", /终端启动命令\.txt/],
+    ["终端启动命令仅进入测试包", /if \[\[ "\$unsigned_test" == "true" \]\]; then[\s\S]*\/bin\/cp "\$unsigned_terminal_command" "\$stage\/终端启动命令\.txt"/],
+    ["正式包使用原布局模板", /finder_layout_template="\$formal_finder_layout_template"/],
+    ["测试包使用独立布局模板", /if \[\[ "\$unsigned_test" == "true" \]\]; then[\s\S]*finder_layout_template="\$unsigned_finder_layout_template"/],
     ["可写布局镜像", /-format UDRW/],
     ["Finder 元数据落盘检查", /\.DS_Store/],
     ["解码受控 Finder 布局模板", /base64 -D[\s\S]*finder_layout_template[\s\S]*stage\/\.DS_Store/],
@@ -157,16 +190,26 @@ if (packager) {
   }
 }
 
-const finderLayoutTemplatePath = "packaging/macos/dmg-layout.dsstore.base64";
-const finderLayoutTemplate = read(finderLayoutTemplatePath);
-if (finderLayoutTemplate) {
-  const decodedTemplate = Buffer.from(finderLayoutTemplate.replace(/\s/g, ""), "base64");
-  if (decodedTemplate.subarray(4, 8).toString("ascii") !== "Bud1") {
-    failures.push(`${finderLayoutTemplatePath} 不是有效的 Finder .DS_Store 模板`);
-  }
-  const templateDigest = crypto.createHash("sha256").update(decodedTemplate).digest("hex");
-  if (templateDigest !== "bd345bfc5b70ac1d47fa48c620d04d085b22cbe453dc0ed3542cad0403cc3f38") {
-    failures.push(`${finderLayoutTemplatePath} 与已验收布局不一致`);
+for (const [finderLayoutTemplatePath, expectedDigest] of [
+  [
+    "packaging/macos/dmg-layout.dsstore.base64",
+    "bd345bfc5b70ac1d47fa48c620d04d085b22cbe453dc0ed3542cad0403cc3f38",
+  ],
+  [
+    "packaging/macos/dmg-layout-unsigned.dsstore.base64",
+    "0c644b5a00c78eb44be4095fc3060bc76224e4f2d87f1c7b7c36a940f8268537",
+  ],
+]) {
+  const finderLayoutTemplate = read(finderLayoutTemplatePath);
+  if (finderLayoutTemplate) {
+    const decodedTemplate = Buffer.from(finderLayoutTemplate.replace(/\s/g, ""), "base64");
+    if (decodedTemplate.subarray(4, 8).toString("ascii") !== "Bud1") {
+      failures.push(`${finderLayoutTemplatePath} 不是有效的 Finder .DS_Store 模板`);
+    }
+    const templateDigest = crypto.createHash("sha256").update(decodedTemplate).digest("hex");
+    if (templateDigest !== expectedDigest) {
+      failures.push(`${finderLayoutTemplatePath} 与已验收布局不一致`);
+    }
   }
 }
 
@@ -187,6 +230,8 @@ if (auditor) {
     ["ad-hoc App 检查", /Signature=adhoc/],
     ["测试包警告检查", /未签名测试版\.txt/],
     ["测试包来源检查", /构建来源\.txt/],
+    ["测试包终端启动命令检查", /终端启动命令\.txt/],
+    ["正式包拒绝终端绕过入口", /正式 DMG 不得包含终端 Gatekeeper 绕过入口/],
     ["Finder 元数据检查", /mounted_ds_store/],
     ["Finder 布局回读", /configure-dmg-layout\.applescript[\s\S]*inspect/],
     ["系统临时目录检查", /\.fseventsd/],
@@ -209,15 +254,18 @@ if (finderLayout) {
     ["隐藏 Finder 工具栏", /toolbar visible to false/],
     ["隐藏 Finder 侧边栏", /sidebar width to 0/],
     ["920×600 窗口", /set bounds to \{[0-9]+, [0-9]+, [0-9]+, [0-9]+\}/],
+    ["未签名测试包 1080×600 窗口", /set bounds to \{100, 100, 1180, 700\}/],
     ["App 固定坐标", /position of item "token-station\.app" .* to \{310, 170\}/],
     ["Applications 固定坐标", /position of item "Applications" .* to \{610, 170\}/],
     ["安装脚本固定坐标", /position of item "安装 Token Station\.command"/],
     ["安装说明固定坐标", /position of item "安装前必读\.md"/],
     ["构建来源固定坐标", /position of item "构建来源\.txt"/],
     ["未签名提示固定坐标", /position of item "未签名测试版\.txt"/],
+    ["终端启动命令固定坐标", /position of item "终端启动命令\.txt" .* to \{460, 440\}/],
     ["Agent 约束固定坐标", /position of item "AGENTS\.md"/],
     ["正式包可省略构建来源", /if exists item "构建来源\.txt"[\s\S]*set position of item "构建来源\.txt"/],
     ["正式包可省略未签名提示", /if exists item "未签名测试版\.txt"[\s\S]*set position of item "未签名测试版\.txt"/],
+    ["正式包可省略终端启动命令", /if exists item "终端启动命令\.txt"[\s\S]*set position of item "终端启动命令\.txt"/],
   ];
   for (const [label, pattern] of requiredFinderLayoutPatterns) {
     if (!pattern.test(finderLayout)) failures.push(`${finderLayoutPath} 缺少${label}`);

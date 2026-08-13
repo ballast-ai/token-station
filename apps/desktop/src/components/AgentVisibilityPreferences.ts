@@ -56,15 +56,17 @@ export function readHiddenAgentIds(): Set<string> {
   }
 }
 
-export function writeHiddenAgentIds(ids: ReadonlySet<string>): void {
+export function writeHiddenAgentIds(ids: ReadonlySet<string>): boolean {
   try {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined") return true;
     const normalized = normalizedAgentIds(ids);
     window.localStorage.setItem(
       AGENT_VISIBILITY_STORAGE_KEY,
       JSON.stringify(normalized),
     );
+    return true;
   } catch {
     // UI preferences are best-effort and must never block navigation changes.
+    return false;
   }
 }

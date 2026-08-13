@@ -5,7 +5,7 @@
 
 ### 面向 AI Agent 与 LLM 供应商的本地路由控制台
 
-让 Claude Code、Codex、WorkBuddy 等 Agent 统一连接一个本地网关，再按任务复杂度或账户剩余额度，把每次请求路由到你的 API 供应商或本地模型。
+让 Claude Code、Codex、WorkBuddy 等 Agent 统一连接一个本地网关。每次请求可固定到一个供应商和模型，也可按任务复杂度或账户剩余额度分配。
 
 [![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![Release type](https://img.shields.io/badge/v1.1.3-test%20DMG-orange.svg)](https://github.com/ballast-ai/token-station/releases/latest) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
 
@@ -34,7 +34,7 @@
 
 ## 核心能力
 
-- **两种路由模式。** 三档路由根据显式关键词、请求能力和确定性复杂度分数，把任务分到高、中、低三档模型；额度优先路由会优先选择更值得在重置前消耗的账户。
+- **三种路由模式。** 单独路由把请求固定发送到明确选中的一个供应商和已管理模型；三档路由根据显式关键词、请求能力和确定性复杂度分数，把任务分到高、中、低三档模型；额度优先路由会优先选择更值得在重置前消耗的账户。
 - **每个 Agent 独立配置。** Agent 可以跟随全局路由、使用独立路由，或挂载一份可复用的路由方案。
 - **丰富的供应商目录。** 桌面端内置 40 多个可编辑预设，覆盖官方 API、托管推理服务和 Ollama，另有免费或试用额度目录，也支持自定义 OpenAI 兼容端点。
 - **沙箱化 WASM 插件架构。** 5 个官方适配器覆盖 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses、Gemini 和 OpenAI 兼容供应商。适配器不能直接访问网络、文件系统、环境变量或明文凭证；需要权限的操作统一由 Rust 宿主校验。
@@ -86,8 +86,8 @@ Claude Desktop 目前没有公开的产品仓库；该链接指向 Anthropic 官
 你至少需要一个供应商 API Key，或一个本地模型端点。Token Station 不会把 Claude、Codex 等 Agent 的订阅或 OAuth 会话导入成供应商账户。额度优先会优先使用可识别的供应商限额响应头；没有权威响应头时，只能根据本网关观察到的流量估算已配置额度，无法看到同一 Key 在其他客户端的消耗。
 
 1. 打开 Token Station，选择“添加供应商”。从预设中选择，或填写自定义 OpenAI 兼容端点，然后添加模型和 API Key。
-2. 进入“路由”，选择三档路由或额度优先，配置模型或账户，再点击“保存并应用”。这会启动或热更新本地代理。
-3. 进入“Agent”并扫描本机安装。对内置 Connector，点击“一键接入”就会立即写入，随后展示本次改动；Cursor 请遵循上面的专用接入提示。
+2. 等待启动扫描完成并进入“主页”。左侧固定首行是全局路由；选择单独路由、智能分档或额度优先，配置目标后应用。
+3. 在同一个主页左侧选择启动时发现的 Agent。对内置 Connector，点击“一键接入”会在需要时自动启动本地代理，立即写入并展示本次改动。新安装的 Agent 会在下次启动 App 时出现；Cursor 请遵循上面的专用接入提示。
 4. 从已接入的 Agent 发起一次请求。它会连接到带鉴权的回环网关 `127.0.0.1:8787`。
 5. 进入“用量”，确认路由结果、Token、延迟、失败、额度状态和成本估算。
 
@@ -189,7 +189,7 @@ npm --prefix apps/desktop run build
 
 ## 项目状态
 
-Token Station 仍处于早期公开发布阶段。本地网关、桌面控制面、两种路由模式、内置 Agent Connector、供应商目录、用量视图和恢复链路已经实现。公开分发范围小于源码兼容矩阵：当前桌面 Release 只提供 macOS Apple Silicon 未签名、未公证测试 DMG。
+Token Station 仍处于早期公开发布阶段。本地网关、桌面控制面、三种路由模式、内置 Agent Connector、供应商目录、用量视图和恢复链路已经实现。公开分发范围小于源码兼容矩阵：当前桌面 Release 只提供 macOS Apple Silicon 未签名、未公证测试 DMG。
 
 ## 许可证
 

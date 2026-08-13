@@ -4,6 +4,8 @@ import type { ProviderRemovalPreview, ProviderView, StateView } from "../api";
 import ProviderModelManager from "./ProviderModelManager";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { humanizeAppError } from "../errors";
+import { ProviderIcon } from "../brandIcons";
+import { useErrorToast } from "./ErrorToast";
 
 interface ProviderListProps {
   providers: ProviderView[];
@@ -13,7 +15,7 @@ interface ProviderListProps {
   busy: boolean;
   onRemove: (name: string) => void;
   onRestore: (name: string) => void;
-  onStateChange: (state: StateView, message: string) => void;
+  onStateChange: (state: StateView) => void;
 }
 
 export default function ProviderList({
@@ -27,16 +29,15 @@ export default function ProviderList({
   onStateChange,
 }: ProviderListProps) {
   const { copy, language } = useLocalizedCopy();
+  const { showError } = useErrorToast();
   const [managedProvider, setManagedProvider] = useState<string | null>(null);
   const [removal, setRemoval] = useState<ProviderRemovalPreview | null>(null);
-  const [removalError, setRemovalError] = useState("");
 
   const inspectRemoval = async (name: string) => {
-    setRemovalError("");
     try {
       setRemoval(await previewProviderRemoval(name));
     } catch (caught) {
-      setRemovalError(humanizeAppError(caught, language));
+      showError(humanizeAppError(caught, language), `provider-removal-preview:${name}`);
     }
   };
 
@@ -82,7 +83,9 @@ export default function ProviderList({
         {providers.map((provider) => (
           <article className={`provider-card ${managedProvider === provider.name ? "expanded" : ""}`} key={provider.name}>
             <div className="provider-card-head">
-              <div className="provider-monogram" aria-hidden="true">{provider.name.slice(0, 2).toUpperCase()}</div>
+              <div className="provider-monogram" aria-hidden="true">
+                <ProviderIcon id={provider.brand_id} label={provider.name} size={34} />
+              </div>
               <div className="provider-main">
                 <div className="provider-name">
                   {provider.name}
@@ -133,13 +136,7 @@ export default function ProviderList({
                   provider={provider}
                   serveRunning={serveRunning}
                   disabled={busy}
-                  onSaved={(next) => onStateChange(
-                    next,
-                    copy(
-                      `Models for ${provider.name} saved`,
-                      `${provider.name} 的模型已保存`,
-                    ),
-                  )}
+                  onSaved={onStateChange}
                 />
               )
             )}
@@ -181,7 +178,6 @@ export default function ProviderList({
             )}
           </article>
         ))}
-        {removalError && <div className="manager-error">{removalError}</div>}
       </div>
     </section>
   );

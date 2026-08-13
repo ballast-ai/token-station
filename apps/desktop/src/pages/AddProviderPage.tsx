@@ -17,6 +17,7 @@ import PageBackButton from "../components/PageBackButton";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { englishProviderName } from "../providerCopy";
 import { humanizeAppError } from "../errors";
+import { useErrorToast } from "../components/ErrorToast";
 
 export type ProviderCatalogMode = "regular" | "free";
 
@@ -90,6 +91,7 @@ export default function AddProviderPage({
   onSelectFree,
   onProviderSelected,
 }: AddProviderPageProps) {
+  const { showError } = useErrorToast();
   const { copy, language } = useLocalizedCopy();
   const offerLabel = (kind: FreeOfferKind) => (
     kind === "recurring" ? copy("Always free", "长期免费") : copy("Trial credit", "试用额度")
@@ -300,6 +302,7 @@ export default function AddProviderPage({
       setDiscoveredModels((current) => [...new Set([...current, ...result.models])]);
     } catch (caught) {
       setDiscovery({ models: [], source: "none", fetched_at_ms: null, warning: String(caught) });
+      showError(humanizeAppError(caught), `provider-model-discovery:${name.trim()}`);
     } finally {
       setDiscovering(false);
     }
@@ -350,7 +353,7 @@ export default function AddProviderPage({
           : copy("Provider added", "供应商已添加"),
       );
     } catch (caught) {
-      setError(humanizeAppError(caught));
+      showError(humanizeAppError(caught), `provider-save:${name.trim()}`);
     } finally {
       setSaving(false);
     }

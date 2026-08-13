@@ -1,11 +1,12 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   LANGUAGE_STORAGE_KEY,
   LanguageProvider,
   useLanguage,
 } from "./LanguageProvider";
+import { ErrorToastProvider } from "./ErrorToast";
 
 function LanguageProbe() {
   const { language, setLanguage, t, copy } = useLanguage();
@@ -19,6 +20,7 @@ function LanguageProbe() {
 }
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   window.localStorage.clear();
   document.documentElement.lang = "";
 });
@@ -51,6 +53,24 @@ describe("LanguageProvider", () => {
     expect(screen.getByText("en:Settings:Home routing")).toBeInTheDocument();
     expect(document.documentElement).toHaveAttribute("lang", "en");
     expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("en");
+  });
+
+  it("语言偏好写入失败时保留本次切换并用左下角提示", async () => {
+    const user = userEvent.setup();
+    render(
+      <ErrorToastProvider>
+        <LanguageProvider><LanguageProbe /></LanguageProvider>
+      </ErrorToastProvider>,
+    );
+    vi.spyOn(Storage.prototype, "setItem").mockImplementationOnce(() => {
+      throw new Error("storage denied");
+    });
+
+    await user.click(screen.getByRole("button", { name: "简体中文" }));
+
+    expect(screen.getByText("zh-CN:设置:主页路由")).toBeInTheDocument();
+    expect(within(screen.getByTestId("error-toast-viewport")).getByRole("alert"))
+      .toHaveTextContent("语言已在本次会话生效，但无法保存到下次启动");
   });
 
   it("migrates the cc-Switch-style zh value and falls back to English for unknown values", () => {

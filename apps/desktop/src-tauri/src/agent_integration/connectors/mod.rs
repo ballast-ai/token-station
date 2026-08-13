@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 use super::config_codec::{ConfigDocument, DocumentFormat};
-use super::types::{BaseUrlShape, ConfigPath, PatchOperation, Platform};
+use super::types::{BaseUrlShape, ConfigPath, PatchKind, PatchOperation, Platform};
 
 include!(concat!(env!("OUT_DIR"), "/builtin_connectors.rs"));
 
@@ -162,6 +162,23 @@ pub trait Connector: Sync {
     ) -> Result<Vec<PatchOperation>, String> {
         Ok(self.disconnect_patch())
     }
+    fn disconnect_companion_patch_for_document(
+        &self,
+        _primary_target: &Path,
+        _companion_target: &Path,
+        _document: &ConfigDocument,
+        owned_paths: &[ConfigPath],
+    ) -> Result<Vec<PatchOperation>, String> {
+        Ok(owned_paths
+            .iter()
+            .cloned()
+            .map(|path| PatchOperation {
+                operation: PatchKind::Remove,
+                path,
+                value: None,
+            })
+            .collect())
+    }
     fn project_owned_document(
         &self,
         current: &mut ConfigDocument,
@@ -228,7 +245,8 @@ mod tests {
 
     use super::*;
     use crate::agent_integration::config_codec::{
-        apply_patch, parse_rendered, parse_source_bytes, render_document, semantic_json,
+        apply_patch, parse_rendered, parse_source_bytes, prepare_owned_paths_for_write,
+        render_document, semantic_json,
     };
     use crate::agent_integration::types::PatchKind;
 
@@ -283,6 +301,95 @@ mod tests {
             assert_eq!(find_connector(id).unwrap().connector_id(), id);
         }
         assert!(find_connector("future-v1").is_none());
+    }
+
+    #[test]
+    fn every_builtin_connector_can_connect_disconnect_and_reconnect() {
+        let fixtures: [(&str, &[u8], &str); 8] = [
+            (
+                "claude-code-v1",
+                br#"{"env":null,"keep":"claude-code"}"#,
+                "claude-code",
+            ),
+            (
+                "claude-desktop-3p-v1",
+                br#"{"keep":"claude-desktop"}"#,
+                "claude-desktop",
+            ),
+            ("codex-v1", b"keep = \"codex\"\n", "codex"),
+            ("gemini-cli-v1", b"KEEP=gemini\n", "gemini"),
+            (
+                "hermes-v1",
+                b"# keep Hermes comment\nmodel:\nkeep: hermes\n",
+                "hermes",
+            ),
+            (
+                "openclaw-v1",
+                b"{models:null, agents:null, keep:'openclaw'}",
+                "openclaw",
+            ),
+            (
+                "opencode-v1",
+                br#"{"provider":null,"keep":"opencode"}"#,
+                "opencode",
+            ),
+            (
+                "workbuddy-v1",
+                br#"{"models":[],"availableModels":[],"keep":"workbuddy"}"#,
+                "workbuddy",
+            ),
+        ];
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/lifecycle/v1",
+            token: Some("fixture-lifecycle-secret"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+
+        assert_eq!(fixtures.len(), builtin_connectors().len());
+        for (connector_id, source, marker) in fixtures {
+            let connector = find_connector(connector_id).expect("fixture connector is registered");
+            let owned_paths = connector.owned_paths();
+            let mut document =
+                parse_source_bytes(Some(source), connector.format(), connector.label()).unwrap();
+
+            prepare_owned_paths_for_write(&mut document, &owned_paths).unwrap();
+            connector.validate_source(&document).unwrap();
+            let connect = connector
+                .connect_patch_for_document(&document, &input)
+                .unwrap();
+            validate_patch_ownership(&connect, &owned_paths).unwrap();
+            apply_patch(&mut document, &connect).unwrap();
+            connector.validate_projected(&document, &input).unwrap();
+
+            let disconnect = connector.disconnect_patch_for_document(&document).unwrap();
+            validate_patch_ownership(&disconnect, &owned_paths).unwrap();
+            apply_patch(&mut document, &disconnect).unwrap();
+            let disconnected = render_document(&document, connector.label()).unwrap();
+            assert!(
+                disconnected.contains(marker),
+                "{connector_id} must preserve unowned content: {disconnected}"
+            );
+            assert!(
+                !disconnected.contains("fixture-lifecycle-secret"),
+                "{connector_id} must remove the managed credential"
+            );
+
+            prepare_owned_paths_for_write(&mut document, &owned_paths).unwrap();
+            connector.validate_source(&document).unwrap();
+            let reconnect = connector
+                .connect_patch_for_document(&document, &input)
+                .unwrap();
+            validate_patch_ownership(&reconnect, &owned_paths).unwrap();
+            apply_patch(&mut document, &reconnect).unwrap();
+            connector.validate_projected(&document, &input).unwrap();
+            assert!(
+                render_document(&document, connector.label())
+                    .unwrap()
+                    .contains(marker),
+                "{connector_id} must preserve unowned content after reconnect"
+            );
+        }
     }
 
     #[test]

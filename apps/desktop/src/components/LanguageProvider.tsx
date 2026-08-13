@@ -7,6 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useErrorToast } from "./ErrorToast";
 
 export type Language = "zh-CN" | "en";
 
@@ -636,9 +637,13 @@ function isLanguage(value: string | null): value is Language {
 
 function storedLanguage(): Language {
   if (typeof window === "undefined") return "en";
-  const value = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
-  if (value === "zh") return "zh-CN";
-  return isLanguage(value) ? value : "en";
+  try {
+    const value = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
+    if (value === "zh") return "zh-CN";
+    return isLanguage(value) ? value : "en";
+  } catch {
+    return "en";
+  }
 }
 
 function format(message: string, replacements?: Replacements): string {
@@ -648,11 +653,21 @@ function format(message: string, replacements?: Replacements): string {
 }
 
 export function LanguageProvider({ children }: { children: ReactNode }) {
+  const { showError } = useErrorToast();
   const [language, setLanguage] = useState<Language>(storedLanguage);
 
   useEffect(() => {
-    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
-  }, [language]);
+    try {
+      window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
+    } catch {
+      showError(
+        language === "zh-CN"
+          ? "语言已在本次会话生效，但无法保存到下次启动。"
+          : "The language changed for this session, but it could not be saved for the next launch.",
+        "language-storage",
+      );
+    }
+  }, [language, showError]);
 
   useLayoutEffect(() => {
     document.documentElement.lang = language;

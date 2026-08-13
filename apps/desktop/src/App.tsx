@@ -3,6 +3,7 @@ import {
   addKeyword,
   applyHomeRouteToAllAgents,
   deleteProfile,
+  getCachedAgentViews,
   getRuntimeState,
   getState,
   listAgentRegistry,
@@ -11,11 +12,13 @@ import {
   removeKeyword,
   removeProvider,
   restoreProvider,
+  restartAgentRoute,
   scanAgents,
   saveHomeRouteAsProfile,
   serveStart,
   serveStop,
   setAdminEndpoint,
+  setDirectRoute,
   setLocalRouting,
   setQuotaAccounts,
   setQuotaPlan,
@@ -31,6 +34,7 @@ import {
   type TierSlot,
 } from "./api";
 import AppShell, { type AppView } from "./components/AppShell";
+import TokenStationMark from "./components/TokenStationMark";
 import FirstRunGuide, {
   FirstRunCompletionDialog,
   markFirstRunGuideDismissed,
@@ -49,6 +53,7 @@ import {
   type Language,
 } from "./components/LanguageProvider";
 import { ThemeBoundary } from "./components/ThemeProvider";
+import { ErrorToastBoundary, useErrorToast } from "./components/ErrorToast";
 import AddProviderPage, {
   type FreeCatalogFilters,
   type ProviderCatalogMode,
@@ -70,10 +75,6 @@ function errorText(error: unknown): string {
   return humanizeAppError(error);
 }
 
-function hasErrorCode(error: unknown, code: string): boolean {
-  return Boolean(error && typeof error === "object" && (error as { code?: unknown }).code === code);
-}
-
 function emptyAgentRoute(state: StateView): AgentRouteView {
   return {
     mode: "inherit",
@@ -81,6 +82,7 @@ function emptyAgentRoute(state: StateView): AgentRouteView {
     config_error: null,
     profile: null,
     routing_mode: state.routing_mode,
+    direct_target: state.direct_target ?? null,
   };
 }
 
@@ -95,7 +97,9 @@ function firstIncompleteSetupStep(state: StateView, agents: AgentView[]): FirstR
   if (!state.providers.some((provider) => provider.models.length > 0)) return "provider";
   const routeConfigured = state.routing_mode === "quota_first"
     ? (state.quota_accounts ?? []).some((account) => account.upstream && account.model)
-    : Object.values(state.tiers).every((tier) => tier.upstream && tier.model);
+    : state.routing_mode === "direct"
+      ? Boolean(state.direct_target?.upstream && state.direct_target.model)
+      : Object.values(state.tiers).every((tier) => tier.upstream && tier.model);
   const routeReady = routeConfigured
     && state.serve.app_runtime === "running"
     && state.serve.listener_reachable
@@ -136,20 +140,108 @@ export function configSaveStatus(state: StateView, language: Language = "en"): s
   return chinese ? "无改动" : "No changes";
 }
 
+function StartupHome({ error, onReload }: { error: string; onReload: () => void }) {
+  const { copy } = useLanguage();
+  const failed = Boolean(error);
+  const statusLabel = failed
+    ? copy("Unable to check local Agents", "无法检查本机 Agent")
+    : copy("Checking local Agents", "正在检查本机 Agent");
+
+  return (
+    <div className="startup-home agent-workspace-page">
+      <header className="startup-heading">
+        <div>
+          <span className="startup-eyebrow">AGENT FLEET</span>
+          <h1>{copy("Home", "主页")}</h1>
+          <p>{copy(
+            "Preparing the local Agent and routing workspace.",
+            "正在准备本机 Agent 与路由工作区。",
+          )}</p>
+        </div>
+      </header>
+
+      <div className="startup-layout">
+        <section
+          className="startup-agent-card"
+          aria-label={copy("Local clients", "本机客户端")}
+        >
+          <header className="startup-agent-card-header">
+            <div>
+              <span className="startup-eyebrow">AGENTS</span>
+              <h2>{copy("Local clients", "本机客户端")}</h2>
+            </div>
+            <span className="startup-count" aria-hidden="true">—</span>
+          </header>
+          <div className="startup-agent-card-body">
+            <div className="startup-global-route-row">
+              <span className="startup-global-route-mark" aria-hidden="true">
+                <TokenStationMark size={36} />
+              </span>
+              <span className="startup-global-route-copy">
+                <strong>{copy("Global routing", "全局路由")}</strong>
+                <small>{copy("Local default", "本机默认")}</small>
+              </span>
+              <span className="startup-default-badge">{copy("Default", "默认")}</span>
+            </div>
+            <p className="startup-agent-pending-copy">{copy(
+              "Detected Agents appear together when this startup check finishes.",
+              "启动检查完成后，已发现的 Agent 会一次性出现。",
+            )}</p>
+          </div>
+        </section>
+
+        <section
+          className={`startup-status-panel${failed ? " startup-status-panel-failed" : ""}`}
+          role="status"
+          aria-live="polite"
+          aria-busy={!failed}
+          aria-label={statusLabel}
+        >
+          <span className="startup-eyebrow">LOCAL DISCOVERY</span>
+          <h2>{statusLabel}</h2>
+          <p>{failed
+            ? copy(
+                "The startup check did not complete. No empty Agent result has been applied.",
+                "启动检查未完成，当前不会把失败结果当作空 Agent 列表。",
+              )
+            : copy(
+                "Verifying installation locations, versions, and local configuration. This runs once per launch.",
+                "正在核对安装位置、版本与本地配置；每次启动只执行一次。",
+              )}</p>
+          {!failed && (
+            <div className="startup-discovery-track" aria-hidden="true">
+              <span>{copy("ENTRY", "入口")}</span>
+              <i><b /></i>
+              <span>{copy("HOME", "主页")}</span>
+            </div>
+          )}
+          {failed && (
+            <div className="startup-failure-actions">
+              <p className="startup-error-detail">{error}</p>
+              <button className="startup-reload-button" type="button" onClick={onReload}>
+                {copy("Reload Token Station", "重新进入 Token Station")}
+              </button>
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
 function StationApp() {
   const { language, copy } = useLanguage();
+  const { dismissToast, showError, showInfo, showSuccess } = useErrorToast();
   const [state, setState] = useState<StateView | null>(null);
-  const [view, setView] = useState<AppView>("overview");
+  const [view, setView] = useState<AppView>("home");
   const [hiddenAgentIds, setHiddenAgentIds] = useState<Set<string>>(readHiddenAgentIds);
   const hiddenAgentIdsRef = useRef(hiddenAgentIds);
   const [registry, setRegistry] = useState<AgentUiMetadataView[]>([]);
   const [agents, setAgents] = useState<AgentView[]>([]);
-  const [scanBusy, setScanBusy] = useState(false);
   const [scanSucceeded, setScanSucceeded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [serveBusy, setServeBusy] = useState(false);
   const [freeProviderBusy, setFreeProviderBusy] = useState(false);
-  const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [freePresets, setFreePresets] = useState<FreeProviderPresetView[]>([]);
   const [freeCatalogLoading, setFreeCatalogLoading] = useState(false);
@@ -169,17 +261,16 @@ function StationApp() {
     region: "all",
   });
   const busyRef = useRef(false);
-  const scanRef = useRef(false);
-  const scanQueuedRef = useRef(false);
-  const scanGenerationRef = useRef(0);
+  const detectedAgentIdsAtBootRef = useRef<Set<string>>(new Set());
+  const cachedAgentRefreshGenerationRef = useRef(0);
+  const observedServeRef = useRef<{ ready: boolean; instanceId: string | null } | null>(null);
+  const agentConnectInFlightRef = useRef(false);
   const pendingServeRef = useRef<ServeView | null>(null);
   const viewHistoryRef = useRef<AppView[]>([]);
   const pendingApplyRevisionRef = useRef<number | null>(null);
+  const pendingServeActionRef = useRef<"start" | "stop" | null>(null);
   const firstRunGuideCheckedRef = useRef(false);
-  const runtimeObservationRef = useRef<{
-    ready: boolean;
-    instanceId: string | null;
-  } | null>(null);
+  const startupLoadStartedRef = useRef(false);
 
   const orderedRegistry = useMemo(
     () => registry
@@ -198,9 +289,21 @@ function StationApp() {
     [registry],
   );
   const visibleRegistry = useMemo(
-    () => orderedRegistry.filter((metadata) => !hiddenAgentIds.has(metadata.agent_id)),
-    [hiddenAgentIds, orderedRegistry],
+    () => orderedRegistry.filter((metadata) => (
+      detectedAgentIdsAtBootRef.current.has(metadata.agent_id)
+      && !hiddenAgentIds.has(metadata.agent_id)
+    )),
+    [agents, hiddenAgentIds, orderedRegistry],
   );
+
+  useEffect(() => {
+    if (!scanSucceeded || !view.startsWith("agent:")) return;
+    const selectedId = view.slice("agent:".length);
+    if (!visibleRegistry.some((metadata) => metadata.agent_id === selectedId)) {
+      viewHistoryRef.current = [];
+      setView("home");
+    }
+  }, [scanSucceeded, view, visibleRegistry]);
 
   const setAgentVisible = useCallback((agentId: string, visible: boolean) => {
     const current = hiddenAgentIdsRef.current;
@@ -209,104 +312,168 @@ function StationApp() {
     const next = updateHiddenAgentIds(current, agentId, !visible);
     hiddenAgentIdsRef.current = next;
     setHiddenAgentIds(next);
-    writeHiddenAgentIds(next);
-  }, []);
+    if (!writeHiddenAgentIds(next)) {
+      showError(copy(
+        "Agent visibility changed for this session, but it could not be saved for the next launch.",
+        "Agent 显示已在本次会话生效，但无法保存到下次启动。",
+      ), "agent-visibility-storage");
+    }
+  }, [copy, showError]);
 
-  const rescanAgents = useCallback(async () => {
-    const requestedGeneration = ++scanGenerationRef.current;
-    setScanSucceeded(false);
-    if (scanRef.current) {
-      scanQueuedRef.current = true;
+  const refreshCachedAgents = useCallback(async () => {
+    const refreshGeneration = ++cachedAgentRefreshGenerationRef.current;
+    try {
+      const cached = await getCachedAgentViews();
+      if (refreshGeneration !== cachedAgentRefreshGenerationRef.current) return;
+      const startupIds = detectedAgentIdsAtBootRef.current;
+      setAgents(cached.filter((agent) => startupIds.has(agent.metadata.agent_id)));
+    } catch (caught) {
+      if (refreshGeneration !== cachedAgentRefreshGenerationRef.current) return;
+      showError(errorText(caught), "cached-agent-overlay");
+    }
+  }, [showError]);
+
+  const observeServeRuntime = useCallback((serve: ServeView) => {
+    const next = {
+      ready: serve.app_runtime === "running" && serve.listener_reachable,
+      instanceId: serve.instance_id,
+    };
+    const previous = observedServeRef.current;
+    observedServeRef.current = next;
+
+    if (detectedAgentIdsAtBootRef.current.size === 0 || !previous) return;
+    if (!next.ready) {
+      if (previous.ready && !agentConnectInFlightRef.current) {
+        void refreshCachedAgents();
+      }
       return;
     }
-    scanRef.current = true;
-    setScanBusy(true);
-    try {
-      let generation = requestedGeneration;
-      for (;;) {
-        scanQueuedRef.current = false;
-        try {
-          const nextAgents = await scanAgents();
-          if (generation === scanGenerationRef.current) {
-            setAgents(nextAgents);
-            setScanSucceeded(true);
-          }
-        } catch (caught) {
-          if (generation === scanGenerationRef.current) {
-            setScanSucceeded(false);
-            if (!hasErrorCode(caught, "scan_in_progress")) setError(errorText(caught));
-          }
-        }
-        if (!scanQueuedRef.current) break;
-        generation = scanGenerationRef.current;
-      }
-    } finally {
-      scanRef.current = false;
-      setScanBusy(false);
+
+    const becameReady = !previous.ready;
+    const instanceChanged = previous.ready && previous.instanceId !== next.instanceId;
+    if ((becameReady || instanceChanged) && !agentConnectInFlightRef.current) {
+      void refreshCachedAgents();
     }
-  }, []);
+  }, [refreshCachedAgents]);
 
   useEffect(() => {
+    if (startupLoadStartedRef.current) return undefined;
+    startupLoadStartedRef.current = true;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     const load = async () => {
+      const discoveryLoad = Promise.all([
+        listAgentRegistry(),
+        scanAgents(),
+      ]).then(
+        (value) => ({ ok: true as const, value }),
+        (caught: unknown) => ({ ok: false as const, caught }),
+      );
       try {
-        const [nextState, nextRegistry] = await Promise.all([getState(), listAgentRegistry()]);
+        const nextState = await getState();
         if (disposed) return;
-        setState(pendingServeRef.current ? { ...nextState, serve: pendingServeRef.current } : nextState);
+        const effectiveServe = pendingServeRef.current ?? nextState.serve;
+        observedServeRef.current = {
+          ready: effectiveServe.app_runtime === "running" && effectiveServe.listener_reachable,
+          instanceId: effectiveServe.instance_id,
+        };
+        setState(pendingServeRef.current ? { ...nextState, serve: effectiveServe } : nextState);
+
+        const discoveryResult = await discoveryLoad;
+        if (disposed) return;
+        if (!discoveryResult.ok) {
+          setError(errorText(discoveryResult.caught));
+          return;
+        }
+        const [nextRegistry, scannedAgents] = discoveryResult.value;
+        const detectedAgents = scannedAgents.filter((agent) => agent.installations.length > 0);
+        detectedAgentIdsAtBootRef.current = new Set(
+          detectedAgents.map((agent) => agent.metadata.agent_id),
+        );
         setRegistry(nextRegistry);
-        void rescanAgents();
+        setAgents(detectedAgents);
+        setScanSucceeded(true);
       } catch (caught) {
         if (!disposed) setError(errorText(caught));
       }
     };
 
+    void load();
     void listenServeState((serve) => {
       pendingServeRef.current = serve;
+      observeServeRuntime(serve);
       if (!disposed) setState((current) => current ? { ...current, serve } : current);
     }).then((stop) => {
       if (disposed) stop();
-      else {
-        unlisten = stop;
-        void load();
-      }
+      else unlisten = stop;
     }).catch((caught) => {
-      if (!disposed) {
-        setError(copy(
-          `Failed to listen for proxy status: ${errorText(caught)}`,
-          `代理状态监听失败：${errorText(caught)}`,
-        ));
-        void load();
-      }
+      if (!disposed) showError(errorText(caught), "serve-state-listener");
     });
 
     return () => {
       disposed = true;
       unlisten?.();
     };
-  }, [rescanAgents]);
+  }, [observeServeRuntime, showError]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       void getRuntimeState()
         .then((serve) => {
           pendingServeRef.current = serve;
+          observeServeRuntime(serve);
           setState((current) => current ? { ...current, serve } : current);
         })
-        .catch(() => undefined);
+        .catch((caught) => {
+          showError(errorText(caught), "runtime-state-poll");
+        });
     }, 500);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [observeServeRuntime, showError]);
 
   useEffect(() => {
     if (state) setAdminEndpoint(state.serve);
   }, [state]);
 
   useEffect(() => {
-    if (!state || firstRunGuideCheckedRef.current) return;
+    if (!state?.serve.error) return;
+    const toastId = pendingServeActionRef.current
+      ? "serve-toggle"
+      : pendingApplyRevisionRef.current != null
+        ? "config-apply"
+        : `serve-runtime:${state.serve.error}`;
+    if (pendingServeActionRef.current) pendingServeActionRef.current = null;
+    showError(
+      humanizeAppError(state.serve.error, language),
+      toastId,
+    );
+  }, [language, showError, state?.serve.error]);
+
+  useEffect(() => {
+    const action = pendingServeActionRef.current;
+    if (!state || !action || state.serve.error) return;
+    if (
+      action === "start"
+      && state.serve.app_runtime === "running"
+      && state.serve.listener_reachable
+    ) {
+      pendingServeActionRef.current = null;
+      showSuccess(copy("Proxy started", "代理已启动"), "serve-toggle");
+    } else if (
+      action === "stop"
+      && state.serve.phase === "stopped"
+      && state.serve.app_runtime === "stopped"
+    ) {
+      pendingServeActionRef.current = null;
+      showSuccess(copy("Proxy stopped", "代理已停止"), "serve-toggle");
+    }
+  }, [copy, showSuccess, state?.serve.app_runtime, state?.serve.error, state?.serve.listener_reachable, state?.serve.phase]);
+
+  useEffect(() => {
+    if (!state || !scanSucceeded || firstRunGuideCheckedRef.current) return;
     firstRunGuideCheckedRef.current = true;
     if (shouldOpenFirstRunGuide()) setFirstRunGuideOpen(true);
-  }, [state]);
+  }, [scanSucceeded, state]);
 
   useEffect(() => {
     if (firstRunSetupStep !== "agent" || !hasConnectedAgent(agents)) return;
@@ -346,42 +513,36 @@ function StationApp() {
             ? "agent-select"
             : "agent-scan-empty",
         );
-        setView("agents");
-        setMessage(copy(
+        setView(agents[0] ? `agent:${agents[0].metadata.agent_id}` : "home");
+        showSuccess(copy(
           "Routing is running. Connect an Agent next.",
           "路由已运行，接下来接入 Agent。",
-        ));
+        ), "config-apply");
       } else {
-        setMessage(copy(
+        showSuccess(copy(
           `Configuration applied · revision ${targetRevision}`,
           `配置已应用 · revision ${targetRevision}`,
-        ));
+        ), "config-apply");
       }
-      const timer = window.setTimeout(
-        () => setMessage((current) => (
-          current.startsWith("Configuration applied")
-            || current.startsWith("配置已应用")
-            || current.startsWith("Routing is running")
-            || current.startsWith("路由已运行")
-            ? ""
-            : current
-        )),
-        2600,
-      );
-      return () => window.clearTimeout(timer);
+      return undefined;
     }
     // Falling back to the old instance after a failure also reports a running
     // phase; error is the authoritative failure signal. A late old
     // running_revision without an error may only be a reordered 500 ms poll, so
     // keep waiting for the target revision.
-    if (state.serve.error !== null || phase !== "running") {
+    if (state.serve.error !== null) {
       pendingApplyRevisionRef.current = null;
+    } else if (phase !== "running") {
+      pendingApplyRevisionRef.current = null;
+      dismissToast("config-apply");
     }
     return undefined;
   }, [
     agents,
     copy,
+    dismissToast,
     firstRunSetupStep,
+    showSuccess,
     state?.config_dirty,
     state?.config_error,
     state?.saved_revision,
@@ -392,48 +553,9 @@ function StationApp() {
     state?.serve.running_revision,
   ]);
 
-  // Rescan once when runtime changes from not ready to ready. The initial app
-  // scan can run before the gateway starts, so scan_agents receives runtime=None
-  // and marks every installation disconnected, incorrectly showing managed
-  // Agents as needing repair. The 500 ms header poll corrects runtime but not the
-  // scan results, so rescan when ready to align cards with reality. rescanAgents
-  // already deduplicates and queues requests.
-  useEffect(() => {
-    if (!state) return;
-    const ready = state.serve.app_runtime === "running" && Boolean(state.serve.listener_reachable);
-    const observation = {
-      ready,
-      instanceId: state.serve.instance_id,
-    };
-    const previous = runtimeObservationRef.current;
-    runtimeObservationRef.current = observation;
-    // The first observation (null) is not a ready transition. If runtime is
-    // already ready then load() included it in the first scan. Rescan after a
-    // real not-ready-to-ready transition or when the serving instance changes
-    // while ready. The latter prevents Agent adapter readiness from staying on
-    // the old instance after Applying.old -> Running(new).
-    const becameReady = previous?.ready === false && ready;
-    const servingInstanceChanged = Boolean(
-      previous?.ready
-        && ready
-        && previous.instanceId
-        && observation.instanceId
-        && previous.instanceId !== observation.instanceId,
-    );
-    if (becameReady || servingInstanceChanged) {
-      void rescanAgents();
-    }
-  }, [
-    state?.serve.app_runtime,
-    state?.serve.instance_id,
-    state?.serve.listener_reachable,
-    rescanAgents,
-  ]);
-
   const showState = (next: StateView, nextMessage?: string) => {
     setState(next);
-    setError("");
-    if (nextMessage) setMessage(nextMessage);
+    if (nextMessage) showSuccess(nextMessage);
   };
 
   const run = async (
@@ -444,8 +566,9 @@ function StationApp() {
     if (busyRef.current) return false;
     busyRef.current = true;
     setBusy(true);
-    setError("");
-    setMessage("");
+    if (recordApplyTarget) {
+      showInfo(copy("Applying configuration…", "正在应用配置…"), "config-apply");
+    }
     try {
       const next = await action();
       if (recordApplyTarget) {
@@ -455,7 +578,7 @@ function StationApp() {
       return true;
     } catch (caught) {
       if (recordApplyTarget) pendingApplyRevisionRef.current = null;
-      setError(errorText(caught));
+      showError(errorText(caught), recordApplyTarget ? "config-apply" : undefined);
       return false;
     } finally {
       busyRef.current = false;
@@ -466,14 +589,28 @@ function StationApp() {
   const toggleServe = async () => {
     if (!state || serveBusy) return;
     pendingApplyRevisionRef.current = null;
+    dismissToast("config-apply");
     setServeBusy(true);
-    setError("");
-    setMessage("");
+    const active = state.serve.app_runtime === "running" || state.serve.phase === "starting";
+    const action = active ? "stop" : "start";
+    pendingServeActionRef.current = action;
+    showInfo(
+      action === "start"
+        ? copy("Starting proxy…", "正在启动代理…")
+        : copy("Stopping proxy…", "正在停止代理…"),
+      "serve-toggle",
+    );
     try {
-      const active = state.serve.app_runtime === "running" || state.serve.phase === "starting";
-      showState(await (active ? serveStop() : serveStart()));
+      const next = await (active ? serveStop() : serveStart());
+      showState(next);
+      const ready = next.serve.app_runtime === "running" && next.serve.listener_reachable;
+      observedServeRef.current = { ready, instanceId: next.serve.instance_id };
+      if (detectedAgentIdsAtBootRef.current.size > 0 && (active || ready)) {
+        await refreshCachedAgents();
+      }
     } catch (caught) {
-      setError(errorText(caught));
+      pendingServeActionRef.current = null;
+      showError(errorText(caught), "serve-toggle");
     } finally {
       setServeBusy(false);
     }
@@ -481,6 +618,7 @@ function StationApp() {
 
   const navigate = (next: AppView) => {
     if (freeProviderBusy) return;
+    if (next === "agents") next = "home";
     if (next === view) return;
     if (
       next === "usage" ||
@@ -493,22 +631,19 @@ function StationApp() {
       viewHistoryRef.current = [];
     }
     setView(next);
-    setMessage("");
-    setError("");
   };
 
   const navigateBack = () => {
-    const previous = viewHistoryRef.current.pop() ?? "overview";
+    const previous = viewHistoryRef.current.pop() ?? "home";
     if (
       previous.startsWith("agent:")
       && hiddenAgentIds.has(previous.slice("agent:".length))
     ) {
       viewHistoryRef.current = [];
-      setView("overview");
+      setView("home");
     } else {
       setView(previous);
     }
-    setError("");
   };
 
   const loadFreeCatalog = async () => {
@@ -525,7 +660,15 @@ function StationApp() {
 
   if (!state) {
     return (
-      <div className="loading-screen">
+      <div
+        className="loading-screen"
+        role="status"
+        aria-live="polite"
+        aria-busy={!error}
+        aria-label={error
+          ? copy("Unable to load Token Station", "无法加载 Token Station")
+          : copy("Opening Token Station", "正在进入 Token Station")}
+      >
         <span className="loading-mark" aria-hidden="true"><i /><i /><i /></span>
         <strong>{error
           ? copy("Unable to load Token Station", "无法加载 Token Station")
@@ -542,8 +685,25 @@ function StationApp() {
     );
   }
 
+  if (!scanSucceeded) {
+    return (
+      <AppShell
+        view="home"
+        serve={state.serve}
+        registry={[]}
+        agents={[]}
+        commandBusy
+        discoveryPending
+        onNavigate={() => undefined}
+        onToggleServe={() => undefined}
+      >
+        <StartupHome error={error} onReload={() => window.location.reload()} />
+      </AppShell>
+    );
+  }
+
   const agentId = view.startsWith("agent:") ? view.slice("agent:".length) : null;
-  const selectedAgentId = agentId ?? (view === "agents" ? visibleRegistry[0]?.agent_id : undefined);
+  const selectedAgentId = agentId ?? undefined;
   const metadata = selectedAgentId ? orderedRegistry.find((item) => item.agent_id === selectedAgentId) : undefined;
   const agent = selectedAgentId ? agents.find((item) => item.metadata.agent_id === selectedAgentId) : undefined;
   const route = selectedAgentId ? (state.agent_routes?.[selectedAgentId] ?? emptyAgentRoute(state)) : undefined;
@@ -551,15 +711,15 @@ function StationApp() {
   const saveStatus = configSaveStatus(state, language);
   const recommendedFirstRunStep = firstIncompleteSetupStep(state, agents);
   const activeFirstRunStep = firstRunSetupStep ?? recommendedFirstRunStep;
+  const agentDetected = agents.some((item) => item.installations.length > 0);
   const activeFirstRunMicroStep = firstRunMicroStep
     ?? (activeFirstRunStep === "provider"
       ? "provider-entry"
       : activeFirstRunStep === "route"
         ? "route-entry"
         : activeFirstRunStep === "agent"
-          ? "agent-entry"
+          ? (agentDetected ? "agent-entry" : "agent-scan-empty")
           : "complete");
-  const agentDetected = agents.some((item) => item.installations.length > 0);
 
   // Quota-first Save and Apply persists the account list before restarting the proxy.
   const saveQuota = (accounts: QuotaAccount[]) =>
@@ -582,21 +742,10 @@ function StationApp() {
       serve={state.serve}
       registry={visibleRegistry}
       agents={agents}
-      scanBusy={scanBusy}
       commandBusy={serveBusy || busy || freeProviderBusy}
       onNavigate={navigate}
-      onRescan={() => void rescanAgents()}
       onToggleServe={() => void toggleServe()}
     >
-      {state.serve.phase === "starting" && !error && (
-        <div className="banner ok global-banner">
-          {copy("Applying configuration…", "正在应用配置…")}
-        </div>
-      )}
-      {message && state.serve.phase !== "starting" && <div className="banner ok global-banner">{message}</div>}
-      {error && <div className="banner err global-banner">{error}</div>}
-      {state.serve.error && <div className="banner err global-banner">{humanizeAppError(state.serve.error, language)}</div>}
-
       {view === "overview" && (
         <OverviewPage
           state={state}
@@ -607,12 +756,34 @@ function StationApp() {
       )}
 
       {view === "home" && (
+        <AgentsPage
+          registry={visibleRegistry}
+          agents={agents}
+          homeSelected
+          onOpenHome={() => navigate("home")}
+          onOpenAgent={(id) => {
+            navigate(`agent:${id}`);
+            if (firstRunGuideOpen && activeFirstRunMicroStep === "agent-select") {
+              const selected = agents.find((item) => item.metadata.agent_id === id);
+              setFirstRunMicroStep(
+                (selected?.installations.length ?? 0) > 1
+                  ? "agent-installation"
+                  : "agent-connect",
+              );
+            }
+          }}
+        >
         <HomePage
           providers={state.providers}
           tiers={state.tiers}
           profiles={state.profiles ?? []}
           routingMode={state.routing_mode}
+          directTarget={state.direct_target ?? null}
           onSetRoutingMode={(mode) => void run(() => setRoutingMode(mode))}
+          onApplyDirect={(upstream, model) => void run(async () => {
+            await setDirectRoute(upstream, model);
+            return serveStart();
+          }, undefined, true)}
           quotaAccounts={state.quota_accounts ?? []}
           onSaveQuota={saveQuota}
           onSaveQuotaPlan={saveQuotaPlan}
@@ -652,16 +823,18 @@ function StationApp() {
                 )
               : copy("All Agents now follow Home", "全部 Agent 已恢复跟随主页"),
           )}
+          embedded
         />
+        </AgentsPage>
       )}
 
-      {(view === "agents" || agentId) && (
+      {agentId && (
         <AgentsPage
           registry={visibleRegistry}
           agents={agents}
           selectedAgentId={selectedAgentId}
-          scanBusy={scanBusy}
-          onRescan={() => void rescanAgents()}
+          homeSelected={false}
+          onOpenHome={() => navigate("home")}
           onOpenAgent={(id) => {
             navigate(`agent:${id}`);
             if (firstRunGuideOpen && activeFirstRunMicroStep === "agent-select") {
@@ -686,11 +859,22 @@ function StationApp() {
               serveRunning={runtimeHealthy}
               applying={state.serve.phase === "starting"}
               onStateChange={showState}
-              onRescan={rescanAgents}
+              onRefreshAgents={refreshCachedAgents}
+              onConnectInFlightChange={(inFlight) => {
+                agentConnectInFlightRef.current = inFlight;
+              }}
               onSaveQuota={saveQuota}
               onSaveQuotaPlan={saveQuotaPlan}
               onViewQuotaUsage={() => navigate("quota-usage")}
               onSetRoutingMode={(mode) => void run(() => setRoutingMode(mode, metadata.agent_id))}
+              onApplyDirect={(upstream, model) => run(async () => {
+                await setDirectRoute(upstream, model, metadata.agent_id);
+                return restartAgentRoute(metadata.agent_id);
+              })}
+              onDeleteProfile={(name) => run(
+                () => deleteProfile(name),
+                copy(`Profile "${name}" deleted`, `已删除策略组“${name}”`),
+              )}
               onInstallationSelected={() => {
                 if (firstRunGuideOpen && activeFirstRunMicroStep === "agent-installation") {
                   setFirstRunMicroStep("agent-connect-multiple");
@@ -747,9 +931,7 @@ function StationApp() {
           onAgentVisibilityChange={setAgentVisible}
           onOpenFirstRunGuide={() => {
             viewHistoryRef.current = [];
-            setView("overview");
-            setMessage("");
-            setError("");
+            setView("home");
             setFirstRunSetupStep(null);
             setFirstRunMicroStep(null);
             setFirstRunGuideOpen(true);
@@ -832,7 +1014,7 @@ function StationApp() {
       <FirstRunGuide
         open={firstRunGuideOpen}
         microStep={activeFirstRunMicroStep}
-        canSkipAgent={scanSucceeded && !scanBusy && !agentDetected}
+        canSkipAgent={scanSucceeded && !agentDetected}
         onBack={() => {
           if (activeFirstRunMicroStep === "provider-models") {
             setFirstRunMicroStep("provider-credential");
@@ -874,9 +1056,7 @@ function StationApp() {
             setFirstRunSetupStep(null);
             setFirstRunMicroStep(null);
             viewHistoryRef.current = [];
-            setView("overview");
-            setMessage("");
-            setError("");
+            setView("home");
           }
         }}
         onSkipAgent={() => {
@@ -907,9 +1087,7 @@ function StationApp() {
         onFinish={() => {
           setFirstRunCompletion(null);
           viewHistoryRef.current = [];
-          setView("overview");
-          setMessage("");
-          setError("");
+          setView("home");
         }}
       />
     </AppShell>
@@ -918,10 +1096,12 @@ function StationApp() {
 
 export default function App() {
   return (
-    <LanguageBoundary>
-      <ThemeBoundary>
-        <StationApp />
-      </ThemeBoundary>
-    </LanguageBoundary>
+    <ErrorToastBoundary>
+      <LanguageBoundary>
+        <ThemeBoundary>
+          <StationApp />
+        </ThemeBoundary>
+      </LanguageBoundary>
+    </ErrorToastBoundary>
   );
 }

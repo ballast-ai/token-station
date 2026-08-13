@@ -733,7 +733,7 @@ impl SqliteStore {
             let candidates = {
                 let mut statement = transaction
                     .prepare(
-                        "SELECT id, model,
+                        "SELECT id, upstream, model,
                                 COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
                                 COALESCE(cache_read_tokens, 0), COALESCE(cache_write_tokens, 0),
                                 COALESCE(reasoning_tokens, 0)
@@ -752,13 +752,14 @@ impl SqliteStore {
                         |row| {
                             Ok((
                                 row.get::<_, i64>(0)?,
-                                row.get::<_, String>(1)?,
+                                row.get::<_, Option<String>>(1)?,
+                                row.get::<_, String>(2)?,
                                 Usage {
-                                    input_tokens: narrow(row.get::<_, i64>(2)?),
-                                    output_tokens: narrow(row.get::<_, i64>(3)?),
-                                    cache_read_tokens: narrow(row.get::<_, i64>(4)?),
-                                    cache_write_tokens: narrow(row.get::<_, i64>(5)?),
-                                    reasoning_tokens: narrow(row.get::<_, i64>(6)?),
+                                    input_tokens: narrow(row.get::<_, i64>(3)?),
+                                    output_tokens: narrow(row.get::<_, i64>(4)?),
+                                    cache_read_tokens: narrow(row.get::<_, i64>(5)?),
+                                    cache_write_tokens: narrow(row.get::<_, i64>(6)?),
+                                    reasoning_tokens: narrow(row.get::<_, i64>(7)?),
                                     ..Usage::default()
                                 },
                             ))
@@ -768,9 +769,13 @@ impl SqliteStore {
                     .map_err(|error| format!("cost backfill decode: {error}"))?
             };
             let batch_len = candidates.len();
-            for (id, model, usage) in candidates {
+            for (id, upstream, model, usage) in candidates {
                 last_id = id;
-                let Some((cost, version)) = pricing.price(&model, &usage) else {
+                let priced = upstream.as_deref().map_or_else(
+                    || pricing.price(&model, &usage),
+                    |upstream| pricing.price_for_upstream(upstream, &model, &usage),
+                );
+                let Some((cost, version)) = priced else {
                     continue;
                 };
                 updated += transaction
@@ -2074,6 +2079,113 @@ mod tests {
                 ),
             ],
         );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn scoped_prices_backfill_same_model_for_each_recorded_upstream() {
+        use std::collections::BTreeMap;
+
+        use crate::pricing::{ModelPrice, PriceTable};
+
+        let path = scratch("scoped-price-backfill");
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        for (request_id, upstream) in [
+            ("req-provider-a", "provider_a"),
+            ("req-provider-b", "provider_b"),
+        ] {
+            let mut record = receipt(request_id, 1);
+            let routing = record.routing.as_mut().expect("fixture has routing");
+            routing.upstream = upstream.to_owned();
+            routing.model = "shared-model".to_owned();
+            record.usage = Some(Usage {
+                input_tokens: 1_000_000,
+                ..Usage::default()
+            });
+            record.cost_kind = CostKind::Unknown;
+            record.cost_micros = None;
+            record.price_version = None;
+            store.record(&record);
+        }
+        drop(store);
+
+        let price = |input_per_mtok| ModelPrice {
+            input_per_mtok,
+            ..ModelPrice::default()
+        };
+        let pricing = PriceTable {
+            version: 9,
+            models: BTreeMap::from([
+                ("provider_a/shared-model".to_owned(), price(200_000)),
+                ("provider_b/shared-model".to_owned(), price(700_000)),
+            ]),
+        };
+
+        assert_eq!(
+            SqliteStore::backfill_unknown_costs(&path, &pricing).expect("backfills"),
+            2
+        );
+        let rows = SqliteStore::recent_receipts(&path, 5).expect("reads receipts");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].cost_micros, Some(700_000));
+        assert_eq!(rows[0].price_version, Some(9));
+        assert_eq!(rows[1].cost_micros, Some(200_000));
+        assert_eq!(rows[1].price_version, Some(9));
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn legacy_receipts_without_upstream_use_the_model_only_price() {
+        use std::collections::BTreeMap;
+
+        use crate::pricing::{ModelPrice, PriceTable};
+
+        let path = scratch("legacy-null-upstream-price-backfill");
+        std::fs::remove_file(&path).ok();
+        let store = SqliteStore::open(&path).expect("creates");
+        let mut record = receipt("req-legacy", 1);
+        record.routing.as_mut().expect("fixture has routing").model = "legacy-model".to_owned();
+        record.usage = Some(Usage {
+            input_tokens: 1_000_000,
+            ..Usage::default()
+        });
+        record.cost_kind = CostKind::Unknown;
+        record.cost_micros = None;
+        record.price_version = None;
+        store.record(&record);
+        store
+            .connection
+            .lock()
+            .expect("lock")
+            .execute(
+                "UPDATE requests SET upstream = NULL WHERE request_id = ?1",
+                ["req-legacy"],
+            )
+            .expect("represents a legacy row without upstream identity");
+        drop(store);
+
+        let pricing = PriceTable {
+            version: 4,
+            models: BTreeMap::from([(
+                "legacy-model".to_owned(),
+                ModelPrice {
+                    input_per_mtok: 300_000,
+                    ..ModelPrice::default()
+                },
+            )]),
+        };
+
+        assert_eq!(
+            SqliteStore::backfill_unknown_costs(&path, &pricing).expect("backfills"),
+            1
+        );
+        let rows = SqliteStore::recent_receipts(&path, 5).expect("reads receipts");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cost_micros, Some(300_000));
+        assert_eq!(rows[0].price_version, Some(4));
 
         std::fs::remove_file(path).ok();
     }

@@ -9,6 +9,7 @@ import {
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { setDockThemeIcon } from "../api";
+import { useErrorToast } from "./ErrorToast";
 
 export type Theme = "light" | "dark" | "system";
 export type ResolvedTheme = Exclude<Theme, "system">;
@@ -29,8 +30,12 @@ function isTheme(value: string | null): value is Theme {
 
 function storedTheme(): Theme {
   if (typeof window === "undefined") return "system";
-  const value = window.localStorage.getItem(THEME_STORAGE_KEY);
-  return isTheme(value) ? value : "system";
+  try {
+    const value = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return isTheme(value) ? value : "system";
+  } catch {
+    return "system";
+  }
 }
 
 function systemTheme(): ResolvedTheme {
@@ -39,12 +44,22 @@ function systemTheme(): ResolvedTheme {
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
+  const { showError } = useErrorToast();
   const [theme, setTheme] = useState<Theme>(storedTheme);
   const [preferredTheme, setPreferredTheme] = useState<ResolvedTheme>(systemTheme);
 
   useEffect(() => {
-    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
-  }, [theme]);
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      showError(
+        document.documentElement.lang === "zh-CN"
+          ? "主题已在本次会话生效，但无法保存到下次启动。"
+          : "The theme changed for this session, but it could not be saved for the next launch.",
+        "theme-storage",
+      );
+    }
+  }, [showError, theme]);
 
   useEffect(() => {
     if (theme !== "system" || typeof window.matchMedia !== "function") return;
@@ -64,10 +79,16 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     document.documentElement.classList.remove("light", "dark");
     document.documentElement.classList.add(resolvedTheme);
     if ("__TAURI_INTERNALS__" in window) {
-      void getCurrentWindow().setTheme(resolvedTheme).catch(() => undefined);
-      void setDockThemeIcon(resolvedTheme).catch(() => undefined);
+      const reportSyncFailure = () => showError(
+        document.documentElement.lang === "zh-CN"
+          ? "界面主题已切换，但 macOS 外观没有完全同步。"
+          : "The interface theme changed, but the macOS appearance did not fully synchronize.",
+        "theme-native-sync",
+      );
+      void getCurrentWindow().setTheme(resolvedTheme).catch(reportSyncFailure);
+      void setDockThemeIcon(resolvedTheme).catch(reportSyncFailure);
     }
-  }, [resolvedTheme]);
+  }, [resolvedTheme, showError]);
 
   const value = useMemo(
     () => ({ theme, resolvedTheme, setTheme }),

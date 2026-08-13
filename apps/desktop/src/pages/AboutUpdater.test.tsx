@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import About from "./About";
@@ -7,6 +7,7 @@ import {
   installDesktopUpdateAndRestart,
   listenDesktopUpdateProgress,
 } from "../api";
+import { ErrorToastProvider } from "../components/ErrorToast";
 
 vi.mock("../api", () => ({
   checkDesktopUpdate: vi.fn(),
@@ -19,6 +20,54 @@ describe("desktop in-app update", () => {
     vi.mocked(checkDesktopUpdate).mockReset();
     vi.mocked(installDesktopUpdateAndRestart).mockReset();
     vi.mocked(listenDesktopUpdateProgress).mockReset().mockResolvedValue(() => undefined);
+  });
+
+  it("更新进度监听注册失败时进入全局错误弹窗", async () => {
+    vi.mocked(listenDesktopUpdateProgress).mockRejectedValue(
+      new Error("update progress subscription failed"),
+    );
+
+    render(
+      <ErrorToastProvider>
+        <About desktopVersion="1.1.2" coreVersion="0.2.0" />
+      </ErrorToastProvider>,
+    );
+
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByRole("alert"))
+      .toHaveTextContent("Token Station 无法检查更新");
+  });
+
+  it("复制发布链接失败时只在左下角提示且不误报已复制", async () => {
+    vi.mocked(checkDesktopUpdate).mockResolvedValue({
+      status: "update_available",
+      current_version: "1.1.2",
+      version: "1.1.3",
+      notes: null,
+      pub_date: null,
+      release_url: "https://example.test/v1.1.3",
+      message: null,
+    });
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error("clipboard denied")) },
+    });
+
+    render(
+      <ErrorToastProvider>
+        <About desktopVersion="1.1.2" coreVersion="0.2.0" />
+      </ErrorToastProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "检查更新" }));
+    await user.click(await screen.findByRole("button", { name: "复制链接" }));
+
+    const message = "无法复制发布链接。请检查系统剪贴板权限，然后重试。";
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByRole("alert"))
+      .toHaveTextContent(message);
+    expect(screen.getByRole("button", { name: "复制链接" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "已复制" })).not.toBeInTheDocument();
+    expect(screen.queryByText(message, { selector: ".banner" })).not.toBeInTheDocument();
   });
 
   it("shows signed download progress while installation is in flight", async () => {

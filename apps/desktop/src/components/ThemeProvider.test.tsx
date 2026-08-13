@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setDockThemeIcon } from "../api";
@@ -8,6 +8,7 @@ import {
   useTheme,
   type ResolvedTheme,
 } from "./ThemeProvider";
+import { ErrorToastProvider } from "./ErrorToast";
 
 const { setDockThemeIconMock, setWindowThemeMock } = vi.hoisted(() => ({
   setDockThemeIconMock: vi.fn(),
@@ -165,15 +166,27 @@ describe("ThemeProvider", () => {
     setDockThemeIconMock.mockRejectedValue(new Error("native Dock update failed"));
     const user = userEvent.setup();
 
-    render(
-      <ThemeProvider>
-        <ThemeProbe />
-      </ThemeProvider>,
-    );
+    render(<ErrorToastProvider><ThemeProvider><ThemeProbe /></ThemeProvider></ErrorToastProvider>);
 
     await user.click(screen.getByRole("button", { name: "Dark" }));
     expect(screen.getByText("dark:dark")).toBeInTheDocument();
     expect(document.documentElement).toHaveClass("dark");
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByRole("alert"))
+      .toHaveTextContent("macOS appearance did not fully synchronize");
+  });
+
+  it("主题偏好写入失败时保留本次切换并用左下角提示", async () => {
+    const user = userEvent.setup();
+    render(<ErrorToastProvider><ThemeProvider><ThemeProbe /></ThemeProvider></ErrorToastProvider>);
+    vi.spyOn(Storage.prototype, "setItem").mockImplementationOnce(() => {
+      throw new Error("storage denied");
+    });
+
+    await user.click(screen.getByRole("button", { name: "Dark" }));
+
+    expect(screen.getByText("dark:dark")).toBeInTheDocument();
+    expect(within(screen.getByTestId("error-toast-viewport")).getByRole("alert"))
+      .toHaveTextContent("theme changed for this session");
   });
 
   it("ignores invalid persisted values", () => {

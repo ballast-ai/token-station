@@ -1,9 +1,11 @@
 use serde_json::json;
 use token_station_desktop_lib::agent_integration::config_codec::{
-    apply_patch, parse_rendered, project_owned_paths, render_document, semantic_json,
-    DocumentFormat,
+    apply_patch, parse_rendered, prepare_owned_paths_for_write, project_owned_paths,
+    render_document, semantic_json, DocumentFormat,
 };
-use token_station_desktop_lib::agent_integration::connectors::{Connector, HermesConnector};
+use token_station_desktop_lib::agent_integration::connectors::{
+    ConnectInput, Connector, HermesConnector,
+};
 use token_station_desktop_lib::agent_integration::types::{ConfigPath, PatchKind, PatchOperation};
 
 #[test]
@@ -89,4 +91,165 @@ fn hermes_disconnect_projection_removes_missing_owned_fields_only() {
         assert!(semantic["model"].get(field).is_none(), "{rendered}");
     }
     assert_eq!(semantic["model"]["user_field"], "keep-current");
+}
+
+#[test]
+fn hermes_reuses_every_safe_empty_model_spelling_without_losing_comments() {
+    let input = ConnectInput {
+        base_url: "http://127.0.0.1:8787/agents/nous-hermes-agent/v1",
+        token: Some("fixture-empty-parent-secret"),
+        adapter_ready: true,
+        model_metadata: None,
+    };
+    for spelling in ["", "null", "~", "{}"] {
+        let source = format!(
+            "# keep root comment\nmodel: {spelling} # keep model comment\nfallback_providers: [] # keep sibling\n"
+        );
+        let mut document = parse_rendered(&source, DocumentFormat::Yaml, "Hermes").unwrap();
+        prepare_owned_paths_for_write(&mut document, &HermesConnector.owned_paths()).unwrap();
+        HermesConnector.validate_source(&document).unwrap();
+        apply_patch(
+            &mut document,
+            &HermesConnector.connect_patch(&input).unwrap(),
+        )
+        .unwrap();
+        HermesConnector
+            .validate_projected(&document, &input)
+            .unwrap();
+
+        let rendered = render_document(&document, "Hermes").unwrap();
+        assert!(rendered.starts_with("# keep root comment\n"), "{rendered}");
+        assert!(rendered.contains("# keep model comment"), "{rendered}");
+        assert!(
+            rendered.contains("fallback_providers: [] # keep sibling"),
+            "{rendered}"
+        );
+        assert_eq!(
+            semantic_json(&document).unwrap()["model"]["provider"],
+            "custom"
+        );
+    }
+}
+
+#[test]
+fn hermes_reuses_safe_empty_model_spellings_at_eof_without_a_newline() {
+    for source in ["model:", "model: null", "model: ~", "model: {}"] {
+        let mut document = parse_rendered(source, DocumentFormat::Yaml, "Hermes").unwrap();
+        prepare_owned_paths_for_write(&mut document, &HermesConnector.owned_paths()).unwrap();
+        let operations = HermesConnector
+            .connect_patch(&ConnectInput {
+                base_url: "http://127.0.0.1:8787/v1",
+                token: Some("fixture-secret"),
+                adapter_ready: true,
+                model_metadata: None,
+            })
+            .unwrap();
+
+        apply_patch(&mut document, &operations).unwrap();
+
+        let semantic = semantic_json(&document).unwrap();
+        assert_eq!(semantic["model"]["provider"], "custom", "{source}");
+    }
+}
+
+#[test]
+fn hermes_keeps_ambiguous_model_shapes_blocked() {
+    for source in [
+        "model: []\n",
+        "model: auto\n",
+        "model: {keep: true}\n",
+        "model: &empty {}\n",
+        "model: !!map {}\n",
+    ] {
+        let mut document = parse_rendered(source, DocumentFormat::Yaml, "Hermes").unwrap();
+        let _ = prepare_owned_paths_for_write(&mut document, &HermesConnector.owned_paths());
+        assert!(
+            HermesConnector.validate_source(&document).is_err()
+                || HermesConnector
+                    .connect_patch(&ConnectInput {
+                        base_url: "http://127.0.0.1:8787/v1",
+                        token: Some("fixture-secret"),
+                        adapter_ready: true,
+                        model_metadata: None,
+                    })
+                    .and_then(|operations| apply_patch(&mut document, &operations))
+                    .is_err(),
+            "unsafe model shape must remain blocked: {source}"
+        );
+    }
+}
+
+#[test]
+fn yaml_reverse_patch_can_remove_a_parent_created_by_connection() {
+    let mut document = parse_rendered(
+        "# keep root comment\nfallback_providers: [] # keep sibling\n",
+        DocumentFormat::Yaml,
+        "Hermes",
+    )
+    .unwrap();
+    let reverse =
+        token_station_desktop_lib::agent_integration::config_codec::apply_patch_with_reverse(
+            &mut document,
+            &[PatchOperation {
+                operation: PatchKind::Replace,
+                path: ConfigPath {
+                    segments: vec!["model".to_string(), "default".to_string()],
+                },
+                value: Some(json!("auto")),
+            }],
+        )
+        .unwrap();
+
+    apply_patch(&mut document, &reverse).unwrap();
+
+    let rendered = render_document(&document, "Hermes").unwrap();
+    assert_eq!(
+        rendered,
+        "# keep root comment\nfallback_providers: [] # keep sibling\n"
+    );
+}
+
+#[test]
+fn yaml_parent_reverse_preserves_following_root_comments_and_blank_lines() {
+    let source = "keep_before: true\n# keep comment before insertion\n\nkeep_after: true\n";
+    let mut document = parse_rendered(source, DocumentFormat::Yaml, "Hermes").unwrap();
+    let reverse =
+        token_station_desktop_lib::agent_integration::config_codec::apply_patch_with_reverse(
+            &mut document,
+            &[PatchOperation {
+                operation: PatchKind::Replace,
+                path: ConfigPath {
+                    segments: vec!["model".to_string(), "default".to_string()],
+                },
+                value: Some(json!("auto")),
+            }],
+        )
+        .unwrap();
+
+    apply_patch(&mut document, &reverse).unwrap();
+
+    assert_eq!(render_document(&document, "Hermes").unwrap(), source);
+}
+
+#[test]
+fn yaml_parent_reverse_removes_internal_trivia_without_orphaning_children() {
+    let source = "model:\n  default: auto\n\n# managed block note\n  provider: custom\n# keep sibling comment\n\nfallback_providers: []\n";
+    let mut document = parse_rendered(source, DocumentFormat::Yaml, "Hermes").unwrap();
+
+    apply_patch(
+        &mut document,
+        &[PatchOperation {
+            operation: PatchKind::Remove,
+            path: ConfigPath {
+                segments: vec!["model".to_string()],
+            },
+            value: None,
+        }],
+    )
+    .unwrap();
+
+    assert_eq!(
+        render_document(&document, "Hermes").unwrap(),
+        "# keep sibling comment\n\nfallback_providers: []\n"
+    );
 }

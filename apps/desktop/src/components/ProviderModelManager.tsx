@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import {
   CatalogModelView,
   ModelDiscoveryView,
@@ -13,6 +13,7 @@ import {
   previewProviderEndpoints,
   ProviderEndpointPreview,
   ProviderTestResult,
+  setProviderModelLimits,
   setProviderModelVision,
   testProvider,
   updateProviderModels,
@@ -20,6 +21,7 @@ import {
 import ModelPicker, { CatalogStatus } from "./ModelPicker";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { humanizeAppError } from "../errors";
+import { useErrorToast } from "./ErrorToast";
 
 interface ProviderModelManagerProps {
   provider: ProviderView;
@@ -35,9 +37,16 @@ const unknownCapabilities = (model: string): ModelCapabilityView => ({
   tool: "unknown",
   vision: "unknown",
   json_schema: "unknown",
+  context_window: 0,
+  max_output_tokens: 0,
 });
 
 type ProviderHealth = "untested" | "healthy" | "degraded" | "unavailable";
+
+interface ModelLimitDraft {
+  context: string;
+  output: string;
+}
 
 const baseLayers = new Set(["network", "http", "auth", "model", "generation"]);
 
@@ -94,6 +103,13 @@ const resultStatus = (
       warning,
     };
   }
+  if (result.source === "preset") {
+    return {
+      label: copy("Using built-in presets", "使用内置预设"),
+      tone: "cache",
+      warning,
+    };
+  }
   return { label: copy("Fetch failed", "获取失败"), tone: "error", warning };
 };
 
@@ -104,6 +120,8 @@ export default function ProviderModelManager({
   onSaved,
 }: ProviderModelManagerProps) {
   const { copy, language } = useLocalizedCopy();
+  const { showError, showSuccess } = useErrorToast();
+  const endpointErrorId = useId();
   const [models, setModels] = useState(provider.models);
   const [selected, setSelected] = useState(provider.models);
   const [status, setStatus] = useState<CatalogStatus>({
@@ -112,14 +130,17 @@ export default function ProviderModelManager({
   });
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
   const [catalog, setCatalog] = useState<CatalogModelView[]>(provider.catalog ?? []);
   const [diff, setDiff] = useState<{ added: string[]; removed: string[] } | null>(null);
   const [endpointPreview, setEndpointPreview] = useState<ProviderEndpointPreview | null>(null);
+  const [endpointError, setEndpointError] = useState("");
   const [testResults, setTestResults] = useState<ProviderTestResult[]>([]);
   const [testedAtMs, setTestedAtMs] = useState<number | null>(null);
   const [testing, setTesting] = useState(false);
   const [capabilitySaving, setCapabilitySaving] = useState<string | null>(null);
+  const [limitSaving, setLimitSaving] = useState<string | null>(null);
+  const [limitDrafts, setLimitDrafts] = useState<Record<string, ModelLimitDraft>>({});
+  const [limitErrors, setLimitErrors] = useState<Record<string, string>>({});
   const [usage, setUsage] = useState<string>(copy(
     "Reading metadata-only usage…",
     "正在读取无正文用量…",
@@ -144,17 +165,25 @@ export default function ProviderModelManager({
     const capByModel = new Map(capabilities.map((cap) => [cap.model, cap]));
     return mergeModels(catalog.map((c) => c.model), capabilities.map((c) => c.model)).map((model) => ({
       model,
+      configured: provider.models.includes(model),
       catalog: catalogByModel.get(model) ?? null,
       cap: capByModel.get(model) ?? unknownCapabilities(model),
     }));
-  }, [catalog, capabilities]);
-  const operationDisabled = disabled || refreshing || saving || testing || editing || capabilitySaving !== null;
+  }, [catalog, capabilities, provider.models]);
+  const operationDisabled = disabled || refreshing || saving || testing || editing
+    || capabilitySaving !== null || limitSaving !== null;
   const capabilityLabel: Record<CapabilityState, string> = {
     verified: copy("Verified", "已验证"),
     declared: copy("Declared", "已声明"),
     unsupported: copy("Unsupported", "不支持"),
     unknown: copy("Unknown", "未知"),
   };
+  const limitSourceLabel = {
+    provider: copy("Provider API", "供应商接口"),
+    builtin_preset: copy("Built-in preset (not live)", "内置预设（非实时值）"),
+    operator: copy("Manual configuration", "手动配置"),
+    heuristic: copy("Heuristic default", "启发式默认"),
+  } as const;
   const catalogStateLabel = {
     active: copy("Active", "在售"),
     stale: copy("Cached, pending confirmation", "缓存待确认"),
@@ -183,7 +212,21 @@ export default function ProviderModelManager({
   };
 
   useEffect(() => {
-    void previewProviderEndpoints(editBaseUrl).then(setEndpointPreview).catch(() => setEndpointPreview(null));
+    let active = true;
+    setEndpointPreview(null);
+    setEndpointError("");
+    void previewProviderEndpoints(editBaseUrl)
+      .then((preview) => {
+        if (!active) return;
+        setEndpointPreview(preview);
+      })
+      .catch((caught) => {
+        if (!active) return;
+        setEndpointError(humanizeAppError(caught));
+      });
+    return () => {
+      active = false;
+    };
   }, [editBaseUrl]);
 
   useEffect(() => {
@@ -200,10 +243,73 @@ export default function ProviderModelManager({
       .catch(() => setUsage(copy("Usage is temporarily unavailable", "用量暂不可读")));
   }, [copy, provider.name]);
 
+  useEffect(() => {
+    setLimitDrafts(Object.fromEntries(capabilities.map((capability) => [
+      capability.model,
+      {
+        context: capability.context_window ? String(capability.context_window) : "",
+        output: capability.max_output_tokens ? String(capability.max_output_tokens) : "",
+      },
+    ])));
+    setLimitErrors({});
+  }, [capabilities]);
+
+  const updateLimitDraft = (model: string, field: keyof ModelLimitDraft, value: string) => {
+    setLimitDrafts((current) => ({
+      ...current,
+      [model]: {
+        context: current[model]?.context ?? "",
+        output: current[model]?.output ?? "",
+        [field]: value,
+      },
+    }));
+    setLimitErrors((current) => ({ ...current, [model]: "" }));
+  };
+
+  const saveLimits = async (model: string) => {
+    const draft = limitDrafts[model] ?? { context: "", output: "" };
+    const context = Number(draft.context);
+    const output = Number(draft.output);
+    let error = "";
+    if (!Number.isSafeInteger(context) || !Number.isSafeInteger(output)
+      || context <= 0 || output <= 0 || context > 0xffff_ffff || output > 0xffff_ffff) {
+      error = copy(
+        "Context and maximum output tokens must be positive integers.",
+        "上下文上限和最大输出 Token 必须是大于 0 的整数。",
+      );
+    } else if (output > context) {
+      error = copy(
+        "Maximum output tokens cannot exceed the context window.",
+        "最大输出 Token 不能大于上下文上限。",
+      );
+    }
+    if (error) {
+      setLimitErrors((current) => ({ ...current, [model]: error }));
+      return;
+    }
+    setLimitSaving(model);
+    try {
+      const next = await setProviderModelLimits(provider.name, model, context, output);
+      onSaved(next);
+      showSuccess(
+        serveRunning
+          ? copy("Model limits saved; restart the proxy to apply.", "已保存模型限制；重启代理后生效")
+          : copy("Model limits saved.", "已保存模型限制"),
+        `provider-model-limits:${provider.name}:${model}`,
+      );
+    } catch (caught) {
+      showError(
+        humanizeAppError(caught, language),
+        `provider-model-limits:${provider.name}:${model}`,
+      );
+    } finally {
+      setLimitSaving(null);
+    }
+  };
+
   const saveProviderDetails = async () => {
     if (operationDisabled || !endpointPreview) return;
     setEditing(true);
-    setError("");
     try {
       onSaved(await editProvider(
         provider.name,
@@ -215,8 +321,12 @@ export default function ProviderModelManager({
           : null,
       ));
       setEditKey("");
+      showSuccess(
+        copy(`Provider ${provider.name} details saved`, `${provider.name} 的基本信息已保存`),
+        `provider-edit:${provider.name}`,
+      );
     } catch (caught) {
-      setError(humanizeAppError(caught));
+      showError(humanizeAppError(caught), `provider-edit:${provider.name}`);
     } finally {
       setEditing(false);
     }
@@ -225,13 +335,12 @@ export default function ProviderModelManager({
   const runProviderTest = async () => {
     if (operationDisabled) return;
     setTesting(true);
-    setError("");
     try {
       const results = await testProvider(provider.name);
       setTestResults(results);
       setTestedAtMs(Date.now());
     } catch (caught) {
-      setError(humanizeAppError(caught));
+      showError(humanizeAppError(caught), `provider-test:${provider.name}`);
     } finally {
       setTesting(false);
     }
@@ -240,11 +349,10 @@ export default function ProviderModelManager({
   const toggleVision = async (model: string, state: CapabilityState) => {
     if (operationDisabled || state === "verified") return;
     setCapabilitySaving(model);
-    setError("");
     try {
       onSaved(await setProviderModelVision(provider.name, model, state !== "declared"));
     } catch (caught) {
-      setError(humanizeAppError(caught));
+      showError(humanizeAppError(caught), `provider-capability:${provider.name}:${model}`);
     } finally {
       setCapabilitySaving(null);
     }
@@ -253,7 +361,6 @@ export default function ProviderModelManager({
   const refresh = async () => {
     if (operationDisabled) return;
     setRefreshing(true);
-    setError("");
     setStatus({ label: copy("Fetching…", "正在获取…"), tone: "loading" });
     try {
       const result = await discoverProviderModels(provider.name, provider.base_url, null);
@@ -264,8 +371,14 @@ export default function ProviderModelManager({
       if (result.capabilities_updated) {
         onSaved(await getState());
       }
+      showSuccess(
+        copy(`Models for ${provider.name} refreshed`, `${provider.name} 的模型目录已刷新`),
+        `provider-catalog:${provider.name}`,
+      );
     } catch (caught) {
-      setStatus({ label: copy("Fetch failed", "获取失败"), tone: "error", warning: humanizeAppError(caught) });
+      const message = humanizeAppError(caught);
+      setStatus({ label: copy("Fetch failed", "获取失败"), tone: "error", warning: null });
+      showError(message, `provider-catalog:${provider.name}`);
     } finally {
       setRefreshing(false);
     }
@@ -274,13 +387,19 @@ export default function ProviderModelManager({
   const save = async () => {
     if (operationDisabled) return;
     setSaving(true);
-    setError("");
     try {
       const next = await updateProviderModels(provider.name, selected);
       onSaved(next);
-      setStatus({ label: copy(`Saved ${selected.length}`, `已保存 ${selected.length} 个`), tone: "live" });
+      setStatus({
+        label: copy(`Configured ${selected.length}`, `已配置 ${selected.length} 个`),
+        tone: "idle",
+      });
+      showSuccess(
+        copy(`Saved ${selected.length} models`, `已保存 ${selected.length} 个模型`),
+        `provider-models-save:${provider.name}`,
+      );
     } catch (caught) {
-      setError(humanizeAppError(caught));
+      showError(humanizeAppError(caught), `provider-models-save:${provider.name}`);
     } finally {
       setSaving(false);
     }
@@ -313,7 +432,15 @@ export default function ProviderModelManager({
         </div>
       </div>
       <div className="provider-edit-fields">
-        <input className="input mono" aria-label={copy("Edit base URL", "编辑 Base URL")} value={editBaseUrl} disabled={operationDisabled} onChange={(event) => setEditBaseUrl(event.target.value)} />
+        <input
+          className="input mono"
+          aria-label={copy("Edit base URL", "编辑 Base URL")}
+          aria-invalid={Boolean(endpointError)}
+          aria-describedby={endpointError ? endpointErrorId : undefined}
+          value={editBaseUrl}
+          disabled={operationDisabled}
+          onChange={(event) => setEditBaseUrl(event.target.value)}
+        />
         <select
           className="input"
           aria-label={copy("Edit credential source", "编辑凭据来源")}
@@ -349,6 +476,11 @@ export default function ProviderModelManager({
           {editing ? copy("Saving…", "保存中…") : copy("Save details", "保存基本信息")}
         </button>
       </div>
+      {endpointError && (
+        <p id={endpointErrorId} className="error-text" role="alert">
+          {endpointError}
+        </p>
+      )}
       {endpointPreview && (
         <div className="provider-endpoint-list" aria-label={copy("Final provider URLs", "Provider 最终 URL")}>
           <code>{endpointPreview.chat}</code>
@@ -429,6 +561,73 @@ export default function ProviderModelManager({
                   )
                 ))}
               </div>
+              {row.configured && row.cap.context_window_source
+                && row.cap.context_window_source === row.cap.max_output_tokens_source && (
+                <p className="model-limit-source">
+                  {copy("Limit source", "限制来源")} · {limitSourceLabel[row.cap.context_window_source]}
+                </p>
+              )}
+              {row.configured && row.cap.context_window_source
+                && row.cap.max_output_tokens_source
+                && row.cap.context_window_source !== row.cap.max_output_tokens_source && (
+                <p className="model-limit-source">
+                  {copy("Context", "上下文")} · {limitSourceLabel[row.cap.context_window_source]}
+                  {" · "}
+                  {copy("Output", "输出")} · {limitSourceLabel[row.cap.max_output_tokens_source]}
+                </p>
+              )}
+              {row.configured && <div className="model-limit-editor">
+                <label>
+                  <span>{copy("Context", "上下文上限")}</span>
+                  <input
+                    aria-label={copy(`${row.model} context window`, `${row.model} 上下文上限`)}
+                    className="input mono"
+                    disabled={operationDisabled}
+                    inputMode="numeric"
+                    min={1}
+                    max={0xffff_ffff}
+                    onChange={(event) => updateLimitDraft(row.model, "context", event.target.value)}
+                    step={1}
+                    type="number"
+                    value={limitDrafts[row.model]?.context ?? ""}
+                  />
+                </label>
+                <label>
+                  <span>{copy("Maximum output", "最大输出 Token")}</span>
+                  <input
+                    aria-label={copy(`${row.model} maximum output tokens`, `${row.model} 最大输出 Token`)}
+                    className="input mono"
+                    disabled={operationDisabled}
+                    inputMode="numeric"
+                    min={1}
+                    max={0xffff_ffff}
+                    onChange={(event) => updateLimitDraft(row.model, "output", event.target.value)}
+                    step={1}
+                    type="number"
+                    value={limitDrafts[row.model]?.output ?? ""}
+                  />
+                </label>
+                <button
+                  aria-label={copy(`Save ${row.model} model limits`, `保存 ${row.model} 模型限制`)}
+                  className="btn tiny"
+                  disabled={operationDisabled}
+                  onClick={() => void saveLimits(row.model)}
+                  type="button"
+                >
+                  {limitSaving === row.model ? copy("Saving…", "保存中…") : copy("Save limits", "保存限制")}
+                </button>
+              </div>}
+              {row.configured && !row.cap.max_output_tokens && (
+                <p className="model-limit-warning">
+                  {copy(
+                    "This model's metadata is missing a maximum output limit.",
+                    "该模型元数据缺少最大输出上限",
+                  )}
+                </p>
+              )}
+              {row.configured && limitErrors[row.model] && (
+                <p className="field-error" role="alert">{limitErrors[row.model]}</p>
+              )}
             </div>
           ))}
         </div>
@@ -450,7 +649,6 @@ export default function ProviderModelManager({
           if (!selectedSet.has(model)) setSelected((current) => [...current, model]);
         }}
       />
-      {error && <div className="manager-error">{error}</div>}
       <div className="manager-actions">
         <span className="manager-hint">
           {serveRunning

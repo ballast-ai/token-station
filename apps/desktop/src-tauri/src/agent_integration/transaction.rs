@@ -776,6 +776,12 @@ impl<'a> TransactionEngine<'a> {
                     true,
                     &mut error,
                 );
+            } else {
+                self.unpin_failed_connection_snapshots(
+                    plan,
+                    &snapshot.record.snapshot_id,
+                    &companion_snapshots,
+                );
             }
             return Err(error);
         }
@@ -866,6 +872,25 @@ impl<'a> TransactionEngine<'a> {
             );
             return Err(error);
         }
+        let actual_after_hash = match file_revision_hash(target, &after_source) {
+            Ok(hash) => hash,
+            Err(_) => {
+                let mut error = failure(
+                    plan,
+                    TransactionStage::PostWriteRead,
+                    "actual_after_hash_failed",
+                );
+                self.recover_files(
+                    plan,
+                    &snapshot.record.snapshot_id,
+                    &companion_snapshots,
+                    plan.companions.len(),
+                    true,
+                    &mut error,
+                );
+                return Err(error);
+            }
+        };
         let document = match parse_source_bytes(
             after_source
                 .existed
@@ -908,6 +933,7 @@ impl<'a> TransactionEngine<'a> {
             return Err(error);
         }
         let mut companion_documents = Vec::with_capacity(plan.companions.len());
+        let mut companion_after_hashes = Vec::with_capacity(plan.companions.len());
         for companion in &plan.companions {
             let target = Path::new(&companion.target_path);
             let source = match read_config_source(target) {
@@ -956,6 +982,25 @@ impl<'a> TransactionEngine<'a> {
                 );
                 return Err(error);
             }
+            let actual_hash = match file_revision_hash(target, &source) {
+                Ok(hash) => hash,
+                Err(_) => {
+                    let mut error = failure(
+                        plan,
+                        TransactionStage::PostWriteRead,
+                        "companion_actual_after_hash_failed",
+                    );
+                    self.recover_files(
+                        plan,
+                        &snapshot.record.snapshot_id,
+                        &companion_snapshots,
+                        plan.companions.len(),
+                        true,
+                        &mut error,
+                    );
+                    return Err(error);
+                }
+            };
             let parsed = match parse_source_bytes(
                 source.existed.then_some(source.exact_bytes.as_slice()),
                 companion.format,
@@ -996,6 +1041,7 @@ impl<'a> TransactionEngine<'a> {
                 return Err(error);
             }
             companion_documents.push(parsed);
+            companion_after_hashes.push(actual_hash);
         }
         let key = match self.keys.load() {
             Ok(key) => key,
@@ -1040,8 +1086,9 @@ impl<'a> TransactionEngine<'a> {
             .companions
             .iter()
             .zip(&companion_documents)
+            .zip(&companion_after_hashes)
             .zip(&companion_snapshots)
-            .map(|((companion, document), snapshot)| {
+            .map(|(((companion, document), managed_after_hash), snapshot)| {
                 compute_owned_value_macs(document, &companion.owned_paths, &key).map(|macs| {
                     CompanionOwnership {
                         target_config_path: companion.target_path.clone(),
@@ -1049,7 +1096,7 @@ impl<'a> TransactionEngine<'a> {
                         baseline_snapshot_id: snapshot.record.snapshot_id.clone(),
                         last_transaction_snapshot_id: snapshot.record.snapshot_id.clone(),
                         before_hash: companion.before_hash.clone(),
-                        managed_after_hash: companion.expected_after_hash.clone(),
+                        managed_after_hash: managed_after_hash.clone(),
                         owned_paths: companion.owned_paths.clone(),
                         owned_value_macs: macs,
                     }
@@ -1087,7 +1134,7 @@ impl<'a> TransactionEngine<'a> {
                     baseline_snapshot_id: snapshot.record.snapshot_id.clone(),
                     last_transaction_snapshot_id: snapshot.record.snapshot_id.clone(),
                     before_hash: plan.view.before_hash.clone(),
-                    managed_after_hash: plan.view.expected_after_hash.clone(),
+                    managed_after_hash: actual_after_hash.clone(),
                     owned_paths: plan.view.owned_paths.clone(),
                     owned_value_macs,
                     companion_files: companion_ownership.clone(),
@@ -1285,7 +1332,6 @@ impl<'a> TransactionEngine<'a> {
         primary_written: bool,
         error: &mut TransactionFailure,
     ) {
-        self.unpin_failed_connection_snapshots(plan, primary_snapshot_id, companion_snapshots);
         error.recovery = RecoveryStatus::RepairRequired;
         let mut recovery_failed = false;
         for index in (0..written_companions).rev() {
@@ -1306,30 +1352,28 @@ impl<'a> TransactionEngine<'a> {
                 recovery_failed = true;
             }
         }
-        if !primary_written {
-            if !recovery_failed {
-                error.recovery = RecoveryStatus::Restored;
-                error.recovery_reason_code = None;
-            }
-            return;
-        }
-        if self
-            .restore_projection(
-                Path::new(&plan.view.target_config_path),
-                primary_snapshot_id,
-                &plan.view.expected_after_hash,
-                &plan.view.before_hash,
-                !plan.view.target_existed,
-            )
-            .is_err()
+        if primary_written
+            && self
+                .restore_projection(
+                    Path::new(&plan.view.target_config_path),
+                    primary_snapshot_id,
+                    &plan.view.expected_after_hash,
+                    &plan.view.before_hash,
+                    !plan.view.target_existed,
+                )
+                .is_err()
         {
             error.recovery_reason_code = Some("restore_write_failed_or_target_changed".to_string());
-            return;
+            recovery_failed = true;
         }
         if !recovery_failed {
             error.recovery = RecoveryStatus::Restored;
             error.recovery_reason_code = None;
         }
+        // A failed connect keeps its baseline snapshots pinned until every
+        // recovery read has finished. Unpinning reapplies retention and may
+        // prune the oldest snapshot immediately.
+        self.unpin_failed_connection_snapshots(plan, primary_snapshot_id, companion_snapshots);
     }
 
     fn unpin_failed_connection_snapshots(
@@ -1420,7 +1464,7 @@ mod tests {
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::Duration;
 
-    use serde_json::Value;
+    use serde_json::{json, Value};
     use zeroize::Zeroizing;
 
     use super::*;
@@ -1440,7 +1484,7 @@ mod tests {
     use crate::agent_integration::types::SnapshotRecord;
     use crate::agent_integration::types::{
         AllowedAction, BinarySource, CompatibilityDecision, ConfigPath, Diagnostic,
-        DiscoveryEvidence, DiscoveryRecord, DiscoverySource, Platform, ReasonCode,
+        DiscoveryEvidence, DiscoveryRecord, DiscoverySource, PatchKind, Platform, ReasonCode,
     };
 
     struct TestKeys {
@@ -2875,6 +2919,9 @@ mod tests {
             target_config_path: target.to_string_lossy().into_owned(),
         };
         let ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let managed_hash =
+            file_revision_hash(&target, &read_config_source(&target).unwrap()).unwrap();
+        assert_eq!(managed_hash, ownership.managed_after_hash);
         let baseline = snapshots.load(&ownership.baseline_snapshot_id).unwrap();
         let baseline_source = ConfigSource {
             existed: baseline.record.original_existed,
@@ -2922,6 +2969,34 @@ mod tests {
             serde_json::from_slice::<Value>(original_settings).unwrap()
         );
         assert!(ownership_store.load(&ownership_key).unwrap().is_none());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn gemini_connection_plan_reuses_a_null_companion_ancestor() {
+        let root = scratch("gemini-null-companion-plan");
+        let target = root.join(".gemini/.env");
+        let settings = root.join(".gemini/settings.json");
+        write_initial(&target, b"UNOWNED=keep\n");
+        write_initial(&settings, br#"{"security":null,"keep":true}"#);
+
+        let plan = prepare_gemini(&target, "vk-gemini-null-companion");
+        let companion = plan
+            .view
+            .projection
+            .files
+            .iter()
+            .find(|file| file.target_config_path == settings.to_string_lossy())
+            .expect("Gemini settings.json must be part of the real connection plan");
+
+        assert!(companion.reverse_changes.iter().any(|change| {
+            change.operation == PatchKind::Replace && change.path.segments == ["security"]
+        }));
+        assert_eq!(
+            serde_json::from_slice::<Value>(plan.companions[0].projected_bytes.as_slice()).unwrap()
+                ["security"]["auth"]["selectedType"],
+            "gemini-api-key"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -3824,6 +3899,277 @@ mod tests {
                 0o600
             );
         }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn post_write_recovery_restores_before_unpin_retention_can_prune_snapshot() {
+        let root = scratch("recovery-before-unpin-prune");
+        let target = root.join("nested/settings.json");
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership = FileOwnershipStore::new(root.join("ownership"));
+        let missing = ConfigSource::missing();
+        let missing_hash = file_revision_hash(&target, &missing).unwrap();
+
+        for created_at_ms in 10_000..10_005 {
+            snapshots
+                .create(SnapshotRequest {
+                    operation_id: &format!("{created_at_ms:032x}"),
+                    agent_id: "claude-code",
+                    target_config_path: target.to_str().unwrap(),
+                    before_hash: missing_hash.clone(),
+                    source: &missing,
+                    created_at_ms,
+                    connector_id: "claude-code-v1",
+                    app_version: env!("CARGO_PKG_VERSION"),
+                    pinned: false,
+                })
+                .unwrap();
+        }
+
+        let rejected = prepare(&target, "vk-retention-recovery-secret");
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &RejectVerifier,
+            &TEST_CLOCK,
+        );
+        let error = engine
+            .apply_connection(&rejected, &confirmation(&rejected), &admission(), 1_002)
+            .expect_err("post-write failure restores before retention pruning");
+
+        assert_eq!(error.recovery, RecoveryStatus::Restored);
+        assert!(!target.exists());
+        let records = snapshots
+            .list("claude-code", target.to_str().unwrap())
+            .unwrap();
+        assert_eq!(records.len(), 5);
+        assert!(records.iter().all(|record| !record.pinned));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn disconnect_removes_nested_config_that_was_missing_before_connection() {
+        let root = scratch("disconnect-missing-target");
+        let target = root.join("nested/settings.json");
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership_store = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership_store,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        let connect = prepare(&target, "vk-disconnect-missing-target");
+
+        engine
+            .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
+            .unwrap();
+        assert!(target.exists());
+
+        let ownership_key = OwnershipKey {
+            agent_id: "claude-code".to_string(),
+            installation_path: "/opt/claude".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let managed_source = read_config_source(&target).unwrap();
+        assert_eq!(
+            file_revision_hash(&target, &managed_source).unwrap(),
+            ownership.managed_after_hash,
+            "ownership must bind the actual post-write owner as well as bytes and permissions"
+        );
+        let baseline = snapshots.load(&ownership.baseline_snapshot_id).unwrap();
+        assert!(!baseline.record.original_existed);
+        let baseline_source = ConfigSource {
+            existed: false,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let disconnect = build_disconnect_plan(
+            &ClaudeCodeConnector,
+            &discovery(&target),
+            &verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &ownership,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            2_000,
+            "5e".repeat(16),
+        )
+        .unwrap();
+        assert_eq!(
+            disconnect.view.expected_after_hash,
+            file_revision_hash(&target, &ConfigSource::missing()).unwrap(),
+            "the disconnect plan must project an unchanged managed-only file to absence"
+        );
+
+        engine
+            .apply_disconnect(
+                &disconnect,
+                &confirmation_at(&disconnect, 2_001),
+                &admission(),
+                2_002,
+            )
+            .unwrap();
+
+        assert!(
+            !target.exists(),
+            "a target created only for managed nested fields must return to absence"
+        );
+        assert!(ownership_store.load(&ownership_key).unwrap().is_none());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn disconnect_does_not_delete_a_created_config_after_owner_only_drift() {
+        let root = scratch("disconnect-missing-target-owner-drift");
+        let target = root.join("nested/settings.json");
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership_store = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership_store,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        let connect = prepare(&target, "vk-disconnect-owner-drift");
+        engine
+            .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
+            .unwrap();
+
+        let ownership_key = OwnershipKey {
+            agent_id: "claude-code".to_string(),
+            installation_path: "/opt/claude".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let baseline = snapshots.load(&ownership.baseline_snapshot_id).unwrap();
+        assert!(!baseline.record.original_existed);
+        let baseline_source = ConfigSource {
+            existed: false,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let mut owner_drifted = read_config_source(&target).unwrap();
+        owner_drifted.original_owner = Some("synthetic-owner-drift".to_string());
+        assert_ne!(
+            file_revision_hash(&target, &owner_drifted).unwrap(),
+            ownership.managed_after_hash
+        );
+
+        let disconnect = build_disconnect_plan(
+            &ClaudeCodeConnector,
+            &discovery(&target),
+            &verified(),
+            &target,
+            &owner_drifted,
+            &ownership,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            2_000,
+            "5f".repeat(16),
+        )
+        .unwrap();
+
+        assert_ne!(
+            disconnect.view.expected_after_hash,
+            file_revision_hash(&target, &ConfigSource::missing()).unwrap(),
+            "an owner-only user change must prevent deleting a file created by connection"
+        );
+        assert!(disconnect.view.target_existed);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn disconnect_preserves_comment_added_to_a_config_created_by_connection() {
+        let root = scratch("disconnect-missing-target-user-comment");
+        let target = root.join("nested/settings.json");
+        let keys = Arc::new(TestKeys::available());
+        let snapshots = FileSnapshotStore::new(root.join("snapshots"), keys.clone());
+        let ownership_store = FileOwnershipStore::new(root.join("ownership"));
+        let engine = TransactionEngine::new(
+            &snapshots,
+            &ownership_store,
+            keys.as_ref(),
+            &FsAtomicConfigWriter,
+            &ParseOnlyVerifier,
+            &TEST_CLOCK,
+        );
+        let connect = prepare(&target, "vk-disconnect-user-comment");
+        engine
+            .apply_connection(&connect, &confirmation(&connect), &admission(), 1_002)
+            .unwrap();
+
+        let managed = std::fs::read_to_string(&target).unwrap();
+        std::fs::write(&target, format!("{managed}\n"))
+            .expect("a user-only whitespace edit changes the exact file revision");
+
+        let ownership_key = OwnershipKey {
+            agent_id: "claude-code".to_string(),
+            installation_path: "/opt/claude".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+        };
+        let ownership = ownership_store.load(&ownership_key).unwrap().unwrap();
+        let baseline = snapshots.load(&ownership.baseline_snapshot_id).unwrap();
+        let baseline_source = ConfigSource {
+            existed: false,
+            exact_bytes: baseline.exact_bytes,
+            original_permissions: baseline.record.original_permissions,
+            original_owner: baseline.record.original_owner.clone(),
+        };
+        let disconnect = build_disconnect_plan(
+            &ClaudeCodeConnector,
+            &discovery(&target),
+            &verified(),
+            &target,
+            &read_config_source(&target).unwrap(),
+            &ownership,
+            &baseline.record,
+            &baseline_source,
+            &keys.load().unwrap(),
+            1,
+            None,
+            2_000,
+            "6e".repeat(16),
+        )
+        .unwrap();
+        engine
+            .apply_disconnect(
+                &disconnect,
+                &confirmation_at(&disconnect, 2_001),
+                &admission(),
+                2_002,
+            )
+            .unwrap();
+
+        assert!(
+            target.exists(),
+            "a user byte edit must prevent file deletion"
+        );
+        let restored = serde_json::from_slice::<Value>(&std::fs::read(&target).unwrap()).unwrap();
+        assert!(
+            restored == json!({}) || restored == json!({ "env": {} }),
+            "only reconnectable empty structural shells may remain: {restored}"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 

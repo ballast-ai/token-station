@@ -77,10 +77,14 @@ CST changes only owned paths. It preserves:
 - unknown fields, field order, whitespace, and untouched scalar styles
 - user changes to unowned fields after connection
 
-Reject the write before it starts if the YAML is invalid. Also reject multiple
-YAML documents, duplicate keys, merge keys, a non-object root, a non-object
-`model`, or a parent-type conflict on an owned path. Error messages do not
-include original configuration lines or the virtual key.
+Reject invalid YAML, multiple YAML documents, duplicate keys, merge keys, and a
+non-object root. Also reject `model` when it is a string, array, non-empty flow
+mapping, or contains an anchor, tag, or alias. Reject other parent-type
+conflicts on owned paths. `model:`, `model: null`, `model: ~`, and
+`model: {}` are safe empty forms. New Token Station versions preserve
+comments and expand these forms to a block mapping. Users do not need to edit
+the file manually. Error messages do not include original configuration lines
+or the virtual key.
 
 ## 4. Write and disconnect
 
@@ -96,7 +100,8 @@ encrypted snapshot → revision check → same-directory atomic replacement → 
 ```
 
 Selecting **One-click Connect** gives consent to write. **Restore Official
-Configuration and Disconnect** removes only the five owned paths.
+Configuration and Disconnect** removes only the five owned paths. Before it
+writes, Token Station verifies that the result can be connected again.
 If another tool changes an owned value, revision or ownership checks invalidate
 the old plan. Scan again. Historical `.bak` files are read-only candidates.
 Token Station does not overwrite, delete, or restore them automatically.

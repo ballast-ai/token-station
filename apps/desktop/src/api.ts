@@ -8,6 +8,8 @@ export interface TierView {
 
 export interface ProviderView {
   name: string;
+  /** Stable catalog brand identifier used for local provider artwork. */
+  brand_id?: string | null;
   provider: string;
   base_url: string;
   models: string[];
@@ -69,7 +71,13 @@ export interface ModelCapabilityView {
   tool: CapabilityState;
   vision: CapabilityState;
   json_schema: CapabilityState;
+  context_window?: number | null;
+  max_output_tokens?: number | null;
+  context_window_source?: ModelLimitSource;
+  max_output_tokens_source?: ModelLimitSource;
 }
+
+export type ModelLimitSource = "provider" | "builtin_preset" | "operator" | "heuristic";
 
 export type CatalogSource = "live" | "cache" | "configured";
 export type CatalogState = "active" | "stale" | "removed";
@@ -118,7 +126,7 @@ export interface ProviderTestResult {
 
 export interface ModelDiscoveryView {
   models: string[];
-  source: "live" | "cache" | "none";
+  source: "live" | "cache" | "preset" | "none";
   fetched_at_ms: number | null;
   warning: string | null;
   capabilities_updated?: boolean;
@@ -310,6 +318,14 @@ export interface ServeView {
 
 export type TierSlot = "high" | "mid" | "low";
 
+export type RoutingMode = "direct" | "tiered" | "quota_first";
+
+export interface DirectRouteTarget {
+  upstream: string;
+  /** Null preserves a known provider when its previously selected model was removed. */
+  model: string | null;
+}
+
 export type AgentRouteMode = "inherit" | "custom" | "profile";
 
 export interface AgentRouteView {
@@ -318,7 +334,9 @@ export interface AgentRouteView {
   config_error: string | null;
   profile: string | null;
   /** Effective routing mode for this Agent: its override first, otherwise the home default. */
-  routing_mode: "tiered" | "quota_first";
+  routing_mode: RoutingMode;
+  /** Effective exact target for Direct mode; absent/null means configuration is incomplete. */
+  direct_target?: DirectRouteTarget | null;
 }
 
 export interface QuotaAccount {
@@ -398,8 +416,10 @@ export interface StateView {
   local_only: boolean;
   /** Whether local_only may fall back to cloud when no local target is available; false means strict local routing. */
   allow_cloud_fallback: boolean;
-  /** Routing mode: tiered intelligent routing by default, or quota_first. */
-  routing_mode: "tiered" | "quota_first";
+  /** Routing mode: an exact target, intelligent tiers, or quota-first rotation. */
+  routing_mode: RoutingMode;
+  /** Exact Home target used by Direct mode; null means the draft is incomplete. */
+  direct_target?: DirectRouteTarget | null;
   /** Globally shared quota-first rotation accounts, provider plus model, in priority order. */
   quota_accounts: QuotaAccount[];
   serve: ServeView;
@@ -493,6 +513,11 @@ export interface AgentInstallationView {
   discovery: AgentDiscoveryView;
   compatibility: AgentCompatibilityView;
   adapter_ready: boolean | null;
+  connection_issue?: {
+    code: string;
+    message: string;
+    target?: string | null;
+  } | null;
   managed: boolean;
   connected: boolean;
 }
@@ -811,9 +836,17 @@ export const setLocalRouting = (localOnly: boolean, allowCloudFallback: boolean)
     allowCloudFallback,
   });
 
-/** Switch between tiered intelligent routing and quota-first routing. */
-export const setRoutingMode = (mode: "tiered" | "quota_first", agentId?: string) =>
+/** Switch among exact-target, tiered intelligent, and quota-first routing. */
+export const setRoutingMode = (mode: RoutingMode, agentId?: string) =>
   invoke<StateView>("set_routing_mode", { mode, agentId: agentId ?? null });
+
+/** Persist one exact Provider/model target; display order is intentionally not part of this command. */
+export const setDirectRoute = (upstream: string, model: string, agentId?: string) =>
+  invoke<StateView>("set_direct_route", {
+    upstream,
+    model,
+    agentId: agentId ?? null,
+  });
 
 export const setQuotaAccounts = (accounts: QuotaAccount[]) =>
   invoke<StateView>("set_quota_accounts", { accounts });
@@ -879,6 +912,18 @@ export const testProvider = (name: string) =>
 export const setProviderModelVision = (name: string, model: string, supported: boolean) =>
   invoke<StateView>("set_provider_model_vision", { name, model, supported });
 
+export const setProviderModelLimits = (
+  name: string,
+  model: string,
+  contextWindow: number,
+  maxOutputTokens: number,
+) => invoke<StateView>("set_provider_model_limits", {
+  name,
+  model,
+  contextWindow,
+  maxOutputTokens,
+});
+
 export const updateProviderModels = (name: string, models: string[]) =>
   invoke<StateView>("update_provider_models", { name, models });
 
@@ -927,6 +972,7 @@ export const applyHomeRouteToAllAgents = () =>
 export const saveConfig = () => invoke<StateView>("save_config");
 
 export const getRuntimeState = () => invoke<ServeView>("get_runtime_state");
+export const ensureServeRunning = () => invoke<StateView>("ensure_serve_running");
 export const serveStart = () => invoke<StateView>("serve_start");
 export const serveStop = () => invoke<StateView>("serve_stop");
 
@@ -988,6 +1034,9 @@ export const removeModelPrice = (model: string, expectedVersion: number) =>
   invoke<PriceTableView>("remove_model_price", { model, expectedVersion });
 
 export const scanAgents = () => invoke<AgentView[]>("scan_agents");
+
+/** Refresh runtime ownership/connection overlays without running installation discovery again. */
+export const getCachedAgentViews = () => invoke<AgentView[]>("get_cached_agent_views");
 
 export const planAgentConnection = (
   agentId: AgentId,

@@ -10,6 +10,7 @@ import {
   setAgentBudget,
 } from "../api";
 import Stats, { formatBudgetAmount } from "./Stats";
+import { ErrorToastProvider } from "../components/ErrorToast";
 
 vi.mock("../components/PricingEditor", () => ({ default: () => null }));
 
@@ -247,7 +248,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
   });
 
   it("keeps a failed request batch in flight until every sibling settles", async () => {
-    render(<Stats />);
+    render(<ErrorToastProvider><Stats /></ErrorToastProvider>);
     await screen.findByText("1,500");
 
     const siblings = Array.from(
@@ -274,7 +275,9 @@ describe("usage dashboard and display-only Agent budgets", () => {
       await Promise.all(siblings.map(({ promise }) => promise));
     });
     await waitFor(() => expect(refresh).not.toBeDisabled());
-    expect(screen.getByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
+    expect(within(screen.getByTestId("error-toast-viewport")).getByText(
+      "操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。",
+    )).toBeInTheDocument();
   });
 
   it("does not start a queued refresh after the page unmounts", async () => {
@@ -363,7 +366,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
 
   it("persists and removes a per-Agent budget through exact named fields", async () => {
     const user = userEvent.setup();
-    render(<Stats />);
+    render(<ErrorToastProvider><Stats /></ErrorToastProvider>);
     await screen.findByText(/Codex 已使用 85\.0%/);
 
     const limit = screen.getByRole("spinbutton", { name: "预算上限" });
@@ -379,8 +382,27 @@ describe("usage dashboard and display-only Agent budgets", () => {
       1_800_000_000_000,
       7,
     ));
+    const viewport = screen.getByTestId("error-toast-viewport");
+    expect(await within(viewport).findByText("预算已保存 · 仅用于展示与预警"))
+      .toBeInTheDocument();
+    expect(screen.queryByText("预算已保存 · 仅用于展示与预警", { selector: ".banner" }))
+      .toBeNull();
 
     await user.click(screen.getByRole("button", { name: "删除预算" }));
     await waitFor(() => expect(removeAgentBudget).toHaveBeenCalledWith("codex"));
+    expect(await within(viewport).findByText("预算已删除")).toBeInTheDocument();
+    expect(screen.queryByText("预算已删除", { selector: ".banner" })).toBeNull();
+  });
+
+  it("把预算保存请求失败放到全局错误弹窗", async () => {
+    vi.mocked(setAgentBudget).mockRejectedValue(new Error("budget write failed"));
+    const user = userEvent.setup();
+    render(<ErrorToastProvider><Stats /></ErrorToastProvider>);
+    await screen.findByText(/Codex 已使用 85\.0%/);
+
+    await user.click(screen.getByRole("button", { name: "保存预算" }));
+
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByRole("alert"))
+      .toHaveTextContent("操作未能完成");
   });
 });

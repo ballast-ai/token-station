@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use token_station_router_core::RouterConfig;
 
-use crate::config::PluginsConfig;
+use crate::config::{ClientConfig, PluginsConfig};
 use crate::plugins::{PluginRegistry, Receipts};
 use crate::stats;
 use crate::store::SqliteStore;
@@ -35,6 +35,22 @@ pub struct AdminContext {
 }
 
 impl AdminContext {
+    /// Builds the read-only snapshot from the same effective Home router that
+    /// the Gateway runs. Host-only modes such as Direct must be compiled before
+    /// they are exposed through `/admin/router-table`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same fail-closed routing error as Gateway construction when
+    /// the effective Home mode cannot be compiled.
+    pub fn from_config(config: &ClientConfig) -> Result<Self, String> {
+        Ok(Self {
+            data_dir: config.data.dir.clone(),
+            router: config.home_router_config()?,
+            plugins: config.plugins.clone(),
+        })
+    }
+
     /// Usage aggregates, shaped exactly like the desktop's `StatsView` so the
     /// frontend needs one type for both transports. A missing metrics store is
     /// `empty: true`, not an error — same contract as the IPC command.

@@ -5,7 +5,7 @@
 
 ### Local routing control plane for AI agents and LLM providers
 
-Connect Claude Code, Codex, WorkBuddy, and other agents to one loopback gateway. Route each request by task complexity or remaining quota across your own API providers and local models.
+Connect Claude Code, Codex, WorkBuddy, and other agents to one loopback gateway. Pin requests to one provider and model, or route them by task complexity or remaining quota across your own API providers and local models.
 
 [![Release](https://img.shields.io/github/v/release/ballast-ai/token-station?display_name=tag&sort=semver)](https://github.com/ballast-ai/token-station/releases/latest) [![CI](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml/badge.svg)](https://github.com/ballast-ai/token-station/actions/workflows/ci.yml) [![Release type](https://img.shields.io/badge/v1.1.3-test%20DMG-orange.svg)](https://github.com/ballast-ai/token-station/releases/latest) [![License](https://img.shields.io/github/license/ballast-ai/token-station)](LICENSE)
 
@@ -34,7 +34,7 @@ The gateway only binds to a loopback address. A request sent to a cloud provider
 
 ## Features
 
-- **Two routing modes.** Three-tier routing maps requests to High, Mid, or Low models using explicit keywords, request capabilities, and a deterministic complexity score. Quota-first routing favors accounts whose allowance is most useful to spend before reset.
+- **Three routing modes.** Direct routing pins traffic to one explicitly selected provider and managed model. Three-tier routing maps requests to High, Mid, or Low models using explicit keywords, request capabilities, and a deterministic complexity score. Quota-first routing favors accounts whose allowance is most useful to spend before reset.
 - **Per-agent policies.** Each agent can inherit the global route, use an independent route, or mount a reusable routing profile.
 - **Broad provider catalog.** The desktop app includes 40+ editable presets for first-party APIs, managed inference services, and Ollama, plus a curated catalog of free or trial offers. Custom OpenAI-compatible endpoints are supported.
 - **Sandboxed WASM plugin architecture.** Five official adapters cover Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, Gemini, and OpenAI-compatible providers. Adapters cannot directly access the network, filesystem, environment variables, or plaintext credentials; the Rust host validates privileged operations.
@@ -83,8 +83,8 @@ Use macOS 11.0 or newer. The v1.1.3 DMG is an unsigned and unnotarized Apple Sil
 You need at least one provider API key or a local model endpoint. Token Station does not import Claude, Codex, or other agent subscriptions and OAuth sessions as provider accounts. Quota-first routing uses recognized provider rate-limit headers when available; otherwise it estimates a quota plan from traffic observed through this gateway and cannot see usage from other clients.
 
 1. Open Token Station and choose **Add Provider**. Pick a preset or enter a custom OpenAI-compatible endpoint, then add its models and API key.
-2. Open **Routing**. Choose three-tier or quota-first routing, configure the models or accounts, then choose **Save and apply**. This starts or reloads the local proxy.
-3. Open **Agents** and scan installed agents. For a built-in connector, clicking **Connect** writes immediately and then shows what changed. For Cursor, follow the separate setup warning above.
+2. Wait for the startup Agent scan to finish and **Home** to appear. The fixed first row opens global routing; choose direct, three-tier, or quota-first routing, configure its target, and apply it.
+3. Select a detected Agent from the same Home sidebar. For a built-in connector, clicking **Connect** starts the local proxy if needed, writes immediately, and then shows what changed. Installations added later appear after the next app launch. For Cursor, follow the separate setup warning above.
 4. Send one request from a managed agent. It will connect to the authenticated loopback gateway at `127.0.0.1:8787`.
 5. Open **Usage** to verify the routing decision, tokens, latency, failures, quota state, and estimated cost.
 
@@ -186,7 +186,7 @@ Issues and focused pull requests are welcome. Read the contribution guide first.
 
 ## Project status
 
-Token Station is an early public release. The local gateway, desktop control plane, two routing modes, built-in agent connectors, provider catalog, usage views, and recovery paths are implemented. Distribution is narrower than the source compatibility matrix: the current public desktop release is macOS Apple Silicon only, and the DMG is not yet Apple-signed or notarized.
+Token Station is an early public release. The local gateway, desktop control plane, three routing modes, built-in agent connectors, provider catalog, usage views, and recovery paths are implemented. Distribution is narrower than the source compatibility matrix: the current public desktop release is macOS Apple Silicon only, and the DMG is not yet Apple-signed or notarized.
 
 ## License
 

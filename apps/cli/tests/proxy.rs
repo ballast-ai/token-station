@@ -425,6 +425,24 @@ fn start_proxy_with_agents_and_budgets(
     agent_plugins: &[&str],
     agent_budgets: Option<Value>,
 ) -> Proxy {
+    start_proxy_with_agents_budgets_and_catalog_price(
+        upstream,
+        key_file,
+        metrics,
+        agent_plugins,
+        agent_budgets,
+        false,
+    )
+}
+
+fn start_proxy_with_agents_budgets_and_catalog_price(
+    upstream: &MockUpstream,
+    key_file: &Path,
+    metrics: bool,
+    agent_plugins: &[&str],
+    agent_budgets: Option<Value>,
+    include_catalog_price: bool,
+) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
         "ts-proxy-data-{}-{}",
@@ -446,7 +464,7 @@ fn start_proxy_with_agents_and_budgets(
                 "base_url": upstream.base_url(),
                 "auth": { "slot": "provider_api_key", "file": key_file },
                 "models": [
-                    { "model": "gpt-5.5", "tool": true, "tool_state": "verified", "vision": true, "vision_state": "verified", "json_schema": true, "json_schema_state": "declared", "context_window": 400_000 }
+                    { "model": "gpt-5.5", "tool": true, "tool_state": "verified", "vision": true, "vision_state": "verified", "json_schema": true, "json_schema_state": "declared", "context_window": 400_000, "max_output_tokens": 32_768 }
                 ]
             }
         },
@@ -461,6 +479,19 @@ fn start_proxy_with_agents_and_budgets(
     });
     if let Some(agent_budgets) = agent_budgets {
         config["agent_budgets"] = agent_budgets;
+    }
+    if include_catalog_price {
+        config["pricing"] = json!({
+            "version": 7,
+            "models": {
+                "mock_primary/gpt-5.5": {
+                    "input_per_mtok": 5_000_000,
+                    "output_per_mtok": 30_000_000,
+                    "cache_read_per_mtok": 500_000,
+                    "cache_write_per_mtok": 0
+                }
+            }
+        });
     }
     let config: ClientConfig = serde_json::from_value(config).expect("test config parses");
     spawn_proxy(&config)
@@ -489,11 +520,10 @@ fn spawn_proxy(config: &ClientConfig) -> Proxy {
     let state = server::AppState::new(
         Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
-        Arc::new(token_station_cli::admin::AdminContext {
-            data_dir: config.data.dir.clone(),
-            router: config.router.clone(),
-            plugins: config.plugins.clone(),
-        }),
+        Arc::new(
+            token_station_cli::admin::AdminContext::from_config(config)
+                .expect("admin snapshot compiles"),
+        ),
     );
     let control = state.control.clone();
 
@@ -526,13 +556,22 @@ fn spawn_proxy(config: &ClientConfig) -> Proxy {
 /// anthropic-messages request is forwarded verbatim to the mock instead of being
 /// lowered through the Canonical IR.
 fn start_native_anthropic_proxy(upstream: &MockUpstream, key_file: &Path) -> Proxy {
+    start_native_anthropic_proxy_with(upstream, key_file, false, "verified")
+}
+
+fn start_native_anthropic_proxy_with(
+    upstream: &MockUpstream,
+    key_file: &Path,
+    direct: bool,
+    tool_state: &str,
+) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
         "ts-native-proxy-{}-{}",
         std::process::id(),
         SEQ.fetch_add(1, Ordering::SeqCst)
     ));
-    let config = json!({
+    let mut config = json!({
         "version": 1,
         "server": { "listen": "127.0.0.1:0" },
         "data": { "dir": data_dir, "metrics": true },
@@ -548,7 +587,12 @@ fn start_native_anthropic_proxy(upstream: &MockUpstream, key_file: &Path) -> Pro
                 "base_url": upstream.base_url(),
                 "auth": { "slot": "provider_api_key", "file": key_file },
                 "models": [
-                    { "model": "deepseek-chat", "tool": true, "tool_state": "verified", "context_window": 128_000 }
+                    {
+                        "model": "deepseek-chat",
+                        "tool": tool_state != "unsupported",
+                        "tool_state": tool_state,
+                        "context_window": 128_000
+                    }
                 ]
             }
         },
@@ -558,6 +602,12 @@ fn start_native_anthropic_proxy(upstream: &MockUpstream, key_file: &Path) -> Pro
             "default_pool": "main"
         }
     });
+    if direct {
+        config["routing"] = json!({
+            "mode": "direct",
+            "direct_target": { "upstream": "deepseek_native", "model": "deepseek-chat" }
+        });
+    }
     let config: ClientConfig = serde_json::from_value(config).expect("native config parses");
     spawn_proxy(&config)
 }
@@ -630,11 +680,10 @@ fn start_scoped_proxy(home: &MockUpstream, custom: &MockUpstream, key_file: &Pat
     let state = server::AppState::new(
         Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
-        Arc::new(token_station_cli::admin::AdminContext {
-            data_dir: config.data.dir.clone(),
-            router: config.router.clone(),
-            plugins: config.plugins.clone(),
-        }),
+        Arc::new(
+            token_station_cli::admin::AdminContext::from_config(&config)
+                .expect("admin snapshot compiles"),
+        ),
     );
     let control = state.control.clone();
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
@@ -2988,6 +3037,43 @@ fn anthropic_unreadable_documents_become_honest_localized_text() {
 }
 
 #[test]
+fn anthropic_native_direct_refuses_tools_before_hitting_an_unsupported_target() {
+    let upstream_answer = json!({
+        "id": "msg_native_tools_unsupported",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-chat",
+        "content": [{"type": "text", "text": "should not be reached"}],
+        "usage": {"input_tokens": 4, "output_tokens": 2}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("direct-native-tools-unsupported", "sk-upstream-secret\n");
+    let proxy = start_native_anthropic_proxy_with(&mock, &key, true, "unsupported");
+
+    let (status, body) = post_messages(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Read the marker"}],
+            "tools": [{
+                "name": "read_marker",
+                "description": "Read a marker",
+                "input_schema": {"type": "object", "properties": {}}
+            }]
+        }),
+        &proxy.virtual_key,
+    );
+
+    assert_eq!(
+        (status, mock.hits()),
+        (400, 0),
+        "tool-incapable Direct target must fail before dispatch: {body}"
+    );
+    std::fs::remove_file(key).ok();
+}
+
+#[test]
 fn anthropic_native_passthrough_only_replaces_images_for_a_text_only_model() {
     // Native passthrough keeps server tools and forced tool choice verbatim, but
     // its confirmed text-only target receives localized image and PDF fallback.
@@ -3445,7 +3531,14 @@ fn invalid_first_sse_event_falls_back_before_stream_commit() {
 fn the_models_catalog_aggregates_configured_upstreams() {
     let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
     let key = key_file("models", "sk-test-key-abc");
-    let proxy = start_proxy(&mock, &key);
+    let proxy = start_proxy_with_agents_budgets_and_catalog_price(
+        &mock,
+        &key,
+        true,
+        &["agent-openai"],
+        None,
+        true,
+    );
 
     let response = ureq::get(format!("{}/v1/models", proxy.url))
         .header("authorization", &format!("Bearer {}", proxy.virtual_key))
@@ -3458,6 +3551,17 @@ fn the_models_catalog_aggregates_configured_upstreams() {
     assert_eq!(body["object"], json!("list"));
     assert_eq!(body["data"][0]["id"], json!("gpt-5.5"));
     assert_eq!(body["data"][0]["owned_by"], json!("mock_primary"));
+    assert_eq!(body["data"][0]["context_window"], json!(400_000));
+    assert_eq!(body["data"][0]["max_output_tokens"], json!(32_768));
+    assert_eq!(body["data"][0]["limit"]["context"], json!(400_000));
+    assert_eq!(body["data"][0]["limit"]["output"], json!(32_768));
+    assert_eq!(body["data"][0]["cost"]["input"], json!(5.0));
+    assert_eq!(body["data"][0]["cost"]["output"], json!(30.0));
+    assert_eq!(body["data"][0]["cost"]["cache_read"], json!(0.5));
+    assert_eq!(
+        body["data"][0]["modalities"]["input"],
+        json!(["text", "image"])
+    );
     assert_eq!(
         mock.hits(),
         0,
@@ -4002,11 +4106,10 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
     let state = server::AppState::new(
         Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
-        Arc::new(token_station_cli::admin::AdminContext {
-            data_dir: config.data.dir.clone(),
-            router: config.router.clone(),
-            plugins: config.plugins.clone(),
-        }),
+        Arc::new(
+            token_station_cli::admin::AdminContext::from_config(&config)
+                .expect("admin snapshot compiles"),
+        ),
     );
     let control = state.control.clone();
 
@@ -4031,6 +4134,97 @@ fn start_proxy_two(primary: &MockUpstream, fallback: &MockUpstream, key_file: &P
         control,
         gateway,
     }
+}
+
+fn start_direct_proxy_two(first: &MockUpstream, applied: &MockUpstream, key_file: &Path) -> Proxy {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-proxy-direct-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    let upstream = |mock: &MockUpstream| {
+        json!({
+            "provider": "openai-compatible",
+            "base_url": mock.base_url(),
+            "auth": { "slot": "provider_api_key", "file": key_file },
+            "models": [ { "model": "gpt-5.5", "tool": true, "context_window": 400_000 } ]
+        })
+    };
+    let config = json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": true },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agent": "agent-openai",
+            "providers": { "openai-compatible": "provider-openai-compatible" }
+        },
+        "upstreams": {
+            "a_first": upstream(first),
+            "z_applied": upstream(applied)
+        },
+        "router": {
+            "version": 1,
+            "pools": { "main": [
+                { "upstream": "a_first", "model": "gpt-5.5" },
+                { "upstream": "z_applied", "model": "gpt-5.5" }
+            ]},
+            "default_pool": "main"
+        },
+        "routing": {
+            "mode": "direct",
+            "direct_target": { "upstream": "z_applied", "model": "gpt-5.5" }
+        }
+    });
+    let config: ClientConfig = serde_json::from_value(config).expect("direct config parses");
+    spawn_proxy(&config)
+}
+
+#[test]
+fn direct_gateway_dispatches_only_to_the_applied_target() {
+    let answer = json!({
+        "id": "cmpl-direct",
+        "object": "chat.completion",
+        "model": "gpt-5.5",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "ok" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    });
+    let first = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let applied = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let key = key_file("direct-dispatch", "sk-test-key-abc\n");
+    let proxy = start_direct_proxy_two(&first, &applied, &key);
+
+    let (status, body) = post_chat(
+        &proxy,
+        &json!({ "model": "auto", "messages": [{ "role": "user", "content": "hello" }] }),
+        None,
+    );
+
+    assert_eq!(
+        (status, first.hits(), applied.hits()),
+        (200, 0, 1),
+        "only the applied target may receive the request: {body}"
+    );
+
+    let (admin_status, _, admin_body) = admin_get(
+        &proxy,
+        "/admin/router-table",
+        Some(&proxy.virtual_key),
+        None,
+    );
+    assert_eq!(admin_status, 200, "admin body={admin_body}");
+    let table: Value = serde_json::from_str(&admin_body).expect("router table is JSON");
+    assert_eq!(table["default_pool"], "direct");
+    assert_eq!(table["pools"].as_array().map(Vec::len), Some(1));
+    assert_eq!(table["pools"][0]["pool"], "direct");
+    assert_eq!(table["pools"][0]["upstream"], "z_applied");
+    assert_eq!(table["pools"][0]["model"], "gpt-5.5");
+    std::fs::remove_file(key).ok();
 }
 
 fn start_quota_proxy_two(
@@ -4093,11 +4287,10 @@ fn start_quota_proxy_two(
     let state = server::AppState::new(
         Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
-        Arc::new(token_station_cli::admin::AdminContext {
-            data_dir: config.data.dir.clone(),
-            router: config.router.clone(),
-            plugins: config.plugins.clone(),
-        }),
+        Arc::new(
+            token_station_cli::admin::AdminContext::from_config(&config)
+                .expect("admin snapshot compiles"),
+        ),
     );
     let control = state.control.clone();
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
@@ -4300,11 +4493,10 @@ fn start_proxy_many(upstream: &MockUpstream, count: usize, key_file: &Path) -> P
     let state = server::AppState::new(
         Arc::clone(&gateway),
         Some(Arc::from(virtual_key.as_str())),
-        Arc::new(token_station_cli::admin::AdminContext {
-            data_dir: config.data.dir.clone(),
-            router: config.router.clone(),
-            plugins: config.plugins.clone(),
-        }),
+        Arc::new(
+            token_station_cli::admin::AdminContext::from_config(&config)
+                .expect("admin snapshot compiles"),
+        ),
     );
     let control = state.control.clone();
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");

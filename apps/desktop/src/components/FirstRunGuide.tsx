@@ -169,8 +169,8 @@ export default function FirstRunGuide({
                   index: copy("CONFIGURE ROUTING · 1/4", "配置路由 · 1/4"),
                   title: copy("Open routing setup", "打开路由配置"),
                   description: copy(
-                    "Select the real Routing navigation item to continue.",
-                    "点击真实“路由”导航，进入下一阶段配置。",
+                    "Select Global routing on Home to continue.",
+                    "点击主页左侧的“全局路由”，进入下一阶段配置。",
                   ),
                   advanceOnTargetClick: true,
                   continueLabel: null,
@@ -216,8 +216,8 @@ export default function FirstRunGuide({
                           index: copy("CONNECT AGENT · 1/3", "接入 Agent · 1/3"),
                           title: copy("Open Agent management", "打开 Agent 管理"),
                           description: copy(
-                            "Select the real Agent navigation item to continue.",
-                            "点击真实“Agent”导航，查看本机检测结果。",
+                            "Select a detected Agent on Home to continue.",
+                            "点击主页左侧扫描到的 Agent，查看本机接入配置。",
                           ),
                           advanceOnTargetClick: true,
                           continueLabel: null,
@@ -250,8 +250,8 @@ export default function FirstRunGuide({
                               index: copy("CONNECT AGENT · 3/3", "接入 Agent · 3/3"),
                               title: copy("Connect the Agent", "一键接入 Agent"),
                               description: copy(
-                                "Select the real connection action. Completion waits for a rescan to report CONNECTED.",
-                                "点击真实接入操作；完成状态必须等待重扫确认 CONNECTED。",
+                                "Select the real connection action. Completion waits for the cached Agent state to report CONNECTED.",
+                                "点击真实接入操作；完成状态会由 Agent 缓存状态确认。",
                               ),
                               advanceOnTargetClick: false,
                               continueLabel: null,
@@ -263,8 +263,8 @@ export default function FirstRunGuide({
                                 index: copy("CONNECT AGENT · 4/4", "接入 Agent · 4/4"),
                                 title: copy("Connect the Agent", "一键接入 Agent"),
                                 description: copy(
-                                  "Select the real connection action. Completion waits for a rescan to report CONNECTED.",
-                                  "点击真实接入操作；完成状态必须等待重扫确认 CONNECTED。",
+                                  "Select the real connection action. Completion waits for the cached Agent state to report CONNECTED.",
+                                  "点击真实接入操作；完成状态会由 Agent 缓存状态确认。",
                                 ),
                                 advanceOnTargetClick: false,
                                 continueLabel: null,
@@ -272,12 +272,12 @@ export default function FirstRunGuide({
                               }
                           : microStep === "agent-scan-empty"
                           ? {
-                              target: "agent-rescan",
+                              target: null,
                               index: copy("CONNECT AGENT · 2/2", "接入 Agent · 2/2"),
                               title: copy("No connectable Agent detected", "未检测到可接入 Agent"),
                               description: copy(
-                                "Rescan after installing an Agent, or explicitly finish the basic setup without one.",
-                                "安装 Agent 后可重新扫描，也可以明确暂不接入并完成基础设置。",
+                                "Agent discovery runs once before Home appears. Install an Agent and restart the app, or finish the basic setup without one.",
+                                "Agent 会在主页出现前扫描一次。安装 Agent 后请重启应用，也可以暂不接入并完成基础设置。",
                               ),
                               advanceOnTargetClick: false,
                               continueLabel: null,
@@ -288,7 +288,7 @@ export default function FirstRunGuide({
                     title: copy("First setup is complete", "首次设置已完成"),
                     description: copy("No repeated setup is required.", "无需重复配置。"),
                     advanceOnTargetClick: false,
-                    continueLabel: copy("Back to Overview", "返回概览"),
+                    continueLabel: copy("Back to Home", "返回主页"),
                   };
   const lockWorkspaceScroll = content.target === "route-mode"
     || content.target === "route-config"
@@ -634,7 +634,7 @@ export function FirstRunCompletionDialog({
         </DialogHeader>
         <DialogFooter>
           <Button type="button" onClick={onFinish}>
-            {copy("Back to Overview", "返回概览")}
+            {copy("Back to Home", "返回主页")}
           </Button>
         </DialogFooter>
       </DialogContent>

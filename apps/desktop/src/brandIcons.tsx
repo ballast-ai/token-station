@@ -128,7 +128,7 @@ const AGENT_IMAGES: Record<string, AgentImage> = {
 /** Initial or abbreviation tile for items without a brand logo. */
 function Fallback({ text, size }: { text: string; size: number }) {
   return (
-    <span className="brand-fallback" style={{ width: size, height: size }}>
+    <span className="brand-fallback" aria-hidden="true" style={{ width: size, height: size }}>
       {text}
     </span>
   );
@@ -162,10 +162,21 @@ function BrandImage({
 }
 
 /** Provider brand logo that falls back to the label's initial when unmatched. */
-export function ProviderIcon({ id, label, size = 28 }: { id: string; label: string; size?: number }) {
-  const Icon = PROVIDER_ICONS[id];
-  if (Icon) return <Icon.Avatar size={size} />;
-  return <Fallback text={label.slice(0, 1).toUpperCase()} size={size} />;
+export function ProviderIcon({ id, label, size = 28 }: { id?: string | null; label: string; size?: number }) {
+  const Icon = id ? PROVIDER_ICONS[id] : undefined;
+  return (
+    <span
+      className="provider-brand-glyph"
+      data-provider-brand={Icon ? id ?? undefined : undefined}
+      data-provider-artwork={Icon ? "official" : "fallback"}
+      aria-hidden="true"
+      style={{ width: size, height: size }}
+    >
+      {Icon
+        ? <Icon.Avatar size={size} />
+        : <Fallback text={label.slice(0, 1).toUpperCase()} size={size} />}
+    </span>
+  );
 }
 
 /** Agent brand logo using the full mark instead of a black avatar that shrinks it into a corner. */

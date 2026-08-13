@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import type { ProviderView, QuotaAccount, QuotaPlanView } from "../api";
+import { ProviderIcon } from "../brandIcons";
 import CompactCombobox, { type CompactComboboxOption } from "./CompactCombobox";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { Field, FieldGroup, FieldLabel } from "./ui/field";
@@ -82,6 +83,7 @@ export default function QuotaPriorityPanel({
     return {
       value: name,
       label: name,
+      icon: <ProviderIcon id={provider?.brand_id} label={name} size={20} />,
       hint: provider?.access_tier === "free" ? copy("Free", "免费") : undefined,
     };
   };
@@ -209,13 +211,17 @@ export default function QuotaPriorityPanel({
         <div className="quota-plan-section">
           <Separator className="quota-plan-separator" />
           <div className="quota-plan-head">
-            <strong>{copy("Quota plans (optional)", "额度计划(可选)")}</strong>
-            <span>
-              {copy(
-                "Declare each provider's reset window and allowance so its remaining can be estimated locally. Providers that report their own limits don't need this.",
-                "为各供应商声明刷新窗口与额度上限,即可本地估算剩余;会自行上报限额的供应商无需填写。",
-              )}
-            </span>
+            <strong>{copy("Quota plans (optional)", "额度计划（可选）")}</strong>
+            <div className="quota-plan-description">
+              <span>{copy(
+                "After you enter a provider's allowance and reset window, Token Station estimates its remaining quota locally.",
+                "填写供应商的额度上限和刷新周期后，Token Station 会在本机估算剩余额度。",
+              )}</span>
+              <span>{copy(
+                "If the provider reports quota automatically, leave this blank.",
+                "若供应商会自动上报额度，则无需填写。",
+              )}</span>
+            </div>
           </div>
           {planProviders.map((upstream) => (
             <QuotaPlanRow

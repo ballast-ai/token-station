@@ -84,6 +84,214 @@ pub fn apply_patch(
     Ok(())
 }
 
+/// Promote only semantically empty ancestors of declared owned paths to empty
+/// objects so a later add/replace can safely reuse configuration left by a
+/// prior removal. JSON/JSON5 accept only `null`; YAML also normalizes its empty
+/// mapping spellings before the scalar patcher expands them to block form.
+/// Missing ancestors are still created by the regular patch path, while every
+/// non-null scalar or collection keeps failing closed in connector validation.
+pub fn prepare_owned_paths_for_write(
+    document: &mut ConfigDocument,
+    owned_paths: &[ConfigPath],
+) -> Result<(), String> {
+    prepare_owned_paths_for_write_with_reverse(document, owned_paths).map(|_| ())
+}
+
+/// Prepare owned ancestors for writing and return the structural reverse
+/// operations required to restore ancestors that were semantically `null`.
+/// Callers building a public reversible plan append these operations after the
+/// leaf reverses, so `env: null`, `models: null`, and YAML `model:` do not drift
+/// to empty objects when the projection is reversed.
+pub fn prepare_owned_paths_for_write_with_reverse(
+    document: &mut ConfigDocument,
+    owned_paths: &[ConfigPath],
+) -> Result<Vec<PatchOperation>, String> {
+    let before = semantic_json(document)?;
+    let needs_explicit_null_reverse =
+        matches!(document, ConfigDocument::Json(_) | ConfigDocument::Json5(_));
+    match document {
+        ConfigDocument::Json(root) => {
+            for path in owned_paths {
+                promote_json_null_ancestors(root, strict_ancestors(path)?)?;
+            }
+        }
+        ConfigDocument::Json5(document) => {
+            for path in owned_paths {
+                promote_json5_null_ancestors(&mut document.value, strict_ancestors(path)?)?;
+            }
+        }
+        ConfigDocument::Yaml(document) => {
+            let mut promoted_roots = std::collections::BTreeSet::new();
+            for path in owned_paths {
+                let ancestors = strict_ancestors(path)?;
+                let Some(root) = ancestors.first() else {
+                    continue;
+                };
+                if ancestors.len() != 1 || !promoted_roots.insert(root.clone()) {
+                    continue;
+                }
+                let semantic = strict_yaml_semantic(&document.rendered, "YAML 空父级兼容")?;
+                let is_empty_owned_parent = semantic.get(root).is_some_and(|value| {
+                    value.is_null() || value.as_object().is_some_and(serde_json::Map::is_empty)
+                });
+                if is_empty_owned_parent {
+                    document.rendered = promote_yaml_empty_root(&document.rendered, root)?;
+                }
+            }
+            validate_yaml_rendered(&document.rendered, "YAML 空父级兼容")?;
+        }
+        ConfigDocument::Toml(_) | ConfigDocument::Dotenv(_) => {
+            for path in owned_paths {
+                strict_ancestors(path)?;
+            }
+        }
+    }
+    let after = semantic_json(document)?;
+    if !needs_explicit_null_reverse {
+        return Ok(Vec::new());
+    }
+    let mut ancestors = owned_paths
+        .iter()
+        .flat_map(|path| {
+            (1..path.segments.len()).map(|length| ConfigPath {
+                segments: path.segments[..length].to_vec(),
+            })
+        })
+        .collect::<Vec<_>>();
+    ancestors.sort();
+    ancestors.dedup();
+    Ok(ancestors
+        .into_iter()
+        .filter(|path| {
+            semantic_value_at(&before, path).is_some_and(Value::is_null)
+                && semantic_value_at(&after, path).is_some_and(Value::is_object)
+        })
+        .map(|path| PatchOperation {
+            operation: PatchKind::Replace,
+            path,
+            value: Some(Value::Null),
+        })
+        .collect())
+}
+
+fn strict_ancestors(path: &ConfigPath) -> Result<&[String], String> {
+    split_path(path).map(|(_, parents)| parents)
+}
+
+fn promote_json_null_ancestors(root: &mut Value, ancestors: &[String]) -> Result<(), String> {
+    let mut current = root;
+    for segment in ancestors {
+        let Some(object) = current.as_object_mut() else {
+            return Ok(());
+        };
+        let Some(child) = object.get_mut(segment) else {
+            return Ok(());
+        };
+        if child.is_null() {
+            *child = json!({});
+        }
+        if !child.is_object() {
+            return Ok(());
+        }
+        current = child;
+    }
+    Ok(())
+}
+
+fn promote_json5_null_ancestors(root: &mut JSONValue, ancestors: &[String]) -> Result<(), String> {
+    let mut current = root;
+    for segment in ancestors {
+        let JSONValue::JSONObject {
+            key_value_pairs, ..
+        } = current
+        else {
+            return Ok(());
+        };
+        let Some(index) = json5_property_index(key_value_pairs, segment)? else {
+            return Ok(());
+        };
+        let child = &mut key_value_pairs[index].value;
+        if matches!(child, JSONValue::Null) {
+            *child = json5_empty_object();
+        }
+        if !matches!(child, JSONValue::JSONObject { .. }) {
+            return Ok(());
+        }
+        current = child;
+    }
+    Ok(())
+}
+
+fn promote_yaml_empty_root(rendered: &str, root: &str) -> Result<String, String> {
+    if !is_plain_yaml_key(root) {
+        return Err(format!("YAML owned path 的父级 '{root}' 不是安全键"));
+    }
+    let root_prefix = format!("{root}:");
+    let mut replacement = None;
+    for (offset, line) in rendered.split_inclusive('\n').scan(0usize, |cursor, line| {
+        let offset = *cursor;
+        *cursor += line.len();
+        Some((offset, line))
+    }) {
+        let without_newline = line.trim_end_matches(['\r', '\n']);
+        let Some(rest) = without_newline.strip_prefix(&root_prefix) else {
+            continue;
+        };
+        let comment = yaml_inline_comment_start(rest);
+        let value_region = &rest[..comment.unwrap_or(rest.len())];
+        let value = value_region.trim();
+        if !value.is_empty() && value != "~" && value != "{}" && !value.eq_ignore_ascii_case("null")
+        {
+            return Err(format!(
+                "配置路径 '{root}' 的空父级不是可安全提升的 YAML 表示"
+            ));
+        }
+        replacement = Some((
+            offset + root_prefix.len(),
+            offset + root_prefix.len() + value_region.len(),
+            if comment.is_some() { " {} " } else { " {}" },
+        ));
+        break;
+    }
+    let Some((start, end, replacement)) = replacement else {
+        return Err(format!("配置路径 '{root}' 缺少可安全提升的 YAML 父级"));
+    };
+    let mut updated = rendered.to_string();
+    updated.replace_range(start..end, replacement);
+    Ok(updated)
+}
+
+fn expand_yaml_empty_root_to_block(rendered: &str, root: &str) -> Result<String, String> {
+    let root_prefix = format!("{root}:");
+    for (offset, line) in rendered.split_inclusive('\n').scan(0usize, |cursor, line| {
+        let offset = *cursor;
+        *cursor += line.len();
+        Some((offset, line))
+    }) {
+        let without_newline = line.trim_end_matches(['\r', '\n']);
+        let Some(rest) = without_newline.strip_prefix(&root_prefix) else {
+            continue;
+        };
+        let comment = yaml_inline_comment_start(rest);
+        let value_region = &rest[..comment.unwrap_or(rest.len())];
+        let value = value_region.trim();
+        if value.is_empty() {
+            return Ok(rendered.to_string());
+        }
+        if value != "~" && value != "{}" && !value.eq_ignore_ascii_case("null") {
+            return Ok(rendered.to_string());
+        }
+        let mut updated = rendered.to_string();
+        let replacement = if comment.is_some() { " " } else { "" };
+        updated.replace_range(
+            offset + root_prefix.len()..offset + root_prefix.len() + value_region.len(),
+            replacement,
+        );
+        return Ok(updated);
+    }
+    Ok(rendered.to_string())
+}
+
 /// Apply a structured projection and return the inverse operations in the
 /// order required to undo it. Values remain in the non-serializable
 /// `PatchOperation` type, so credentials cannot cross the IPC boundary.
@@ -162,7 +370,7 @@ pub fn project_owned_paths(
     baseline: &ConfigDocument,
     owned_paths: &[ConfigPath],
 ) -> Result<(), String> {
-    match (current, baseline) {
+    match (&mut *current, baseline) {
         (ConfigDocument::Json(current), ConfigDocument::Json(baseline)) => {
             for path in owned_paths {
                 let value = semantic_value_at(baseline, path).cloned();
@@ -227,7 +435,86 @@ pub fn project_owned_paths(
             project_dotenv_paths(current, baseline, owned_paths)
         }
         _ => Err("当前配置与基线快照格式不一致".to_string()),
+    }?;
+    restore_null_owned_ancestors(current, baseline, owned_paths)
+}
+
+fn restore_null_owned_ancestors(
+    current: &mut ConfigDocument,
+    baseline: &ConfigDocument,
+    owned_paths: &[ConfigPath],
+) -> Result<(), String> {
+    match current {
+        ConfigDocument::Json(_) => {}
+        ConfigDocument::Json5(_) => {
+            let rendered = render_document(current, "JSON5 ancestor restore")?;
+            // A global comment check is intentionally conservative. A false
+            // positive (for example `//` inside a string) merely leaves a
+            // reconnectable empty object instead of risking trivia loss.
+            if rendered.contains("//") || rendered.contains("/*") {
+                return Ok(());
+            }
+        }
+        ConfigDocument::Toml(_) | ConfigDocument::Yaml(_) | ConfigDocument::Dotenv(_) => {
+            return Ok(())
+        }
     }
+    let baseline_semantic = semantic_json(baseline)?;
+    let mut ancestors = owned_paths
+        .iter()
+        .flat_map(|path| {
+            (1..path.segments.len()).map(|length| ConfigPath {
+                segments: path.segments[..length].to_vec(),
+            })
+        })
+        .collect::<Vec<_>>();
+    ancestors.sort_by(|left, right| {
+        right
+            .segments
+            .len()
+            .cmp(&left.segments.len())
+            .then_with(|| left.cmp(right))
+    });
+    ancestors.dedup();
+    let null_ancestors = ancestors
+        .iter()
+        .filter(|ancestor| {
+            semantic_value_at(&baseline_semantic, ancestor).is_some_and(Value::is_null)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for ancestor in ancestors {
+        let baseline_value = semantic_value_at(&baseline_semantic, &ancestor);
+        let belongs_to_promoted_null = null_ancestors.iter().any(|null_ancestor| {
+            ancestor.segments.len() >= null_ancestor.segments.len()
+                && ancestor.segments[..null_ancestor.segments.len()] == null_ancestor.segments
+        });
+        if !belongs_to_promoted_null {
+            continue;
+        }
+        let current_is_empty_object = semantic_value_at(&semantic_json(current)?, &ancestor)
+            .and_then(Value::as_object)
+            .is_some_and(serde_json::Map::is_empty);
+        if !current_is_empty_object {
+            continue;
+        }
+        let operation = match baseline_value {
+            None => PatchOperation {
+                operation: PatchKind::Remove,
+                path: ancestor,
+                value: None,
+            },
+            Some(value) if value.is_null() => PatchOperation {
+                operation: PatchKind::Replace,
+                path: ancestor,
+                value: Some(Value::Null),
+            },
+            Some(_) => continue,
+        };
+        apply_patch(current, &[operation])?;
+    }
+    Ok(())
 }
 
 fn collapse_empty_materialized_ancestors(
@@ -782,6 +1069,8 @@ fn insert_missing_yaml_scalar(
     if !is_plain_yaml_key(root) || !is_plain_yaml_key(child) {
         return Err(format!("配置路径 '{}' 包含不安全的 YAML 键", path));
     }
+    let normalized = expand_yaml_empty_root_to_block(rendered, root)?;
+    let rendered = normalized.as_str();
     let scalar = yaml_scalar(value, path)?;
     let root_prefix = format!("{root}:");
     let mut root_line_end = None;
@@ -832,6 +1121,10 @@ fn insert_missing_yaml_scalar(
     let mut updated = rendered.to_string();
     if root_line_end.is_some() {
         let line = format!("  {child}: {scalar}\n");
+        if insertion == updated.len() && !updated.ends_with('\n') {
+            updated.push('\n');
+            insertion = updated.len();
+        }
         updated.insert_str(insertion, &line);
     } else {
         // `parse_source_bytes(None, Yaml, ..)` represents an empty mapping as
@@ -1100,7 +1393,14 @@ fn yaml_root_block(
         let mut end = offset + line.len();
         for (next_offset, next_line) in lines.iter().skip(index + 1) {
             let next = next_line.trim_end_matches(['\r', '\n']);
-            if !next.is_empty() && !next.starts_with([' ', '\t']) {
+            let trimmed = next.trim_start_matches([' ', '\t']);
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                // Trivia belongs to the block only if another indented value
+                // follows it. Keep trailing root comments and blank lines by
+                // advancing `end` only when that value is actually observed.
+                continue;
+            }
+            if !next.starts_with([' ', '\t']) {
                 break;
             }
             end = next_offset + next_line.len();
@@ -1306,6 +1606,41 @@ pub fn semantic_json(document: &ConfigDocument) -> Result<Value, String> {
         }
         ConfigDocument::Dotenv(document) => dotenv_semantic(&document.rendered),
     }
+}
+
+/// Returns whether a projected document contains no semantic user content
+/// after pruning only empty ancestors of declared owned paths. This is used
+/// when a baseline file did not exist: nested patch removal can otherwise
+/// leave `{}`, an empty TOML table, or YAML `null` parents behind and prevent
+/// the transaction from restoring the original absence.
+pub fn is_empty_owned_projection(
+    document: &ConfigDocument,
+    owned_paths: &[ConfigPath],
+) -> Result<bool, String> {
+    let mut semantic = semantic_json(document)?;
+    for path in owned_paths {
+        prune_empty_owned_ancestors(&mut semantic, strict_ancestors(path)?)?;
+    }
+    Ok(semantic.as_object().is_some_and(serde_json::Map::is_empty))
+}
+
+fn prune_empty_owned_ancestors(value: &mut Value, ancestors: &[String]) -> Result<(), String> {
+    let Some((segment, remaining)) = ancestors.split_first() else {
+        return Ok(());
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Ok(());
+    };
+    if let Some(child) = object.get_mut(segment) {
+        prune_empty_owned_ancestors(child, remaining)?;
+    }
+    let removable = object.get(segment).is_some_and(|child| {
+        child.is_null() || child.as_object().is_some_and(serde_json::Map::is_empty)
+    });
+    if removable {
+        object.remove(segment);
+    }
+    Ok(())
 }
 
 pub fn parse_rendered(
@@ -1721,6 +2056,28 @@ mod tests {
         assert_eq!(reverse.len(), 2);
         assert_eq!(reverse[0].path.segments, ["provider", "api_key"]);
         assert_eq!(reverse[1].path.segments, ["provider", "base_url"]);
+    }
+
+    #[test]
+    fn reverse_patch_removes_the_outermost_parent_created_for_a_deep_path() {
+        let mut document = ConfigDocument::Json(json!({ "keep": true }));
+        let original = semantic_json(&document).unwrap();
+
+        let reverse = apply_patch_with_reverse(
+            &mut document,
+            &[operation(
+                PatchKind::Replace,
+                &["models", "providers", "tokenstation", "base_url"],
+                Some(json!("http://127.0.0.1:8787/v1")),
+            )],
+        )
+        .unwrap();
+        apply_patch(&mut document, &reverse).unwrap();
+
+        assert_eq!(semantic_json(&document).unwrap(), original);
+        assert!(!render_document(&document, "fixture")
+            .unwrap()
+            .contains("models"));
     }
 
     #[test]
@@ -2151,6 +2508,167 @@ mod tests {
             .err()
             .expect("duplicate JSON5 keys fail closed");
         assert!(error.contains("重复属性"), "{error}");
+    }
+
+    #[test]
+    fn owned_projection_restores_null_ancestors_after_a_temporary_write_promotion() {
+        let cases = [
+            (
+                DocumentFormat::Json,
+                r#"{"env":null,"keep":true}"#,
+                ConfigPath {
+                    segments: vec!["env".to_string(), "token".to_string()],
+                },
+            ),
+            (
+                DocumentFormat::Json5,
+                "{ models: null, keep: true }",
+                ConfigPath {
+                    segments: vec![
+                        "models".to_string(),
+                        "providers".to_string(),
+                        "tokenstation".to_string(),
+                    ],
+                },
+            ),
+        ];
+
+        for (format, source, owned) in cases {
+            let baseline = parse_rendered(source, format, "fixture").unwrap();
+            let mut connected = parse_rendered(source, format, "fixture").unwrap();
+            prepare_owned_paths_for_write(&mut connected, std::slice::from_ref(&owned)).unwrap();
+            apply_patch(
+                &mut connected,
+                &[PatchOperation {
+                    operation: PatchKind::Replace,
+                    path: owned.clone(),
+                    value: Some(json!("managed")),
+                }],
+            )
+            .unwrap();
+
+            project_owned_paths(&mut connected, &baseline, std::slice::from_ref(&owned)).unwrap();
+
+            let semantic = semantic_json(&connected).unwrap();
+            assert!(
+                semantic.get(&owned.segments[0]).is_some_and(Value::is_null),
+                "{source} must restore its original null ancestor"
+            );
+            assert_eq!(semantic["keep"], true);
+        }
+    }
+
+    #[test]
+    fn json5_null_ancestor_projection_keeps_user_comments_and_unknown_children() {
+        let source = "{ models: null, keep: true }";
+        let owned = ConfigPath {
+            segments: vec![
+                "models".to_string(),
+                "providers".to_string(),
+                "tokenstation".to_string(),
+            ],
+        };
+        let baseline = parse_rendered(source, DocumentFormat::Json5, "fixture").unwrap();
+        let mut current = parse_rendered(source, DocumentFormat::Json5, "fixture").unwrap();
+        prepare_owned_paths_for_write(&mut current, std::slice::from_ref(&owned)).unwrap();
+        apply_patch(
+            &mut current,
+            &[PatchOperation {
+                operation: PatchKind::Replace,
+                path: owned.clone(),
+                value: Some(json!("managed")),
+            }],
+        )
+        .unwrap();
+        apply_patch(
+            &mut current,
+            &[PatchOperation {
+                operation: PatchKind::Replace,
+                path: ConfigPath {
+                    segments: vec![
+                        "models".to_string(),
+                        "providers".to_string(),
+                        "user".to_string(),
+                    ],
+                },
+                value: Some(json!("keep")),
+            }],
+        )
+        .unwrap();
+        let rendered = render_document(&current, "fixture").unwrap();
+        let commented = rendered.replacen("models:", "// user note\n  models:", 1);
+        let mut current = parse_rendered(&commented, DocumentFormat::Json5, "fixture").unwrap();
+
+        project_owned_paths(&mut current, &baseline, std::slice::from_ref(&owned)).unwrap();
+
+        let restored = render_document(&current, "fixture").unwrap();
+        assert!(restored.contains("// user note"), "{restored}");
+        assert_eq!(
+            semantic_json(&current).unwrap()["models"]["providers"]["user"],
+            "keep"
+        );
+    }
+
+    #[test]
+    fn empty_owned_projection_recognizes_nested_shells_in_every_config_format() {
+        let cases = [
+            (
+                DocumentFormat::Json,
+                r#"{"env":{}}"#,
+                vec![ConfigPath {
+                    segments: vec!["env".to_string(), "key".to_string()],
+                }],
+            ),
+            (
+                DocumentFormat::Json5,
+                "{ models: { providers: {} }, agents: { defaults: {} } }",
+                vec![
+                    ConfigPath {
+                        segments: vec![
+                            "models".to_string(),
+                            "providers".to_string(),
+                            "tokenstation".to_string(),
+                        ],
+                    },
+                    ConfigPath {
+                        segments: vec![
+                            "agents".to_string(),
+                            "defaults".to_string(),
+                            "model".to_string(),
+                        ],
+                    },
+                ],
+            ),
+            (
+                DocumentFormat::Toml,
+                "[model_providers]\n",
+                vec![ConfigPath {
+                    segments: vec!["model_providers".to_string(), "tokenstation".to_string()],
+                }],
+            ),
+            (
+                DocumentFormat::Yaml,
+                "model:\n",
+                vec![ConfigPath {
+                    segments: vec!["model".to_string(), "default".to_string()],
+                }],
+            ),
+            (
+                DocumentFormat::Dotenv,
+                "",
+                vec![ConfigPath {
+                    segments: vec!["GEMINI_API_KEY".to_string()],
+                }],
+            ),
+        ];
+
+        for (format, source, owned) in cases {
+            let document = parse_rendered(source, format, "fixture").unwrap();
+            assert!(
+                is_empty_owned_projection(&document, &owned).unwrap(),
+                "{format:?} owned-only shell must be semantically empty"
+            );
+        }
     }
 
     #[test]

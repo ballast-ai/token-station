@@ -63,6 +63,8 @@ describe("RecoveryShell", () => {
   it("stays usable without the business DB and exposes only recovery actions", async () => {
     render(<RecoveryShell initialState={safeState} />);
     expect(await screen.findByRole("heading", { name: "Token Station 自救模式" })).toBeInTheDocument();
+    expect(screen.getByTestId("token-station-mark")).toBeInTheDocument();
+    expect(screen.queryByText("TS")).toBeNull();
     expect(screen.getByText("本地数据无法安全打开。请使用自救模式检查或导出本地数据。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "检查更新" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "打开备份位置" })).toBeInTheDocument();

@@ -10,6 +10,7 @@ import {
 } from "../api";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { humanizeAppError } from "../errors";
+import { useErrorToast } from "./ErrorToast";
 
 function displayRate(rate: number | null): string {
   return rate == null ? "" : String(rate / 1_000_000);
@@ -30,6 +31,7 @@ function rateMicros(raw: string, invalidMessage: string): number {
 
 export default function PricingEditor() {
   const { copy } = useLocalizedCopy();
+  const { dismissToast, showError, showInfo, showSuccess } = useErrorToast();
   const [table, setTable] = useState<PriceTableView | null>(null);
   const [model, setModel] = useState("");
   const [input, setInput] = useState("0");
@@ -38,12 +40,15 @@ export default function PricingEditor() {
   const [cacheWrite, setCacheWrite] = useState("0");
   const [reasoning, setReasoning] = useState("");
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
   // A dirty price belongs to one model only. Reusing it after the model ID
   // changes can silently save one model's price under another model.
   const [touchedModel, setTouchedModel] = useState<string | null>(null);
   const [lookupRequestedFor, setLookupRequestedFor] = useState<string | null>(null);
   const [suggestion, setSuggestion] = useState<ModelPriceSuggestionView | null>(null);
+  const noPublicPriceMessage = copy(
+    "No public price was found.",
+    "未找到公开价格。",
+  );
 
   useEffect(() => {
     getPriceTable().then(setTable).catch((value) => setError(humanizeAppError(value)));
@@ -64,22 +69,34 @@ export default function PricingEditor() {
     const timer = window.setTimeout(() => {
       suggestModelPrice(null, requestedModel)
         .then((value) => {
-          if (cancelled || !value) return;
+          if (cancelled) return;
+          if (!value) {
+            setLookupRequestedFor(null);
+            showInfo(noPublicPriceMessage, `model-price-suggest:${requestedModel}`);
+            return;
+          }
           setInput(displayRate(value.input_per_mtok));
           setOutput(displayRate(value.output_per_mtok));
           setCacheRead(displayRate(value.cache_read_per_mtok));
           setCacheWrite(displayRate(value.cache_write_per_mtok));
           setReasoning(displayRate(value.reasoning_per_mtok));
           setSuggestion(value);
+          dismissToast(`model-price-suggest:${requestedModel}`);
         })
-        // Suggestions are optional. Manual entry remains available offline.
-        .catch(() => undefined);
+        // Suggestions are optional. Manual entry remains available offline,
+        // but an explicit lookup must not fail silently.
+        .catch((value) => {
+          if (!cancelled) {
+            setLookupRequestedFor(null);
+            showError(humanizeAppError(value), `model-price-suggest:${requestedModel}`);
+          }
+        });
     }, 350);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [lookupRequestedFor, model, table, touchedModel]);
+  }, [dismissToast, lookupRequestedFor, model, noPublicPriceMessage, showError, showInfo, table, touchedModel]);
 
   const edit = (name: string, price: ModelPriceView) => {
     setModel(name);
@@ -89,14 +106,12 @@ export default function PricingEditor() {
     setCacheWrite(displayRate(price.cache_write_per_mtok));
     setReasoning(displayRate(price.reasoning_per_mtok));
     setError("");
-    setNotice("");
     setTouchedModel(name);
     setSuggestion(null);
   };
 
   const save = async () => {
     setError("");
-    setNotice("");
     if (!table) return;
     if (!model || model.trim() !== model || model.length > 256) {
       setError(copy(
@@ -105,8 +120,9 @@ export default function PricingEditor() {
       ));
       return;
     }
+    let price: ModelPriceView;
     try {
-      const price: ModelPriceView = {
+      price = {
         input_per_mtok: rateMicros(input, copy(
           "Input price must be a valid amount from 0 to 9 billion with at most 6 decimal places.",
           "输入价格必须是 0 到 90 亿之间、最多 6 位小数的有效金额。",
@@ -128,21 +144,25 @@ export default function PricingEditor() {
           "推理价格必须是 0 到 90 亿之间、最多 6 位小数的有效金额。",
         )),
       };
-      const next = await setModelPrice(model, price, table.version);
-      setTable(next);
-      setNotice(copy(
-        `Created price v${next.version}. Reapply the configuration to update the running proxy.`,
-        `已生成 price v${next.version}；正在运行的代理需重新应用配置。`,
-      ));
     } catch (value) {
       setError(humanizeAppError(value));
+      return;
+    }
+    try {
+      const next = await setModelPrice(model, price, table.version);
+      setTable(next);
+      showSuccess(copy(
+        `Created price v${next.version}. Reapply the configuration to update the running proxy.`,
+        `已生成 price v${next.version}；正在运行的代理需重新应用配置。`,
+      ), `model-price-save:${model}`);
+    } catch (value) {
+      showError(humanizeAppError(value), `model-price-save:${model}`);
     }
   };
 
   const remove = async (name: string) => {
     if (!table) return;
     setError("");
-    setNotice("");
     try {
       const next = await removeModelPrice(name, table.version);
       setTable(next);
@@ -157,12 +177,12 @@ export default function PricingEditor() {
         setLookupRequestedFor(null);
         setSuggestion(null);
       }
-      setNotice(copy(
+      showSuccess(copy(
         `Created price v${next.version}. Historical receipts keep their original cost.`,
         `已生成 price v${next.version}；历史回执保持原成本。`,
-      ));
+      ), `model-price-remove:${name}`);
     } catch (value) {
-      setError(humanizeAppError(value));
+      showError(humanizeAppError(value), `model-price-remove:${name}`);
     }
   };
 
@@ -291,7 +311,6 @@ export default function PricingEditor() {
         </div>
       )}
       {error && <div className="banner err">{error}</div>}
-      {notice && <div className="banner ok">{notice}</div>}
     </div>
   );
 }

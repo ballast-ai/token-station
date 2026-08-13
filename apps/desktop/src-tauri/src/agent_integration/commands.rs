@@ -19,9 +19,13 @@ use tauri::{State, WebviewWindow};
 use zeroize::Zeroizing;
 
 use super::compatibility::{evaluate_discovery, CatalogSource, CompatibilityCatalog};
-use super::config_codec::{apply_patch, parse_source_bytes, render_document, DocumentFormat};
+use super::config_codec::{
+    apply_patch, parse_rendered, parse_source_bytes, prepare_owned_paths_for_write,
+    render_document, DocumentFormat,
+};
 use super::connectors::{
-    builtin_connectors, find_connector, AgentModelCost, AgentModelMetadata, ConnectInput, Connector,
+    builtin_connectors, find_connector, validate_patch_ownership, AgentModelCost,
+    AgentModelMetadata, ConnectInput, Connector,
 };
 use super::discovery::DiscoveryScanner;
 use super::drift::analyze_drift;
@@ -35,13 +39,13 @@ use super::plan::{
 use super::registry::AgentRegistry;
 use super::snapshot::{FileMasterKeyStore, FileSnapshotStore, MasterKeyStore, SnapshotStore};
 use super::transaction::{
-    Clock, ConfirmedOperation, FsAtomicConfigWriter, ParseOnlyVerifier, RecoveryStatus,
-    RuntimeAdmission, SystemClock, TransactionCoordinator, TransactionEngine, TransactionFailure,
-    TransactionOutcome, TransactionStage,
+    AtomicConfigWriter, Clock, ConfirmedOperation, FsAtomicConfigWriter, ParseOnlyVerifier,
+    RecoveryStatus, RuntimeAdmission, SystemClock, TransactionCoordinator, TransactionEngine,
+    TransactionFailure, TransactionOutcome, TransactionStage,
 };
 use super::types::{
     AgentDriftView, AgentUiMetadata, CompatibilityDecision, CompatibilityStatus, ConfigChangePlan,
-    Diagnostic, DiscoveryRecord, DriftStatus, PatchKind, PatchOperation, PlanIntent, ReasonCode,
+    ConfigPath, Diagnostic, DiscoveryRecord, DriftStatus, PatchOperation, PlanIntent, ReasonCode,
     SnapshotRecord,
 };
 use crate::{AgentIntegrationPaths, AppStateManaged};
@@ -56,8 +60,17 @@ pub struct AgentInstallationView {
     pub discovery: DiscoveryRecord,
     pub compatibility: CompatibilityDecision,
     pub adapter_ready: Option<bool>,
+    pub connection_issue: Option<AgentConnectionIssueView>,
     pub managed: bool,
     pub connected: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConnectionIssueView {
+    pub code: String,
+    pub message: String,
+    pub target: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -165,6 +178,7 @@ fn legacy_snapshot_view(agent_id: &str, target: &Path) -> Option<SnapshotView> {
 pub struct AgentCommandError {
     pub code: String,
     pub message: String,
+    pub target: Option<String>,
     pub stage: Option<TransactionStage>,
     pub recovery: Option<RecoveryStatus>,
     pub recovery_reason_code: Option<String>,
@@ -175,6 +189,7 @@ impl AgentCommandError {
         Self {
             code: code.to_string(),
             message: message.into(),
+            target: None,
             stage: None,
             recovery: None,
             recovery_reason_code: None,
@@ -198,6 +213,17 @@ impl AgentCommandError {
             _ => Self::internal(message),
         }
     }
+
+    fn connection_issue(issue: &AgentConnectionIssueView) -> Self {
+        Self {
+            code: issue.code.clone(),
+            message: issue.message.clone(),
+            target: issue.target.clone(),
+            stage: None,
+            recovery: None,
+            recovery_reason_code: None,
+        }
+    }
 }
 
 impl From<TransactionFailure> for AgentCommandError {
@@ -205,6 +231,7 @@ impl From<TransactionFailure> for AgentCommandError {
         Self {
             code: value.reason_code.clone(),
             message: "Agent 配置事务未完成，请重新扫描并预览".to_string(),
+            target: None,
             stage: Some(value.stage),
             recovery: Some(value.recovery),
             recovery_reason_code: value.recovery_reason_code,
@@ -212,6 +239,7 @@ impl From<TransactionFailure> for AgentCommandError {
     }
 }
 
+#[derive(Clone)]
 struct ScanSnapshot {
     catalog: CompatibilityCatalog,
     source: CatalogSource,
@@ -304,6 +332,7 @@ pub struct AgentProxyRuntime {
     connector_adapter_ready: BTreeMap<String, bool>,
     virtual_key: Zeroizing<String>,
     model_metadata: BTreeMap<String, AgentModelMetadata>,
+    connection_issues: BTreeMap<String, AgentConnectionIssueView>,
 }
 
 impl AgentProxyRuntime {
@@ -313,6 +342,7 @@ impl AgentProxyRuntime {
         virtual_key: String,
         adapter_readiness: BTreeMap<String, bool>,
         model_metadata: BTreeMap<String, AgentModelMetadata>,
+        connection_issues: BTreeMap<String, AgentConnectionIssueView>,
     ) -> Self {
         let mut connector_base_urls = BTreeMap::new();
         let mut connector_adapter_ready = BTreeMap::new();
@@ -338,6 +368,7 @@ impl AgentProxyRuntime {
             connector_adapter_ready,
             virtual_key: Zeroizing::new(virtual_key),
             model_metadata,
+            connection_issues,
         }
     }
 
@@ -382,6 +413,12 @@ impl AgentProxyRuntime {
                 serde_json::to_vec(metadata).expect("Agent model metadata is always serializable");
             hash_field(&mut hash, &serialized);
         }
+        for (connector_id, issue) in &self.connection_issues {
+            hash_field(&mut hash, connector_id.as_bytes());
+            let serialized =
+                serde_json::to_vec(issue).expect("Agent connection issue is always serializable");
+            hash_field(&mut hash, &serialized);
+        }
         hash.finalize().into()
     }
 
@@ -406,17 +443,29 @@ impl AgentProxyRuntime {
             model_metadata: self.model_metadata.get(connector.agent_id()),
         })
     }
+
+    fn connection_issue(&self, connector_id: &str) -> Option<&AgentConnectionIssueView> {
+        self.connection_issues.get(connector_id)
+    }
 }
 
+#[cfg(test)]
 fn agent_model_metadata(
     config: &token_station_cli::config::ClientConfig,
     agent_id: &str,
 ) -> Result<Option<AgentModelMetadata>, String> {
-    use token_station_router_core::RoutingMode;
-
     let router = config
         .custom_router_for_agent(agent_id)?
         .unwrap_or_else(|| config.router.clone());
+    agent_model_metadata_for_router(config, &router)
+}
+
+fn agent_model_metadata_for_router(
+    config: &token_station_cli::config::ClientConfig,
+    router: &token_station_router_core::RouterConfig,
+) -> Result<Option<AgentModelMetadata>, String> {
+    use token_station_router_core::RoutingMode;
+
     let mut candidates = BTreeSet::new();
     if router.routing_mode == RoutingMode::QuotaFirst && !router.quota_accounts.is_empty() {
         candidates.extend(router.quota_accounts.iter().cloned());
@@ -457,12 +506,7 @@ fn agent_model_metadata(
         let Some(capability) = capability else {
             return Ok(None);
         };
-        let max_output = capability
-            .extensions
-            .get("max_output_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .filter(|value| *value > 0);
+        let max_output = (capability.max_output_tokens > 0).then_some(capability.max_output_tokens);
         context = context.and_then(|current| {
             (capability.context_window > 0).then_some(current.min(capability.context_window))
         });
@@ -507,6 +551,176 @@ fn agent_model_metadata(
         reasoning,
         cost,
     }))
+}
+
+fn connection_issue(
+    code: &str,
+    message: impl Into<String>,
+    target: Option<String>,
+) -> AgentConnectionIssueView {
+    AgentConnectionIssueView {
+        code: code.to_owned(),
+        message: message.into(),
+        target,
+    }
+}
+
+fn opencode_connection_issue(
+    config: &token_station_cli::config::ClientConfig,
+    router: &token_station_router_core::RouterConfig,
+) -> Option<AgentConnectionIssueView> {
+    if router.honor_exact_model {
+        return Some(connection_issue(
+            "model_contract_exact_routing_unsupported",
+            "OpenCode 固定使用 tokenstation/auto，与当前精确模型路由不兼容；请改用分层、额度优先或单独路由",
+            None,
+        ));
+    }
+
+    let mut targets = if router.routing_mode == token_station_router_core::RoutingMode::QuotaFirst
+        && !router.quota_accounts.is_empty()
+    {
+        router.quota_accounts.clone()
+    } else if router.routing_mode == token_station_router_core::RoutingMode::QuotaFirst {
+        config
+            .upstreams
+            .iter()
+            .flat_map(|(upstream, entry)| {
+                entry.models.iter().filter_map(move |capability| {
+                    token_station_router_core::UpstreamRef::new(upstream.clone())
+                        .ok()
+                        .map(|upstream| {
+                            token_station_router_core::UpstreamModel::new(
+                                upstream,
+                                capability.model.clone(),
+                            )
+                        })
+                })
+            })
+            .collect()
+    } else {
+        let mut reachable_pools = BTreeSet::from([router.default_pool.clone()]);
+        reachable_pools.extend(router.rules.iter().map(|rule| rule.route_to.clone()));
+        reachable_pools.extend(
+            router
+                .hint_routes
+                .iter()
+                .map(|route| route.route_to.clone()),
+        );
+        if let Some(heuristic) = &router.heuristic {
+            reachable_pools.insert(heuristic.above.clone());
+            reachable_pools.insert(heuristic.below.clone());
+            reachable_pools.extend(heuristic.bands.iter().map(|band| band.pool.clone()));
+        }
+        if let token_station_router_core::RecoveryPolicy::Ordered { pools } = &router.recovery {
+            reachable_pools.extend(pools.iter().cloned());
+        }
+        reachable_pools
+            .into_iter()
+            .flat_map(|pool| router.pools.get(&pool).into_iter().flatten().cloned())
+            .collect()
+    };
+    if router.local_only && !router.allow_cloud_fallback {
+        targets.retain(|target| {
+            config
+                .upstreams
+                .get(target.upstream.as_str())
+                .is_some_and(|upstream| upstream.local)
+        });
+    }
+    targets.sort();
+    targets.dedup();
+    if targets.is_empty() {
+        return Some(connection_issue(
+            "model_contract_no_reachable_model",
+            "OpenCode 当前路由没有可达模型，无法证明自动压缩所需的输入预算",
+            Some("opencode".to_owned()),
+        ));
+    }
+
+    for target in targets {
+        let Some(upstream) = config.upstreams.get(target.upstream.as_str()) else {
+            return Some(connection_issue(
+                "model_contract_unknown_provider",
+                format!("OpenCode 路由引用了未知供应商 `{}`", target.upstream),
+                Some(target.upstream.to_string()),
+            ));
+        };
+        let Some(capability) = upstream
+            .models
+            .iter()
+            .find(|capability| capability.model == target.model)
+        else {
+            return Some(connection_issue(
+                "model_contract_unknown_model",
+                format!("OpenCode 路由引用了未知模型 `{target}`"),
+                Some(target.to_string()),
+            ));
+        };
+        if capability.context_window == 0 {
+            return Some(connection_issue(
+                "model_contract_missing_context_window",
+                format!(
+                    "模型 `{target}` 缺少可信 context window；不会使用路由假定值代替供应商事实"
+                ),
+                Some(target.to_string()),
+            ));
+        }
+        if capability.max_output_tokens == 0 {
+            return Some(connection_issue(
+                "model_contract_missing_max_output_tokens",
+                format!("模型 `{target}` 缺少 max_output_tokens；OpenCode 无法证明安全输入预算"),
+                Some(target.to_string()),
+            ));
+        }
+        if capability.max_output_tokens >= capability.context_window {
+            return Some(connection_issue(
+                "model_contract_invalid_limits",
+                format!("模型 `{target}` 的最大输出必须小于 context window"),
+                Some(target.to_string()),
+            ));
+        }
+    }
+    None
+}
+
+fn serving_router_for_agent(
+    server: &crate::serve_lifecycle::RunningServer,
+    agent_id: &str,
+) -> Result<token_station_router_core::RouterConfig, String> {
+    let config = server.serving_config();
+    match server.agent_router_override(agent_id) {
+        Some(Some(router)) => Ok(router.clone()),
+        Some(None) => Ok(config.router.clone()),
+        None => config
+            .custom_router_for_agent(agent_id)
+            .map(|router| router.unwrap_or_else(|| config.router.clone())),
+    }
+}
+
+fn opencode_issue_from_inner(
+    inner: &crate::AppInner,
+) -> Result<Option<AgentConnectionIssueView>, String> {
+    match &inner.server {
+        crate::ServerLifecycle::Running { server, .. } => {
+            let router = serving_router_for_agent(server, "opencode")?;
+            Ok(opencode_connection_issue(server.serving_config(), &router))
+        }
+        crate::ServerLifecycle::Starting { .. }
+        | crate::ServerLifecycle::Applying { .. }
+        | crate::ServerLifecycle::Stopping { .. } => Ok(Some(connection_issue(
+            "agent_runtime_transition",
+            "代理正在切换运行实例，完成后将重新检查 OpenCode 接入条件",
+            None,
+        ))),
+        crate::ServerLifecycle::Stopped { .. } | crate::ServerLifecycle::Failed { .. } => {
+            let config = inner.materialize()?;
+            let router = config
+                .custom_router_for_agent("opencode")?
+                .unwrap_or_else(|| config.router.clone());
+            Ok(opencode_connection_issue(&config, &router))
+        }
+    }
 }
 
 pub struct AgentCommandState {
@@ -554,54 +768,193 @@ fn ensure_master_key_file(key_path: &Path) {
     let _ = FileMasterKeyStore::new(key_path.to_path_buf()).load_or_create(true);
 }
 
-/// Apply `removals` to the target config and write atomically while preserving
-/// permissions. A missing file succeeds. Force disconnect uses this to remove
-/// only managed fields without touching other user content.
-fn force_strip_owned(
-    target: &Path,
+struct PreparedForceStrip {
+    target: PathBuf,
+    rendered: Zeroizing<Vec<u8>>,
+    permissions: Option<u32>,
+    original_owner: Option<String>,
+    expected_before_hash: String,
+    expected_after_hash: String,
     format: DocumentFormat,
-    label: &str,
-    removals: &[PatchOperation],
-) -> Result<(), AgentCommandError> {
-    let source = read_config_source(target).map_err(AgentCommandError::internal)?;
-    if !source.existed {
-        return Ok(());
-    }
-    let mut document = parse_source_bytes(Some(source.exact_bytes.as_slice()), format, label)
-        .map_err(AgentCommandError::internal)?;
-    apply_patch(&mut document, removals).map_err(AgentCommandError::internal)?;
-    let rendered = render_document(&document, label).map_err(AgentCommandError::internal)?;
-    write_config_atomic(target, rendered.as_bytes(), source.original_permissions)
-        .map_err(AgentCommandError::internal)
+    label: &'static str,
 }
 
-/// Atomically rewrite a config through a sibling temporary file and rename, preserving permissions when possible.
-fn write_config_atomic(
+/// Project `removals` entirely in memory. Force-forget prepares every primary
+/// and companion before any file is changed, so parse/patch/reconnect failures
+/// cannot leave a partially stripped multi-file installation behind.
+#[cfg(test)]
+fn prepare_force_strip_owned(
     target: &Path,
-    bytes: &[u8],
-    permissions: Option<u32>,
+    format: DocumentFormat,
+    label: &'static str,
+    removals: &[PatchOperation],
+    reconnect_connector: Option<&dyn Connector>,
+) -> Result<Option<PreparedForceStrip>, AgentCommandError> {
+    let source = read_config_source(target).map_err(AgentCommandError::internal)?;
+    if !source.existed {
+        return Ok(None);
+    }
+    let document = parse_source_bytes(Some(source.exact_bytes.as_slice()), format, label)
+        .map_err(AgentCommandError::internal)?;
+    prepare_force_strip_projection(
+        target,
+        source,
+        document,
+        format,
+        label,
+        removals,
+        reconnect_connector,
+    )
+    .map(Some)
+}
+
+/// Read a Connector's primary document exactly once, then derive its dynamic
+/// disconnect patch, projected bytes, and revision guard from that same
+/// snapshot. WorkBuddy's array replacement must never be computed from an
+/// earlier read than the one later accepted by the commit CAS.
+fn prepare_connector_force_strip_owned(
+    target: &Path,
+    connector: &dyn Connector,
+) -> Result<Option<PreparedForceStrip>, AgentCommandError> {
+    let source = read_config_source(target).map_err(AgentCommandError::internal)?;
+    if !source.existed {
+        return Ok(None);
+    }
+    let document = parse_source_bytes(
+        Some(source.exact_bytes.as_slice()),
+        connector.format(),
+        connector.label(),
+    )
+    .map_err(AgentCommandError::internal)?;
+    let removals = connector
+        .disconnect_patch_for_document(&document)
+        .map_err(AgentCommandError::internal)?;
+    validate_patch_ownership(&removals, &connector.owned_paths())
+        .map_err(AgentCommandError::internal)?;
+    prepare_force_strip_projection(
+        target,
+        source,
+        document,
+        connector.format(),
+        connector.label(),
+        &removals,
+        Some(connector),
+    )
+    .map(Some)
+}
+
+/// Read and project one companion from a single revision. Connectors may
+/// dynamically filter a shared collection (for example Claude Desktop's
+/// metadata entries) instead of deleting the entire persisted owned path.
+#[allow(clippy::too_many_arguments)]
+fn prepare_connector_companion_force_strip_owned(
+    primary_target: &Path,
+    companion_target: &Path,
+    connector: &dyn Connector,
+    format: DocumentFormat,
+    label: &'static str,
+    owned_paths: &[ConfigPath],
+) -> Result<Option<PreparedForceStrip>, AgentCommandError> {
+    let source = read_config_source(companion_target).map_err(AgentCommandError::internal)?;
+    if !source.existed {
+        return Ok(None);
+    }
+    let document = parse_source_bytes(Some(source.exact_bytes.as_slice()), format, label)
+        .map_err(AgentCommandError::internal)?;
+    let removals = connector
+        .disconnect_companion_patch_for_document(
+            primary_target,
+            companion_target,
+            &document,
+            owned_paths,
+        )
+        .map_err(AgentCommandError::internal)?;
+    validate_patch_ownership(&removals, owned_paths).map_err(AgentCommandError::internal)?;
+    if removals.is_empty() {
+        return Ok(None);
+    }
+    prepare_force_strip_projection(
+        companion_target,
+        source,
+        document,
+        format,
+        label,
+        &removals,
+        None,
+    )
+    .map(Some)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_force_strip_projection(
+    target: &Path,
+    source: ConfigSource,
+    mut document: super::config_codec::ConfigDocument,
+    format: DocumentFormat,
+    label: &'static str,
+    removals: &[PatchOperation],
+    reconnect_connector: Option<&dyn Connector>,
+) -> Result<PreparedForceStrip, AgentCommandError> {
+    apply_patch(&mut document, removals).map_err(AgentCommandError::internal)?;
+    if let Some(connector) = reconnect_connector {
+        validate_force_forget_reconnect(connector, &document)
+            .map_err(AgentCommandError::internal)?;
+    }
+    let rendered = render_document(&document, label).map_err(AgentCommandError::internal)?;
+    let expected_before_hash =
+        super::plan::file_revision_hash(target, &source).map_err(AgentCommandError::internal)?;
+    let projected = ConfigSource::existing(
+        rendered.as_bytes().to_vec(),
+        source.original_permissions,
+        source.original_owner.clone(),
+    );
+    let expected_after_hash =
+        super::plan::file_revision_hash(target, &projected).map_err(AgentCommandError::internal)?;
+    Ok(PreparedForceStrip {
+        target: target.to_path_buf(),
+        rendered: Zeroizing::new(rendered.into_bytes()),
+        permissions: source.original_permissions,
+        original_owner: source.original_owner.clone(),
+        expected_before_hash,
+        expected_after_hash,
+        format,
+        label,
+    })
+}
+
+/// Fail closed before force-forget writes a primary config that the same
+/// Connector cannot safely connect again. The check is purely in memory and
+/// uses fixed non-secret fixture values; it performs no network request and
+/// never reads the runtime virtual key.
+fn validate_force_forget_reconnect(
+    connector: &dyn Connector,
+    disconnected: &super::config_codec::ConfigDocument,
 ) -> Result<(), String> {
-    let dir = target
-        .parent()
-        .ok_or_else(|| "配置路径缺少父目录".to_string())?;
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "配置路径缺少文件名".to_string())?;
-    let tmp = dir.join(format!(".{file_name}.ts-force"));
-    std::fs::write(&tmp, bytes).map_err(|_| "写入临时配置失败".to_string())?;
-    #[cfg(unix)]
-    if let Some(mode) = permissions {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
-    }
-    #[cfg(not(unix))]
-    let _ = permissions;
-    if let Err(error) = super::safe_fs::atomic_replace(&tmp, target) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("原子替换配置失败：{error}"));
-    }
-    Ok(())
+    const RECONNECT_BASE_URL: &str =
+        "http://127.0.0.1:8787/agents/token-station-reconnect-check/v1";
+    const RECONNECT_TOKEN: &str = "token-station-reconnect-check";
+
+    let rendered = render_document(disconnected, connector.label())?;
+    let mut projected = parse_rendered(&rendered, connector.format(), connector.label())?;
+    let owned_paths = connector.owned_paths();
+    prepare_owned_paths_for_write(&mut projected, &owned_paths)?;
+    connector.validate_source(&projected)?;
+    let input = ConnectInput {
+        base_url: RECONNECT_BASE_URL,
+        token: Some(RECONNECT_TOKEN),
+        adapter_ready: true,
+        model_metadata: None,
+    };
+    let reconnect = connector.connect_patch_for_document(&projected, &input)?;
+    validate_patch_ownership(&reconnect, &owned_paths)?;
+    apply_patch(&mut projected, &reconnect)?;
+    connector.validate_projected(&projected, &input)?;
+    let reparsed = parse_rendered(
+        &render_document(&projected, connector.label())?,
+        connector.format(),
+        connector.label(),
+    )?;
+    connector.validate_projected(&reparsed, &input)
 }
 
 impl AgentCommandState {
@@ -661,21 +1014,39 @@ impl AgentCommandState {
 
     #[cfg(test)]
     fn scan(&self) -> Result<Vec<AgentView>, AgentCommandError> {
-        self.scan_with_runtime(None)
+        self.scan_with_runtime(None, None)
     }
 
     fn scan_with_runtime(
         &self,
         runtime: Option<&AgentProxyRuntime>,
+        opencode_issue: Option<&AgentConnectionIssueView>,
     ) -> Result<Vec<AgentView>, AgentCommandError> {
         let _scan_guard = self.begin_scan()?;
         let snapshot = self.perform_scan()?;
-        let views = self.views(&snapshot, runtime)?;
+        let views = self.views(&snapshot, runtime, opencode_issue)?;
         self.session
             .lock()
             .map_err(|_| AgentCommandError::boundary("state_poisoned", "Agent 会话状态不可用"))?
             .scan = Some(snapshot);
         Ok(views)
+    }
+
+    fn cached_views_with_runtime(
+        &self,
+        runtime: Option<&AgentProxyRuntime>,
+        opencode_issue: Option<&AgentConnectionIssueView>,
+    ) -> Result<Vec<AgentView>, AgentCommandError> {
+        let snapshot = self
+            .session
+            .lock()
+            .map_err(|_| AgentCommandError::boundary("state_poisoned", "Agent 会话状态不可用"))?
+            .scan
+            .clone()
+            .ok_or_else(|| {
+                AgentCommandError::boundary("scan_required", "请先执行服务端 Agent 扫描")
+            })?;
+        self.views(&snapshot, runtime, opencode_issue)
     }
 
     /// Re-reads managed Agent files and validates their projected values
@@ -763,6 +1134,9 @@ impl AgentCommandState {
                 if !connector.projects_model_metadata() {
                     continue;
                 }
+                if let Some(issue) = runtime.connection_issue(&owned.connector_id) {
+                    return Err(AgentCommandError::connection_issue(issue));
+                }
                 let target = Path::new(&owned.target_config_path);
                 let source = read_config_source(target).map_err(AgentCommandError::internal)?;
                 let input = runtime.input_for(&owned.connector_id)?;
@@ -820,6 +1194,7 @@ impl AgentCommandState {
         &self,
         snapshot: &ScanSnapshot,
         runtime: Option<&AgentProxyRuntime>,
+        opencode_issue: Option<&AgentConnectionIssueView>,
     ) -> Result<Vec<AgentView>, AgentCommandError> {
         let metadata = self.registry.ui_metadata();
         self.registry
@@ -854,6 +1229,16 @@ impl AgentCommandState {
                                 .and_then(|connector_id| runtime.input_for(connector_id).ok())
                                 .map(|input| input.adapter_ready)
                         });
+                        let connection_issue = runtime
+                            .and_then(|runtime| {
+                                connector_id.and_then(|id| runtime.connection_issue(id))
+                            })
+                            .or_else(|| {
+                                (connector_id == Some("opencode-v1"))
+                                    .then_some(opencode_issue)
+                                    .flatten()
+                            })
+                            .cloned();
                         let ownership_available = ownership.is_ok();
                         let managed = ownership.is_ok_and(|records| !records.is_empty());
                         let connected = ownership_available && runtime.is_some_and(|runtime| {
@@ -864,6 +1249,7 @@ impl AgentCommandState {
                             discovery: record,
                             compatibility,
                             adapter_ready,
+                            connection_issue,
                             managed,
                             connected,
                         })
@@ -1010,6 +1396,9 @@ impl AgentCommandState {
             }
         }
         let connector = connector_for(connector_id)?;
+        if let Some(issue) = runtime.connection_issue(connector_id) {
+            return Err(AgentCommandError::connection_issue(issue));
+        }
         if !connector.supports_platform(record.environment) {
             return Err(AgentCommandError::boundary(
                 "unsupported_platform",
@@ -1116,6 +1505,12 @@ impl AgentCommandState {
                 "该安装实例没有可清除的接管记录",
             ));
         }
+        if owned.len() != 1 {
+            return Err(AgentCommandError::boundary(
+                "ownership_ambiguous",
+                "该安装实例存在多条归属记录，必须使用逐项快照恢复",
+            ));
+        }
 
         // Parse every companion format before writing anything. If the connector's
         // explicit contract cannot confirm a legacy ownership format, force
@@ -1135,43 +1530,47 @@ impl AgentCommandState {
             })
             .collect::<Result<Vec<_>, AgentCommandError>>()?;
 
-        for (ownership, companion_formats) in owned.into_iter().zip(companion_formats) {
+        let mut prepared_strips = Vec::new();
+        for (ownership, companion_formats) in owned.iter().zip(&companion_formats) {
             let connector = connector_for(&ownership.connector_id)?;
             let target = Path::new(&ownership.target_config_path);
-            let source = read_config_source(target).map_err(AgentCommandError::internal)?;
-            let document = parse_source_bytes(
-                source.existed.then_some(source.exact_bytes.as_slice()),
-                connector.format(),
-                connector.label(),
-            )
-            .map_err(AgentCommandError::internal)?;
-            let disconnect = connector
-                .disconnect_patch_for_document(&document)
-                .map_err(AgentCommandError::internal)?;
             // Main config: regular connectors use fixed Remove operations, while
             // WorkBuddy filters dynamically by model ID so force disconnect does
             // not remove models the user added later.
-            force_strip_owned(target, connector.format(), connector.label(), &disconnect)?;
+            if let Some(prepared) = prepare_connector_force_strip_owned(target, connector)? {
+                prepared_strips.push(prepared);
+            }
             // Companion config: parse the persisted format or a connector's
             // explicit legacy contract, then remove owned_paths.
-            for (companion, document_format) in
-                ownership.companion_files.iter().zip(companion_formats)
+            for (companion, document_format) in ownership
+                .companion_files
+                .iter()
+                .zip(companion_formats.iter().copied())
             {
-                let removals: Vec<PatchOperation> = companion
-                    .owned_paths
-                    .iter()
-                    .map(|owned_path| PatchOperation {
-                        operation: PatchKind::Remove,
-                        path: owned_path.clone(),
-                        value: None,
-                    })
-                    .collect();
-                force_strip_owned(
+                if let Some(prepared) = prepare_connector_companion_force_strip_owned(
+                    target,
                     Path::new(&companion.target_config_path),
+                    connector,
                     document_format,
                     "companion 配置",
-                    &removals,
-                )?;
+                    &companion.owned_paths,
+                )? {
+                    prepared_strips.push(prepared);
+                }
+            }
+        }
+
+        let written_strips =
+            commit_force_strips(&prepared_strips, &FsAtomicConfigWriter, &read_config_source)?;
+
+        for ownership in &owned {
+            if let Err(error) = self.ownership.remove(&ownership.key(), ownership.revision) {
+                rollback_force_strips(&prepared_strips, &written_strips, &FsAtomicConfigWriter);
+                return Err(AgentCommandError::internal(error));
+            }
+        }
+        for ownership in owned {
+            for companion in &ownership.companion_files {
                 let _ = self
                     .snapshots
                     .set_pinned(&companion.baseline_snapshot_id, false);
@@ -1179,9 +1578,6 @@ impl AgentCommandState {
             let _ = self
                 .snapshots
                 .set_pinned(&ownership.baseline_snapshot_id, false);
-            self.ownership
-                .remove(&ownership.key(), ownership.revision)
-                .map_err(AgentCommandError::internal)?;
         }
         Ok(())
     }
@@ -1600,6 +1996,28 @@ impl AgentCommandState {
         runtime: Option<&AgentProxyRuntime>,
     ) -> Result<TransactionOutcome, AgentCommandError> {
         self.refresh_scan()?;
+        self.apply_from_cached_scan(
+            operation_id,
+            confirmation_token,
+            session_label,
+            expected_intents,
+            runtime,
+        )
+    }
+
+    /// Apply a confirmed plan against the scan snapshot already stored in this
+    /// command state. Production callers refresh immediately before reaching
+    /// this boundary; tests inject an isolated scan so the full confirmation,
+    /// discovery-binding and transaction path can run without touching real
+    /// Agent installations.
+    fn apply_from_cached_scan(
+        &self,
+        operation_id: &str,
+        confirmation_token: &str,
+        session_label: &str,
+        expected_intents: &[PlanIntent],
+        runtime: Option<&AgentProxyRuntime>,
+    ) -> Result<TransactionOutcome, AgentCommandError> {
         let taken = self.take_plan(
             operation_id,
             confirmation_token,
@@ -1676,6 +2094,116 @@ impl AgentCommandState {
             ),
         };
         result.map_err(AgentCommandError::from)
+    }
+}
+
+fn commit_force_strips(
+    prepared: &[PreparedForceStrip],
+    writer: &dyn AtomicConfigWriter,
+    read_source: &dyn Fn(&Path) -> Result<ConfigSource, String>,
+) -> Result<Vec<(usize, ConfigSource)>, AgentCommandError> {
+    let mut written_strips: Vec<(usize, ConfigSource)> = Vec::new();
+    for (index, strip) in prepared.iter().enumerate() {
+        let current = match read_source(&strip.target) {
+            Ok(current) => current,
+            Err(error) => {
+                rollback_force_strips(prepared, &written_strips, writer);
+                return Err(AgentCommandError::internal(error));
+            }
+        };
+        let current_hash = match super::plan::file_revision_hash(&strip.target, &current) {
+            Ok(hash) => hash,
+            Err(error) => {
+                rollback_force_strips(prepared, &written_strips, writer);
+                return Err(AgentCommandError::internal(error));
+            }
+        };
+        if current_hash != strip.expected_before_hash {
+            rollback_force_strips(prepared, &written_strips, writer);
+            return Err(AgentCommandError::boundary(
+                "target_changed_before_force_forget",
+                "配置在恢复前已变化，请重新扫描后再试",
+            ));
+        }
+        if let Err(failure) = writer.replace(
+            &strip.target,
+            strip.rendered.as_slice(),
+            strip.permissions,
+            strip.original_owner.as_deref(),
+            &strip.expected_before_hash,
+            false,
+        ) {
+            if failure.target_replaced {
+                written_strips.push((index, current));
+            }
+            rollback_force_strips(prepared, &written_strips, writer);
+            return Err(AgentCommandError::internal(format!(
+                "原子替换配置失败（{:?}）",
+                failure.stage
+            )));
+        }
+        let written = match read_source(&strip.target) {
+            Ok(written) => written,
+            Err(error) => {
+                written_strips.push((index, current));
+                rollback_force_strips(prepared, &written_strips, writer);
+                return Err(AgentCommandError::internal(error));
+            }
+        };
+        let written_hash = match super::plan::file_revision_hash(&strip.target, &written) {
+            Ok(hash) => hash,
+            Err(error) => {
+                written_strips.push((index, current));
+                rollback_force_strips(prepared, &written_strips, writer);
+                return Err(AgentCommandError::internal(error));
+            }
+        };
+        if written_hash != strip.expected_after_hash {
+            written_strips.push((index, current));
+            rollback_force_strips(prepared, &written_strips, writer);
+            return Err(AgentCommandError::internal(
+                "恢复后的配置 revision 与计划不一致".to_string(),
+            ));
+        }
+        let reparsed = match parse_source_bytes(
+            written.existed.then_some(written.exact_bytes.as_slice()),
+            strip.format,
+            strip.label,
+        ) {
+            Ok(reparsed) => reparsed,
+            Err(error) => {
+                written_strips.push((index, current));
+                rollback_force_strips(prepared, &written_strips, writer);
+                return Err(AgentCommandError::internal(error));
+            }
+        };
+        if render_document(&reparsed, strip.label).is_err() {
+            written_strips.push((index, current));
+            rollback_force_strips(prepared, &written_strips, writer);
+            return Err(AgentCommandError::internal(
+                "恢复后的配置无法通过写后复验".to_string(),
+            ));
+        }
+        written_strips.push((index, current));
+    }
+    Ok(written_strips)
+}
+
+fn rollback_force_strips(
+    prepared: &[PreparedForceStrip],
+    written: &[(usize, ConfigSource)],
+    writer: &dyn AtomicConfigWriter,
+) {
+    for (index, source) in written.iter().rev() {
+        let strip = &prepared[*index];
+        let _ = writer.replace(
+            &strip.target,
+            source.exact_bytes.as_slice(),
+            source.original_permissions,
+            source.original_owner.as_deref(),
+            &strip.expected_after_hash,
+            false,
+        );
     }
 }
 
@@ -1867,29 +2395,42 @@ pub(crate) fn runtime_from_app(
             )
         })
         .collect();
-    let config = inner.materialize().map_err(AgentCommandError::internal)?;
+    let config = serving.serving_config();
     let mut model_metadata = BTreeMap::new();
     for connector in builtin_connectors() {
         let agent_id = connector.agent_id();
         if model_metadata.contains_key(agent_id) {
             continue;
         }
+        let router =
+            serving_router_for_agent(serving, agent_id).map_err(AgentCommandError::internal)?;
         if let Some(metadata) =
-            agent_model_metadata(&config, agent_id).map_err(AgentCommandError::internal)?
+            agent_model_metadata_for_router(config, &router).map_err(AgentCommandError::internal)?
         {
             model_metadata.insert(agent_id.to_string(), metadata);
         }
     }
+    let mut connection_issues = BTreeMap::new();
+    let opencode_router =
+        serving_router_for_agent(serving, "opencode").map_err(AgentCommandError::internal)?;
+    if let Some(issue) = opencode_connection_issue(config, &opencode_router) {
+        connection_issues.insert("opencode-v1".to_owned(), issue);
+    }
+    let virtual_key = serve.virtual_key.ok_or_else(|| {
+        AgentCommandError::boundary(
+            "local_auth_disabled",
+            "Agent 接入需要稳定的本地虚拟 Key；请先在设置中开启本地鉴权并重启代理",
+        )
+    })?;
     Ok(AgentProxyRuntime::new(
         serve.instance_id.ok_or_else(|| {
             AgentCommandError::boundary("proxy_not_running", "代理运行实例身份不可用")
         })?,
         &origin,
-        serve
-            .virtual_key
-            .unwrap_or_else(|| "token-station-no-auth".to_string()),
+        virtual_key,
         adapter_readiness,
         model_metadata,
+        connection_issues,
     ))
 }
 
@@ -1904,7 +2445,28 @@ pub(crate) fn scan_agents(
     app_state: State<'_, AppStateManaged>,
 ) -> Result<Vec<AgentView>, AgentCommandError> {
     let runtime = runtime_from_app(app_state.inner()).ok();
-    state.scan_with_runtime(runtime.as_ref())
+    let opencode_issue = app_state
+        .inner()
+        .0
+        .lock()
+        .ok()
+        .and_then(|inner| opencode_issue_from_inner(&inner).ok().flatten());
+    state.scan_with_runtime(runtime.as_ref(), opencode_issue.as_ref())
+}
+
+#[tauri::command(async)]
+pub(crate) fn get_cached_agent_views(
+    state: State<'_, AgentCommandState>,
+    app_state: State<'_, AppStateManaged>,
+) -> Result<Vec<AgentView>, AgentCommandError> {
+    let runtime = runtime_from_app(app_state.inner()).ok();
+    let opencode_issue = app_state
+        .inner()
+        .0
+        .lock()
+        .ok()
+        .and_then(|inner| opencode_issue_from_inner(&inner).ok().flatten());
+    state.cached_views_with_runtime(runtime.as_ref(), opencode_issue.as_ref())
 }
 
 const CURSOR_APPLICATION_USER_KEY: &str =
@@ -2073,6 +2635,7 @@ fn configure_cursor_database(
         "openAIBaseUrl".to_string(),
         serde_json::Value::String(base_url.to_string()),
     );
+    object.insert("useOpenAIKey".to_string(), serde_json::Value::Bool(true));
     let encoded = serde_json::to_string(&application_user)
         .map_err(|_| "无法序列化 Cursor applicationUser".to_string())?;
 
@@ -2097,42 +2660,49 @@ fn configure_cursor_database(
     transaction.commit().map_err(|error| error.to_string())?;
     drop(connection);
 
-    let verified = Connection::open(db_path).map_err(|error| error.to_string())?;
-    let updated_application_user: String = verified
-        .query_row(
-            "SELECT value FROM ItemTable WHERE key = ?1",
-            [CURSOR_APPLICATION_USER_KEY],
-            |row| row.get(0),
-        )
-        .map_err(|_| "Cursor Base URL 回读失败".to_string())?;
-    let updated_openai_key: Option<String> = verified
-        .query_row(
-            "SELECT value FROM ItemTable WHERE key = ?1",
-            [CURSOR_OPENAI_KEY],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|_| "Cursor 加密 API Key 回读失败".to_string())?;
-    let base_url_matches = serde_json::from_str::<serde_json::Value>(&updated_application_user)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("openAIBaseUrl")
-                .and_then(serde_json::Value::as_str)
-                .map(|value| value == base_url)
-        })
-        .unwrap_or(false);
-    if !base_url_matches || updated_openai_key.as_deref() != Some(token) {
-        drop(verified);
-        restore_cursor_settings(
-            db_path,
-            &original_application_user,
-            encrypted_openai_key.as_deref(),
-        )
-        .map_err(|error| format!("Cursor 配置验证失败，且恢复原设置失败：{error}"))?;
-        return Err("Cursor 配置验证失败，已恢复原设置".to_string());
-    }
-    Ok(backup_path)
+    let verification = (|| -> Result<bool, String> {
+        let verified = Connection::open(db_path)
+            .map_err(|error| format!("Cursor 配置数据库回读失败：{error}"))?;
+        let updated_application_user: String = verified
+            .query_row(
+                "SELECT value FROM ItemTable WHERE key = ?1",
+                [CURSOR_APPLICATION_USER_KEY],
+                |row| row.get(0),
+            )
+            .map_err(|_| "Cursor Base URL 回读失败".to_string())?;
+        let updated_openai_key: Option<String> = verified
+            .query_row(
+                "SELECT value FROM ItemTable WHERE key = ?1",
+                [CURSOR_OPENAI_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| "Cursor 加密 API Key 回读失败".to_string())?;
+        let updated_application_user =
+            serde_json::from_str::<serde_json::Value>(&updated_application_user)
+                .map_err(|_| "Cursor applicationUser 回读结果不是合法 JSON".to_string())?;
+        let base_url_matches = updated_application_user
+            .get("openAIBaseUrl")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value == base_url);
+        let openai_key_enabled = updated_application_user
+            .get("useOpenAIKey")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        Ok(base_url_matches && openai_key_enabled && updated_openai_key.as_deref() == Some(token))
+    })();
+    let verification_error = match verification {
+        Ok(true) => return Ok(backup_path),
+        Ok(false) => "Cursor 配置验证不一致".to_string(),
+        Err(error) => error,
+    };
+    restore_cursor_settings(
+        db_path,
+        &original_application_user,
+        encrypted_openai_key.as_deref(),
+    )
+    .map_err(|error| format!("{verification_error}，且恢复原设置失败：{error}"))?;
+    Err(format!("{verification_error}，已恢复原设置"))
 }
 
 /// Cursor keeps BYOK settings in its globalStorage SQLite database rather than
@@ -2169,7 +2739,7 @@ pub(crate) fn configure_cursor_provider(
     )
     .map_err(AgentCommandError::internal)?;
     Ok(format!(
-        "Cursor 已接入 Token Station，原设置已备份到 {}。下次启动 Cursor 时生效。",
+        "Cursor 的 OpenAI BYOK 通道已接入 Token Station，原设置已备份到 {}。下次启动 Cursor 时生效；请在 Cursor 中选择支持自定义 OpenAI Key 的模型。",
         backup.display()
     ))
 }
@@ -2289,14 +2859,44 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::agent_integration::config_codec::semantic_json;
     use crate::agent_integration::connectors::ConnectInput;
     use crate::agent_integration::plan::build_connection_plan;
     use crate::agent_integration::types::{
         AllowedAction, BinarySource, ConfigPath, ConfirmationKind, Diagnostic, DiscoveryEvidence,
-        DiscoverySource, DriftScope, DriftStatus, Platform,
+        DiscoverySource, DriftScope, DriftStatus, PatchKind, Platform,
     };
 
     struct MemoryMasterKey;
+
+    #[test]
+    fn force_forget_reconnect_validator_covers_every_builtin_connector() {
+        let fixtures = [
+            ("claude-code-v1", DocumentFormat::Json, r#"{"env":{}}"#),
+            ("claude-desktop-3p-v1", DocumentFormat::Json, "{}"),
+            ("codex-v1", DocumentFormat::Toml, "[model_providers]\n"),
+            ("gemini-cli-v1", DocumentFormat::Dotenv, ""),
+            ("hermes-v1", DocumentFormat::Yaml, "model:\n"),
+            (
+                "openclaw-v1",
+                DocumentFormat::Json5,
+                "{ models: { providers: {} }, agents: { defaults: {} } }",
+            ),
+            ("opencode-v1", DocumentFormat::Json, r#"{"provider":{}}"#),
+            (
+                "workbuddy-v1",
+                DocumentFormat::Json,
+                r#"{"models":[],"availableModels":[]}"#,
+            ),
+        ];
+
+        for (connector_id, format, source) in fixtures {
+            let connector = connector_for(connector_id).unwrap();
+            let document = parse_rendered(source, format, connector.label()).unwrap();
+            validate_force_forget_reconnect(connector, &document)
+                .unwrap_or_else(|error| panic!("{connector_id}: {error}"));
+        }
+    }
 
     impl MasterKeyStore for MemoryMasterKey {
         fn load_or_create(&self, _allow_create: bool) -> Result<Zeroizing<[u8; 32]>, String> {
@@ -2403,6 +3003,7 @@ mod tests {
             token.to_string(),
             adapter_readiness,
             BTreeMap::new(),
+            BTreeMap::new(),
         )
     }
 
@@ -2446,6 +3047,7 @@ mod tests {
 
         draft["agent_routes"]["workbuddy"] = json!({
             "mode": "custom",
+            "routing_mode": "tiered",
             "custom_route": {
                 "high": {"upstream": "provider_a", "model": "glm-5.2"},
                 "mid": {"upstream": "provider_a", "model": "glm-5.2"},
@@ -2554,6 +3156,354 @@ mod tests {
         assert_eq!(metadata.cost.as_ref().map(|cost| cost.output), Some(0.6));
     }
 
+    #[test]
+    fn opencode_refuses_assumed_context_and_reports_the_exact_missing_target() {
+        let root = scratch("opencode-fail-closed-limits");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://provider.example/v1",
+            "models": [{
+                "model": "unknown-context",
+                "context_window": 0,
+                "max_output_tokens": 1
+            }]
+        });
+        draft["router"]["assumed_context_window"] = json!(128_000);
+        draft["router"]["pools"] = json!({
+            "tier_low": [{"upstream": "provider", "model": "unknown-context"}]
+        });
+        draft["router"]["default_pool"] = json!("tier_low");
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        let issue = opencode_connection_issue(&config, &config.router)
+            .expect("an assumed context is not a trustworthy provider fact");
+
+        assert_eq!(issue.code, "model_contract_missing_context_window");
+        assert_eq!(issue.target.as_deref(), Some("provider/unknown-context"));
+        assert!(issue.message.contains("不会使用路由假定值"));
+    }
+
+    struct LifecycleFileFixture {
+        path: PathBuf,
+        baseline: &'static [u8],
+        format: DocumentFormat,
+        marker: &'static str,
+    }
+
+    struct LifecycleCase {
+        label: &'static str,
+        agent_id: &'static str,
+        connector_id: &'static str,
+        version: &'static str,
+        installation_path: String,
+        primary: LifecycleFileFixture,
+        companions: Vec<LifecycleFileFixture>,
+    }
+
+    fn non_codex_lifecycle_cases(root: &Path) -> Vec<LifecycleCase> {
+        let claude_desktop_support = root.join("claude-desktop/Application Support");
+        let claude_desktop_library = claude_desktop_support
+            .join("Claude-3p")
+            .join("configLibrary");
+        let claude_desktop_primary =
+            claude_desktop_library.join("7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2.json");
+
+        vec![
+            LifecycleCase {
+                label: "claude-code",
+                agent_id: "claude-code",
+                connector_id: "claude-code-v1",
+                version: "2.1.211",
+                installation_path: root
+                    .join("install/claude")
+                    .to_string_lossy()
+                    .into_owned(),
+                primary: LifecycleFileFixture {
+                    path: root.join("home/.claude/settings.json"),
+                    baseline: br#"{"env":null,"keep":"claude-code"}"#,
+                    format: DocumentFormat::Json,
+                    marker: "claude-code",
+                },
+                companions: Vec::new(),
+            },
+            LifecycleCase {
+                label: "claude-desktop",
+                agent_id: "claude-desktop",
+                connector_id: "claude-desktop-3p-v1",
+                version: "1.0.0",
+                installation_path: root
+                    .join("install/Claude.app/Contents/MacOS/Claude")
+                    .to_string_lossy()
+                    .into_owned(),
+                primary: LifecycleFileFixture {
+                    path: claude_desktop_primary,
+                    baseline: br#"{"keep":"claude-desktop"}"#,
+                    format: DocumentFormat::Json,
+                    marker: "claude-desktop",
+                },
+                companions: vec![
+                    LifecycleFileFixture {
+                        path: claude_desktop_library.join("_meta.json"),
+                        baseline: br#"{"appliedId":"user-profile","entries":[{"id":"user-profile","name":"User"}],"keep":"desktop-meta"}"#,
+                        format: DocumentFormat::Json,
+                        marker: "user-profile",
+                    },
+                    LifecycleFileFixture {
+                        path: claude_desktop_support.join("Claude/config.json"),
+                        baseline: br#"{"keep":"desktop-official"}"#,
+                        format: DocumentFormat::Json,
+                        marker: "desktop-official",
+                    },
+                    LifecycleFileFixture {
+                        path: claude_desktop_support.join("Claude-3p/config.json"),
+                        baseline: br#"{"keep":"desktop-3p"}"#,
+                        format: DocumentFormat::Json,
+                        marker: "desktop-3p",
+                    },
+                ],
+            },
+            LifecycleCase {
+                label: "gemini-cli",
+                agent_id: "gemini-cli",
+                connector_id: "gemini-cli-v1",
+                version: "1.0.0",
+                installation_path: root
+                    .join("install/gemini")
+                    .to_string_lossy()
+                    .into_owned(),
+                primary: LifecycleFileFixture {
+                    path: root.join("home/.gemini/.env"),
+                    baseline: b"UNOWNED=gemini\n",
+                    format: DocumentFormat::Dotenv,
+                    marker: "UNOWNED=gemini",
+                },
+                companions: vec![LifecycleFileFixture {
+                    path: root.join("home/.gemini/settings.json"),
+                    baseline: br#"{"security":null,"keep":"gemini-settings"}"#,
+                    format: DocumentFormat::Json,
+                    marker: "gemini-settings",
+                }],
+            },
+            LifecycleCase {
+                label: "hermes",
+                agent_id: "nous-hermes-agent",
+                connector_id: "hermes-v1",
+                version: "0.18.0",
+                installation_path: root
+                    .join("install/hermes")
+                    .to_string_lossy()
+                    .into_owned(),
+                primary: LifecycleFileFixture {
+                    path: root.join("home/.hermes/config.yaml"),
+                    baseline: b"# keep Hermes comment\nmodel:\nfallback_providers: []\n",
+                    format: DocumentFormat::Yaml,
+                    marker: "fallback_providers",
+                },
+                companions: Vec::new(),
+            },
+            LifecycleCase {
+                label: "openclaw",
+                agent_id: "openclaw",
+                connector_id: "openclaw-v1",
+                version: "1.0.0",
+                installation_path: root
+                    .join("install/openclaw")
+                    .to_string_lossy()
+                    .into_owned(),
+                primary: LifecycleFileFixture {
+                    path: root.join("home/.openclaw/openclaw.json"),
+                    baseline: b"{ // keep OpenClaw comment\n models: null, agents: null, keep: 'openclaw'\n}\n",
+                    format: DocumentFormat::Json5,
+                    marker: "openclaw",
+                },
+                companions: Vec::new(),
+            },
+            LifecycleCase {
+                label: "opencode",
+                agent_id: "opencode",
+                connector_id: "opencode-v1",
+                version: "1.18.2",
+                installation_path: root
+                    .join("install/opencode")
+                    .to_string_lossy()
+                    .into_owned(),
+                primary: LifecycleFileFixture {
+                    path: root.join("home/.config/opencode/opencode.json"),
+                    baseline: br#"{"provider":null,"keep":"opencode"}"#,
+                    format: DocumentFormat::Json,
+                    marker: "opencode",
+                },
+                companions: Vec::new(),
+            },
+            LifecycleCase {
+                label: "workbuddy",
+                agent_id: "workbuddy",
+                connector_id: "workbuddy-v1",
+                version: "1.0.0",
+                installation_path: root
+                    .join("install/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy")
+                    .to_string_lossy()
+                    .into_owned(),
+                primary: LifecycleFileFixture {
+                    path: root.join("home/.workbuddy/models.json"),
+                    baseline: br#"{"models":[{"id":"user-model","name":"User"}],"availableModels":["user-model"],"keep":"workbuddy"}"#,
+                    format: DocumentFormat::Json,
+                    marker: "user-model",
+                },
+                companions: Vec::new(),
+            },
+        ]
+    }
+
+    fn seed_lifecycle_case(case: &LifecycleCase) {
+        for file in std::iter::once(&case.primary).chain(&case.companions) {
+            std::fs::create_dir_all(file.path.parent().unwrap()).unwrap();
+            std::fs::write(&file.path, file.baseline).unwrap();
+        }
+    }
+
+    fn lifecycle_record(case: &LifecycleCase) -> DiscoveryRecord {
+        let mut installation = record(&case.primary.path, false);
+        installation.agent_id = case.agent_id.to_string();
+        installation.executable_path = case.installation_path.clone();
+        installation.canonical_path = case.installation_path.clone();
+        installation.version_raw = Some(case.version.to_string());
+        installation.version_normalized = Some(case.version.to_string());
+        installation.evidence[0].observed_path = case.installation_path.clone();
+        installation
+    }
+
+    fn apply_lifecycle_connection(
+        state: &AgentCommandState,
+        case: &LifecycleCase,
+        runtime: &AgentProxyRuntime,
+        session_label: &str,
+    ) -> ConfigPlanView {
+        let plan = state
+            .plan_connection(
+                case.agent_id,
+                &case.installation_path,
+                Some(case.version),
+                session_label,
+                runtime,
+            )
+            .unwrap_or_else(|error| panic!("{} plan failed: {}", case.label, error.message));
+        assert_eq!(plan.plan.connector_id, case.connector_id);
+        assert_eq!(
+            plan.plan.projection.files.len(),
+            1 + case.companions.len(),
+            "{} must include every companion in the public projection",
+            case.label
+        );
+        let public_plan = serde_json::to_string(&plan.plan).unwrap();
+        assert!(!public_plan.contains(runtime.virtual_key()));
+        state
+            .apply_from_cached_scan(
+                &plan.plan.operation_id,
+                &plan.confirmation_token,
+                session_label,
+                &[PlanIntent::Connect],
+                Some(runtime),
+            )
+            .unwrap_or_else(|error| panic!("{} apply failed: {}", case.label, error.message));
+        plan
+    }
+
+    fn lifecycle_files(case: &LifecycleCase) -> impl Iterator<Item = &LifecycleFileFixture> {
+        std::iter::once(&case.primary).chain(&case.companions)
+    }
+
+    fn assert_lifecycle_files(
+        case: &LifecycleCase,
+        forbidden_tokens: &[&str],
+        expected_token: Option<&str>,
+    ) {
+        let connector = connector_for(case.connector_id).unwrap();
+        for file in lifecycle_files(case) {
+            let bytes = std::fs::read(&file.path).unwrap_or_else(|error| {
+                panic!(
+                    "{} cannot read {}: {error}",
+                    case.label,
+                    file.path.display()
+                )
+            });
+            parse_source_bytes(Some(&bytes), file.format, case.label).unwrap_or_else(|error| {
+                panic!(
+                    "{} cannot parse {}: {error}",
+                    case.label,
+                    file.path.display()
+                )
+            });
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                text.contains(file.marker),
+                "{} must preserve marker {} in {}",
+                case.label,
+                file.marker,
+                file.path.display()
+            );
+            for token in forbidden_tokens {
+                assert!(
+                    !text.contains(token),
+                    "{} leaked an obsolete credential into {}",
+                    case.label,
+                    file.path.display()
+                );
+            }
+            #[cfg(unix)]
+            if expected_token.is_some() {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(&file.path).unwrap().permissions().mode() & 0o777,
+                    0o600,
+                    "{} must keep managed files private",
+                    case.label
+                );
+            }
+        }
+
+        if let Some(token) = expected_token {
+            let primary = std::fs::read(&case.primary.path).unwrap();
+            let document =
+                parse_source_bytes(Some(&primary), case.primary.format, case.label).unwrap();
+            let fixture_runtime = runtime(token);
+            connector
+                .validate_projected(
+                    &document,
+                    &fixture_runtime.input_for(case.connector_id).unwrap(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{} projected validation failed: {error}", case.label)
+                });
+            assert!(String::from_utf8_lossy(&primary).contains(token));
+        }
+    }
+
+    fn assert_lifecycle_ownership(
+        state: &AgentCommandState,
+        case: &LifecycleCase,
+        expected: usize,
+    ) {
+        let ownership = state
+            .ownership
+            .list_agent_installation(case.agent_id, &case.installation_path)
+            .unwrap();
+        assert_eq!(ownership.len(), expected, "{} ownership count", case.label);
+        if let Some(record) = ownership.first() {
+            assert_eq!(record.connector_id, case.connector_id);
+            assert_eq!(record.companion_files.len(), case.companions.len());
+        }
+    }
+
+    fn clean_lifecycle_case(state: &AgentCommandState, root: &Path) {
+        std::fs::remove_dir_all(root).ok();
+        if let Some(state_root) = state.paths.snapshot_root.parent() {
+            std::fs::remove_dir_all(state_root).ok();
+        }
+    }
+
     fn running_app_with_adapters(
         label: &str,
         installed_agents: &[&str],
@@ -2580,8 +3530,12 @@ mod tests {
 
         let data_dir = root.join("data");
         let mut draft = crate::template(&data_dir, &plugins_dir);
+        draft
+            .as_object_mut()
+            .expect("config fixture is an object")
+            .remove("routing");
         draft["server"]["listen"] = json!("127.0.0.1:0");
-        draft["server"]["auth"] = json!(false);
+        draft["server"]["auth"] = json!(true);
         draft["data"]["metrics"] = json!(false);
         draft["plugins"]["agents"] = json!(configured_agents);
         draft["upstreams"]["local"] = json!({
@@ -2782,7 +3736,7 @@ mod tests {
             warning: None,
             records: Vec::new(),
         };
-        let views = state.views(&empty, None).unwrap();
+        let views = state.views(&empty, None, None).unwrap();
         assert_eq!(views.len(), 9);
         assert!(views.iter().all(|view| {
             view.status == CompatibilityStatus::NotDetected && view.installations.is_empty()
@@ -2802,6 +3756,28 @@ mod tests {
         };
 
         assert_eq!(error.code, "scan_in_progress");
+    }
+
+    #[test]
+    fn commands_cached_views_require_a_snapshot_and_do_not_start_a_scan() {
+        let state = state("cached-views");
+        let missing = state
+            .cached_views_with_runtime(None, None)
+            .err()
+            .expect("cached views must fail before the startup scan");
+        assert_eq!(missing.code, "scan_required");
+
+        let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+        install_scan(&state, catalog, Vec::new());
+        state
+            .scan_in_progress
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let views = state.cached_views_with_runtime(None, None).unwrap();
+
+        assert_eq!(views.len(), 9);
+        assert!(views.iter().all(|view| view.installations.is_empty()));
+        assert!(state.scan_in_progress.load(Ordering::Acquire));
     }
 
     #[test]
@@ -2915,7 +3891,7 @@ mod tests {
         };
 
         let views = state
-            .views(&snapshot, Some(&runtime("vk-ownership-read-degrade")))
+            .views(&snapshot, Some(&runtime("vk-ownership-read-degrade")), None)
             .expect("read-only discovery remains available");
         let installation = &views
             .iter()
@@ -3393,9 +4369,10 @@ mod tests {
             "vk-readiness-view".to_string(),
             adapter_readiness,
             BTreeMap::new(),
+            BTreeMap::new(),
         );
 
-        let views = state.views(&snapshot, Some(&runtime)).unwrap();
+        let views = state.views(&snapshot, Some(&runtime), None).unwrap();
         let installation = &views
             .iter()
             .find(|view| view.metadata.agent_id == "claude-code")
@@ -3535,7 +4512,7 @@ mod tests {
             warning: None,
             records: vec![record(&target, false)],
         };
-        let views = state.views(&snapshot, None).unwrap();
+        let views = state.views(&snapshot, None, None).unwrap();
         let claude = views
             .iter()
             .find(|view| view.metadata.agent_id == "claude-code")
@@ -3773,6 +4750,609 @@ mod tests {
     }
 
     #[test]
+    fn force_strip_commit_rolls_back_primary_when_companion_read_fails() {
+        let root = scratch("force-strip-companion-read-failure");
+        let primary = root.join("primary.json");
+        let companion = root.join("companion.json");
+        std::fs::create_dir_all(&root).unwrap();
+        let primary_before = br#"{"owned":"remove","keep":"primary"}"#;
+        let companion_before = br#"{"owned":"remove","keep":"companion"}"#;
+        std::fs::write(&primary, primary_before).unwrap();
+        std::fs::write(&companion, companion_before).unwrap();
+        let removals = vec![PatchOperation {
+            operation: PatchKind::Remove,
+            path: ConfigPath {
+                segments: vec!["owned".to_string()],
+            },
+            value: None,
+        }];
+        let prepared = vec![
+            prepare_force_strip_owned(
+                &primary,
+                DocumentFormat::Json,
+                "primary fixture",
+                &removals,
+                None,
+            )
+            .unwrap()
+            .unwrap(),
+            prepare_force_strip_owned(
+                &companion,
+                DocumentFormat::Json,
+                "companion fixture",
+                &removals,
+                None,
+            )
+            .unwrap()
+            .unwrap(),
+        ];
+        let read_count = std::cell::Cell::new(0_usize);
+        let reader = |target: &Path| {
+            let call = read_count.get();
+            read_count.set(call + 1);
+            if call == 2 {
+                Err("simulated companion read failure".to_string())
+            } else {
+                read_config_source(target)
+            }
+        };
+
+        let error = match commit_force_strips(&prepared, &FsAtomicConfigWriter, &reader) {
+            Ok(_) => panic!("the second file read must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.message.contains("simulated companion read failure"));
+        assert_eq!(std::fs::read(&primary).unwrap(), primary_before);
+        assert_eq!(std::fs::read(&companion).unwrap(), companion_before);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn claude_desktop_force_forget_preserves_user_profile_metadata() {
+        const TOKEN_STATION_PROFILE_ID: &str = "7f60d1f4-8d8c-4f5c-9f4c-2c2530c4f9f2";
+
+        let state = state("claude-desktop-force-forget-metadata");
+        let root = scratch("claude-desktop-force-forget-metadata-target");
+        let library = root.join("Claude-3p/configLibrary");
+        let primary = library.join(format!("{TOKEN_STATION_PROFILE_ID}.json"));
+        let metadata = library.join("_meta.json");
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::write(&primary, br#"{"keep":"primary"}"#).unwrap();
+        std::fs::write(
+            &metadata,
+            format!(
+                r#"{{"appliedId":"user-profile","entries":[{{"id":"user-profile","name":"User"}},{{"id":"{TOKEN_STATION_PROFILE_ID}","name":"Token Station"}}],"keep":true}}"#
+            ),
+        )
+        .unwrap();
+
+        let applied_id = ConfigPath {
+            segments: vec!["appliedId".to_string()],
+        };
+        let entries = ConfigPath {
+            segments: vec!["entries".to_string()],
+        };
+        let primary_owned_paths = connector_for("claude-desktop-3p-v1").unwrap().owned_paths();
+        let primary_macs = primary_owned_paths
+            .iter()
+            .map(|path| (path.to_string(), "e".repeat(64)))
+            .collect();
+        let companion_macs = BTreeMap::from([
+            (applied_id.to_string(), "f".repeat(64)),
+            (entries.to_string(), "0".repeat(64)),
+        ]);
+        state
+            .ownership
+            .commit(
+                crate::agent_integration::ownership::OwnershipRecord {
+                    schema_version: 1,
+                    revision: 0,
+                    agent_id: "claude-desktop".to_string(),
+                    installation_path: "/Applications/Claude.app/Contents/MacOS/Claude".to_string(),
+                    target_config_path: primary.to_string_lossy().into_owned(),
+                    connector_id: "claude-desktop-3p-v1".to_string(),
+                    baseline_snapshot_id: "21".repeat(16),
+                    last_transaction_snapshot_id: "22".repeat(16),
+                    before_hash: "a".repeat(64),
+                    managed_after_hash: "b".repeat(64),
+                    owned_paths: primary_owned_paths,
+                    owned_value_macs: primary_macs,
+                    companion_files: vec![
+                        crate::agent_integration::ownership::CompanionOwnership {
+                            target_config_path: metadata.to_string_lossy().into_owned(),
+                            document_format: Some(DocumentFormat::Json),
+                            baseline_snapshot_id: "23".repeat(16),
+                            last_transaction_snapshot_id: "24".repeat(16),
+                            before_hash: "c".repeat(64),
+                            managed_after_hash: "d".repeat(64),
+                            owned_paths: vec![applied_id, entries],
+                            owned_value_macs: companion_macs,
+                        },
+                    ],
+                    acquired_at_ms: 1,
+                    updated_at_ms: 1,
+                },
+                None,
+            )
+            .unwrap();
+
+        state
+            .force_forget(
+                "claude-desktop",
+                "/Applications/Claude.app/Contents/MacOS/Claude",
+            )
+            .unwrap();
+
+        let restored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&metadata).unwrap()).unwrap();
+        assert_eq!(restored["appliedId"], "user-profile");
+        assert_eq!(
+            restored["entries"],
+            json!([{"id":"user-profile","name":"User"}])
+        );
+        assert_eq!(restored["keep"], true);
+        assert!(!restored.to_string().contains(TOKEN_STATION_PROFILE_ID));
+        assert!(state
+            .ownership
+            .list_agent_installation(
+                "claude-desktop",
+                "/Applications/Claude.app/Contents/MacOS/Claude"
+            )
+            .unwrap()
+            .is_empty());
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&state.paths.snapshot_root).ok();
+        std::fs::remove_dir_all(&state.paths.ownership_root).ok();
+    }
+
+    #[test]
+    fn workbuddy_force_strip_derives_the_dynamic_patch_from_the_written_revision() {
+        let root = scratch("workbuddy-force-strip-single-revision");
+        let target = root.join("models.json");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            &target,
+            br#"{
+              "models": [
+                {"id":"user-existing"},
+                {"id":"user-added-after-scan"},
+                {"id":"tokenstation-auto","apiKey":"managed-secret"}
+              ],
+              "availableModels": [
+                "user-existing",
+                "user-added-after-scan",
+                "tokenstation-auto"
+              ],
+              "keep": true
+            }"#,
+        )
+        .unwrap();
+        let connector = connector_for("workbuddy-v1").unwrap();
+
+        let prepared = prepare_connector_force_strip_owned(&target, connector)
+            .unwrap()
+            .expect("the existing WorkBuddy file must be projected");
+        let projected = parse_source_bytes(
+            Some(prepared.rendered.as_slice()),
+            DocumentFormat::Json,
+            connector.label(),
+        )
+        .unwrap();
+        let semantic = semantic_json(&projected).unwrap();
+        let model_ids = semantic["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            model_ids,
+            vec!["user-existing", "user-added-after-scan"],
+            "the force strip must preserve every user model in the exact revision it binds"
+        );
+        assert_eq!(
+            semantic["availableModels"],
+            json!(["user-existing", "user-added-after-scan"])
+        );
+        assert_eq!(semantic["keep"], json!(true));
+        assert!(!String::from_utf8_lossy(prepared.rendered.as_slice()).contains("managed-secret"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn workbuddy_force_strip_rejects_a_user_model_added_after_projection() {
+        let root = scratch("workbuddy-force-strip-revision-race");
+        let target = root.join("models.json");
+        std::fs::create_dir_all(&root).unwrap();
+        let initial = br#"{
+          "models": [
+            {"id":"user-existing"},
+            {"id":"tokenstation-auto","apiKey":"managed-secret"}
+          ],
+          "availableModels": ["user-existing", "tokenstation-auto"]
+        }"#;
+        std::fs::write(&target, initial).unwrap();
+        let connector = connector_for("workbuddy-v1").unwrap();
+        let prepared = vec![prepare_connector_force_strip_owned(&target, connector)
+            .unwrap()
+            .unwrap()];
+        let externally_updated = br#"{
+          "models": [
+            {"id":"user-existing"},
+            {"id":"user-added-after-projection"},
+            {"id":"tokenstation-auto","apiKey":"managed-secret"}
+          ],
+          "availableModels": [
+            "user-existing",
+            "user-added-after-projection",
+            "tokenstation-auto"
+          ]
+        }"#;
+        std::fs::write(&target, externally_updated).unwrap();
+
+        let error = match commit_force_strips(&prepared, &FsAtomicConfigWriter, &read_config_source)
+        {
+            Ok(_) => panic!("an external WorkBuddy model must invalidate the projection"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, "target_changed_before_force_forget");
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            externally_updated,
+            "revision rejection must preserve the user's newly added model byte-for-byte"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn hermes_force_forget_keeps_the_configuration_reconnectable() {
+        let state = state("hermes-force-forget-reconnect");
+        let root = scratch("hermes-force-forget-reconnect-target");
+        let target = root.join("config.yaml");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            &target,
+            b"# keep root comment\nfallback_providers: [] # keep unowned field\n",
+        )
+        .unwrap();
+
+        let mut installation = record(&target, false);
+        installation.agent_id = "nous-hermes-agent".to_string();
+        installation.executable_path = "/opt/hermes".to_string();
+        installation.canonical_path = "/opt/hermes".to_string();
+        installation.version_raw = Some("0.18.0".to_string());
+        installation.version_normalized = Some("0.18.0".to_string());
+        let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+        install_scan(&state, catalog, vec![installation]);
+        let first_runtime = runtime("vk-hermes-first-connection");
+
+        let connection = state
+            .plan_connection(
+                "nous-hermes-agent",
+                "/opt/hermes",
+                Some("0.18.0"),
+                "main",
+                &first_runtime,
+            )
+            .unwrap();
+        state
+            .apply_from_cached_scan(
+                &connection.plan.operation_id,
+                &connection.confirmation_token,
+                "main",
+                &[PlanIntent::Connect],
+                Some(&first_runtime),
+            )
+            .unwrap();
+
+        state
+            .force_forget("nous-hermes-agent", "/opt/hermes")
+            .unwrap();
+        let disconnected = String::from_utf8(std::fs::read(&target).unwrap()).unwrap();
+        assert!(disconnected.starts_with("# keep root comment\n"));
+        assert!(disconnected.contains("fallback_providers: [] # keep unowned field"));
+        assert!(!disconnected.contains("vk-hermes-first-connection"));
+        assert!(state
+            .ownership
+            .list_agent_installation("nous-hermes-agent", "/opt/hermes")
+            .unwrap()
+            .is_empty());
+
+        let reconnect_runtime = runtime("vk-hermes-second-connection");
+        let reconnected = state
+            .plan_connection(
+                "nous-hermes-agent",
+                "/opt/hermes",
+                Some("0.18.0"),
+                "main",
+                &reconnect_runtime,
+            )
+            .unwrap();
+        state
+            .apply_from_cached_scan(
+                &reconnected.plan.operation_id,
+                &reconnected.confirmation_token,
+                "main",
+                &[PlanIntent::Connect],
+                Some(&reconnect_runtime),
+            )
+            .unwrap();
+        let connected_again = String::from_utf8(std::fs::read(&target).unwrap()).unwrap();
+        assert!(connected_again.contains("vk-hermes-second-connection"));
+        assert!(!connected_again.contains("vk-hermes-first-connection"));
+        assert_eq!(
+            state
+                .ownership
+                .list_agent_installation("nous-hermes-agent", "/opt/hermes")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        state
+            .force_forget("nous-hermes-agent", "/opt/hermes")
+            .unwrap();
+        let cleaned = String::from_utf8(std::fs::read(&target).unwrap()).unwrap();
+        assert!(!cleaned.contains("vk-hermes-second-connection"));
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&state.paths.snapshot_root).ok();
+        std::fs::remove_dir_all(&state.paths.ownership_root).ok();
+    }
+
+    #[test]
+    fn every_non_codex_connector_completes_the_production_command_lifecycle() {
+        let root = scratch("non-codex-production-command-lifecycle");
+        for case in non_codex_lifecycle_cases(&root) {
+            let state = state(&format!("{}-production-lifecycle", case.label));
+            seed_lifecycle_case(&case);
+            let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+            install_scan(&state, catalog, vec![lifecycle_record(&case)]);
+
+            let first_token = format!("vk-{}-first-connection", case.label);
+            let first_runtime = runtime(&first_token);
+            apply_lifecycle_connection(&state, &case, &first_runtime, "lifecycle-main");
+            assert_lifecycle_ownership(&state, &case, 1);
+            assert_lifecycle_files(&case, &[], Some(&first_token));
+
+            state
+                .force_forget(case.agent_id, &case.installation_path)
+                .unwrap_or_else(|error| {
+                    panic!("{} force-forget failed: {}", case.label, error.message)
+                });
+            assert_lifecycle_ownership(&state, &case, 0);
+            assert_lifecycle_files(
+                &case,
+                &[&first_token, "token-station-reconnect-check"],
+                None,
+            );
+            assert!(
+                state
+                    .snapshots
+                    .list_agent(case.agent_id)
+                    .unwrap()
+                    .iter()
+                    .all(|snapshot| !snapshot.pinned),
+                "{} force-forget must unpin every baseline snapshot",
+                case.label
+            );
+
+            let second_token = format!("vk-{}-second-connection", case.label);
+            let second_runtime = runtime(&second_token);
+            apply_lifecycle_connection(&state, &case, &second_runtime, "lifecycle-main");
+            assert_lifecycle_ownership(&state, &case, 1);
+            assert_lifecycle_files(&case, &[&first_token], Some(&second_token));
+
+            state
+                .force_forget(case.agent_id, &case.installation_path)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{} final force-forget failed: {}",
+                        case.label, error.message
+                    )
+                });
+            assert_lifecycle_ownership(&state, &case, 0);
+            assert_lifecycle_files(&case, &[&first_token, &second_token], None);
+            clean_lifecycle_case(&state, &root);
+        }
+    }
+
+    #[test]
+    fn concurrent_non_codex_connection_plans_leave_one_consistent_owner() {
+        const CONTENDERS: usize = 8;
+        let root = scratch("non-codex-concurrent-connection-plans");
+        for case in non_codex_lifecycle_cases(&root) {
+            let state = state(&format!("{}-concurrent-lifecycle", case.label));
+            seed_lifecycle_case(&case);
+            let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+            install_scan(&state, catalog, vec![lifecycle_record(&case)]);
+            let shared_token = format!("vk-{}-concurrent-winner", case.label);
+            let shared_runtime = runtime(&shared_token);
+            let plans = (0..CONTENDERS)
+                .map(|_| {
+                    state
+                        .plan_connection(
+                            case.agent_id,
+                            &case.installation_path,
+                            Some(case.version),
+                            "concurrent-main",
+                            &shared_runtime,
+                        )
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let barrier = Arc::new(std::sync::Barrier::new(CONTENDERS));
+            let results = std::thread::scope(|scope| {
+                let handles = plans
+                    .into_iter()
+                    .map(|plan| {
+                        let barrier = Arc::clone(&barrier);
+                        let state = &state;
+                        let runtime = &shared_runtime;
+                        scope.spawn(move || {
+                            barrier.wait();
+                            state.apply_from_cached_scan(
+                                &plan.plan.operation_id,
+                                &plan.confirmation_token,
+                                "concurrent-main",
+                                &[PlanIntent::Connect],
+                                Some(runtime),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            let success_count = results.iter().filter(|result| result.is_ok()).count();
+            assert_eq!(
+                success_count, 1,
+                "{} must admit exactly one concurrent connection commit",
+                case.label
+            );
+            for error in results.into_iter().filter_map(Result::err) {
+                assert!(
+                    matches!(
+                        (error.stage, error.code.as_str()),
+                        (
+                            Some(TransactionStage::Ownership),
+                            "ownership_already_active"
+                        ) | (Some(TransactionStage::Revision), "before_hash_changed")
+                            | (
+                                Some(TransactionStage::Revision),
+                                "companion_before_hash_changed"
+                            )
+                            | (
+                                Some(TransactionStage::TargetWrite),
+                                "target_changed_before_replace"
+                            )
+                            | (
+                                Some(TransactionStage::OwnershipCommit),
+                                "ownership_commit_failed"
+                            )
+                    ),
+                    "{} loser must be rejected only by revision, CAS, or ownership: {} / {:?}",
+                    case.label,
+                    error.code,
+                    error.stage
+                );
+                let serialized = serde_json::to_string(&error).unwrap();
+                assert!(!serialized.contains(&shared_token));
+            }
+            assert_lifecycle_ownership(&state, &case, 1);
+            assert_lifecycle_files(&case, &[], Some(&shared_token));
+            assert_eq!(
+                state
+                    .snapshots
+                    .list_agent(case.agent_id)
+                    .unwrap()
+                    .iter()
+                    .filter(|snapshot| snapshot.pinned)
+                    .count(),
+                1 + case.companions.len(),
+                "{} must pin only the winning connection baseline files",
+                case.label
+            );
+
+            state
+                .force_forget(case.agent_id, &case.installation_path)
+                .unwrap();
+            assert_lifecycle_ownership(&state, &case, 0);
+            assert_lifecycle_files(&case, &[&shared_token], None);
+
+            let reconnect_token = format!("vk-{}-after-contention", case.label);
+            let reconnect_runtime = runtime(&reconnect_token);
+            apply_lifecycle_connection(&state, &case, &reconnect_runtime, "concurrent-main");
+            assert_lifecycle_ownership(&state, &case, 1);
+            assert_lifecycle_files(&case, &[&shared_token], Some(&reconnect_token));
+            state
+                .force_forget(case.agent_id, &case.installation_path)
+                .unwrap();
+            clean_lifecycle_case(&state, &root);
+        }
+    }
+
+    #[test]
+    #[ignore = "explicit configurable filesystem/ownership/snapshot lifecycle stress"]
+    fn non_codex_connectors_survive_configured_production_lifecycle_stress() {
+        const DEFAULT_ROUNDS: usize = 100;
+        const MAX_ROUNDS: usize = 1_000;
+        let rounds = match std::env::var("TOKEN_STATION_AGENT_LIFECYCLE_ROUNDS") {
+            Ok(value) => value.parse::<usize>().unwrap_or_else(|_| {
+                panic!("TOKEN_STATION_AGENT_LIFECYCLE_ROUNDS must be an integer")
+            }),
+            Err(std::env::VarError::NotPresent) => DEFAULT_ROUNDS,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                panic!("TOKEN_STATION_AGENT_LIFECYCLE_ROUNDS must be valid UTF-8")
+            }
+        };
+        assert!(
+            (1..=MAX_ROUNDS).contains(&rounds),
+            "TOKEN_STATION_AGENT_LIFECYCLE_ROUNDS must be within 1..={MAX_ROUNDS}"
+        );
+        eprintln!(
+            "running {rounds} lifecycle rounds across {} non-Codex connectors",
+            non_codex_lifecycle_cases(Path::new("unused")).len()
+        );
+
+        let root = scratch("non-codex-production-lifecycle-stress");
+        for case in non_codex_lifecycle_cases(&root) {
+            let state = state(&format!("{}-lifecycle-stress", case.label));
+            seed_lifecycle_case(&case);
+            let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+            install_scan(&state, catalog, vec![lifecycle_record(&case)]);
+
+            for round in 0..rounds {
+                let first_token = format!("vk-{}-stress-{round}-first", case.label);
+                let first_runtime = runtime(&first_token);
+                apply_lifecycle_connection(&state, &case, &first_runtime, "stress-main");
+                assert_lifecycle_ownership(&state, &case, 1);
+                assert_lifecycle_files(&case, &[], Some(&first_token));
+                state
+                    .force_forget(case.agent_id, &case.installation_path)
+                    .unwrap();
+                assert_lifecycle_ownership(&state, &case, 0);
+                assert_lifecycle_files(&case, &[&first_token], None);
+
+                let second_token = format!("vk-{}-stress-{round}-second", case.label);
+                let second_runtime = runtime(&second_token);
+                apply_lifecycle_connection(&state, &case, &second_runtime, "stress-main");
+                assert_lifecycle_ownership(&state, &case, 1);
+                assert_lifecycle_files(&case, &[&first_token], Some(&second_token));
+                state
+                    .force_forget(case.agent_id, &case.installation_path)
+                    .unwrap();
+                assert_lifecycle_ownership(&state, &case, 0);
+                assert_lifecycle_files(&case, &[&first_token, &second_token], None);
+            }
+
+            let snapshots = state.snapshots.list_agent(case.agent_id).unwrap();
+            assert!(snapshots.iter().all(|snapshot| !snapshot.pinned));
+            let mut counts_by_target = BTreeMap::<&str, usize>::new();
+            for snapshot in &snapshots {
+                *counts_by_target
+                    .entry(snapshot.target_config_path.as_str())
+                    .or_default() += 1;
+            }
+            assert!(
+                counts_by_target.values().all(|count| *count <= 5),
+                "{} snapshot retention must stay bounded after stress",
+                case.label
+            );
+            clean_lifecycle_case(&state, &root);
+        }
+    }
+
+    #[test]
     fn force_forget_unknown_legacy_companion_fails_before_any_write() {
         let state = state("force-forget-unknown-companion");
         let root = scratch("force-forget-unknown-companion-target");
@@ -3855,6 +5435,90 @@ mod tests {
                 .len(),
             1,
             "ownership must remain available for a later safe recovery"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&state.paths.snapshot_root).ok();
+        std::fs::remove_dir_all(&state.paths.ownership_root).ok();
+    }
+
+    #[test]
+    fn force_forget_invalid_known_companion_fails_before_writing_primary() {
+        let state = state("force-forget-invalid-companion");
+        let root = scratch("force-forget-invalid-companion-target");
+        let target = root.join(".gemini/.env");
+        let companion = root.join(".gemini/settings.json");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(
+            &target,
+            b"GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/agents/gemini-cli\nUNOWNED=keep\n",
+        )
+        .unwrap();
+        std::fs::write(&companion, br#"{"security":"user-scalar","keep":true}"#).unwrap();
+
+        let primary_path = ConfigPath {
+            segments: vec!["GOOGLE_GEMINI_BASE_URL".to_string()],
+        };
+        let companion_path = ConfigPath {
+            segments: vec![
+                "security".to_string(),
+                "auth".to_string(),
+                "selectedType".to_string(),
+            ],
+        };
+        state
+            .ownership
+            .commit(
+                crate::agent_integration::ownership::OwnershipRecord {
+                    schema_version: 1,
+                    revision: 0,
+                    agent_id: "gemini-cli".to_string(),
+                    installation_path: "/opt/gemini".to_string(),
+                    target_config_path: target.to_string_lossy().into_owned(),
+                    connector_id: "gemini-cli-v1".to_string(),
+                    baseline_snapshot_id: "11".repeat(16),
+                    last_transaction_snapshot_id: "12".repeat(16),
+                    before_hash: "a".repeat(64),
+                    managed_after_hash: "b".repeat(64),
+                    owned_paths: vec![primary_path.clone()],
+                    owned_value_macs: BTreeMap::from([(primary_path.to_string(), "c".repeat(64))]),
+                    companion_files: vec![
+                        crate::agent_integration::ownership::CompanionOwnership {
+                            target_config_path: companion.to_string_lossy().into_owned(),
+                            document_format: Some(DocumentFormat::Json),
+                            baseline_snapshot_id: "13".repeat(16),
+                            last_transaction_snapshot_id: "14".repeat(16),
+                            before_hash: "d".repeat(64),
+                            managed_after_hash: "e".repeat(64),
+                            owned_paths: vec![companion_path.clone()],
+                            owned_value_macs: BTreeMap::from([(
+                                companion_path.to_string(),
+                                "f".repeat(64),
+                            )]),
+                        },
+                    ],
+                    acquired_at_ms: 1,
+                    updated_at_ms: 1,
+                },
+                None,
+            )
+            .unwrap();
+        let target_before = std::fs::read(&target).unwrap();
+        let companion_before = std::fs::read(&companion).unwrap();
+
+        state
+            .force_forget("gemini-cli", "/opt/gemini")
+            .expect_err("an invalid known companion must fail before any write");
+
+        assert_eq!(std::fs::read(&target).unwrap(), target_before);
+        assert_eq!(std::fs::read(&companion).unwrap(), companion_before);
+        assert_eq!(
+            state
+                .ownership
+                .list_agent_installation("gemini-cli", "/opt/gemini")
+                .unwrap()
+                .len(),
+            1
         );
 
         std::fs::remove_dir_all(&root).ok();

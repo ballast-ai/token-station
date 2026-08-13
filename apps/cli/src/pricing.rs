@@ -15,6 +15,11 @@ use std::collections::BTreeMap;
 use token_station_protocol::Usage;
 
 const MAX_PRICE_PER_MTOK: u64 = 9_000_000_000_000_000;
+// A provider-scoped catalog key is `<upstream>/<model>`. Model discovery accepts
+// 512-byte supplier IDs and a validated upstream reference has no smaller core
+// limit, so leave bounded headroom for the scope while still rejecting
+// unbounded operator input.
+const MAX_PRICING_MODEL_ID_BYTES: usize = 1_024;
 
 /// Micro-units of currency per one million tokens, per token class. `0` is a
 /// real price (a free tier), distinct from a model that is simply absent.
@@ -154,6 +159,28 @@ impl PriceTable {
     /// `None` when the model has no entry — an unknown cost, never a zero one.
     #[must_use]
     pub fn price(&self, model: &str, usage: &Usage) -> Option<(i64, u32)> {
+        self.model_price(model)
+            .map(|price| (price.cost_micros(usage), self.version))
+    }
+
+    /// Prices one concrete upstream/model target. Provider-scoped catalog
+    /// prices win; legacy model-only tables remain the compatibility fallback.
+    #[must_use]
+    pub fn price_for_upstream(
+        &self,
+        upstream: &str,
+        model: &str,
+        usage: &Usage,
+    ) -> Option<(i64, u32)> {
+        self.model_price_for_upstream(upstream, model)
+            .map(|price| (price.cost_micros(usage), self.version))
+    }
+
+    /// Resolves the immutable configured rates for one model using the same
+    /// normalization rules as settlement. Agent connectors use this to expose
+    /// an exact static price only when every reachable route agrees.
+    #[must_use]
+    pub fn model_price(&self, model: &str) -> Option<&ModelPrice> {
         let normalized = normalize_model_id(model);
         self.models
             .get(model)
@@ -162,6 +189,9 @@ impl PriceTable {
                 self.models
                     .iter()
                     .filter_map(|(candidate, price)| {
+                        if candidate.contains('/') {
+                            return None;
+                        }
                         let candidate = normalize_model_id(candidate);
                         normalized
                             .strip_prefix(&candidate)
@@ -171,7 +201,13 @@ impl PriceTable {
                     .max_by_key(|(candidate_len, _)| *candidate_len)
                     .map(|(_, price)| price)
             })
-            .map(|price| (price.cost_micros(usage), self.version))
+    }
+
+    #[must_use]
+    pub fn model_price_for_upstream(&self, upstream: &str, model: &str) -> Option<&ModelPrice> {
+        self.models
+            .get(&format!("{upstream}/{model}"))
+            .or_else(|| self.model_price(model))
     }
 
     /// Validates the current table without changing it.
@@ -253,11 +289,13 @@ fn normalize_model_id(model: &str) -> String {
 
 fn validate_model_id(model: &str) -> Result<(), String> {
     if model.is_empty()
-        || model.len() > 256
+        || model.len() > MAX_PRICING_MODEL_ID_BYTES
         || model.trim() != model
         || model.chars().any(char::is_control)
     {
-        return Err("pricing model id must be 1-256 trimmed, non-control characters".to_string());
+        return Err(format!(
+            "pricing model id must be 1-{MAX_PRICING_MODEL_ID_BYTES} bytes, trimmed, and non-control"
+        ));
     }
     Ok(())
 }
@@ -325,6 +363,55 @@ mod tests {
         assert_eq!(
             table.price("anthropic/Claude-Opus-4.8", &usage(1_000_000, 0)),
             Some((5_000_000, 3)),
+        );
+    }
+
+    #[test]
+    fn provider_scoped_price_wins_and_model_only_price_remains_the_fallback() {
+        let scoped = ModelPrice {
+            input_per_mtok: 200_000,
+            ..ModelPrice::default()
+        };
+        let fallback = ModelPrice {
+            input_per_mtok: 900_000,
+            ..ModelPrice::default()
+        };
+        let table = PriceTable {
+            version: 8,
+            models: BTreeMap::from([
+                ("glm-5.2".to_owned(), fallback),
+                ("wecoding/glm-5.2".to_owned(), scoped),
+            ]),
+        };
+
+        assert_eq!(
+            table.model_price_for_upstream("wecoding", "glm-5.2"),
+            Some(&scoped)
+        );
+        assert_eq!(
+            table.model_price_for_upstream("another", "glm-5.2"),
+            Some(&fallback)
+        );
+        assert_eq!(
+            table.price_for_upstream("wecoding", "glm-5.2", &usage(1_000_000, 0)),
+            Some((200_000, 8))
+        );
+    }
+
+    #[test]
+    fn another_providers_scoped_price_never_becomes_a_model_only_fallback() {
+        let scoped = ModelPrice {
+            input_per_mtok: 200_000,
+            ..ModelPrice::default()
+        };
+        let table = PriceTable {
+            version: 9,
+            models: BTreeMap::from([("wecoding/glm-5.2".to_owned(), scoped)]),
+        };
+
+        assert_eq!(
+            table.model_price_for_upstream("another", "glm-5.2-variant"),
+            None
         );
     }
 
@@ -489,6 +576,24 @@ mod tests {
         assert!(
             exhausted
                 .next_with_model("m", ModelPrice::default())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn provider_scoped_catalog_keys_cover_the_desktop_identity_bounds() {
+        let provider = "p".repeat(511);
+        let model = "m".repeat(512);
+        let scoped = format!("{provider}/{model}");
+
+        let table = PriceTable::default()
+            .next_with_model(&scoped, ModelPrice::default())
+            .expect("a valid provider plus supplier model identity remains priceable");
+
+        assert!(table.models.contains_key(&scoped));
+        assert!(
+            table
+                .next_with_model(&format!("{scoped}xx"), ModelPrice::default())
                 .is_err()
         );
     }

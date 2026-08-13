@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Activity, Moon, Plus, Sun } from "lucide-react";
 import type { AgentUiMetadataView, AgentView, ServeView } from "../api";
 import { useLanguage } from "./LanguageProvider";
+import TokenStationMark from "./TokenStationMark";
 import { useTheme } from "./ThemeProvider";
 import { Button } from "./ui/button";
 
@@ -23,25 +24,22 @@ interface AppShellProps {
   serve: ServeView;
   registry: AgentUiMetadataView[];
   agents: AgentView[];
-  scanBusy: boolean;
   commandBusy: boolean;
+  discoveryPending?: boolean;
   onNavigate: (view: AppView) => void;
-  onRescan: () => void;
   onToggleServe: () => void;
   children: ReactNode;
 }
 
 const PRIMARY_NAV: Array<{ view: AppView; en: string; zh: string }> = [
-  { view: "overview", en: "Overview", zh: "概览" },
-  { view: "home", en: "Routing", zh: "路由" },
-  { view: "agents", en: "Agents", zh: "Agent" },
+  { view: "home", en: "Home", zh: "主页" },
   { view: "providers", en: "Providers", zh: "供应商" },
   { view: "usage", en: "Usage", zh: "用量" },
   { view: "settings", en: "Settings", zh: "设置" },
 ];
 
 function primaryView(view: AppView): AppView {
-  if (view.startsWith("agent:")) return "agents";
+  if (view.startsWith("agent:") || view === "agents") return "home";
   if (view === "logs") return "usage";
   if (view === "quota-usage") return "usage";
   if (view === "add-provider" || view.startsWith("free-provider:")) return "providers";
@@ -53,8 +51,8 @@ export default function AppShell({
   serve,
   registry,
   agents,
-  scanBusy,
   commandBusy,
+  discoveryPending = false,
   onNavigate,
   onToggleServe,
   children,
@@ -90,14 +88,7 @@ export default function AppShell({
           onClick={() => onNavigate("overview")}
           aria-label={copy("Token Station Overview", "Token Station 概览")}
         >
-          <span className="station-brand-mark" aria-hidden="true">
-            <img
-              data-testid="station-brand-icon"
-              className={resolvedTheme === "dark" ? "dark-mode" : undefined}
-              src="/icon.png"
-              alt=""
-            />
-          </span>
+          <TokenStationMark className="station-brand-mark" size={28} />
           <span>Token Station</span>
         </button>
 
@@ -112,22 +103,20 @@ export default function AppShell({
                 variant="ghost"
                 size="sm"
                 type="button"
-                disabled={commandBusy && !selected}
+                disabled={discoveryPending || (commandBusy && !selected)}
                 aria-current={selected ? "page" : undefined}
                 aria-label={label}
                 data-onboarding-target={
                   item.view === "home"
-                    ? "routing"
-                    : item.view === "agents"
-                      ? "agent-entry"
-                      : undefined
+                    ? "home-entry"
+                    : undefined
                 }
                 onClick={() => onNavigate(item.view)}
               >
                 <span data-onboarding-target={item.view === "settings" ? "settings" : undefined}>
                   {label}
                 </span>
-                {item.view === "agents" && agents.length > connectedAgents && (
+                {item.view === "home" && agents.length > connectedAgents && (
                   <span className="station-nav-alert" aria-hidden="true" />
                 )}
               </Button>
@@ -168,19 +157,20 @@ export default function AppShell({
         </div>
       </header>
 
-      <main className={`station-content station-content-topnav${activePrimary === "agents" ? " station-content-agent" : ""}`}>{children}</main>
+      <main className={`station-content station-content-topnav${activePrimary === "home" ? " station-content-agent" : ""}`}>{children}</main>
 
-      <span className="station-agent-summary" data-testid="agent-runtime-connection" aria-live="polite">
-        {copy(
-          `Agent: ${serve.agent_connected ? "Connected" : "Disconnected"}`,
-          `Agent：${serve.agent_connected ? "已连接" : "未连接"}`,
-        )}
-        {copy(
-          ` · ${connectedAgents} of ${registry.length} managed`,
-          ` · ${connectedAgents} / ${registry.length} 个已接管`,
-        )}
-        {scanBusy ? copy(" · scanning", " · 扫描中") : ""}
-      </span>
+      {!discoveryPending && (
+        <span className="station-agent-summary" data-testid="agent-runtime-connection" aria-live="polite">
+          {copy(
+            `Agent: ${serve.agent_connected ? "Connected" : "Disconnected"}`,
+            `Agent：${serve.agent_connected ? "已连接" : "未连接"}`,
+          )}
+          {copy(
+            ` · ${connectedAgents} of ${registry.length} managed`,
+            ` · ${connectedAgents} / ${registry.length} 个已接管`,
+          )}
+        </span>
+      )}
     </div>
   );
 }

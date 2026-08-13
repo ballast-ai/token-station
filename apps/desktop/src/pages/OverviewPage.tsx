@@ -116,16 +116,35 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
         <Card role="region" aria-label={copy("Current routing snapshot", "当前路由快照")}>
           <CardHeader><CardTitle>{copy("Current routing snapshot", "当前路由快照")}</CardTitle><RevisionChain state={state} /></CardHeader>
           <CardContent className="overview-route-list">
-            {(["high", "mid", "low"] as TierSlot[]).map((slot) => {
-              const tier = state.tiers[slot];
-              return (
-                <div key={slot}>
-                  <Badge variant="outline">{copy(TIER_COPY[slot].en, TIER_COPY[slot].zh)}</Badge>
-                  <strong>{tier.model ?? copy("Not configured", "未配置")}</strong>
-                  <code>{tier.upstream ?? "—"}</code>
-                </div>
-              );
-            })}
+            {state.routing_mode === "direct" ? (
+              <div data-routing-snapshot-mode="direct">
+                <Badge variant="outline">{copy("Direct", "单独路由")}</Badge>
+                <strong>{state.direct_target?.model ?? copy("Select a model", "待选择模型")}</strong>
+                <code>{state.direct_target?.upstream ?? copy("Select a provider", "待选择供应商")}</code>
+              </div>
+            ) : state.routing_mode === "quota_first" ? (
+              <div data-routing-snapshot-mode="quota-first">
+                <Badge variant="outline">{copy("Quota-first", "额度优先")}</Badge>
+                <strong>{copy(
+                  `${state.quota_accounts.length} accounts`,
+                  `${state.quota_accounts.length} 个账户`,
+                )}</strong>
+                <code>{state.quota_accounts.length > 0
+                  ? state.quota_accounts
+                    .map((account) => `${account.upstream}/${account.model}`)
+                    .join(" · ")
+                  : copy("Add a quota account", "待添加额度账户")}</code>
+              </div>
+            ) : (["high", "mid", "low"] as TierSlot[]).map((slot) => {
+                const tier = state.tiers[slot];
+                return (
+                  <div key={slot}>
+                    <Badge variant="outline">{copy(TIER_COPY[slot].en, TIER_COPY[slot].zh)}</Badge>
+                    <strong>{tier.model ?? copy("Not configured", "未配置")}</strong>
+                    <code>{tier.upstream ?? "—"}</code>
+                  </div>
+                );
+              })}
             <Button variant="ghost" size="sm" onClick={() => onNavigate("home")}><Route />{copy("Adjust global routing", "调整全局路由")}</Button>
           </CardContent>
         </Card>

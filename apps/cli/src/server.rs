@@ -77,6 +77,14 @@ impl ServerControl {
         self.inner.stop_accepting.send_replace(true);
     }
 
+    /// Reports the in-memory listener ownership intent without performing a
+    /// network probe. The desktop shell uses this only to distinguish a live
+    /// handoff from the short interval after stop-accepting has been issued.
+    #[must_use]
+    pub fn is_accepting(&self) -> bool {
+        !*self.inner.stop_accepting.borrow()
+    }
+
     /// Cancels every request context created under this server instance.
     pub fn cancel_in_flight(&self) {
         self.inner.drain.cancel_with(CancelReason::ServerDrain);
@@ -703,12 +711,14 @@ mod tests {
     #[test]
     fn accept_stop_and_request_drain_are_separate_lifecycle_steps() {
         let control = ServerControl::new();
+        assert!(control.is_accepting());
         let context = control.request_context();
         let request = control.begin_request();
         assert_eq!(control.in_flight(), 1);
         assert!(!context.is_cancelled());
 
         control.stop_accepting();
+        assert!(!control.is_accepting());
         assert!(!context.is_cancelled());
         control.cancel_in_flight();
         assert!(context.is_cancelled());

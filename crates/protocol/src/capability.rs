@@ -48,11 +48,24 @@ pub struct ModelCapability {
     /// router treats as "do not route long-context requests here".
     #[serde(default)]
     pub context_window: u32,
+    /// Maximum output tokens for one response. Zero means unknown. Keeping this
+    /// separate from `context_window` lets Agent clients reserve a safe input
+    /// budget instead of guessing a model-family default.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_output_tokens: u32,
     /// Sampling parameter names this model honours, e.g. `temperature`.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub supported_parameters: BTreeSet<String>,
     #[serde(default, flatten)]
     pub extensions: Extensions,
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if requires a predicate taking &T"
+)]
+const fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl ModelCapability {
@@ -98,6 +111,7 @@ mod tests {
         assert_eq!(capability.json_schema_state(), CapabilityState::Unsupported);
         assert!(!capability.tool_state().is_supported());
         assert_eq!(capability.context_window, 0);
+        assert_eq!(capability.max_output_tokens, 0);
     }
 
     #[test]
@@ -130,6 +144,22 @@ mod tests {
         assert_eq!(
             json["supported_parameters"],
             serde_json::json!(["stop", "temperature", "top_p"])
+        );
+    }
+
+    #[test]
+    fn output_limit_round_trips_without_breaking_legacy_documents() {
+        let capability: ModelCapability = serde_json::from_value(serde_json::json!({
+            "model": "glm-5.2",
+            "context_window": 257_550,
+            "max_output_tokens": 32_768
+        }))
+        .expect("extended capability parses");
+
+        assert_eq!(capability.max_output_tokens, 32_768);
+        assert_eq!(
+            serde_json::to_value(capability).unwrap()["max_output_tokens"],
+            serde_json::json!(32_768)
         );
     }
 }

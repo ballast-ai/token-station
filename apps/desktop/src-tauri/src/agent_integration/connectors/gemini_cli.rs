@@ -5,8 +5,8 @@ use zeroize::Zeroizing;
 
 use super::{path, CompanionProjection, ConnectInput, Connector, ConnectorCapabilities};
 use crate::agent_integration::config_codec::{
-    apply_patch, parse_source_bytes, render_document, semantic_json, ConfigDocument,
-    DocumentFormat,
+    apply_patch, parse_source_bytes, prepare_owned_paths_for_write, render_document, semantic_json,
+    ConfigDocument, DocumentFormat,
 };
 use crate::agent_integration::plan::read_config_source;
 use crate::agent_integration::types::{
@@ -115,6 +115,7 @@ impl Connector for GeminiCliConnector {
             path: owned_path.clone(),
             value: Some(json!(API_KEY_AUTH_TYPE)),
         }];
+        prepare_owned_paths_for_write(&mut document, std::slice::from_ref(&owned_path))?;
         apply_patch(&mut document, &operations)?;
         let projected_bytes = render_document(&document, label)?.into_bytes();
         Ok(vec![CompanionProjection {
