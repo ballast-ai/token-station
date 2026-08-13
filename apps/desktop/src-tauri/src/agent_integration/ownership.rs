@@ -308,11 +308,11 @@ fn compute_owned_value_macs_from_semantic(
         let mut message = Vec::new();
         message.extend_from_slice(b"token-station-owned-value-v1\0");
         encode_field(&mut message, path.to_string().as_bytes());
-        match semantic_value_at(canonical, path) {
+        match semantic_value_for_mac(canonical, path) {
             Some(value) => {
                 message.push(1);
-                let bytes =
-                    serde_json::to_vec(value).map_err(|_| "序列化 owned value 失败".to_string())?;
+                let bytes = serde_json::to_vec(&value)
+                    .map_err(|_| "序列化 owned value 失败".to_string())?;
                 encode_field(&mut message, &bytes);
             }
             None => message.push(0),
@@ -323,6 +323,39 @@ fn compute_owned_value_macs_from_semantic(
         );
     }
     Ok(result)
+}
+
+fn semantic_value_for_mac(
+    root: &serde_json::Value,
+    path: &ConfigPath,
+) -> Option<serde_json::Value> {
+    let value = semantic_value_at(root, path)?;
+    if path.segments == ["models"] {
+        if let Some(models) = value.as_array() {
+            return Some(serde_json::Value::Array(
+                models
+                    .iter()
+                    .filter(|model| {
+                        model.get("id").and_then(serde_json::Value::as_str)
+                            == Some("tokenstation-auto")
+                    })
+                    .cloned()
+                    .collect(),
+            ));
+        }
+    }
+    if path.segments == ["availableModels"] {
+        if let Some(models) = value.as_array() {
+            return Some(serde_json::Value::Array(
+                models
+                    .iter()
+                    .filter(|model| model.as_str() == Some("tokenstation-auto"))
+                    .cloned()
+                    .collect(),
+            ));
+        }
+    }
+    Some(value.clone())
 }
 
 pub fn legacy_widened_ownership_matches(

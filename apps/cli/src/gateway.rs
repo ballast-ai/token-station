@@ -1427,10 +1427,12 @@ fn sanitized_catalog_cost(value: &Value) -> Option<Value> {
             .and_then(Value::as_f64)
             .filter(|rate| rate.is_finite() && (0.0..=9_000_000_000.0).contains(rate))
     };
+    let input = serde_json::Number::from_f64(rate("input")?)?;
+    let output_rate = serde_json::Number::from_f64(rate("output")?)?;
     let mut output = serde_json::Map::new();
+    output.insert("input".to_owned(), Value::Number(input));
+    output.insert("output".to_owned(), Value::Number(output_rate));
     for (name, value) in [
-        ("input", rate("input")),
-        ("output", rate("output")),
         ("cache_read", rate("cache_read")),
         ("cache_write", rate("cache_write")),
     ] {
@@ -1438,7 +1440,7 @@ fn sanitized_catalog_cost(value: &Value) -> Option<Value> {
             output.insert(name.to_owned(), Value::Number(value));
         }
     }
-    (!output.is_empty()).then_some(Value::Object(output))
+    Some(Value::Object(output))
 }
 
 fn retain_free_fallbacks(decision: &mut Decision, free_upstreams: &BTreeSet<String>) {
@@ -5198,11 +5200,14 @@ mod free_fallback_tests {
 
 #[cfg(test)]
 mod request_receipt_tests {
+    use std::collections::BTreeMap;
+
     use super::{
-        annotate_conversion_failure, begin_record, catalog_model_document,
+        annotate_conversion_failure, begin_record, catalog_model_document, model_cost_document,
         record_actual_attempt_target, record_conversion, record_conversion_cancelled,
         record_route_decision, tag_transport,
     };
+    use crate::pricing::{ModelPrice, PriceTable};
     use token_station_metrics::{
         ConversionOutcome, ConversionReasonCode, ConversionReasonDetail, ConversionStage,
         RequestPathKind,
@@ -5236,6 +5241,39 @@ mod request_receipt_tests {
         assert_eq!(
             document["cost"],
             serde_json::json!({"input": 0.2, "output": 0.6, "cache_read": 0.04})
+        );
+    }
+
+    #[test]
+    fn partial_catalog_cost_falls_back_to_complete_configured_pricing() {
+        let capability: ModelCapability = serde_json::from_value(serde_json::json!({
+            "model": "priced-model",
+            "context_window": 32_000,
+            "catalog_cost": {"input": 99.0}
+        }))
+        .unwrap();
+        let pricing = PriceTable {
+            models: BTreeMap::from([(
+                "priced-model".to_owned(),
+                ModelPrice {
+                    input_per_mtok: 1_000_000,
+                    output_per_mtok: 2_000_000,
+                    cache_read_per_mtok: 300_000,
+                    cache_write_per_mtok: 400_000,
+                    reasoning_per_mtok: None,
+                },
+            )]),
+            ..PriceTable::default()
+        };
+
+        assert_eq!(
+            model_cost_document(&capability, &pricing),
+            Some(serde_json::json!({
+                "input": 1.0,
+                "output": 2.0,
+                "cache_read": 0.3,
+                "cache_write": 0.4
+            }))
         );
     }
 

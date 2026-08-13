@@ -49,6 +49,13 @@ pub struct AgentModelMetadata {
     pub cost: Option<AgentModelCost>,
 }
 
+impl AgentModelMetadata {
+    pub fn safe_limits(&self) -> Option<(u32, u32)> {
+        (self.context > 0 && self.output > 0 && self.output < self.context)
+            .then_some((self.context, self.output))
+    }
+}
+
 pub struct ConnectInput<'a> {
     pub base_url: &'a str,
     pub token: Option<&'a str>,
@@ -130,6 +137,7 @@ pub trait Connector: Sync {
         &self,
         document: &ConfigDocument,
         input: &ConnectInput<'_>,
+        _owned_paths: &[ConfigPath],
     ) -> Result<Vec<PatchOperation>, String> {
         self.connect_patch_for_document(document, input)
     }
@@ -154,11 +162,27 @@ pub trait Connector: Sync {
     ) -> Result<Vec<PatchOperation>, String> {
         Ok(self.disconnect_patch())
     }
+    fn project_owned_document(
+        &self,
+        current: &mut ConfigDocument,
+        source: &ConfigDocument,
+        owned_paths: &[ConfigPath],
+    ) -> Result<(), String> {
+        crate::agent_integration::config_codec::project_owned_paths(current, source, owned_paths)
+    }
     fn validate_projected(
         &self,
         document: &ConfigDocument,
         input: &ConnectInput<'_>,
     ) -> Result<(), String>;
+    fn validate_refresh_projected(
+        &self,
+        document: &ConfigDocument,
+        input: &ConnectInput<'_>,
+        _owned_paths: &[ConfigPath],
+    ) -> Result<(), String> {
+        self.validate_projected(document, input)
+    }
     fn success_message(&self, input: &ConnectInput<'_>) -> String;
 }
 
@@ -540,7 +564,7 @@ mod tests {
             model_metadata: Some(&metadata),
         };
         let refresh = connector
-            .refresh_patch_for_document(&document, &refresh_input)
+            .refresh_patch_for_document(&document, &refresh_input, &connector.owned_paths())
             .expect("a managed native-array model can refresh in place");
         apply_patch(&mut document, &refresh).unwrap();
         connector
@@ -742,6 +766,81 @@ mod tests {
     }
 
     #[test]
+    fn partial_metadata_projects_capabilities_without_zero_limits() {
+        let metadata = AgentModelMetadata {
+            context: 0,
+            output: 0,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: Some(AgentModelCost {
+                input: 0.2,
+                output: 0.6,
+                cache_read: None,
+                cache_write: None,
+            }),
+        };
+
+        let opencode_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/opencode/v1",
+            token: Some("fixture-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut opencode = parse_source_bytes(None, DocumentFormat::Json, "OpenCode").unwrap();
+        apply_patch(
+            &mut opencode,
+            &OpenCodeConnector.connect_patch(&opencode_input).unwrap(),
+        )
+        .unwrap();
+        OpenCodeConnector
+            .validate_projected(&opencode, &opencode_input)
+            .unwrap();
+        let opencode = semantic_json(&opencode).unwrap();
+        let opencode_model = &opencode["provider"]["tokenstation"]["models"]["auto"];
+        assert_eq!(opencode_model["attachment"], json!(true));
+        assert_eq!(opencode_model["cost"]["output"], json!(0.6));
+        assert!(opencode_model.get("limit").is_none());
+
+        let workbuddy_input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/workbuddy/v1",
+            token: Some("fixture-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut workbuddy = parse_source_bytes(None, DocumentFormat::Json, "WorkBuddy").unwrap();
+        let workbuddy_patch = WorkBuddyConnector
+            .connect_patch_for_document(&workbuddy, &workbuddy_input)
+            .unwrap();
+        apply_patch(&mut workbuddy, &workbuddy_patch).unwrap();
+        let workbuddy = semantic_json(&workbuddy).unwrap();
+        let workbuddy_model = &workbuddy["models"][0];
+        assert_eq!(workbuddy_model["supportsImages"], json!(true));
+        assert_eq!(workbuddy_model["supportsToolCall"], json!(true));
+        assert_eq!(workbuddy_model["supportsReasoning"], json!(true));
+        assert!(workbuddy_model.get("maxInputTokens").is_none());
+        assert!(workbuddy_model.get("maxOutputTokens").is_none());
+
+        for connector in [&CodexConnector as &dyn Connector, &HermesConnector] {
+            let input = ConnectInput {
+                base_url: "http://127.0.0.1:8787/v1",
+                token: Some("fixture-key"),
+                adapter_ready: true,
+                model_metadata: Some(&metadata),
+            };
+            let mut document =
+                parse_source_bytes(None, connector.format(), connector.label()).unwrap();
+            apply_patch(&mut document, &connector.connect_patch(&input).unwrap()).unwrap();
+            let projected = semantic_json(&document).unwrap();
+            assert!(projected.pointer("/model_context_window").is_none());
+            assert!(projected
+                .pointer("/model_auto_compact_token_limit")
+                .is_none());
+            assert!(projected.pointer("/model/context_length").is_none());
+        }
+    }
+
+    #[test]
     fn metadata_refresh_removes_stale_managed_limits_when_metadata_becomes_unknown() {
         let codex_input = ConnectInput {
             base_url: "http://127.0.0.1:8787/agents/codex/v1",
@@ -766,7 +865,7 @@ experimental_bearer_token = "fixture-codex-key"
         )
         .unwrap();
         let patch = CodexConnector
-            .refresh_patch_for_document(&codex, &codex_input)
+            .refresh_patch_for_document(&codex, &codex_input, &CodexConnector.owned_paths())
             .unwrap();
         apply_patch(&mut codex, &patch).unwrap();
         let codex = semantic_json(&codex).unwrap();
@@ -786,7 +885,7 @@ experimental_bearer_token = "fixture-codex-key"
         )
         .unwrap();
         let patch = HermesConnector
-            .refresh_patch_for_document(&hermes, &hermes_input)
+            .refresh_patch_for_document(&hermes, &hermes_input, &HermesConnector.owned_paths())
             .unwrap();
         apply_patch(&mut hermes, &patch).unwrap();
         assert!(semantic_json(&hermes)

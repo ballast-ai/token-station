@@ -2,8 +2,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use super::{path, ConnectInput, Connector, ConnectorCapabilities};
-use crate::agent_integration::config_codec::{semantic_json, ConfigDocument, DocumentFormat};
+use super::{path, AgentModelMetadata, ConnectInput, Connector, ConnectorCapabilities};
+use crate::agent_integration::config_codec::{
+    apply_patch, semantic_json, ConfigDocument, DocumentFormat,
+};
 use crate::agent_integration::types::{ConfigPath, PatchKind, PatchOperation};
 
 const MODEL_ID: &str = "tokenstation-auto";
@@ -57,9 +59,9 @@ fn model_value(input: &ConnectInput<'_>) -> Result<Value, String> {
             "canDisableThinking": true
         });
     }
-    if let Some(metadata) = input.model_metadata {
-        model["maxInputTokens"] = json!(metadata.context);
-        model["maxOutputTokens"] = json!(metadata.output);
+    if let Some((context, output)) = input.model_metadata.and_then(AgentModelMetadata::safe_limits) {
+        model["maxInputTokens"] = json!(context);
+        model["maxOutputTokens"] = json!(output);
     }
     Ok(model)
 }
@@ -189,6 +191,7 @@ impl Connector for WorkBuddyConnector {
         &self,
         document: &ConfigDocument,
         input: &ConnectInput<'_>,
+        _owned_paths: &[ConfigPath],
     ) -> Result<Vec<PatchOperation>, String> {
         let (mut models, mut available, native_array) = arrays(document)?;
         let replacement = model_value(input)?;
@@ -235,6 +238,34 @@ impl Connector for WorkBuddyConnector {
         Ok(replace_arrays(models, available, native_array))
     }
 
+    fn project_owned_document(
+        &self,
+        current: &mut ConfigDocument,
+        source: &ConfigDocument,
+        _owned_paths: &[ConfigPath],
+    ) -> Result<(), String> {
+        let (mut current_models, mut current_available, native_array) = arrays(current)?;
+        let (source_models, source_available, _) = arrays(source)?;
+        current_models.retain(|model| model.get("id").and_then(Value::as_str) != Some(MODEL_ID));
+        if let Some(managed) = source_models
+            .into_iter()
+            .find(|model| model.get("id").and_then(Value::as_str) == Some(MODEL_ID))
+        {
+            current_models.push(managed);
+        }
+        current_available.retain(|item| item.as_str() != Some(MODEL_ID));
+        if source_available
+            .iter()
+            .any(|item| item.as_str() == Some(MODEL_ID))
+        {
+            current_available.push(json!(MODEL_ID));
+        }
+        apply_patch(
+            current,
+            &replace_arrays(current_models, current_available, native_array),
+        )
+    }
+
     fn validate_projected(
         &self,
         document: &ConfigDocument,
@@ -252,9 +283,15 @@ impl Connector for WorkBuddyConnector {
     }
 
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
-        let metadata = input.model_metadata.map_or("模型限制未知，未写入猜测值", |_| {
+        let metadata = if input
+            .model_metadata
+            .and_then(AgentModelMetadata::safe_limits)
+            .is_some()
+        {
             "已同步上下文和最大输出限制"
-        });
+        } else {
+            "模型限制未知，未写入猜测值"
+        };
         format!(
             "WorkBuddy 已加入 Token Station 自定义模型并指向 {}；{}；原 models.json 已备份。",
             model_endpoint(input.base_url), metadata

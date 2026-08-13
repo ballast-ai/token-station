@@ -255,8 +255,8 @@ fn build_connection_or_refresh_plan(
         connector.validate_source(&document)?;
     }
     let baseline_semantic = semantic_json(&document)?;
-    let operations = if ownership.is_some() {
-        connector.refresh_patch_for_document(&document, input)?
+    let operations = if let Some(record) = ownership {
+        connector.refresh_patch_for_document(&document, input, &record.owned_paths)?
     } else {
         connector.connect_patch_for_document(&document, input)?
     };
@@ -265,14 +265,30 @@ fn build_connection_or_refresh_plan(
     validate_patch_ownership(&operations, &declared_owned_paths)?;
     let reverse_operations = apply_patch_with_reverse(&mut document, &operations)?;
     let owned_paths = ownership.map_or_else(
-        || declared_owned_paths.clone(),
-        |record| normalized_legacy_owned_paths(&record.owned_paths, &declared_owned_paths),
+        || owned_paths_touched_by(&declared_owned_paths, &operations),
+        |record| {
+            let previous =
+                normalized_legacy_owned_paths(&record.owned_paths, &declared_owned_paths);
+            declared_owned_paths
+                .iter()
+                .filter(|path| previous.contains(path) || owned_path_is_touched(path, &operations))
+                .cloned()
+                .collect()
+        },
     );
     validate_owned_paths(&owned_paths)?;
-    connector.validate_projected(&document, input)?;
+    if ownership.is_some() {
+        connector.validate_refresh_projected(&document, input, &owned_paths)?;
+    } else {
+        connector.validate_projected(&document, input)?;
+    }
     let rendered = render_document(&document, connector.label())?;
     let reparsed = parse_rendered(&rendered, connector.format(), connector.label())?;
-    connector.validate_projected(&reparsed, input)?;
+    if ownership.is_some() {
+        connector.validate_refresh_projected(&reparsed, input, &owned_paths)?;
+    } else {
+        connector.validate_projected(&reparsed, input)?;
+    }
     verify_reverse_projection(
         &reparsed,
         &baseline_semantic,
@@ -863,7 +879,7 @@ fn build_owned_projection_plan(
     let original_semantic = semantic_json(&current_document)?;
     let (forward_operations, reverse_operations) =
         projection_operations(&current_document, &source_document, &projected_owned_paths)?;
-    project_owned_paths(
+    connector.project_owned_document(
         &mut current_document,
         &source_document,
         &projected_owned_paths,
@@ -1089,6 +1105,24 @@ fn validate_owned_paths(paths: &[ConfigPath]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn owned_paths_touched_by(
+    declared_paths: &[ConfigPath],
+    operations: &[PatchOperation],
+) -> Vec<ConfigPath> {
+    declared_paths
+        .iter()
+        .filter(|owned| owned_path_is_touched(owned, operations))
+        .cloned()
+        .collect()
+}
+
+fn owned_path_is_touched(owned: &ConfigPath, operations: &[PatchOperation]) -> bool {
+    operations.iter().any(|operation| {
+        operation.path.segments.len() >= owned.segments.len()
+            && operation.path.segments[..owned.segments.len()] == owned.segments
+    })
 }
 
 fn redact_changes(
@@ -1456,6 +1490,135 @@ mod tests {
             .iter()
             .any(|change| change.operation == PatchKind::Remove
                 && change.path.segments == ["model_providers"]));
+    }
+
+    #[test]
+    fn codex_unknown_metadata_does_not_claim_user_limits() {
+        #[cfg(windows)]
+        let target = Path::new(r"C:\tmp\token-station-plan\config.toml");
+        #[cfg(not(windows))]
+        let target = Path::new("/tmp/token-station-plan/config.toml");
+        let mut codex_discovery = discovery(target);
+        codex_discovery.agent_id = "codex".to_string();
+        let mut codex_compatibility = verified();
+        codex_compatibility.agent_id = "codex".to_string();
+        codex_compatibility.connector_id = Some("codex-v1".to_string());
+        let source = ConfigSource::existing(
+            b"model_context_window = 64000\nmodel_auto_compact_token_limit = 48000\n".to_vec(),
+            Some(0o600),
+            None,
+        );
+
+        let prepared = build_connection_plan(
+            &CodexConnector,
+            &codex_discovery,
+            &codex_compatibility,
+            target,
+            &source,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/agents/codex/v1",
+                token: Some("fixture-codex-virtual-key"),
+                adapter_ready: true,
+                model_metadata: None,
+            },
+            1,
+            None,
+            10,
+            "16".repeat(16),
+        )
+        .unwrap();
+
+        assert!(!prepared.view.owned_paths.iter().any(|path| {
+            matches!(
+                path.segments.as_slice(),
+                [field] if field == "model_context_window" || field == "model_auto_compact_token_limit"
+            )
+        }));
+    }
+
+    #[test]
+    fn codex_unknown_metadata_refresh_preserves_unowned_user_limits() {
+        #[cfg(windows)]
+        let target = Path::new(r"C:\tmp\token-station-plan\config.toml");
+        #[cfg(not(windows))]
+        let target = Path::new("/tmp/token-station-plan/config.toml");
+        let mut codex_discovery = discovery(target);
+        codex_discovery.agent_id = "codex".to_string();
+        let mut codex_compatibility = verified();
+        codex_compatibility.agent_id = "codex".to_string();
+        codex_compatibility.connector_id = Some("codex-v1".to_string());
+        let source = ConfigSource::existing(
+            br#"model = "auto"
+model_provider = "tokenstation"
+model_context_window = 64000
+model_auto_compact_token_limit = 48000
+
+[model_providers.tokenstation]
+base_url = "http://127.0.0.1:8787/agents/codex/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "fixture-codex-virtual-key"
+"#
+            .to_vec(),
+            Some(0o600),
+            None,
+        );
+        let ownership = OwnershipRecord {
+            schema_version: 1,
+            revision: 1,
+            agent_id: "codex".to_string(),
+            installation_path: "/opt/claude".to_string(),
+            target_config_path: target.to_string_lossy().into_owned(),
+            connector_id: "codex-v1".to_string(),
+            baseline_snapshot_id: "01".repeat(16),
+            last_transaction_snapshot_id: "02".repeat(16),
+            before_hash: "a".repeat(64),
+            managed_after_hash: "b".repeat(64),
+            owned_paths: vec![
+                ConfigPath {
+                    segments: vec!["model".to_string()],
+                },
+                ConfigPath {
+                    segments: vec!["model_provider".to_string()],
+                },
+                ConfigPath {
+                    segments: vec!["model_providers".to_string(), "tokenstation".to_string()],
+                },
+            ],
+            owned_value_macs: std::collections::BTreeMap::new(),
+            companion_files: Vec::new(),
+            acquired_at_ms: 1,
+            updated_at_ms: 1,
+        };
+
+        let prepared = build_metadata_refresh_plan(
+            &CodexConnector,
+            &codex_discovery,
+            &codex_compatibility,
+            target,
+            &source,
+            &ConnectInput {
+                base_url: "http://127.0.0.1:8787/agents/codex/v1",
+                token: Some("fixture-codex-virtual-key"),
+                adapter_ready: true,
+                model_metadata: None,
+            },
+            &ownership,
+            1,
+            None,
+            10,
+            "17".repeat(16),
+        )
+        .unwrap();
+        let projected = parse_source_bytes(
+            Some(prepared.projected_bytes.as_slice()),
+            DocumentFormat::Toml,
+            "Codex",
+        )
+        .unwrap();
+        let projected = semantic_json(&projected).unwrap();
+        assert_eq!(projected["model_context_window"], json!(64_000));
+        assert_eq!(projected["model_auto_compact_token_limit"], json!(48_000));
     }
 
     #[test]

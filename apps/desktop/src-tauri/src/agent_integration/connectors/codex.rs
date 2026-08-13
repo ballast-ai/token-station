@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::{path, ConnectInput, Connector, ConnectorCapabilities};
-use crate::agent_integration::config_codec::{ConfigDocument, DocumentFormat};
+use super::{path, AgentModelMetadata, ConnectInput, Connector, ConnectorCapabilities};
+use crate::agent_integration::config_codec::{semantic_json, ConfigDocument, DocumentFormat};
 use crate::agent_integration::types::{ConfigPath, PatchKind, PatchOperation};
 
 pub struct CodexConnector;
@@ -129,14 +129,14 @@ impl Connector for CodexConnector {
                 .into_iter()
                 .map(|(field, value)| replace(&["model_providers", "tokenstation", field], value)),
         );
-        if let Some(metadata) = input.model_metadata {
+        if let Some((context, output)) = input.model_metadata.and_then(AgentModelMetadata::safe_limits) {
             operations.push(replace(
                 &["model_context_window"],
-                json!(metadata.context),
+                json!(context),
             ));
             operations.push(replace(
                 &["model_auto_compact_token_limit"],
-                json!(metadata.context - metadata.output),
+                json!(context - output),
             ));
         }
         // Older connectors wrote env_key. Codex prefers it over the embedded
@@ -152,23 +152,60 @@ impl Connector for CodexConnector {
 
     fn refresh_patch_for_document(
         &self,
-        _document: &ConfigDocument,
+        document: &ConfigDocument,
         input: &ConnectInput<'_>,
+        owned_paths: &[ConfigPath],
     ) -> Result<Vec<PatchOperation>, String> {
         let mut operations = self.connect_patch(input)?;
-        if input.model_metadata.is_none() {
+        let semantic = semantic_json(document)?;
+        let context_path = path(&["model_context_window"]);
+        let compact_path = path(&["model_auto_compact_token_limit"]);
+        if input.model_metadata.and_then(AgentModelMetadata::safe_limits).is_some() {
+            operations.retain(|operation| {
+                if operation.path == context_path {
+                    owned_paths.contains(&context_path)
+                        || semantic.get("model_context_window").is_none()
+                } else if operation.path == compact_path {
+                    owned_paths.contains(&compact_path)
+                        || semantic.get("model_auto_compact_token_limit").is_none()
+                } else {
+                    true
+                }
+            });
+        } else {
+            if owned_paths.contains(&context_path) {
             operations.push(PatchOperation {
                 operation: PatchKind::Remove,
-                path: path(&["model_context_window"]),
+                    path: context_path,
                 value: None,
             });
+            }
+            if owned_paths.contains(&compact_path) {
             operations.push(PatchOperation {
                 operation: PatchKind::Remove,
-                path: path(&["model_auto_compact_token_limit"]),
+                    path: compact_path,
                 value: None,
             });
+            }
         }
         Ok(operations)
+    }
+
+    fn validate_refresh_projected(
+        &self,
+        document: &ConfigDocument,
+        input: &ConnectInput<'_>,
+        owned_paths: &[ConfigPath],
+    ) -> Result<(), String> {
+        let owns_metadata = owned_paths.contains(&path(&["model_context_window"]))
+            && owned_paths.contains(&path(&["model_auto_compact_token_limit"]));
+        let validation_input = ConnectInput {
+            base_url: input.base_url,
+            token: input.token,
+            adapter_ready: input.adapter_ready,
+            model_metadata: owns_metadata.then_some(input.model_metadata).flatten(),
+        };
+        self.validate_projected(document, &validation_input)
     }
 
     fn disconnect_patch(&self) -> Vec<PatchOperation> {
@@ -215,15 +252,15 @@ impl Connector for CodexConnector {
         if provider.get("env_key").is_some() {
             return Err("Codex 写入前复验遗留 env_key".to_string());
         }
-        if let Some(metadata) = input.model_metadata {
+        if let Some((expected_context, output)) = input.model_metadata.and_then(AgentModelMetadata::safe_limits) {
             let context = root
                 .get("model_context_window")
                 .and_then(toml_edit::Item::as_integer);
             let compact = root
                 .get("model_auto_compact_token_limit")
                 .and_then(toml_edit::Item::as_integer);
-            if context != Some(i64::from(metadata.context))
-                || compact != Some(i64::from(metadata.context - metadata.output))
+            if context != Some(i64::from(expected_context))
+                || compact != Some(i64::from(expected_context - output))
             {
                 return Err("Codex 写入前复验模型上下文或自动压缩阈值失败".to_string());
             }
@@ -232,9 +269,15 @@ impl Connector for CodexConnector {
     }
 
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
-        let metadata = input.model_metadata.map_or("模型限制未知，未写入上下文设置", |_| {
+        let metadata = if input
+            .model_metadata
+            .and_then(AgentModelMetadata::safe_limits)
+            .is_some()
+        {
             "已同步安全上下文窗口和自动压缩阈值"
-        });
+        } else {
+            "模型限制未知，未写入上下文设置"
+        };
         format!(
             "Codex 已通过 Responses API 指向 {}(~/.codex/config.toml,已备份；{})。",
             input.base_url, metadata
