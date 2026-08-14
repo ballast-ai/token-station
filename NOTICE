@@ -1,0 +1,15 @@
+Token Station History Reconstruction Notice
+
+This public branch was reconstructed on 2026-08-14 from the authorized
+develop history of an internal private Token Station repository. The source
+history was frozen at commit 8fe4ee430031a7818b6363f7a616fd7baa4e5310.
+Some commit dates are earlier than the creation date of this public repository.
+GitHub push, review, and repository activity timestamps show the actual
+migration time.
+
+The source owners authorized this migration and the following attribution map:
+
+- Commits recorded as JYC0413 or juyichen were work performed by Rainrain2007
+  on a colleague's Windows computer and were assigned to Rainrain2007.
+- Existing alkut, LB623, and Rainrain2007 records were normalized to their
+  GitHub-linked identities.
