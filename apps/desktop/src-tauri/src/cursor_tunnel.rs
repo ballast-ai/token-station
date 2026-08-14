@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{BufRead, BufReader};
 #[cfg(target_os = "macos")]
 use std::io::Read;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
