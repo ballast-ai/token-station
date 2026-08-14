@@ -409,6 +409,7 @@ fn cursor_safe_storage_password() -> Result<Zeroizing<String>, String> {
     Ok(Zeroizing::new(password.trim_end().to_string()))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn cursor_keychain_access_error() -> String {
     "cursor_keychain_access_required: 首次接入需要 macOS 钥匙串授权。请在系统对话框中输入本机登录密码，并选择“始终允许”后重试。".to_string()
 }
