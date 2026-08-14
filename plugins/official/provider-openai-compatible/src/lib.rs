@@ -448,12 +448,12 @@ fn events_of_frame(
     }
 
     if let Some(usage) = usage {
-        events.push(StreamEvent::Usage {
-            usage: usage_of(usage),
-        });
         if let Some(done) = pending_finish.take_done() {
             events.push(done);
         }
+        events.push(StreamEvent::Usage {
+            usage: usage_of(usage),
+        });
     }
     Ok(events)
 }
@@ -815,6 +815,26 @@ mod tests {
         let wire = body_of(&request).expect("DeepSeek tool history is representable");
         assert_eq!(wire["messages"][0]["content"], Value::Null);
         assert_eq!(wire["messages"][0]["reasoning_content"], json!(""));
+    }
+
+    #[test]
+    fn final_usage_is_emitted_after_the_delayed_done_event() {
+        let mut pending = PendingFinish::default();
+        let finish = events_of_frame(
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+            &mut pending,
+        )
+        .expect("finish frame parses");
+        assert!(finish.is_empty(), "finish waits for the final usage frame");
+
+        let events = events_of_frame(
+            r#"{"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7,"total_tokens":49}}"#,
+            &mut pending,
+        )
+        .expect("usage frame parses");
+
+        assert!(matches!(events.first(), Some(StreamEvent::Done { .. })));
+        assert!(matches!(events.get(1), Some(StreamEvent::Usage { usage }) if usage.input_tokens == 42));
     }
 }
 
