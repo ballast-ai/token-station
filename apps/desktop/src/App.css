@@ -6081,10 +6081,10 @@ pre.block {
   max-width: 44%;
   overflow: hidden;
   padding: 5px 8px;
-  border: 1px solid color-mix(in srgb, var(--success) 30%, var(--line));
+  border: 1px solid var(--success-border);
   border-radius: 999px;
   color: var(--success);
-  background: color-mix(in srgb, var(--success) 8%, var(--surface));
+  background: var(--success-soft);
   font: 9.5px/1.2 "IBM Plex Mono", monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6121,8 +6121,8 @@ pre.block {
 }
 
 .direct-provider-row:hover:not(.unavailable) {
-  border-color: color-mix(in srgb, var(--signal) 28%, var(--line));
-  background: color-mix(in srgb, var(--signal) 3%, var(--surface));
+  border-color: var(--signal-hover-border);
+  background: var(--signal-hover-soft);
 }
 
 .direct-provider-row:focus-within {
@@ -6131,8 +6131,8 @@ pre.block {
 }
 
 .direct-provider-row.selected {
-  border-color: color-mix(in srgb, var(--signal) 52%, var(--line));
-  background: color-mix(in srgb, var(--signal) 10%, var(--surface));
+  border-color: var(--signal-selection-border);
+  background: var(--signal-soft);
   box-shadow: inset 3px 0 0 var(--signal);
 }
 
@@ -6388,10 +6388,10 @@ pre.block {
 
 .routing-mode-tabs [data-slot="tabs-trigger"][data-state="active"],
 .routing-mode-tabs [data-slot="tabs-trigger"][data-active] {
-  border-color: color-mix(in srgb, var(--signal) 58%, var(--line));
+  border-color: var(--signal-selection-border);
   color: var(--ink);
-  background: color-mix(in srgb, var(--signal) 9%, var(--surface));
-  box-shadow: 0 1px 3px color-mix(in srgb, var(--signal) 16%, transparent);
+  background: var(--signal-soft);
+  box-shadow: var(--signal-selection-shadow);
 }
 
 .routing-mode-tabs [data-slot="tabs-trigger"] > span {
@@ -7036,10 +7036,12 @@ pre.block {
   gap: 10px;
   padding: 11px 10px 11px 13px;
   --toast-tone: var(--danger);
-  border: 1px solid color-mix(in srgb, var(--toast-tone) 45%, var(--line));
+  --toast-border: var(--danger-border);
+  --toast-soft: var(--danger-soft);
+  border: 1px solid var(--toast-border);
   border-radius: 11px;
   color: var(--ink);
-  background: color-mix(in srgb, var(--toast-tone) 8%, var(--surface));
+  background: var(--toast-soft);
   box-shadow: 0 18px 42px rgb(9 9 11 / 18%);
   font-size: 12px;
   line-height: 1.45;
@@ -7049,9 +7051,23 @@ pre.block {
   pointer-events: auto;
 }
 
-.error-toast.is-info { --toast-tone: var(--signal); }
-.error-toast.is-success { --toast-tone: var(--success); }
-.error-toast.is-error { --toast-tone: var(--danger); }
+.error-toast.is-info {
+  --toast-tone: var(--signal);
+  --toast-border: var(--signal-selection-border);
+  --toast-soft: var(--signal-soft);
+}
+
+.error-toast.is-success {
+  --toast-tone: var(--success);
+  --toast-border: var(--success-border);
+  --toast-soft: var(--success-soft);
+}
+
+.error-toast.is-error {
+  --toast-tone: var(--danger);
+  --toast-border: var(--danger-border);
+  --toast-soft: var(--danger-soft);
+}
 
 .error-toast.is-fading {
   opacity: 0;
@@ -8240,8 +8256,16 @@ a:focus-visible {
   --signal: #5368e8;
   --signal-foreground: #ffffff;
   --signal-soft: #edf0ff;
+  --signal-selection-border: #a8b2ed;
+  --signal-selection-shadow: 0 1px 3px rgb(83 104 232 / 16%);
+  --signal-hover-border: #adb8e4;
+  --signal-hover-soft: #f7f8fe;
   --success: #1b8a5a;
+  --success-border: #a5ccbd;
+  --success-soft: #edf7f2;
   --danger: #be3f4a;
+  --danger-border: #d19ba5;
+  --danger-soft: #faf0f1;
   --warning: #a96a12;
   --shadow: 0 16px 44px rgba(31, 42, 70, 0.07);
   font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -8258,8 +8282,16 @@ a:focus-visible {
   --signal: #7284ff;
   --signal-foreground: #08101f;
   --signal-soft: #262f51;
+  --signal-selection-border: #53639f;
+  --signal-selection-shadow: 0 1px 3px rgb(114 132 255 / 18%);
+  --signal-hover-border: #485674;
+  --signal-hover-soft: #1c2231;
   --success: #41c98a;
+  --success-border: #3d6d67;
+  --success-soft: #1c2d33;
   --danger: #ff7883;
+  --danger-border: #8d5059;
+  --danger-soft: #2b262f;
   --warning: #efb55c;
   --shadow: 0 18px 52px rgba(0, 0, 0, 0.26);
 }
