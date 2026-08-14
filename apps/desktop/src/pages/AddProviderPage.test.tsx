@@ -155,7 +155,41 @@ function FreeCatalogHarness() {
   );
 }
 
+function RegularCatalogHarness() {
+  const [filters, setFilters] = useState<RegularCatalogFilters>(regularFilters);
+  return (
+    <AddProviderPage
+      existingNames={[]}
+      onCancel={vi.fn()}
+      onAdded={vi.fn()}
+      catalogMode="regular"
+      onCatalogModeChange={vi.fn()}
+      regularFilters={filters}
+      onRegularFiltersChange={setFilters}
+      freePresets={[]}
+      freeLoading={false}
+      freeError=""
+      freeFilters={freeFilters}
+      onFreeFiltersChange={vi.fn()}
+      onLoadFree={vi.fn()}
+      onSelectFree={vi.fn()}
+    />
+  );
+}
+
 describe("AddProviderPage", () => {
+  it("filters standard providers by a model name across punctuation boundaries", async () => {
+    window.localStorage.setItem("token-station-language", "en");
+    const user = userEvent.setup();
+    render(<RegularCatalogHarness />);
+
+    await user.type(screen.getByRole("searchbox", { name: "Search standard providers" }), "gpt 5.6 sol");
+
+    const providers = screen.getByRole("list", { name: "Standard providers" });
+    expect(within(providers).getByText("OpenAI", { selector: "strong" })).toBeInTheDocument();
+    expect(within(providers).queryByText("Anthropic Claude", { selector: "strong" })).not.toBeInTheDocument();
+  });
+
   it("renders localized provider names in the default English interface", () => {
     window.localStorage.removeItem("token-station-language");
     renderPage();
@@ -269,7 +303,8 @@ describe("AddProviderPage", () => {
 
     expect(screen.getByLabelText("API Key")).toBeInTheDocument();
     await user.click(screen.getByText("高级凭据来源"));
-    await user.selectOptions(screen.getByLabelText("凭据来源"), "env");
+    await user.click(screen.getByRole("combobox", { name: "凭据来源" }));
+    await user.click(await screen.findByRole("option", { name: "环境变量" }));
     expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
     await user.type(screen.getByLabelText("环境变量名"), "DEEPSEEK_API_KEY");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
@@ -281,6 +316,18 @@ describe("AddProviderPage", () => {
       credentialSource: "env",
       credentialReference: "DEEPSEEK_API_KEY",
     }));
+  });
+
+  it("凭据来源使用组件库下拉而非原生 select", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    const { container } = renderPage();
+    await pickPreset(user, "DeepSeek");
+    await user.click(screen.getByText("高级凭据来源"));
+
+    const trigger = screen.getByRole("combobox", { name: "凭据来源" });
+    expect(container.querySelector('select[aria-label="凭据来源"]')).not.toBeInTheDocument();
+    expect(trigger).toHaveAttribute("data-slot", "select-trigger");
   });
 
   it("offers official and self-hosted presets as cards and omits non-default aggregators", () => {
@@ -319,7 +366,7 @@ describe("AddProviderPage", () => {
     const user = userEvent.setup();
     render(<FreeCatalogHarness />);
 
-    await user.type(screen.getByRole("searchbox", { name: "搜索免费供应商" }), "gpt-oss");
+    await user.type(screen.getByRole("searchbox", { name: "搜索免费供应商" }), "gpt oss 120b");
     const grid = screen.getByRole("list", { name: "免费供应商列表" });
     expect(within(grid).getByText("NVIDIA API Catalog")).toBeInTheDocument();
     expect(within(grid).queryByText("Cohere")).toBeNull();

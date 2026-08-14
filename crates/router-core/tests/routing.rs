@@ -760,6 +760,15 @@ fn quota_router_with_accounts(accounts: Vec<UpstreamModel>) -> Router {
     .expect("a quota-first config needs no pools")
 }
 
+fn quota_router_for_candidates(candidates: &[Candidate]) -> Router {
+    quota_router_with_accounts(
+        candidates
+            .iter()
+            .map(|candidate| candidate.target.clone())
+            .collect(),
+    )
+}
+
 const FIVE_H_MS: u64 = 5 * 60 * 60 * 1000;
 
 fn quota_candidate(upstream: &str, quota: QuotaState) -> Candidate {
@@ -772,12 +781,28 @@ fn quota_candidate(upstream: &str, quota: QuotaState) -> Candidate {
 }
 
 #[test]
+fn quota_first_with_no_selected_accounts_routes_nothing() {
+    let accounts = vec![quota_candidate("plan_a", QuotaState::open(FIVE_H_MS))];
+
+    let error = quota_router()
+        .route_quota_first(&ask("anything"), &accounts, None)
+        .expect_err("empty explicit selection must not expand to host candidates");
+
+    assert_eq!(
+        error,
+        NoRoute::Unavailable {
+            pool: "quota".to_owned(),
+        }
+    );
+}
+
+#[test]
 fn quota_first_serves_the_soonest_resetting_account_first() {
     let accounts = vec![
         quota_candidate("plan_slow", QuotaState::open(FIVE_H_MS)),
         quota_candidate("plan_closing", QuotaState::open(20 * 60 * 1000)),
     ];
-    let decision = quota_router()
+    let decision = quota_router_for_candidates(&accounts)
         .route_quota_first(&ask("anything"), &accounts, None)
         .expect("routable");
 
@@ -840,7 +865,7 @@ fn quota_first_keeps_a_conversation_on_the_account_it_warmed() {
         quota_candidate("plan_b", QuotaState::open(FIVE_H_MS / 2)),
     ];
     let warmed = target("plan_b", "shared-model");
-    let decision = quota_router()
+    let decision = quota_router_for_candidates(&accounts)
         .route_quota_first(&ask("follow-up"), &accounts, Some(&warmed))
         .expect("routable");
     assert_eq!(decision.chosen, warmed);
@@ -862,7 +887,7 @@ fn quota_first_spills_off_a_warmed_but_rate_pressured_account() {
         quota_candidate("plan_free", QuotaState::open(FIVE_H_MS / 2)),
     ];
     let warmed = target("plan_warm", "shared-model");
-    let decision = quota_router()
+    let decision = quota_router_for_candidates(&accounts)
         .route_quota_first(&ask("hi"), &accounts, Some(&warmed))
         .expect("routable");
     assert_eq!(
@@ -887,7 +912,7 @@ fn quota_first_skips_a_spent_allowance() {
         quota_candidate("plan_spent", spent),
         quota_candidate("plan_left", QuotaState::open(FIVE_H_MS)),
     ];
-    let decision = quota_router()
+    let decision = quota_router_for_candidates(&accounts)
         .route_quota_first(&ask("hi"), &accounts, None)
         .expect("routable");
     assert_eq!(decision.chosen, target("plan_left", "shared-model"));
@@ -903,7 +928,7 @@ fn quota_first_prefers_a_windowed_account_over_pay_as_you_go() {
         quota_candidate("metered", QuotaState::non_windowed()),
         quota_candidate("windowed", QuotaState::open(FIVE_H_MS)),
     ];
-    let decision = quota_router()
+    let decision = quota_router_for_candidates(&accounts)
         .route_quota_first(&ask("hi"), &accounts, None)
         .expect("routable");
     assert_eq!(
@@ -929,7 +954,7 @@ fn quota_first_reports_unavailable_when_every_account_is_ejected() {
         )
         .quota(QuotaState::open(FIVE_H_MS)),
     ];
-    let error = quota_router()
+    let error = quota_router_for_candidates(&accounts)
         .route_quota_first(&ask("hi"), &accounts, None)
         .expect_err("all ejected");
     assert!(matches!(error, NoRoute::Unavailable { .. }));

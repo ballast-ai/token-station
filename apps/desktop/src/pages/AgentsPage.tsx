@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { RefreshCw } from "lucide-react";
 import type { AgentUiMetadataView, AgentView } from "../api";
 import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy } from "../components/LanguageProvider";
@@ -7,14 +8,17 @@ import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { ScrollArea } from "../components/ui/scroll-area";
+import { cn } from "../lib/utils";
 
 interface AgentsPageProps {
   registry: AgentUiMetadataView[];
   agents: AgentView[];
   selectedAgentId?: string;
   homeSelected: boolean;
+  scanBusy: boolean;
   onOpenHome: () => void;
   onOpenAgent: (agentId: string) => void;
+  onRescan: () => void;
   children: ReactNode;
 }
 
@@ -33,7 +37,7 @@ function navStatusCopy(status: AgentView["status"] | undefined, copy: (en: strin
   if (status === "MULTIPLE_INSTALLATIONS") return copy("Multiple", "多实例");
   if (status === "DETECTED_BLOCKED" || status === "INSTALLED_BROKEN") return copy("Issue", "异常");
   if (status === "DETECTED_UNKNOWN") return copy("Found", "已发现");
-  return copy("Offline", "离线");
+  return copy("Not found", "未检测");
 }
 
 export default function AgentsPage({
@@ -41,8 +45,10 @@ export default function AgentsPage({
   agents,
   selectedAgentId,
   homeSelected,
+  scanBusy,
   onOpenHome,
   onOpenAgent,
+  onRescan,
   children,
 }: AgentsPageProps) {
   const { copy } = useLocalizedCopy();
@@ -53,7 +59,7 @@ export default function AgentsPage({
         <div>
           <span className="page-eyebrow">AGENT FLEET</span>
           <h1>{copy("Home", "主页")}</h1>
-          <p>{copy("Choose global routing or a detected Agent, then configure it on the right.", "选择全局路由或启动时发现的 Agent，在右侧完成配置。")}</p>
+          <p>{copy("Choose global routing or a visible Agent, then configure it on the right.", "选择全局路由或主页中显示的 Agent，在右侧完成配置。")}</p>
         </div>
       </header>
 
@@ -69,7 +75,24 @@ export default function AgentsPage({
               <span className="page-eyebrow">AGENTS</span>
               <CardTitle><h2>{copy("Local clients", "本机客户端")}</h2></CardTitle>
             </div>
-            <Badge variant="outline">{registry.length}</Badge>
+            <div className="agent-master-actions">
+              <Badge variant="outline">{registry.length}</Badge>
+              <Button
+                variant="outline"
+                size="sm"
+                type="button"
+                data-onboarding-target="agent-rescan"
+                onClick={onRescan}
+                disabled={scanBusy}
+              >
+                <RefreshCw
+                  data-icon="inline-start"
+                  className={cn(scanBusy && "is-spinning")}
+                  aria-hidden="true"
+                />
+                {scanBusy ? copy("Scanning…", "扫描中…") : copy("Rescan", "重新扫描")}
+              </Button>
+            </div>
           </CardHeader>
           <CardContent>
             <ScrollArea className="agent-master-scroll">

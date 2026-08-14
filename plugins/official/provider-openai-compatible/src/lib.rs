@@ -343,18 +343,27 @@ fn body_of(request: &ChatRequest) -> Result<Value, String> {
     Ok(Value::Object(body))
 }
 
-/// Whether `reasoning_effort` may be sent for the chosen model. An undeclared
-/// (empty) parameter set is optimistic — the field is rendered. A model that
-/// enumerates its parameters and omits `reasoning_effort` opts out, and the
-/// field is dropped rather than risking an upstream rejection.
+/// Whether `reasoning_effort` may be sent for the chosen model. Native OpenAI
+/// clients retain the existing optimistic behavior when a model has no declared
+/// parameter set. Anthropic adaptive/enabled thinking is different: it is a
+/// translated preference, not an OpenAI wire guarantee, so an undeclared model
+/// must explicitly opt in before receiving the field. This lets shared
+/// OpenAI-compatible routes degrade safely for providers such as DeepSeek.
 fn reasoning_effort_allowed(request: &ChatRequest, config: &ProviderConfig) -> bool {
+    let requires_explicit_capability = request
+        .extensions
+        .get("anthropic_thinking")
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| matches!(kind, "adaptive" | "enabled"));
+
     config
         .models
         .iter()
         .find(|capability| capability.model == request.model)
-        .map_or(true, |capability| {
-            capability.supported_parameters.is_empty()
-                || capability.supported_parameters.contains("reasoning_effort")
+        .map_or(!requires_explicit_capability, |capability| {
+            capability.supported_parameters.contains("reasoning_effort")
+                || (!requires_explicit_capability && capability.supported_parameters.is_empty())
         })
 }
 
@@ -506,9 +515,9 @@ impl Guest for OpenAiCompatible {
             SafeHeaders::try_new([("content-type", "application/json")]).map_err(internal)?;
         let mut body = body_of(&request)?;
         // `reasoning_effort` arrives through the extensions passthrough. Render
-        // it unless the chosen model explicitly enumerates its parameters and
-        // omits it — an empty (undeclared) set is treated optimistically, matching
-        // how the sampling params above render unconditionally.
+        // it when the chosen model allows it. Anthropic adaptive/enabled requests
+        // require an explicit declaration; native OpenAI-family requests retain
+        // the adapter's historical optimistic behavior for undeclared models.
         if let Some(effort) = request
             .extensions
             .get("reasoning_effort")

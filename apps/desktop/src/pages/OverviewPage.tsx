@@ -80,7 +80,12 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
           );
 
   return (
-    <div className="page-stack overview-page">
+    <div
+      className="page-stack overview-page"
+      role="region"
+      aria-label={copy("Overview page", "概览页")}
+      data-onboarding-target="overview"
+    >
       <header className="overview-heading">
         <div>
           <span className="page-eyebrow">RUNTIME STATUS</span>
@@ -92,7 +97,10 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
         </div>
       </header>
 
-      <section className="overview-metrics" aria-label={copy("System summary", "系统摘要")}>
+      <section
+        className="overview-metrics"
+        aria-label={copy("System summary", "系统摘要")}
+      >
         <Card size="sm" className="overview-status-card">
           <CardHeader>
             <span><Activity />{copy("Proxy status", "代理状态")}</span>

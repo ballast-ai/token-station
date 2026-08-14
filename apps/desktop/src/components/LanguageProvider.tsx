@@ -42,7 +42,7 @@ const messages = {
     "settings.general": "通用",
     "settings.generalHint": "代理、鉴权和环境",
     "settings.agentVisibility": "Agent 显示",
-    "settings.agentVisibilityHint": "左侧导航项目",
+    "settings.agentVisibilityHint": "主页 Agent 列表",
     "settings.router": "路由表",
     "settings.routerHint": "只读决策结构",
     "settings.plugins": "插件",
@@ -74,7 +74,7 @@ const messages = {
     "appearance.systemLight": "浅色",
     "appearance.systemDark": "深色",
     "agentVisibility.title": "Agent 显示",
-    "agentVisibility.description": "选择显示在左侧导航中的 Agent。",
+    "agentVisibility.description": "选择显示在主页列表中的 Agent；未检测到的 Agent 默认关闭。",
     "agentVisibility.count": "{visible} / {total} 已显示",
     "agentVisibility.groupLabel": "Agent 显示选项",
     "agentVisibility.empty": "当前 Registry 没有可显示的 Agent。",
@@ -193,7 +193,7 @@ const messages = {
     "settings.general": "一般",
     "settings.generalHint": "代理、驗證與環境",
     "settings.agentVisibility": "Agent 顯示",
-    "settings.agentVisibilityHint": "左側導覽項目",
+    "settings.agentVisibilityHint": "首頁 Agent 列表",
     "settings.router": "路由表",
     "settings.routerHint": "唯讀決策結構",
     "settings.plugins": "外掛",
@@ -225,7 +225,7 @@ const messages = {
     "appearance.systemLight": "淺色",
     "appearance.systemDark": "深色",
     "agentVisibility.title": "Agent 顯示",
-    "agentVisibility.description": "選擇顯示在左側導覽中的 Agent。",
+    "agentVisibility.description": "選擇顯示在首頁列表中的 Agent；未偵測到的 Agent 預設關閉。",
     "agentVisibility.count": "{visible} / {total} 已顯示",
     "agentVisibility.groupLabel": "Agent 顯示選項",
     "agentVisibility.empty": "目前 Registry 沒有可顯示的 Agent。",
@@ -343,7 +343,7 @@ const messages = {
     "settings.general": "General",
     "settings.generalHint": "Proxy, auth, and environment",
     "settings.agentVisibility": "Agent visibility",
-    "settings.agentVisibilityHint": "Sidebar navigation items",
+    "settings.agentVisibilityHint": "Home Agent list",
     "settings.router": "Router",
     "settings.routerHint": "Read-only decision structure",
     "settings.plugins": "Plugins",
@@ -375,7 +375,7 @@ const messages = {
     "appearance.systemLight": "light mode",
     "appearance.systemDark": "dark mode",
     "agentVisibility.title": "Agent visibility",
-    "agentVisibility.description": "Choose which Agents appear in the sidebar.",
+    "agentVisibility.description": "Choose which Agents appear on Home. Undetected Agents are off by default.",
     "agentVisibility.count": "{visible} / {total} visible",
     "agentVisibility.groupLabel": "Agent visibility options",
     "agentVisibility.empty": "The current Registry has no Agents available to show.",
@@ -494,7 +494,7 @@ const messages = {
     "settings.general": "一般",
     "settings.generalHint": "プロキシ、認証、環境",
     "settings.agentVisibility": "Agent 表示",
-    "settings.agentVisibilityHint": "サイドバーの項目",
+    "settings.agentVisibilityHint": "ホームの Agent 一覧",
     "settings.router": "ルーター",
     "settings.routerHint": "読み取り専用の判断構造",
     "settings.plugins": "プラグイン",
@@ -526,7 +526,7 @@ const messages = {
     "appearance.systemLight": "ライトモード",
     "appearance.systemDark": "ダークモード",
     "agentVisibility.title": "Agent 表示",
-    "agentVisibility.description": "サイドバーに表示する Agent を選びます。",
+    "agentVisibility.description": "ホームに表示する Agent を選びます。未検出の Agent は既定でオフです。",
     "agentVisibility.count": "{visible} / {total} 表示中",
     "agentVisibility.groupLabel": "Agent 表示オプション",
     "agentVisibility.empty": "現在の Registry には表示できる Agent がありません。",
@@ -635,14 +635,39 @@ function isLanguage(value: string | null): value is Language {
   return value === "zh-CN" || value === "en";
 }
 
+function detectedLanguage(): Language {
+  if (typeof window === "undefined") return "en";
+  try {
+    const locales = window.navigator.languages.length > 0
+      ? window.navigator.languages
+      : [window.navigator.language];
+    for (const locale of locales) {
+      const parts = locale.replace(/_/g, "-").toLocaleLowerCase().split("-");
+      if (parts[0] === "en") return "en";
+      if (
+        parts[0] === "zh"
+        && (
+          parts.length === 1
+          || parts.includes("hans")
+          || parts.includes("cn")
+          || parts.includes("sg")
+        )
+      ) return "zh-CN";
+    }
+  } catch {
+    // Locale detection is best-effort; English remains the safe complete fallback.
+  }
+  return "en";
+}
+
 function storedLanguage(): Language {
   if (typeof window === "undefined") return "en";
   try {
     const value = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
     if (value === "zh") return "zh-CN";
-    return isLanguage(value) ? value : "en";
+    return isLanguage(value) ? value : detectedLanguage();
   } catch {
-    return "en";
+    return detectedLanguage();
   }
 }
 
