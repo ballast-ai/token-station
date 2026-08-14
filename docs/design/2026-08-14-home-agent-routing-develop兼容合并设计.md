@@ -126,3 +126,21 @@ Shell、前端状态及公开设计文档产生冲突。
 - 首轮 `desktop-rust` 同时发现状态栏 Agent 菜单投影方法只在 macOS 调用、却未声明平台编译边界；Linux
   `-D warnings` 将其判为 dead code。方法现与实际调用统一使用 `cfg(target_os = "macos")`，不改变 macOS 行为。
 - 必须等待 PR #89 的 GitHub CI 全绿再合入 `develop`；最终合并状态以 PR 记录为准。
+
+### 2026-08-14 新手引导增量直接合并
+
+- 基于最新 `origin/develop` 仅移植 `0915cbd` 与 `beee65d`，不重复合入已经由 PR #89
+  兼容移植的旧分支历史；不创建新的 PR。
+- Agent 阶段在用户选择具体 Agent 前新增只读范围提示：主页列表只代表本机当前扫描结果；
+  Token Station 支持的全部 Agent 及主页显示控制位于“设置 → Agent 显示”。
+- 概览预备步只聚光左上角真实 Token Station 入口，明确说明从任意页面点击该入口即可切换回
+  概览；常规桌面宽度下卡片停靠在入口右侧顶部，四张概览核心指标卡保持完整可见。
+- 教程存储版本升级为 `spotlight-setup-v4`。引导不修改扫描结果、显示偏好、Agent 接入、
+  路由或概览数据。
+- `develop` 已删除的旧首次引导内部设计快照保持删除；本节承接稳定设计与验收记录。
+- 干净 worktree 验收通过：`npm ci` 无漏洞；前端 36 个文件、412 项测试全通过，生产构建通过，
+  仅保留既有大 chunk 提示；check Skill 的仓库级验证完成 Rust workspace `cargo check` 与全量
+  `cargo test`，全部通过。
+- 最终 `develop` 执行 `scripts/install-local-desktop.sh` 成功，release bundle、bundle id、签名、
+  制品审计、固定路径安装和启动全部通过；真实 App 重开教程后确认 Token Station 入口聚光、切换
+  文案和顶部停靠布局正确，四张概览核心指标卡完整可见。

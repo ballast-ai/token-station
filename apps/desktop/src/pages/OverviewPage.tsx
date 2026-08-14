@@ -84,7 +84,6 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
       className="page-stack overview-page"
       role="region"
       aria-label={copy("Overview page", "概览页")}
-      data-onboarding-target="overview"
     >
       <header className="overview-heading">
         <div>

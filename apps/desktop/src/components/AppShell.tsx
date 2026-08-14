@@ -82,6 +82,7 @@ export default function AppShell({
       <header className="station-header">
         <button
           data-onboarding-return-focus
+          data-onboarding-target="overview-entry"
           className="station-brand-top"
           type="button"
           disabled={commandBusy}

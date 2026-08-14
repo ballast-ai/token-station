@@ -980,6 +980,20 @@ body[data-first-run-guide-active="true"] [data-onboarding-floating="true"] {
   color: var(--muted);
 }
 
+.first-run-coachmark-overview-entry {
+  padding: 14px 16px;
+}
+
+.first-run-coachmark-overview-entry h2 {
+  margin-top: 8px;
+  margin-bottom: 5px;
+}
+
+.first-run-coachmark-overview-entry .first-run-coachmark-actions {
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
 .first-run-complete-dialog {
   width: min(400px, calc(100vw - 32px));
 }

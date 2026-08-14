@@ -13,7 +13,7 @@ import {
 } from "./ui/dialog";
 
 export const FIRST_RUN_GUIDE_STORAGE_KEY = "token-station-first-run-guide";
-export const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v3";
+export const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v4";
 
 export type FirstRunSetupStep = "provider" | "route" | "agent" | "complete";
 export type FirstRunMicroStep =
@@ -107,16 +107,16 @@ export default function FirstRunGuide({
   targetActionRef.current = onTargetAction;
   const content: CoachmarkContent = microStep === "overview"
     ? {
-        target: "overview",
+        target: "overview-entry",
         index: copy("GET ORIENTED · OVERVIEW", "认识 Token Station · 概览"),
-        title: copy("Start with Overview", "先看概览"),
+        title: copy("Return to Overview anytime", "从这里随时回到概览"),
         description: copy(
-          "Overview brings proxy status, current routing, requests, cost, Agents, and providers together. Select the Token Station mark at the top left to return here anytime. To review this guide later, go to Settings → About → Review getting started guide.",
-          "概览汇总代理状态、当前路由、请求与成本，以及 Agent 和供应商规模。以后点击左上角 Token Station 标志可随时回到这里；需要重看教程时，前往“设置 → 关于 → 重新查看新手引导”。",
+          "Wherever you are, select the Token Station mark at the top left to switch to Overview. It brings proxy status, current routing, requests, cost, Agents, and providers together.",
+          "无论当前在哪个页面，点击左上角 Token Station 标志都能切换到概览页。这里汇总代理状态、当前路由、请求与成本，以及 Agent 和供应商规模。",
         ),
         allowTargetInteraction: false,
         advanceOnTargetClick: false,
-        continueLabel: copy("Start setup", "开始配置"),
+        continueLabel: copy("Got it, start setup", "知道了，开始配置"),
       }
     : microStep === "provider-entry"
     ? {
@@ -546,11 +546,21 @@ export default function FirstRunGuide({
         }
       : { ...hole, borderRadius: undefined }
     : null;
-  const cardWidth = Math.min(360, viewportWidth - 32);
-  const estimatedCardHeight = 230;
-  const cardGap = 18;
+  const isOverviewEntry = content.target === "overview-entry";
+  const cardWidth = Math.min(isOverviewEntry ? 720 : 360, viewportWidth - 32);
+  const estimatedCardHeight = isOverviewEntry ? 176 : 230;
+  const cardGap = isOverviewEntry ? 14 : 18;
+  const overviewRightWidth = targetRect
+    ? viewportWidth - targetRect.right - cardGap - 16
+    : 0;
   const cardStyle: CSSProperties = targetRect && targetRect.width > 0
-    ? targetRect.bottom + cardGap + estimatedCardHeight <= viewportHeight - 16
+    ? isOverviewEntry && overviewRightWidth >= 420
+      ? {
+          width: Math.min(cardWidth, overviewRightWidth),
+          left: targetRect.right + cardGap,
+          top: clamp(targetRect.top, 16, viewportHeight - estimatedCardHeight - 16),
+        }
+      : targetRect.bottom + cardGap + estimatedCardHeight <= viewportHeight - 16
       ? {
           width: cardWidth,
           left: clamp(targetRect.left, 16, viewportWidth - cardWidth - 16),
@@ -620,7 +630,7 @@ export default function FirstRunGuide({
       )}
       <section
         ref={coachmarkRef}
-        className="first-run-coachmark"
+        className={`first-run-coachmark${isOverviewEntry ? " first-run-coachmark-overview-entry" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="first-run-coachmark-title"

@@ -26,7 +26,7 @@ function rect(top: number, left: number, width: number, height: number): DOMRect
 }
 
 it("升级教程版本，使只看过旧版的用户看到新增步骤", () => {
-  const storage = new Map([[FIRST_RUN_GUIDE_STORAGE_KEY, "spotlight-setup-v2"]]);
+  const storage = new Map([[FIRST_RUN_GUIDE_STORAGE_KEY, "spotlight-setup-v3"]]);
   expect(shouldOpenFirstRunGuide({ getItem: (key) => storage.get(key) ?? null })).toBe(true);
   storage.set(FIRST_RUN_GUIDE_STORAGE_KEY, FIRST_RUN_GUIDE_VERSION);
   expect(shouldOpenFirstRunGuide({ getItem: (key) => storage.get(key) ?? null })).toBe(false);
@@ -80,13 +80,13 @@ it("在选择 Agent 前区分本机发现结果与全部支持清单", async () 
   }
 });
 
-it("从真实概览开始，并在教程内说明之后从哪里重看", async () => {
+it("高亮左上角入口并说明之后如何切换回概览", async () => {
   const onTargetAction = vi.fn();
   const getBoundingClientRect = vi
     .spyOn(HTMLElement.prototype, "getBoundingClientRect")
     .mockImplementation(function getBoundingClientRectMock(this: HTMLElement) {
-      if (this.getAttribute("data-onboarding-target") === "overview") {
-        return rect(64, 24, 960, 640);
+      if (this.getAttribute("data-onboarding-target") === "overview-entry") {
+        return rect(16, 12, 148, 34);
       }
       return rect(0, 0, 0, 0);
     });
@@ -94,7 +94,10 @@ it("从真实概览开始，并在教程内说明之后从哪里重看", async (
   try {
     render(
       <LanguageProvider>
-        <main data-onboarding-target="overview">概览真实内容</main>
+        <button type="button" data-onboarding-target="overview-entry">
+          Token Station 概览
+        </button>
+        <main>概览真实内容</main>
         <FirstRunGuide
           open
           microStep="overview"
@@ -108,18 +111,23 @@ it("从真实概览开始，并在教程内说明之后从哪里重看", async (
       </LanguageProvider>,
     );
 
-    const coachmark = await screen.findByRole("dialog", { name: "先看概览" });
+    const coachmark = await screen.findByRole("dialog", { name: "从这里随时回到概览" });
+    expect(coachmark).toHaveStyle({ left: "174px", top: "16px" });
+    expect(coachmark).toHaveTextContent(
+      "无论当前在哪个页面，点击左上角 Token Station 标志都能切换到概览页",
+    );
     expect(coachmark).toHaveTextContent("代理状态、当前路由、请求与成本");
-    expect(coachmark).toHaveTextContent("设置 → 关于 → 重新查看新手引导");
-    expect(screen.getByText("概览真实内容")).toHaveAttribute(
+    expect(coachmark).not.toHaveTextContent("设置 → 关于 → 重新查看新手引导");
+    expect(screen.getByRole("button", { name: "Token Station 概览" })).toHaveAttribute(
       "data-onboarding-active",
       "true",
     );
+    expect(screen.getByText("概览真实内容")).not.toHaveAttribute("data-onboarding-active");
     expect(document.querySelector(".first-run-spotlight-hole-blocker")).not.toBeNull();
     const user = userEvent.setup();
     await user.tab();
     expect(within(coachmark).getByRole("button", { name: "稍后继续" })).toHaveFocus();
-    await user.click(within(coachmark).getByRole("button", { name: "开始配置" }));
+    await user.click(within(coachmark).getByRole("button", { name: "知道了，开始配置" }));
     expect(onTargetAction).toHaveBeenCalledOnce();
   } finally {
     getBoundingClientRect.mockRestore();
