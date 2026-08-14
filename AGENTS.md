@@ -1,58 +1,102 @@
-# Token Station 工程约定
+# Token Station Engineering Rules
 
-## 设计文档先行
+## Use English by default
 
-凡是改动用户可见界面、交互流程、状态模型、前后端契约或发布行为，必须先在
-当前代码仓的 `docs/design/` 新建或更新设计文档，再编写测试和代码。设计文档
-必须与对应实现处于同一 PR，确保审查、版本追踪和后续维护不依赖额外私有仓权限。
+Use English for new and modified technical content. This rule applies to code comments, documentation,
+design records, test names, commit messages, pull requests, release notes, and contributor instructions.
 
-设计文档至少包含：
+Keep commands, paths, protocol fields, API names, and code identifiers unchanged. Keep required localized
+user-interface text in its target language. You can quote an error or log entry in its original language.
 
-1. 问题、目标、范围和非目标。
-2. 不允许触碰的安全与数据红线。
-3. 用户可见交互、状态变化和失败处理。
-4. 响应式、键盘操作和可访问性要求。
-5. 公开测试边界、验收标准和真实 App 检查项。
-6. 实现落点、已知遗留项和发布要求。
+If a document must contain English and Simplified Chinese, put the complete English text first. Put the
+complete Simplified Chinese text after it.
 
-执行顺序固定为：
+Write commit messages in English. Use a short imperative subject. Describe one logical change in each
+commit.
 
-1. 设计文档。
-2. 公开行为测试。
-3. 代码实现。
-4. 全量测试与构建。
-5. 本地 App 更新和真实界面验收。
-6. 回写文档中的实现状态、验收结果和遗留项。
-7. 使用中文提交说明创建本地 commit。
+## Use Simplified Technical English
 
-紧急缺陷修复也必须先写最小设计记录，至少说明现象、预期行为、红线和回归测试，
-不能在代码交付后再补文档。
+Use strict Simplified Technical English for procedures, runbooks, safety warnings, and error messages.
 
-## 本地桌面 App 必须同步更新
+- Put one instruction in each sentence.
+- Put the condition before the action.
+- Use the imperative form for instructions.
+- Keep an instruction at 20 words or fewer when practical.
+- Keep a descriptive sentence at 25 words or fewer when practical.
+- Use active voice when the actor is known.
+- Do not use contractions or semicolons.
+- Use one stable name for one thing.
+- Prefer short and common words.
 
-凡是改动会影响 Token Station 可执行行为或界面的代码（包括 `apps/`、`crates/`、
-`plugins/` 下的源代码及构建配置），在交付前必须完成本机桌面 App 更新，不能只运行
-前端构建或测试后结束。
+Use STE-flavored English for READMEs, design documents, pull requests, release notes, and general technical
+explanations. Keep the text direct and natural. Remove filler, marketing claims, and unnecessary abstract
+terms.
 
-统一执行：
+Do not apply STE rules to code, identifiers, command syntax, or required localized text.
+
+## Write the design document first
+
+Create or update a file in `docs/design/` before you change any of these items:
+
+- User-visible interfaces.
+- Interaction flows.
+- State models.
+- Frontend and backend contracts.
+- Release behavior.
+
+Keep the design document and its implementation in the same pull request. The review and maintenance
+process must not depend on access to a private repository.
+
+Include these sections in the design document:
+
+1. Problem, goal, scope, and non-goals.
+2. Security and data boundaries.
+3. User-visible behavior, state changes, and failure handling.
+4. Responsive behavior, keyboard operation, and accessibility.
+5. Public test boundaries, acceptance criteria, and real App checks.
+6. Implementation locations, known remaining work, and release requirements.
+
+Use this implementation order:
+
+1. Write the design document.
+2. Add public behavior tests.
+3. Implement the change.
+4. Run the full tests and build.
+5. Update the local desktop App and inspect the real interface.
+6. Record the implementation status, test result, and remaining work in the design document.
+7. Create a local commit with an English commit message.
+
+For an urgent fix, write a small design record before you change the code. Include the symptom, expected
+behavior, safety boundaries, and regression test.
+
+## Update the local desktop App
+
+Update the local Token Station App before you deliver a change to executable behavior or the interface.
+This requirement applies to source and build configuration under `apps/`, `crates/`, and `plugins/`.
+
+Run this command:
 
 ```bash
 scripts/install-local-desktop.sh
 ```
 
-该流程必须遵守以下顺序：
+The script must use this order:
 
-1. 使用官方 `scripts/build-desktop.sh --local` 流程构建并审计新 App。
-2. 只有新 App 构建和审计全部成功后，才退出并删除旧 App。
-3. 只允许替换 bundle id 为 `com.tokenstation.desktop` 的
-   `/Applications/token-station.app`，禁止使用通配符或模糊匹配删除。
-4. 安装新 App 后校验 bundle id 与代码签名，并启动 App 验证。
-5. 任一步失败都必须如实报告；构建失败时必须保留当前已安装 App。
+1. Build and audit the new App with `scripts/build-desktop.sh --local`.
+2. Exit and remove the old App only after the new App passes all checks.
+3. Replace only `/Applications/token-station.app` with bundle ID `com.tokenstation.desktop`.
+4. Verify the bundle ID and code signature after installation.
+5. Start the App and inspect it.
 
-纯文档、注释或测试数据改动不要求重装 App，除非用户明确要求。
+Do not use a wildcard to remove or replace an App. Keep the installed App if the new build fails. Report
+each failed step accurately.
 
-## macOS DMG 打包前必读
+A change to documentation, comments, or test data does not require App installation. Install the App if
+the user explicitly requests it.
 
-任何人或 Agent 准备创建、修改、上传或发布 macOS DMG 前，必须完整阅读并遵守
-[`docs/release/macOS-DMG安装提示与打包要求.md`](docs/release/macOS-DMG安装提示与打包要求.md)。
-该文档是发布要求，不代表当前任务已经获准执行打包。
+## Read the macOS DMG requirements
+
+Before you create, change, upload, or release a macOS DMG, read and follow
+[`docs/release/macOS-DMG安装提示与打包要求.md`](docs/release/macOS-DMG安装提示与打包要求.md).
+
+This requirement does not grant permission to create or publish a release.
