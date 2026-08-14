@@ -2,6 +2,34 @@ import { describe, expect, it } from "vitest";
 import { humanizeAppError } from "./errors";
 
 describe("humanizeAppError", () => {
+  it("explains that Cursor must be quit before its local database can be configured", () => {
+    const structured = {
+      code: "cursor_running",
+      message: "Cursor 正在运行。请手动退出 Cursor 后再点一键接入。",
+    };
+
+    expect(humanizeAppError(structured, "en")).toBe(
+      "Cursor is still running. Quit Cursor completely, then click Connect again. Token Station will not close it for you.",
+    );
+    expect(humanizeAppError(structured, "zh-CN")).toBe(
+      "Cursor 仍在运行。请彻底退出 Cursor 后再点一次一键接入。Token Station 不会强制关闭它。",
+    );
+    expect(humanizeAppError("cursor_running", "zh-CN")).toBe(
+      "Cursor 仍在运行。请彻底退出 Cursor 后再点一次一键接入。Token Station 不会强制关闭它。",
+    );
+  });
+
+  it("explains Cursor tunnel failures without falling back to a generic error", () => {
+    const raw = "读取 cloudflared 下载包失败：the response body is larger than request limit";
+
+    expect(humanizeAppError(raw, "en")).toBe(
+      "Token Station could not establish the Cursor HTTPS tunnel. Check the network, then try again. The temporary endpoint has been closed.",
+    );
+    expect(humanizeAppError(raw, "zh-CN")).toBe(
+      "Token Station 无法建立 Cursor HTTPS 隧道。请检查网络后重试。本次临时入口已经关闭。",
+    );
+  });
+
   it("explains a concurrent configuration update in the selected language", () => {
     const raw = "apply_in_progress: 已有配置正在应用";
 

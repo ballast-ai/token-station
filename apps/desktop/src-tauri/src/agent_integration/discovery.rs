@@ -2104,7 +2104,12 @@ mod tests {
             },
         );
 
-        let records = scanner.scan_registry(&registry);
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        let records = scanner
+            .scan_registry(&registry)
+            .into_iter()
+            .filter(|record| Path::new(&record.canonical_path).starts_with(&canonical_root))
+            .collect::<Vec<_>>();
 
         assert!(
             peak.load(Ordering::SeqCst) > 1,

@@ -1048,8 +1048,19 @@ export const planAgentConnection = (
   ...(options ? options : {}),
 });
 
+export interface CursorProviderStatusView {
+  state: "disconnected" | "connected" | "repair_required";
+  message: string | null;
+}
+
+export const getCursorProviderStatus = () =>
+  invoke<CursorProviderStatusView>("get_cursor_provider_status");
+
 export const configureCursorProvider = () =>
-  invoke<string>("configure_cursor_provider");
+  invoke<CursorProviderStatusView>("configure_cursor_provider");
+
+export const restoreCursorProvider = () =>
+  invoke<CursorProviderStatusView>("restore_cursor_provider");
 
 export const applyAgentPlan = (
   operationId: string,

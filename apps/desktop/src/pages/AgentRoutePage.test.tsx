@@ -9,9 +9,11 @@ import {
   ensureServeRunning,
   forceForgetAgent,
   getAgentDrift,
+  getCursorProviderStatus,
   mountAgentProfile,
   planAgentConnection,
   restartAgentRoute,
+  restoreCursorProvider,
   saveAgentRoutes,
   setAgentRouteMode,
   type AgentInstallationView,
@@ -24,9 +26,11 @@ vi.mock("../api", () => ({
   ensureServeRunning: vi.fn(),
   forceForgetAgent: vi.fn(),
   getAgentDrift: vi.fn(),
+  getCursorProviderStatus: vi.fn(),
   mountAgentProfile: vi.fn(),
   planAgentConnection: vi.fn(),
   restartAgentRoute: vi.fn(),
+  restoreCursorProvider: vi.fn(),
   saveAgentRoutes: vi.fn(),
   setAgentRouteMode: vi.fn(),
   setAgentTier: vi.fn(),
@@ -74,12 +78,23 @@ describe("AgentRoutePage multi-install admission", () => {
   beforeEach(() => {
     vi.mocked(ensureServeRunning).mockReset().mockResolvedValue({} as never);
     vi.mocked(applyAgentPlan).mockReset().mockResolvedValue({} as never);
-    vi.mocked(configureCursorProvider).mockReset().mockResolvedValue("Cursor 已配置");
+    vi.mocked(configureCursorProvider).mockReset().mockResolvedValue({
+      state: "connected",
+      message: "Cursor 已配置",
+    });
     vi.mocked(getAgentDrift).mockReset().mockResolvedValue([]);
+    vi.mocked(getCursorProviderStatus).mockReset().mockResolvedValue({
+      state: "disconnected",
+      message: null,
+    });
     vi.mocked(planAgentConnection).mockReset().mockReturnValue(new Promise(() => undefined));
     vi.mocked(forceForgetAgent).mockReset().mockReturnValue(new Promise(() => undefined));
     vi.mocked(mountAgentProfile).mockReset().mockResolvedValue({} as never);
     vi.mocked(restartAgentRoute).mockReset().mockResolvedValue({} as never);
+    vi.mocked(restoreCursorProvider).mockReset().mockResolvedValue({
+      state: "disconnected",
+      message: "已恢复 Cursor 官方配置并断开",
+    });
     vi.mocked(saveAgentRoutes).mockReset().mockResolvedValue({} as never);
     vi.mocked(setAgentRouteMode).mockReset().mockResolvedValue({} as never);
   });
@@ -352,8 +367,164 @@ describe("AgentRoutePage multi-install admission", () => {
     }
   });
 
-  it("Cursor 配置成功后只在 Toast 容器中提示", async () => {
+  it("Cursor 接入后显示恢复按钮，恢复后回到一键接入", async () => {
     const user = userEvent.setup();
+    const found = installation("/Applications/Cursor.app/Contents/MacOS/Cursor", "1.0.0");
+    found.discovery.agent_id = "cursor";
+    found.discovery.is_path_default = true;
+    found.discovery.conflict_group = null;
+    found.discovery.diagnostics = [];
+    found.compatibility = {
+      ...found.compatibility,
+      agent_id: "cursor",
+      status: "DETECTED_UNKNOWN",
+      reason_code: "CONNECTOR_BINDING_NOT_UNIQUE",
+      message: "无法唯一确定该 Agent 的配置 Connector",
+      connector_id: null,
+      allowed_actions: ["view_details", "rescan", "export_diagnostics"],
+    };
+    const agent: AgentView = {
+      metadata: {
+        agent_id: "cursor",
+        legacy_kind: null,
+        display_name: "Cursor",
+        icon_key: "cursor",
+        admission: "supported",
+      },
+      installations: [found],
+      status: "DETECTED_VERIFIED",
+      catalog_sequence: 1,
+      catalog_expires_at_ms: null,
+      catalog_source: "builtin",
+      catalog_warning: null,
+    };
+
+    render(
+      <ErrorToastProvider>
+        <AgentRoutePage
+          metadata={agent.metadata}
+          agent={agent}
+          route={{
+            mode: "inherit",
+            tiers: {
+              high: { upstream: null, model: null },
+              mid: { upstream: null, model: null },
+              low: { upstream: null, model: null },
+            },
+            config_error: null,
+            profile: null,
+            routing_mode: "tiered",
+          }}
+          providers={[]}
+          profiles={[]}
+          quotaAccounts={[]}
+          serveRunning={false}
+          applying={false}
+          onStateChange={vi.fn()}
+          onRefreshAgents={vi.fn().mockResolvedValue(undefined)}
+          onSaveQuota={vi.fn()}
+          onSaveQuotaPlan={vi.fn()}
+          onViewQuotaUsage={vi.fn()}
+        />
+      </ErrorToastProvider>,
+    );
+
+    expect(screen.getByText("可接入")).toBeInTheDocument();
+    expect(screen.queryByText("暂不可接入")).toBeNull();
+    const connectButton = await screen.findByRole("button", { name: "一键接入并启动" });
+    await user.click(connectButton);
+
+    const toastViewport = screen.getByTestId("error-toast-viewport");
+    expect(await within(toastViewport).findByRole("status")).toHaveTextContent("Cursor 已配置");
+    const restoreButton = await screen.findByRole("button", { name: "恢复官方配置并断开" });
+    await user.click(restoreButton);
+
+    expect(restoreCursorProvider).toHaveBeenCalledOnce();
+    expect(await screen.findByRole("button", { name: "一键接入并启动" })).toBeEnabled();
+    expect(within(toastViewport).getAllByRole("status").some((toast) =>
+      toast.textContent?.includes("已恢复 Cursor 官方配置并断开"),
+    )).toBe(true);
+    expect(document.querySelector(".agent-route-page .banner")).toBeNull();
+  });
+
+  it("Cursor 隧道失效后可以直接重新接入，也可以恢复官方配置", async () => {
+    vi.mocked(getCursorProviderStatus).mockResolvedValueOnce({
+      state: "repair_required",
+      message: "上次 Cursor 隧道已失效，请重新接入或恢复官方配置",
+    });
+    const user = userEvent.setup();
+    const found = installation("/Applications/Cursor.app/Contents/MacOS/Cursor", "1.0.0");
+    found.discovery.agent_id = "cursor";
+    found.discovery.is_path_default = true;
+    found.discovery.conflict_group = null;
+    found.discovery.diagnostics = [];
+    const agent: AgentView = {
+      metadata: {
+        agent_id: "cursor",
+        legacy_kind: null,
+        display_name: "Cursor",
+        icon_key: "cursor",
+        admission: "supported",
+      },
+      installations: [found],
+      status: "DETECTED_VERIFIED",
+      catalog_sequence: 1,
+      catalog_expires_at_ms: null,
+      catalog_source: "builtin",
+      catalog_warning: null,
+    };
+
+    render(
+      <ErrorToastProvider>
+        <AgentRoutePage
+          metadata={agent.metadata}
+          agent={agent}
+          route={{
+            mode: "inherit",
+            tiers: {
+              high: { upstream: null, model: null },
+              mid: { upstream: null, model: null },
+              low: { upstream: null, model: null },
+            },
+            config_error: null,
+            profile: null,
+            routing_mode: "tiered",
+          }}
+          providers={[]}
+          profiles={[]}
+          quotaAccounts={[]}
+          serveRunning
+          applying={false}
+          onStateChange={vi.fn()}
+          onRefreshAgents={vi.fn().mockResolvedValue(undefined)}
+          onSaveQuota={vi.fn()}
+          onSaveQuotaPlan={vi.fn()}
+          onViewQuotaUsage={vi.fn()}
+        />
+      </ErrorToastProvider>,
+    );
+
+    expect(await screen.findByText("需修复")).toBeInTheDocument();
+    const reconnect = screen.getByRole("button", { name: "重新接入并启动" });
+    expect(screen.getByRole("button", { name: "恢复官方配置并断开" })).toBeEnabled();
+    await user.click(reconnect);
+
+    await waitFor(() => expect(configureCursorProvider).toHaveBeenCalledOnce());
+    expect(restoreCursorProvider).not.toHaveBeenCalled();
+  });
+
+  it("Cursor 运行时显示安全退出提示并恢复接入按钮", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    vi.mocked(configureCursorProvider).mockRejectedValueOnce({
+      code: "cursor_running",
+      message: "Cursor 正在运行。请手动退出 Cursor 后再点一键接入。",
+      target: null,
+      stage: null,
+      recovery: null,
+      recovery_reason_code: null,
+    });
+    const user = userEvent.setup();
+    const onRefreshAgents = vi.fn().mockResolvedValue(undefined);
     const found = installation("/Applications/Cursor.app/Contents/MacOS/Cursor", "1.0.0");
     found.discovery.agent_id = "cursor";
     found.discovery.is_path_default = true;
@@ -404,7 +575,7 @@ describe("AgentRoutePage multi-install admission", () => {
           serveRunning={false}
           applying={false}
           onStateChange={vi.fn()}
-          onRefreshAgents={vi.fn().mockResolvedValue(undefined)}
+          onRefreshAgents={onRefreshAgents}
           onSaveQuota={vi.fn()}
           onSaveQuotaPlan={vi.fn()}
           onViewQuotaUsage={vi.fn()}
@@ -412,11 +583,16 @@ describe("AgentRoutePage multi-install admission", () => {
       </ErrorToastProvider>,
     );
 
-    await user.click(screen.getByRole("button", { name: "一键接入" }));
+    await user.click(screen.getByRole("button", { name: "一键接入并启动" }));
 
     const toastViewport = screen.getByTestId("error-toast-viewport");
-    expect(await within(toastViewport).findByRole("status")).toHaveTextContent("Cursor 已配置");
-    expect(document.querySelector(".agent-route-page .banner")).toBeNull();
+    const alert = await within(toastViewport).findByRole("alert");
+    expect(alert).toHaveTextContent("Cursor 仍在运行");
+    expect(alert).toHaveTextContent("请彻底退出 Cursor 后再点一次一键接入");
+    expect(alert).not.toHaveTextContent("操作未能完成");
+    expect(within(toastViewport).queryByRole("status")).toBeNull();
+    await waitFor(() => expect(onRefreshAgents).toHaveBeenCalledOnce());
+    expect(screen.getByRole("button", { name: "一键接入并启动" })).toBeEnabled();
   });
 
   it("没有策略组时用错误 Toast 提示且页面不渲染错误横条", async () => {
@@ -1001,6 +1177,6 @@ describe("AgentRoutePage multi-install admission", () => {
 
     expect(screen.getByText("接管状态不可用")).toBeInTheDocument();
     expect(screen.getByText(/Agent 仍可只读显示/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "一键接入" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "一键接入并启动" })).toBeDisabled();
   });
 });
