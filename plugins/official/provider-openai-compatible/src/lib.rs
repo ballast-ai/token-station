@@ -448,12 +448,12 @@ fn events_of_frame(
     }
 
     if let Some(usage) = usage {
-        if let Some(done) = pending_finish.take_done() {
-            events.push(done);
-        }
         events.push(StreamEvent::Usage {
             usage: usage_of(usage),
         });
+        if let Some(done) = pending_finish.take_done() {
+            events.push(done);
+        }
     }
     Ok(events)
 }
@@ -833,10 +833,10 @@ mod tests {
         )
         .expect("usage frame parses");
 
-        assert!(matches!(events.first(), Some(StreamEvent::Done { .. })));
         assert!(
-            matches!(events.get(1), Some(StreamEvent::Usage { usage }) if usage.input_tokens == 42)
+            matches!(events.first(), Some(StreamEvent::Usage { usage }) if usage.input_tokens == 42)
         );
+        assert!(matches!(events.get(1), Some(StreamEvent::Done { .. })));
     }
 }
 
