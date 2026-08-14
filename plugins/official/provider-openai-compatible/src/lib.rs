@@ -834,7 +834,9 @@ mod tests {
         .expect("usage frame parses");
 
         assert!(matches!(events.first(), Some(StreamEvent::Done { .. })));
-        assert!(matches!(events.get(1), Some(StreamEvent::Usage { usage }) if usage.input_tokens == 42));
+        assert!(
+            matches!(events.get(1), Some(StreamEvent::Usage { usage }) if usage.input_tokens == 42)
+        );
     }
 }
 
