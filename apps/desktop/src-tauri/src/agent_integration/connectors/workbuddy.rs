@@ -42,7 +42,7 @@ fn model_value(input: &ConnectInput<'_>) -> Result<Value, String> {
         .is_some_and(|metadata| metadata.reasoning);
     let mut model = json!({
         "id": MODEL_ID,
-        "name": "Token Station",
+        "name": "Token Station Auto",
         "vendor": "Token Station",
         "url": model_endpoint(input.base_url),
         "apiKey": token,
@@ -50,7 +50,7 @@ fn model_value(input: &ConnectInput<'_>) -> Result<Value, String> {
         "supportsImages": input.model_metadata.is_some_and(|metadata| metadata.vision),
         "supportsReasoning": reasoning,
         "onlyReasoning": false,
-        "useCustomProtocol": true
+        "useCustomProtocol": false
     });
     if reasoning {
         model["reasoning"] = json!({

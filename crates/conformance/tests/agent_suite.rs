@@ -277,6 +277,18 @@ impl AgentAdapter for OpenAiClient {
                 "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{}}}}}\n\n",
                 usage.input_tokens, usage.output_tokens
             ),
+            StreamEvent::Finish {
+                finish_reason,
+                stop_sequence: _,
+            } => {
+                let reason = match finish_reason {
+                    Some(reason) => serde_json::to_string(reason).map_err(internal)?,
+                    None => "null".to_owned(),
+                };
+                format!(
+                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":{reason}}}]}}\n\n"
+                )
+            }
             StreamEvent::Done {
                 finish_reason,
                 // openai chat SSE has no stop-sequence slot to render into.

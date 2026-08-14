@@ -4,14 +4,17 @@ import {
   configureCursorProvider,
   ensureServeRunning,
   forceForgetAgent,
+  getCursorProviderStatus,
   mountAgentProfile,
   planAgentConnection,
   saveAgentRoutes,
   restartAgentRoute,
+  restoreCursorProvider,
   setAgentRouteMode,
   setAgentTier,
   type AgentInstallationView,
   type ConfigPlanView,
+  type CursorProviderStatusView,
   type AgentRouteView,
   type AgentUiMetadataView,
   type AgentView,
@@ -63,6 +66,8 @@ interface AgentRoutePageProps {
   onApplyDirect?: (upstream: string, model: string) => void | Promise<boolean>;
   onDeleteProfile?: (name: string) => void | Promise<boolean>;
   onInstallationSelected?: () => void;
+  selectedInstallationPath?: string;
+  onInstallationPathChange?: (path: string) => void;
   embedded?: boolean;
 }
 
@@ -83,6 +88,8 @@ function statusCopy(
   copy: (english: string, simplifiedChinese: string) => string,
   language: "en" | "zh-CN",
 ) {
+  const usesCursorDatabaseIntegration = metadata.agent_id === "cursor"
+    && installation?.compatibility.reason_code === "CONNECTOR_BINDING_NOT_UNIQUE";
   if (!agent || agent.installations.length === 0) {
     return {
       tone: "idle",
@@ -127,7 +134,8 @@ function statusCopy(
   }
   if (installation
     && installation.compatibility.status !== "DETECTED_VERIFIED"
-    && !isExactMultiInstallSelection(agent, installation)) {
+    && !isExactMultiInstallSelection(agent, installation)
+    && !usesCursorDatabaseIntegration) {
     return {
       tone: "danger",
       label: copy("Unavailable", "暂不可接入"),
@@ -159,7 +167,7 @@ function statusCopy(
       label: copy("Ready", "可接入"),
       detail: copy(
         "Cursor settings will be backed up and configured automatically.",
-        "运行中的 Cursor 不会被强制关闭。请退出 Cursor 后再点一键接入。",
+        "运行中的 Cursor 不会被强制关闭。请退出 Cursor 后再点一键接入并启动。",
       ),
     };
   }
@@ -219,28 +227,74 @@ export default function AgentRoutePage({
   onApplyDirect = () => {},
   onDeleteProfile = () => {},
   onInstallationSelected,
+  selectedInstallationPath,
+  onInstallationPathChange,
   embedded = false,
 }: AgentRoutePageProps) {
   const { copy, language } = useLocalizedCopy();
   const { showError, showSuccess } = useErrorToast();
-  const [selectedPath, setSelectedPath] = useState("");
+  const [localSelectedPath, setLocalSelectedPath] = useState("");
+  const selectedPath = selectedInstallationPath ?? localSelectedPath;
   const [busy, setBusy] = useState(false);
+  const [cursorStatus, setCursorStatus] = useState<CursorProviderStatusView | null>(null);
   // Show configuration changes after the first connection, then persist dismissal in localStorage.
   const [connectDiff, setConnectDiff] = useState<ConfigPlanView | null>(null);
   const dismissConnectDiff = () => setConnectDiff(null);
 
   useEffect(() => {
+    if (selectedInstallationPath !== undefined) return;
     const paths = agent?.installations.map((item) => item.discovery.canonical_path) ?? [];
-    setSelectedPath((current) => paths.includes(current) ? current : paths.length === 1 ? paths[0] : "");
-  }, [agent]);
+    setLocalSelectedPath((current) => paths.includes(current) ? current : paths.length === 1 ? paths[0] : "");
+  }, [agent, selectedInstallationPath]);
+
+  useEffect(() => {
+    if (metadata.agent_id !== "cursor") {
+      setCursorStatus(null);
+      return;
+    }
+    let cancelled = false;
+    void getCursorProviderStatus()
+      .then((next) => {
+        if (!cancelled) setCursorStatus(next);
+      })
+      .catch((caught) => {
+        if (!cancelled) showError(errorText(caught), "cursor-provider-status");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [metadata.agent_id, showError]);
 
   const installation = useMemo(
     () => agent?.installations.find((item) => item.discovery.canonical_path === selectedPath),
     [agent, selectedPath],
   );
 
-  const status = statusCopy(metadata, agent, installation, copy, language);
-  const managed = installation?.managed ?? false;
+  const discoveredStatus = statusCopy(metadata, agent, installation, copy, language);
+  const status = metadata.agent_id === "cursor" && cursorStatus?.state === "connected"
+    ? {
+      tone: "success" as const,
+      label: copy("Connected", "已接入"),
+      detail: cursorStatus.message ?? copy(
+        "Requests are routed through Token Station.",
+        "请求已通过 Token Station。",
+      ),
+    }
+    : metadata.agent_id === "cursor" && cursorStatus?.state === "repair_required"
+      ? {
+        tone: "danger" as const,
+        label: copy("Repair needed", "需修复"),
+        detail: cursorStatus.message ?? copy(
+          "The previous Cursor tunnel is no longer active. Restore and reconnect.",
+          "上次 Cursor 隧道已失效，请恢复后重新接入。",
+        ),
+      }
+      : discoveredStatus;
+  const cursorRepairRequired = metadata.agent_id === "cursor"
+    && cursorStatus?.state === "repair_required";
+  const managed = metadata.agent_id === "cursor"
+    ? cursorStatus?.state === "connected"
+    : installation?.managed ?? false;
   const canConnect = Boolean(
     installation
       && installation.adapter_ready !== false
@@ -259,13 +313,7 @@ export default function AgentRoutePage({
       onStateChange(await action());
       if (message) showSuccess(message, `agent-route-action:${metadata.agent_id}`);
     } catch (caught) {
-      const message = errorText(caught);
-      showError(message.includes("cursor_running")
-        ? copy(
-          "Cursor is still running. Enter the TS API in Cursor settings, or quit Cursor yourself and click Connect again. Token Station will not close it for you.",
-          "Cursor 仍在运行。你可以在 Cursor 设置中填写 TS API，或者自己退出 Cursor 后再点一次一键接入。Token Station 不会强制关闭它。",
-        )
-        : message, `agent-route-action:${metadata.agent_id}`);
+      showError(errorText(caught), `agent-route-action:${metadata.agent_id}`);
     } finally {
       setBusy(false);
     }
@@ -280,8 +328,12 @@ export default function AgentRoutePage({
     try {
       onStateChange(await ensureServeRunning());
       if (metadata.agent_id === "cursor") {
-        const message = await configureCursorProvider();
-        showSuccess(message, `agent-connect:${metadata.agent_id}`);
+        const next = await configureCursorProvider();
+        setCursorStatus(next);
+        showSuccess(
+          next.message ?? copy("Cursor connected.", "Cursor 已接入"),
+          `agent-connect:${metadata.agent_id}`,
+        );
         return;
       }
       const plan = await planAgentConnection(
@@ -315,13 +367,7 @@ export default function AgentRoutePage({
         `agent-connect:${metadata.agent_id}`,
       );
     } catch (caught) {
-      const message = errorText(caught);
-      showError(message.includes("cursor_running")
-        ? copy(
-          "Cursor is still running. Enter the TS API in Cursor settings, or quit Cursor yourself and click Connect again. Token Station will not close it for you.",
-          "Cursor 仍在运行。你可以在 Cursor 设置中填写 TS API，或者自己退出 Cursor 后再点一次一键接入。Token Station 不会强制关闭它。",
-        )
-        : message, `agent-connect:${metadata.agent_id}`);
+      showError(errorText(caught), `agent-connect:${metadata.agent_id}`);
     } finally {
       onConnectInFlightChange?.(false);
       setBusy(false);
@@ -342,6 +388,19 @@ export default function AgentRoutePage({
     setBusy(true);
     let restored = false;
     try {
+      if (metadata.agent_id === "cursor") {
+        const next = await restoreCursorProvider();
+        setCursorStatus(next);
+        showSuccess(
+          next.message ?? copy(
+            "Restored the official Cursor configuration and disconnected.",
+            "已恢复 Cursor 官方配置并断开。",
+          ),
+          `agent-restore-official:${metadata.agent_id}`,
+        );
+        restored = true;
+        return;
+      }
       await forceForgetAgent(metadata.agent_id, installation.discovery.canonical_path);
       restored = true;
       showSuccess(
@@ -462,7 +521,11 @@ export default function AgentRoutePage({
             disabled={busy}
             onboardingTarget="agent-installation"
             onSelect={(path) => {
-              setSelectedPath(path);
+              if (onInstallationPathChange) {
+                onInstallationPathChange(path);
+              } else {
+                setLocalSelectedPath(path);
+              }
               onInstallationSelected?.();
             }}
           />
@@ -483,8 +546,26 @@ export default function AgentRoutePage({
               ? copy("Working…", "处理中…")
               : managed
                 ? copy("Restore official configuration & disconnect", "恢复官方配置并断开")
-                : copy("Connect", "一键接入")}
+                : cursorRepairRequired
+                  ? copy("Reconnect & launch", "重新接入并启动")
+                : metadata.agent_id === "cursor"
+                  ? copy("Connect & launch", "一键接入并启动")
+                  : copy("Connect", "一键接入")}
           </button>
+          {cursorRepairRequired ? (
+            <button
+              className="btn agent-secondary-action"
+              type="button"
+              disabled={busy || !installation}
+              onClick={() => void restoreOfficial()}
+              title={copy(
+                "Restore the original Cursor configuration and clear the stale management record.",
+                "恢复 Cursor 原配置，并清除失效的接管记录。",
+              )}
+            >
+              {copy("Restore official configuration & disconnect", "恢复官方配置并断开")}
+            </button>
+          ) : null}
         </div>
       </header>
 

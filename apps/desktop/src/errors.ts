@@ -202,6 +202,16 @@ function routerConfigGuidance(raw: string): LocalizedAppMessage | null {
 
 const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
   {
+    matches: /cursor_running|Cursor (?:is|still) running|Cursor (?:正在|仍在)运行/i,
+    en: "Cursor is still running. Quit Cursor completely, then click Connect again. Token Station will not close it for you.",
+    zh: "Cursor 仍在运行。请彻底退出 Cursor 后再点一次一键接入。Token Station 不会强制关闭它。",
+  },
+  {
+    matches: /cloudflared|Cloudflare Quick Tunnel|Cursor 公网隧道/i,
+    en: "Token Station could not establish the Cursor HTTPS tunnel. Check the network, then try again. The temporary endpoint has been closed.",
+    zh: "Token Station 无法建立 Cursor HTTPS 隧道。请检查网络后重试。本次临时入口已经关闭。",
+  },
+  {
     matches: /apply_in_progress|configuration update.*(?:progress|running)|配置.*(?:正在应用|处理中)/i,
     en: "Another configuration update is still running. Wait a moment, then try again.",
     zh: "另一项配置更新仍在进行。请稍等片刻，然后重试。",

@@ -47,24 +47,39 @@ fn finish_reason(raw: Option<&str>) -> Option<FinishReason> {
 struct PendingFinish {
     seen: bool,
     reason: Option<FinishReason>,
+    done_emitted: bool,
 }
 
 impl PendingFinish {
     fn record(&mut self, raw: &str) {
         self.seen = true;
         self.reason = finish_reason(Some(raw));
+        self.done_emitted = false;
     }
 
-    fn take_done(&mut self) -> Option<StreamEvent> {
+    fn take_finish(&mut self) -> Option<StreamEvent> {
         if !self.seen {
             return None;
         }
         self.seen = false;
-        Some(StreamEvent::Done {
+        Some(StreamEvent::Finish {
             finish_reason: self.reason.take(),
             // openai chat wire has no stop-sequence report slot.
             stop_sequence: None,
         })
+    }
+
+    fn finish_marker(&mut self) -> Vec<StreamEvent> {
+        if self.done_emitted {
+            return Vec::new();
+        }
+        let mut events = self.take_finish().into_iter().collect::<Vec<_>>();
+        events.push(StreamEvent::Done {
+            finish_reason: None,
+            stop_sequence: None,
+        });
+        self.done_emitted = true;
+        events
     }
 }
 
@@ -335,9 +350,7 @@ impl StreamParser for SseParser {
                 continue;
             };
             if payload == "[DONE]" {
-                if let Some(done) = self.pending_finish.take_done() {
-                    events.push(done);
-                }
+                events.extend(self.pending_finish.finish_marker());
                 continue;
             }
             let raw: Value = serde_json::from_str(payload).map_err(internal)?;
@@ -371,11 +384,20 @@ impl StreamParser for SseParser {
             }
 
             if let Some(usage) = raw.get("usage").filter(|usage| !usage.is_null()) {
+                let finish = self.pending_finish.take_finish();
+                let has_finish = finish.is_some();
+                if let Some(finish) = finish {
+                    events.push(finish);
+                }
                 events.push(StreamEvent::Usage {
                     usage: usage_of(usage),
                 });
-                if let Some(done) = self.pending_finish.take_done() {
-                    events.push(done);
+                if has_finish {
+                    events.push(StreamEvent::Done {
+                        finish_reason: None,
+                        stop_sequence: None,
+                    });
+                    self.pending_finish.done_emitted = true;
                 }
             }
         }

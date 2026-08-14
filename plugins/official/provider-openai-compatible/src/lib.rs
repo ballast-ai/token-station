@@ -54,30 +54,39 @@ impl PendingFinish {
         self.done_emitted = false;
     }
 
-    fn take_done(&mut self) -> Option<StreamEvent> {
+    fn take_finish(&mut self) -> Option<StreamEvent> {
         if !self.seen {
             return None;
         }
         self.seen = false;
-        self.done_emitted = true;
-        Some(StreamEvent::Done {
+        Some(StreamEvent::Finish {
             finish_reason: self.reason.take(),
             // openai chat wire has no stop-sequence report slot.
             stop_sequence: None,
         })
     }
 
-    fn finish_marker(&mut self) -> Option<StreamEvent> {
-        let done = self.take_done().or_else(|| {
-            (!self.done_emitted).then_some(StreamEvent::Done {
-                finish_reason: None,
-                stop_sequence: None,
-            })
+    fn finish_marker(&mut self) -> Vec<StreamEvent> {
+        if self.done_emitted {
+            self.done_emitted = false;
+            return Vec::new();
+        }
+        let mut events = self.take_finish().into_iter().collect::<Vec<_>>();
+        events.push(StreamEvent::Done {
+            finish_reason: None,
+            stop_sequence: None,
         });
         self.seen = false;
         self.reason = None;
-        self.done_emitted = false;
-        done
+        self.done_emitted = true;
+        events
+    }
+
+    fn flush_pending_finish(&mut self) -> Vec<StreamEvent> {
+        if !self.seen {
+            return Vec::new();
+        }
+        self.finish_marker()
     }
 }
 
@@ -457,11 +466,20 @@ fn events_of_frame(
     }
 
     if let Some(usage) = usage {
+        let finish = pending_finish.take_finish();
+        let has_finish = finish.is_some();
+        if let Some(finish) = finish {
+            events.push(finish);
+        }
         events.push(StreamEvent::Usage {
             usage: usage_of(usage),
         });
-        if let Some(done) = pending_finish.take_done() {
-            events.push(done);
+        if has_finish {
+            events.push(StreamEvent::Done {
+                finish_reason: None,
+                stop_sequence: None,
+            });
+            pending_finish.done_emitted = true;
         }
     }
     Ok(events)
@@ -626,11 +644,7 @@ impl Guest for OpenAiCompatible {
 
         let mut state = STREAM_STATE.lock().expect("single-threaded guest");
         if chunk.data.is_empty() {
-            let events = state
-                .pending_finish
-                .take_done()
-                .into_iter()
-                .collect::<Vec<_>>();
+            let events = state.pending_finish.flush_pending_finish();
             return to_output(&events);
         }
         state.tail.push_str(&chunk.data);
@@ -664,9 +678,7 @@ impl Guest for OpenAiCompatible {
             }
             let payload = data_lines.join("\n");
             if payload == "[DONE]" {
-                if let Some(done) = state.pending_finish.finish_marker() {
-                    events.push(done);
-                }
+                events.extend(state.pending_finish.finish_marker());
                 continue;
             }
             let ProviderStreamState { pending_finish, .. } = &mut *state;
@@ -824,6 +836,42 @@ mod tests {
         let wire = body_of(&request).expect("DeepSeek tool history is representable");
         assert_eq!(wire["messages"][0]["content"], Value::Null);
         assert_eq!(wire["messages"][0]["reasoning_content"], json!(""));
+    }
+
+    #[test]
+    fn finish_usage_and_terminal_events_preserve_workbuddy_order() {
+        let mut pending = PendingFinish::default();
+        let finish = events_of_frame(
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+            &mut pending,
+        )
+        .expect("finish frame parses");
+        assert!(finish.is_empty(), "finish waits for the final usage frame");
+
+        let events = events_of_frame(
+            r#"{"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7,"total_tokens":49}}"#,
+            &mut pending,
+        )
+        .expect("usage frame parses");
+
+        assert!(matches!(
+            events.first(),
+            Some(StreamEvent::Finish {
+                finish_reason: Some(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            events.get(1),
+            Some(StreamEvent::Usage { usage }) if usage.input_tokens == 42
+        ));
+        assert!(matches!(
+            events.get(2),
+            Some(StreamEvent::Done {
+                finish_reason: None,
+                ..
+            })
+        ));
     }
 }
 

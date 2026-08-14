@@ -627,6 +627,8 @@ struct StreamState {
     thinking_blocks: BTreeMap<u32, u32>,
     tool_blocks: BTreeMap<u32, ToolBlock>,
     open_blocks: BTreeSet<u32>,
+    pending_finish_reason: Option<FinishReason>,
+    pending_stop_sequence: Option<String>,
 }
 
 impl StreamState {
@@ -644,6 +646,8 @@ impl StreamState {
             thinking_blocks: BTreeMap::new(),
             tool_blocks: BTreeMap::new(),
             open_blocks: BTreeSet::new(),
+            pending_finish_reason: None,
+            pending_stop_sequence: None,
         }
     }
 
@@ -1108,11 +1112,22 @@ impl Guest for AnthropicClient {
                     )?);
                     Ok(rendered)
                 }
+                StreamEvent::Finish {
+                    finish_reason,
+                    stop_sequence,
+                } => {
+                    let state = states.get_mut(stream_id).expect("state inserted above");
+                    state.pending_finish_reason = finish_reason;
+                    state.pending_stop_sequence = stop_sequence;
+                    Ok(String::new())
+                }
                 StreamEvent::Done {
                     finish_reason,
                     stop_sequence,
                 } => {
                     let mut state = states.remove(stream_id).expect("state inserted above");
+                    let finish_reason = finish_reason.or(state.pending_finish_reason.take());
+                    let stop_sequence = stop_sequence.or(state.pending_stop_sequence.take());
                     let mut rendered = String::new();
                     state.ensure_started(&mut rendered)?;
                     for block_index in &state.open_blocks {
