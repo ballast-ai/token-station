@@ -13,7 +13,7 @@ import {
 } from "./ui/dialog";
 
 export const FIRST_RUN_GUIDE_STORAGE_KEY = "token-station-first-run-guide";
-export const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v2";
+export const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v3";
 
 export type FirstRunSetupStep = "provider" | "route" | "agent" | "complete";
 export type FirstRunMicroStep =
@@ -28,6 +28,7 @@ export type FirstRunMicroStep =
   | "route-config"
   | "route-apply"
   | "agent-entry"
+  | "agent-discovery-scope"
   | "agent-select"
   | "agent-installation"
   | "agent-connect"
@@ -229,7 +230,7 @@ export default function FirstRunGuide({
                     : microStep === "agent-entry"
                       ? {
                           target: "agent-entry",
-                          index: copy("CONNECT AGENT · 1/3", "接入 Agent · 1/3"),
+                          index: copy("CONNECT AGENT · 1/4", "接入 Agent · 1/4"),
                           title: copy("Open Agent management", "打开 Agent 管理"),
                           description: copy(
                             "Select a detected Agent on Home to continue.",
@@ -238,10 +239,28 @@ export default function FirstRunGuide({
                           advanceOnTargetClick: true,
                           continueLabel: null,
                         }
+                      : microStep === "agent-discovery-scope"
+                        ? {
+                            target: "agent-list",
+                            index: copy("CONNECT AGENT · 2/4", "接入 Agent · 2/4"),
+                            title: copy(
+                              "Only scanned Agents appear here",
+                              "这里仅显示扫描到的 Agent",
+                            ),
+                            description: copy(
+                              "This list only contains Agents currently discovered on this device. To see every Agent supported by Token Station, go to Settings → Agent Display. You can also control which Agents appear on Home there.",
+                              "这里仅展示本机当前扫描到的 Agent。想查看 Token Station 支持的全部 Agent，请前往“设置 → Agent 显示”；你也可以在那里控制它们是否显示在主页。",
+                            ),
+                            advanceOnTargetClick: false,
+                            continueLabel: copy(
+                              "Got it, choose an Agent",
+                              "知道了，选择 Agent",
+                            ),
+                          }
                       : microStep === "agent-select"
                         ? {
               target: "agent-list",
-              index: copy("CONNECT AGENT · 2/3", "接入 Agent · 2/3"),
+              index: copy("CONNECT AGENT · 3/4", "接入 Agent · 3/4"),
               title: copy("Choose an Agent", "选择一个 Agent"),
               description: copy("Choose a detected Agent to continue.", "选择一个检测到的 Agent 继续。"),
               advanceOnTargetClick: false,
@@ -250,7 +269,7 @@ export default function FirstRunGuide({
                         : microStep === "agent-installation"
                           ? {
                               target: "agent-installation",
-                              index: copy("CONNECT AGENT · 3/4", "接入 Agent · 3/4"),
+                              index: copy("CONNECT AGENT · 4/5", "接入 Agent · 4/5"),
                               title: copy("Choose the installation to manage", "选择要接管的安装"),
                               description: copy(
                                 "Multiple installations were detected. Open the real picker and choose the exact path to manage.",
@@ -263,7 +282,7 @@ export default function FirstRunGuide({
                         : microStep === "agent-connect"
                           ? {
                               target: "agent-connect",
-                              index: copy("CONNECT AGENT · 3/3", "接入 Agent · 3/3"),
+                              index: copy("CONNECT AGENT · 4/4", "接入 Agent · 4/4"),
                               title: copy("Connect the Agent", "一键接入 Agent"),
                               description: copy(
                                 "Select the real connection action. Completion waits for the cached Agent state to report CONNECTED.",
@@ -276,7 +295,7 @@ export default function FirstRunGuide({
                           : microStep === "agent-connect-multiple"
                             ? {
                                 target: "agent-connect",
-                                index: copy("CONNECT AGENT · 4/4", "接入 Agent · 4/4"),
+                                index: copy("CONNECT AGENT · 5/5", "接入 Agent · 5/5"),
                                 title: copy("Connect the Agent", "一键接入 Agent"),
                                 description: copy(
                                   "Select the real connection action. Completion waits for the cached Agent state to report CONNECTED.",

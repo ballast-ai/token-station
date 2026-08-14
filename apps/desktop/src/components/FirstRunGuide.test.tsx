@@ -25,11 +25,59 @@ function rect(top: number, left: number, width: number, height: number): DOMRect
   };
 }
 
-it("升级教程版本，使只看过旧版的用户看到新增概览", () => {
-  const storage = new Map([[FIRST_RUN_GUIDE_STORAGE_KEY, "spotlight-setup-v1"]]);
+it("升级教程版本，使只看过旧版的用户看到新增步骤", () => {
+  const storage = new Map([[FIRST_RUN_GUIDE_STORAGE_KEY, "spotlight-setup-v2"]]);
   expect(shouldOpenFirstRunGuide({ getItem: (key) => storage.get(key) ?? null })).toBe(true);
   storage.set(FIRST_RUN_GUIDE_STORAGE_KEY, FIRST_RUN_GUIDE_VERSION);
   expect(shouldOpenFirstRunGuide({ getItem: (key) => storage.get(key) ?? null })).toBe(false);
+});
+
+it("在选择 Agent 前区分本机发现结果与全部支持清单", async () => {
+  const onTargetAction = vi.fn();
+  const getBoundingClientRect = vi
+    .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+    .mockImplementation(function getBoundingClientRectMock(this: HTMLElement) {
+      if (this.getAttribute("data-onboarding-target") === "agent-list") {
+        return rect(96, 24, 280, 560);
+      }
+      return rect(0, 0, 0, 0);
+    });
+
+  try {
+    render(
+      <LanguageProvider>
+        <section data-onboarding-target="agent-list">Claude Code</section>
+        <FirstRunGuide
+          open
+          microStep="agent-discovery-scope"
+          canSkipAgent={false}
+          onTargetAction={onTargetAction}
+          onBack={() => {}}
+          onSkipAgent={() => {}}
+          onPause={() => {}}
+          onDismiss={() => {}}
+        />
+      </LanguageProvider>,
+    );
+
+    const coachmark = await screen.findByRole("dialog", {
+      name: "这里仅显示扫描到的 Agent",
+    });
+    expect(coachmark).toHaveTextContent("本机当前扫描到的 Agent");
+    expect(coachmark).toHaveTextContent("Token Station 支持的全部 Agent");
+    expect(coachmark).toHaveTextContent("设置 → Agent 显示");
+    expect(screen.getByText("Claude Code")).toHaveAttribute(
+      "data-onboarding-active",
+      "true",
+    );
+
+    await userEvent.setup().click(
+      within(coachmark).getByRole("button", { name: "知道了，选择 Agent" }),
+    );
+    expect(onTargetAction).toHaveBeenCalledOnce();
+  } finally {
+    getBoundingClientRect.mockRestore();
+  }
 });
 
 it("从真实概览开始，并在教程内说明之后从哪里重看", async () => {

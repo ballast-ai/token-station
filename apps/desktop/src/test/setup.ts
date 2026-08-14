@@ -43,7 +43,7 @@ HTMLElement.prototype.getBoundingClientRect = function getBoundingClientRectForT
 // App and LanguageProvider default-language suites clear this preference themselves.
 beforeEach(() => {
   window.localStorage.setItem("token-station-language", "zh-CN");
-  window.localStorage.setItem("token-station-first-run-guide", "spotlight-setup-v2");
+  window.localStorage.setItem("token-station-first-run-guide", "spotlight-setup-v3");
   window.localStorage.removeItem(AGENT_VISIBILITY_STORAGE_KEY);
   window.localStorage.removeItem(SHOWN_UNDETECTED_AGENT_IDS_STORAGE_KEY);
 });
