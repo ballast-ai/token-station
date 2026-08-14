@@ -202,6 +202,11 @@ function routerConfigGuidance(raw: string): LocalizedAppMessage | null {
 
 const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
   {
+    matches: /cursor_keychain_access_required|Cursor Safe Storage|登录钥匙串/i,
+    en: "The first Cursor connection needs macOS Keychain access. Enter your Mac login password in the system dialog, choose Always Allow, then try again.",
+    zh: "首次接入需要 macOS 钥匙串授权。请在系统对话框中输入本机登录密码，并选择“始终允许”后重试。",
+  },
+  {
     matches: /cursor_running|Cursor (?:is|still) running|Cursor (?:正在|仍在)运行/i,
     en: "Cursor is still running. Quit Cursor completely, then click Connect again. Token Station will not close it for you.",
     zh: "Cursor 仍在运行。请彻底退出 Cursor 后再点一次一键接入。Token Station 不会强制关闭它。",

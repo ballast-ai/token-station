@@ -402,11 +402,15 @@ fn cursor_safe_storage_password() -> Result<Zeroizing<String>, String> {
         .output()
         .map_err(|error| format!("无法读取 Cursor Safe Storage：{error}"))?;
     if !output.status.success() {
-        return Err("无法从登录钥匙串读取 Cursor Safe Storage".to_string());
+        return Err(cursor_keychain_access_error());
     }
     let password = String::from_utf8(output.stdout)
         .map_err(|_| "Cursor Safe Storage 主密码不是 UTF-8".to_string())?;
     Ok(Zeroizing::new(password.trim_end().to_string()))
+}
+
+fn cursor_keychain_access_error() -> String {
+    "cursor_keychain_access_required: 首次接入需要 macOS 钥匙串授权。请在系统对话框中输入本机登录密码，并选择“始终允许”后重试。".to_string()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1048,10 +1052,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     use super::encrypt_cursor_secret;
     use super::{
-        cursor_database_matches_managed_state, cursor_request_allowed, parse_trycloudflare_origin,
-        preserve_record_after_failed_restore, start_cloudflared, update_cursor_database,
-        write_backup_file, CursorManagedRecord, CursorSettingsBackup, CURSOR_APPLICATION_USER_KEY,
-        CURSOR_MODEL,
+        cursor_database_matches_managed_state, cursor_keychain_access_error,
+        cursor_request_allowed, parse_trycloudflare_origin, preserve_record_after_failed_restore,
+        start_cloudflared, update_cursor_database, write_backup_file, CursorManagedRecord,
+        CursorSettingsBackup, CURSOR_APPLICATION_USER_KEY, CURSOR_MODEL,
     };
     use rusqlite::Connection;
     use serde_json::json;
@@ -1232,6 +1236,14 @@ mod tests {
             decrypt_cursor_secret_for_test(&encrypted, "master-password").unwrap(),
             "temporary-cursor-token"
         );
+    }
+
+    #[test]
+    fn cursor_keychain_error_explains_authorization_without_leaking_command_output() {
+        let error = cursor_keychain_access_error();
+        assert!(error.starts_with("cursor_keychain_access_required:"));
+        assert!(error.contains("始终允许"));
+        assert!(!error.contains("security:"));
     }
 
     #[test]
