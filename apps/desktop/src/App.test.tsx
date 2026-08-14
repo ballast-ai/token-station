@@ -797,7 +797,7 @@ it("requires an exact installation choice before connecting a multi-installation
   await user.click(screen.getByRole("button", { name: "Claude Code" }));
 
   expect(await screen.findByRole("dialog", { name: "选择要接管的安装" })).toBeInTheDocument();
-  const picker = screen.getByRole("button", { name: "选择安装" });
+  const picker = screen.getByRole("button", { name: "选择版本" });
   expect(picker).toHaveAttribute("data-onboarding-active", "true");
   expect(screen.queryByRole("dialog", { name: "一键接入 Agent" })).toBeNull();
 
@@ -2511,7 +2511,7 @@ describe("desktop station navigation", () => {
     render(<App />);
     await waitFor(() => expect(scans).toBe(1));
     await openAgent(user, "Claude Code");
-    expect(screen.queryByRole("button", { name: /选择安装/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /选择版本/ })).toBeNull();
     await user.click(await screen.findByRole("button", { name: "一键接入" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plan_agent_connection", {
       agentId: "claude-code",
@@ -2614,6 +2614,57 @@ describe("desktop station navigation", () => {
     expect(document.querySelector(".agent-route-page > .banner.ok")).toBeNull();
   });
 
+  it("keeps the selected Claude Code version after switching to another Agent and back", async () => {
+    const user = userEvent.setup();
+    const running = stateFixture({
+      serve: serveFixture({
+        phase: "running",
+        app_runtime: "running",
+        listener_reachable: true,
+        running_revision: 1,
+        instance_id: "instance",
+        virtual_key: "vk-test",
+      }),
+    });
+    const multipleClaude = structuredClone(scannedClaude);
+    const preview = structuredClone(multipleClaude.installations[0]);
+    preview.discovery.executable_path = "/opt/claude-preview";
+    preview.discovery.canonical_path = "/opt/claude-preview";
+    preview.discovery.version_raw = "10.0.0";
+    preview.discovery.version_normalized = "10.0.0";
+    preview.compatibility.installation_path = "/opt/claude-preview";
+    multipleClaude.installations.push(preview);
+    multipleClaude.status = "MULTIPLE_INSTALLATIONS";
+    const detectedCodex = detectedAgentsFixture.find((agent) => agent.metadata.agent_id === "codex");
+    expect(detectedCodex).toBeDefined();
+
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return running;
+      if (command === "get_runtime_state") return running.serve;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [multipleClaude, detectedCodex];
+      if (command === "get_request_receipts") return { items: [], total: 0, page: 1, page_size: 20 };
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await openAgents(user);
+    const navigation = screen.getByRole("navigation", { name: "Agent 列表" });
+    await user.click(within(navigation).getByRole("button", { name: "Claude Code" }));
+    await user.click(await screen.findByRole("button", { name: "选择版本" }));
+    await user.click(screen.getByRole("option", { name: "claude-preview · v10.0.0" }));
+
+    expect(screen.getByRole("button", { name: "一键接入" })).toBeEnabled();
+    await user.click(within(screen.getByRole("navigation", { name: "Agent 列表" })).getByRole("button", { name: "Codex" }));
+    expect(await screen.findByRole("heading", { name: "Codex", level: 2 })).toBeInTheDocument();
+    await user.click(within(screen.getByRole("navigation", { name: "Agent 列表" })).getByRole("button", { name: "Claude Code" }));
+    expect(await screen.findByRole("heading", { name: "Claude Code", level: 2 })).toBeInTheDocument();
+
+    await user.click(await screen.findByRole("button", { name: "选择版本" }));
+    expect(screen.getByRole("option", { name: "claude-preview · v10.0.0" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("button", { name: "一键接入" })).toBeEnabled();
+  });
+
   it("selects an exact installation and plans against its path", async () => {
     const user = userEvent.setup();
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -2647,7 +2698,7 @@ describe("desktop station navigation", () => {
     await openAgent(user, "Claude Code");
     expect(await screen.findByRole("button", { name: "一键接入" })).toBeDisabled();
     expect(screen.getByText("检测到多份安装，请先选择要接管的精确路径。")).toBeInTheDocument();
-    await user.click(await screen.findByRole("button", { name: /选择安装/ }));
+    await user.click(await screen.findByRole("button", { name: /选择版本/ }));
     await user.click(screen.getByRole("option", { name: "claude.exe · v10.0.0" }));
     expect(screen.queryByRole("listbox")).toBeNull();
     await user.click(screen.getByRole("button", { name: "一键接入" }));

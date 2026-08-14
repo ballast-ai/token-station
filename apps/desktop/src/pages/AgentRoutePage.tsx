@@ -66,6 +66,8 @@ interface AgentRoutePageProps {
   onApplyDirect?: (upstream: string, model: string) => void | Promise<boolean>;
   onDeleteProfile?: (name: string) => void | Promise<boolean>;
   onInstallationSelected?: () => void;
+  selectedInstallationPath?: string;
+  onInstallationPathChange?: (path: string) => void;
   embedded?: boolean;
 }
 
@@ -225,11 +227,14 @@ export default function AgentRoutePage({
   onApplyDirect = () => {},
   onDeleteProfile = () => {},
   onInstallationSelected,
+  selectedInstallationPath,
+  onInstallationPathChange,
   embedded = false,
 }: AgentRoutePageProps) {
   const { copy, language } = useLocalizedCopy();
   const { showError, showSuccess } = useErrorToast();
-  const [selectedPath, setSelectedPath] = useState("");
+  const [localSelectedPath, setLocalSelectedPath] = useState("");
+  const selectedPath = selectedInstallationPath ?? localSelectedPath;
   const [busy, setBusy] = useState(false);
   const [cursorStatus, setCursorStatus] = useState<CursorProviderStatusView | null>(null);
   // Show configuration changes after the first connection, then persist dismissal in localStorage.
@@ -237,9 +242,10 @@ export default function AgentRoutePage({
   const dismissConnectDiff = () => setConnectDiff(null);
 
   useEffect(() => {
+    if (selectedInstallationPath !== undefined) return;
     const paths = agent?.installations.map((item) => item.discovery.canonical_path) ?? [];
-    setSelectedPath((current) => paths.includes(current) ? current : paths.length === 1 ? paths[0] : "");
-  }, [agent]);
+    setLocalSelectedPath((current) => paths.includes(current) ? current : paths.length === 1 ? paths[0] : "");
+  }, [agent, selectedInstallationPath]);
 
   useEffect(() => {
     if (metadata.agent_id !== "cursor") {
@@ -515,7 +521,11 @@ export default function AgentRoutePage({
             disabled={busy}
             onboardingTarget="agent-installation"
             onSelect={(path) => {
-              setSelectedPath(path);
+              if (onInstallationPathChange) {
+                onInstallationPathChange(path);
+              } else {
+                setLocalSelectedPath(path);
+              }
               onInstallationSelected?.();
             }}
           />

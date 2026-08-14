@@ -949,7 +949,7 @@ describe("AgentRoutePage multi-install admission", () => {
 
     const connect = screen.getByRole("button", { name: "一键接入" });
     expect(connect).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: /选择安装/ }));
+    await user.click(screen.getByRole("button", { name: /选择版本/ }));
     await user.click(screen.getByRole("option", { name: "claude · v2.1.211" }));
 
     expect(connect).toBeEnabled();

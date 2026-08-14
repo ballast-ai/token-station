@@ -238,6 +238,7 @@ function StationApp() {
   const hiddenAgentIdsRef = useRef(hiddenAgentIds);
   const [registry, setRegistry] = useState<AgentUiMetadataView[]>([]);
   const [agents, setAgents] = useState<AgentView[]>([]);
+  const [selectedInstallationPaths, setSelectedInstallationPaths] = useState<Record<string, string>>({});
   const [scanSucceeded, setScanSucceeded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [serveBusy, setServeBusy] = useState(false);
@@ -319,6 +320,18 @@ function StationApp() {
       ), "agent-visibility-storage");
     }
   }, [copy, showError]);
+
+  useEffect(() => {
+    setSelectedInstallationPaths((current) => {
+      const next = Object.fromEntries(Object.entries(current).filter(([agentId, path]) => (
+        agents.some((agent) => (
+          agent.metadata.agent_id === agentId
+          && agent.installations.some((installation) => installation.discovery.canonical_path === path)
+        ))
+      )));
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+  }, [agents]);
 
   const refreshCachedAgents = useCallback(async () => {
     const refreshGeneration = ++cachedAgentRefreshGenerationRef.current;
@@ -875,6 +888,18 @@ function StationApp() {
                 () => deleteProfile(name),
                 copy(`Profile "${name}" deleted`, `已删除策略组“${name}”`),
               )}
+              selectedInstallationPath={(() => {
+                const selectedPath = selectedInstallationPaths[metadata.agent_id];
+                if (agent?.installations.some((installation) => installation.discovery.canonical_path === selectedPath)) {
+                  return selectedPath;
+                }
+                return agent?.installations.length === 1
+                  ? agent.installations[0].discovery.canonical_path
+                  : "";
+              })()}
+              onInstallationPathChange={(path) => {
+                setSelectedInstallationPaths((current) => ({ ...current, [metadata.agent_id]: path }));
+              }}
               onInstallationSelected={() => {
                 if (firstRunGuideOpen && activeFirstRunMicroStep === "agent-installation") {
                   setFirstRunMicroStep("agent-connect-multiple");

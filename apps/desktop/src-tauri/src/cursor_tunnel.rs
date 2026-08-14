@@ -122,10 +122,7 @@ pub(crate) fn cursor_request_allowed(method: &str, path: &str) -> bool {
 }
 
 pub(crate) fn parse_trycloudflare_origin(line: &str) -> Option<String> {
-    let regex = Regex::new(
-        r"https://[a-z0-9]+(?:-[a-z0-9]+)+\.trycloudflare\.com(?:\b|/)",
-    )
-    .ok()?;
+    let regex = Regex::new(r"https://[a-z0-9]+(?:-[a-z0-9]+)+\.trycloudflare\.com(?:\b|/)").ok()?;
     let matched = regex.find(line)?.as_str().trim_end_matches('/');
     Some(matched.to_string())
 }
@@ -948,10 +945,12 @@ pub(crate) fn restore_cursor_provider(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::decrypt_cursor_secret_for_test;
     use super::{
-        cursor_request_allowed, decrypt_cursor_secret_for_test, encrypt_cursor_secret,
-        parse_trycloudflare_origin, update_cursor_database, write_backup_file,
-        CursorSettingsBackup, CURSOR_APPLICATION_USER_KEY, CURSOR_MODEL,
+        cursor_request_allowed, encrypt_cursor_secret, parse_trycloudflare_origin,
+        update_cursor_database, write_backup_file, CursorSettingsBackup,
+        CURSOR_APPLICATION_USER_KEY, CURSOR_MODEL,
     };
     use rusqlite::Connection;
     use serde_json::json;
@@ -1112,6 +1111,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn macos_safe_storage_ciphertext_round_trips_as_cursor_buffer_json() {
         let encrypted = encrypt_cursor_secret("temporary-cursor-token", "master-password")

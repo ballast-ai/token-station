@@ -52,7 +52,7 @@ describe("InstallationPicker", () => {
         onSelect={vi.fn()}
       />,
     );
-    expect(screen.queryByRole("button", { name: /选择安装/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /选择版本/ })).toBeNull();
   });
 
   it("shows only short names, versions and stable duplicate indexes", () => {
@@ -111,7 +111,7 @@ describe("InstallationPicker", () => {
     );
 
     expect(screen.queryByText("/Users/x/bin/claude")).toBeNull();
-    await user.click(screen.getByRole("button", { name: /选择安装/ }));
+    await user.click(screen.getByRole("button", { name: /选择版本/ }));
     expect(screen.getByRole("listbox"))
       .toHaveAttribute("data-onboarding-floating", "true");
     expect(screen.getByRole("option", { name: "claude · v1.2.3" }))
@@ -154,7 +154,7 @@ describe("InstallationPicker", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: /选择安装/ }));
+    await user.click(screen.getByRole("button", { name: /选择版本/ }));
     expect(screen.getByText("/opt/homebrew/bin/claude")).toBeInTheDocument();
     expect(screen.getByText("/Users/x/.npm/bin/claude")).toBeInTheDocument();
     expect(screen.getByText(/Homebrew · 当前生效/)).toBeInTheDocument();
