@@ -22,7 +22,7 @@ const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
 const getStatsMock = vi.mocked(getStats);
 const FIRST_RUN_GUIDE_STORAGE_KEY = "token-station-first-run-guide";
-const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v2";
+const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v3";
 
 const emptyRoute: AgentRouteView = {
   mode: "inherit",
@@ -751,6 +751,15 @@ it("一键接入后只通过缓存状态刷新确认 CONNECTED", async () => {
   await screen.findByRole("dialog", { name: "打开 Agent 管理" });
   await user.click(screen.getByRole("button", { name: "Claude Code" }));
 
+  const discoveryScope = await screen.findByRole("dialog", {
+    name: "这里仅显示扫描到的 Agent",
+  });
+  expect(discoveryScope).toHaveTextContent("Token Station 支持的全部 Agent");
+  expect(discoveryScope).toHaveTextContent("设置 → Agent 显示");
+  await user.click(within(discoveryScope).getByRole("button", {
+    name: "知道了，选择 Agent",
+  }));
+
   await screen.findByRole("dialog", { name: "选择一个 Agent" });
   expect(screen.getByRole("region", { name: "Agent 选择列表" }))
     .toHaveAttribute("data-onboarding-active", "true");
@@ -759,7 +768,7 @@ it("一键接入后只通过缓存状态刷新确认 CONNECTED", async () => {
   const connectCoachmark = await screen.findByRole("dialog", { name: "一键接入 Agent" });
   const connect = screen.getByRole("button", { name: "一键接入" });
   expect(connect).toHaveAttribute("data-onboarding-active", "true");
-  expect(connectCoachmark).toHaveTextContent("接入 Agent · 3/3");
+  expect(connectCoachmark).toHaveTextContent("接入 Agent · 4/4");
   await user.click(connect);
 
   await waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
@@ -821,6 +830,12 @@ it("requires an exact installation choice before connecting a multi-installation
   await continueFromOverview(user);
   await screen.findByRole("dialog", { name: "打开 Agent 管理" });
   await user.click(screen.getByRole("button", { name: "Claude Code" }));
+  const discoveryScope = await screen.findByRole("dialog", {
+    name: "这里仅显示扫描到的 Agent",
+  });
+  await user.click(within(discoveryScope).getByRole("button", {
+    name: "知道了，选择 Agent",
+  }));
   await screen.findByRole("dialog", { name: "选择一个 Agent" });
   await user.click(screen.getByRole("button", { name: "Claude Code" }));
 

@@ -1166,7 +1166,9 @@ function StationApp() {
             setFirstRunMicroStep("route-apply");
           } else if (activeFirstRunMicroStep === "agent-entry") {
             setFirstRunSetupStep("agent");
-            setFirstRunMicroStep(agentDetected ? "agent-select" : "agent-scan-empty");
+            setFirstRunMicroStep(agentDetected ? "agent-discovery-scope" : "agent-scan-empty");
+          } else if (activeFirstRunMicroStep === "agent-discovery-scope") {
+            setFirstRunMicroStep("agent-select");
           } else if (activeFirstRunMicroStep === "complete") {
             markFirstRunGuideDismissed();
             setFirstRunGuideOpen(false);
