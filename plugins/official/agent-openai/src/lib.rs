@@ -470,8 +470,7 @@ impl Guest for OpenAiClient {
             StreamEvent::Usage { usage } => format!(
                 "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{},\
                  \"total_tokens\":{},\"prompt_tokens_details\":{{\"cached_tokens\":{},\
-                 \"cache_write_tokens\":{}}},\"completion_tokens_details\":{{\"reasoning_tokens\":{}}}}}}}\n\n\
-                 data: [DONE]\n\n",
+                 \"cache_write_tokens\":{}}},\"completion_tokens_details\":{{\"reasoning_tokens\":{}}}}}}}\n\n",
                 usage.input_tokens,
                 usage.output_tokens,
                 usage.total(),
@@ -500,7 +499,8 @@ impl Guest for OpenAiClient {
                     None => "null".to_owned(),
                 };
                 format!(
-                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":{reason}}}]}}\n\n"
+                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":{reason}}}]}}\
+                     \n\ndata: [DONE]\n\n"
                 )
             }
             StreamEvent::Error { error } => {
@@ -645,14 +645,13 @@ mod tests {
                 "data: {\"choices\":[],\"usage\":{",
                 "\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":120,",
                 "\"prompt_tokens_details\":{\"cached_tokens\":60,\"cache_write_tokens\":10},",
-                "\"completion_tokens_details\":{\"reasoning_tokens\":5}}}\n\n",
-                "data: [DONE]\n\n"
+                "\"completion_tokens_details\":{\"reasoning_tokens\":5}}}\n\n"
             ))
         );
     }
 
     #[test]
-    fn stream_done_waits_for_final_usage_before_emitting_done_marker() {
+    fn stream_done_emits_the_finish_reason_before_the_done_marker() {
         let event = json!({
             "type": "done",
             "finish_reason": "stop",
@@ -665,7 +664,11 @@ mod tests {
         let data = rendered["data"].as_str().expect("stream data is text");
 
         assert!(data.contains("\"finish_reason\":\"stop\""));
-        assert!(!data.contains("[DONE]"));
+        assert!(data.trim_end().ends_with("data: [DONE]"));
+        assert!(
+            data.find("\"finish_reason\":\"stop\"") < data.find("data: [DONE]"),
+            "finish reason must precede the terminal marker"
+        );
     }
 }
 
