@@ -32,19 +32,19 @@ const CURSOR_APPLICATION_USER_KEY: &str =
 const CURSOR_OPENAI_KEY: &str = "secret://cursorAuth/openAIKey";
 const CURSOR_MODEL: &str = "tokenstation/auto";
 #[cfg(target_os = "macos")]
-const CLOUDFLARED_VERSION: &str = "2026.8.0";
+const CLOUDFLARED_VERSION: &str = "2026.8.1";
 #[cfg(target_os = "macos")]
-const CLOUDFLARED_ASSET_URL: &str = "https://github.com/cloudflare/cloudflared/releases/download/2026.8.0/cloudflared-darwin-arm64.tgz";
+const CLOUDFLARED_ASSET_URL: &str = "https://github.com/cloudflare/cloudflared/releases/download/2026.8.1/cloudflared-darwin-arm64.tgz";
 #[cfg(target_os = "macos")]
-const CLOUDFLARED_ASSET_SIZE: usize = 19_214_411;
+const CLOUDFLARED_ASSET_SIZE: usize = 19_214_919;
 #[cfg(target_os = "macos")]
 const CLOUDFLARED_MAX_ARCHIVE_BYTES: u64 = 24 * 1024 * 1024;
 #[cfg(target_os = "macos")]
 const CLOUDFLARED_ASSET_SHA256: &str =
-    "6244b4b199515690f93e170110d219d8d141184ba847179980c2f5906800c931";
+    "2d42cd4448f95a5383f0c5c9777d0c29ff70c275d024945862502bee4db174b4";
 #[cfg(target_os = "macos")]
 const CLOUDFLARED_BINARY_SHA256: &str =
-    "145790f4f8a6413f69ce08800c401bc15a2a18afcc3b5ffea0a861623566c0a9";
+    "ebd6cc90cc6342b8e512f77cfaeb241852d87c557a317d91d23c63f4f99333d9";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -132,9 +132,17 @@ pub(crate) fn cursor_request_allowed(method: &str, path: &str) -> bool {
 }
 
 pub(crate) fn parse_trycloudflare_origin(line: &str) -> Option<String> {
-    let regex = Regex::new(r"https://[a-z0-9]+(?:-[a-z0-9]+)+\.trycloudflare\.com(?:\b|/)").ok()?;
-    let matched = regex.find(line)?.as_str().trim_end_matches('/');
-    Some(matched.to_string())
+    let regex = Regex::new(r"https://[a-z0-9]+(?:-[a-z0-9]+)+\.trycloudflare\.com").ok()?;
+    let matched = regex.find(line)?;
+    let suffix = &line[matched.end()..];
+    if suffix
+        .chars()
+        .next()
+        .is_some_and(|next| next != '/' && !next.is_ascii_whitespace())
+    {
+        return None;
+    }
+    Some(matched.as_str().to_string())
 }
 
 fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
@@ -337,7 +345,18 @@ fn start_cloudflared(binary: &Path, bridge_port: u16) -> Result<(Child, String),
         }
     });
     match receiver.recv_timeout(Duration::from_secs(30)) {
-        Ok(origin) => Ok((child, origin)),
+        Ok(origin) => {
+            std::thread::sleep(Duration::from_millis(50));
+            match child.try_wait() {
+                Ok(None) => Ok((child, origin)),
+                Ok(Some(_)) => Err("cloudflared 在建立 Quick Tunnel 后立即退出".to_string()),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    Err(format!("无法确认 cloudflared 运行状态：{error}"))
+                }
+            }
+        }
         Err(_) => {
             let _ = child.kill();
             let _ = child.wait();
@@ -664,6 +683,50 @@ fn read_cursor_backup(db_path: &Path) -> Result<CursorSettingsBackup, String> {
     Ok(backup)
 }
 
+fn cursor_database_matches_managed_state(db_path: &Path, public_origin: &str) -> bool {
+    let Ok(connection) = Connection::open(db_path) else {
+        return false;
+    };
+    let Ok(application_user) = connection.query_row(
+        "SELECT value FROM ItemTable WHERE key = ?1",
+        [CURSOR_APPLICATION_USER_KEY],
+        |row| row.get::<_, String>(0),
+    ) else {
+        return false;
+    };
+    let Ok(application_user) = serde_json::from_str::<serde_json::Value>(&application_user) else {
+        return false;
+    };
+    let expected_base_url = format!("{}/agents/cursor/v1", public_origin.trim_end_matches('/'));
+    let selected_models_match = application_user
+        .pointer("/aiSettings/modelConfig")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|configs| {
+            !configs.is_empty()
+                && configs.values().all(|config| {
+                    config.get("modelName").and_then(serde_json::Value::as_str)
+                        == Some(CURSOR_MODEL)
+                })
+        });
+    application_user
+        .get("openAIBaseUrl")
+        .and_then(serde_json::Value::as_str)
+        == Some(expected_base_url.as_str())
+        && application_user
+            .get("useOpenAIKey")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && application_user
+            .pointer("/aiSettings/userAddedModels")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|models| {
+                models
+                    .iter()
+                    .any(|model| model.as_str() == Some(CURSOR_MODEL))
+            })
+        && selected_models_match
+}
+
 fn restore_cursor_database(
     db_path: &Path,
     application_user: &str,
@@ -737,6 +800,19 @@ fn write_record(path: &Path, record: &CursorManagedRecord) -> Result<(), String>
         .map_err(|_| "无法写入 Cursor 接管记录".to_string())
 }
 
+fn preserve_record_after_failed_restore(
+    managed_path: &Path,
+    restore_result: Result<(), String>,
+) -> Result<(), String> {
+    match restore_result {
+        Ok(()) => fs::remove_file(managed_path)
+            .map_err(|error| format!("无法清除 Cursor 接管记录：{error}")),
+        Err(error) => Err(format!(
+            "Cursor 原配置恢复失败：{error}；接管记录与备份已保留，可重试恢复"
+        )),
+    }
+}
+
 fn generate_cursor_token() -> Result<Zeroizing<String>, String> {
     let mut bytes = [0u8; 32];
     fill_random(&mut bytes).map_err(|error| format!("无法生成 Cursor 临时令牌：{error}"))?;
@@ -752,9 +828,14 @@ fn status_view(
         .0
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let db_path = cursor_database_path().ok();
     if let Some(running) = active.as_mut() {
         match running.cloudflared.try_wait() {
-            Ok(None) => {
+            Ok(None)
+                if db_path.as_deref().is_some_and(|db_path| {
+                    cursor_database_matches_managed_state(db_path, &running.public_origin)
+                }) =>
+            {
                 return CursorProviderStatusView {
                     state: CursorProviderState::Connected,
                     message: Some(format!(
@@ -763,7 +844,7 @@ fn status_view(
                     )),
                 }
             }
-            Ok(Some(_)) | Err(_) => {
+            Ok(None) | Ok(Some(_)) | Err(_) => {
                 if let Some(stopped) = active.take() {
                     stopped.stop();
                 }
@@ -876,28 +957,34 @@ pub(crate) async fn configure_cursor_provider(
             None => read_cursor_backup(&db_path)?,
         };
         write_backup_file(&backup_path(&paths), &backup)?;
-        if let Err(error) = write_cursor_database(
-            &db_path,
-            &backup.application_user,
-            &base_url,
-            &encrypted_token,
-        ) {
-            let _ = backup.restore(&db_path);
-            return Err(error);
-        }
         let record = CursorManagedRecord {
             schema_version: 1,
             public_origin: pending.public_origin.clone(),
             backup,
         };
-        if let Err(error) = write_record(&managed_path, &record) {
-            let _ = record.backup.restore(&db_path);
-            return Err(error);
+        write_record(&managed_path, &record)?;
+        if let Err(error) = write_cursor_database(
+            &db_path,
+            &record.backup.application_user,
+            &base_url,
+            &encrypted_token,
+        ) {
+            return match preserve_record_after_failed_restore(
+                &managed_path,
+                record.backup.restore(&db_path),
+            ) {
+                Ok(()) => Err(error),
+                Err(restore_error) => Err(format!("{error}；{restore_error}")),
+            };
         }
         if let Err(error) = launch_cursor() {
-            let _ = record.backup.restore(&db_path);
-            let _ = fs::remove_file(&managed_path);
-            return Err(error);
+            return match preserve_record_after_failed_restore(
+                &managed_path,
+                record.backup.restore(&db_path),
+            ) {
+                Ok(()) => Err(error),
+                Err(restore_error) => Err(format!("{error}；{restore_error}")),
+            };
         }
         Ok(())
     })();
@@ -961,13 +1048,18 @@ mod tests {
     #[cfg(target_os = "macos")]
     use super::encrypt_cursor_secret;
     use super::{
-        cursor_request_allowed, parse_trycloudflare_origin, update_cursor_database,
-        write_backup_file, CursorSettingsBackup, CURSOR_APPLICATION_USER_KEY, CURSOR_MODEL,
+        cursor_database_matches_managed_state, cursor_request_allowed, parse_trycloudflare_origin,
+        preserve_record_after_failed_restore, start_cloudflared, update_cursor_database,
+        write_backup_file, CursorManagedRecord, CursorSettingsBackup, CURSOR_APPLICATION_USER_KEY,
+        CURSOR_MODEL,
     };
     use rusqlite::Connection;
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn temp_dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -1003,7 +1095,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn pinned_cloudflared_asset_fits_the_bounded_download_limit() {
-        assert_eq!(super::CLOUDFLARED_ASSET_SIZE, 19_214_411);
+        assert_eq!(super::CLOUDFLARED_ASSET_SIZE, 19_214_919);
         assert!(
             u64::try_from(super::CLOUDFLARED_ASSET_SIZE).unwrap()
                 < super::CLOUDFLARED_MAX_ARCHIVE_BYTES
@@ -1120,6 +1212,10 @@ mod tests {
             parse_trycloudflare_origin(
                 "INF Requesting new quick Tunnel on https://api.trycloudflare.com"
             ),
+            None
+        );
+        assert_eq!(
+            parse_trycloudflare_origin("INF https://quiet-tree.trycloudflare.com.attacker.example"),
             None
         );
     }
@@ -1265,6 +1361,111 @@ mod tests {
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(persisted.schema_version, 1);
         assert_eq!(persisted.application_user, "{}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_state_check_rejects_cursor_database_drift() {
+        let root = temp_dir("cursor-managed-state");
+        let db_path = root.join("state.vscdb");
+        let connection = Connection::open(&db_path).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE ItemTable(key TEXT PRIMARY KEY, value TEXT)",
+                [],
+            )
+            .unwrap();
+        let original = json!({
+            "openAIBaseUrl": "https://api.openai.com/v1",
+            "useOpenAIKey": false,
+            "aiSettings": {"userAddedModels": []}
+        })
+        .to_string();
+        connection
+            .execute(
+                "INSERT INTO ItemTable(key, value) VALUES(?1, ?2)",
+                [CURSOR_APPLICATION_USER_KEY, original.as_str()],
+            )
+            .unwrap();
+        drop(connection);
+
+        update_cursor_database(
+            &db_path,
+            "https://quiet-tree.trycloudflare.com/agents/cursor/v1",
+            "encrypted-token",
+        )
+        .unwrap();
+        assert!(cursor_database_matches_managed_state(
+            &db_path,
+            "https://quiet-tree.trycloudflare.com"
+        ));
+
+        let connection = Connection::open(&db_path).unwrap();
+        let mut drifted: serde_json::Value = serde_json::from_str(
+            &connection
+                .query_row(
+                    "SELECT value FROM ItemTable WHERE key = ?1",
+                    [CURSOR_APPLICATION_USER_KEY],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        drifted["useOpenAIKey"] = json!(false);
+        connection
+            .execute(
+                "UPDATE ItemTable SET value = ?1 WHERE key = ?2",
+                [drifted.to_string().as_str(), CURSOR_APPLICATION_USER_KEY],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(!cursor_database_matches_managed_state(
+            &db_path,
+            "https://quiet-tree.trycloudflare.com"
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_restore_keeps_the_managed_record_recoverable() {
+        let root = temp_dir("cursor-restore-failure");
+        let record_path = root.join("active.json");
+        let record = CursorManagedRecord {
+            schema_version: 1,
+            public_origin: "https://quiet-tree.trycloudflare.com".to_string(),
+            backup: CursorSettingsBackup {
+                schema_version: 1,
+                created_at_ms: 123,
+                application_user: "{}".to_string(),
+                encrypted_openai_key: None,
+            },
+        };
+        super::write_record(&record_path, &record).unwrap();
+
+        let error = preserve_record_after_failed_restore(
+            &record_path,
+            Err("database remained locked".to_string()),
+        )
+        .unwrap_err();
+
+        assert!(record_path.is_file());
+        assert!(error.contains("database remained locked"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quick_tunnel_url_from_an_exited_process_is_rejected() {
+        let root = temp_dir("cursor-dead-cloudflared");
+        let binary = root.join("cloudflared");
+        fs::write(
+            &binary,
+            "#!/bin/sh\necho 'https://quiet-tree.trycloudflare.com' >&2\nexit 0\n",
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(start_cloudflared(&binary, 48787).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

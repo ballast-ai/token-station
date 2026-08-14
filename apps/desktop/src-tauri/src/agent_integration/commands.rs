@@ -14,7 +14,7 @@ use std::time::UNIX_EPOCH;
 use ring::hmac;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tauri::{State, WebviewWindow};
+use tauri::{AppHandle, State, WebviewWindow};
 use zeroize::Zeroizing;
 
 use super::compatibility::{evaluate_discovery, CatalogSource, CompatibilityCatalog};
@@ -993,6 +993,34 @@ impl AgentCommandState {
 
     fn registry_metadata(&self) -> Vec<AgentUiMetadata> {
         self.registry.ui_metadata()
+    }
+
+    /// Projects the last completed discovery scan into a path-free status-menu
+    /// view. Ownership is the durable "connected through Token Station" fact;
+    /// unlike runtime validation it remains truthful while the proxy is stopped.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn managed_agent_menu_entries(&self) -> Vec<(String, String, u16)> {
+        let records = self
+            .session
+            .lock()
+            .ok()
+            .and_then(|session| session.scan.as_ref().map(|scan| scan.records.clone()))
+            .unwrap_or_default();
+        self.registry
+            .ui_metadata()
+            .into_iter()
+            .filter(|metadata| {
+                records
+                    .iter()
+                    .filter(|record| record.agent_id == metadata.agent_id)
+                    .any(|record| {
+                        self.ownership
+                            .list_agent_installation(&record.agent_id, &record.canonical_path)
+                            .is_ok_and(|ownership| !ownership.is_empty())
+                    })
+            })
+            .map(|metadata| (metadata.agent_id, metadata.display_name, metadata.ui_order))
+            .collect()
     }
 
     fn begin_scan(&self) -> Result<ScanInFlightGuard<'_>, AgentCommandError> {
@@ -2438,6 +2466,7 @@ pub(crate) fn list_agent_registry(state: State<'_, AgentCommandState>) -> Vec<Ag
 
 #[tauri::command(async)]
 pub(crate) fn scan_agents(
+    app: AppHandle,
     state: State<'_, AgentCommandState>,
     app_state: State<'_, AppStateManaged>,
 ) -> Result<Vec<AgentView>, AgentCommandError> {
@@ -2448,7 +2477,9 @@ pub(crate) fn scan_agents(
         .lock()
         .ok()
         .and_then(|inner| opencode_issue_from_inner(&inner).ok().flatten());
-    state.scan_with_runtime(runtime.as_ref(), opencode_issue.as_ref())
+    let views = state.scan_with_runtime(runtime.as_ref(), opencode_issue.as_ref())?;
+    crate::desktop_shell::update_agent_menu(&app);
+    Ok(views)
 }
 
 #[tauri::command(async)]
@@ -2488,6 +2519,7 @@ pub(crate) fn plan_agent_connection(
 
 #[tauri::command(async)]
 pub(crate) fn apply_agent_plan(
+    app: AppHandle,
     state: State<'_, AgentCommandState>,
     app_state: State<'_, AppStateManaged>,
     window: WebviewWindow,
@@ -2500,13 +2532,15 @@ pub(crate) fn apply_agent_plan(
     } else {
         None
     };
-    state.apply(
+    let outcome = state.apply(
         &operation_id,
         &confirmation_token,
         window.label(),
         &[PlanIntent::Connect, PlanIntent::Disconnect],
         runtime.as_ref(),
-    )
+    )?;
+    crate::desktop_shell::update_agent_menu(&app);
+    Ok(outcome)
 }
 
 #[tauri::command(async)]
@@ -2523,12 +2557,15 @@ pub(crate) fn plan_agent_disconnect(
 /// Force-disconnect fallback: remove managed fields and ownership when a lost key blocks normal snapshot restoration.
 #[tauri::command(async)]
 pub(crate) fn force_forget_agent(
+    app: AppHandle,
     state: State<'_, AgentCommandState>,
     agent_id: String,
     installation_path: String,
 ) -> Result<(), AgentCommandError> {
     state.refresh_scan()?;
-    state.force_forget(&agent_id, &installation_path)
+    state.force_forget(&agent_id, &installation_path)?;
+    crate::desktop_shell::update_agent_menu(&app);
+    Ok(())
 }
 
 #[tauri::command]

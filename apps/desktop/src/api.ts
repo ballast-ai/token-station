@@ -285,8 +285,19 @@ export interface ReceiptView {
   conversion_reports: ReceiptConversionView[];
 }
 
+export interface RequestPlaintextView {
+  request_id: string;
+  captured_at_ms: number;
+  input: string;
+  output: string;
+  input_truncated: boolean;
+  output_truncated: boolean;
+}
+
 export interface ReceiptPageView {
   items: ReceiptView[];
+  plaintext_by_request_id?: Record<string, RequestPlaintextView>;
+  plaintext_errors_by_request_id?: Record<string, string>;
   total: number;
   page: number;
   page_size: number;
@@ -978,6 +989,9 @@ export const serveStop = () => invoke<StateView>("serve_stop");
 
 export const listenServeState = (handler: (serve: ServeView) => void) =>
   listen<ServeView>("serve-state-changed", (event) => handler(event.payload));
+
+export const listenStatusMenuNavigate = (handler: (target: string) => void) =>
+  listen<string>("status-menu-navigate", (event) => handler(event.payload));
 
 export const listenDesktopUpdateProgress = (
   handler: (progress: DesktopUpdateProgress) => void,

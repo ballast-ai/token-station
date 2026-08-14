@@ -489,7 +489,7 @@ impl Guest for OpenAiClient {
                 serde_json::to_string(thinking_delta).map_err(internal)?
             ),
             StreamEvent::ThinkingSignatureDelta { .. } => String::new(),
-            StreamEvent::Done {
+            StreamEvent::Finish {
                 finish_reason,
                 // openai chat SSE has no stop-sequence slot to render into.
                 stop_sequence: _,
@@ -499,9 +499,26 @@ impl Guest for OpenAiClient {
                     None => "null".to_owned(),
                 };
                 format!(
-                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":{reason}}}]}}\
-                     \n\ndata: [DONE]\n\n"
+                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":{reason}}}]}}\n\n"
                 )
+            }
+            StreamEvent::Done {
+                finish_reason,
+                // openai chat SSE has no stop-sequence slot to render into.
+                stop_sequence: _,
+            } => {
+                let reason = match finish_reason {
+                    Some(reason) => serde_json::to_string(reason).map_err(internal)?,
+                    None => "null".to_owned(),
+                };
+                if finish_reason.is_some() {
+                    format!(
+                        "data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":{reason}}}]}}\
+                         \n\ndata: [DONE]\n\n"
+                    )
+                } else {
+                    "data: [DONE]\n\n".to_owned()
+                }
             }
             StreamEvent::Error { error } => {
                 let rendered = Self::map_inbound_error(to_output(error)?, String::new())?;
@@ -651,24 +668,39 @@ mod tests {
     }
 
     #[test]
-    fn stream_done_emits_the_finish_reason_before_the_done_marker() {
-        let event = json!({
-            "type": "done",
-            "finish_reason": "stop",
-            "stop_sequence": null
-        });
+    fn finish_usage_and_done_render_in_workbuddy_order() {
+        let events = [
+            json!({"type": "finish", "finish_reason": "stop", "stop_sequence": null}),
+            json!({
+                "type": "usage",
+                "usage": {
+                    "input_tokens": 42,
+                    "output_tokens": 7,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "reasoning_tokens": 0
+                }
+            }),
+            json!({"type": "done", "finish_reason": null, "stop_sequence": null}),
+        ];
+        let data = events
+            .into_iter()
+            .map(|event| {
+                let rendered = OpenAiClient::render_stream_event(event.to_string(), String::new())
+                    .expect("canonical stream event renders");
+                let rendered: Value =
+                    serde_json::from_str(&rendered).expect("stream wrapper is JSON");
+                rendered["data"]
+                    .as_str()
+                    .expect("stream data is text")
+                    .to_owned()
+            })
+            .collect::<String>();
 
-        let rendered = OpenAiClient::render_stream_event(event.to_string(), String::new())
-            .expect("canonical done event renders");
-        let rendered: Value = serde_json::from_str(&rendered).expect("stream wrapper is JSON");
-        let data = rendered["data"].as_str().expect("stream data is text");
-
-        assert!(data.contains("\"finish_reason\":\"stop\""));
-        assert!(data.trim_end().ends_with("data: [DONE]"));
-        assert!(
-            data.find("\"finish_reason\":\"stop\"") < data.find("data: [DONE]"),
-            "finish reason must precede the terminal marker"
-        );
+        let finish = data.find("\"finish_reason\":\"stop\"").unwrap();
+        let usage = data.find("\"prompt_tokens\":42").unwrap();
+        let done = data.find("data: [DONE]").unwrap();
+        assert!(finish < usage && usage < done);
     }
 }
 

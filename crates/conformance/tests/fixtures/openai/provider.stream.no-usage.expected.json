@@ -5,7 +5,10 @@
     "content": "ok"
   },
   {
-    "type": "done",
+    "type": "finish",
     "finish_reason": "stop"
+  },
+  {
+    "type": "done"
   }
 ]

@@ -5,6 +5,7 @@ use std::net::{SocketAddr, TcpListener as StdTcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use token_station_cli::bodylog::BodyLog;
 use token_station_cli::config::ClientConfig;
 use token_station_cli::filelog::{FileLog, Recorders};
 use token_station_cli::gateway::{Gateway, PrevalidatedAgentRouter};
@@ -413,8 +414,12 @@ pub(crate) fn prepare_server(config: ClientConfig) -> Result<PreparedServer, Sta
         })?));
     }
 
+    let body_log = Arc::new(timed_stage("body_log_open", || {
+        BodyLog::open(&config.data.dir)
+    })?);
     let gateway = Arc::new(timed_stage("gateway_init", || {
         Gateway::new(&config, Arc::new(Recorders(sinks)))
+            .map(|gateway| gateway.with_body_log(body_log))
     })?);
     let admin = Arc::new(timed_stage("admin_snapshot", || {
         token_station_cli::admin::AdminContext::from_config(&config)

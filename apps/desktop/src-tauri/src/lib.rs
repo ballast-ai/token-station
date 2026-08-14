@@ -33,6 +33,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tauri_plugin_updater::UpdaterExt;
 use zeroize::Zeroizing;
 
+use token_station_cli::bodylog::{valid_request_id, BodyLog, PlaintextExchange};
 use token_station_cli::budget::{AgentBudget, BudgetStatus};
 use token_station_cli::config::{
     ClientConfig, EgressConfig, PluginsConfig, RoutingMode as HostRoutingMode,
@@ -1253,6 +1254,8 @@ struct StatsView {
 #[derive(Serialize)]
 struct ReceiptPageView {
     items: Vec<ReceiptView>,
+    plaintext_by_request_id: BTreeMap<String, PlaintextExchange>,
+    plaintext_errors_by_request_id: BTreeMap<String, String>,
     total: u64,
     page: usize,
     page_size: usize,
@@ -2409,13 +2412,19 @@ fn apply_macos_dock_icon(icon_bytes: &'static [u8]) -> Result<(), String> {
     let data = NSData::with_bytes(icon_bytes);
     let image = NSImage::initWithData(NSImage::alloc(), &data)
         .ok_or_else(|| "failed to decode the embedded Dock icon".to_string())?;
+    if !image.isValid() {
+        return Err("decoded Dock icon is not a valid AppKit image".to_string());
+    }
     let application = NSApp(main_thread);
 
     // AppKit requires application icon updates on the main thread.
     unsafe { application.setApplicationIconImage(Some(&image)) };
-    application
+    let applied_image = application
         .applicationIconImage()
         .ok_or_else(|| "AppKit did not retain the Dock icon".to_string())?;
+    if !applied_image.isValid() {
+        return Err("AppKit did not apply the requested Dock icon".to_string());
+    }
 
     Ok(())
 }
@@ -3207,10 +3216,10 @@ fn set_direct_route(
 
 /// Persists the quota-first rotation list (ordered upstream+model accounts). The
 /// order is the operator's priority; it lands verbatim in
-/// `router.quota_accounts` and drives `Router::route_quota_first`. Incomplete
-/// rows (a provider picked but no model yet) are dropped, complete ones are
-/// validated against the configured catalog, and exact duplicates are collapsed
-/// while keeping first-seen order.
+/// `router.quota_accounts` and drives `Router::route_quota_first`. At least one
+/// complete row is required; incomplete rows are rejected without changing the
+/// draft. Complete rows are validated against the configured catalog, and exact
+/// duplicates are collapsed while keeping first-seen order.
 #[tauri::command]
 fn set_quota_accounts(
     state: State<'_, AppStateManaged>,
@@ -3219,13 +3228,17 @@ fn set_quota_accounts(
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
 
+    if accounts.is_empty() {
+        return Err("额度优先至少需要一个完整账户，请选择供应商和模型".to_owned());
+    }
+
     let mut seen = std::collections::BTreeSet::new();
     let mut clean: Vec<Value> = Vec::new();
-    for account in &accounts {
+    for (index, account) in accounts.iter().enumerate() {
         let upstream = account.upstream.trim();
         let model = account.model.trim();
         if upstream.is_empty() || model.is_empty() {
-            continue;
+            return Err(format!("额度优先账户 #{} 缺少供应商或模型", index + 1));
         }
         inner.validate_route_target(upstream, model)?;
         if seen.insert((upstream.to_owned(), model.to_owned())) {
@@ -3234,13 +3247,7 @@ fn set_quota_accounts(
     }
 
     let previous = inner.draft["router"].clone();
-    if clean.is_empty() {
-        if let Some(router) = inner.draft["router"].as_object_mut() {
-            router.remove("quota_accounts");
-        }
-    } else {
-        inner.draft["router"]["quota_accounts"] = Value::Array(clean);
-    }
+    inner.draft["router"]["quota_accounts"] = Value::Array(clean);
     if let Err(error) = inner.observe_draft() {
         inner.draft["router"] = previous;
         return Err(error);
@@ -5772,14 +5779,14 @@ fn get_request_receipts(
     page: usize,
     page_size: usize,
 ) -> Result<ReceiptPageView, String> {
-    let (db, now_ms) = {
+    let (data_dir, now_ms) = {
         let inner = state.0.lock().unwrap();
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| {
                 u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
             });
-        (inner.data_dir().join("metrics.sqlite"), now_ms)
+        (inner.data_dir(), now_ms)
     };
     let since_ms = stats::cutoff_from_since(&since, now_ms)?;
     let bounded_page_size = page_size.clamp(1, 50);
@@ -5788,7 +5795,7 @@ fn get_request_receipts(
         .saturating_sub(1)
         .saturating_mul(bounded_page_size);
     let result = SqliteStore::receipt_page(
-        &db,
+        &data_dir.join("metrics.sqlite"),
         &ReceiptQuery {
             since_ms,
             agent_id,
@@ -5799,8 +5806,38 @@ fn get_request_receipts(
         bounded_page_size,
         offset,
     )?;
+    let mut plaintext_by_request_id = BTreeMap::new();
+    let mut plaintext_errors_by_request_id = BTreeMap::new();
+    match BodyLog::open(&data_dir) {
+        Ok(body_log) => {
+            for receipt in &result.items {
+                if !valid_request_id(&receipt.request_id) {
+                    continue;
+                }
+                match body_log.read(&receipt.request_id) {
+                    Ok(Some(exchange)) => {
+                        plaintext_by_request_id.insert(receipt.request_id.clone(), exchange);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        plaintext_errors_by_request_id.insert(receipt.request_id.clone(), error);
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            for receipt in &result.items {
+                if valid_request_id(&receipt.request_id) {
+                    plaintext_errors_by_request_id
+                        .insert(receipt.request_id.clone(), error.clone());
+                }
+            }
+        }
+    }
     Ok(ReceiptPageView {
         items: result.items,
+        plaintext_by_request_id,
+        plaintext_errors_by_request_id,
         total: result.total,
         page: bounded_page,
         page_size: bounded_page_size,
@@ -6251,6 +6288,7 @@ pub fn run() {
                             "不可用（恢复安全模式不读取配置）",
                         )
                     },
+                    |_app| desktop_shell::AgentMenuSnapshot::default(),
                     |_app, _action, _expected_generation| {},
                 )?;
                 return Ok(());
@@ -6287,6 +6325,19 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             let read_only = inner.load_error.is_some();
             app.manage(AppStateManaged(Mutex::new(inner)));
+
+            // Agent command state must exist before the native menu is built so
+            // its initial snapshot and every later refresh share one authority.
+            let paths = AgentIntegrationPaths {
+                snapshot_root: desktop_paths.agent_data_root.join("snapshots"),
+                ownership_root: desktop_paths.agent_data_root.join("ownership"),
+            };
+            let agent_commands = AgentCommandState::new(paths.clone()).map_err(|message| {
+                std::io::Error::other(format!("初始化 Agent IPC 失败：{message}"))
+            })?;
+            app.manage(paths);
+            app.manage(agent_commands);
+            app.manage(CursorTunnelState::default());
             #[cfg(target_os = "macos")]
             desktop_shell::install(
                 app.handle(),
@@ -6299,6 +6350,18 @@ pub fn run() {
                     let state = app.state::<AppStateManaged>();
                     let inner = state.0.lock().unwrap();
                     desktop_shell_snapshot(&inner)
+                },
+                |app| {
+                    let Some(agents) = app.try_state::<AgentCommandState>() else {
+                        return desktop_shell::AgentMenuSnapshot::default();
+                    };
+                    desktop_shell::agent_menu_snapshot(
+                        agents.managed_agent_menu_entries().into_iter().map(
+                            |(agent_id, display_name, order)| {
+                                desktop_shell::AgentMenuEntry::new(agent_id, display_name, order)
+                            },
+                        ),
+                    )
                 },
                 |app, action, expected_generation| {
                     let Some(state) = app.try_state::<AppStateManaged>() else {
@@ -6353,16 +6416,6 @@ pub fn run() {
                 });
             }
 
-            let paths = AgentIntegrationPaths {
-                snapshot_root: desktop_paths.agent_data_root.join("snapshots"),
-                ownership_root: desktop_paths.agent_data_root.join("ownership"),
-            };
-            let agent_commands = AgentCommandState::new(paths.clone()).map_err(|message| {
-                std::io::Error::other(format!("初始化 Agent IPC 失败：{message}"))
-            })?;
-            app.manage(paths);
-            app.manage(agent_commands);
-            app.manage(CursorTunnelState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -11238,7 +11291,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_accounts_persist_validate_dedupe_and_drop_incomplete_rows() {
+    fn quota_accounts_persist_validate_dedupe_and_reject_invalid_input() {
         let root = scratch_home("quota-accounts");
         let inner = AppInner::new(
             root.join("token-station.json"),
@@ -11267,9 +11320,8 @@ mod tests {
         )
         .unwrap();
 
-        // A valid pick, an incomplete row (no model → dropped), another valid
-        // pick, then an exact duplicate of the first (→ collapsed). Order is
-        // preserved as the operator's priority.
+        // Two valid picks, then an exact duplicate of the first (→ collapsed).
+        // Order is preserved as the operator's priority.
         let arg = |upstream: &str, model: &str| QuotaAccountArg {
             upstream: upstream.to_owned(),
             model: model.to_owned(),
@@ -11278,7 +11330,6 @@ mod tests {
             app.state(),
             vec![
                 arg("deepseek", "deepseek-v4-flash"),
-                arg("deepseek", ""),
                 arg("ollama", "qwen2.5"),
                 arg("deepseek", "deepseek-v4-flash"),
             ],
@@ -11301,19 +11352,19 @@ mod tests {
             assert_eq!(stored[0]["model"], json!("deepseek-v4-flash"));
         }
 
+        // An incomplete row is rejected as a whole; the command must not
+        // silently reinterpret the visible editor state or touch prior state.
+        assert!(set_quota_accounts(app.state(), vec![arg("deepseek", "")]).is_err());
+        assert_eq!(get_state(app.state()).quota_accounts.len(), 2);
+
         // An account referencing a model the provider never declared is rejected,
         // and the previously saved list is left intact.
         assert!(set_quota_accounts(app.state(), vec![arg("deepseek", "ghost-model")]).is_err());
         assert_eq!(get_state(app.state()).quota_accounts.len(), 2);
 
-        // Clearing removes the key entirely (tiered configs stay minimal).
-        let cleared = set_quota_accounts(app.state(), vec![]).unwrap();
-        assert!(cleared.quota_accounts.is_empty());
-        {
-            let state = app.state::<AppStateManaged>();
-            let inner = state.0.lock().unwrap();
-            assert!(inner.draft["router"].get("quota_accounts").is_none());
-        }
+        // Empty selection is not a valid quota route and leaves prior state intact.
+        assert!(set_quota_accounts(app.state(), vec![]).is_err());
+        assert_eq!(get_state(app.state()).quota_accounts.len(), 2);
 
         std::fs::remove_dir_all(root).ok();
     }

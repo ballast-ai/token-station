@@ -1755,6 +1755,7 @@ struct StreamState {
     reasoning: BTreeMap<u32, ReasoningStream>,
     next_output_index: u32,
     usage: Usage,
+    pending_finish_reason: Option<FinishReason>,
     /// Flat-name → original Codex tool kind, built once from the request's tools
     /// so streamed tool calls restore to the same shapes as the non-streaming
     /// path. Empty when the caller declared no restorable tools.
@@ -1777,6 +1778,7 @@ impl StreamState {
             reasoning: BTreeMap::new(),
             next_output_index: 0,
             usage: Usage::default(),
+            pending_finish_reason: None,
             restore,
         }
     }
@@ -2539,12 +2541,19 @@ impl Guest for ResponsesClient {
                 StreamEvent::Usage { usage } => {
                     state.usage = usage;
                 }
+                StreamEvent::Finish {
+                    finish_reason,
+                    stop_sequence: _,
+                } => {
+                    state.pending_finish_reason = finish_reason;
+                }
                 StreamEvent::Done {
                     finish_reason,
                     // Responses SSE has no stop-sequence slot to render into.
                     stop_sequence: _,
                 } => {
-                    let state = states.remove(stream_id).expect("state inserted");
+                    let mut state = states.remove(stream_id).expect("state inserted");
+                    let finish_reason = finish_reason.or(state.pending_finish_reason.take());
                     if let Some(key) = state.continuation_key.as_deref() {
                         let assistant_messages = stream_assistant_messages(&state);
                         CONTINUATIONS.with(|continuations| {

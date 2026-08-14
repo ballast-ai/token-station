@@ -17,6 +17,10 @@
     "arguments_delta": ": \"Beijing\"}"
   },
   {
+    "type": "finish",
+    "finish_reason": "tool_calls"
+  },
+  {
     "type": "usage",
       "usage": {
         "input_tokens": 33,
@@ -27,7 +31,6 @@
       }
   },
   {
-    "type": "done",
-    "finish_reason": "tool_calls"
+    "type": "done"
   }
 ]

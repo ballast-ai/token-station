@@ -845,6 +845,17 @@ mod tests {
         assert_eq!(labels[7].1, "WorkBuddy");
         assert_eq!(labels[8].1, "Hermes Agent");
 
+        let claude_desktop = &registry.descriptors()[1];
+        assert!(claude_desktop.version_probe.argv.is_empty());
+        assert_eq!(
+            claude_desktop.version_probe.output_matcher,
+            super::super::types::VersionOutputMatcher::SuccessOnly
+        );
+        assert!(matches!(
+            claude_desktop.version_probe.runtime,
+            Some(ProbeRuntime::PassiveFile)
+        ));
+
         let gemini = &registry.descriptors()[3];
         assert_eq!(gemini.agent_id, "gemini-cli");
         assert_eq!(gemini.local_connector_ids, ["gemini-cli-v1"]);

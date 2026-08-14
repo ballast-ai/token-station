@@ -54,30 +54,39 @@ impl PendingFinish {
         self.done_emitted = false;
     }
 
-    fn take_done(&mut self) -> Option<StreamEvent> {
+    fn take_finish(&mut self) -> Option<StreamEvent> {
         if !self.seen {
             return None;
         }
         self.seen = false;
-        self.done_emitted = true;
-        Some(StreamEvent::Done {
+        Some(StreamEvent::Finish {
             finish_reason: self.reason.take(),
             // openai chat wire has no stop-sequence report slot.
             stop_sequence: None,
         })
     }
 
-    fn finish_marker(&mut self) -> Option<StreamEvent> {
-        let done = self.take_done().or_else(|| {
-            (!self.done_emitted).then_some(StreamEvent::Done {
-                finish_reason: None,
-                stop_sequence: None,
-            })
+    fn finish_marker(&mut self) -> Vec<StreamEvent> {
+        if self.done_emitted {
+            self.done_emitted = false;
+            return Vec::new();
+        }
+        let mut events = self.take_finish().into_iter().collect::<Vec<_>>();
+        events.push(StreamEvent::Done {
+            finish_reason: None,
+            stop_sequence: None,
         });
         self.seen = false;
         self.reason = None;
-        self.done_emitted = false;
-        done
+        self.done_emitted = true;
+        events
+    }
+
+    fn flush_pending_finish(&mut self) -> Vec<StreamEvent> {
+        if !self.seen {
+            return Vec::new();
+        }
+        self.finish_marker()
     }
 }
 
@@ -343,18 +352,27 @@ fn body_of(request: &ChatRequest) -> Result<Value, String> {
     Ok(Value::Object(body))
 }
 
-/// Whether `reasoning_effort` may be sent for the chosen model. An undeclared
-/// (empty) parameter set is optimistic — the field is rendered. A model that
-/// enumerates its parameters and omits `reasoning_effort` opts out, and the
-/// field is dropped rather than risking an upstream rejection.
+/// Whether `reasoning_effort` may be sent for the chosen model. Native OpenAI
+/// clients retain the existing optimistic behavior when a model has no declared
+/// parameter set. Anthropic adaptive/enabled thinking is different: it is a
+/// translated preference, not an OpenAI wire guarantee, so an undeclared model
+/// must explicitly opt in before receiving the field. This lets shared
+/// OpenAI-compatible routes degrade safely for providers such as DeepSeek.
 fn reasoning_effort_allowed(request: &ChatRequest, config: &ProviderConfig) -> bool {
+    let requires_explicit_capability = request
+        .extensions
+        .get("anthropic_thinking")
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| matches!(kind, "adaptive" | "enabled"));
+
     config
         .models
         .iter()
         .find(|capability| capability.model == request.model)
-        .map_or(true, |capability| {
-            capability.supported_parameters.is_empty()
-                || capability.supported_parameters.contains("reasoning_effort")
+        .map_or(!requires_explicit_capability, |capability| {
+            capability.supported_parameters.contains("reasoning_effort")
+                || (!requires_explicit_capability && capability.supported_parameters.is_empty())
         })
 }
 
@@ -448,11 +466,20 @@ fn events_of_frame(
     }
 
     if let Some(usage) = usage {
+        let finish = pending_finish.take_finish();
+        let has_finish = finish.is_some();
+        if let Some(finish) = finish {
+            events.push(finish);
+        }
         events.push(StreamEvent::Usage {
             usage: usage_of(usage),
         });
-        if let Some(done) = pending_finish.take_done() {
-            events.push(done);
+        if has_finish {
+            events.push(StreamEvent::Done {
+                finish_reason: None,
+                stop_sequence: None,
+            });
+            pending_finish.done_emitted = true;
         }
     }
     Ok(events)
@@ -506,9 +533,9 @@ impl Guest for OpenAiCompatible {
             SafeHeaders::try_new([("content-type", "application/json")]).map_err(internal)?;
         let mut body = body_of(&request)?;
         // `reasoning_effort` arrives through the extensions passthrough. Render
-        // it unless the chosen model explicitly enumerates its parameters and
-        // omits it — an empty (undeclared) set is treated optimistically, matching
-        // how the sampling params above render unconditionally.
+        // it when the chosen model allows it. Anthropic adaptive/enabled requests
+        // require an explicit declaration; native OpenAI-family requests retain
+        // the adapter's historical optimistic behavior for undeclared models.
         if let Some(effort) = request
             .extensions
             .get("reasoning_effort")
@@ -617,11 +644,7 @@ impl Guest for OpenAiCompatible {
 
         let mut state = STREAM_STATE.lock().expect("single-threaded guest");
         if chunk.data.is_empty() {
-            let events = state
-                .pending_finish
-                .take_done()
-                .into_iter()
-                .collect::<Vec<_>>();
+            let events = state.pending_finish.flush_pending_finish();
             return to_output(&events);
         }
         state.tail.push_str(&chunk.data);
@@ -655,9 +678,7 @@ impl Guest for OpenAiCompatible {
             }
             let payload = data_lines.join("\n");
             if payload == "[DONE]" {
-                if let Some(done) = state.pending_finish.finish_marker() {
-                    events.push(done);
-                }
+                events.extend(state.pending_finish.finish_marker());
                 continue;
             }
             let ProviderStreamState { pending_finish, .. } = &mut *state;
@@ -818,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn final_usage_is_emitted_after_the_delayed_done_event() {
+    fn finish_usage_and_terminal_events_preserve_workbuddy_order() {
         let mut pending = PendingFinish::default();
         let finish = events_of_frame(
             r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
@@ -833,10 +854,24 @@ mod tests {
         )
         .expect("usage frame parses");
 
-        assert!(
-            matches!(events.first(), Some(StreamEvent::Usage { usage }) if usage.input_tokens == 42)
-        );
-        assert!(matches!(events.get(1), Some(StreamEvent::Done { .. })));
+        assert!(matches!(
+            events.first(),
+            Some(StreamEvent::Finish {
+                finish_reason: Some(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            events.get(1),
+            Some(StreamEvent::Usage { usage }) if usage.input_tokens == 42
+        ));
+        assert!(matches!(
+            events.get(2),
+            Some(StreamEvent::Done {
+                finish_reason: None,
+                ..
+            })
+        ));
     }
 }
 
