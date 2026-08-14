@@ -3,14 +3,18 @@ use axum::extract::{Request, State as AxumState};
 use axum::http::{header, StatusCode};
 use axum::response::Response;
 use axum::Router;
+#[cfg(target_os = "macos")]
 use flate2::read::GzDecoder;
 use getrandom::fill as fill_random;
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
+#[cfg(target_os = "macos")]
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
@@ -27,12 +31,18 @@ const CURSOR_APPLICATION_USER_KEY: &str =
     "src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser";
 const CURSOR_OPENAI_KEY: &str = "secret://cursorAuth/openAIKey";
 const CURSOR_MODEL: &str = "tokenstation/auto";
+#[cfg(target_os = "macos")]
 const CLOUDFLARED_VERSION: &str = "2026.8.0";
+#[cfg(target_os = "macos")]
 const CLOUDFLARED_ASSET_URL: &str = "https://github.com/cloudflare/cloudflared/releases/download/2026.8.0/cloudflared-darwin-arm64.tgz";
+#[cfg(target_os = "macos")]
 const CLOUDFLARED_ASSET_SIZE: usize = 19_214_411;
+#[cfg(target_os = "macos")]
 const CLOUDFLARED_MAX_ARCHIVE_BYTES: u64 = 24 * 1024 * 1024;
+#[cfg(target_os = "macos")]
 const CLOUDFLARED_ASSET_SHA256: &str =
     "6244b4b199515690f93e170110d219d8d141184ba847179980c2f5906800c931";
+#[cfg(target_os = "macos")]
 const CLOUDFLARED_BINARY_SHA256: &str =
     "145790f4f8a6413f69ce08800c401bc15a2a18afcc3b5ffea0a861623566c0a9";
 
@@ -217,6 +227,7 @@ async fn start_bridge(context: BridgeContext) -> Result<(u16, oneshot::Sender<()
     Ok((port, shutdown_tx))
 }
 
+#[cfg(target_os = "macos")]
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -339,8 +350,8 @@ fn cursor_database_path() -> Result<PathBuf, String> {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var_os("HOME").ok_or_else(|| "无法确定当前用户目录".to_string())?;
-        return Ok(PathBuf::from(home)
-            .join("Library/Application Support/Cursor/User/globalStorage/state.vscdb"));
+        Ok(PathBuf::from(home)
+            .join("Library/Application Support/Cursor/User/globalStorage/state.vscdb"))
     }
     #[cfg(not(target_os = "macos"))]
     Err("Cursor 公网接入当前只支持 macOS".to_string())
@@ -355,11 +366,11 @@ fn cursor_is_running() -> Result<bool, String> {
             .stderr(Stdio::null())
             .status()
             .map_err(|error| format!("无法检查 Cursor 运行状态：{error}"))?;
-        return match status.code() {
+        match status.code() {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
             _ => Err("Cursor 运行状态检查失败".to_string()),
-        };
+        }
     }
     #[cfg(not(target_os = "macos"))]
     Err("Cursor 公网接入当前只支持 macOS".to_string())
@@ -947,10 +958,11 @@ pub(crate) fn restore_cursor_provider(
 mod tests {
     #[cfg(target_os = "macos")]
     use super::decrypt_cursor_secret_for_test;
+    #[cfg(target_os = "macos")]
+    use super::encrypt_cursor_secret;
     use super::{
-        cursor_request_allowed, encrypt_cursor_secret, parse_trycloudflare_origin,
-        update_cursor_database, write_backup_file, CursorSettingsBackup,
-        CURSOR_APPLICATION_USER_KEY, CURSOR_MODEL,
+        cursor_request_allowed, parse_trycloudflare_origin, update_cursor_database,
+        write_backup_file, CursorSettingsBackup, CURSOR_APPLICATION_USER_KEY, CURSOR_MODEL,
     };
     use rusqlite::Connection;
     use serde_json::json;
@@ -988,6 +1000,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn pinned_cloudflared_asset_fits_the_bounded_download_limit() {
         assert_eq!(super::CLOUDFLARED_ASSET_SIZE, 19_214_411);
