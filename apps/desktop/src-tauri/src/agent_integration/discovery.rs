@@ -2267,6 +2267,53 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn claude_desktop_discovery_never_launches_the_gui_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch("claude-desktop-passive-probe");
+        let marker = root.join("launched");
+        let executable = root.join("Claude");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf launched > '{}'\nsleep 3\necho '1.2.3'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let registry = AgentRegistry::builtin().unwrap();
+        let mut descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "claude-desktop")
+            .unwrap()
+            .clone();
+        descriptor.known_install_locations.insert(
+            Platform::Macos,
+            vec![executable.to_string_lossy().into_owned()],
+        );
+        let mut context = environment(&root);
+        context.path_entries.clear();
+
+        let records =
+            DiscoveryScanner::new(context, SystemProbeRunner).scan_descriptor(&descriptor);
+
+        assert_eq!(records.len(), 1);
+        assert!(records[0].runnable, "{:?}", records[0].diagnostics);
+        assert_eq!(records[0].version_raw, None);
+        assert_eq!(records[0].version_normalized, None);
+        assert!(records[0].diagnostics.is_empty());
+        assert!(
+            !marker.exists(),
+            "Claude Desktop discovery launched the GUI executable"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "token-station-discovery-{name}-{}-{}",

@@ -2,8 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AGENT_VISIBILITY_STORAGE_KEY,
   readHiddenAgentIds,
+  readShownUndetectedAgentIds,
+  SHOWN_UNDETECTED_AGENT_IDS_STORAGE_KEY,
   updateHiddenAgentIds,
   writeHiddenAgentIds,
+  writeShownUndetectedAgentIds,
 } from "./AgentVisibilityPreferences";
 
 beforeEach(() => {
@@ -77,6 +80,16 @@ describe("AgentVisibilityPreferences", () => {
     );
 
     expect(readHiddenAgentIds()).toEqual(new Set(["retired-agent"]));
+  });
+
+  it("persists an explicit request to show an undetected Agent separately", () => {
+    expect(writeShownUndetectedAgentIds(new Set(["gemini-cli"]))).toBe(true);
+
+    expect(readShownUndetectedAgentIds()).toEqual(new Set(["gemini-cli"]));
+    expect(window.localStorage.getItem(SHOWN_UNDETECTED_AGENT_IDS_STORAGE_KEY)).toBe(
+      JSON.stringify(["gemini-cli"]),
+    );
+    expect(window.localStorage.getItem(AGENT_VISIBILITY_STORAGE_KEY)).toBeNull();
   });
 
   it("returns an empty set when localStorage cannot be read", () => {

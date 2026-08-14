@@ -1,8 +1,40 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getRequestReceipts, type ReceiptView } from "../api";
+import { getRequestReceipts, type ReceiptView, type RequestPlaintextView } from "../api";
 import UsageRequestLog from "./UsageRequestLog";
+
+const rawInput = JSON.stringify({
+  system: [{ type: "text", text: "你是代码审查助手" }],
+  messages: [{
+    role: "user",
+    content: [
+      { type: "text", text: "<system-reminder>只读取本地文件</system-reminder>" },
+      { type: "text", text: "解释这个错误" },
+    ],
+  }],
+  tools: [{ name: "read_file", description: "读取文件" }],
+});
+const rawSseOutput = [
+  "event: message_start",
+  'data:{"type":"message_start","message":{"id":"msg-1"}}',
+  "",
+  "event: content_block_delta",
+  'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"先检查堆栈"}}',
+  "",
+  "event: content_block_delta",
+  'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"这是明文输出"}}',
+  "",
+  "event: content_block_start",
+  'data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"tool-1","name":"read_file","input":{}}}',
+  "",
+  "event: content_block_delta",
+  'data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"/tmp/a.ts\\"}"}}',
+  "",
+  "data: not-json",
+  "",
+  "data: [DONE]",
+].join("\n");
 
 vi.mock("../api", async (loadOriginal) => {
   const original = await loadOriginal<typeof import("../api")>();
@@ -73,7 +105,53 @@ describe("UsageRequestLog", () => {
     vi.mocked(getRequestReceipts).mockReset().mockImplementation(async ({ page }) => ({
       items: page === 1
         ? [
-            receipt({}),
+            receipt({
+              decision: receipt({}).routing,
+              attempt_records: [{
+                ordinal: 1,
+                upstream: "deepseek",
+                model: "deepseek-v4-pro",
+                latency_ms: 820,
+                http_status: 200,
+                error_code: null,
+                stream_outcome: "complete",
+                fallback_allowed: false,
+              }],
+              conversion_reports: [
+                {
+                  ordinal: 1,
+                  stage: "inbound_normalize",
+                  source_protocol: "openai-chat-completions",
+                  target_protocol: "token-station-chat",
+                  succeeded: true,
+                  error_code: null,
+                },
+                {
+                  ordinal: 2,
+                  stage: "provider_request",
+                  source_protocol: "token-station-chat",
+                  target_protocol: "openai-compatible",
+                  succeeded: true,
+                  error_code: null,
+                },
+                {
+                  ordinal: 3,
+                  stage: "provider_response",
+                  source_protocol: "openai-compatible",
+                  target_protocol: "token-station-chat",
+                  succeeded: true,
+                  error_code: null,
+                },
+                {
+                  ordinal: 4,
+                  stage: "outbound_render",
+                  source_protocol: "token-station-chat",
+                  target_protocol: "openai-chat-completions",
+                  succeeded: true,
+                  error_code: null,
+                },
+              ],
+            }),
             receipt({
               request_id: "req-unknown",
               routing: {
@@ -86,6 +164,18 @@ describe("UsageRequestLog", () => {
             }),
           ]
         : [receipt({ request_id: "req-page-2" })],
+      plaintext_by_request_id: page === 1
+        ? {
+            "req-1": {
+              request_id: "req-1",
+              captured_at_ms: new Date(2026, 7, 13, 17, 55).getTime(),
+              input: rawInput,
+              output: rawSseOutput,
+              input_truncated: false,
+              output_truncated: false,
+            },
+          }
+        : {} as Record<string, RequestPlaintextView>,
       total: 21,
       page,
       page_size: 20,
@@ -104,7 +194,7 @@ describe("UsageRequestLog", () => {
       />,
     );
 
-    expect(await screen.findByText("deepseek/deepseek-v4-pro")).toBeInTheDocument();
+    expect((await screen.findAllByText("deepseek/deepseek-v4-pro")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("估算 $0.435000")).toHaveLength(2);
     expect(screen.getByText("缺少模型价格：unknown-model")).toBeInTheDocument();
     expect(screen.getByText("1–20 / 21")).toBeInTheDocument();
@@ -141,5 +231,121 @@ describe("UsageRequestLog", () => {
       page: 1,
       pageSize: 20,
     }));
+  });
+
+  it("shows independently scrollable plaintext input and output below the receipt timeline", async () => {
+    const user = userEvent.setup();
+    render(
+      <UsageRequestLog
+        since="24h"
+        agentId=""
+        upstream=""
+        model=""
+        refreshKey={0}
+      />,
+    );
+
+    await user.click((await screen.findAllByText("deepseek/deepseek-v4-pro"))[0]);
+
+    const input = screen.getByRole("region", { name: "明文输入" });
+    const output = screen.getByRole("region", { name: "明文输出" });
+    expect(input).toHaveClass("request-plaintext-scroll");
+    expect(output).toHaveClass("request-plaintext-scroll");
+    expect(within(input).getAllByText("系统提示词")).toHaveLength(2);
+    expect(within(input).getByText("你是代码审查助手")).toBeInTheDocument();
+    expect(within(input).getByText("只读取本地文件")).toBeInTheDocument();
+    expect(within(input).getByText("用户输入")).toBeInTheDocument();
+    expect(within(input).getByText("解释这个错误")).toBeInTheDocument();
+    expect(within(input).getByText("工具定义 · 1 个")).toBeInTheDocument();
+    expect(within(input).getByText(/read_file/)).toBeInTheDocument();
+    expect(within(output).getByText("助手思考")).toBeInTheDocument();
+    expect(within(output).getByText("先检查堆栈")).toBeInTheDocument();
+    expect(within(output).getByText("助手输出")).toBeInTheDocument();
+    expect(within(output).getByText("这是明文输出")).toBeInTheDocument();
+    expect(within(output).getByText("工具调用 · read_file")).toBeInTheDocument();
+    expect(within(output).getByText(/\/tmp\/a\.ts/)).toBeInTheDocument();
+    expect(screen.getByText("默认保留 7 天")).toBeInTheDocument();
+  });
+
+  it("formats complete JSON in source view and preserves non-JSON source exactly", async () => {
+    const user = userEvent.setup();
+    render(
+      <UsageRequestLog
+        since="24h"
+        agentId=""
+        upstream=""
+        model=""
+        refreshKey={0}
+      />,
+    );
+
+    await user.click((await screen.findAllByText("deepseek/deepseek-v4-pro"))[0]);
+    const input = screen.getByRole("region", { name: "明文输入" });
+    const output = screen.getByRole("region", { name: "明文输出" });
+    const parsedButton = screen.getByRole("button", { name: "解析视图" });
+    const sourceButton = screen.getByRole("button", { name: "原文" });
+
+    expect(parsedButton).toHaveAttribute("aria-pressed", "true");
+    expect(sourceButton).toHaveAttribute("aria-pressed", "false");
+    expect(input.textContent).not.toBe(rawInput);
+    expect(within(input).getAllByText("系统提示词")).toHaveLength(2);
+    expect(within(output).getByText("助手输出")).toBeInTheDocument();
+
+    await user.click(sourceButton);
+    expect(parsedButton).toHaveAttribute("aria-pressed", "false");
+    expect(sourceButton).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("region", { name: "明文输入" }).textContent).toBe(
+      JSON.stringify(JSON.parse(rawInput), null, 2),
+    );
+    expect(screen.getByRole("region", { name: "明文输出" }).textContent).toBe(rawSseOutput);
+
+    await user.click(parsedButton);
+    const parsedOutput = screen.getByRole("region", { name: "明文输出" });
+    expect(within(parsedOutput).getByText("助手思考")).toBeInTheDocument();
+    expect(within(parsedOutput).getByText("工具调用 · read_file")).toBeInTheDocument();
+  });
+
+  it("uses a compact two-row trace and explains conversion stages in user language", async () => {
+    const user = userEvent.setup();
+    render(
+      <UsageRequestLog
+        since="24h"
+        agentId=""
+        upstream=""
+        model=""
+        refreshKey={0}
+      />,
+    );
+
+    const route = (await screen.findAllByText("deepseek/deepseek-v4-pro"))[0];
+    await user.click(route);
+    const row = route.closest("details")!;
+
+    const trace = within(row).getByTestId("receipt-trace");
+    expect(trace).toHaveClass("receipt-timeline-compact");
+    expect(within(row).getByRole("list", { name: "协议转换流程" })).toHaveClass("receipt-conversion-flow");
+    expect(within(row).getByText("收到调用方请求")).toBeInTheDocument();
+    expect(within(row).getByText("转为供应商格式")).toBeInTheDocument();
+    expect(within(row).getByText("解析供应商响应")).toBeInTheDocument();
+    expect(within(row).getByText("返回调用方格式")).toBeInTheDocument();
+    expect(within(row).getByText("inbound_normalize")).toBeInTheDocument();
+  });
+
+  it("explains when an older receipt has no retained plaintext", async () => {
+    const user = userEvent.setup();
+    render(
+      <UsageRequestLog
+        since="24h"
+        agentId=""
+        upstream=""
+        model=""
+        refreshKey={0}
+      />,
+    );
+
+    await user.click(await screen.findByText("deepseek/unknown-model"));
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "此请求没有可用明文。它可能早于本功能、写入失败或已被保留策略清理。",
+    );
   });
 });

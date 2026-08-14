@@ -443,6 +443,44 @@ fn start_proxy_with_agents_budgets_and_catalog_price(
     agent_budgets: Option<Value>,
     include_catalog_price: bool,
 ) -> Proxy {
+    start_proxy_with_agents_budgets_catalog_price_and_parameters(
+        upstream,
+        key_file,
+        metrics,
+        agent_plugins,
+        agent_budgets,
+        include_catalog_price,
+        None,
+    )
+}
+
+fn start_proxy_with_agent_and_supported_parameters(
+    upstream: &MockUpstream,
+    key_file: &Path,
+    metrics: bool,
+    agent_plugin: &str,
+    supported_parameters: Value,
+) -> Proxy {
+    start_proxy_with_agents_budgets_catalog_price_and_parameters(
+        upstream,
+        key_file,
+        metrics,
+        &[agent_plugin],
+        None,
+        false,
+        Some(supported_parameters),
+    )
+}
+
+fn start_proxy_with_agents_budgets_catalog_price_and_parameters(
+    upstream: &MockUpstream,
+    key_file: &Path,
+    metrics: bool,
+    agent_plugins: &[&str],
+    agent_budgets: Option<Value>,
+    include_catalog_price: bool,
+    supported_parameters: Option<Value>,
+) -> Proxy {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
         "ts-proxy-data-{}-{}",
@@ -479,6 +517,10 @@ fn start_proxy_with_agents_budgets_and_catalog_price(
     });
     if let Some(agent_budgets) = agent_budgets {
         config["agent_budgets"] = agent_budgets;
+    }
+    if let Some(supported_parameters) = supported_parameters {
+        config["upstreams"]["mock_primary"]["models"][0]["supported_parameters"] =
+            supported_parameters;
     }
     if include_catalog_price {
         config["pricing"] = json!({
@@ -2769,7 +2811,13 @@ fn claude_desktop_adaptive_thinking_reaches_the_translated_provider() {
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
     let key = key_file("claude-desktop-adaptive-thinking", "sk-test-key-abc");
-    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
+    let proxy = start_proxy_with_agent_and_supported_parameters(
+        &mock,
+        &key,
+        true,
+        "agent-anthropic",
+        json!(["reasoning_effort"]),
+    );
 
     let (status, body) = post_scoped(
         &proxy,
@@ -2800,9 +2848,19 @@ fn claude_desktop_adaptive_thinking_reaches_the_translated_provider() {
 }
 
 #[test]
-fn anthropic_enabled_thinking_is_refused_before_upstream() {
-    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
-    let key = key_file("anthropic-enabled-thinking", "sk-test-key-abc");
+fn anthropic_adaptive_thinking_degrades_safely_for_an_undeclared_chat_provider() {
+    let upstream_answer = json!({
+        "id": "chatcmpl-adaptive",
+        "model": "deepseek-v4-flash",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "hello"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1}
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &upstream_answer.to_string())]]);
+    let key = key_file("anthropic-adaptive-thinking", "sk-test-key-abc");
     let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
 
     let (status, content_type, body) = send_messages(
@@ -2810,48 +2868,23 @@ fn anthropic_enabled_thinking_is_refused_before_upstream() {
         &json!({
             "model": "auto",
             "max_tokens": 128,
-            "thinking": {"type": "enabled", "budget_tokens": 128},
-            "messages": [{"role": "user", "content": "think before answering"}]
-        }),
-        &proxy.virtual_key,
-    );
-
-    assert_eq!(status, 400, "{body}");
-    assert_eq!(content_type.as_deref(), Some("application/json"));
-    let body: Value = serde_json::from_str(&body).expect("Anthropic error is JSON");
-    assert_eq!(body["error"]["type"], json!("invalid_request_error"));
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("thinking type enabled"))
-    );
-    assert_eq!(mock.hits(), 0, "enabled thinking is refused before routing");
-
-    std::fs::remove_file(key).ok();
-}
-
-#[test]
-fn anthropic_adaptive_thinking_without_claude_desktop_scope_is_refused() {
-    let mock = MockUpstream::start(vec![vec![http_json(200, "{}")]]);
-    let key = key_file("anthropic-unscoped-adaptive-thinking", "sk-test-key-abc");
-    let proxy = start_proxy_with_agent(&mock, &key, true, "agent-anthropic");
-
-    let (status, _, body) = send_messages(
-        &proxy,
-        &json!({
-            "model": "auto",
-            "max_tokens": 128,
             "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "medium"},
             "messages": [{"role": "user", "content": "think before answering"}]
         }),
         &proxy.virtual_key,
     );
 
-    assert_eq!(status, 400, "{body}");
-    assert_eq!(
-        mock.hits(),
-        0,
-        "unscoped adaptive thinking stays fail-closed"
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(content_type.as_deref(), Some("application/json"));
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1, "adaptive thinking reaches the upstream");
+    assert!(seen[0].body.get("thinking").is_none());
+    assert!(seen[0].body.get("anthropic_thinking").is_none());
+    assert!(
+        seen[0].body.get("reasoning_effort").is_none(),
+        "an undeclared OpenAI-compatible model must not receive reasoning_effort: {}",
+        seen[0].body
     );
 
     std::fs::remove_file(key).ok();

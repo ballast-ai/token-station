@@ -14,10 +14,11 @@
 //! runtime is synchronous, so the data plane is too, and async stops at the
 //! server facade.
 //!
-//! # What this module never does
+//! # Content logging boundary
 //!
-//! Log content. The one line it prints per request is the routing decision,
-//! which is content-free by `router-core`'s construction.
+//! Body-free receipts remain the default. Desktop may explicitly attach an
+//! owner-only [`BodyLog`]; it receives bounded inbound
+//! and client-facing output bodies, never headers or credentials.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -48,6 +49,7 @@ use token_station_router_core::{
 };
 
 use crate::admission::Admission;
+use crate::bodylog::{BodyLog, BoundedBody};
 use crate::cancel::{CancelReason, CancelToken};
 use crate::request_context::RequestContext;
 use crate::sse::SseFrameDecoder;
@@ -1517,6 +1519,9 @@ pub struct Gateway {
     secrets: SecretStore,
     egress: EgressPolicy,
     recorder: Arc<dyn Recorder>,
+    /// Optional Desktop-only body sink. It is separate from every [`Recorder`]
+    /// so `RequestRecord`, `SQLite`, and the JSONL request log remain body-free.
+    body_log: Option<Arc<BodyLog>>,
 }
 
 /// An Agent router that has already passed every fallible construction step.
@@ -1975,7 +1980,15 @@ impl Gateway {
             secrets: SecretStore::from_config(config, &config.data.dir),
             egress: EgressPolicy::new(config.egress.clone()),
             recorder,
+            body_log: None,
         })
+    }
+
+    /// Attach the Desktop's dedicated owner-only request-body store.
+    #[must_use]
+    pub fn with_body_log(mut self, body_log: Arc<BodyLog>) -> Self {
+        self.body_log = Some(body_log);
+        self
     }
 
     /// The model catalog visible to one host-validated Agent namespace.
@@ -2907,50 +2920,72 @@ impl Gateway {
         let mut record = begin_record(started_at_ms, protocol, agent_id, running_revision);
         tag_transport(&mut record, method, path, selected.is_some());
 
-        if let Some(agent) = selected {
-            match self.chat_inner(
-                ctx,
-                agent,
-                &router,
-                method,
-                path,
-                headers,
-                body,
-                emit,
-                &mut record,
-            ) {
-                Ok((served, outcome)) => self.settle(&mut record, &served, outcome),
-                Err(refusal) => {
-                    // Failed before any upstream served — a whole error response
-                    // the client can still receive; no upstream health verdict.
-                    record.status = refusal.http_status;
-                    record.error_code = Some(refusal.code);
-                    let rendered = Self::render_error(agent, &refusal);
-                    emit(Reply::BeginJson(rendered));
+        let mut captured_output = BoundedBody::default();
+        {
+            let mut capturing_emit = |reply: Reply| {
+                match &reply {
+                    Reply::BeginJson(reply) => captured_output.push(&reply.body),
+                    Reply::Chunk(chunk) => captured_output.push(chunk),
+                    Reply::BeginStream => {}
                 }
-            }
-        } else {
-            let refusal = ErrorEnvelope::new(
-                ErrorCode::InvalidRequest,
-                404,
-                format!("no inbound adapter claims {method} {path}"),
-            );
-            record.status = refusal.http_status;
-            record.error_code = Some(refusal.code);
-            emit(Reply::BeginJson(JsonReply {
-                status: refusal.http_status,
-                body: json!({
-                    "error": {
-                        "message": refusal.message,
-                        "type": refusal.code.as_str(),
-                        "code": refusal.code.as_str()
+                emit(reply)
+            };
+
+            if let Some(agent) = selected {
+                match self.chat_inner(
+                    ctx,
+                    agent,
+                    &router,
+                    method,
+                    path,
+                    headers,
+                    body,
+                    &mut capturing_emit,
+                    &mut record,
+                ) {
+                    Ok((served, outcome)) => self.settle(&mut record, &served, outcome),
+                    Err(refusal) => {
+                        // Failed before any upstream served — a whole error response
+                        // the client can still receive; no upstream health verdict.
+                        record.status = refusal.http_status;
+                        record.error_code = Some(refusal.code);
+                        let rendered = Self::render_error(agent, &refusal);
+                        capturing_emit(Reply::BeginJson(rendered));
                     }
-                })
-                .to_string(),
-            }));
+                }
+            } else {
+                let refusal = ErrorEnvelope::new(
+                    ErrorCode::InvalidRequest,
+                    404,
+                    format!("no inbound adapter claims {method} {path}"),
+                );
+                record.status = refusal.http_status;
+                record.error_code = Some(refusal.code);
+                capturing_emit(Reply::BeginJson(JsonReply {
+                    status: refusal.http_status,
+                    body: json!({
+                        "error": {
+                            "message": refusal.message,
+                            "type": refusal.code.as_str(),
+                            "code": refusal.code.as_str()
+                        }
+                    })
+                    .to_string(),
+                }));
+            }
         }
 
         record.latency_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if let Some(body_log) = &self.body_log
+            && let Err(error) = body_log.record(
+                &record.request_id,
+                started_at_ms,
+                BoundedBody::from_bytes(body),
+                captured_output,
+            )
+        {
+            eprintln!("request body snapshot write failed: {error}");
+        }
         self.recorder.record(&record);
     }
 

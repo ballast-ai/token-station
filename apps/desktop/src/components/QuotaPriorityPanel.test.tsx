@@ -25,23 +25,29 @@ const providers: ProviderView[] = [
   },
 ];
 
-function renderPanel(overrides: Partial<ComponentProps<typeof QuotaPriorityPanel>> = {}) {
+function renderQuotaPanel(overrides: Partial<ComponentProps<typeof QuotaPriorityPanel>> = {}) {
   const onSavePlan = vi.fn();
+  const onSave = vi.fn();
   render(
     <QuotaPriorityPanel
       providers={providers}
       accounts={[{ upstream: "deepseek", model: "deepseek-v4-flash" }]}
       busy={false}
       applying={false}
-      onSave={vi.fn()}
+      onSave={onSave}
       onViewUsage={vi.fn()}
       onSavePlan={onSavePlan}
       {...overrides}
     />,
   );
+  return { onSave, onSavePlan };
+}
+
+function renderPanel(overrides: Partial<ComponentProps<typeof QuotaPriorityPanel>> = {}) {
+  const result = renderQuotaPanel(overrides);
   const planSection = screen.getByText("额度计划（可选）").closest(".quota-plan-section") as HTMLElement | null;
   if (!planSection) throw new Error("quota plan section is missing");
-  return { onSavePlan, planSection };
+  return { ...result, planSection };
 }
 
 describe("QuotaPriorityPanel quota plans", () => {
@@ -92,6 +98,33 @@ describe("QuotaPriorityPanel quota plans", () => {
       .toHaveAttribute("data-onboarding-target", "route-config");
     expect(screen.getByRole("button", { name: "保存并应用" }))
       .toHaveAttribute("data-onboarding-target", "route-apply");
+  });
+
+  it("模型未选时禁止应用并在完成选择后恢复", async () => {
+    const user = userEvent.setup();
+    const { onSave } = renderQuotaPanel({
+      accounts: [{ upstream: "deepseek", model: "" }],
+    });
+
+    const apply = screen.getByRole("button", { name: "保存并应用" });
+    const model = screen.getByRole("combobox", { name: "账户 1 模型" });
+    const row = model.closest(".quota-entry-row");
+    const warning = screen.getByText("请选择模型。");
+    expect(apply).toBeDisabled();
+    expect(row).toHaveClass("quota-entry-row-top-aligned");
+    expect(model).toHaveAttribute("aria-invalid", "true");
+    expect(model).toHaveAttribute("aria-describedby", warning.id);
+    await user.click(apply);
+    expect(onSave).not.toHaveBeenCalled();
+
+    await user.click(model);
+    await user.click(screen.getByRole("option", { name: "deepseek-v4-flash" }));
+    expect(screen.queryByText("请选择模型。")).not.toBeInTheDocument();
+    expect(apply).toBeEnabled();
+    await user.click(apply);
+    expect(onSave).toHaveBeenCalledWith([
+      { upstream: "deepseek", model: "deepseek-v4-flash" },
+    ]);
   });
 
   it("uses the shadcn controls for quota plan rows instead of native selects", () => {

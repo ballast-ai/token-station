@@ -19,10 +19,22 @@ function LanguageProbe() {
   );
 }
 
+function setBrowserLanguages(languages: string[]) {
+  Object.defineProperty(window.navigator, "languages", {
+    configurable: true,
+    value: languages,
+  });
+  Object.defineProperty(window.navigator, "language", {
+    configurable: true,
+    value: languages[0] ?? "",
+  });
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
   window.localStorage.clear();
   document.documentElement.lang = "";
+  setBrowserLanguages(["en-US"]);
 });
 
 describe("LanguageProvider", () => {
@@ -36,6 +48,53 @@ describe("LanguageProvider", () => {
     expect(screen.getByText("en:Settings:Home routing")).toBeInTheDocument();
     expect(document.documentElement).toHaveAttribute("lang", "en");
     expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("en");
+  });
+
+  it("detects Simplified Chinese from the browser language priority on first launch", () => {
+    setBrowserLanguages(["ja-JP", "zh-Hans-CN", "en-US"]);
+
+    render(
+      <LanguageProvider>
+        <LanguageProbe />
+      </LanguageProvider>,
+    );
+
+    expect(screen.getByText("zh-CN:设置:主页路由")).toBeInTheDocument();
+    expect(document.documentElement).toHaveAttribute("lang", "zh-CN");
+    expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("zh-CN");
+  });
+
+  it("keeps an explicit saved language ahead of the browser language", () => {
+    setBrowserLanguages(["zh-CN", "en-US"]);
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "en");
+
+    render(
+      <LanguageProvider>
+        <LanguageProbe />
+      </LanguageProvider>,
+    );
+
+    expect(screen.getByText("en:Settings:Home routing")).toBeInTheDocument();
+  });
+
+  it("skips unsupported locales in order and falls back to English", () => {
+    setBrowserLanguages(["ja-JP", "zh-TW", "en-GB"]);
+    const { unmount } = render(
+      <LanguageProvider>
+        <LanguageProbe />
+      </LanguageProvider>,
+    );
+    expect(screen.getByText("en:Settings:Home routing")).toBeInTheDocument();
+    unmount();
+
+    window.localStorage.clear();
+    setBrowserLanguages(["ja-JP", "fr-FR"]);
+    render(
+      <LanguageProvider>
+        <LanguageProbe />
+      </LanguageProvider>,
+    );
+    expect(screen.getByText("en:Settings:Home routing")).toBeInTheDocument();
   });
 
   it("restores and persists an explicit language selection", async () => {

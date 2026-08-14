@@ -21,7 +21,7 @@ export default function UsageWorkspace({ section, onSectionChange }: UsageWorksp
           <span className="page-eyebrow">LOCAL RECEIPT LEDGER</span>
           <h1>{logs ? copy("Request logs", "请求日志") : copy("Usage", "用量统计")}</h1>
           <p>{logs
-            ? copy("Inspect routing outcomes and failures. Prompt and response bodies are never stored.", "查看路由结果与失败原因；不会存储提示词或响应正文。")
+            ? copy("Inspect routing outcomes, failures, and locally retained plaintext bodies.", "查看路由结果、失败原因和本地保留的明文正文。")
             : copy("Review model usage, cost, and reliability. Only local request metadata is aggregated.", "查看模型消耗、成本与稳定性；只聚合本地请求元数据。")}</p>
         </div>
       </header>

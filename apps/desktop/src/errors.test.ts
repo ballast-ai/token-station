@@ -2,6 +2,36 @@ import { describe, expect, it } from "vitest";
 import { humanizeAppError } from "./errors";
 
 describe("humanizeAppError", () => {
+  it("does not misclassify a model-catalog response read failure as a local-file error", () => {
+    const raw = "读取模型目录失败：transport failed to read response body";
+
+    expect(humanizeAppError(raw, "en")).toBe(
+      "The latest provider data is unavailable. Keep the current settings and try refreshing again later.",
+    );
+    expect(humanizeAppError(raw, "zh-CN")).toBe(
+      "暂时无法获取最新的供应商数据。请保留当前设置，稍后再次刷新。",
+    );
+  });
+
+  it("keeps explicit local permission failures in local-file guidance", () => {
+    const raw = "failed to write local cache: permission denied";
+
+    expect(humanizeAppError(raw, "zh-CN")).toBe(
+      "Token Station 无法访问所需的本地文件。请检查文件权限和磁盘空间，然后重试。",
+    );
+  });
+
+  it("does not treat provider catalog authorization as local-file permission", () => {
+    const raw = "Key 无效，或当前账号没有读取模型目录的权限";
+
+    expect(humanizeAppError(raw, "en")).toBe(
+      "The API key is invalid, or this account cannot read the provider's model catalog.",
+    );
+    expect(humanizeAppError(raw, "zh-CN")).toBe(
+      "API Key 无效，或当前账号没有读取该供应商模型目录的权限。",
+    );
+  });
+
   it("explains a concurrent configuration update in the selected language", () => {
     const raw = "apply_in_progress: 已有配置正在应用";
 
@@ -13,6 +43,20 @@ describe("humanizeAppError", () => {
     );
   });
 
+  it("describes a local Agent version probe timeout without blaming the network", () => {
+    const error = {
+      code: "VERSION_PROBE_TIMEOUT",
+      message: "安装入口存在，但版本探测进程未成功运行",
+    };
+
+    expect(humanizeAppError(error, "en")).toBe(
+      "Agent version detection timed out. Rescan; if it still fails, check that the Agent installation is complete.",
+    );
+    expect(humanizeAppError(error, "zh-CN")).toBe(
+      "Agent 版本检测超时。请重新扫描；如果仍然失败，请检查该 Agent 的安装是否完整。",
+    );
+  });
+
   it("turns the production no-pools error into startup guidance", () => {
     const raw = "a router with no pools can route nothing";
 
@@ -21,6 +65,17 @@ describe("humanizeAppError", () => {
     );
     expect(humanizeAppError(raw, "zh-CN")).toBe(
       "路由尚未配置。请至少为一个路由选择供应商和模型，保存后再启动 Token Station。",
+    );
+  });
+
+  it("将额度账户不完整错误转为可操作提示", () => {
+    const raw = "额度优先账户 #1 缺少供应商或模型";
+
+    expect(humanizeAppError(raw, "en")).toBe(
+      "A quota account is incomplete. Select both a provider and a model, then apply again.",
+    );
+    expect(humanizeAppError(raw, "zh-CN")).toBe(
+      "有一个额度账户尚未配置完整。请同时选择供应商和模型，然后重新应用。",
     );
   });
 

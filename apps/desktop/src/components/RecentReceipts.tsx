@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getRecentReceipts,
+  type ReceiptConversionView,
   type ReceiptDecidedByView,
   type ReceiptFeaturesView,
   type ReceiptRouteView,
@@ -118,6 +119,26 @@ function formatFeatures(
   );
 }
 
+function formatConversionStage(
+  stage: ReceiptConversionView["stage"],
+  copy: (english: string, simplifiedChinese: string) => string,
+): string {
+  switch (stage) {
+    case "inbound_normalize":
+      return copy("Receive client request", "收到调用方请求");
+    case "provider_request":
+      return copy("Convert to provider format", "转为供应商格式");
+    case "provider_response":
+      return copy("Parse provider response", "解析供应商响应");
+    case "outbound_render":
+      return copy("Return in client format", "返回调用方格式");
+    case "stream_translate":
+      return copy("Translate streaming chunks", "转换流式片段");
+    default:
+      return stage;
+  }
+}
+
 export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
   const { language, copy } = useLocalizedCopy();
   const attempts = receipt.attempt_records ?? [];
@@ -129,7 +150,7 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
       (conversion) => conversion.stage === "inbound_normalize" && !conversion.succeeded,
     );
   return (
-    <div className="receipt-timeline">
+    <div className="receipt-timeline receipt-timeline-compact" data-testid="receipt-trace">
       {diagnosis && (
         <section className="receipt-diagnosis" aria-label={copy("Error diagnosis", "错误诊断")}>
           <h4>Diagnosis</h4>
@@ -139,7 +160,7 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
         </section>
       )}
       <section aria-label={copy("Decision record", "决策记录")}>
-        <h4>Decision</h4>
+        <h4>{copy("Decision", "路由决策")}</h4>
         {receipt.decision ? (
           <div className="receipt-event">
             <span className="receipt-event-index">D</span>
@@ -170,7 +191,7 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
       </section>
 
       <section aria-label={copy("Upstream attempt records", "上游尝试记录")}>
-        <h4>Attempts</h4>
+        <h4>{copy("Attempts", "上游尝试")}</h4>
         {attempts.length ? attempts.map((attempt) => (
           <div className="receipt-event" key={attempt.ordinal}>
             <span className="receipt-event-index">{attempt.ordinal}</span>
@@ -196,24 +217,38 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
           : copy("No upstream attempts", "没有真实上游尝试")}</p>}
       </section>
 
-      <section aria-label={copy("Protocol conversion records", "协议转换记录")}>
-        <h4>Conversions</h4>
-        {conversions.length ? conversions.map((conversion) => (
-          <div className="receipt-event" key={conversion.ordinal}>
-            <span className="receipt-event-index">{conversion.ordinal}</span>
-            <div>
-              <strong>{conversion.stage}</strong>
-              <span>{conversion.source_protocol} → {conversion.target_protocol}</span>
-              <small>{conversion.outcome === "cancelled"
-                ? copy("Cancelled by client", "客户端已取消")
-                : conversion.succeeded
-                  ? copy("Succeeded", "成功")
-                  : [conversion.error_code, conversion.reason_code, conversion.reason_detail]
-                    .filter(Boolean)
-                    .join(" · ") || copy("Failed", "失败")}</small>
-            </div>
-          </div>
-        )) : <p className="receipt-section-empty">{copy("No conversion records", "没有转换记录")}</p>}
+      <section className="receipt-conversions" aria-label={copy("Protocol conversion records", "协议转换记录")}>
+        <div className="receipt-conversion-heading">
+          <h4>{copy("Protocol flow", "协议转换")}</h4>
+          <p>{copy(
+            "Client request to provider and back to the client",
+            "调用方请求经 Token Station 转给供应商，再转换后返回",
+          )}</p>
+        </div>
+        {conversions.length ? (
+          <ol
+            className="receipt-conversion-flow"
+            aria-label={copy("Protocol conversion flow", "协议转换流程")}
+          >
+            {conversions.map((conversion) => (
+              <li className="receipt-conversion-step" key={conversion.ordinal}>
+                <span className="receipt-event-index">{conversion.ordinal}</span>
+                <div>
+                  <strong>{formatConversionStage(conversion.stage, copy)}</strong>
+                  <code>{conversion.stage}</code>
+                  <span>{conversion.source_protocol} → {conversion.target_protocol}</span>
+                  <small>{conversion.outcome === "cancelled"
+                    ? copy("Cancelled by client", "客户端已取消")
+                    : conversion.succeeded
+                      ? copy("Succeeded", "成功")
+                      : [conversion.error_code, conversion.reason_code, conversion.reason_detail]
+                        .filter(Boolean)
+                        .join(" · ") || copy("Failed", "失败")}</small>
+                </div>
+              </li>
+            ))}
+          </ol>
+        ) : <p className="receipt-section-empty">{copy("No conversion records", "没有转换记录")}</p>}
       </section>
     </div>
   );
@@ -351,8 +386,8 @@ export default function RecentReceipts() {
           <span className="eyebrow">REQUEST RECEIPTS</span>
           <h2 id="recent-receipts-heading">{copy("Recent requests", "最近 5 次请求")}</h2>
           <p className="sub">{copy(
-            "Only route, final status, and usage metadata are stored. Request and response bodies are never recorded.",
-            "仅保留路由、终态与用量元数据，不记录请求或响应正文。",
+            "Receipts retain route, final status, and usage metadata. Plaintext bodies are stored separately for 7 days by default.",
+            "Receipt 保留路由、终态与用量元数据；正文明文独立存储，默认保留 7 天。",
           )}</p>
         </div>
         <div className="receipt-refresh-actions">
@@ -410,8 +445,8 @@ export default function RecentReceipts() {
         <div className="empty-state">
           <strong>{copy("No request receipts yet", "还没有请求回执")}</strong>
           <span>{copy(
-            "Start the proxy and complete a request to create a body-free receipt.",
-            "启动代理并完成一次请求后，这里会显示无正文回执。",
+            "Start the proxy and complete a request to create a receipt.",
+            "启动代理并完成一次请求后，这里会显示请求回执。",
           )}</span>
         </div>
       )}

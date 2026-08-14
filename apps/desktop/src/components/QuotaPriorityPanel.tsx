@@ -62,9 +62,10 @@ export default function QuotaPriorityPanel({
   const [entries, setEntries] = useState<QuotaEntry[]>(() =>
     accounts.map((account) => ({ upstream: account.upstream, model: account.model })),
   );
-  // Resynchronize after persistence returns fresh state, removing incomplete rows.
-  // Preserve local edits and reset only when persisted content actually changes.
+  // Resynchronize after persistence returns fresh state. Preserve local edits
+  // and reset only when persisted content actually changes.
   const accountsKey = accounts.map((account) => `${account.upstream}/${account.model}`).join(",");
+  const validationId = useId();
   useEffect(() => {
     setEntries(accounts.map((account) => ({ upstream: account.upstream, model: account.model })));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- accountsKey summarizes account content.
@@ -112,6 +113,14 @@ export default function QuotaPriorityPanel({
   const planProviders = Array.from(
     new Set(entries.map((entry) => entry.upstream).filter(Boolean)),
   );
+  const hasCompleteEntry = entries.some((entry) => entry.upstream && entry.model);
+  const hasIncompleteEntry = entries.some((entry) => !entry.upstream || !entry.model);
+  const canApply = hasCompleteEntry && !hasIncompleteEntry;
+  const applyHint = entries.length === 0
+    ? copy("Add at least one provider and model before applying.", "至少添加一个供应商和模型后才能应用。")
+    : hasIncompleteEntry
+      ? copy("Complete every provider and model selection before applying.", "请完成所有账户的供应商和模型选择。")
+      : null;
 
   return (
     <section
@@ -171,8 +180,10 @@ export default function QuotaPriorityPanel({
               // Use the nearest selected provider in an earlier row as the preferred dropdown item.
               const preferred =
                 entries.slice(0, index).reverse().find((e) => e.upstream)?.upstream ?? "";
+              const modelMissing = Boolean(entry.upstream && !entry.model);
+              const modelErrorId = `${validationId}-model-${index}`;
               return (
-              <div className="quota-entry-row" key={index}>
+              <div className="quota-entry-row quota-entry-row-top-aligned" key={index}>
                 <span className="quota-provider-order">{index + 1}</span>
                 <CompactCombobox
                   ariaLabel={copy(`Provider ${index + 1}`, `账户 ${index + 1} 供应商`)}
@@ -181,13 +192,26 @@ export default function QuotaPriorityPanel({
                   options={providerOptions(entry.upstream, preferred)}
                   onChange={(upstream) => updateEntry(index, { upstream, model: "" })}
                 />
-                <CompactCombobox
-                  ariaLabel={copy(`Model ${index + 1}`, `账户 ${index + 1} 模型`)}
-                  disabled={busy || !entry.upstream}
-                  value={entry.model}
-                  options={modelOptions(entry.upstream)}
-                  onChange={(model) => updateEntry(index, { ...entry, model })}
-                />
+                <div className="grid min-w-0 gap-1">
+                  <CompactCombobox
+                    ariaLabel={copy(`Model ${index + 1}`, `账户 ${index + 1} 模型`)}
+                    ariaDescribedBy={modelMissing ? modelErrorId : undefined}
+                    ariaInvalid={modelMissing}
+                    disabled={busy || !entry.upstream}
+                    value={entry.model}
+                    options={modelOptions(entry.upstream)}
+                    onChange={(model) => updateEntry(index, { ...entry, model })}
+                  />
+                  {modelMissing && (
+                    <span
+                      className="text-xs text-[var(--danger)]"
+                      id={modelErrorId}
+                      role="status"
+                    >
+                      {copy("Select a model.", "请选择模型。")}
+                    </span>
+                  )}
+                </div>
                 <button
                   type="button"
                   className="quota-entry-remove"
@@ -237,12 +261,13 @@ export default function QuotaPriorityPanel({
       )}
 
       <footer className="panel-foot route-actions">
+        {applyHint && <p className="foot-hint" role="status" aria-live="polite">{applyHint}</p>}
         <button
           className="btn primary"
           type="button"
           data-onboarding-target="route-apply"
-          disabled={busy || applying}
-          onClick={() => onSave(entries.filter((entry) => entry.upstream && entry.model))}
+          disabled={busy || applying || !canApply}
+          onClick={() => onSave(entries)}
         >
           {applying ? copy("Applying…", "应用中…") : copy("Save & apply", "保存并应用")}
         </button>

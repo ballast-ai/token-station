@@ -1,4 +1,5 @@
 export const AGENT_VISIBILITY_STORAGE_KEY = "token-station-hidden-agent-ids";
+export const SHOWN_UNDETECTED_AGENT_IDS_STORAGE_KEY = "token-station-shown-undetected-agent-ids";
 
 const MAX_HIDDEN_AGENT_IDS = 64;
 const AGENT_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -43,9 +44,17 @@ export function updateHiddenAgentIds(
 }
 
 export function readHiddenAgentIds(): Set<string> {
+  return readAgentIds(AGENT_VISIBILITY_STORAGE_KEY);
+}
+
+export function readShownUndetectedAgentIds(): Set<string> {
+  return readAgentIds(SHOWN_UNDETECTED_AGENT_IDS_STORAGE_KEY);
+}
+
+function readAgentIds(storageKey: string): Set<string> {
   try {
     if (typeof window === "undefined") return new Set();
-    const raw = window.localStorage.getItem(AGENT_VISIBILITY_STORAGE_KEY);
+    const raw = window.localStorage.getItem(storageKey);
     if (raw == null) return new Set();
     const parsed: unknown = JSON.parse(raw);
     return Array.isArray(parsed)
@@ -57,11 +66,19 @@ export function readHiddenAgentIds(): Set<string> {
 }
 
 export function writeHiddenAgentIds(ids: ReadonlySet<string>): boolean {
+  return writeAgentIds(AGENT_VISIBILITY_STORAGE_KEY, ids);
+}
+
+export function writeShownUndetectedAgentIds(ids: ReadonlySet<string>): boolean {
+  return writeAgentIds(SHOWN_UNDETECTED_AGENT_IDS_STORAGE_KEY, ids);
+}
+
+function writeAgentIds(storageKey: string, ids: ReadonlySet<string>): boolean {
   try {
     if (typeof window === "undefined") return true;
     const normalized = normalizedAgentIds(ids);
     window.localStorage.setItem(
-      AGENT_VISIBILITY_STORAGE_KEY,
+      storageKey,
       JSON.stringify(normalized),
     );
     return true;
