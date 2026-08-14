@@ -47,6 +47,14 @@ pub enum StreamEvent {
     /// The signature fragment closing a thinking block (Anthropic
     /// `signature_delta`). Arrives after the block's text deltas.
     ThinkingSignatureDelta { index: u32, signature_delta: String },
+    /// The provider has chosen a finish reason, but the stream is not terminal
+    /// yet. A final usage report may follow before [`Self::Done`].
+    Finish {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finish_reason: Option<FinishReason>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_sequence: Option<String>,
+    },
     Done {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         finish_reason: Option<FinishReason>,
@@ -142,6 +150,10 @@ mod tests {
             StreamEvent::ThinkingSignatureDelta {
                 index: 0,
                 signature_delta: "EqQBCg".to_owned(),
+            },
+            StreamEvent::Finish {
+                finish_reason: Some(FinishReason::Stop),
+                stop_sequence: None,
             },
             StreamEvent::Done {
                 finish_reason: Some(FinishReason::Stop),

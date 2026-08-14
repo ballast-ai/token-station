@@ -130,7 +130,7 @@ export default function InstallationPicker({
         disabled={disabled}
         onClick={() => setOpen((current) => !current)}
       >
-        {copy("Select installation", "选择安装")} <span aria-hidden="true">⌄</span>
+        {copy("Select version", "选择版本")} <span aria-hidden="true">⌄</span>
       </button>
       {open && (
         <div

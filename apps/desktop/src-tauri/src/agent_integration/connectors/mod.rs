@@ -49,10 +49,21 @@ pub struct AgentModelMetadata {
     pub cost: Option<AgentModelCost>,
 }
 
+pub const OPENCODE_SAFE_DEFAULT_OUTPUT_TOKENS: u32 = 8_192;
+
 impl AgentModelMetadata {
     pub fn safe_limits(&self) -> Option<(u32, u32)> {
         (self.context > 0 && self.output > 0 && self.output < self.context)
             .then_some((self.context, self.output))
+    }
+
+    pub fn opencode_limits(&self) -> Option<(u32, u32)> {
+        let output = if self.output == 0 {
+            OPENCODE_SAFE_DEFAULT_OUTPUT_TOKENS
+        } else {
+            self.output
+        };
+        (self.context > 0 && output < self.context).then_some((self.context, output))
     }
 }
 
@@ -678,8 +689,11 @@ mod tests {
             .validate_projected(&document, &refresh_input)
             .unwrap();
         let refreshed = semantic_json(&document).unwrap();
+        assert_eq!(refreshed[1]["name"], json!("Token Station Auto"));
+        assert_eq!(refreshed[1]["useCustomProtocol"], json!(false));
         assert_eq!(refreshed[1]["maxInputTokens"], json!(257_550));
         assert_eq!(refreshed[1]["maxOutputTokens"], json!(32_768));
+        assert_eq!(refreshed[0]["id"], json!("user-model"));
 
         let disconnect = connector.disconnect_patch_for_document(&document).unwrap();
         validate_patch_ownership(&disconnect, &connector.owned_paths()).unwrap();

@@ -12,8 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use ring::hmac;
-use rusqlite::{Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, State, WebviewWindow};
 use zeroize::Zeroizing;
@@ -539,10 +538,8 @@ fn agent_model_metadata_for_router(
             .iter()
             .all(|candidate| candidate.as_ref() == Some(first))
     });
-    let (context, output) = match (context, output) {
-        (Some(context), Some(output)) if output < context => (context, output),
-        _ => (0, 0),
-    };
+    let context = context.unwrap_or(0);
+    let output = output.unwrap_or(0);
     Ok(Some(AgentModelMetadata {
         context,
         output,
@@ -666,17 +663,17 @@ fn opencode_connection_issue(
                 Some(target.to_string()),
             ));
         }
-        if capability.max_output_tokens == 0 {
-            return Some(connection_issue(
-                "model_contract_missing_max_output_tokens",
-                format!("模型 `{target}` 缺少 max_output_tokens；OpenCode 无法证明安全输入预算"),
-                Some(target.to_string()),
-            ));
-        }
-        if capability.max_output_tokens >= capability.context_window {
+        let projected_output = if capability.max_output_tokens == 0 {
+            super::connectors::OPENCODE_SAFE_DEFAULT_OUTPUT_TOKENS
+        } else {
+            capability.max_output_tokens
+        };
+        if projected_output >= capability.context_window {
             return Some(connection_issue(
                 "model_contract_invalid_limits",
-                format!("模型 `{target}` 的最大输出必须小于 context window"),
+                format!(
+                    "模型 `{target}` 的 OpenCode 输出预算 {projected_output} 必须小于 context window"
+                ),
                 Some(target.to_string()),
             ));
         }
@@ -2500,281 +2497,6 @@ pub(crate) fn get_cached_agent_views(
     state.cached_views_with_runtime(runtime.as_ref(), opencode_issue.as_ref())
 }
 
-const CURSOR_APPLICATION_USER_KEY: &str =
-    "src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser";
-const CURSOR_OPENAI_KEY: &str = "secret://cursorAuth/openAIKey";
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct CursorSettingsBackup {
-    schema_version: u32,
-    created_at_ms: u64,
-    application_user: String,
-    encrypted_openai_key: Option<String>,
-}
-
-fn cursor_database_path_for(
-    platform: super::types::Platform,
-    variable: impl Fn(&str) -> Option<std::ffi::OsString>,
-) -> Result<PathBuf, String> {
-    match platform {
-        super::types::Platform::Macos => variable("HOME")
-            .map(PathBuf::from)
-            .map(|home| {
-                home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
-            })
-            .ok_or_else(|| "无法确定当前用户目录".to_string()),
-        super::types::Platform::Windows => variable("APPDATA")
-            .map(PathBuf::from)
-            .map(|app_data| app_data.join("Cursor/User/globalStorage/state.vscdb"))
-            .ok_or_else(|| "无法确定 Windows AppData 目录".to_string()),
-        super::types::Platform::Linux | super::types::Platform::Wsl => {
-            Err("Cursor 自动配置暂不支持当前平台".to_string())
-        }
-    }
-}
-
-fn cursor_database_path() -> Result<PathBuf, AgentCommandError> {
-    cursor_database_path_for(super::platform::current_platform(), |name| {
-        std::env::var_os(name)
-    })
-    .map_err(|message| AgentCommandError::boundary("cursor_platform_unsupported", message))
-}
-
-#[cfg(target_os = "macos")]
-fn cursor_is_running() -> Result<bool, AgentCommandError> {
-    let status = std::process::Command::new("pgrep")
-        .args(["-f", "/Applications/Cursor.app/Contents/MacOS/Cursor"])
-        .status()
-        .map_err(|_| AgentCommandError::internal("无法检查 Cursor 运行状态".to_string()))?;
-    match status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => Err(AgentCommandError::internal(
-            "Cursor 运行状态检查失败".to_string(),
-        )),
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn cursor_is_running() -> Result<bool, AgentCommandError> {
-    use std::os::windows::process::CommandExt;
-
-    let output = std::process::Command::new("tasklist")
-        .args(["/FI", "IMAGENAME eq Cursor.exe", "/FO", "CSV", "/NH"])
-        .creation_flags(0x0800_0000)
-        .output()
-        .map_err(|_| AgentCommandError::internal("无法检查 Cursor 运行状态".to_string()))?;
-    if !output.status.success() {
-        return Err(AgentCommandError::internal(
-            "Cursor 运行状态检查失败".to_string(),
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.split(',').next())
-        .any(|name| name.trim_matches('"').eq_ignore_ascii_case("Cursor.exe")))
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn cursor_is_running() -> Result<bool, AgentCommandError> {
-    Err(AgentCommandError::boundary(
-        "cursor_platform_unsupported",
-        "Cursor 自动配置暂不支持当前平台",
-    ))
-}
-
-fn restore_cursor_settings(
-    db_path: &Path,
-    original_application_user: &str,
-    original_openai_key: Option<&str>,
-) -> Result<(), String> {
-    let mut connection = Connection::open(db_path).map_err(|error| error.to_string())?;
-    let transaction = connection
-        .transaction()
-        .map_err(|error| error.to_string())?;
-    let changed = transaction
-        .execute(
-            "UPDATE ItemTable SET value = ?1 WHERE key = ?2",
-            rusqlite::params![original_application_user, CURSOR_APPLICATION_USER_KEY],
-        )
-        .map_err(|error| error.to_string())?;
-    if changed != 1 {
-        return Err("Cursor applicationUser 恢复目标不存在".to_string());
-    }
-    match original_openai_key {
-        Some(value) => {
-            transaction
-                .execute(
-                    "INSERT INTO ItemTable(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    rusqlite::params![CURSOR_OPENAI_KEY, value],
-                )
-                .map_err(|error| error.to_string())?;
-        }
-        None => {
-            transaction
-                .execute("DELETE FROM ItemTable WHERE key = ?1", [CURSOR_OPENAI_KEY])
-                .map_err(|error| error.to_string())?;
-        }
-    }
-    transaction.commit().map_err(|error| error.to_string())
-}
-
-fn configure_cursor_database(
-    db_path: &Path,
-    backup_dir: &Path,
-    base_url: &str,
-    token: &str,
-    now_ms: u64,
-) -> Result<PathBuf, String> {
-    super::safe_fs::ensure_private_dir(backup_dir)
-        .map_err(|_| "无法创建 Cursor 私有备份目录".to_string())?;
-    let mut connection = Connection::open(db_path).map_err(|error| error.to_string())?;
-    let original_application_user: String = connection
-        .query_row(
-            "SELECT value FROM ItemTable WHERE key = ?1",
-            [CURSOR_APPLICATION_USER_KEY],
-            |row| row.get(0),
-        )
-        .map_err(|_| "Cursor applicationUser 配置不存在".to_string())?;
-    let encrypted_openai_key: Option<String> = connection
-        .query_row(
-            "SELECT value FROM ItemTable WHERE key = ?1",
-            [CURSOR_OPENAI_KEY],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|_| "无法读取 Cursor 加密 API Key 记录".to_string())?;
-    let backup = CursorSettingsBackup {
-        schema_version: 1,
-        created_at_ms: now_ms,
-        application_user: original_application_user.clone(),
-        encrypted_openai_key: encrypted_openai_key.clone(),
-    };
-    let backup_path = backup_dir.join(format!("cursor-settings.{now_ms}.json.bak"));
-    let backup_bytes =
-        serde_json::to_vec(&backup).map_err(|_| "无法序列化 Cursor 配置备份".to_string())?;
-    super::safe_fs::write_atomic_private(&backup_path, &backup_bytes)
-        .map_err(|_| "无法写入 Cursor 私有配置备份".to_string())?;
-
-    let mut application_user: serde_json::Value = serde_json::from_str(&original_application_user)
-        .map_err(|_| "Cursor applicationUser JSON 无法解析".to_string())?;
-    let object = application_user
-        .as_object_mut()
-        .ok_or_else(|| "Cursor applicationUser 必须是 JSON object".to_string())?;
-    object.insert(
-        "openAIBaseUrl".to_string(),
-        serde_json::Value::String(base_url.to_string()),
-    );
-    object.insert("useOpenAIKey".to_string(), serde_json::Value::Bool(true));
-    let encoded = serde_json::to_string(&application_user)
-        .map_err(|_| "无法序列化 Cursor applicationUser".to_string())?;
-
-    let transaction = connection
-        .transaction()
-        .map_err(|error| error.to_string())?;
-    let changed = transaction
-        .execute(
-            "UPDATE ItemTable SET value = ?1 WHERE key = ?2",
-            rusqlite::params![encoded, CURSOR_APPLICATION_USER_KEY],
-        )
-        .map_err(|error| error.to_string())?;
-    if changed != 1 {
-        return Err("Cursor applicationUser 写入目标不存在".to_string());
-    }
-    transaction
-        .execute(
-            "INSERT INTO ItemTable(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            rusqlite::params![CURSOR_OPENAI_KEY, token],
-        )
-        .map_err(|error| error.to_string())?;
-    transaction.commit().map_err(|error| error.to_string())?;
-    drop(connection);
-
-    let verification = (|| -> Result<bool, String> {
-        let verified = Connection::open(db_path)
-            .map_err(|error| format!("Cursor 配置数据库回读失败：{error}"))?;
-        let updated_application_user: String = verified
-            .query_row(
-                "SELECT value FROM ItemTable WHERE key = ?1",
-                [CURSOR_APPLICATION_USER_KEY],
-                |row| row.get(0),
-            )
-            .map_err(|_| "Cursor Base URL 回读失败".to_string())?;
-        let updated_openai_key: Option<String> = verified
-            .query_row(
-                "SELECT value FROM ItemTable WHERE key = ?1",
-                [CURSOR_OPENAI_KEY],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|_| "Cursor 加密 API Key 回读失败".to_string())?;
-        let updated_application_user =
-            serde_json::from_str::<serde_json::Value>(&updated_application_user)
-                .map_err(|_| "Cursor applicationUser 回读结果不是合法 JSON".to_string())?;
-        let base_url_matches = updated_application_user
-            .get("openAIBaseUrl")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|value| value == base_url);
-        let openai_key_enabled = updated_application_user
-            .get("useOpenAIKey")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true);
-        Ok(base_url_matches && openai_key_enabled && updated_openai_key.as_deref() == Some(token))
-    })();
-    let verification_error = match verification {
-        Ok(true) => return Ok(backup_path),
-        Ok(false) => "Cursor 配置验证不一致".to_string(),
-        Err(error) => error,
-    };
-    restore_cursor_settings(
-        db_path,
-        &original_application_user,
-        encrypted_openai_key.as_deref(),
-    )
-    .map_err(|error| format!("{verification_error}，且恢复原设置失败：{error}"))?;
-    Err(format!("{verification_error}，已恢复原设置"))
-}
-
-/// Cursor keeps BYOK settings in its globalStorage SQLite database rather than
-/// a user-owned JSON file. Never close a running Cursor process here; the user
-/// quits Cursor before Token Station updates both settings in one transaction.
-#[tauri::command(async)]
-pub(crate) fn configure_cursor_provider(
-    app_state: State<'_, AppStateManaged>,
-    paths: State<'_, AgentIntegrationPaths>,
-) -> Result<String, AgentCommandError> {
-    let runtime = runtime_from_app(&app_state)?;
-    let db_path = cursor_database_path()?;
-    if !db_path.is_file() {
-        return Err(AgentCommandError::boundary(
-            "cursor_database_missing",
-            "找不到 Cursor 本机配置数据库",
-        ));
-    }
-    if cursor_is_running()? {
-        return Err(AgentCommandError::boundary(
-            "cursor_running",
-            "Cursor 正在运行。请手动退出 Cursor 后再点一键接入。",
-        ));
-    }
-    let backup_dir = paths.snapshot_root.join("cursor");
-    let base_url = format!("{}/agents/cursor/v1", runtime.gateway_origin()?);
-    let token = runtime.virtual_key().to_string();
-    let backup = configure_cursor_database(
-        &db_path,
-        &backup_dir,
-        &base_url,
-        &token,
-        SystemClock.now_ms(),
-    )
-    .map_err(AgentCommandError::internal)?;
-    Ok(format!(
-        "Cursor 的 OpenAI BYOK 通道已接入 Token Station，原设置已备份到 {}。下次启动 Cursor 时生效；请在 Cursor 中选择支持自定义 OpenAI Key 的模型。",
-        backup.display()
-    ))
-}
-
 #[tauri::command(async)]
 pub(crate) fn plan_agent_connection(
     state: State<'_, AgentCommandState>,
@@ -3220,6 +2942,60 @@ mod tests {
         assert_eq!(issue.code, "model_contract_missing_context_window");
         assert_eq!(issue.target.as_deref(), Some("provider/unknown-context"));
         assert!(issue.message.contains("不会使用路由假定值"));
+    }
+
+    #[test]
+    fn opencode_accepts_a_trusted_context_with_the_safe_default_output() {
+        let root = scratch("opencode-safe-default-output");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://provider.example/v1",
+            "models": [{
+                "model": "known-context",
+                "context_window": 128_000
+            }]
+        });
+        draft["router"]["pools"] = json!({
+            "tier_low": [{"upstream": "provider", "model": "known-context"}]
+        });
+        draft["router"]["default_pool"] = json!("tier_low");
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        assert_eq!(opencode_connection_issue(&config, &config.router), None);
+        let metadata = agent_model_metadata(&config, "opencode")
+            .unwrap()
+            .expect("trusted context remains available");
+        assert_eq!(metadata.safe_limits(), None);
+        assert_eq!(metadata.opencode_limits(), Some((128_000, 8_192)));
+    }
+
+    #[test]
+    fn opencode_rejects_the_safe_default_when_it_leaves_no_input_budget() {
+        let root = scratch("opencode-default-output-too-large");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://provider.example/v1",
+            "models": [{
+                "model": "tiny-context",
+                "context_window": 8_192
+            }]
+        });
+        draft["router"]["pools"] = json!({
+            "tier_low": [{"upstream": "provider", "model": "tiny-context"}]
+        });
+        draft["router"]["default_pool"] = json!("tier_low");
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        let issue = opencode_connection_issue(&config, &config.router)
+            .expect("the default output must leave a positive input budget");
+
+        assert_eq!(issue.code, "model_contract_invalid_limits");
+        assert_eq!(issue.target.as_deref(), Some("provider/tiny-context"));
+        assert!(issue.message.contains("8192"));
     }
 
     struct LifecycleFileFixture {
@@ -3815,99 +3591,6 @@ mod tests {
         assert_eq!(views.len(), 9);
         assert!(views.iter().all(|view| view.installations.is_empty()));
         assert!(state.scan_in_progress.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn cursor_database_path_uses_platform_user_data_root() {
-        let mac = cursor_database_path_for(Platform::Macos, |name| {
-            (name == "HOME").then(|| std::ffi::OsString::from("/Users/tester"))
-        })
-        .unwrap();
-        assert_eq!(
-            mac,
-            PathBuf::from(
-                "/Users/tester/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
-            )
-        );
-
-        let windows = cursor_database_path_for(Platform::Windows, |name| {
-            (name == "APPDATA")
-                .then(|| std::ffi::OsString::from(r"C:\Users\tester\AppData\Roaming"))
-        })
-        .unwrap();
-        assert_eq!(
-            windows,
-            PathBuf::from(r"C:\Users\tester\AppData\Roaming")
-                .join("Cursor/User/globalStorage/state.vscdb")
-        );
-    }
-
-    #[test]
-    fn cursor_database_writes_base_url_and_key_and_keeps_a_private_backup() {
-        let root = scratch("cursor-direct-settings");
-        std::fs::create_dir_all(&root).unwrap();
-        let db_path = root.join("state.vscdb");
-        let connection = Connection::open(&db_path).unwrap();
-        connection
-            .execute(
-                "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
-                [],
-            )
-            .unwrap();
-        let original_application_user = r#"{"openAIBaseUrl":"https://old.example/v1","keep":true}"#;
-        let original_key = "old-key";
-        connection
-            .execute(
-                "INSERT INTO ItemTable(key, value) VALUES(?1, ?2)",
-                rusqlite::params![CURSOR_APPLICATION_USER_KEY, original_application_user],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO ItemTable(key, value) VALUES(?1, ?2)",
-                rusqlite::params![CURSOR_OPENAI_KEY, original_key],
-            )
-            .unwrap();
-        drop(connection);
-
-        let backup_path = configure_cursor_database(
-            &db_path,
-            &root.join("backups"),
-            "http://127.0.0.1:8787/agents/cursor/v1",
-            "ts-direct-key",
-            42,
-        )
-        .unwrap();
-
-        let connection = Connection::open(&db_path).unwrap();
-        let application_user: String = connection
-            .query_row(
-                "SELECT value FROM ItemTable WHERE key = ?1",
-                [CURSOR_APPLICATION_USER_KEY],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&application_user)
-                .unwrap()
-                .get("openAIBaseUrl")
-                .and_then(serde_json::Value::as_str),
-            Some("http://127.0.0.1:8787/agents/cursor/v1")
-        );
-        let key: String = connection
-            .query_row(
-                "SELECT value FROM ItemTable WHERE key = ?1",
-                [CURSOR_OPENAI_KEY],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(key, "ts-direct-key");
-
-        let backup: CursorSettingsBackup =
-            serde_json::from_slice(&std::fs::read(&backup_path).unwrap()).unwrap();
-        assert_eq!(backup.application_user, original_application_user);
-        assert_eq!(backup.encrypted_openai_key.as_deref(), Some(original_key));
-        super::super::safe_fs::verify_private_file(&backup_path).unwrap();
     }
 
     #[test]
