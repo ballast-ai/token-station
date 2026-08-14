@@ -112,7 +112,7 @@ impl Connector for OpenCodeConnector {
             }
         });
         if let Some(metadata) = input.model_metadata {
-            if let Some((context, output)) = metadata.safe_limits() {
+            if let Some((context, output)) = metadata.opencode_limits() {
                 model["limit"] = json!({"context": context, "output": output});
             }
             if let Some(cost) = &metadata.cost {
@@ -157,7 +157,7 @@ impl Connector for OpenCodeConnector {
             .ok_or_else(|| "OpenCode 接入缺少虚拟 Key".to_string())?;
         let metadata_valid = input.model_metadata.is_none_or(|metadata| {
             let model = &provider["models"]["auto"];
-            let limits_valid = metadata.safe_limits().map_or_else(
+            let limits_valid = metadata.opencode_limits().map_or_else(
                 || model.get("limit").is_none(),
                 |(context, output)| model["limit"] == json!({"context": context, "output": output}),
             );
@@ -190,6 +190,9 @@ impl Connector for OpenCodeConnector {
 
     fn success_message(&self, input: &ConnectInput<'_>) -> String {
         let metadata = match input.model_metadata {
+            Some(value) if value.output == 0 && value.opencode_limits().is_some() => {
+                "已同步可信上下文；输出上限使用安全默认值 8192，未改写供应商模型能力。"
+            }
             Some(value) if value.cost.is_some() => "已同步上下文、输出上限和统一价格。",
             Some(_) => "已同步安全的上下文和输出上限；候选价格不一致或未知，未写入虚假价格。",
             None => "当前路由缺少完整模型上限，未猜测上下文和价格；请先刷新 Provider 模型目录。",
@@ -198,5 +201,40 @@ impl Connector for OpenCodeConnector {
             "opencode 已加入 token-station provider(~/.config/opencode/opencode.json,已备份)。\
              在 opencode 里选模型 tokenstation/auto 即可。{metadata}"
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_integration::connectors::AgentModelMetadata;
+
+    #[test]
+    fn missing_provider_output_uses_the_opencode_safe_default() {
+        let metadata = AgentModelMetadata {
+            context: 128_000,
+            output: 0,
+            vision: false,
+            tools: true,
+            reasoning: false,
+            cost: None,
+        };
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/opencode/v1",
+            token: Some("local-virtual-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+
+        let operations = OpenCodeConnector.connect_patch(&input).unwrap();
+        let provider = operations[0].value.as_ref().unwrap();
+
+        assert_eq!(
+            provider.pointer("/models/auto/limit"),
+            Some(&json!({"context": 128_000, "output": 8_192}))
+        );
+        assert!(OpenCodeConnector
+            .success_message(&input)
+            .contains("输出上限使用安全默认值 8192"));
     }
 }

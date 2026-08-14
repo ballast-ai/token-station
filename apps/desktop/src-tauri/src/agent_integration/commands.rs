@@ -538,10 +538,8 @@ fn agent_model_metadata_for_router(
             .iter()
             .all(|candidate| candidate.as_ref() == Some(first))
     });
-    let (context, output) = match (context, output) {
-        (Some(context), Some(output)) if output < context => (context, output),
-        _ => (0, 0),
-    };
+    let context = context.unwrap_or(0);
+    let output = output.unwrap_or(0);
     Ok(Some(AgentModelMetadata {
         context,
         output,
@@ -665,17 +663,17 @@ fn opencode_connection_issue(
                 Some(target.to_string()),
             ));
         }
-        if capability.max_output_tokens == 0 {
-            return Some(connection_issue(
-                "model_contract_missing_max_output_tokens",
-                format!("模型 `{target}` 缺少 max_output_tokens；OpenCode 无法证明安全输入预算"),
-                Some(target.to_string()),
-            ));
-        }
-        if capability.max_output_tokens >= capability.context_window {
+        let projected_output = if capability.max_output_tokens == 0 {
+            super::connectors::OPENCODE_SAFE_DEFAULT_OUTPUT_TOKENS
+        } else {
+            capability.max_output_tokens
+        };
+        if projected_output >= capability.context_window {
             return Some(connection_issue(
                 "model_contract_invalid_limits",
-                format!("模型 `{target}` 的最大输出必须小于 context window"),
+                format!(
+                    "模型 `{target}` 的 OpenCode 输出预算 {projected_output} 必须小于 context window"
+                ),
                 Some(target.to_string()),
             ));
         }
@@ -2907,6 +2905,60 @@ mod tests {
         assert_eq!(issue.code, "model_contract_missing_context_window");
         assert_eq!(issue.target.as_deref(), Some("provider/unknown-context"));
         assert!(issue.message.contains("不会使用路由假定值"));
+    }
+
+    #[test]
+    fn opencode_accepts_a_trusted_context_with_the_safe_default_output() {
+        let root = scratch("opencode-safe-default-output");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://provider.example/v1",
+            "models": [{
+                "model": "known-context",
+                "context_window": 128_000
+            }]
+        });
+        draft["router"]["pools"] = json!({
+            "tier_low": [{"upstream": "provider", "model": "known-context"}]
+        });
+        draft["router"]["default_pool"] = json!("tier_low");
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        assert_eq!(opencode_connection_issue(&config, &config.router), None);
+        let metadata = agent_model_metadata(&config, "opencode")
+            .unwrap()
+            .expect("trusted context remains available");
+        assert_eq!(metadata.safe_limits(), None);
+        assert_eq!(metadata.opencode_limits(), Some((128_000, 8_192)));
+    }
+
+    #[test]
+    fn opencode_rejects_the_safe_default_when_it_leaves_no_input_budget() {
+        let root = scratch("opencode-default-output-too-large");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://provider.example/v1",
+            "models": [{
+                "model": "tiny-context",
+                "context_window": 8_192
+            }]
+        });
+        draft["router"]["pools"] = json!({
+            "tier_low": [{"upstream": "provider", "model": "tiny-context"}]
+        });
+        draft["router"]["default_pool"] = json!("tier_low");
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        let issue = opencode_connection_issue(&config, &config.router)
+            .expect("the default output must leave a positive input budget");
+
+        assert_eq!(issue.code, "model_contract_invalid_limits");
+        assert_eq!(issue.target.as_deref(), Some("provider/tiny-context"));
+        assert!(issue.message.contains("8192"));
     }
 
     struct LifecycleFileFixture {
