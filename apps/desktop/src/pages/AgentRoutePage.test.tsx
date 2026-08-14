@@ -430,6 +430,7 @@ describe("AgentRoutePage multi-install admission", () => {
     );
 
     expect(screen.getByText("可接入")).toBeInTheDocument();
+    expect(screen.getByText("仅 Cursor 付费会员可接入")).toBeInTheDocument();
     expect(screen.queryByText("暂不可接入")).toBeNull();
     const connectButton = await screen.findByRole("button", { name: "一键接入并启动" });
     await user.click(connectButton);
@@ -593,6 +594,80 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(within(toastViewport).queryByRole("status")).toBeNull();
     await waitFor(() => expect(onRefreshAgents).toHaveBeenCalledOnce());
     expect(screen.getByRole("button", { name: "一键接入并启动" })).toBeEnabled();
+  });
+
+  it("Cursor 钥匙串未授权时显示具体处理方法", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    vi.mocked(configureCursorProvider).mockRejectedValueOnce(
+      "cursor_keychain_access_required: Cursor Safe Storage access denied",
+    );
+    const user = userEvent.setup();
+    const found = installation("/Applications/Cursor.app/Contents/MacOS/Cursor", "1.0.0");
+    found.discovery.agent_id = "cursor";
+    found.discovery.is_path_default = true;
+    found.discovery.conflict_group = null;
+    found.discovery.diagnostics = [];
+    found.compatibility = {
+      ...found.compatibility,
+      agent_id: "cursor",
+      status: "DETECTED_VERIFIED",
+      reason_code: "DEFAULT_ADMISSION",
+      connector_id: "cursor-v1",
+    };
+    const agent: AgentView = {
+      metadata: {
+        agent_id: "cursor",
+        legacy_kind: null,
+        display_name: "Cursor",
+        icon_key: "cursor",
+        admission: "supported",
+      },
+      installations: [found],
+      status: "DETECTED_VERIFIED",
+      catalog_sequence: 1,
+      catalog_expires_at_ms: null,
+      catalog_source: "builtin",
+      catalog_warning: null,
+    };
+
+    render(
+      <ErrorToastProvider>
+        <AgentRoutePage
+          metadata={agent.metadata}
+          agent={agent}
+          route={{
+            mode: "inherit",
+            tiers: {
+              high: { upstream: null, model: null },
+              mid: { upstream: null, model: null },
+              low: { upstream: null, model: null },
+            },
+            config_error: null,
+            profile: null,
+            routing_mode: "tiered",
+          }}
+          providers={[]}
+          profiles={[]}
+          quotaAccounts={[]}
+          serveRunning={false}
+          applying={false}
+          onStateChange={vi.fn()}
+          onRefreshAgents={vi.fn().mockResolvedValue(undefined)}
+          onSaveQuota={vi.fn()}
+          onSaveQuotaPlan={vi.fn()}
+          onViewQuotaUsage={vi.fn()}
+        />
+      </ErrorToastProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "一键接入并启动" }));
+
+    const toastViewport = screen.getByTestId("error-toast-viewport");
+    const alert = await within(toastViewport).findByRole("alert");
+    expect(alert).toHaveTextContent("首次接入需要 macOS 钥匙串授权");
+    expect(alert).toHaveTextContent("允许一次");
+    expect(alert).not.toHaveTextContent("始终允许");
+    expect(alert).not.toHaveTextContent("操作未能完成");
   });
 
   it("没有策略组时用错误 Toast 提示且页面不渲染错误横条", async () => {

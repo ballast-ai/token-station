@@ -509,6 +509,11 @@ export default function AgentRoutePage({
           <div>
             <span className="eyebrow">AGENT ROUTE</span>
             {embedded ? <h2>{metadata.display_name}</h2> : <h1>{metadata.display_name}</h1>}
+            {metadata.agent_id === "cursor" ? (
+              <span className="cursor-membership-note">
+                {copy("Cursor paid membership required", "仅 Cursor 付费会员可接入")}
+              </span>
+            ) : null}
           </div>
         </div>
         <div className="agent-connect-box">

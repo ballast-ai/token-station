@@ -1592,6 +1592,14 @@ body[data-first-run-guide-active="true"] [data-onboarding-floating="true"] {
   gap: 9px;
 }
 .agent-connect-box small { max-width: 150px; color: var(--muted); font-size: 10px; }
+.cursor-membership-note {
+  display: block;
+  max-width: 190px;
+  margin-top: 6px;
+  color: var(--warning);
+  font-size: 11px;
+  line-height: 1.35;
+}
 .agent-primary-action {
   min-width: 92px;
   flex: 0 0 auto;
