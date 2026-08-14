@@ -35,15 +35,20 @@ serde_norway = "=0.9.42"
 yaml-edit = "=0.2.3"
 toml = "0.8"
 toml_edit = "=0.20.2"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+axum = "=0.8.9"
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream"] }
 ureq = { version = "3.3.0", features = ["socks-proxy"] }
 semver = "=1.0.28"
 sha2 = "=0.10.9"
 command-group = { version = "=5.0.1", default-features = false }
 getrandom = "=0.4.3"
 ring = "=0.17.14"
+subtle = "=2.6.1"
 rusqlite = "=0.40.1"
 zeroize = "=1.9.0"
+flate2 = "=1.1.9"
+tar = "=0.4.46"
 
 # The kernel, reused as a library — routing / gateway / config / metrics /
 # keychain all come from here. No fork of any of it.
@@ -61,6 +66,10 @@ windows = { version = "=0.61.3", features = ["ApplicationModel", "Management_Dep
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+aes = "=0.8.4"
+cbc = { version = "=0.1.2", features = ["alloc", "block-padding"] }
+pbkdf2 = "=0.12.2"
+sha1 = "=0.10.6"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData"] }

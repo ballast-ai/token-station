@@ -12,6 +12,7 @@
 
 pub mod agent_integration;
 mod config_state;
+mod cursor_tunnel;
 mod desktop_shell;
 pub mod desktop_update;
 mod free_provider_catalog;
@@ -49,14 +50,17 @@ use token_station_protocol::{CapabilityState, ModelCapability, ProviderApi, Prov
 use token_station_router_core::{UpstreamModel, UpstreamRef};
 
 use agent_integration::commands::{
-    apply_agent_plan, apply_snapshot_restore, configure_cursor_provider, force_forget_agent,
-    get_agent_drift, get_cached_agent_views, list_agent_registry, list_agent_snapshots,
-    plan_agent_connection, plan_agent_disconnect, plan_snapshot_restore, runtime_from_app,
-    scan_agents, AgentCommandState,
+    apply_agent_plan, apply_snapshot_restore, force_forget_agent, get_agent_drift,
+    get_cached_agent_views, list_agent_registry, list_agent_snapshots, plan_agent_connection,
+    plan_agent_disconnect, plan_snapshot_restore, runtime_from_app, scan_agents, AgentCommandState,
 };
 use agent_integration::registry::AgentRegistry;
 use agent_integration::types::AdmissionStatus;
 use config_state::ConfigState;
+use cursor_tunnel::{
+    configure_cursor_provider, get_cursor_provider_status, restore_cursor_provider,
+    CursorTunnelState,
+};
 use desktop_update::{
     DesktopUpdateCandidate, DesktopUpdateOperation, DesktopUpdateProgress, DesktopUpdateView,
     LATEST_JSON_URL, OFFICIAL_PUBLIC_KEY, PROGRESS_EVENT,
@@ -2409,12 +2413,9 @@ fn apply_macos_dock_icon(icon_bytes: &'static [u8]) -> Result<(), String> {
 
     // AppKit requires application icon updates on the main thread.
     unsafe { application.setApplicationIconImage(Some(&image)) };
-    let applied_image = application
+    application
         .applicationIconImage()
         .ok_or_else(|| "AppKit did not retain the Dock icon".to_string())?;
-    if !std::ptr::eq(&*image, &*applied_image) {
-        return Err("AppKit did not apply the requested Dock icon".to_string());
-    }
 
     Ok(())
 }
@@ -6361,6 +6362,7 @@ pub fn run() {
             })?;
             app.manage(paths);
             app.manage(agent_commands);
+            app.manage(CursorTunnelState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -6407,7 +6409,9 @@ pub fn run() {
             scan_agents,
             get_cached_agent_views,
             plan_agent_connection,
+            get_cursor_provider_status,
             configure_cursor_provider,
+            restore_cursor_provider,
             apply_agent_plan,
             plan_agent_disconnect,
             force_forget_agent,

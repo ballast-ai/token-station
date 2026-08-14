@@ -1,5 +1,7 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setDockThemeIcon } from "../api";
 import {
@@ -74,6 +76,27 @@ beforeEach(() => {
 });
 
 describe("ThemeProvider", () => {
+  it("grants the main window permission to synchronize its native theme", () => {
+    const capability = JSON.parse(
+      readFileSync(
+        resolve(process.cwd(), "src-tauri/capabilities/default.json"),
+        "utf8",
+      ),
+    ) as { permissions?: string[] };
+
+    expect(capability.permissions).toContain("core:window:allow-set-theme");
+  });
+
+  it("does not require AppKit to return the same NSImage allocation", () => {
+    const backendSource = readFileSync(
+      resolve(process.cwd(), "src-tauri/src/lib.rs"),
+      "utf8",
+    );
+
+    expect(backendSource).toContain("applicationIconImage()");
+    expect(backendSource).not.toContain("std::ptr::eq(&*image, &*applied_image)");
+  });
+
   it("defaults to the system preference and keeps the root class in sync", () => {
     systemTheme = "dark";
     installMatchMedia();
