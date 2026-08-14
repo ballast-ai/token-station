@@ -9,10 +9,9 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const requiredFiles = [
   "packaging/macos/安装前必读.md",
-  "packaging/macos/未签名测试版安装前必读.md",
+  "macOS-无法打开怎么办.md",
   "packaging/macos/安装 Token Station.command",
   "packaging/macos/终端启动命令.txt",
-  "packaging/macos/AGENTS.md",
   "packaging/macos/configure-dmg-layout.applescript",
   "packaging/macos/dmg-layout.dsstore.base64",
   "packaging/macos/dmg-layout-unsigned.dsstore.base64",
@@ -76,17 +75,6 @@ if (installer) {
   }
 }
 
-const unsignedTestReadmePath = "packaging/macos/未签名测试版安装前必读.md";
-const unsignedTestReadme = read(unsignedTestReadmePath);
-if (unsignedTestReadme) {
-  for (const phrase of ["未签名", "未经 Apple 公证", "仅供测试", "SHA-256", "UNSIGNED-UNNOTARIZED.dmg"]) {
-    if (!unsignedTestReadme.includes(phrase)) failures.push(`${unsignedTestReadmePath} 缺少“${phrase}”说明`);
-  }
-  if (/已完成 Developer ID 签名和 Apple 公证/.test(unsignedTestReadme)) {
-    failures.push(`${unsignedTestReadmePath} 不能声称测试 DMG 已签名公证`);
-  }
-}
-
 const readmePath = "packaging/macos/安装前必读.md";
 const readme = read(readmePath);
 if (readme) {
@@ -95,14 +83,31 @@ if (readme) {
     "Apple 公证",
     "安装 Token Station.command",
     "管理员密码",
-    "不会显示字符",
+    "不会显示密码字符",
     "不会关闭系统全局安全检查",
     "右键",
-    "xattr -dr com.apple.quarantine /Applications/token-station.app",
-    "可信发布页面",
+    "UNSIGNED-UNNOTARIZED",
+    "Read Before You Install Token Station",
   ];
   for (const phrase of requiredReadmePhrases) {
     if (!readme.includes(phrase)) failures.push(`${readmePath} 缺少“${phrase}”说明`);
+  }
+}
+
+const troubleshootingPath = "macOS-无法打开怎么办.md";
+const troubleshootingGuide = read(troubleshootingPath);
+if (troubleshootingGuide) {
+  for (const phrase of [
+    "If macOS Cannot Open Token Station",
+    "macOS 无法打开 Token Station 时怎么办",
+    "sudo xattr -dr com.apple.quarantine /Applications/token-station.app",
+    "Do not disable Gatekeeper or SIP",
+    "不要关闭 Gatekeeper",
+  ]) {
+    if (!troubleshootingGuide.includes(phrase)) failures.push(`${troubleshootingPath} 缺少“${phrase}”说明`);
+  }
+  if (/spctl\s+--master-disable/.test(troubleshootingGuide)) {
+    failures.push(`${troubleshootingPath} 不能关闭 Gatekeeper`);
   }
 }
 
@@ -133,20 +138,6 @@ if (terminalCommandGuide) {
   }
 }
 
-const agentRulesPath = "packaging/macos/AGENTS.md";
-const agentRules = read(agentRulesPath);
-if (agentRules) {
-  for (const phrase of [
-    "安装前必读.md",
-    "/Applications/token-station.app",
-    "com.tokenstation.desktop",
-    "不得关闭 Gatekeeper",
-    "不得修改 SIP",
-  ]) {
-    if (!agentRules.includes(phrase)) failures.push(`${agentRulesPath} 缺少“${phrase}”红线`);
-  }
-}
-
 const packagerPath = "scripts/package-macos-dmg.sh";
 const packager = read(packagerPath);
 if (packager) {
@@ -154,7 +145,7 @@ if (packager) {
     ["Applications 精确链接", /ln -s \/Applications .*Applications/],
     ["安装说明", /安装前必读\.md/],
     ["安装脚本", /安装 Token Station\.command/],
-    ["Agent 约束", /AGENTS\.md/],
+    ["无法打开说明", /macOS-无法打开怎么办\.md/],
     ["DMG 创建", /hdiutil create/],
     ["DMG 签名", /codesign .*--sign/],
     ["DMG 公证", /notarytool submit/],
@@ -261,8 +252,8 @@ if (finderLayout) {
     ["安装说明固定坐标", /position of item "安装前必读\.md"/],
     ["构建来源固定坐标", /position of item "构建来源\.txt"/],
     ["未签名提示固定坐标", /position of item "未签名测试版\.txt"/],
-    ["终端启动命令固定坐标", /position of item "终端启动命令\.txt" .* to \{460, 440\}/],
-    ["Agent 约束固定坐标", /position of item "AGENTS\.md"/],
+    ["无法打开说明固定坐标", /position of item "macOS-无法打开怎么办\.md" .* to \{460, 440\}/],
+    ["终端启动命令固定坐标", /position of item "终端启动命令\.txt" .* to \{640, 440\}/],
     ["正式包可省略构建来源", /if exists item "构建来源\.txt"[\s\S]*set position of item "构建来源\.txt"/],
     ["正式包可省略未签名提示", /if exists item "未签名测试版\.txt"[\s\S]*set position of item "未签名测试版\.txt"/],
     ["正式包可省略终端启动命令", /if exists item "终端启动命令\.txt"[\s\S]*set position of item "终端启动命令\.txt"/],

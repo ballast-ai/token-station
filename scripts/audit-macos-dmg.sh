@@ -64,15 +64,15 @@ mounted=true
 readonly mounted_app="$mount_point/token-station.app"
 readonly mounted_applications="$mount_point/Applications"
 readonly mounted_readme="$mount_point/安装前必读.md"
+readonly mounted_troubleshooting_guide="$mount_point/macOS-无法打开怎么办.md"
 readonly mounted_installer="$mount_point/安装 Token Station.command"
-readonly mounted_agent_rules="$mount_point/AGENTS.md"
 readonly mounted_unsigned_test_marker="$mount_point/未签名测试版.txt"
 readonly mounted_provenance="$mount_point/构建来源.txt"
 readonly mounted_terminal_command="$mount_point/终端启动命令.txt"
 readonly mounted_ds_store="$mount_point/.DS_Store"
 readonly finder_layout_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/packaging/macos/configure-dmg-layout.applescript"
 
-for required_path in "$mounted_app" "$mounted_applications" "$mounted_readme" "$mounted_installer" "$mounted_agent_rules"; do
+for required_path in "$mounted_app" "$mounted_applications" "$mounted_readme" "$mounted_troubleshooting_guide" "$mounted_installer"; do
   [[ -e "$required_path" || -L "$required_path" ]] || {
     echo "DMG 缺少根目录入口：$(basename "$required_path")" >&2
     exit 1
@@ -90,8 +90,8 @@ if [[ "$unsigned_test" == "true" ]]; then
     token-station.app \
     Applications \
     '安装前必读.md' \
+    'macOS-无法打开怎么办.md' \
     '安装 Token Station.command' \
-    AGENTS.md \
     '未签名测试版.txt' \
     '构建来源.txt' \
     '终端启动命令.txt' \
@@ -130,17 +130,17 @@ if [[ "$unsigned_test" == "true" ]]; then
     'applications=720,170' \
     'installer=100,440' \
     'readme=280,440' \
-    'terminal_command=460,440' \
-    'provenance=640,440' \
-    'warning=820,440' \
-    'agent_rules=1000,440')
+    'troubleshooting=460,440' \
+    'terminal_command=640,440' \
+    'provenance=820,440' \
+    'warning=1000,440')
 else
   finder_layout_lines+=( \
     'app=310,170' \
     'applications=610,170' \
     'installer=100,440' \
     'readme=280,440' \
-    'agent_rules=820,440')
+    'troubleshooting=460,440')
 fi
 expected_finder_layout=$(printf '%s\n' "${finder_layout_lines[@]}")
 if ! actual_finder_layout=$(osascript "$finder_layout_script" inspect "$mount_point"); then
@@ -273,7 +273,7 @@ else
   }
 fi
 
-gatekeeper_documents=("$mounted_readme" "$mounted_installer")
+gatekeeper_documents=("$mounted_readme" "$mounted_troubleshooting_guide" "$mounted_installer")
 if [[ "$unsigned_test" == "true" ]]; then
   gatekeeper_documents+=("$mounted_terminal_command")
 fi

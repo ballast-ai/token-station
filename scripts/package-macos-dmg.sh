@@ -47,13 +47,11 @@ done
 readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly expected_bundle_id="com.tokenstation.desktop"
 readonly installer="$root/packaging/macos/安装 Token Station.command"
-readonly agent_rules="$root/packaging/macos/AGENTS.md"
-readonly formal_readme="$root/packaging/macos/安装前必读.md"
-readonly unsigned_test_readme="$root/packaging/macos/未签名测试版安装前必读.md"
+readonly readme="$root/packaging/macos/安装前必读.md"
+readonly troubleshooting_guide="$root/macOS-无法打开怎么办.md"
 readonly unsigned_terminal_command="$root/packaging/macos/终端启动命令.txt"
 readonly formal_finder_layout_template="$root/packaging/macos/dmg-layout.dsstore.base64"
 readonly unsigned_finder_layout_template="$root/packaging/macos/dmg-layout-unsigned.dsstore.base64"
-readme="$formal_readme"
 finder_layout_template="$formal_finder_layout_template"
 packaging_source_commit=""
 tag_commit=""
@@ -86,7 +84,6 @@ if [[ "$unsigned_test" == "true" ]]; then
     echo "当前打包提交中的 App 源码已与 v${version} 标签分叉，已停止。" >&2
     exit 1
   fi
-  readme="$unsigned_test_readme"
   finder_layout_template="$unsigned_finder_layout_template"
 else
   [[ -n "$signing_identity" && "$signing_identity" != "-" ]] || {
@@ -147,9 +144,9 @@ trap cleanup EXIT
 /usr/bin/ditto "$app_path" "$stage/token-station.app"
 ln -s /Applications "$stage/Applications"
 /bin/cp "$readme" "$stage/安装前必读.md"
+/bin/cp "$troubleshooting_guide" "$stage/macOS-无法打开怎么办.md"
 /bin/cp "$installer" "$stage/安装 Token Station.command"
 /bin/chmod 755 "$stage/安装 Token Station.command"
-/bin/cp "$agent_rules" "$stage/AGENTS.md"
 if [[ "$unsigned_test" == "true" ]]; then
   /bin/cp "$unsigned_terminal_command" "$stage/终端启动命令.txt"
   printf '%s\n' \
