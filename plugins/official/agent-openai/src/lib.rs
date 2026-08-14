@@ -470,7 +470,8 @@ impl Guest for OpenAiClient {
             StreamEvent::Usage { usage } => format!(
                 "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{},\
                  \"total_tokens\":{},\"prompt_tokens_details\":{{\"cached_tokens\":{},\
-                 \"cache_write_tokens\":{}}},\"completion_tokens_details\":{{\"reasoning_tokens\":{}}}}}}}\n\n",
+                 \"cache_write_tokens\":{}}},\"completion_tokens_details\":{{\"reasoning_tokens\":{}}}}}}}\n\n\
+                 data: [DONE]\n\n",
                 usage.input_tokens,
                 usage.output_tokens,
                 usage.total(),
@@ -499,8 +500,7 @@ impl Guest for OpenAiClient {
                     None => "null".to_owned(),
                 };
                 format!(
-                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":{reason}}}]}}\
-                     \n\ndata: [DONE]\n\n"
+                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":{reason}}}]}}\n\n"
                 )
             }
             StreamEvent::Error { error } => {
@@ -645,9 +645,27 @@ mod tests {
                 "data: {\"choices\":[],\"usage\":{",
                 "\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":120,",
                 "\"prompt_tokens_details\":{\"cached_tokens\":60,\"cache_write_tokens\":10},",
-                "\"completion_tokens_details\":{\"reasoning_tokens\":5}}}\n\n"
+                "\"completion_tokens_details\":{\"reasoning_tokens\":5}}}\n\n",
+                "data: [DONE]\n\n"
             ))
         );
+    }
+
+    #[test]
+    fn stream_done_waits_for_final_usage_before_emitting_done_marker() {
+        let event = json!({
+            "type": "done",
+            "finish_reason": "stop",
+            "stop_sequence": null
+        });
+
+        let rendered = OpenAiClient::render_stream_event(event.to_string(), String::new())
+            .expect("canonical done event renders");
+        let rendered: Value = serde_json::from_str(&rendered).expect("stream wrapper is JSON");
+        let data = rendered["data"].as_str().expect("stream data is text");
+
+        assert!(data.contains("\"finish_reason\":\"stop\""));
+        assert!(!data.contains("[DONE]"));
     }
 }
 

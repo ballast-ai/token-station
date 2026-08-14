@@ -678,8 +678,11 @@ mod tests {
             .validate_projected(&document, &refresh_input)
             .unwrap();
         let refreshed = semantic_json(&document).unwrap();
+        assert_eq!(refreshed[1]["name"], json!("Token Station Auto"));
+        assert_eq!(refreshed[1]["useCustomProtocol"], json!(false));
         assert_eq!(refreshed[1]["maxInputTokens"], json!(257_550));
         assert_eq!(refreshed[1]["maxOutputTokens"], json!(32_768));
+        assert_eq!(refreshed[0]["id"], json!("user-model"));
 
         let disconnect = connector.disconnect_patch_for_document(&document).unwrap();
         validate_patch_ownership(&disconnect, &connector.owned_paths()).unwrap();
