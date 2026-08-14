@@ -397,6 +397,8 @@ struct PendingCall {
 thread_local! {
     static STREAM_CALLS: RefCell<BTreeMap<String, BTreeMap<u32, PendingCall>>> =
         const { RefCell::new(BTreeMap::new()) };
+    static STREAM_FINISHES: RefCell<BTreeMap<String, Option<FinishReason>>> =
+        const { RefCell::new(BTreeMap::new()) };
 }
 
 fn sse(value: &Value) -> Result<String, String> {
@@ -572,11 +574,28 @@ impl Guest for GeminiClient {
                 },
                 "modelVersion": model,
             }))?,
+            StreamEvent::Finish {
+                finish_reason,
+                stop_sequence: _,
+            } => {
+                STREAM_FINISHES.with(|finishes| {
+                    finishes.borrow_mut().insert(id.clone(), finish_reason);
+                });
+                String::new()
+            }
             StreamEvent::Done {
-                finish_reason: reason,
+                finish_reason: mut reason,
                 // Gemini candidates carry no stop-sequence report slot.
                 stop_sequence: _,
             } => {
+                if reason.is_none() {
+                    reason = STREAM_FINISHES
+                        .with(|finishes| finishes.borrow_mut().remove(&id).flatten());
+                } else {
+                    STREAM_FINISHES.with(|finishes| {
+                        finishes.borrow_mut().remove(&id);
+                    });
+                }
                 let calls = STREAM_CALLS.with(|streams| streams.borrow_mut().remove(&id));
                 let mut parts = Vec::new();
                 if let Some(calls) = calls {
@@ -601,6 +620,9 @@ impl Guest for GeminiClient {
             }
             StreamEvent::Error { error } => {
                 STREAM_CALLS.with(|streams| streams.borrow_mut().remove(&id));
+                STREAM_FINISHES.with(|finishes| {
+                    finishes.borrow_mut().remove(&id);
+                });
                 let rendered = Self::map_inbound_error(encode(&error)?, String::new())?;
                 format!("data: {rendered}\n\n")
             }

@@ -13,10 +13,11 @@ import {
 } from "./ui/dialog";
 
 export const FIRST_RUN_GUIDE_STORAGE_KEY = "token-station-first-run-guide";
-export const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v1";
+export const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v2";
 
 export type FirstRunSetupStep = "provider" | "route" | "agent" | "complete";
 export type FirstRunMicroStep =
+  | "overview"
   | "provider-entry"
   | "provider-choice"
   | "provider-credential"
@@ -70,6 +71,7 @@ interface SpotlightRect {
   bottom: number;
   width: number;
   height: number;
+  borderRadius: string;
 }
 
 interface CoachmarkContent {
@@ -77,6 +79,7 @@ interface CoachmarkContent {
   index: string;
   title: string;
   description: string;
+  allowTargetInteraction?: boolean;
   advanceOnTargetClick: boolean;
   continueLabel: string | null;
   backLabel?: string;
@@ -101,7 +104,20 @@ export default function FirstRunGuide({
   const targetActionRef = useRef(onTargetAction);
   const coachmarkRef = useRef<HTMLElement>(null);
   targetActionRef.current = onTargetAction;
-  const content: CoachmarkContent = microStep === "provider-entry"
+  const content: CoachmarkContent = microStep === "overview"
+    ? {
+        target: "overview",
+        index: copy("GET ORIENTED · OVERVIEW", "认识 Token Station · 概览"),
+        title: copy("Start with Overview", "先看概览"),
+        description: copy(
+          "Overview brings proxy status, current routing, requests, cost, Agents, and providers together. Select the Token Station mark at the top left to return here anytime. To review this guide later, go to Settings → About → Review getting started guide.",
+          "概览汇总代理状态、当前路由、请求与成本，以及 Agent 和供应商规模。以后点击左上角 Token Station 标志可随时回到这里；需要重看教程时，前往“设置 → 关于 → 重新查看新手引导”。",
+        ),
+        allowTargetInteraction: false,
+        advanceOnTargetClick: false,
+        continueLabel: copy("Start setup", "开始配置"),
+      }
+    : microStep === "provider-entry"
     ? {
         target: "add-provider",
         index: copy("ADD PROVIDER · 1/5", "添加供应商 · 1/5"),
@@ -286,7 +302,10 @@ export default function FirstRunGuide({
                     target: null,
                     index: copy("FIRST SETUP · COMPLETE", "首次设置 · 已完成"),
                     title: copy("First setup is complete", "首次设置已完成"),
-                    description: copy("No repeated setup is required.", "无需重复配置。"),
+                    description: copy(
+                      "No repeated setup is required. To review this guide later, go to Settings → About → Review getting started guide.",
+                      "无需重复配置。需要重看教程时，前往“设置 → 关于 → 重新查看新手引导”。",
+                    ),
                     advanceOnTargetClick: false,
                     continueLabel: copy("Back to Home", "返回主页"),
                   };
@@ -336,6 +355,7 @@ export default function FirstRunGuide({
           bottom: rect.bottom,
           width: rect.width,
           height: rect.height,
+          borderRadius: window.getComputedStyle(target).borderRadius,
         });
       };
       const activate = () => targetActionRef.current();
@@ -461,8 +481,13 @@ export default function FirstRunGuide({
         ...(layer.matches(focusableSelector) ? [layer] : []),
         ...layer.querySelectorAll<HTMLElement>(focusableSelector),
       ]);
+      const targetCandidates = target
+        ? content.allowTargetInteraction === false
+          ? [target]
+          : [target, ...target.querySelectorAll<HTMLElement>(focusableSelector)]
+        : [];
       const candidates = [
-        ...(target ? [target, ...target.querySelectorAll<HTMLElement>(focusableSelector)] : []),
+        ...targetCandidates,
         ...floatingCandidates,
         ...(coachmarkRef.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? []),
       ].filter((element, index, items) => (
@@ -478,7 +503,7 @@ export default function FirstRunGuide({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [content.target, onPause, open]);
+  }, [content.allowTargetInteraction, content.target, onPause, open]);
 
   if (!open) return null;
   const padding = 7;
@@ -491,6 +516,17 @@ export default function FirstRunGuide({
     right: clamp(targetRect.right + padding, viewportInset, viewportWidth - viewportInset),
     bottom: clamp(targetRect.bottom + padding, viewportInset, viewportHeight - viewportInset),
   } : null;
+  const outline = targetRect && hole
+    ? content.target === "add-provider"
+      ? {
+          top: targetRect.top,
+          left: targetRect.left,
+          right: targetRect.right,
+          bottom: targetRect.bottom,
+          borderRadius: targetRect.borderRadius,
+        }
+      : { ...hole, borderRadius: undefined }
+    : null;
   const cardWidth = Math.min(360, viewportWidth - 32);
   const estimatedCardHeight = 230;
   const cardGap = 18;
@@ -536,10 +572,28 @@ export default function FirstRunGuide({
           <div className="first-run-spotlight-blocker" style={{ top: hole.top, left: 0, width: hole.left, height: hole.bottom - hole.top }} />
           <div className="first-run-spotlight-blocker" style={{ top: hole.top, left: hole.right, right: 0, height: hole.bottom - hole.top }} />
           <div className="first-run-spotlight-blocker" style={{ top: hole.bottom, left: 0, right: 0, bottom: 0 }} />
+          {content.allowTargetInteraction === false && (
+            <div
+              className="first-run-spotlight-hole-blocker"
+              aria-hidden="true"
+              style={{
+                top: hole.top,
+                left: hole.left,
+                width: hole.right - hole.left,
+                height: hole.bottom - hole.top,
+              }}
+            />
+          )}
           <div
             className="first-run-spotlight-outline"
             aria-hidden="true"
-            style={{ top: hole.top, left: hole.left, width: hole.right - hole.left, height: hole.bottom - hole.top }}
+            style={{
+              top: outline!.top,
+              left: outline!.left,
+              width: outline!.right - outline!.left,
+              height: outline!.bottom - outline!.top,
+              borderRadius: outline!.borderRadius,
+            }}
           />
         </>
       ) : (
@@ -631,6 +685,12 @@ export function FirstRunCompletionDialog({
                   "供应商、路由和 Agent 均已就绪，Token Station 现在可以接管模型请求。",
                 )}
           </DialogDescription>
+          <p className="first-run-complete-revisit">
+            {copy(
+              "To review this guide later, go to Settings → About → Review getting started guide.",
+              "需要重看教程时，前往“设置 → 关于 → 重新查看新手引导”。",
+            )}
+          </p>
         </DialogHeader>
         <DialogFooter>
           <Button type="button" onClick={onFinish}>

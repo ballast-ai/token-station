@@ -6,7 +6,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import App, { configSaveStatus, firstRunRouteApplyComplete } from "./App";
 import { getStats } from "./api";
 import type { AgentRouteView, AgentUiMetadataView, AgentView, ServeView, StateView } from "./api";
-import { AGENT_VISIBILITY_STORAGE_KEY } from "./components/AgentVisibilityPreferences";
+import {
+  AGENT_VISIBILITY_STORAGE_KEY,
+  SHOWN_UNDETECTED_AGENT_IDS_STORAGE_KEY,
+} from "./components/AgentVisibilityPreferences";
 import { LANGUAGE_STORAGE_KEY } from "./components/LanguageProvider";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -19,7 +22,7 @@ const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
 const getStatsMock = vi.mocked(getStats);
 const FIRST_RUN_GUIDE_STORAGE_KEY = "token-station-first-run-guide";
-const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v1";
+const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v2";
 
 const emptyRoute: AgentRouteView = {
   mode: "inherit",
@@ -254,10 +257,18 @@ async function openAgentVisibility(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByRole("heading", { name: "Agent 显示" });
 }
 
+async function continueFromOverview(user: ReturnType<typeof userEvent.setup>) {
+  const overviewCoachmark = await screen.findByRole("dialog", { name: "先看概览" });
+  expect(screen.getByRole("heading", { name: "概览" })).toBeInTheDocument();
+  expect(overviewCoachmark).toHaveTextContent("设置 → 关于 → 重新查看新手引导");
+  await user.click(within(overviewCoachmark).getByRole("button", { name: "开始配置" }));
+}
+
 beforeEach(() => {
   window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "zh-CN");
   window.localStorage.setItem(FIRST_RUN_GUIDE_STORAGE_KEY, FIRST_RUN_GUIDE_VERSION);
   window.localStorage.removeItem(AGENT_VISIBILITY_STORAGE_KEY);
+  window.localStorage.removeItem(SHOWN_UNDETECTED_AGENT_IDS_STORAGE_KEY);
   listenMock.mockReset();
   listenMock.mockResolvedValue(vi.fn());
   getStatsMock.mockReset();
@@ -275,11 +286,18 @@ beforeEach(() => {
   });
 });
 
-it("teaches a new user by spotlighting the real add-provider button", async () => {
+it("teaches overview first, then spotlights the real add-provider button", async () => {
   window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
   const user = userEvent.setup();
 
   render(<App />);
+
+  const overviewCoachmark = await screen.findByRole("dialog", { name: "先看概览" });
+  expect(screen.getByRole("heading", { name: "概览" })).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "概览页" }))
+    .toHaveAttribute("data-onboarding-active", "true");
+  expect(overviewCoachmark).toHaveTextContent("设置 → 关于 → 重新查看新手引导");
+  await user.click(within(overviewCoachmark).getByRole("button", { name: "开始配置" }));
 
   const coachmark = await screen.findByRole("dialog", { name: "添加你的第一个供应商" });
   expect(document.body).toHaveAttribute("data-first-run-guide-active", "true");
@@ -342,6 +360,7 @@ it("walks through provider configuration and advances only after a real save", a
 
   render(<App />);
 
+  await continueFromOverview(user);
   await screen.findByRole("dialog", { name: "添加你的第一个供应商" });
   await user.click(screen.getByRole("button", { name: "添加供应商" }));
   expect(await screen.findByRole("dialog", { name: "选择一个模型供应商" })).toBeInTheDocument();
@@ -431,6 +450,7 @@ it("spotlights routing controls and advances only when the requested revision is
   });
 
   render(<App />);
+  await continueFromOverview(user);
   const entryCoachmark = await screen.findByRole("dialog", { name: "打开路由配置" });
   expect(entryCoachmark).toHaveTextContent("配置路由 · 1/4");
   const routingNav = screen.getByRole("button", { name: "全局路由" });
@@ -530,6 +550,7 @@ it("pins each route teaching target and restores main scrolling when paused", as
   });
 
   render(<App />);
+  await continueFromOverview(user);
   await screen.findByRole("dialog", { name: "打开路由配置" });
   await user.click(screen.getByRole("button", { name: "全局路由" }));
 
@@ -591,6 +612,7 @@ it("pins each route teaching target and restores main scrolling when paused", as
 
 it("does not treat a running but unconfigured route as onboarding-complete", async () => {
   window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+  const user = userEvent.setup();
   const provider = {
     name: "openai",
     provider: "openai-compatible",
@@ -616,6 +638,7 @@ it("does not treat a running but unconfigured route as onboarding-complete", asy
 
   render(<App />);
 
+  await continueFromOverview(user);
   expect(await screen.findByRole("dialog", { name: "打开路由配置" })).toBeInTheDocument();
   expect(screen.queryByRole("dialog", { name: "打开 Agent 管理" })).toBeNull();
 });
@@ -657,14 +680,17 @@ it("启动未扫到 Agent 时可直接完成基础设置并回到主页", async 
 
   render(<App />);
 
+  await continueFromOverview(user);
   const emptyCoachmark = await screen.findByRole("dialog", { name: "未检测到可接入 Agent" });
-  expect(screen.queryByRole("button", { name: "重新扫描" })).toBeNull();
+  expect(screen.getByRole("button", { name: "重新扫描" })).toBeEnabled();
   expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
   await user.click(within(emptyCoachmark).getByRole("button", { name: "暂不接入，完成设置" }));
 
   expect(await screen.findByRole("dialog", { name: "基础设置完成" })).toBeInTheDocument();
   expect(screen.getByText("供应商和路由已就绪，Agent 尚未接入。"))
     .toBeInTheDocument();
+  expect(screen.getByRole("dialog", { name: "基础设置完成" }))
+    .toHaveTextContent("设置 → 关于 → 重新查看新手引导");
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(FIRST_RUN_GUIDE_VERSION);
   await user.click(screen.getByRole("button", { name: "返回主页" }));
   expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
@@ -721,6 +747,7 @@ it("一键接入后只通过缓存状态刷新确认 CONNECTED", async () => {
   });
 
   render(<App />);
+  await continueFromOverview(user);
   await screen.findByRole("dialog", { name: "打开 Agent 管理" });
   await user.click(screen.getByRole("button", { name: "Claude Code" }));
 
@@ -791,6 +818,7 @@ it("requires an exact installation choice before connecting a multi-installation
   });
 
   render(<App />);
+  await continueFromOverview(user);
   await screen.findByRole("dialog", { name: "打开 Agent 管理" });
   await user.click(screen.getByRole("button", { name: "Claude Code" }));
   await screen.findByRole("dialog", { name: "选择一个 Agent" });
@@ -852,7 +880,10 @@ it("shows an already-complete summary without asking for repeated setup", async 
 
   render(<App />);
 
+  await continueFromOverview(user);
   expect(await screen.findByRole("dialog", { name: "首次设置已完成" })).toBeInTheDocument();
+  expect(screen.getByRole("dialog", { name: "首次设置已完成" }))
+    .toHaveTextContent("设置 → 关于 → 重新查看新手引导");
   await user.click(screen.getByRole("button", { name: "返回主页" }));
 
   expect(screen.queryByRole("dialog")).toBeNull();
@@ -865,7 +896,7 @@ it("persists a skipped guide and does not show it on the next App session", asyn
   const user = userEvent.setup();
   const firstSession = render(<App />);
 
-  await screen.findByRole("dialog", { name: "添加你的第一个供应商" });
+  await screen.findByRole("dialog", { name: "先看概览" });
   await user.click(screen.getByRole("button", { name: "不再提示" }));
 
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(
@@ -886,8 +917,8 @@ it("reopens the guide from the About page without clearing the dismissed version
   await user.click(screen.getByRole("button", { name: /关于/ }));
   await user.click(screen.getByRole("button", { name: "重新查看新手引导" }));
 
-  expect(await screen.findByRole("dialog", { name: "添加你的第一个供应商" })).toBeInTheDocument();
-  expect(screen.getByRole("heading", { name: "主页" })).toBeInTheDocument();
+  expect(await screen.findByRole("dialog", { name: "先看概览" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "概览" })).toBeInTheDocument();
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(
     FIRST_RUN_GUIDE_VERSION,
   );
@@ -898,7 +929,7 @@ it("treats Escape as a pause, restores focus, and offers setup next session", as
   const user = userEvent.setup();
   const firstSession = render(<App />);
 
-  await screen.findByRole("dialog", { name: "添加你的第一个供应商" });
+  await screen.findByRole("dialog", { name: "先看概览" });
   await user.keyboard("{Escape}");
 
   expect(screen.queryByRole("dialog")).toBeNull();
@@ -910,7 +941,7 @@ it("treats Escape as a pause, restores focus, and offers setup next session", as
 
   firstSession.unmount();
   render(<App />);
-  expect(await screen.findByRole("dialog", { name: "添加你的第一个供应商" }))
+  expect(await screen.findByRole("dialog", { name: "先看概览" }))
     .toBeInTheDocument();
 });
 
@@ -931,6 +962,7 @@ it("不显示仅存在于注册表但启动扫描未发现安装的 Agent", asyn
 describe("desktop station navigation", () => {
   it("等启动扫描完成后一次性显示合并主页与已发现 Agent", async () => {
     window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
+    const user = userEvent.setup();
     let emitServe: ((serve: ServeView) => void) | undefined;
     listenMock.mockImplementation(async (_eventName, handler) => {
       emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
@@ -974,6 +1006,7 @@ describe("desktop station navigation", () => {
 
     await act(async () => resolveScan([scannedClaude]));
 
+    await continueFromOverview(user);
     expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
     const nav = within(screen.getByLabelText("主导航"));
     expect(nav.getAllByRole("button").map((item) => item.getAttribute("aria-label"))).toEqual([
@@ -1718,28 +1751,54 @@ describe("desktop station navigation", () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
   });
 
-  it("只按启动扫描结果排列 Agent，页面内不提供重扫", async () => {
+  it("可从主页手动重新扫描本机 Agent，并在失败时保留上次结果", async () => {
     const user = userEvent.setup();
+    const initial = stateFixture();
+    const scannedGemini = detectedAgentsFixture.find(
+      (agent) => agent.metadata.agent_id === "gemini-cli",
+    )!;
+    let scanCalls = 0;
+    let resolveRescan!: (agents: AgentView[]) => void;
+    const pendingRescan = new Promise<AgentView[]>((resolve) => {
+      resolveRescan = resolve;
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return initial;
+      if (command === "get_runtime_state") return initial.serve;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") {
+        scanCalls += 1;
+        if (scanCalls === 1) return [scannedClaude];
+        if (scanCalls === 2) return pendingRescan;
+        throw new Error("manual rescan failed");
+      }
+      if (command === "get_request_receipts") {
+        return { items: [], total: 0, page: 1, page_size: 20 };
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
     render(<App />);
     await openAgents(user);
 
-    const orderedButtons = agentNavigationNames.map((name) =>
-      screen.getByRole("button", { name }));
-    for (let index = 0; index < orderedButtons.length - 1; index += 1) {
-      expect(
-        orderedButtons[index].compareDocumentPosition(orderedButtons[index + 1])
-        & Node.DOCUMENT_POSITION_FOLLOWING,
-      ).toBeTruthy();
-    }
-    expect(screen.getByRole("button", { name: "Cursor" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Future/i })).toBeNull();
-    await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1));
+    expect(screen.getByRole("button", { name: "Claude Code" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Gemini CLI" })).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: "Codex" }));
-    expect(await screen.findByRole("heading", { name: "Codex" })).toBeInTheDocument();
-    await user.click(navigation().getByRole("button", { name: "主页" }));
-    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
-    expect(screen.queryByRole("button", { name: "重新扫描" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "重新扫描" }));
+    const scanningButton = screen.getByRole("button", { name: "扫描中…" });
+    expect(scanningButton).toBeDisabled();
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2);
+
+    await act(async () => resolveRescan([scannedClaude, scannedGemini]));
+    expect(await screen.findByRole("button", { name: "Gemini CLI" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新扫描" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "重新扫描" }));
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByRole("alert"))
+      .toHaveTextContent("操作未能完成");
+    expect(screen.getByRole("button", { name: "Gemini CLI" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新扫描" })).toBeEnabled();
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(3);
   });
 
   it("lets the user hide and restore a sidebar Agent from Settings without rescanning", async () => {
@@ -1783,6 +1842,64 @@ describe("desktop station navigation", () => {
       JSON.stringify([]),
     );
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
+  });
+
+  it("defaults undetected Agents off and lets the user show their honest empty state", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [scannedClaude];
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await openAgentVisibility(user);
+
+    expect(screen.getByRole("switch", { name: "Claude Code", checked: true }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Gemini CLI", checked: false }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(`1 / ${agentIds.length} 已显示`);
+
+    await user.click(screen.getByRole("switch", { name: "Gemini CLI", checked: false }));
+    expect(screen.getByRole("switch", { name: "Gemini CLI", checked: true }))
+      .toBeInTheDocument();
+    expect(window.localStorage.getItem(SHOWN_UNDETECTED_AGENT_IDS_STORAGE_KEY)).toBe(
+      JSON.stringify(["gemini-cli"]),
+    );
+    expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents"))
+      .toHaveLength(1);
+
+    await user.click(navigation().getByRole("button", { name: "主页" }));
+    const gemini = await screen.findByRole("button", { name: "Gemini CLI" });
+    expect(gemini).toHaveAttribute("title", "Gemini CLI · 未检测");
+    expect(within(gemini).getByText("未检测")).toBeInTheDocument();
+
+    await user.click(gemini);
+    expect(await screen.findByRole("heading", { name: "Gemini CLI" })).toBeInTheDocument();
+    expect(screen.getByText("没有在本机发现可管理的安装。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "一键接入" })).toBeDisabled();
+  });
+
+  it("restores an explicit undetected Agent after remount", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(
+      SHOWN_UNDETECTED_AGENT_IDS_STORAGE_KEY,
+      JSON.stringify(["gemini-cli"]),
+    );
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return [scannedClaude];
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await openAgents(user);
+
+    expect(screen.getByRole("button", { name: "Gemini CLI" }))
+      .toHaveAttribute("title", "Gemini CLI · 未检测");
   });
 
   it("restores hidden Agent preferences after remount while newly detected Agents remain visible", async () => {
@@ -2021,7 +2138,7 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("button", { name: /Agent visibility/ }));
     expect(await screen.findByRole("heading", { name: "Agent visibility" })).toBeInTheDocument();
     expect(screen.getByText(
-      "Choose which Agents appear in the sidebar.",
+      "Choose which Agents appear on Home. Undetected Agents are off by default.",
     )).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length} / ${agentIds.length} visible`);
     expect(screen.getByRole("group", { name: "Agent visibility options" })).toBeInTheDocument();
@@ -2051,7 +2168,7 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("button", { name: /Agent 显示/ }));
     expect(await screen.findByRole("heading", { name: "Agent 显示" })).toBeInTheDocument();
     expect(screen.getByText(
-      "选择显示在左侧导航中的 Agent。",
+      "选择显示在主页列表中的 Agent；未检测到的 Agent 默认关闭。",
     )).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length} / ${agentIds.length} 已显示`);
     expect(screen.getByRole("group", { name: "Agent 显示选项" })).toBeInTheDocument();

@@ -65,19 +65,15 @@ fn capability(detail: impl Into<String>) -> String {
     fail(&ErrorEnvelope::new(ErrorCode::Capability, 400, detail))
 }
 
-fn validate_thinking(body: &Value, agent_tool: Option<&str>) -> Result<(), String> {
+fn validate_thinking(body: &Value) -> Result<(), String> {
     match body.get("thinking") {
         None | Some(Value::Null) => Ok(()),
         Some(Value::Object(config)) => match config.get("type").and_then(Value::as_str) {
-            Some("disabled") => Ok(()),
-            // Claude Desktop enables adaptive thinking as an optional client
-            // preference on ordinary 3P Gateway requests. The translated path
-            // can carry its separate output_config.effort as reasoning_effort,
-            // but cannot promise Anthropic thinking blocks or a token budget.
-            // Keep this downgrade scoped to the identified Desktop route;
-            // native Anthropic providers bypass normalization and preserve the
-            // original body verbatim.
-            Some("adaptive") if agent_tool == Some("claude-desktop") => Ok(()),
+            // Native Anthropic routes bypass this adapter and preserve the
+            // object verbatim. Translated routes keep it in extensions; the
+            // provider may render a compatible effort control only when its
+            // target model explicitly declares that capability.
+            Some("adaptive" | "enabled" | "disabled") => Ok(()),
             Some(kind) => Err(capability(format!(
                 "Anthropic thinking type {kind} is not supported by the configured provider"
             ))),
@@ -631,6 +627,8 @@ struct StreamState {
     thinking_blocks: BTreeMap<u32, u32>,
     tool_blocks: BTreeMap<u32, ToolBlock>,
     open_blocks: BTreeSet<u32>,
+    pending_finish_reason: Option<FinishReason>,
+    pending_stop_sequence: Option<String>,
 }
 
 impl StreamState {
@@ -648,6 +646,8 @@ impl StreamState {
             thinking_blocks: BTreeMap::new(),
             tool_blocks: BTreeMap::new(),
             open_blocks: BTreeSet::new(),
+            pending_finish_reason: None,
+            pending_stop_sequence: None,
         }
     }
 
@@ -806,7 +806,7 @@ impl Guest for AnthropicClient {
     fn normalize_inbound(envelope: String) -> Result<String, String> {
         let envelope: AgentRequestEnvelope = parse_input(&envelope)?;
         let body = &envelope.body;
-        validate_thinking(body, envelope.agent_tool.as_deref())?;
+        validate_thinking(body)?;
         validate_tool_choice(body)?;
         let model = body
             .get("model")
@@ -1112,11 +1112,22 @@ impl Guest for AnthropicClient {
                     )?);
                     Ok(rendered)
                 }
+                StreamEvent::Finish {
+                    finish_reason,
+                    stop_sequence,
+                } => {
+                    let state = states.get_mut(stream_id).expect("state inserted above");
+                    state.pending_finish_reason = finish_reason;
+                    state.pending_stop_sequence = stop_sequence;
+                    Ok(String::new())
+                }
                 StreamEvent::Done {
                     finish_reason,
                     stop_sequence,
                 } => {
                     let mut state = states.remove(stream_id).expect("state inserted above");
+                    let finish_reason = finish_reason.or(state.pending_finish_reason.take());
+                    let stop_sequence = stop_sequence.or(state.pending_stop_sequence.take());
                     let mut rendered = String::new();
                     state.ensure_started(&mut rendered)?;
                     for block_index in &state.open_blocks {

@@ -9,6 +9,7 @@ import {
   listAgentRegistry,
   listFreeProviderPresets,
   listenServeState,
+  listenStatusMenuNavigate,
   removeKeyword,
   removeProvider,
   restoreProvider,
@@ -44,8 +45,10 @@ import FirstRunGuide, {
 } from "./components/FirstRunGuide";
 import {
   readHiddenAgentIds,
+  readShownUndetectedAgentIds,
   updateHiddenAgentIds,
   writeHiddenAgentIds,
+  writeShownUndetectedAgentIds,
 } from "./components/AgentVisibilityPreferences";
 import {
   LanguageBoundary,
@@ -70,6 +73,7 @@ import SettingsHub from "./pages/SettingsHub";
 import UsageWorkspace from "./pages/UsageWorkspace";
 import "./App.css";
 import { humanizeAppError } from "./errors";
+import { resolveStatusMenuNavigation } from "./statusMenuNavigation";
 
 function errorText(error: unknown): string {
   return humanizeAppError(error);
@@ -236,9 +240,14 @@ function StationApp() {
   const [view, setView] = useState<AppView>("home");
   const [hiddenAgentIds, setHiddenAgentIds] = useState<Set<string>>(readHiddenAgentIds);
   const hiddenAgentIdsRef = useRef(hiddenAgentIds);
+  const [shownUndetectedAgentIds, setShownUndetectedAgentIds] = useState<Set<string>>(
+    readShownUndetectedAgentIds,
+  );
+  const shownUndetectedAgentIdsRef = useRef(shownUndetectedAgentIds);
   const [registry, setRegistry] = useState<AgentUiMetadataView[]>([]);
   const [agents, setAgents] = useState<AgentView[]>([]);
   const [selectedInstallationPaths, setSelectedInstallationPaths] = useState<Record<string, string>>({});
+  const [scanBusy, setScanBusy] = useState(false);
   const [scanSucceeded, setScanSucceeded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [serveBusy, setServeBusy] = useState(false);
@@ -262,7 +271,8 @@ function StationApp() {
     region: "all",
   });
   const busyRef = useRef(false);
-  const detectedAgentIdsAtBootRef = useRef<Set<string>>(new Set());
+  const scanBusyRef = useRef(false);
+  const detectedAgentIdsRef = useRef<Set<string>>(new Set());
   const cachedAgentRefreshGenerationRef = useRef(0);
   const observedServeRef = useRef<{ ready: boolean; instanceId: string | null } | null>(null);
   const agentConnectInFlightRef = useRef(false);
@@ -289,13 +299,42 @@ function StationApp() {
       .map(({ metadata }) => metadata),
     [registry],
   );
-  const visibleRegistry = useMemo(
-    () => orderedRegistry.filter((metadata) => (
-      detectedAgentIdsAtBootRef.current.has(metadata.agent_id)
-      && !hiddenAgentIds.has(metadata.agent_id)
-    )),
-    [agents, hiddenAgentIds, orderedRegistry],
+  const visibleAgentIds = useMemo(
+    () => new Set(orderedRegistry
+      .filter((metadata) => !hiddenAgentIds.has(metadata.agent_id) && (
+        detectedAgentIdsRef.current.has(metadata.agent_id)
+        || shownUndetectedAgentIds.has(metadata.agent_id)
+      ))
+      .map((metadata) => metadata.agent_id)),
+    [agents, hiddenAgentIds, orderedRegistry, shownUndetectedAgentIds],
   );
+  const visibleRegistry = useMemo(
+    () => orderedRegistry.filter((metadata) => visibleAgentIds.has(metadata.agent_id)),
+    [orderedRegistry, visibleAgentIds],
+  );
+  const statusMenuAgentIdsRef = useRef<ReadonlySet<string>>(visibleAgentIds);
+  statusMenuAgentIdsRef.current = visibleAgentIds;
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenStatusMenuNavigate((target) => {
+      if (disposed) return;
+      const next = resolveStatusMenuNavigation(target, statusMenuAgentIdsRef.current);
+      if (!next) return;
+      viewHistoryRef.current = [];
+      setView(next);
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch((caught) => {
+      if (!disposed) showError(errorText(caught), "status-menu-navigation-listener");
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [showError]);
 
   useEffect(() => {
     if (!scanSucceeded || !view.startsWith("agent:")) return;
@@ -307,13 +346,30 @@ function StationApp() {
   }, [scanSucceeded, view, visibleRegistry]);
 
   const setAgentVisible = useCallback((agentId: string, visible: boolean) => {
-    const current = hiddenAgentIdsRef.current;
-    const currentlyVisible = !current.has(agentId);
+    const detected = detectedAgentIdsRef.current.has(agentId);
+    const currentHidden = hiddenAgentIdsRef.current;
+    const currentShown = shownUndetectedAgentIdsRef.current;
+    const currentlyVisible = !currentHidden.has(agentId) && (
+      detected || currentShown.has(agentId)
+    );
     if (currentlyVisible === visible) return;
-    const next = updateHiddenAgentIds(current, agentId, !visible);
-    hiddenAgentIdsRef.current = next;
-    setHiddenAgentIds(next);
-    if (!writeHiddenAgentIds(next)) {
+    const nextHidden = updateHiddenAgentIds(
+      currentHidden,
+      agentId,
+      !visible && detected,
+    );
+    const nextShown = updateHiddenAgentIds(
+      currentShown,
+      agentId,
+      visible && !detected,
+    );
+    hiddenAgentIdsRef.current = nextHidden;
+    shownUndetectedAgentIdsRef.current = nextShown;
+    setHiddenAgentIds(nextHidden);
+    setShownUndetectedAgentIds(nextShown);
+    const hiddenSaved = writeHiddenAgentIds(nextHidden);
+    const shownSaved = writeShownUndetectedAgentIds(nextShown);
+    if (!hiddenSaved || !shownSaved) {
       showError(copy(
         "Agent visibility changed for this session, but it could not be saved for the next launch.",
         "Agent 显示已在本次会话生效，但无法保存到下次启动。",
@@ -333,13 +389,34 @@ function StationApp() {
     });
   }, [agents]);
 
+  const rescanAgents = useCallback(async () => {
+    if (scanBusyRef.current) return;
+    scanBusyRef.current = true;
+    setScanBusy(true);
+    cachedAgentRefreshGenerationRef.current += 1;
+    try {
+      const scannedAgents = await scanAgents();
+      const detectedAgents = scannedAgents.filter((agent) => agent.installations.length > 0);
+      detectedAgentIdsRef.current = new Set(
+        detectedAgents.map((agent) => agent.metadata.agent_id),
+      );
+      setAgents(detectedAgents);
+      setScanSucceeded(true);
+    } catch (caught) {
+      showError(errorText(caught), "agent-rescan");
+    } finally {
+      scanBusyRef.current = false;
+      setScanBusy(false);
+    }
+  }, [showError]);
+
   const refreshCachedAgents = useCallback(async () => {
     const refreshGeneration = ++cachedAgentRefreshGenerationRef.current;
     try {
       const cached = await getCachedAgentViews();
       if (refreshGeneration !== cachedAgentRefreshGenerationRef.current) return;
-      const startupIds = detectedAgentIdsAtBootRef.current;
-      setAgents(cached.filter((agent) => startupIds.has(agent.metadata.agent_id)));
+      const detectedIds = detectedAgentIdsRef.current;
+      setAgents(cached.filter((agent) => detectedIds.has(agent.metadata.agent_id)));
     } catch (caught) {
       if (refreshGeneration !== cachedAgentRefreshGenerationRef.current) return;
       showError(errorText(caught), "cached-agent-overlay");
@@ -354,7 +431,7 @@ function StationApp() {
     const previous = observedServeRef.current;
     observedServeRef.current = next;
 
-    if (detectedAgentIdsAtBootRef.current.size === 0 || !previous) return;
+    if (detectedAgentIdsRef.current.size === 0 || !previous) return;
     if (!next.ready) {
       if (previous.ready && !agentConnectInFlightRef.current) {
         void refreshCachedAgents();
@@ -400,7 +477,7 @@ function StationApp() {
         }
         const [nextRegistry, scannedAgents] = discoveryResult.value;
         const detectedAgents = scannedAgents.filter((agent) => agent.installations.length > 0);
-        detectedAgentIdsAtBootRef.current = new Set(
+        detectedAgentIdsRef.current = new Set(
           detectedAgents.map((agent) => agent.metadata.agent_id),
         );
         setRegistry(nextRegistry);
@@ -485,7 +562,13 @@ function StationApp() {
   useEffect(() => {
     if (!state || !scanSucceeded || firstRunGuideCheckedRef.current) return;
     firstRunGuideCheckedRef.current = true;
-    if (shouldOpenFirstRunGuide()) setFirstRunGuideOpen(true);
+    if (shouldOpenFirstRunGuide()) {
+      viewHistoryRef.current = [];
+      setView("overview");
+      setFirstRunSetupStep(null);
+      setFirstRunMicroStep("overview");
+      setFirstRunGuideOpen(true);
+    }
   }, [scanSucceeded, state]);
 
   useEffect(() => {
@@ -618,7 +701,7 @@ function StationApp() {
       showState(next);
       const ready = next.serve.app_runtime === "running" && next.serve.listener_reachable;
       observedServeRef.current = { ready, instanceId: next.serve.instance_id };
-      if (detectedAgentIdsAtBootRef.current.size > 0 && (active || ready)) {
+      if (detectedAgentIdsRef.current.size > 0 && (active || ready)) {
         await refreshCachedAgents();
       }
     } catch (caught) {
@@ -650,7 +733,7 @@ function StationApp() {
     const previous = viewHistoryRef.current.pop() ?? "home";
     if (
       previous.startsWith("agent:")
-      && hiddenAgentIds.has(previous.slice("agent:".length))
+      && !visibleAgentIds.has(previous.slice("agent:".length))
     ) {
       viewHistoryRef.current = [];
       setView("home");
@@ -773,7 +856,9 @@ function StationApp() {
           registry={visibleRegistry}
           agents={agents}
           homeSelected
+          scanBusy={scanBusy}
           onOpenHome={() => navigate("home")}
+          onRescan={() => void rescanAgents()}
           onOpenAgent={(id) => {
             navigate(`agent:${id}`);
             if (firstRunGuideOpen && activeFirstRunMicroStep === "agent-select") {
@@ -847,7 +932,9 @@ function StationApp() {
           agents={agents}
           selectedAgentId={selectedAgentId}
           homeSelected={false}
+          scanBusy={scanBusy}
           onOpenHome={() => navigate("home")}
+          onRescan={() => void rescanAgents()}
           onOpenAgent={(id) => {
             navigate(`agent:${id}`);
             if (firstRunGuideOpen && activeFirstRunMicroStep === "agent-select") {
@@ -952,13 +1039,13 @@ function StationApp() {
           settings={state.settings}
           serve={state.serve}
           registry={orderedRegistry}
-          hiddenAgentIds={hiddenAgentIds}
+          visibleAgentIds={visibleAgentIds}
           onAgentVisibilityChange={setAgentVisible}
           onOpenFirstRunGuide={() => {
             viewHistoryRef.current = [];
-            setView("home");
+            setView("overview");
             setFirstRunSetupStep(null);
-            setFirstRunMicroStep(null);
+            setFirstRunMicroStep("overview");
             setFirstRunGuideOpen(true);
           }}
           onSaved={showState}
@@ -1039,7 +1126,7 @@ function StationApp() {
       <FirstRunGuide
         open={firstRunGuideOpen}
         microStep={activeFirstRunMicroStep}
-        canSkipAgent={scanSucceeded && !agentDetected}
+        canSkipAgent={scanSucceeded && !scanBusy && !agentDetected}
         onBack={() => {
           if (activeFirstRunMicroStep === "provider-models") {
             setFirstRunMicroStep("provider-credential");
@@ -1058,7 +1145,12 @@ function StationApp() {
           }
         }}
         onTargetAction={() => {
-          if (activeFirstRunMicroStep === "provider-entry") {
+          if (activeFirstRunMicroStep === "overview") {
+            viewHistoryRef.current = [];
+            setView("home");
+            setFirstRunSetupStep(null);
+            setFirstRunMicroStep(null);
+          } else if (activeFirstRunMicroStep === "provider-entry") {
             setFirstRunSetupStep("provider");
             setFirstRunMicroStep("provider-choice");
           } else if (activeFirstRunMicroStep === "provider-credential") {

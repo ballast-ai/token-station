@@ -1,7 +1,10 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach, beforeEach } from "vitest";
-import { AGENT_VISIBILITY_STORAGE_KEY } from "../components/AgentVisibilityPreferences";
+import {
+  AGENT_VISIBILITY_STORAGE_KEY,
+  SHOWN_UNDETECTED_AGENT_IDS_STORAGE_KEY,
+} from "../components/AgentVisibilityPreferences";
 
 // Radix primitives use browser layout and pointer-capture APIs that jsdom does
 // not implement. Keep the public interaction tests browser-shaped.
@@ -40,8 +43,9 @@ HTMLElement.prototype.getBoundingClientRect = function getBoundingClientRectForT
 // App and LanguageProvider default-language suites clear this preference themselves.
 beforeEach(() => {
   window.localStorage.setItem("token-station-language", "zh-CN");
-  window.localStorage.setItem("token-station-first-run-guide", "spotlight-setup-v1");
+  window.localStorage.setItem("token-station-first-run-guide", "spotlight-setup-v2");
   window.localStorage.removeItem(AGENT_VISIBILITY_STORAGE_KEY);
+  window.localStorage.removeItem(SHOWN_UNDETECTED_AGENT_IDS_STORAGE_KEY);
 });
 
 afterEach(() => {

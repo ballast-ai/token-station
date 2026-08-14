@@ -14,14 +14,15 @@ use std::time::Duration;
 
 use serde_json::json;
 use token_station_conformance::{
-    AgentAdapter, AgentFamily, FixturePack, ProviderFamily, run_agent_suite, run_provider_suite,
+    AgentAdapter, AgentFamily, FixturePack, ProviderAdapter, ProviderFamily, run_agent_suite,
+    run_provider_suite,
 };
 use token_station_plugin_runtime::{
     AgentPlugin, LoadError, NoSecrets, PluginRuntime, ProviderPlugin, RuntimeLimits,
 };
 use token_station_protocol::{
-    AgentRequestEnvelope, ChatResponse, ErrorCode, ErrorEnvelope, Extensions, FinishReason,
-    HeaderDigest, Principal, ResponseFormat, StreamEvent, ToolChoice,
+    AgentRequestEnvelope, ChatRequest, ChatResponse, ErrorCode, ErrorEnvelope, Extensions,
+    FinishReason, HeaderDigest, Principal, ProviderConfig, ResponseFormat, StreamEvent, ToolChoice,
 };
 
 fn repo_root() -> &'static Path {
@@ -976,6 +977,88 @@ fn anthropic_output_config_effort_maps_to_reasoning_effort() {
         .normalize_inbound(&request(serde_json::json!("turbo")))
         .expect("normalizes");
     assert_eq!(unknown.extensions.get("reasoning_effort"), None);
+}
+
+#[test]
+fn anthropic_adaptive_thinking_normalizes_without_losing_compatibility_metadata() {
+    let plugin = AgentPlugin::load(&runtime(), anthropic_agent_package()).expect("loads clean");
+    let request = |kind: &str| {
+        envelope(
+            "anthropic-messages",
+            json!({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 256,
+                "messages": [{"role": "user", "content": "hi"}],
+                "thinking": {"type": kind},
+                "output_config": {"effort": "medium"}
+            }),
+        )
+    };
+
+    for kind in ["adaptive", "enabled"] {
+        let normalized = plugin
+            .normalize_inbound(&request(kind))
+            .expect("supported Anthropic thinking modes normalize");
+        assert_eq!(
+            normalized.extensions.get("anthropic_thinking"),
+            Some(&json!({"type": kind}))
+        );
+        assert_eq!(
+            normalized.extensions.get("reasoning_effort"),
+            Some(&json!("medium"))
+        );
+    }
+
+    let unknown = plugin
+        .normalize_inbound(&request("future-mode"))
+        .expect_err("unknown thinking modes still fail closed");
+    assert_eq!(unknown.code, ErrorCode::Capability);
+}
+
+#[test]
+fn anthropic_reasoning_effort_requires_an_explicit_provider_capability() {
+    let plugin =
+        ProviderPlugin::load(&runtime(), provider_package(), NoSecrets).expect("loads clean");
+    let request: ChatRequest = serde_json::from_value(json!({
+        "model": "deepseek-v4-flash",
+        "messages": [{"role": "user", "content": "hi"}],
+        "anthropic_thinking": {"type": "adaptive"},
+        "reasoning_effort": "medium"
+    }))
+    .expect("valid canonical request");
+    let config = |supported_parameters: serde_json::Value| -> ProviderConfig {
+        serde_json::from_value(json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.deepseek.example/v1",
+            "models": [{
+                "model": "deepseek-v4-flash",
+                "supported_parameters": supported_parameters
+            }]
+        }))
+        .expect("valid provider config")
+    };
+
+    let undeclared = plugin
+        .build_http_request(&request, &config(json!([])))
+        .expect("request builds");
+    assert!(
+        undeclared
+            .body
+            .as_ref()
+            .is_some_and(|body| body.get("reasoning_effort").is_none()),
+        "adaptive effort must be omitted when the model did not declare support"
+    );
+
+    let declared = plugin
+        .build_http_request(&request, &config(json!(["reasoning_effort"])))
+        .expect("request builds");
+    assert_eq!(
+        declared
+            .body
+            .as_ref()
+            .and_then(|body| body.get("reasoning_effort")),
+        Some(&json!("medium"))
+    );
 }
 
 #[test]

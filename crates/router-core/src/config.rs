@@ -99,9 +99,8 @@ pub struct RouterConfig {
     pub quota: QuotaConfig,
     /// The ordered accounts (upstream + model) that participate in quota-first
     /// rotation. Order is the operator's priority: it breaks exact quota ties
-    /// (earlier wins). When non-empty in quota-first mode, only these accounts
-    /// route, and only in this order; empty falls back to every host-supplied
-    /// candidate (the pre-selection behavior). Ignored in tiered mode.
+    /// (earlier wins). In quota-first mode, only these accounts route, and only
+    /// in this order; an empty list routes nothing. Ignored in tiered mode.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quota_accounts: Vec<UpstreamModel>,
 }
@@ -468,11 +467,12 @@ impl RouterConfig {
         }
 
         // Quota-first mode uses none of the tier machinery — pools, the default
-        // pool, rules, hints, the heuristic, ordered recovery. Its accounts are
-        // the candidates the host supplies at route time, ranked by quota, so a
+        // pool, rules, hints, the heuristic, ordered recovery. Its explicit
+        // accounts are matched against host candidates at route time, so a
         // quota-first config legitimately carries empty pools and an empty
-        // default pool. Skip the tiered validation entirely rather than force a
-        // dummy pool into existence.
+        // default pool. An empty account list remains structurally loadable for
+        // legacy configs, but route_quota_first fails it closed. Skip the tiered
+        // validation rather than force a dummy pool into existence.
         if self.routing_mode == RoutingMode::QuotaFirst {
             return Ok(());
         }

@@ -217,6 +217,11 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     zh: "另一项配置更新仍在进行。请稍等片刻，然后重试。",
   },
   {
+    matches: /quota_(?:accounts_required|account_incomplete)|额度优先.*(?:至少需要|缺少).*(?:供应商|模型)/i,
+    en: "A quota account is incomplete. Select both a provider and a model, then apply again.",
+    zh: "有一个额度账户尚未配置完整。请同时选择供应商和模型，然后重新应用。",
+  },
+  {
     matches: /a router with no pools can route nothing|没有设置路由池|no route pools?|routing.*not configured/i,
     en: "Routing is not configured yet. Select a provider and model for at least one route, then save before starting Token Station.",
     zh: "路由尚未配置。请至少为一个路由选择供应商和模型，保存后再启动 Token Station。",
@@ -260,6 +265,11 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     matches: /Agent .*model metadata refresh failed|Agent 模型元数据刷新失败/i,
     en: "The proxy is running, but Token Station could not refresh one managed Agent configuration. Open the Agent page, rescan, and repair that Agent before using its route.",
     zh: "代理已经运行，但一个已接管 Agent 的模型元数据刷新失败。请打开 Agent 页面重新扫描，并修复该 Agent 后再使用它的路由。",
+  },
+  {
+    matches: /\bVERSION_PROBE_TIMEOUT\b/i,
+    en: "Agent version detection timed out. Rescan; if it still fails, check that the Agent installation is complete.",
+    zh: "Agent 版本检测超时。请重新扫描；如果仍然失败，请检查该 Agent 的安装是否完整。",
   },
   {
     matches: /timed? ?out|timeout|超时/i,
@@ -312,7 +322,12 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     zh: "配置在打开后又发生了变化。请重新加载最新版本，确认后再次应用。",
   },
   {
-    matches: /permission denied|read-only file|failed to (?:read|write)|无法(?:读取|写入)|权限/i,
+    matches: /Key 无效，或当前账号没有读取模型目录的权限|model catalog.*(?:401|403)|模型目录.*(?:401|403)/i,
+    en: "The API key is invalid, or this account cannot read the provider's model catalog.",
+    zh: "API Key 无效，或当前账号没有读取该供应商模型目录的权限。",
+  },
+  {
+    matches: /permission denied|read-only file|权限/i,
     en: "Token Station could not access the required local file. Check file permissions and available disk space, then try again.",
     zh: "Token Station 无法访问所需的本地文件。请检查文件权限和磁盘空间，然后重试。",
   },
@@ -340,6 +355,11 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     matches: /quota|usage|pricing|catalog|额度|用量|价格目录|模型目录/i,
     en: "The latest provider data is unavailable. Keep the current settings and try refreshing again later.",
     zh: "暂时无法获取最新的供应商数据。请保留当前设置，稍后再次刷新。",
+  },
+  {
+    matches: /failed to (?:read|write)|无法(?:读取|写入)/i,
+    en: "Token Station could not access the required local file. Check file permissions and available disk space, then try again.",
+    zh: "Token Station 无法访问所需的本地文件。请检查文件权限和磁盘空间，然后重试。",
   },
   {
     matches: /暂无公开发布版本|no public release (?:is )?available/i,

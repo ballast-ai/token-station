@@ -18,6 +18,14 @@ import { useLocalizedCopy } from "../components/LanguageProvider";
 import { englishProviderName } from "../providerCopy";
 import { humanizeAppError } from "../errors";
 import { useErrorToast } from "../components/ErrorToast";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select";
 
 export type ProviderCatalogMode = "regular" | "free";
 
@@ -72,6 +80,21 @@ function searchableFree(preset: FreeProviderPresetView): string {
     ...preset.tags,
     ...preset.models.flatMap((model) => [model.id, model.label]),
   ].join(" ").toLocaleLowerCase();
+}
+
+function matchesCatalogSearch(searchableText: string, query: string): boolean {
+  const terms = query
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+  if (terms.length === 0) return true;
+
+  const normalizedText = searchableText
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ");
+  return terms.every((term) => normalizedText.includes(term));
 }
 
 export default function AddProviderPage({
@@ -155,7 +178,7 @@ export default function AddProviderPage({
         && regularRegion(item) !== regularFilters.region
       ) return false;
       if (!query) return true;
-      return searchableRegular(item).includes(query);
+      return matchesCatalogSearch(searchableRegular(item), query);
     });
   }, [copy, regularFilters]);
 
@@ -164,7 +187,7 @@ export default function AddProviderPage({
     return freePresets.filter((item) => {
       if (freeFilters.offer !== "all" && item.offer_kind !== freeFilters.offer) return false;
       if (freeFilters.region !== "all" && item.region !== freeFilters.region) return false;
-      return !query || searchableFree(item).includes(query);
+      return matchesCatalogSearch(searchableFree(item), query);
     });
   }, [freeFilters, freePresets]);
 
@@ -701,23 +724,38 @@ export default function AddProviderPage({
                 )}
                 <details className="credential-source-advanced">
                   <summary>{copy("Advanced credential source", "高级凭据来源")}</summary>
-                  <label className="field-label">
-                    {copy("Credential source", "凭据来源")}
-                    <select
-                      aria-label={copy("Credential source", "凭据来源")}
+                  <div className="field-label">
+                    <span>{copy("Credential source", "凭据来源")}</span>
+                    <Select
                       value={credentialSource}
                       disabled={disabled}
-                      onChange={(event) => {
-                        setCredentialSource(event.target.value as typeof credentialSource);
+                      onValueChange={(value) => {
+                        setCredentialSource(value as typeof credentialSource);
                         setKey("");
                         setCredentialReference("");
                       }}
                     >
-                      <option value="store">{copy("Local store (default)", "本地存储（默认）")}</option>
-                      <option value="env">{copy("Environment variable", "环境变量")}</option>
-                      <option value="file">{copy("Credential file", "凭据文件")}</option>
-                    </select>
-                  </label>
+                      <SelectTrigger
+                        className="w-full"
+                        aria-label={copy("Credential source", "凭据来源")}
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent position="popper" align="start">
+                        <SelectGroup>
+                          <SelectItem value="store">
+                            {copy("Local store (default)", "本地存储（默认）")}
+                          </SelectItem>
+                          <SelectItem value="env">
+                            {copy("Environment variable", "环境变量")}
+                          </SelectItem>
+                          <SelectItem value="file">
+                            {copy("Credential file", "凭据文件")}
+                          </SelectItem>
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  </div>
                   {credentialSource !== "store" && (
                     <label className="field-label">
                       {credentialSource === "env"

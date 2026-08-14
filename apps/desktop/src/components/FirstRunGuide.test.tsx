@@ -1,8 +1,13 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { expect, it, vi } from "vitest";
-import FirstRunGuide from "./FirstRunGuide";
+import FirstRunGuide, {
+  FIRST_RUN_GUIDE_STORAGE_KEY,
+  FIRST_RUN_GUIDE_VERSION,
+  FirstRunCompletionDialog,
+  shouldOpenFirstRunGuide,
+} from "./FirstRunGuide";
 import { LanguageProvider } from "./LanguageProvider";
 import TierRouteEditor from "./TierRouteEditor";
 
@@ -19,6 +24,119 @@ function rect(top: number, left: number, width: number, height: number): DOMRect
     toJSON: () => ({}),
   };
 }
+
+it("升级教程版本，使只看过旧版的用户看到新增概览", () => {
+  const storage = new Map([[FIRST_RUN_GUIDE_STORAGE_KEY, "spotlight-setup-v1"]]);
+  expect(shouldOpenFirstRunGuide({ getItem: (key) => storage.get(key) ?? null })).toBe(true);
+  storage.set(FIRST_RUN_GUIDE_STORAGE_KEY, FIRST_RUN_GUIDE_VERSION);
+  expect(shouldOpenFirstRunGuide({ getItem: (key) => storage.get(key) ?? null })).toBe(false);
+});
+
+it("从真实概览开始，并在教程内说明之后从哪里重看", async () => {
+  const onTargetAction = vi.fn();
+  const getBoundingClientRect = vi
+    .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+    .mockImplementation(function getBoundingClientRectMock(this: HTMLElement) {
+      if (this.getAttribute("data-onboarding-target") === "overview") {
+        return rect(64, 24, 960, 640);
+      }
+      return rect(0, 0, 0, 0);
+    });
+
+  try {
+    render(
+      <LanguageProvider>
+        <main data-onboarding-target="overview">概览真实内容</main>
+        <FirstRunGuide
+          open
+          microStep="overview"
+          canSkipAgent={false}
+          onTargetAction={onTargetAction}
+          onBack={() => {}}
+          onSkipAgent={() => {}}
+          onPause={() => {}}
+          onDismiss={() => {}}
+        />
+      </LanguageProvider>,
+    );
+
+    const coachmark = await screen.findByRole("dialog", { name: "先看概览" });
+    expect(coachmark).toHaveTextContent("代理状态、当前路由、请求与成本");
+    expect(coachmark).toHaveTextContent("设置 → 关于 → 重新查看新手引导");
+    expect(screen.getByText("概览真实内容")).toHaveAttribute(
+      "data-onboarding-active",
+      "true",
+    );
+    expect(document.querySelector(".first-run-spotlight-hole-blocker")).not.toBeNull();
+    const user = userEvent.setup();
+    await user.tab();
+    expect(within(coachmark).getByRole("button", { name: "稍后继续" })).toHaveFocus();
+    await user.click(within(coachmark).getByRole("button", { name: "开始配置" }));
+    expect(onTargetAction).toHaveBeenCalledOnce();
+  } finally {
+    getBoundingClientRect.mockRestore();
+  }
+});
+
+it("在两种完成状态下都说明教程重看路径", () => {
+  const view = render(
+    <LanguageProvider>
+      <FirstRunCompletionDialog open agentSkipped={false} onFinish={() => {}} />
+    </LanguageProvider>,
+  );
+
+  expect(screen.getByRole("dialog", { name: "首次设置完成" }))
+    .toHaveTextContent("设置 → 关于 → 重新查看新手引导");
+
+  view.rerender(
+    <LanguageProvider>
+      <FirstRunCompletionDialog open agentSkipped onFinish={() => {}} />
+    </LanguageProvider>,
+  );
+  expect(screen.getByRole("dialog", { name: "基础设置完成" }))
+    .toHaveTextContent("设置 → 关于 → 重新查看新手引导");
+});
+
+it("aligns the compact add-provider spotlight outline to the button bounds", async () => {
+  const getBoundingClientRect = vi
+    .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+    .mockImplementation(function getBoundingClientRectMock(this: HTMLElement) {
+      if (this.getAttribute("data-onboarding-target") === "add-provider") {
+        return rect(40, 120, 176, 28);
+      }
+      return rect(0, 0, 0, 0);
+    });
+
+  try {
+    render(
+      <LanguageProvider>
+        <button data-onboarding-target="add-provider" type="button">添加供应商</button>
+        <FirstRunGuide
+          open
+          microStep="provider-entry"
+          canSkipAgent={false}
+          onTargetAction={() => {}}
+          onBack={() => {}}
+          onSkipAgent={() => {}}
+          onPause={() => {}}
+          onDismiss={() => {}}
+        />
+      </LanguageProvider>,
+    );
+
+    await screen.findByRole("dialog", { name: "添加你的第一个供应商" });
+    const outline = document.querySelector<HTMLElement>(".first-run-spotlight-outline");
+    expect(outline).not.toBeNull();
+    expect(outline).toHaveStyle({
+      top: "40px",
+      left: "120px",
+      width: "176px",
+      height: "28px",
+    });
+  } finally {
+    getBoundingClientRect.mockRestore();
+  }
+});
 
 it("目标尚未挂载时只显示等待状态，挂载后恢复真实操作", async () => {
   const onTargetAction = vi.fn();

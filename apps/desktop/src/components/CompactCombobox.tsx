@@ -19,6 +19,8 @@ export interface CompactComboboxOption {
 
 interface CompactComboboxProps {
   ariaLabel: string;
+  ariaDescribedBy?: string;
+  ariaInvalid?: boolean;
   value: string;
   options: CompactComboboxOption[];
   disabled?: boolean;
@@ -32,6 +34,8 @@ const INITIAL_OPTION_LIMIT = 100;
 
 export default function CompactCombobox({
   ariaLabel,
+  ariaDescribedBy,
+  ariaInvalid = false,
   value,
   options,
   disabled = false,
@@ -176,9 +180,11 @@ export default function CompactCombobox({
         type="button"
         role="combobox"
         aria-label={ariaLabel}
+        aria-describedby={ariaDescribedBy}
         aria-expanded={open}
         aria-controls={listboxId}
         aria-haspopup="listbox"
+        aria-invalid={ariaInvalid || undefined}
         disabled={disabled}
         title={selected?.label}
         onClick={() => {

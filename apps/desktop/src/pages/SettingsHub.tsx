@@ -150,16 +150,16 @@ function AppearancePanel() {
 
 function AgentVisibilityPanel({
   registry,
-  hiddenAgentIds,
+  visibleAgentIds,
   onVisibilityChange,
 }: {
   registry: AgentUiMetadataView[];
-  hiddenAgentIds: ReadonlySet<string>;
+  visibleAgentIds: ReadonlySet<string>;
   onVisibilityChange: (agentId: string, visible: boolean) => void;
 }) {
   const { t } = useLanguage();
   const visibleCount = registry.reduce(
-    (count, metadata) => count + Number(!hiddenAgentIds.has(metadata.agent_id)),
+    (count, metadata) => count + Number(visibleAgentIds.has(metadata.agent_id)),
     0,
   );
 
@@ -188,7 +188,7 @@ function AgentVisibilityPanel({
           aria-label={t("agentVisibility.groupLabel")}
         >
           {registry.map((metadata) => {
-            const visible = !hiddenAgentIds.has(metadata.agent_id);
+            const visible = visibleAgentIds.has(metadata.agent_id);
             return (
               <div
                 key={metadata.agent_id}
@@ -267,7 +267,7 @@ interface SettingsHubProps {
   settings: SettingsView;
   serve: ServeView;
   registry: AgentUiMetadataView[];
-  hiddenAgentIds: ReadonlySet<string>;
+  visibleAgentIds: ReadonlySet<string>;
   onAgentVisibilityChange: (agentId: string, visible: boolean) => void;
   onOpenFirstRunGuide: () => void;
   onSaved: (state: StateView) => void;
@@ -277,7 +277,7 @@ function SettingsHubContent({
   settings,
   serve,
   registry,
-  hiddenAgentIds,
+  visibleAgentIds,
   onAgentVisibilityChange,
   onOpenFirstRunGuide,
   onSaved,
@@ -321,7 +321,7 @@ function SettingsHubContent({
         {section === "agent-visibility" && (
           <AgentVisibilityPanel
             registry={registry}
-            hiddenAgentIds={hiddenAgentIds}
+            visibleAgentIds={visibleAgentIds}
             onVisibilityChange={onAgentVisibilityChange}
           />
         )}

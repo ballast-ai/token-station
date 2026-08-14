@@ -3,6 +3,7 @@ import {
   getRequestReceipts,
   type ReceiptCostKind,
   type ReceiptPageView,
+  type RequestPlaintextView,
   type ReceiptView,
 } from "../api";
 import { ReceiptDetails } from "./RecentReceipts";
@@ -62,6 +63,452 @@ function unknownCostReason(
   if (receipt.usage == null) return missingUsage;
   const model = receipt.routing?.model || receipt.requested_model;
   return missingPrice(model);
+}
+
+type SemanticKind =
+  | "system"
+  | "developer"
+  | "user"
+  | "assistant"
+  | "thinking"
+  | "tool-call"
+  | "tool-result"
+  | "tools"
+  | "unrecognized"
+  | "stream-end";
+
+interface SemanticBlock {
+  kind: SemanticKind;
+  content: string;
+  detail?: string;
+}
+
+type JsonObject = Record<string, unknown>;
+
+function isObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function prettyValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function formatJsonSource(source: string): string {
+  try {
+    return JSON.stringify(JSON.parse(source), null, 2);
+  } catch {
+    return source;
+  }
+}
+
+function textParts(value: unknown): Array<{ kind: "text" | "thinking" | "tool-call" | "tool-result"; content: string; detail?: string }> {
+  if (typeof value === "string") return value ? [{ kind: "text", content: value }] : [];
+  if (Array.isArray(value)) return value.flatMap(textParts);
+  if (!isObject(value)) return value == null ? [] : [{ kind: "text", content: String(value) }];
+
+  const type = typeof value.type === "string" ? value.type : "";
+  if (type === "thinking" || type === "reasoning") {
+    const content = value.thinking ?? value.text ?? value.content;
+    return content == null ? [] : [{ kind: "thinking", content: prettyValue(content) }];
+  }
+  if (type === "tool_use" || type === "function_call") {
+    return [{
+      kind: "tool-call",
+      detail: typeof value.name === "string" ? value.name : undefined,
+      content: prettyValue(value.input ?? value.arguments ?? {}),
+    }];
+  }
+  if (type === "tool_result" || type === "function_call_output") {
+    return [{
+      kind: "tool-result",
+      detail: typeof value.tool_use_id === "string" ? value.tool_use_id : undefined,
+      content: prettyValue(value.content ?? value.output ?? ""),
+    }];
+  }
+  const text = value.text ?? value.input_text ?? value.output_text;
+  if (typeof text === "string") return text ? [{ kind: "text", content: text }] : [];
+  if (value.content != null) return textParts(value.content);
+  return [];
+}
+
+function splitEmbeddedSystemText(content: string): SemanticBlock[] | null {
+  const pattern = /<system-reminder>\s*([\s\S]*?)\s*<\/system-reminder>/gi;
+  const blocks: SemanticBlock[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(content)) !== null) {
+    const userText = content.slice(cursor, match.index).trim();
+    if (userText) blocks.push({ kind: "user", content: userText });
+    if (match[1].trim()) blocks.push({ kind: "system", content: match[1].trim() });
+    cursor = match.index + match[0].length;
+  }
+  if (!blocks.length) return null;
+  const trailing = content.slice(cursor).trim();
+  if (trailing) blocks.push({ kind: "user", content: trailing });
+  return blocks;
+}
+
+function parseInputSemantics(body: string): SemanticBlock[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return [{ kind: "unrecognized", content: body }];
+  }
+  if (!isObject(parsed)) return [{ kind: "unrecognized", content: prettyValue(parsed) }];
+
+  const blocks: SemanticBlock[] = [];
+  for (const value of [parsed.system, parsed.instructions]) {
+    for (const part of textParts(value)) {
+      blocks.push({ kind: part.kind === "thinking" ? "thinking" : "system", content: part.content });
+    }
+  }
+  const messages = Array.isArray(parsed.messages)
+    ? parsed.messages
+    : parsed.input != null ? (Array.isArray(parsed.input) ? parsed.input : [{ role: "user", content: parsed.input }]) : [];
+  for (const message of messages) {
+    if (!isObject(message)) continue;
+    const role = typeof message.role === "string" ? message.role : "user";
+    for (const part of textParts(message.content ?? message)) {
+      if (role === "user" && part.kind === "text") {
+        const embedded = splitEmbeddedSystemText(part.content);
+        if (embedded) {
+          blocks.push(...embedded);
+          continue;
+        }
+      }
+      const kind: SemanticKind = part.kind === "thinking"
+        ? "thinking"
+        : part.kind === "tool-call"
+          ? "tool-call"
+          : part.kind === "tool-result"
+            ? "tool-result"
+            : role === "system"
+              ? "system"
+              : role === "developer"
+                ? "developer"
+                : role === "assistant"
+                  ? "assistant"
+                  : role === "tool"
+                    ? "tool-result"
+                    : "user";
+      blocks.push({ kind, content: part.content, detail: part.detail });
+    }
+  }
+  if (Array.isArray(parsed.tools) && parsed.tools.length) {
+    const tools = parsed.tools.map((tool) => {
+      if (!isObject(tool)) return prettyValue(tool);
+      const definition = isObject(tool.function) ? tool.function : tool;
+      const name = typeof definition.name === "string" ? definition.name : "未命名工具";
+      const description = typeof definition.description === "string" ? definition.description : "";
+      return description ? `${name} — ${description}` : name;
+    });
+    blocks.push({ kind: "tools", detail: String(parsed.tools.length), content: tools.join("\n") });
+  }
+  return blocks.length ? blocks : [{ kind: "unrecognized", content: prettyValue(parsed) }];
+}
+
+function ssePayloads(body: string): { found: boolean; values: unknown[] } {
+  const values: unknown[] = [];
+  let found = false;
+  for (const frame of body.replace(/\r\n?/g, "\n").split(/\n{2,}/)) {
+    const dataLines = frame.split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /, ""));
+    if (!dataLines.length) continue;
+    found = true;
+    const payload = dataLines.join("\n");
+    if (payload === "[DONE]") {
+      values.push(payload);
+      continue;
+    }
+    try {
+      values.push(JSON.parse(payload));
+    } catch {
+      values.push(payload);
+    }
+  }
+  return { found, values };
+}
+
+function parseOutputSemantics(body: string): SemanticBlock[] {
+  const stream = ssePayloads(body);
+  let values = stream.values;
+  if (!stream.found) {
+    try {
+      values = [JSON.parse(body)];
+    } catch {
+      return [{ kind: "unrecognized", content: body }];
+    }
+  }
+
+  let thinking = "";
+  let output = "";
+  const tools = new Map<string, { name?: string; arguments: string }>();
+  const unrecognized: string[] = [];
+  let sawEnd = false;
+
+  const appendParts = (parts: ReturnType<typeof textParts>) => {
+    for (const part of parts) {
+      if (part.kind === "thinking") thinking += part.content;
+      else if (part.kind === "text") output += part.content;
+      else if (part.kind === "tool-call") {
+        const key = `content-${tools.size}`;
+        tools.set(key, { name: part.detail, arguments: part.content });
+      } else if (part.kind === "tool-result") {
+        unrecognized.push(part.content);
+      }
+    }
+  };
+
+  for (const value of values) {
+    if (value === "[DONE]") {
+      sawEnd = true;
+      continue;
+    }
+    if (!isObject(value)) {
+      unrecognized.push(prettyValue(value));
+      continue;
+    }
+    let recognized = false;
+    const index = typeof value.index === "number" ? String(value.index) : "0";
+    if (isObject(value.content_block) && value.content_block.type === "tool_use") {
+      const initialInput = value.content_block.input;
+      tools.set(index, {
+        name: typeof value.content_block.name === "string" ? value.content_block.name : undefined,
+        arguments: isObject(initialInput) && Object.keys(initialInput).length === 0
+          ? ""
+          : prettyValue(initialInput ?? ""),
+      });
+      recognized = true;
+    }
+    if (isObject(value.delta)) {
+      const delta = value.delta;
+      if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
+        thinking += delta.thinking;
+        recognized = true;
+      }
+      if ((delta.type === "text_delta" || delta.type === "output_text_delta") && typeof delta.text === "string") {
+        output += delta.text;
+        recognized = true;
+      }
+      if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+        const tool = tools.get(index) ?? { arguments: "" };
+        tool.arguments += delta.partial_json;
+        tools.set(index, tool);
+        recognized = true;
+      }
+    }
+    if (Array.isArray(value.choices)) {
+      for (const choice of value.choices) {
+        if (!isObject(choice)) continue;
+        const message = isObject(choice.delta) ? choice.delta : isObject(choice.message) ? choice.message : null;
+        if (!message) continue;
+        if (typeof message.content === "string") output += message.content;
+        else appendParts(textParts(message.content));
+        const reasoning = message.reasoning_content ?? message.reasoning;
+        if (typeof reasoning === "string") thinking += reasoning;
+        if (Array.isArray(message.tool_calls)) {
+          for (const call of message.tool_calls) {
+            if (!isObject(call)) continue;
+            const callIndex = typeof call.index === "number" ? String(call.index) : String(tools.size);
+            const fn = isObject(call.function) ? call.function : call;
+            const tool = tools.get(callIndex) ?? { arguments: "" };
+            if (typeof fn.name === "string") tool.name = fn.name;
+            if (typeof fn.arguments === "string") tool.arguments += fn.arguments;
+            tools.set(callIndex, tool);
+          }
+        }
+        recognized = true;
+      }
+    }
+    if (typeof value.type === "string" && value.type.startsWith("response.")) {
+      if (typeof value.delta === "string") {
+        if (value.type.includes("reasoning")) thinking += value.delta;
+        else if (value.type.includes("output_text")) output += value.delta;
+        else if (value.type.includes("function_call_arguments")) {
+          const key = typeof value.item_id === "string" ? value.item_id : index;
+          const tool = tools.get(key) ?? { arguments: "" };
+          tool.arguments += value.delta;
+          tools.set(key, tool);
+        }
+        recognized = true;
+      }
+    }
+    if (Array.isArray(value.content)) {
+      appendParts(textParts(value.content));
+      recognized = true;
+    }
+    if (Array.isArray(value.output)) {
+      for (const item of value.output) {
+        if (!isObject(item)) continue;
+        if (item.type === "function_call") {
+          const key = typeof item.call_id === "string" ? item.call_id : String(tools.size);
+          tools.set(key, {
+            name: typeof item.name === "string" ? item.name : undefined,
+            arguments: prettyValue(item.arguments ?? ""),
+          });
+        } else appendParts(textParts(item.content ?? item));
+      }
+      recognized = true;
+    }
+    const controlEvent = typeof value.type === "string" && /^(message_|content_block_)/.test(value.type);
+    if (!recognized && !controlEvent) unrecognized.push(prettyValue(value));
+  }
+
+  const blocks: SemanticBlock[] = [];
+  if (thinking) blocks.push({ kind: "thinking", content: thinking });
+  if (output) blocks.push({ kind: "assistant", content: output });
+  for (const tool of tools.values()) {
+    let args = tool.arguments;
+    try {
+      args = JSON.stringify(JSON.parse(args), null, 2);
+    } catch {
+      // Partial tool arguments remain visible exactly as received.
+    }
+    blocks.push({ kind: "tool-call", detail: tool.name, content: args || "{}" });
+  }
+  for (const content of unrecognized) blocks.push({ kind: "unrecognized", content });
+  if (sawEnd) blocks.push({ kind: "stream-end", content: "[DONE]" });
+  return blocks.length ? blocks : [{ kind: "unrecognized", content: prettyValue(values) }];
+}
+
+function RequestPlaintext({
+  plaintext,
+  error,
+}: {
+  plaintext?: RequestPlaintextView;
+  error?: string;
+}) {
+  const { copy } = useLocalizedCopy();
+  const [viewMode, setViewMode] = useState<"parsed" | "source">("parsed");
+  if (error) {
+    return (
+      <section className="request-plaintext" aria-label={copy("Plaintext input and output", "明文输入输出")}>
+        <div className="request-plaintext-state error-text" role="alert">
+          {copy(`Failed to read plaintext: ${error}`, `明文读取失败：${error}`)}
+        </div>
+      </section>
+    );
+  }
+  if (!plaintext) {
+    return (
+      <section className="request-plaintext" aria-label={copy("Plaintext input and output", "明文输入输出")}>
+        <div className="request-plaintext-state" role="status">
+          {copy(
+            "No plaintext is available for this request. It may predate this feature, have failed to write, or have been removed by retention.",
+            "此请求没有可用明文。它可能早于本功能、写入失败或已被保留策略清理。",
+          )}
+        </div>
+      </section>
+    );
+  }
+  const panels = [
+    {
+      key: "input",
+      label: copy("Plaintext input", "明文输入"),
+      body: plaintext.input,
+      truncated: plaintext.input_truncated,
+      blocks: parseInputSemantics(plaintext.input),
+    },
+    {
+      key: "output",
+      label: copy("Plaintext output", "明文输出"),
+      body: plaintext.output,
+      truncated: plaintext.output_truncated,
+      blocks: parseOutputSemantics(plaintext.output),
+    },
+  ];
+  const semanticLabel = (block: SemanticBlock) => {
+    switch (block.kind) {
+      case "system": return copy("System prompt", "系统提示词");
+      case "developer": return copy("Developer prompt", "开发者提示词");
+      case "user": return copy("User input", "用户输入");
+      case "assistant": return copy("Assistant output", "助手输出");
+      case "thinking": return copy("Assistant thinking", "助手思考");
+      case "tool-call": return block.detail
+        ? copy(`Tool call · ${block.detail}`, `工具调用 · ${block.detail}`)
+        : copy("Tool call", "工具调用");
+      case "tool-result": return block.detail
+        ? copy(`Tool result · ${block.detail}`, `工具返回 · ${block.detail}`)
+        : copy("Tool result", "工具返回");
+      case "tools": return copy(`Tool definitions · ${block.detail} total`, `工具定义 · ${block.detail} 个`);
+      case "stream-end": return copy("Stream completed", "流式结束");
+      default: return copy("Unrecognized content", "未识别内容");
+    }
+  };
+  return (
+    <section className="request-plaintext" aria-label={copy("Plaintext input and output", "明文输入输出")}>
+      <header>
+        <div className="request-plaintext-title">
+          <strong>{copy("Plaintext input and output", "明文输入输出")}</strong>
+          <span>{copy("Retained for 7 days by default", "默认保留 7 天")}</span>
+        </div>
+        <div
+          className="request-plaintext-mode"
+          role="group"
+          aria-label={copy("Body display mode", "正文显示方式")}
+        >
+          <button
+            type="button"
+            aria-pressed={viewMode === "parsed"}
+            onClick={() => setViewMode("parsed")}
+          >
+            {copy("Parsed", "解析视图")}
+          </button>
+          <button
+            type="button"
+            aria-pressed={viewMode === "source"}
+            onClick={() => setViewMode("source")}
+          >
+            {copy("Source", "原文")}
+          </button>
+        </div>
+      </header>
+      <div className="request-plaintext-grid">
+        {panels.map((panel) => (
+          <div className="request-plaintext-panel" key={panel.key}>
+            <div className="request-plaintext-label">
+              <span>{panel.key.toUpperCase()}</span>
+              {panel.truncated && <em>{copy("Truncated", "已截断")}</em>}
+            </div>
+            {viewMode === "parsed" ? (
+              <div
+                className="request-plaintext-scroll request-semantic-view"
+                role="region"
+                aria-label={panel.label}
+                tabIndex={0}
+              >
+                {panel.body ? panel.blocks.map((block, index) => (
+                  <section className={`request-semantic-block ${block.kind}`} key={`${block.kind}-${index}`}>
+                    <div>{semanticLabel(block)}</div>
+                    <pre>{block.content}</pre>
+                  </section>
+                )) : <span className="request-semantic-empty">{copy("Empty body", "空正文")}</span>}
+                {panel.truncated && (
+                  <div className="request-semantic-truncated">{copy("Body truncated", "正文已截断")}</div>
+                )}
+              </div>
+            ) : (
+              <pre
+                className="request-plaintext-scroll"
+                role="region"
+                aria-label={panel.label}
+                tabIndex={0}
+              >
+                {panel.body ? formatJsonSource(panel.body) : copy("Empty body", "空正文")}
+              </pre>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 function CostState({
@@ -159,8 +606,8 @@ export default function UsageRequestLog({
         <div>
           <h2>{copy("Request log", "请求日志")}</h2>
           <p>{copy(
-            "Complete local receipts · Request and response bodies are never stored",
-            "完整本地 Receipt · 不含请求或响应正文",
+            "Complete local receipts · Plaintext bodies are retained separately for 7 days by default",
+            "完整本地 Receipt · 正文明文独立存储，默认保留 7 天",
           )}</p>
         </div>
         <div className="usage-log-tools">
@@ -264,6 +711,10 @@ export default function UsageRequestLog({
                     )}
                     <CostState receipt={receipt} />
                     <ReceiptDetails receipt={receipt} />
+                    <RequestPlaintext
+                      plaintext={data.plaintext_by_request_id?.[receipt.request_id]}
+                      error={data.plaintext_errors_by_request_id?.[receipt.request_id]}
+                    />
                   </div>
                 </details>
               );

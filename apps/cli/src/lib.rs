@@ -19,6 +19,7 @@
 pub mod admin;
 pub mod admission;
 pub mod backup;
+pub mod bodylog;
 pub mod budget;
 pub mod cancel;
 pub mod config;

@@ -70,8 +70,9 @@ WorkBuddy 的 `tokenstation-auto` 已经能把请求送入 Token Station。当�
   热更新保留用户模型。
 - `apps/desktop/src-tauri/src/agent_integration/commands.rs` 与 `src/lib.rs`：保证路由切换完成后
   刷新 WorkBuddy 元数据，并把刷新失败返回给调用方。
-- `plugins/official/provider-openai-compatible/src/lib.rs`：在同一个上游用量块中先释放延迟的
-  `Done`，再输出 `Usage`，保证下游 OpenAI SSE 的最终用量位于结束块之后。
+- `crates/protocol/src/stream.rs`、`plugins/official/provider-openai-compatible/src/lib.rs` 与
+  `plugins/official/agent-openai/src/lib.rs`：将完成原因、最终用量和流终止拆为三个语义事件，
+  保证下游 OpenAI SSE 固定输出 `finish_reason`、`usage`、`[DONE]`。
 
 ## 6. 公开测试边界
 
@@ -82,7 +83,7 @@ WorkBuddy 的 `tokenstation-auto` 已经能把请求送入 Token Station。当�
 4. WorkBuddy 接入和路由刷新都写入 `maxInputTokens` 与 `maxOutputTokens`。
 5. WorkBuddy 刷新保留用户自建模型，只替换 `tokenstation-auto`。
 6. WorkBuddy 多模型路由采用候选模型中最小的已验证限制。
-7. OpenAI 兼容流的结束顺序固定为 `Done`、`Usage`，渲染后的 SSE 顺序固定为
+7. OpenAI 兼容流的结束顺序固定为 `Finish`、`Usage`、`Done`，渲染后的 SSE 顺序固定为
    `finish_reason`、`usage`、`[DONE]`。
 8. 目标测试通过后先安装实际 App，并在 WorkBuddy 中确认真实对话的已用量大于零。全量
    测试留到真实行为通过后执行。
@@ -137,8 +138,10 @@ WorkBuddy 的 `tokenstation-auto` 已经能把请求送入 Token Station。当�
 - WorkBuddy 5.3.8 已在不重启的情况下使用 `Token Station Auto` 完成真实对话。上下文面板
   已显示 `29.9K / 257.6K`，用量分子恢复正常。磁盘配置保持
   `maxInputTokens=257550`、`maxOutputTokens=32768`。
-- 本轮按实际行为优先原则只运行了上述定向测试和安装脚本自带门禁，没有重新运行额外的
-  全量测试。
+- 合并阻断修复后已补跑 `cargo test --workspace`、桌面 Rust 全量测试、五个官方插件独立
+  测试、前端 411 项全量测试、production build、fmt、Clippy 与 rustdoc；全部通过。
+- `scripts/install-local-desktop.sh` 已再次完成最终 release 构建、产物审计、签名校验、安装
+  和启动。已安装 App 的 Cursor 页面扫描完成后正确显示现有接入状态与恢复入口。
 
 - Quick Tunnel 地址解析已经拒绝 `api.trycloudflare.com`。失效状态现在可以直接重新接入，
   同时保留恢复官方配置入口。Cursor 退出后已通过安装版本重建隧道并自动启动；用户确认
