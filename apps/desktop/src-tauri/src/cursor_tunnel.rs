@@ -411,7 +411,7 @@ fn cursor_safe_storage_password() -> Result<Zeroizing<String>, String> {
 
 #[cfg(any(target_os = "macos", test))]
 fn cursor_keychain_access_error() -> String {
-    "cursor_keychain_access_required: 首次接入需要 macOS 钥匙串授权。请在系统对话框中输入本机登录密码，并选择“始终允许”后重试。".to_string()
+    "cursor_keychain_access_required: 首次接入需要 macOS 钥匙串授权。请在系统对话框中输入本机登录密码，并选择“允许一次”后重试。".to_string()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1243,7 +1243,8 @@ mod tests {
     fn cursor_keychain_error_explains_authorization_without_leaking_command_output() {
         let error = cursor_keychain_access_error();
         assert!(error.starts_with("cursor_keychain_access_required:"));
-        assert!(error.contains("始终允许"));
+        assert!(error.contains("允许一次"));
+        assert!(!error.contains("始终允许"));
         assert!(!error.contains("security:"));
     }
 

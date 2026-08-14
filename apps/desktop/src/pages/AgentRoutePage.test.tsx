@@ -665,7 +665,8 @@ describe("AgentRoutePage multi-install admission", () => {
     const toastViewport = screen.getByTestId("error-toast-viewport");
     const alert = await within(toastViewport).findByRole("alert");
     expect(alert).toHaveTextContent("首次接入需要 macOS 钥匙串授权");
-    expect(alert).toHaveTextContent("始终允许");
+    expect(alert).toHaveTextContent("允许一次");
+    expect(alert).not.toHaveTextContent("始终允许");
     expect(alert).not.toHaveTextContent("操作未能完成");
   });
 
