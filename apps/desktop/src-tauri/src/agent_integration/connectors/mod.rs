@@ -49,10 +49,21 @@ pub struct AgentModelMetadata {
     pub cost: Option<AgentModelCost>,
 }
 
+pub const OPENCODE_SAFE_DEFAULT_OUTPUT_TOKENS: u32 = 8_192;
+
 impl AgentModelMetadata {
     pub fn safe_limits(&self) -> Option<(u32, u32)> {
         (self.context > 0 && self.output > 0 && self.output < self.context)
             .then_some((self.context, self.output))
+    }
+
+    pub fn opencode_limits(&self) -> Option<(u32, u32)> {
+        let output = if self.output == 0 {
+            OPENCODE_SAFE_DEFAULT_OUTPUT_TOKENS
+        } else {
+            self.output
+        };
+        (self.context > 0 && output < self.context).then_some((self.context, output))
     }
 }
 
