@@ -22,7 +22,7 @@ const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
 const getStatsMock = vi.mocked(getStats);
 const FIRST_RUN_GUIDE_STORAGE_KEY = "token-station-first-run-guide";
-const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v3";
+const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v4";
 
 const emptyRoute: AgentRouteView = {
   mode: "inherit",
@@ -258,10 +258,10 @@ async function openAgentVisibility(user: ReturnType<typeof userEvent.setup>) {
 }
 
 async function continueFromOverview(user: ReturnType<typeof userEvent.setup>) {
-  const overviewCoachmark = await screen.findByRole("dialog", { name: "先看概览" });
+  const overviewCoachmark = await screen.findByRole("dialog", { name: "从这里随时回到概览" });
   expect(screen.getByRole("heading", { name: "概览" })).toBeInTheDocument();
-  expect(overviewCoachmark).toHaveTextContent("设置 → 关于 → 重新查看新手引导");
-  await user.click(within(overviewCoachmark).getByRole("button", { name: "开始配置" }));
+  expect(overviewCoachmark).toHaveTextContent("点击左上角 Token Station 标志都能切换到概览页");
+  await user.click(within(overviewCoachmark).getByRole("button", { name: "知道了，开始配置" }));
 }
 
 beforeEach(() => {
@@ -292,12 +292,14 @@ it("teaches overview first, then spotlights the real add-provider button", async
 
   render(<App />);
 
-  const overviewCoachmark = await screen.findByRole("dialog", { name: "先看概览" });
+  const overviewCoachmark = await screen.findByRole("dialog", { name: "从这里随时回到概览" });
   expect(screen.getByRole("heading", { name: "概览" })).toBeInTheDocument();
-  expect(screen.getByRole("region", { name: "概览页" }))
+  expect(screen.getByRole("button", { name: "Token Station 概览" }))
     .toHaveAttribute("data-onboarding-active", "true");
-  expect(overviewCoachmark).toHaveTextContent("设置 → 关于 → 重新查看新手引导");
-  await user.click(within(overviewCoachmark).getByRole("button", { name: "开始配置" }));
+  expect(screen.getByRole("region", { name: "概览页" }))
+    .not.toHaveAttribute("data-onboarding-active");
+  expect(overviewCoachmark).toHaveTextContent("点击左上角 Token Station 标志都能切换到概览页");
+  await user.click(within(overviewCoachmark).getByRole("button", { name: "知道了，开始配置" }));
 
   const coachmark = await screen.findByRole("dialog", { name: "添加你的第一个供应商" });
   expect(document.body).toHaveAttribute("data-first-run-guide-active", "true");
@@ -911,7 +913,7 @@ it("persists a skipped guide and does not show it on the next App session", asyn
   const user = userEvent.setup();
   const firstSession = render(<App />);
 
-  await screen.findByRole("dialog", { name: "先看概览" });
+  await screen.findByRole("dialog", { name: "从这里随时回到概览" });
   await user.click(screen.getByRole("button", { name: "不再提示" }));
 
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(
@@ -932,7 +934,7 @@ it("reopens the guide from the About page without clearing the dismissed version
   await user.click(screen.getByRole("button", { name: /关于/ }));
   await user.click(screen.getByRole("button", { name: "重新查看新手引导" }));
 
-  expect(await screen.findByRole("dialog", { name: "先看概览" })).toBeInTheDocument();
+  expect(await screen.findByRole("dialog", { name: "从这里随时回到概览" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "概览" })).toBeInTheDocument();
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(
     FIRST_RUN_GUIDE_VERSION,
@@ -944,7 +946,7 @@ it("treats Escape as a pause, restores focus, and offers setup next session", as
   const user = userEvent.setup();
   const firstSession = render(<App />);
 
-  await screen.findByRole("dialog", { name: "先看概览" });
+  await screen.findByRole("dialog", { name: "从这里随时回到概览" });
   await user.keyboard("{Escape}");
 
   expect(screen.queryByRole("dialog")).toBeNull();
@@ -956,7 +958,7 @@ it("treats Escape as a pause, restores focus, and offers setup next session", as
 
   firstSession.unmount();
   render(<App />);
-  expect(await screen.findByRole("dialog", { name: "先看概览" }))
+  expect(await screen.findByRole("dialog", { name: "从这里随时回到概览" }))
     .toBeInTheDocument();
 });
 
