@@ -1366,7 +1366,7 @@ fn redirects_to_other_hosts_loopback_and_metadata_never_receive_a_second_hop() {
         assert!(body.contains("upstream_unavailable"), "{body}");
         assert_eq!(source.hits(), 1, "the authorized first hop is called once");
         assert_eq!(canary.hits(), 0, "{label} target must not be contacted");
-        settle();
+        let _receipt = last_row(&proxy.data_dir);
         let db = rusqlite::Connection::open(proxy.data_dir.join("metrics.sqlite"))
             .expect("receipt db opens");
         let http_status: Option<u16> = db

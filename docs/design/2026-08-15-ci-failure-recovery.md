@@ -61,7 +61,7 @@ The frontend production build passes.
 The shared frontend IPC test fixture preserves the latest runtime returned by state-changing IPC and supplies it only when a test-local mock rejects the background `get_runtime_state` command as unexpected.
 Runtime polling tests that return a state or a deliberate failure keep their explicit behavior.
 The stopped-runtime cache test now keeps its polled runtime in sync with the emitted lifecycle event.
-The proxy metrics helper retries `QueryReturnedNoRows` for up to five seconds, replacing the Windows-sensitive assumption that a 300 ms delay always completes persistence.
+The proxy metrics helper retries `QueryReturnedNoRows` for up to five seconds, replacing the Windows-sensitive assumption that a 300 ms delay always completes persistence; redirect-attempt assertions wait for the parent receipt transaction before reading child rows.
 The Cursor restore test drops its final SQLite connection before temporary-directory cleanup, matching Windows file-lock semantics.
 Desktop Clippy passes with warnings denied.
 The desktop Rust suite passes 365 tests, with 2 explicit ignores.
