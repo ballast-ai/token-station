@@ -24,16 +24,21 @@ const getStatsMock = vi.mocked(getStats);
 type InvokeMockImplementation = Parameters<typeof invokeMock.mockImplementation>[0];
 
 function mockInvokeImplementation(implementation: InvokeMockImplementation) {
+  let fallbackRuntime = serveFixture();
   invokeMock.mockImplementation(async (...args) => {
     try {
-      return await implementation(...args);
+      const result = await implementation(...args);
+      if (result && typeof result === "object" && "serve" in result) {
+        fallbackRuntime = (result as StateView).serve;
+      }
+      return result;
     } catch (error) {
       if (
         args[0] === "get_runtime_state"
         && error instanceof Error
         && error.message.startsWith("unexpected IPC command:")
       ) {
-        return serveFixture() as never;
+        return fallbackRuntime as never;
       }
       throw error;
     }
@@ -1008,11 +1013,12 @@ describe("desktop station navigation", () => {
     const startupScan = new Promise<AgentView[]>((resolve) => {
       resolveScan = resolve;
     });
+    let runtime = serveFixture();
     mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return startupScan;
-      if (command === "get_runtime_state") return serveFixture();
+      if (command === "get_runtime_state") return runtime;
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
@@ -1031,13 +1037,16 @@ describe("desktop station navigation", () => {
     expect(screen.queryByTestId("agent-runtime-connection")).toBeNull();
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
     await waitFor(() => expect(emitServe).toBeTypeOf("function"));
-    act(() => emitServe?.(serveFixture({
-      phase: "running",
-      app_runtime: "running",
-      listener_reachable: true,
-      running_revision: 0,
-      instance_id: "startup-instance",
-    })));
+    act(() => {
+      runtime = serveFixture({
+        phase: "running",
+        app_runtime: "running",
+        listener_reachable: true,
+        running_revision: 0,
+        instance_id: "startup-instance",
+      });
+      emitServe?.(runtime);
+    });
     expect(await screen.findByText("代理运行中")).toBeInTheDocument();
 
     await act(async () => resolveScan([scannedClaude]));
@@ -2517,7 +2526,7 @@ describe("desktop station navigation", () => {
     expect(await screen.findByRole("heading", { name: "OpenCode" })).toBeInTheDocument();
     expect(within(screen.getByTestId("error-toast-viewport")).getByText("供应商已添加"))
       .toBeInTheDocument();
-  });
+  }, 15_000);
 
   it("uses one provider catalog for regular and free APIs and restores the selected mode", async () => {
     const user = userEvent.setup();

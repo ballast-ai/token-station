@@ -23,6 +23,7 @@ Windows Clippy must compile test targets without unused imports.
 Coverage tests must exclude dependency preparation from bounded lifecycle timing.
 Frontend tests must wait for asynchronous UI updates and allow a loaded CI runner to finish valid interactions.
 Test-local IPC mocks must also tolerate the app's background runtime poll unless a test explicitly exercises poll failure behavior.
+Proxy tests must wait on the asynchronous metrics write condition instead of assuming a fixed delay is sufficient on Windows.
 
 ## Accessibility and responsive behavior
 
@@ -44,7 +45,7 @@ CI passes when all five failed jobs have a deterministic local counterpart and n
 ## Implementation locations and release requirements
 
 Update `scripts/check-rust-format.sh` and add `docs/security/rustsec-exceptions.json`.
-Update test-only code in `apps/desktop/src/App.test.tsx`, `apps/desktop/src-tauri/src/cursor_tunnel.rs`, and `apps/desktop/src-tauri/src/lib.rs`.
+Update test-only code in `apps/desktop/src/App.test.tsx`, `apps/desktop/src-tauri/src/cursor_tunnel.rs`, `apps/desktop/src-tauri/src/lib.rs`, and `apps/cli/tests/proxy.rs`.
 
 No local App installation is required because this fix changes only tests, CI metadata, and security evidence.
 No release action is authorized by this record.
@@ -56,9 +57,10 @@ Implementation is complete.
 The Rust format gate and RustSec ledger gate pass.
 The frontend suite passes 413 tests with 86.18 percent line coverage.
 The frontend production build passes.
-The shared frontend IPC test fixture supplies a stopped runtime only when a test-local mock rejects the background `get_runtime_state` command as unexpected.
+The shared frontend IPC test fixture preserves the latest runtime returned by state-changing IPC and supplies it only when a test-local mock rejects the background `get_runtime_state` command as unexpected.
 Runtime polling tests that return a state or a deliberate failure keep their explicit behavior.
 The stopped-runtime cache test now keeps its polled runtime in sync with the emitted lifecycle event.
+The proxy metrics helper retries `QueryReturnedNoRows` for up to five seconds, replacing the Windows-sensitive assumption that a 300 ms delay always completes persistence.
 Desktop Clippy passes with warnings denied.
 The desktop Rust suite passes 365 tests, with 2 explicit ignores.
 The exact desktop `cargo llvm-cov` job command passes and writes the LCOV report.

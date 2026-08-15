@@ -790,19 +790,27 @@ fn start_proxy_with_missing_store_secret(upstream: &MockUpstream) -> Proxy {
 /// One row out of the metrics store, as (column -> debug-rendered value).
 fn last_row(data_dir: &Path) -> std::collections::BTreeMap<String, String> {
     let db = rusqlite::Connection::open(data_dir.join("metrics.sqlite")).expect("db opens");
-    db.query_row(
-        "SELECT * FROM requests ORDER BY id DESC LIMIT 1",
-        [],
-        |row| {
-            let mut out = std::collections::BTreeMap::new();
-            for (index, name) in row.as_ref().column_names().iter().enumerate() {
-                let value: rusqlite::types::Value = row.get(index)?;
-                out.insert((*name).to_owned(), format!("{value:?}"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match db.query_row(
+            "SELECT * FROM requests ORDER BY id DESC LIMIT 1",
+            [],
+            |row| {
+                let mut out = std::collections::BTreeMap::new();
+                for (index, name) in row.as_ref().column_names().iter().enumerate() {
+                    let value: rusqlite::types::Value = row.get(index)?;
+                    out.insert((*name).to_owned(), format!("{value:?}"));
+                }
+                Ok(out)
+            },
+        ) {
+            Ok(row) => return row,
+            Err(rusqlite::Error::QueryReturnedNoRows) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            Ok(out)
-        },
-    )
-    .expect("a row exists")
+            Err(error) => panic!("a row exists: {error}"),
+        }
+    }
 }
 
 fn request_count(data_dir: &Path) -> i64 {
