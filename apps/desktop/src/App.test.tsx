@@ -21,6 +21,25 @@ vi.mock("./api", async (importOriginal) => {
 const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
 const getStatsMock = vi.mocked(getStats);
+type InvokeMockImplementation = Parameters<typeof invokeMock.mockImplementation>[0];
+
+function mockInvokeImplementation(implementation: InvokeMockImplementation) {
+  invokeMock.mockImplementation(async (...args) => {
+    try {
+      return await implementation(...args);
+    } catch (error) {
+      if (
+        args[0] === "get_runtime_state"
+        && error instanceof Error
+        && error.message.startsWith("unexpected IPC command:")
+      ) {
+        return serveFixture() as never;
+      }
+      throw error;
+    }
+  });
+}
+
 const FIRST_RUN_GUIDE_STORAGE_KEY = "token-station-first-run-guide";
 const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v4";
 
@@ -274,7 +293,7 @@ beforeEach(() => {
   getStatsMock.mockReset();
   getStatsMock.mockResolvedValue(statsFixture);
   const initial = stateFixture();
-  invokeMock.mockImplementation(async (command) => {
+  mockInvokeImplementation(async (command) => {
     if (command === "get_state") return initial;
     // App polls runtime state every 500 ms. Keep the default mock complete so
     // slower coverage runners do not turn an unrelated test into a poll error.
@@ -340,7 +359,7 @@ it("walks through provider configuration and advances only after a real save", a
     config_dirty: true,
   });
   let saveAttempts = 0;
-  invokeMock.mockImplementation(async (command) => {
+  mockInvokeImplementation(async (command) => {
     if (command === "get_state") return stateFixture();
     if (command === "list_agent_registry") return registryFixture;
     if (command === "scan_agents") return [];
@@ -443,7 +462,7 @@ it("spotlights routing controls and advances only when the requested revision is
     config_dirty: false,
     serve: serveFixture({ phase: "starting" }),
   });
-  invokeMock.mockImplementation(async (command) => {
+  mockInvokeImplementation(async (command) => {
     if (command === "get_state") return initial;
     if (command === "list_agent_registry") return registryFixture;
     if (command === "scan_agents") return [];
@@ -544,7 +563,7 @@ it("pins each route teaching target and restores main scrolling when paused", as
     saved_revision: 1,
     config_dirty: false,
   });
-  invokeMock.mockImplementation(async (command) => {
+  mockInvokeImplementation(async (command) => {
     if (command === "get_state") return initial;
     if (command === "list_agent_registry") return registryFixture;
     if (command === "scan_agents") return [];
@@ -631,7 +650,7 @@ it("does not treat a running but unconfigured route as onboarding-complete", asy
       running_revision: 0,
     }),
   });
-  invokeMock.mockImplementation(async (command) => {
+  mockInvokeImplementation(async (command) => {
     if (command === "get_state") return unconfigured;
     if (command === "list_agent_registry") return registryFixture;
     if (command === "scan_agents") return [];
@@ -673,7 +692,7 @@ it("启动未扫到 Agent 时可直接完成基础设置并回到主页", async 
       running_revision: 1,
     }),
   });
-  invokeMock.mockImplementation(async (command) => {
+  mockInvokeImplementation(async (command) => {
     if (command === "get_state") return ready;
     if (command === "list_agent_registry") return registryFixture;
     if (command === "scan_agents") return [];
@@ -735,7 +754,7 @@ it("一键接入后只通过缓存状态刷新确认 CONNECTED", async () => {
   connectedAgent.installations[0].managed = true;
   connectedAgent.installations[0].connected = true;
   connectedAgent.installations[0].compatibility.status = "CONNECTED";
-  invokeMock.mockImplementation(async (command) => {
+  mockInvokeImplementation(async (command) => {
     if (command === "get_state") return ready;
     if (command === "list_agent_registry") return registryFixture;
     if (command === "scan_agents") return [scannedClaude];
@@ -821,7 +840,7 @@ it("requires an exact installation choice before connecting a multi-installation
   secondInstall.compatibility.installation_path = "/opt/claude-preview";
   multiInstall.installations.push(secondInstall);
   multiInstall.status = "MULTIPLE_INSTALLATIONS";
-  invokeMock.mockImplementation(async (command) => {
+  mockInvokeImplementation(async (command) => {
     if (command === "get_state") return ready;
     if (command === "list_agent_registry") return registryFixture;
     if (command === "scan_agents") return [multiInstall];
@@ -888,7 +907,7 @@ it("shows an already-complete summary without asking for repeated setup", async 
   connectedAgent.installations[0].managed = true;
   connectedAgent.installations[0].connected = true;
   connectedAgent.installations[0].compatibility.status = "CONNECTED";
-  invokeMock.mockImplementation(async (command) => {
+  mockInvokeImplementation(async (command) => {
     if (command === "get_state") return ready;
     if (command === "list_agent_registry") return registryFixture;
     if (command === "scan_agents") return [connectedAgent];
@@ -964,7 +983,7 @@ it("treats Escape as a pause, restores focus, and offers setup next session", as
 
 it("不显示仅存在于注册表但启动扫描未发现安装的 Agent", async () => {
   const user = userEvent.setup();
-  invokeMock.mockImplementation(async (command) => {
+  mockInvokeImplementation(async (command) => {
     if (command === "get_state") return stateFixture();
     if (command === "list_agent_registry") return registryWithVirtualSupportedAgent;
     if (command === "scan_agents") return [];
@@ -989,7 +1008,7 @@ describe("desktop station navigation", () => {
     const startupScan = new Promise<AgentView[]>((resolve) => {
       resolveScan = resolve;
     });
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return startupScan;
@@ -1062,7 +1081,7 @@ describe("desktop station navigation", () => {
       running_revision: 9,
       instance_id: "runtime-latest",
     });
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return pendingState;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [scannedClaude];
@@ -1104,7 +1123,7 @@ describe("desktop station navigation", () => {
 
   it("启动扫描失败时保留主页壳并提供明确的重新进入操作", async () => {
     window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") throw new Error("agent discovery failed");
@@ -1124,7 +1143,7 @@ describe("desktop station navigation", () => {
   });
 
   it("启动扫描成功为空时进入正常主页而不是失败状态", async () => {
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
@@ -1173,7 +1192,7 @@ describe("desktop station navigation", () => {
 
   it("概览的单独路由快照展示已应用目标而不是三档", async () => {
     const user = userEvent.setup();
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture({
         routing_mode: "direct",
         direct_target: { upstream: "team-openai", model: "gpt-5.6" },
@@ -1196,7 +1215,7 @@ describe("desktop station navigation", () => {
 
   it("概览的单独路由目标缺失时明确提示待选择", async () => {
     const user = userEvent.setup();
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture({
         routing_mode: "direct",
         direct_target: null,
@@ -1215,7 +1234,7 @@ describe("desktop station navigation", () => {
 
   it("概览的额度优先快照展示账户数与实际目标", async () => {
     const user = userEvent.setup();
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture({
         routing_mode: "quota_first",
         quota_accounts: [
@@ -1240,7 +1259,7 @@ describe("desktop station navigation", () => {
 
   it("将操作错误放入左下可关闭 toast，不替换当前主页", async () => {
     const user = userEvent.setup();
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
@@ -1329,7 +1348,7 @@ describe("desktop station navigation", () => {
   it("changes the selected Agent routing strategy from the detail workspace", async () => {
     const user = userEvent.setup();
     const initial = stateFixture();
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return initial;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [scannedClaude];
@@ -1355,7 +1374,7 @@ describe("desktop station navigation", () => {
   it("puts the real global routing-mode switch below the routing title", async () => {
     const user = userEvent.setup();
     const initial = stateFixture();
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return initial;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return detectedAgentsFixture;
@@ -1395,7 +1414,7 @@ describe("desktop station navigation", () => {
       config_dirty: false,
       serve: serveFixture({ phase: "starting" }),
     });
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return dirty;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
@@ -1447,7 +1466,7 @@ describe("desktop station navigation", () => {
       config_dirty: false,
       serve: serveFixture({ phase: "starting" }),
     });
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return dirty;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
@@ -1493,7 +1512,7 @@ describe("desktop station navigation", () => {
       config_dirty: false,
       serve: serveFixture({ phase: "starting" }),
     });
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return dirty;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
@@ -1532,7 +1551,7 @@ describe("desktop station navigation", () => {
       config_dirty: false,
       serve: serveFixture({ phase: "starting" }),
     });
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return dirty;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
@@ -1572,7 +1591,7 @@ describe("desktop station navigation", () => {
       emitServe = (serve) => handler({ payload: serve } as Parameters<typeof handler>[0]);
       return () => undefined;
     });
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") {
         return stateFixture({
           saved_revision: 1,
@@ -1611,7 +1630,7 @@ describe("desktop station navigation", () => {
         instance_id: "runtime-a",
       }),
     });
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return connected;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
@@ -1637,7 +1656,7 @@ describe("desktop station navigation", () => {
   });
 
   it("运行态轮询连续失败时用稳定错误弹窗去重", async () => {
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
@@ -1666,7 +1685,7 @@ describe("desktop station navigation", () => {
         instance_id: "runtime-a",
       }),
     });
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return notReady;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [scannedClaude];
@@ -1702,7 +1721,7 @@ describe("desktop station navigation", () => {
         instance_id: "runtime-old",
       }),
     });
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return oldRuntime;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [scannedClaude];
@@ -1750,12 +1769,13 @@ describe("desktop station navigation", () => {
     connected.installations[0].connected = true;
     connected.installations[0].compatibility.status = "CONNECTED";
     const disconnected = structuredClone(scannedClaude);
-    invokeMock.mockImplementation(async (command) => {
+    let runtime = running.serve;
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return running;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [connected];
       if (command === "get_cached_agent_views") return [disconnected];
-      if (command === "get_runtime_state") return running.serve;
+      if (command === "get_runtime_state") return runtime;
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
@@ -1763,7 +1783,10 @@ describe("desktop station navigation", () => {
     const agentButton = await screen.findByRole("button", { name: "Claude Code" });
     expect(agentButton).toHaveAttribute("title", "Claude Code · 已接入");
 
-    act(() => emitServe?.(serveFixture()));
+    act(() => {
+      runtime = serveFixture();
+      emitServe?.(runtime);
+    });
     await waitFor(() => expect(agentButton).toHaveAttribute("title", "Claude Code · 可接入"));
     expect(invokeMock.mock.calls.filter(([command]) => command === "get_cached_agent_views"))
       .toHaveLength(1);
@@ -1781,7 +1804,7 @@ describe("desktop station navigation", () => {
     const pendingRescan = new Promise<AgentView[]>((resolve) => {
       resolveRescan = resolve;
     });
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return initial;
       if (command === "get_runtime_state") return initial.serve;
       if (command === "list_agent_registry") return registryFixture;
@@ -1865,7 +1888,7 @@ describe("desktop station navigation", () => {
 
   it("defaults undetected Agents off and lets the user show their honest empty state", async () => {
     const user = userEvent.setup();
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [scannedClaude];
@@ -1907,7 +1930,7 @@ describe("desktop station navigation", () => {
       SHOWN_UNDETECTED_AGENT_IDS_STORAGE_KEY,
       JSON.stringify(["gemini-cli"]),
     );
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [scannedClaude];
@@ -1937,7 +1960,7 @@ describe("desktop station navigation", () => {
     ];
     detectedVirtual.installations[0].discovery.agent_id = "virtual-agent";
     detectedVirtual.installations[0].compatibility.agent_id = "virtual-agent";
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryWithVirtualSupportedAgent;
       if (command === "scan_agents") return [...detectedAgentsFixture, detectedVirtual];
@@ -2105,7 +2128,7 @@ describe("desktop station navigation", () => {
 
   it("keeps usage independent and exposes only user-facing categories inside Settings", async () => {
     const user = userEvent.setup();
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
@@ -2203,7 +2226,7 @@ describe("desktop station navigation", () => {
     const running = stateFixture({
       serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test-secret" }),
     });
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return detectedAgentsFixture;
@@ -2241,7 +2264,7 @@ describe("desktop station navigation", () => {
     const starting = stateFixture({
       serve: serveFixture({ phase: "starting" }),
     });
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
@@ -2271,7 +2294,7 @@ describe("desktop station navigation", () => {
 
   it("applies the home route to all Agents with a dedicated command", async () => {
     const user = userEvent.setup();
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (["get_state", "apply_home_route_to_all_agents"].includes(command)) return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
@@ -2289,7 +2312,7 @@ describe("desktop station navigation", () => {
     const user = userEvent.setup();
     const provider = { name: "deepseek", provider: "openai-compatible", base_url: "https://example.test/v1", models: ["deepseek-v4-pro"], has_auth: true };
     let current = stateFixture({ providers: [provider] });
-    invokeMock.mockImplementation(async (command, args) => {
+    mockInvokeImplementation(async (command, args) => {
       if (command === "get_state") return current;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return detectedAgentsFixture;
@@ -2317,7 +2340,7 @@ describe("desktop station navigation", () => {
   it("returns home without promoting or discarding an incomplete Agent editor", async () => {
     const user = userEvent.setup();
     let current = stateFixture();
-    invokeMock.mockImplementation(async (command, args) => {
+    mockInvokeImplementation(async (command, args) => {
       if (command === "get_state") return current;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return detectedAgentsFixture;
@@ -2369,7 +2392,7 @@ describe("desktop station navigation", () => {
       low: { upstream: "deepseek", model: "deepseek-chat" },
     };
     let current = stateFixture({ providers: [provider], tiers: configuredTiers });
-    invokeMock.mockImplementation(async (command, args) => {
+    mockInvokeImplementation(async (command, args) => {
       if (command === "get_state") return current;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return detectedAgentsFixture;
@@ -2412,7 +2435,7 @@ describe("desktop station navigation", () => {
   it("在主页公开管理区删除未挂载策略组", async () => {
     const user = userEvent.setup();
     let current = stateFixture({ profiles: ["已停用"] });
-    invokeMock.mockImplementation(async (command, args) => {
+    mockInvokeImplementation(async (command, args) => {
       if (command === "get_state") return current;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
@@ -2438,7 +2461,7 @@ describe("desktop station navigation", () => {
     const user = userEvent.setup();
     let finishSave: ((value: ReturnType<typeof stateFixture>) => void) | undefined;
     const current = stateFixture();
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return current;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
@@ -2468,7 +2491,7 @@ describe("desktop station navigation", () => {
 
   it("opens Add Provider as a separate page and returns to the source page after saving", async () => {
     const user = userEvent.setup();
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (["get_state", "add_provider_with_credential"].includes(command)) return stateFixture();
       if (command === "preview_provider_endpoints") {
         return {
@@ -2498,7 +2521,7 @@ describe("desktop station navigation", () => {
 
   it("uses one provider catalog for regular and free APIs and restores the selected mode", async () => {
     const user = userEvent.setup();
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [];
@@ -2570,7 +2593,7 @@ describe("desktop station navigation", () => {
       }),
     });
     let scans = 0;
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stopped;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") {
@@ -2620,7 +2643,7 @@ describe("desktop station navigation", () => {
     const stopped = stateFixture();
     const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
     let scans = 0;
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stopped;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") { scans += 1; return [scannedClaude]; }
@@ -2681,7 +2704,7 @@ describe("desktop station navigation", () => {
     const user = userEvent.setup();
     const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
     const admitted = defaultAdmittedClaude();
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return running;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [admitted];
@@ -2716,7 +2739,7 @@ describe("desktop station navigation", () => {
     connected.installations[0].connected = true;
     connected.installations[0].compatibility.status = "CONNECTED";
     connected.status = "CONNECTED";
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [
@@ -2774,7 +2797,7 @@ describe("desktop station navigation", () => {
     const detectedCodex = detectedAgentsFixture.find((agent) => agent.metadata.agent_id === "codex");
     expect(detectedCodex).toBeDefined();
 
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return running;
       if (command === "get_runtime_state") return running.serve;
       if (command === "list_agent_registry") return registryFixture;
@@ -2819,7 +2842,7 @@ describe("desktop station navigation", () => {
       installations: [scannedClaude.installations[0], secondInstallation],
     };
     const running = stateFixture({ serve: serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true, running_revision: 1, instance_id: "instance", virtual_key: "vk-test" }) });
-    invokeMock.mockImplementation(async (command) => {
+    mockInvokeImplementation(async (command) => {
       if (command === "get_state") return running;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return [multipleClaude];

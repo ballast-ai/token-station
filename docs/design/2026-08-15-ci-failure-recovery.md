@@ -22,6 +22,7 @@ The RustSec ledger gate must validate a committed, time-bounded exception record
 Windows Clippy must compile test targets without unused imports.
 Coverage tests must exclude dependency preparation from bounded lifecycle timing.
 Frontend tests must wait for asynchronous UI updates and allow a loaded CI runner to finish valid interactions.
+Test-local IPC mocks must also tolerate the app's background runtime poll unless a test explicitly exercises poll failure behavior.
 
 ## Accessibility and responsive behavior
 
@@ -55,6 +56,9 @@ Implementation is complete.
 The Rust format gate and RustSec ledger gate pass.
 The frontend suite passes 413 tests with 86.18 percent line coverage.
 The frontend production build passes.
+The shared frontend IPC test fixture supplies a stopped runtime only when a test-local mock rejects the background `get_runtime_state` command as unexpected.
+Runtime polling tests that return a state or a deliberate failure keep their explicit behavior.
+The stopped-runtime cache test now keeps its polled runtime in sync with the emitted lifecycle event.
 Desktop Clippy passes with warnings denied.
 The desktop Rust suite passes 365 tests, with 2 explicit ignores.
 The exact desktop `cargo llvm-cov` job command passes and writes the LCOV report.
