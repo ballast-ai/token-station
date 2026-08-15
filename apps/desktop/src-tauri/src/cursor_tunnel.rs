@@ -1047,11 +1047,12 @@ mod tests {
     use super::decrypt_cursor_secret_for_test;
     #[cfg(target_os = "macos")]
     use super::encrypt_cursor_secret;
+    #[cfg(unix)]
+    use super::start_cloudflared;
     use super::{
         cursor_database_matches_managed_state, cursor_request_allowed, parse_trycloudflare_origin,
-        preserve_record_after_failed_restore, start_cloudflared, update_cursor_database,
-        write_backup_file, CursorManagedRecord, CursorSettingsBackup, CURSOR_APPLICATION_USER_KEY,
-        CURSOR_MODEL,
+        preserve_record_after_failed_restore, update_cursor_database, write_backup_file,
+        CursorManagedRecord, CursorSettingsBackup, CURSOR_APPLICATION_USER_KEY, CURSOR_MODEL,
     };
     use rusqlite::Connection;
     use serde_json::json;

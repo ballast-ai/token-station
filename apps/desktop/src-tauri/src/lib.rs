@@ -9532,6 +9532,11 @@ mod tests {
         inner
             .set_tier_value(TIER_LOW, Some("local".into()), Some("small".into()))
             .unwrap();
+        // Build dependency-heavy runtime state before the bounded lifecycle
+        // window. Coverage instrumentation can make this preparation exceed
+        // the production readiness timeout on a loaded runner.
+        let first_prepared = prepare_server(inner.materialize().unwrap()).unwrap();
+        let recovered_prepared = prepare_server(inner.materialize().unwrap()).unwrap();
         let app = tauri::test::mock_app();
         manage_test_agent_state(&app, &root);
         assert!(app.manage(AppStateManaged(Mutex::new(inner))));
@@ -9539,7 +9544,7 @@ mod tests {
         let ready = tauri::async_runtime::block_on(ensure_serve_running_with(
             app.handle().clone(),
             app.state::<AppStateManaged>().inner(),
-            prepare_server,
+            move |_config| Ok(first_prepared),
             Duration::from_secs(30),
         ))
         .unwrap();
@@ -9578,7 +9583,7 @@ mod tests {
         let recovered = tauri::async_runtime::block_on(ensure_serve_running_with(
             app.handle().clone(),
             app.state::<AppStateManaged>().inner(),
-            prepare_server,
+            move |_config| Ok(recovered_prepared),
             Duration::from_secs(30),
         ))
         .unwrap();

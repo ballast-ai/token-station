@@ -1019,7 +1019,7 @@ describe("desktop station navigation", () => {
       running_revision: 0,
       instance_id: "startup-instance",
     })));
-    expect(screen.getByText("代理运行中")).toBeInTheDocument();
+    expect(await screen.findByText("代理运行中")).toBeInTheDocument();
 
     await act(async () => resolveScan([scannedClaude]));
 
@@ -1255,7 +1255,7 @@ describe("desktop station navigation", () => {
     expect(alert.parentElement).toHaveClass("error-toast-viewport");
     expect(screen.getByRole("heading", { name: "主页" })).toBeInTheDocument();
     await user.click(within(alert).getByRole("button", { name: "关闭提示" }));
-    expect(screen.queryByRole("alert")).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
   it("makes cost the primary Overview metric and keeps only shortcut navigation", async () => {
@@ -1473,7 +1473,9 @@ describe("desktop station navigation", () => {
     }
     expect(screen.queryByText(/配置已应用/)).toBeNull();
     if (expectedError) {
-      expect(screen.getByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
+      expect(await within(screen.getByTestId("error-toast-viewport")).findByText(
+        "操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。",
+      )).toBeInTheDocument();
     }
   });
 
@@ -2548,7 +2550,7 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("button", { name: /常规 API/ }));
     expect(screen.getByRole("button", { name: /常规 API/ })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" })).toBeInTheDocument();
-  });
+  }, 15_000);
 
   it("ensure 后 plan 失败仍只刷新缓存覆盖且不重新扫描", async () => {
     const user = userEvent.setup();

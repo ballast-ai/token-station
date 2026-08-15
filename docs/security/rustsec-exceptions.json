@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "exceptions": [
+    {
+      "id": "RUSTSEC-2024-0429",
+      "package": "glib",
+      "locked_version": "0.18.5",
+      "category": "unsound",
+      "dependency_path": "token-station-desktop -> tauri 2.11.5 -> gtk 0.18.2 -> glib 0.18.5",
+      "affected_api": [
+        "glib::VariantStrIter::next",
+        "glib::VariantStrIter::nth",
+        "glib::VariantStrIter::last",
+        "glib::VariantStrIter::next_back",
+        "glib::VariantStrIter::nth_back"
+      ],
+      "exposure_assessment": "Token Station does not call VariantStrIter directly. The crate is a transitive Linux desktop dependency, so indirect use remains possible.",
+      "platform_scope": "Linux desktop GTK and WebKit dependency graph. The dependency is not selected for macOS or Windows targets.",
+      "justification": "Tauri currently selects the GTK 0.18 dependency family. Keep this exception narrow and time-bounded until that graph moves to glib 0.20 or later.",
+      "owner": "@actly",
+      "approved_by": "LB623 in commit f1f939a",
+      "approved_at": "2026-07-20",
+      "expires_at": "2026-09-30",
+      "upstream_tracking": [
+        "https://github.com/rustsec/advisory-db/blob/69f93e1d081d8b6fbee010e48f0b5e0d13661415/crates/glib/RUSTSEC-2024-0429.md",
+        "https://github.com/gtk-rs/gtk-rs-core/pull/1343"
+      ],
+      "remediation_trigger": "Remove the exception when the Linux desktop dependency graph selects glib 0.20.0 or later.",
+      "review_evidence": [
+        "Commit f1f939a added the advisory ignore, the validation script, and @actly CODEOWNERS coverage.",
+        "cargo tree --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --target all -i glib@0.18.5",
+        "rg VariantStrIter apps/desktop/src-tauri/src"
+      ]
+    }
+  ]
+}
