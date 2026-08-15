@@ -1344,6 +1344,7 @@ mod tests {
             .unwrap();
         assert_eq!(restored_application_user, original_application_user);
         assert_eq!(restored_key, original_key);
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 

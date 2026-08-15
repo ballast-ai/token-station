@@ -24,6 +24,7 @@ Coverage tests must exclude dependency preparation from bounded lifecycle timing
 Frontend tests must wait for asynchronous UI updates and allow a loaded CI runner to finish valid interactions.
 Test-local IPC mocks must also tolerate the app's background runtime poll unless a test explicitly exercises poll failure behavior.
 Proxy tests must wait on the asynchronous metrics write condition instead of assuming a fixed delay is sufficient on Windows.
+Cursor database tests must close SQLite handles before deleting their temporary directory on Windows.
 
 ## Accessibility and responsive behavior
 
@@ -61,6 +62,7 @@ The shared frontend IPC test fixture preserves the latest runtime returned by st
 Runtime polling tests that return a state or a deliberate failure keep their explicit behavior.
 The stopped-runtime cache test now keeps its polled runtime in sync with the emitted lifecycle event.
 The proxy metrics helper retries `QueryReturnedNoRows` for up to five seconds, replacing the Windows-sensitive assumption that a 300 ms delay always completes persistence.
+The Cursor restore test drops its final SQLite connection before temporary-directory cleanup, matching Windows file-lock semantics.
 Desktop Clippy passes with warnings denied.
 The desktop Rust suite passes 365 tests, with 2 explicit ignores.
 The exact desktop `cargo llvm-cov` job command passes and writes the LCOV report.
