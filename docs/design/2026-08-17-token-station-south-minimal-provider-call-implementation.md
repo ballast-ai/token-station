@@ -47,7 +47,8 @@
 - 根 workspace 与 fuzz workspace 的 deny、audit、machete 通过。
 - fuzz locked compile、boundary self-test、真实 dependency boundary 和 actionlint 通过。
 - contracts、core、reqwest transport、conformance/testkit 均完成独立规格审查和代码质量审查，最终无未关闭 P0/P1/P2。
-- south feature 分支的英文状态同步提交为 `3a8c525`；尚未 push，远端 CI 尚未运行。
+- 最终全 diff 审查为 `APPROVED`，无未关闭 P0/P1/P2；resolved dependency gate 会拒绝第二个 reqwest 版本、额外统一 feature 和不完整 live metadata。
+- south feature 分支当前 HEAD 为 `fd8df13`；尚未 push，远端 CI 尚未运行。
 
 ## 5. 与当前 Token Station 仓的关系
 
@@ -57,7 +58,6 @@
 
 ## 6. 下一步门禁
 
-1. 对 south feature 分支运行最终全量门禁和独立全 diff 审查。
-2. push feature 分支并创建 PR，等待远端 CI 通过；不能绕过 `main` 分支保护。
-3. 单独启动企业版 host-adoption 纵切，选择一个真实 Bearer JSON POST 调用点，实现宿主 adapter，并运行同一 `south.provider-call.v1` suite。
-4. 只有企业 adapter 的真实编译、运行和 wiring 审查通过后，才把 `token-station-server` 从 `not_verified` 改为已验证；社区版同理独立验收。
+1. push feature 分支并创建 PR，等待远端 CI 通过；不能绕过 `main` 分支保护。
+2. 单独启动企业版 host-adoption 纵切，选择一个真实 Bearer JSON POST 调用点，实现宿主 adapter，并运行同一 `south.provider-call.v1` suite。
+3. 只有企业 adapter 的真实编译、运行和 wiring 审查通过后，才把 `token-station-server` 从 `not_verified` 改为已验证；社区版同理独立验收。
