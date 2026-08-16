@@ -1,6 +1,6 @@
 # `token-station-south` 最小 Provider Call 纵切实施记录
 
-> 状态：south 独立仓的 library slice 已在本地 feature 分支实现并完成审查；远端 CI、PR 合入和真实宿主接入尚未完成。
+> 状态：south 独立仓的 library slice 已推送到 `ballast-ai/token-station-south` private 仓；PR #1 的远端 CI 已通过，PR 合入和真实宿主接入尚未完成。
 >
 > 英文设计：`token-station-south/docs/design/2026-08-16-minimal-provider-call.md`
 >
@@ -48,7 +48,9 @@
 - fuzz locked compile、boundary self-test、真实 dependency boundary 和 actionlint 通过。
 - contracts、core、reqwest transport、conformance/testkit 均完成独立规格审查和代码质量审查，最终无未关闭 P0/P1/P2。
 - 最终全 diff 审查为 `APPROVED`，无未关闭 P0/P1/P2；resolved dependency gate 会拒绝第二个 reqwest 版本、额外统一 feature 和不完整 live metadata。
-- south feature 分支当前 HEAD 为 `fd8df13`；尚未 push，远端 CI 尚未运行。
+- south feature 分支 HEAD 为 `fd8df13`，已推送到 private 仓并创建 PR #1：`https://github.com/ballast-ai/token-station-south/pull/1`。
+- PR #1 的远端 `quality` job 已通过；普通 PR 上的定时 fuzz job 按设计跳过。
+- 当前 GitHub 组织套餐不允许 private 仓启用 branch protection，保护 API 返回 403；在套餐升级前，必须通过团队流程人工保证只经审查和绿色 CI 合入 `main`。
 
 ## 5. 与当前 Token Station 仓的关系
 
@@ -58,6 +60,6 @@
 
 ## 6. 下一步门禁
 
-1. push feature 分支并创建 PR，等待远端 CI 通过；不能绕过 `main` 分支保护。
+1. 完成人工 review 后合入 PR #1；当前套餐无法强制 branch protection，不得直接向 `main` 提交功能改动。
 2. 单独启动企业版 host-adoption 纵切，选择一个真实 Bearer JSON POST 调用点，实现宿主 adapter，并运行同一 `south.provider-call.v1` suite。
 3. 只有企业 adapter 的真实编译、运行和 wiring 审查通过后，才把 `token-station-server` 从 `not_verified` 改为已验证；社区版同理独立验收。
