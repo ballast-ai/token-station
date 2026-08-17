@@ -31,8 +31,8 @@ Token Station 在 AI Agent 与模型供应商之间保留一个本地网关。�
 
 <p align="center">
   <picture>
-    <source media="(max-width: 600px)" srcset="docs/assets/token-station-architecture-zh-CN-mobile.svg">
-    <img src="docs/assets/token-station-architecture-zh-CN.svg" alt="Token Station 请求路由架构" width="720">
+    <source media="(max-width: 600px)" srcset="docs/assets/token-station-architecture-zh-mobile.svg">
+    <img src="docs/assets/token-station-architecture-zh.svg" alt="Token Station 请求路由架构" width="720">
   </picture>
 </p>
 
