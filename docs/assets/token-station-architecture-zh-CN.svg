@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="720" viewBox="0 0 1440 720" role="img" aria-labelledby="title desc">
+  <title id="title">Token Station 请求路由架构</title>
+  <desc id="desc">Claude Code、Codex 和 WorkBuddy 通过本地 Token Station 网关，将请求路由到云端模型或本地 Ollama 模型。</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #17202a; }
+    .bg { fill: #f7f8fa; }
+    .panel { fill: #ffffff; stroke: #c9d2dc; stroke-width: 2; }
+    .panel-strong { fill: #f0f4f8; stroke: #c9d2dc; stroke-width: 1.5; }
+    .title { font-size: 31px; font-weight: 700; text-anchor: middle; }
+    .subtitle { font-size: 16px; fill: #5f6b76; text-anchor: middle; }
+    .section-title { font-size: 22px; font-weight: 700; }
+    .label { font-size: 18px; font-weight: 650; }
+    .small { font-size: 14px; fill: #5f6b76; }
+    .center { text-anchor: middle; }
+    .flow { fill: none; stroke: #2563eb; stroke-width: 3; marker-end: url(#arrow); }
+    .arrow-head { fill: #2563eb; }
+    .accent-dot { fill: #2563eb; }
+    .green-dot { fill: #14804a; }
+    .warm-dot { fill: #c2410c; }
+    .accent-pill { fill: #dbeafe; }
+    .green-pill { fill: #dff6e9; }
+    .warm-pill { fill: #ffedd5; }
+    .accent-text { fill: #2563eb; font-size: 14px; font-weight: 650; }
+    .green-text { fill: #14804a; font-size: 14px; font-weight: 650; }
+    .warm-text { fill: #c2410c; font-size: 14px; font-weight: 650; }
+    .divider { stroke: #c9d2dc; stroke-width: 1.5; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #f0f6fc; }
+      .bg { fill: #0d1117; }
+      .panel { fill: #161b22; stroke: #3d4752; }
+      .panel-strong { fill: #1f2937; stroke: #3d4752; }
+      .subtitle, .small { fill: #a6b0bb; }
+      .flow { stroke: #58a6ff; }
+      .arrow-head, .accent-dot { fill: #58a6ff; }
+      .green-dot { fill: #56d08a; }
+      .warm-dot { fill: #ff9b61; }
+      .accent-pill { fill: #17365f; }
+      .green-pill { fill: #153d2b; }
+      .warm-pill { fill: #4a2b1d; }
+      .accent-text { fill: #58a6ff; }
+      .green-text { fill: #56d08a; }
+      .warm-text { fill: #ff9b61; }
+      .divider { stroke: #3d4752; }
+    }
+  </style>
+  <defs>
+    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path class="arrow-head" d="M0,0 L11,5.5 L0,11 Z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1440" height="720" rx="24"/>
+  <text class="title" x="720" y="58">一个本地网关，为每次请求选择合适模型</text>
+  <text class="subtitle" x="720" y="88">保留 Agent 原生体验，同时统一管理鉴权、路由与额度</text>
+
+  <!-- Draw flows before nodes so cards cover line endpoints. -->
+  <path class="flow" d="M360 354 C392 354 414 354 449 354"/>
+  <path class="flow" d="M990 354 C1022 354 1044 354 1079 354"/>
+  <text class="small center" x="405" y="327">原生协议</text>
+  <text class="small center" x="405" y="347">本地鉴权</text>
+  <text class="small center" x="1035" y="327">策略路由</text>
+  <text class="small center" x="1035" y="347">额度感知</text>
+
+  <rect class="panel" x="60" y="158" width="300" height="392" rx="24"/>
+  <text class="section-title" x="92" y="203">Agent 客户端</text>
+  <text class="small" x="92" y="229">继续使用熟悉的编码工具</text>
+  <rect class="panel-strong" x="88" y="260" width="244" height="70" rx="14"/>
+  <circle class="warm-dot" cx="120" cy="295" r="11"/>
+  <text class="label" x="146" y="302">Claude Code</text>
+  <rect class="panel-strong" x="88" y="345" width="244" height="70" rx="14"/>
+  <circle class="accent-dot" cx="120" cy="380" r="11"/>
+  <text class="label" x="146" y="387">Codex</text>
+  <rect class="panel-strong" x="88" y="430" width="244" height="70" rx="14"/>
+  <circle class="green-dot" cx="120" cy="465" r="11"/>
+  <text class="label" x="146" y="472">WorkBuddy</text>
+
+  <rect class="panel" x="450" y="118" width="540" height="472" rx="28"/>
+  <text class="section-title center" x="720" y="168">Token Station</text>
+  <text class="subtitle" x="720" y="195">本地智能路由网关</text>
+  <rect class="green-pill" x="596" y="216" width="248" height="34" rx="17"/>
+  <text class="green-text center" x="720" y="238">127.0.0.1 · 凭据留在本机</text>
+
+  <rect class="panel-strong" x="488" y="286" width="136" height="92" rx="16"/>
+  <circle class="accent-dot" cx="556" cy="315" r="8"/>
+  <text class="label center" x="556" y="348">解析请求</text>
+  <rect class="panel-strong" x="652" y="286" width="136" height="92" rx="16"/>
+  <circle class="warm-dot" cx="720" cy="315" r="8"/>
+  <text class="label center" x="720" y="348">匹配任务</text>
+  <rect class="panel-strong" x="816" y="286" width="136" height="92" rx="16"/>
+  <circle class="green-dot" cx="884" cy="315" r="8"/>
+  <text class="label center" x="884" y="348">选择模型</text>
+  <path class="flow" d="M624 332 L650 332"/>
+  <path class="flow" d="M788 332 L814 332"/>
+
+  <line class="divider" x1="488" y1="414" x2="952" y2="414"/>
+  <rect class="accent-pill" x="510" y="446" width="196" height="46" rx="14"/>
+  <text class="accent-text center" x="608" y="474">高性能 Rust 核心</text>
+  <rect class="warm-pill" x="734" y="446" width="196" height="46" rx="14"/>
+  <text class="warm-text center" x="832" y="474">沙箱化 WASM 插件</text>
+  <text class="small center" x="720" y="535">统一记录指标与请求历史，不改变 Agent 的使用方式</text>
+
+  <rect class="panel" x="1080" y="158" width="300" height="392" rx="24"/>
+  <text class="section-title" x="1112" y="203">模型与供应商</text>
+  <text class="small" x="1112" y="229">按策略选择目标</text>
+  <rect class="panel-strong" x="1108" y="264" width="244" height="105" rx="16"/>
+  <circle class="accent-dot" cx="1140" cy="300" r="11"/>
+  <text class="label" x="1166" y="307">云端模型</text>
+  <text class="small" x="1140" y="340">使用自己的 API Key</text>
+  <rect class="panel-strong" x="1108" y="391" width="244" height="105" rx="16"/>
+  <circle class="green-dot" cx="1140" cy="427" r="11"/>
+  <text class="label" x="1166" y="434">本地模型</text>
+  <text class="small" x="1140" y="467">通过 Ollama 运行</text>
+
+  <text class="small center" x="720" y="665">请求始终先进入回环地址上的本地网关，再由可审计规则决定去向</text>
+</svg>
