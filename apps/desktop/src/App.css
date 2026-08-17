@@ -8659,6 +8659,271 @@ samp {
   justify-content: initial;
 }
 
+.about-page {
+  display: grid;
+  gap: 14px;
+}
+
+.about-page-head {
+  padding: 2px 2px 4px;
+}
+
+.about-page-head h2 {
+  margin: 0 0 3px;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.about-page-head .sub {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.about-product-card,
+.about-trust-card {
+  position: relative;
+  gap: 0;
+  padding-block: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: none;
+  --tw-ring-shadow: 0 0 #0000;
+}
+
+.about-product-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px;
+}
+
+.about-product-identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 14px;
+}
+
+.about-product-mark {
+  display: grid;
+  width: 62px;
+  height: 62px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-2);
+}
+
+.about-product-copy {
+  min-width: 0;
+}
+
+.about-product-copy h3,
+.about-trust-head h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
+.about-product-copy p,
+.about-trust-head p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.about-version-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.about-version-badges [data-slot="badge"] {
+  height: 22px;
+  gap: 6px;
+  border-color: var(--line-strong);
+  background: var(--surface);
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.about-version-badges strong {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.about-product-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.about-product-actions [data-slot="button"] {
+  height: 32px;
+}
+
+.about-spin {
+  animation: station-spin .8s linear infinite;
+}
+
+.about-update-content {
+  display: grid;
+  gap: 10px;
+  padding: 16px 24px 18px;
+  background: var(--surface-2);
+}
+
+.about-update-content .banner {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.about-update-content .inline-url {
+  margin-top: 5px;
+}
+
+.about-download-progress {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.about-download-progress [data-slot="progress"] {
+  height: 5px;
+  background: var(--line);
+}
+
+.about-trust-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 17px 18px;
+}
+
+.about-trust-head [data-slot="button"] {
+  flex: 0 0 auto;
+}
+
+.about-trust-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  padding: 0;
+}
+
+.about-trust-item {
+  display: flex;
+  min-width: 0;
+  gap: 10px;
+  padding: 16px 18px;
+}
+
+.about-trust-item + .about-trust-item {
+  border-left: 1px solid var(--line);
+}
+
+.about-trust-item > svg {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  color: var(--signal);
+}
+
+.about-trust-item div {
+  display: grid;
+  gap: 4px;
+}
+
+.about-trust-item strong {
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.about-trust-item span {
+  color: var(--muted);
+  font-size: 9.5px;
+  line-height: 1.5;
+}
+
+.about-trust-foot {
+  display: flex;
+  min-height: 34px;
+  gap: 9px;
+  padding: 9px 18px;
+  border-top-color: var(--line);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-family: "IBM Plex Mono", "SF Mono", ui-monospace, monospace;
+  font-size: 9px;
+  letter-spacing: 0.03em;
+}
+
+.about-route-line {
+  position: relative;
+  width: 54px;
+  height: 1px;
+  background: var(--line-strong);
+}
+
+.about-route-line::before,
+.about-route-line::after {
+  position: absolute;
+  top: -2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--signal);
+  content: "";
+}
+
+.about-route-line::before {
+  left: 0;
+}
+
+.about-route-line::after {
+  right: 0;
+  background: var(--success);
+}
+
+@media (max-width: 820px) {
+  .about-product-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .about-product-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .about-trust-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .about-trust-item + .about-trust-item {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+}
+
 .settings-page .agent-visibility-list {
   padding: 0;
 }

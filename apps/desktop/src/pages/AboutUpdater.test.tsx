@@ -8,6 +8,7 @@ import {
   listenDesktopUpdateProgress,
 } from "../api";
 import { ErrorToastProvider } from "../components/ErrorToast";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 vi.mock("../api", () => ({
   checkDesktopUpdate: vi.fn(),
@@ -15,11 +16,59 @@ vi.mock("../api", () => ({
   listenDesktopUpdateProgress: vi.fn(),
 }));
 
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+
 describe("desktop in-app update", () => {
   beforeEach(() => {
     vi.mocked(checkDesktopUpdate).mockReset();
     vi.mocked(installDesktopUpdateAndRestart).mockReset();
     vi.mocked(listenDesktopUpdateProgress).mockReset().mockResolvedValue(() => undefined);
+    vi.mocked(openUrl).mockReset().mockResolvedValue(undefined);
+  });
+
+  it("presents product identity and fixed project destinations with shared primitives", async () => {
+    const user = userEvent.setup();
+    const onOpenFirstRunGuide = vi.fn();
+
+    const { container } = render(
+      <About
+        desktopVersion="1.1.2"
+        coreVersion="0.2.0"
+        onOpenFirstRunGuide={onOpenFirstRunGuide}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Token Station" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Desktop 1.1.2")).toBeInTheDocument();
+    expect(screen.getByLabelText("Core 0.2.0")).toBeInTheDocument();
+    expect(container.querySelector('[data-slot="card"]')).toBeInTheDocument();
+    expect(container.querySelectorAll('[data-slot="badge"]')).toHaveLength(2);
+    expect(container.querySelector('[data-slot="separator"]')).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "GitHub" }));
+    expect(openUrl).toHaveBeenLastCalledWith("https://github.com/ballast-ai/token-station");
+
+    await user.click(screen.getByRole("button", { name: "更新日志" }));
+    expect(openUrl).toHaveBeenLastCalledWith("https://github.com/ballast-ai/token-station/releases");
+
+    await user.click(screen.getByRole("button", { name: "重新查看新手引导" }));
+    expect(onOpenFirstRunGuide).toHaveBeenCalledOnce();
+  });
+
+  it("reports an external destination failure through the global error toast", async () => {
+    vi.mocked(openUrl).mockRejectedValue(new Error("opener denied"));
+    const user = userEvent.setup();
+
+    render(
+      <ErrorToastProvider>
+        <About desktopVersion="1.1.2" coreVersion="0.2.0" />
+      </ErrorToastProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "GitHub" }));
+
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByRole("alert"))
+      .toHaveTextContent("无法打开外部页面");
   });
 
   it("更新进度监听注册失败时进入全局错误弹窗", async () => {
