@@ -23,7 +23,9 @@ use std::fmt::Write as _;
 use std::io::Read;
 use std::path::Path;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use minisign_verify::{PublicKey as MinisignPublicKey, Signature as MinisignSignature};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -194,6 +196,38 @@ pub fn verify_bytes(key: &VerifyingKey, bytes: &[u8], signature_hex: &str) -> Re
         .map_err(|_| "signature is not 64 bytes".to_owned())?;
     key.verify(bytes, &Signature::from_bytes(&raw))
         .map_err(|_| "signature does not verify".to_owned())
+}
+
+/// Verify a Tauri updater signature using the same encoded key and signature
+/// forms that `latest.json` and the desktop updater consume.
+///
+/// # Errors
+///
+/// The public key, signature, or payload does not pass Tauri's Minisign rules.
+pub fn verify_updater_artifact(
+    public_key_base64: &str,
+    artifact: &[u8],
+    signature_base64: &str,
+) -> Result<(), String> {
+    let public_key_text = BASE64
+        .decode(public_key_base64.trim())
+        .map_err(|_| "updater public key is not valid base64".to_owned())?;
+    let public_key_text = std::str::from_utf8(&public_key_text)
+        .map_err(|_| "updater public key is not UTF-8".to_owned())?;
+    let public_key = MinisignPublicKey::decode(public_key_text)
+        .map_err(|error| format!("updater public key: {error}"))?;
+
+    let signature_text = BASE64
+        .decode(signature_base64.trim())
+        .map_err(|_| "updater signature is not valid base64".to_owned())?;
+    let signature_text = std::str::from_utf8(&signature_text)
+        .map_err(|_| "updater signature is not UTF-8".to_owned())?;
+    let signature = MinisignSignature::decode(signature_text)
+        .map_err(|error| format!("updater signature: {error}"))?;
+
+    public_key
+        .verify(artifact, &signature, true)
+        .map_err(|error| format!("updater signature does not verify: {error}"))
 }
 
 /// The canonical digest of a plugin package: every file's name and SHA-256,
@@ -405,6 +439,7 @@ mod tests {
     use super::{
         FORMAT_VERSION, ReleaseManifest, keygen, parse_public_key, plugin_package_digest,
         sign_bytes, sign_plugin_package, verify_bytes, verify_plugin_package,
+        verify_updater_artifact,
     };
     use std::path::PathBuf;
 
@@ -478,6 +513,15 @@ mod tests {
 
         assert!(parse_public_key("zz").is_err());
         assert!(parse_public_key("abc").is_err(), "odd length");
+    }
+
+    #[test]
+    fn a_tauri_updater_signature_is_verified_against_its_embedded_public_key() {
+        const PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkKUldRZjZMUkNHQTlpNTNtbFllY080SXpUNTFUR1Bwdld1Y05TQ2gxQ0JNMFFUYUxuNzNZN0dGTzMK";
+        const SIGNATURE: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIG1pbmlzaWduIHNlY3JldCBrZXkKUldRZjZMUkNHQTlpNTlTTE9GeHo2Tnh2QVNYREplUnR1Wnlrd1FlcGJERUd0ODdpZzFCTnBXYVZXdU5ybTczWWlJaUpicTcxV2krZFA5ZUtMOE9DMzUxdndJYXNTU2JYeHdBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNTU1Nzc5OTY2CWZpbGU6dGVzdApRdEtNWFd5WWN3ZHBaQWxQRjd0RTJFTkprUmQxdWp2S2psajFtOVJ0SFRCblpQYTVXS1U1dVdSczVHb1A1TS9WcUU4MVFGdU1LSTVrL1NmTlFVYU9BQT09Cg==";
+
+        verify_updater_artifact(PUBLIC_KEY, b"test", SIGNATURE).expect("verifies");
+        assert!(verify_updater_artifact(PUBLIC_KEY, b"changed", SIGNATURE).is_err());
     }
 
     #[test]

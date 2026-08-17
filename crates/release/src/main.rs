@@ -60,6 +60,17 @@ enum Command {
         #[arg(long)]
         signature: Option<PathBuf>,
     },
+    /// Verify a Tauri updater payload against its encoded public key.
+    VerifyUpdater {
+        /// Base64 public key, or a path to a file holding it.
+        #[arg(long)]
+        pubkey: String,
+        /// The updater payload, such as a macOS `.app.tar.gz`.
+        artifact: PathBuf,
+        /// Defaults to `<artifact>.sig`.
+        #[arg(long)]
+        signature: Option<PathBuf>,
+    },
     /// Sign a plugin package directory; writes `signature.sig` inside it.
     SignPlugin {
         #[arg(long)]
@@ -163,6 +174,11 @@ fn run(cli: Cli) -> Result<(), String> {
             println!("ok: manifest verifies");
             Ok(())
         }
+        Command::VerifyUpdater {
+            pubkey,
+            artifact,
+            signature,
+        } => verify_updater_command(&pubkey, &artifact, signature),
         Command::SignPlugin { key, package } => {
             let key = release::load_signing_key(&key)?;
             let signature = release::sign_plugin_package(&key, &package)?;
@@ -179,6 +195,22 @@ fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+fn verify_updater_command(
+    pubkey: &str,
+    artifact: &std::path::Path,
+    signature: Option<PathBuf>,
+) -> Result<(), String> {
+    let public_key = read_key_argument(pubkey)?;
+    let bytes = std::fs::read(artifact)
+        .map_err(|error| format!("read `{}`: {error}", artifact.display()))?;
+    let signature_file = signature.unwrap_or_else(|| signature_path(artifact));
+    let signature = std::fs::read_to_string(&signature_file)
+        .map_err(|error| format!("read `{}`: {error}", signature_file.display()))?;
+    release::verify_updater_artifact(&public_key, &bytes, &signature)?;
+    println!("ok: updater artifact verifies");
+    Ok(())
 }
 
 fn signature_path(manifest: &std::path::Path) -> PathBuf {

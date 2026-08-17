@@ -201,10 +201,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.1
+      - run: npm --prefix apps/desktop ci
       - run: node scripts/check-ci-msi-trigger-policy.mjs
       - run: node scripts/check-ci-scaffold-prefetch.mjs
       - run: node scripts/check-macos-dmg-packaging.mjs
       - run: node tests/release-assets.mjs
+      - run: node tests/formal-release-finalization.mjs
+      - run: tests/formal-release-signing.sh
       - run: node tests/release-readiness.mjs
       - run: node tests/desktop-release-dependencies.mjs
       - name: Check release version consistency
