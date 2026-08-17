@@ -36,7 +36,7 @@ Do not apply STE rules to code, identifiers, command syntax, or required localiz
 
 ## Write the design document first
 
-Create or update a file in `docs/design/` before you change any of these items:
+Create or update a design record in the private `ballast-ai/token-station-doc` repository before you change any of these items:
 
 - User-visible interfaces.
 - Interaction flows.
@@ -44,8 +44,8 @@ Create or update a file in `docs/design/` before you change any of these items:
 - Frontend and backend contracts.
 - Release behavior.
 
-Keep the design document and its implementation in the same pull request. The review and maintenance
-process must not depend on access to a private repository.
+Review the design record in the private repository before implementation. Do not copy internal design
+records into the public source repository or its pull requests.
 
 Include these sections in the design document:
 

@@ -213,7 +213,6 @@ plugins/official/            Five official WASM adapters
 docs/product/                User documentation
 docs/guides/                 Agent integration guides
 docs/contributing/           Architecture and development guides
-docs/design/                 Design records and acceptance boundaries
 scripts/                     Build, release, validation, and maintenance scripts
 ```
 
@@ -223,7 +222,7 @@ scripts/                     Build, release, validation, and maintenance scripts
 
 ## Contributing
 
-Issues and focused pull requests are welcome. Read the contribution guide first. User-visible UI, interaction, state, contract, or release behavior changes require a design document in `docs/design/` before tests and implementation; keep that document in the same pull request as the change.
+Issues and focused pull requests are welcome. Read the contribution guide first. Internal design records are maintained separately from this public repository.
 
 ## License
 

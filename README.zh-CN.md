@@ -213,7 +213,6 @@ plugins/official/            5 个官方 WASM 适配器
 docs/product/                用户文档
 docs/guides/                 Agent 接入指南
 docs/contributing/           架构与开发文档
-docs/design/                 设计记录与验收边界
 scripts/                     构建、发布、校验和维护脚本
 ```
 
@@ -223,7 +222,7 @@ scripts/                     构建、发布、校验和维护脚本
 
 ## 参与贡献
 
-欢迎提交问题和边界清晰的 Pull Request。请先阅读贡献流程。涉及用户可见界面、交互、状态、契约或发布行为的改动，必须先在 `docs/design/` 编写设计文档，再补测试和实现；设计文档需要与对应改动放在同一个 Pull Request 中。
+欢迎提交问题和边界清晰的 Pull Request。请先阅读贡献流程。内部设计记录与这个公开仓库分开管理。
 
 ## 许可证
 
