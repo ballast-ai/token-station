@@ -38,6 +38,12 @@
 4. ~~合入开发分支~~:lv 改判合入 **`dev-v2`**(新建于 `origin/dev` 顶端,不动 `dev`):快进合入全部提交,`run_local_matrix.sh` 全矩阵通过(webv2 dist 门为 mtime 误报,重建后内容零变化即绿;PG 腿/Redis 一腿无容器记 SKIP),已推远端。
 5. ~~repository 字段~~:south 仓 PR #3 已合并修复。
 
+## 4b. 流式接入(2026-08-17 第二刀,同日收口)
+
+south v0.1.0(streaming slice,south 仓 PR #5/#6,tag `v0.1.0`)接入企业仓 chat 流式面并合入 `dev-v2`(`02c60f9a`):durable sender 接缝、字节源二臂收敛、资金四不变式零变化、`south.provider-stream.v1` 9/9、全矩阵 PASS WITH SKIPS(外部腿)。对抗审查一条 P1(代理语义分叉)修复为代理环境整体回落 legacy;`gateway_south_chat_stream_routed_total` 指标提供生产采点率观测。lv 完成流式 wiring review 终审;`host_capabilities` 翻转 = south 仓 PR #9。有效流式 scope = openai 型纯 Bearer 供应商(BedrockMantle 因 URL 合成结构性回落,已钉桩)。企业仓真相源:34 号文档 §6。
+
+社区版宿主(token-station)的 `provider_call` 已由独立工作线做成 verified(south 仓 PR #7),与本记录的企业线正交。
+
 ## 5. 对既有文档的影响
 
 - 验收清单(`2026-08-16-token-station-south-acceptance-checklist.md`)§6.3 设想的 `post_json_attempt` 改造路线**不成立**:该系列 API 在企业仓已被源码棘轮封印弃用,且其返回裸 `reqwest::Response`(可流式)与 ProviderCall 的 buffered 契约不兼容。第一刀改落 embeddings,已记入方案 §8。
