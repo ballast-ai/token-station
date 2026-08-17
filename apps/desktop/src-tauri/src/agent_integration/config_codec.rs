@@ -1154,8 +1154,12 @@ fn is_plain_yaml_key(key: &str) -> bool {
 
 fn yaml_scalar(value: &Value, path: &ConfigPath) -> Result<String, String> {
     if value.is_array() || value.is_object() {
-        return serde_json::to_string(value)
-            .map_err(|_| format!("Cannot serialize the YAML flow value at config path '{}'.", path));
+        return serde_json::to_string(value).map_err(|_| {
+            format!(
+                "Cannot serialize the YAML flow value at config path '{}'.",
+                path
+            )
+        });
     }
     if !matches!(value, Value::Null | Value::String(_) | Value::Bool(_)) && value.as_i64().is_none()
     {
@@ -1199,7 +1203,10 @@ fn replace_existing_yaml_scalar(
         ));
     };
     if !is_plain_yaml_key(root) || !is_plain_yaml_key(child) {
-        return Err(format!("Config path '{}' contains an unsafe YAML key.", path));
+        return Err(format!(
+            "Config path '{}' contains an unsafe YAML key.",
+            path
+        ));
     }
     let scalar = yaml_scalar(value, path)?;
     let root_prefix = format!("{root}:");
@@ -1479,7 +1486,10 @@ fn insert_missing_yaml_nested_value(
         .iter()
         .any(|segment| !is_plain_yaml_key(segment))
     {
-        return Err(format!("Config path '{}' contains an unsafe YAML key.", path));
+        return Err(format!(
+            "Config path '{}' contains an unsafe YAML key.",
+            path
+        ));
     }
     let scalar = yaml_scalar(value, path)?;
     let semantic = strict_yaml_semantic(rendered, "YAML nested patch")?;
@@ -1488,10 +1498,17 @@ fn insert_missing_yaml_nested_value(
         let prefix = &path.segments[..length];
         let pointer = format!("/{}", prefix.join("/"));
         if semantic.pointer(&pointer).is_some() {
-            let entry = yaml_block_entry(rendered, prefix)
-                .ok_or_else(|| format!("The parent of config path '{}' must use a YAML block mapping.", path))?;
+            let entry = yaml_block_entry(rendered, prefix).ok_or_else(|| {
+                format!(
+                    "The parent of config path '{}' must use a YAML block mapping.",
+                    path
+                )
+            })?;
             if !entry.block_mapping {
-                return Err(format!("The parent of config path '{}' must use a YAML block mapping.", path));
+                return Err(format!(
+                    "The parent of config path '{}' must use a YAML block mapping.",
+                    path
+                ));
             }
             parent = Some((length, entry));
             break;
@@ -1551,10 +1568,17 @@ fn replace_existing_yaml_nested_value(
         .iter()
         .any(|segment| !is_plain_yaml_key(segment))
     {
-        return Err(format!("Config path '{}' contains an unsafe YAML key.", path));
+        return Err(format!(
+            "Config path '{}' contains an unsafe YAML key.",
+            path
+        ));
     }
-    let entry = yaml_block_entry(rendered, &path.segments)
-        .ok_or_else(|| format!("Config path '{}' is not a safe YAML block field to replace.", path))?;
+    let entry = yaml_block_entry(rendered, &path.segments).ok_or_else(|| {
+        format!(
+            "Config path '{}' is not a safe YAML block field to replace.",
+            path
+        )
+    })?;
     let scalar = yaml_scalar(value, path)?;
     let key = path.segments.last().expect("validated non-empty YAML path");
     let replacement = format!("{}{key}: {scalar}\n", " ".repeat(entry.indent));
@@ -1569,10 +1593,17 @@ fn remove_existing_yaml_nested_value(rendered: &str, path: &ConfigPath) -> Resul
         .iter()
         .any(|segment| !is_plain_yaml_key(segment))
     {
-        return Err(format!("Config path '{}' contains an unsafe YAML key.", path));
+        return Err(format!(
+            "Config path '{}' contains an unsafe YAML key.",
+            path
+        ));
     }
-    let entry = yaml_block_entry(rendered, &path.segments)
-        .ok_or_else(|| format!("Config path '{}' is not a safe YAML block field to remove.", path))?;
+    let entry = yaml_block_entry(rendered, &path.segments).ok_or_else(|| {
+        format!(
+            "Config path '{}' is not a safe YAML block field to remove.",
+            path
+        )
+    })?;
     let mut updated = rendered.to_string();
     updated.replace_range(entry.start..entry.end, "");
     Ok(updated)
@@ -2658,8 +2689,14 @@ mod tests {
         )
         .unwrap();
         let semantic = semantic_json(&yaml_with_shadow_path).unwrap();
-        assert_eq!(semantic["llm-pi-ai"]["providers"]["tokenstation"]["baseURL"], "updated");
-        assert_eq!(semantic["other"]["llm-pi-ai"]["providers"]["tokenstation"]["baseURL"], "nested");
+        assert_eq!(
+            semantic["llm-pi-ai"]["providers"]["tokenstation"]["baseURL"],
+            "updated"
+        );
+        assert_eq!(
+            semantic["other"]["llm-pi-ai"]["providers"]["tokenstation"]["baseURL"],
+            "nested"
+        );
 
         assert!(apply_patch(
             &mut yaml,
