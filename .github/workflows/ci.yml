@@ -207,6 +207,8 @@ jobs:
       - run: node scripts/check-macos-dmg-packaging.mjs
       - run: node tests/release-assets.mjs
       - run: node tests/formal-release-finalization.mjs
+      # Prime the locked Rust dependencies before the test enters its offline signing phase.
+      - run: cargo test -p token-station-release --no-run --locked
       - run: tests/formal-release-signing.sh
       - run: node tests/release-readiness.mjs
       - run: node tests/desktop-release-dependencies.mjs

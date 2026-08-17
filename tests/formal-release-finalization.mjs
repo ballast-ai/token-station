@@ -54,5 +54,8 @@ assert.doesNotMatch(publish, /SIGNING_PRIVATE_KEY|release-signing\.key/);
 
 const ci = read(".github/workflows/ci.yml");
 assert.match(ci, /node tests\/formal-release-finalization\.mjs/);
+const offlinePrime = ci.indexOf("cargo test -p token-station-release --no-run --locked");
+const offlineSigning = ci.indexOf("tests/formal-release-signing.sh");
+assert.ok(offlinePrime >= 0 && offlinePrime < offlineSigning);
 
 console.log("formal release finalization policy: PASS");
