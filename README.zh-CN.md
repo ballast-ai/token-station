@@ -80,6 +80,9 @@ Token Station 在 AI Agent 与模型供应商之间保留一个本地网关。�
 | <a href="https://github.com/anthropics"><img src="docs/assets/agents/claude-desktop.svg" width="20" height="20" alt=""> Claude Desktop</a> | 内置 Connector | Anthropic Messages |
 | <a href="https://github.com/openai/codex"><img src="docs/assets/agents/codex.svg" width="20" height="20" alt=""> Codex</a> | 内置 Connector | OpenAI Responses |
 | <a href="https://github.com/google-gemini/gemini-cli"><img src="docs/assets/agents/gemini-cli.svg" width="20" height="20" alt=""> Gemini CLI</a> | 内置 Connector | Gemini |
+| [Grok Build](https://github.com/xai-org/grok-cli) | 内置 Connector | OpenAI Chat Completions |
+| [Kimi Code](https://github.com/MoonshotAI/kimi-code) | 内置 Connector | OpenAI Chat Completions |
+| [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | 内置 Connector（上游处于开发者预览） | OpenAI Chat Completions |
 | <a href="https://github.com/NousResearch/hermes-agent"><img src="apps/desktop/public/agents/hermes.png" width="20" height="20" alt=""> Hermes Agent</a> | 内置 Connector | OpenAI Chat Completions |
 | <a href="https://github.com/openclaw/openclaw"><img src="docs/assets/agents/openclaw.svg" width="20" height="20" alt=""> OpenClaw</a> | 内置 Connector | OpenAI Chat Completions |
 | <a href="https://www.workbuddy.ai/"><img src="apps/desktop/public/agents/workbuddy.png" width="20" height="20" alt=""> WorkBuddy</a> | 内置 Connector | OpenAI Chat Completions |
@@ -88,7 +91,9 @@ Token Station 在 AI Agent 与模型供应商之间保留一个本地网关。�
 
 Claude Desktop 目前没有公开的产品仓库；该链接指向 Anthropic 官方 GitHub 组织页。
 
-对八种内置 Connector，点击“一键接入”即代表同意立即应用一份边界明确的计划。Token Station 会在需要时启动网关，并在首次接入后展示已改动字段。Connector 的可用平台取决于对应 Agent 和操作系统，并不代表 Token Station 已为该平台发布安装包。
+DeepSeek Harness 扫描同时覆盖常规 `dsh` 命令，以及上游推荐的 `npx @deepseek-ai/dsh web` 所生成的有界 npm 缓存目录。Token Station 只读取已有缓存入口，扫描时不会运行 `npx`，也不会安装软件包。
+
+对十一种内置 Connector，点击“一键接入”即代表同意立即应用一份边界明确的计划。Token Station 会在需要时启动网关，并在首次接入后展示已改动字段。Connector 的可用平台取决于对应 Agent 和操作系统，并不代表 Token Station 已为该平台发布安装包。
 
 Cursor 在 macOS 与 Windows 上使用独立接入路径。请先退出 Cursor。Token Station 会私有备份相关 SQLite 记录，以事务方式写入 OpenAI 兼容端点、虚拟 Key 和启用标记，回读校验失败时恢复原值。完成后重新启动 Cursor，并选择支持自定义 OpenAI Key 路径的模型。该路径不受标准 Connector 的字段归属和应用内断开流程管理。
 

@@ -151,6 +151,17 @@ describe("humanizeAppError", () => {
     );
   });
 
+  it("does not misclassify Kimi's missing context limit as invalid TOML", () => {
+    const raw = "Kimi Code 接入需要当前有效路由提供正数 context 上限；本次未修改 config.toml。";
+
+    expect(humanizeAppError(raw, "en")).toBe(
+      "Kimi Code needs a verified context-window limit for the active route. Complete that model's context window in Providers, restart the proxy, then connect again.",
+    );
+    expect(humanizeAppError(raw, "zh-CN")).toBe(
+      "Kimi Code 需要当前路由模型具备可信的上下文上限。请在供应商页面补全该模型的上下文窗口，重启代理后再次接入。",
+    );
+  });
+
   it("does not expose an unknown backend string", () => {
     const raw = "secret internal transaction detail /Users/example/config.json";
 

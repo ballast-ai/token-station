@@ -11,7 +11,10 @@
     "generic-openai-sdk",
     "cursor",
     "continue",
-    "workbuddy"
+    "workbuddy",
+    "grok-build",
+    "kimi-code",
+    "deepseek-harness"
   ],
   "capabilities": ["chat", "stream", "tool_call", "agent_hint"],
   "permissions": {

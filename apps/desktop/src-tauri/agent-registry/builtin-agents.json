@@ -233,6 +233,171 @@
     },
     {
       "schema_version": 1,
+      "agent_id": "grok-build",
+      "legacy_kind": null,
+      "display_name": "Grok Build",
+      "icon_key": "grok-build",
+      "ui_order": 32,
+      "nav_mark": "GB",
+      "admission": "supported",
+      "executable_candidates": ["grok"],
+      "known_install_locations": {
+        "macos": [
+          "${HOME}/.grok/bin/grok",
+          "${HOME}/.local/bin/grok",
+          "/opt/homebrew/bin/grok",
+          "/usr/local/bin/grok"
+        ],
+        "linux": ["${HOME}/.grok/bin/grok", "${HOME}/.local/bin/grok", "/usr/local/bin/grok", "/usr/bin/grok"],
+        "windows": ["${USERPROFILE}/.grok/bin/grok.exe", "${USERPROFILE}/.local/bin/grok.exe"],
+        "wsl": ["${HOME}/.grok/bin/grok", "${HOME}/.local/bin/grok", "/usr/local/bin/grok", "/usr/bin/grok"]
+      },
+      "version_probe": {
+        "argv": ["--version"],
+        "timeout_ms": 2000,
+        "max_output_bytes": 65536,
+        "output_matcher": "SEMVER_ANYWHERE"
+      },
+      "config_locations": [
+        {
+          "env_override": {
+            "name": "GROK_HOME",
+            "value_kind": "directory",
+            "suffix": "config.toml"
+          },
+          "platform_defaults": {
+            "macos": ["${HOME}/.grok/config.toml"],
+            "linux": ["${HOME}/.grok/config.toml"],
+            "windows": ["${USERPROFILE}/.grok/config.toml"],
+            "wsl": ["${HOME}/.grok/config.toml"]
+          },
+          "format": "toml"
+        }
+      ],
+      "protocol_binding": {
+        "adapter_id": "agent-openai",
+        "base_url_shape": "origin_v1"
+      },
+      "local_connector_ids": ["grok-build-v1"],
+      "discovery_fingerprint_rules": ["toml-shape-v1"]
+    },
+    {
+      "schema_version": 1,
+      "agent_id": "kimi-code",
+      "legacy_kind": null,
+      "display_name": "Kimi Code",
+      "icon_key": "kimi-code",
+      "ui_order": 34,
+      "nav_mark": "K",
+      "admission": "supported",
+      "executable_candidates": ["kimi"],
+      "known_install_locations": {
+        "macos": [
+          "${HOME}/.local/bin/kimi",
+          "${HOME}/.kimi-code/bin/kimi",
+          "${HOME}/.npm-global/bin/kimi",
+          "${HOME}/Library/pnpm/kimi",
+          "${HOME}/.local/share/pnpm/kimi",
+          "${HOME}/.bun/bin/kimi",
+          "${HOME}/.volta/bin/kimi"
+        ],
+        "linux": ["${HOME}/.local/bin/kimi", "${HOME}/.kimi-code/bin/kimi", "/usr/local/bin/kimi", "/usr/bin/kimi"],
+        "windows": ["${APPDATA}/npm/kimi.cmd", "${USERPROFILE}/.kimi-code/bin/kimi.exe", "${USERPROFILE}/.local/bin/kimi.exe"],
+        "wsl": ["${HOME}/.local/bin/kimi", "${HOME}/.kimi-code/bin/kimi", "/usr/local/bin/kimi", "/usr/bin/kimi"]
+      },
+      "version_probe": {
+        "argv": ["--version"],
+        "timeout_ms": 2000,
+        "max_output_bytes": 65536,
+        "output_matcher": "SEMVER_ANYWHERE"
+      },
+      "config_locations": [
+        {
+          "env_override": {
+            "name": "KIMI_CODE_HOME",
+            "value_kind": "directory",
+            "suffix": "config.toml"
+          },
+          "platform_defaults": {
+            "macos": ["${HOME}/.kimi-code/config.toml"],
+            "linux": ["${HOME}/.kimi-code/config.toml"],
+            "windows": ["${USERPROFILE}/.kimi-code/config.toml"],
+            "wsl": ["${HOME}/.kimi-code/config.toml"]
+          },
+          "format": "toml"
+        }
+      ],
+      "protocol_binding": {
+        "adapter_id": "agent-openai",
+        "base_url_shape": "origin_v1"
+      },
+      "local_connector_ids": ["kimi-code-v1"],
+      "discovery_fingerprint_rules": ["toml-shape-v1"]
+    },
+    {
+      "schema_version": 1,
+      "agent_id": "deepseek-harness",
+      "legacy_kind": null,
+      "display_name": "DeepSeek Harness",
+      "icon_key": "deepseek-harness",
+      "ui_order": 36,
+      "nav_mark": "DS",
+      "admission": "supported",
+      "executable_candidates": ["dsh"],
+      "known_install_locations": {
+        "macos": [
+          "${HOME}/.npm-global/bin/dsh",
+          "${HOME}/Library/pnpm/dsh",
+          "${HOME}/.local/share/pnpm/dsh",
+          "${HOME}/.bun/bin/dsh",
+          "${HOME}/.volta/bin/dsh"
+        ],
+        "linux": ["${HOME}/.npm-global/bin/dsh", "${HOME}/.local/share/pnpm/dsh", "/usr/local/bin/dsh", "/usr/bin/dsh"],
+        "windows": ["${APPDATA}/npm/dsh.cmd"],
+        "wsl": ["${HOME}/.npm-global/bin/dsh", "${HOME}/.local/share/pnpm/dsh", "/usr/local/bin/dsh", "/usr/bin/dsh"]
+      },
+      "version_probe": {
+        "argv": ["--version"],
+        "timeout_ms": 3000,
+        "max_output_bytes": 65536,
+        "output_matcher": "SEMVER_ANYWHERE",
+        "runtime": {
+          "kind": "node_package",
+          "interpreter_candidates": ["node", "node.exe"],
+          "resolution_sources": ["observed_entry_sibling", "path", "known_install_locations"],
+          "known_install_locations": {
+            "macos": ["${HOME}/.local/bin/node", "${HOME}/.bun/bin/node", "${HOME}/.volta/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"],
+            "linux": ["${HOME}/.local/bin/node", "/usr/local/bin/node", "/usr/bin/node"],
+            "windows": ["C:/Program Files/nodejs/node.exe", "${LOCALAPPDATA}/Programs/nodejs/node.exe"],
+            "wsl": ["${HOME}/.local/bin/node", "/usr/local/bin/node", "/usr/bin/node"]
+          }
+        }
+      },
+      "config_locations": [
+        {
+          "env_override": {
+            "name": "DSH_HOME",
+            "value_kind": "directory",
+            "suffix": "settings.yaml"
+          },
+          "platform_defaults": {
+            "macos": ["${HOME}/.dsh/settings.yaml"],
+            "linux": ["${HOME}/.dsh/settings.yaml"],
+            "windows": ["${USERPROFILE}/.dsh/settings.yaml"],
+            "wsl": ["${HOME}/.dsh/settings.yaml"]
+          },
+          "format": "yaml"
+        }
+      ],
+      "protocol_binding": {
+        "adapter_id": "agent-openai",
+        "base_url_shape": "origin_v1"
+      },
+      "local_connector_ids": ["deepseek-harness-v1"],
+      "discovery_fingerprint_rules": ["yaml-shape-v1"]
+    },
+    {
+      "schema_version": 1,
       "agent_id": "nous-hermes-agent",
       "legacy_kind": null,
       "display_name": "Hermes Agent",

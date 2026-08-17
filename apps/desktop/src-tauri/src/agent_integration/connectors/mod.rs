@@ -286,6 +286,18 @@ mod tests {
         assert_eq!(OpenCodeConnector.connector_id(), "opencode-v1");
         assert_eq!(OpenClawConnector.connector_id(), "openclaw-v1");
         assert_eq!(WorkBuddyConnector.connector_id(), "workbuddy-v1");
+        assert_eq!(
+            find_connector("grok-build-v1").unwrap().agent_id(),
+            "grok-build"
+        );
+        assert_eq!(
+            find_connector("kimi-code-v1").unwrap().agent_id(),
+            "kimi-code"
+        );
+        assert_eq!(
+            find_connector("deepseek-harness-v1").unwrap().agent_id(),
+            "deepseek-harness"
+        );
     }
 
     #[test]
@@ -301,8 +313,11 @@ mod tests {
                 "claude-code-v1",
                 "claude-desktop-3p-v1",
                 "codex-v1",
+                "deepseek-harness-v1",
                 "gemini-cli-v1",
+                "grok-build-v1",
                 "hermes-v1",
+                "kimi-code-v1",
                 "openclaw-v1",
                 "opencode-v1",
                 "workbuddy-v1",
@@ -316,7 +331,7 @@ mod tests {
 
     #[test]
     fn every_builtin_connector_can_connect_disconnect_and_reconnect() {
-        let fixtures: [(&str, &[u8], &str); 8] = [
+        let fixtures: [(&str, &[u8], &str); 11] = [
             (
                 "claude-code-v1",
                 br#"{"env":null,"keep":"claude-code"}"#,
@@ -328,7 +343,13 @@ mod tests {
                 "claude-desktop",
             ),
             ("codex-v1", b"keep = \"codex\"\n", "codex"),
+            (
+                "deepseek-harness-v1",
+                b"# keep DeepSeek comment\nkeep: deepseek-harness\n",
+                "deepseek-harness",
+            ),
             ("gemini-cli-v1", b"KEEP=gemini\n", "gemini"),
+            ("grok-build-v1", b"keep = \"grok-build\"\n", "grok-build"),
             (
                 "hermes-v1",
                 b"# keep Hermes comment\nmodel:\nkeep: hermes\n",
@@ -339,6 +360,7 @@ mod tests {
                 b"{models:null, agents:null, keep:'openclaw'}",
                 "openclaw",
             ),
+            ("kimi-code-v1", b"keep = \"kimi-code\"\n", "kimi-code"),
             (
                 "opencode-v1",
                 br#"{"provider":null,"keep":"opencode"}"#,
@@ -350,11 +372,19 @@ mod tests {
                 "workbuddy",
             ),
         ];
+        let metadata = AgentModelMetadata {
+            context: 131_072,
+            output: 8_192,
+            vision: true,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
         let input = ConnectInput {
             base_url: "http://127.0.0.1:8787/agents/lifecycle/v1",
             token: Some("fixture-lifecycle-secret"),
             adapter_ready: true,
-            model_metadata: None,
+            model_metadata: Some(&metadata),
         };
 
         assert_eq!(fixtures.len(), builtin_connectors().len());
@@ -401,6 +431,340 @@ mod tests {
                 "{connector_id} must preserve unowned content after reconnect"
             );
         }
+    }
+
+    #[test]
+    fn grok_build_connector_adds_a_namespaced_chat_completions_model() {
+        let connector =
+            find_connector("grok-build-v1").expect("Grok Build connector is registered");
+        let metadata = AgentModelMetadata {
+            context: 131_072,
+            output: 8_192,
+            vision: false,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/grok-build/v1",
+            token: Some("fixture-grok-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut document = parse_source_bytes(
+            Some(b"[ui]\ncompact_mode = true\n"),
+            connector.format(),
+            connector.label(),
+        )
+        .unwrap();
+        prepare_owned_paths_for_write(&mut document, &connector.owned_paths()).unwrap();
+        let patch = connector.connect_patch(&input).unwrap();
+        validate_patch_ownership(&patch, &connector.owned_paths()).unwrap();
+        apply_patch(&mut document, &patch).unwrap();
+        connector.validate_projected(&document, &input).unwrap();
+
+        let semantic = semantic_json(&document).unwrap();
+        assert_eq!(semantic["models"]["default"], json!("tokenstation"));
+        assert!(semantic["models"].get("allowed_models").is_none());
+        for model in ["tokenstation", "grok-4.6", "grok-4.5"] {
+            assert_eq!(semantic["model"][model]["model"], json!("auto"));
+            assert_eq!(
+                semantic["model"][model]["api_backend"],
+                json!("chat_completions")
+            );
+            assert_eq!(
+                semantic["model"][model]["api_key"],
+                json!("fixture-grok-key")
+            );
+            assert_eq!(semantic["model"][model]["context_window"], json!(131_072));
+            assert_eq!(
+                semantic["model"][model]["max_completion_tokens"],
+                json!(8_192)
+            );
+        }
+        assert_eq!(semantic["ui"]["compact_mode"], json!(true));
+    }
+
+    #[test]
+    fn kimi_code_connector_adds_a_namespaced_openai_provider_and_model() {
+        let connector = find_connector("kimi-code-v1").expect("Kimi Code connector is registered");
+        let metadata = AgentModelMetadata {
+            context: 131_072,
+            output: 8_192,
+            vision: false,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
+            token: Some("fixture-kimi-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut document = parse_source_bytes(
+            Some(b"[providers.user]\ntype = \"anthropic\"\napi_key = \"keep\"\n"),
+            connector.format(),
+            connector.label(),
+        )
+        .unwrap();
+        prepare_owned_paths_for_write(&mut document, &connector.owned_paths()).unwrap();
+        let patch = connector.connect_patch(&input).unwrap();
+        validate_patch_ownership(&patch, &connector.owned_paths()).unwrap();
+        apply_patch(&mut document, &patch).unwrap();
+        connector.validate_projected(&document, &input).unwrap();
+
+        let semantic = semantic_json(&document).unwrap();
+        assert_eq!(semantic["default_model"], json!("tokenstation-auto"));
+        assert_eq!(
+            semantic["providers"]["tokenstation"]["type"],
+            json!("openai")
+        );
+        assert_eq!(
+            semantic["providers"]["tokenstation"]["api_key"],
+            json!("fixture-kimi-key")
+        );
+        assert_eq!(
+            semantic["models"]["tokenstation-auto"]["provider"],
+            json!("tokenstation")
+        );
+        assert_eq!(
+            semantic["models"]["tokenstation-auto"]["model"],
+            json!("auto")
+        );
+        assert!(
+            semantic["models"]["tokenstation-auto"]["max_context_size"]
+                .as_u64()
+                .is_some_and(|value| value > 0),
+            "Kimi Code refuses to start a session without a positive max_context_size"
+        );
+        assert_eq!(
+            semantic["models"]["tokenstation-auto"]["max_output_size"],
+            json!(8_192)
+        );
+        assert_eq!(semantic["providers"]["user"]["api_key"], json!("keep"));
+    }
+
+    #[test]
+    fn kimi_code_connector_refuses_unknown_context_limits_before_writing() {
+        let connector = find_connector("kimi-code-v1").expect("Kimi Code connector is registered");
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
+            token: Some("fixture-kimi-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+
+        let error = connector
+            .validate_preconditions(&input)
+            .expect_err("Kimi Code requires a known positive context limit");
+
+        assert!(error.contains("context"), "{error}");
+    }
+
+    #[test]
+    fn kimi_code_connector_rejects_invalid_limits_without_overflowing() {
+        let connector = find_connector("kimi-code-v1").expect("Kimi Code connector is registered");
+        for (context, output) in [(1, 0), (128_000, 128_000), (128_000, 128_001)] {
+            let metadata = AgentModelMetadata {
+                context,
+                output,
+                vision: false,
+                tools: true,
+                reasoning: true,
+                cost: None,
+            };
+            let input = ConnectInput {
+                base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
+                token: Some("fixture-kimi-key"),
+                adapter_ready: true,
+                model_metadata: Some(&metadata),
+            };
+
+            connector
+                .validate_preconditions(&input)
+                .expect_err("invalid context and output limits must fail before writing");
+        }
+
+        let metadata = AgentModelMetadata {
+            context: u32::MAX,
+            output: u32::MAX - 1,
+            vision: false,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
+            token: Some("fixture-kimi-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+
+        connector
+            .validate_preconditions(&input)
+            .expect("u32 limits remain valid without arithmetic overflow");
+    }
+
+    #[test]
+    fn kimi_code_connector_accepts_the_cli_bootstrap_config() {
+        let connector = find_connector("kimi-code-v1").expect("Kimi Code connector is registered");
+        let metadata = AgentModelMetadata {
+            context: 131_072,
+            output: 8_192,
+            vision: false,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/kimi-code/v1",
+            token: Some("fixture-kimi-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut document = parse_source_bytes(
+            Some(
+                b"\n[providers]\n\n[models]\n# ~/.kimi-code/config.toml\n# Runtime settings for Kimi Code.\n# This file starts empty so built-in defaults can apply.\n# Login will populate managed Kimi provider and model entries.\n",
+            ),
+            connector.format(),
+            connector.label(),
+        )
+        .unwrap();
+
+        prepare_owned_paths_for_write(&mut document, &connector.owned_paths())
+            .expect("Kimi Code's own bootstrap config is safe to extend");
+        let patch = connector.connect_patch(&input).unwrap();
+        apply_patch(&mut document, &patch).unwrap();
+        connector.validate_projected(&document, &input).unwrap();
+    }
+
+    #[test]
+    fn deepseek_harness_connector_projects_settings_and_credentials_together() {
+        let connector = find_connector("deepseek-harness-v1")
+            .expect("DeepSeek Harness connector is registered");
+        let root = std::env::temp_dir().join(format!(
+            "token-station-deepseek-harness-companion-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let primary = root.join("settings.yaml");
+        let credentials = root.join(".credentials.yaml");
+        std::fs::write(&credentials, b"USER_API_KEY: keep-me\n").unwrap();
+        let metadata = AgentModelMetadata {
+            context: 131_072,
+            output: 8_192,
+            vision: false,
+            tools: true,
+            reasoning: true,
+            cost: None,
+        };
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/deepseek-harness/v1",
+            token: Some("fixture-dsh-key"),
+            adapter_ready: true,
+            model_metadata: Some(&metadata),
+        };
+        let mut document = parse_source_bytes(
+            Some(
+                b"# keep DeepSeek comment\nllm-pi-ai:\n  providers:\n    user:\n      api: anthropic-messages\nkeep: deepseek-harness\n",
+            ),
+            connector.format(),
+            connector.label(),
+        )
+        .unwrap();
+        prepare_owned_paths_for_write(&mut document, &connector.owned_paths()).unwrap();
+        let patch = connector.connect_patch(&input).unwrap();
+        validate_patch_ownership(&patch, &connector.owned_paths()).unwrap();
+        apply_patch(&mut document, &patch).unwrap();
+        connector.validate_projected(&document, &input).unwrap();
+        let semantic = semantic_json(&document).unwrap();
+        assert_eq!(
+            semantic["agent-default-model"]["provider"],
+            json!("tokenstation")
+        );
+        assert_eq!(semantic["agent-default-model"]["model"], json!("auto"));
+        assert_eq!(
+            semantic["llm-pi-ai"]["providers"]["tokenstation"]["api"],
+            json!("openai-completions")
+        );
+        assert_eq!(
+            semantic["llm-pi-ai"]["providers"]["tokenstation"]["apiKeyEnv"],
+            json!("TOKENSTATION_API_KEY")
+        );
+        assert_eq!(
+            semantic["llm-pi-ai"]["providers"]["tokenstation"]["models"][0]["contextWindow"],
+            json!(131_072)
+        );
+        assert_eq!(
+            semantic["llm-pi-ai"]["providers"]["tokenstation"]["models"][0]["maxTokens"],
+            json!(8_192)
+        );
+        assert_eq!(
+            semantic["llm-pi-ai"]["providers"]["user"]["api"],
+            json!("anthropic-messages")
+        );
+        assert!(render_document(&document, connector.label())
+            .unwrap()
+            .contains("# keep DeepSeek comment"));
+
+        let companions = connector.companion_projections(&primary, &input).unwrap();
+        assert_eq!(companions.len(), 1);
+        assert_eq!(companions[0].target_path, credentials);
+        assert_eq!(
+            companions[0].sensitive_paths,
+            [path(&["TOKENSTATION_API_KEY"])]
+        );
+        let projected = parse_source_bytes(
+            Some(companions[0].projected_bytes.as_slice()),
+            DocumentFormat::Yaml,
+            companions[0].label,
+        )
+        .unwrap();
+        let credentials_semantic = semantic_json(&projected).unwrap();
+        assert_eq!(credentials_semantic["USER_API_KEY"], json!("keep-me"));
+        assert_eq!(
+            credentials_semantic["TOKENSTATION_API_KEY"],
+            json!("fixture-dsh-key")
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn deepseek_harness_accepts_the_stock_onboarding_settings_file() {
+        let connector = find_connector("deepseek-harness-v1")
+            .expect("DeepSeek Harness connector is registered");
+        let input = ConnectInput {
+            base_url: "http://127.0.0.1:8787/agents/deepseek-harness/v1",
+            token: Some("fixture-dsh-key"),
+            adapter_ready: true,
+            model_metadata: None,
+        };
+        let mut document = parse_source_bytes(
+            Some(b"ui-onboarding:\n  welcomeNoticeVersion: 2026-08-13.1\n"),
+            connector.format(),
+            connector.label(),
+        )
+        .expect("the stock DSH settings file is valid YAML");
+
+        connector
+            .validate_source(&document)
+            .expect("the stock DSH settings file is safe to extend");
+        prepare_owned_paths_for_write(&mut document, &connector.owned_paths())
+            .expect("the Token Station paths are safe to create");
+        let patch = connector.connect_patch(&input).unwrap();
+        apply_patch(&mut document, &patch).unwrap();
+        connector.validate_projected(&document, &input).unwrap();
+
+        let semantic = semantic_json(&document).unwrap();
+        assert_eq!(
+            semantic["ui-onboarding"]["welcomeNoticeVersion"],
+            json!("2026-08-13.1")
+        );
+        assert_eq!(
+            semantic["llm-pi-ai"]["providers"]["tokenstation"]["api"],
+            json!("openai-completions")
+        );
     }
 
     #[test]

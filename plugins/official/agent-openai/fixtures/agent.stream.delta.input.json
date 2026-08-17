@@ -1,6 +1,9 @@
 {
   "context": {
-    "protocol": "openai-chat-completions"
+    "protocol": "openai-chat-completions",
+    "stream_id": "stream-1",
+    "response_id": "chatcmpl-token-station-1",
+    "model": "gpt-5.5"
   },
   "events": [
     {

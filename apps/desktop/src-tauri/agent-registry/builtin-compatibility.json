@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "catalog_version": "builtin-2026-07-20.3",
-  "sequence": 1,
-  "issued_at_ms": 1784505600000,
+  "catalog_version": "builtin-2026-08-17.1",
+  "sequence": 2,
+  "issued_at_ms": 1786896000000,
   "expires_at_ms": null,
   "minimum_app_version": "0.1.0",
   "entries": [
@@ -12,6 +12,18 @@
     },
     {
       "agent_id": "codex",
+      "blocked": []
+    },
+    {
+      "agent_id": "grok-build",
+      "blocked": []
+    },
+    {
+      "agent_id": "kimi-code",
+      "blocked": []
+    },
+    {
+      "agent_id": "deepseek-harness",
       "blocked": []
     },
     {

@@ -566,6 +566,18 @@ fn resolve_interpreter(
                 .flat_map(|directory| candidates.iter().map(move |name| directory.join(name)))
                 .collect(),
         };
+        if *source == RuntimeResolutionSource::Path {
+            if let Some(resolved) = paths.into_iter().find_map(|path| {
+                canonical_native_executable(&path, environment.platform)
+                    .map(|canonical| (path, canonical))
+            }) {
+                // PATH is ordered. Selecting its first runnable entry matches
+                // `/usr/bin/env node` and avoids rejecting ordinary systems
+                // that keep more than one Node installation on PATH.
+                return Ok(resolved);
+            }
+            continue;
+        }
         let mut resolved = BTreeMap::new();
         for path in paths {
             if let Some(canonical) = canonical_native_executable(&path, environment.platform) {
@@ -2133,7 +2145,10 @@ mod tests {
                 "claude-desktop",
                 "codex",
                 "cursor",
+                "deepseek-harness",
                 "gemini-cli",
+                "grok-build",
+                "kimi-code",
                 "nous-hermes-agent",
                 "openclaw",
                 "opencode",
@@ -2449,6 +2464,42 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn discovery_finds_deepseek_harness_installed_by_the_official_npx_command() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch("dsh-npx");
+        let cache = root.join(".npm/_npx/0123456789abcdef/node_modules");
+        let actual = cache.join("@deepseek-ai/dsh/lib/bin.js");
+        executable(&actual);
+        let observed = cache.join(".bin/dsh");
+        std::fs::create_dir_all(observed.parent().unwrap()).unwrap();
+        symlink("../@deepseek-ai/dsh/lib/bin.js", &observed).unwrap();
+
+        let registry = AgentRegistry::builtin().unwrap();
+        let mut descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "deepseek-harness")
+            .unwrap()
+            .clone();
+        descriptor.known_install_locations.clear();
+        let mut context = environment(&root);
+        context.path_entries.clear();
+        let records = DiscoveryScanner::new(context, FixedProbe).scan_descriptor(&descriptor);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].executable_path, observed.to_string_lossy());
+        assert_eq!(
+            records[0].canonical_path,
+            std::fs::canonicalize(&actual).unwrap().to_string_lossy()
+        );
+        assert_eq!(records[0].binary_source, BinarySource::KnownPath);
+        assert!(records[0].runnable);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn discovery_keeps_workbuddy_variants_on_one_agent_with_separate_configs() {
         let root = scratch("workbuddy-variants");
         let domestic = root.join(
@@ -2755,6 +2806,36 @@ mod tests {
                 .unwrap_err()
                 .contains("多个")
         );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_runtime_path_uses_the_first_runnable_entry_like_the_shell() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch("runtime-path-order");
+        let observed_entry = root.join("bin/dsh");
+        let first = root.join("runtime-a/node");
+        let second = root.join("runtime-b/node");
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        symlink("/bin/sh", &first).unwrap();
+        symlink("/bin/echo", &second).unwrap();
+        let mut context = environment(&root);
+        context.path_entries = vec![root.join("runtime-a"), root.join("runtime-b")];
+
+        let resolved = resolve_interpreter(
+            &observed_entry,
+            &["node".to_string()],
+            &[RuntimeResolutionSource::Path],
+            &BTreeMap::new(),
+            &context,
+        )
+        .expect("PATH order defines the runtime that an env shebang would use");
+
+        assert_eq!(resolved.0, first);
+        assert_eq!(resolved.1, std::fs::canonicalize(&first).unwrap());
         std::fs::remove_dir_all(root).ok();
     }
 

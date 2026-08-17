@@ -32,6 +32,9 @@ const ALLOWED_PATH_VARIABLES: &[&str] = &[
 const ALLOWED_CONFIG_ENV: &[&str] = &[
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
+    "GROK_HOME",
+    "KIMI_CODE_HOME",
+    "DSH_HOME",
     "OPENCODE_CONFIG",
     "OPENCODE_CONFIG_DIR",
     "OPENCLAW_CONFIG_PATH",
@@ -827,6 +830,9 @@ mod tests {
                 "claude-desktop",
                 "codex",
                 "gemini-cli",
+                "grok-build",
+                "kimi-code",
+                "deepseek-harness",
                 "opencode",
                 "cursor",
                 "openclaw",
@@ -840,10 +846,13 @@ mod tests {
             .into_iter()
             .map(|metadata| (metadata.agent_id, metadata.display_name))
             .collect();
-        assert_eq!(labels.len(), 9);
+        assert_eq!(labels.len(), 12);
         assert_eq!(labels[0].1, "Claude Code");
-        assert_eq!(labels[7].1, "WorkBuddy");
-        assert_eq!(labels[8].1, "Hermes Agent");
+        assert_eq!(labels[4].1, "Grok Build");
+        assert_eq!(labels[5].1, "Kimi Code");
+        assert_eq!(labels[6].1, "DeepSeek Harness");
+        assert_eq!(labels[10].1, "WorkBuddy");
+        assert_eq!(labels[11].1, "Hermes Agent");
 
         let claude_desktop = &registry.descriptors()[1];
         assert!(claude_desktop.version_probe.argv.is_empty());
@@ -863,7 +872,7 @@ mod tests {
             registry.ui_metadata()[3].connector_capabilities[0].config_format,
             "dotenv"
         );
-        let hermes = &registry.descriptors()[8];
+        let hermes = &registry.descriptors()[11];
         assert_eq!(hermes.admission, AdmissionStatus::Supported);
         assert_eq!(hermes.local_connector_ids, ["hermes-v1"]);
         assert_eq!(hermes.version_probe.argv, ["--help"]);
@@ -872,7 +881,7 @@ mod tests {
             super::super::types::VersionOutputMatcher::SuccessOnly
         );
         assert!(!hermes.version_probe.retry_on_timeout);
-        let openclaw = &registry.descriptors()[6];
+        let openclaw = &registry.descriptors()[9];
         assert_eq!(openclaw.admission, AdmissionStatus::Supported);
         assert_eq!(openclaw.local_connector_ids, ["openclaw-v1"]);
         assert!(matches!(
@@ -889,7 +898,12 @@ mod tests {
             .iter()
             .filter(|descriptor| matches!(
                 descriptor.agent_id.as_str(),
-                "claude-code" | "codex" | "gemini-cli" | "opencode" | "openclaw"
+                "claude-code"
+                    | "codex"
+                    | "gemini-cli"
+                    | "deepseek-harness"
+                    | "opencode"
+                    | "openclaw"
             ))
             .all(|descriptor| matches!(
                 descriptor.version_probe.runtime,
@@ -946,7 +960,7 @@ mod tests {
 
         let ui_json = serde_json::to_value(registry.ui_metadata()).unwrap();
         assert_eq!(ui_json[0]["agent_id"], "claude-code");
-        assert_eq!(ui_json[4]["icon_key"], "opencode");
+        assert_eq!(ui_json[7]["icon_key"], "opencode");
 
         let mut shuffled = fixture();
         shuffled["agents"].as_array_mut().unwrap().reverse();
@@ -965,6 +979,9 @@ mod tests {
             ("opencode", "${HOME}/.opencode/bin/opencode"),
             ("openclaw", "${HOME}/.local/share/pnpm/openclaw"),
             ("nous-hermes-agent", "${HOME}/.local/bin/hermes"),
+            ("grok-build", "${HOME}/.grok/bin/grok"),
+            ("kimi-code", "${HOME}/.local/bin/kimi"),
+            ("deepseek-harness", "${HOME}/.npm-global/bin/dsh"),
         ];
 
         for (agent_id, path) in expected {

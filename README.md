@@ -80,6 +80,9 @@ Background mode means that the desktop process remains alive after its window is
 | <a href="https://github.com/anthropics"><img src="docs/assets/agents/claude-desktop.svg" width="20" height="20" alt=""> Claude Desktop</a> | Built-in connector | Anthropic Messages |
 | <a href="https://github.com/openai/codex"><img src="docs/assets/agents/codex.svg" width="20" height="20" alt=""> Codex</a> | Built-in connector | OpenAI Responses |
 | <a href="https://github.com/google-gemini/gemini-cli"><img src="docs/assets/agents/gemini-cli.svg" width="20" height="20" alt=""> Gemini CLI</a> | Built-in connector | Gemini |
+| [Grok Build](https://github.com/xai-org/grok-cli) | Built-in connector | OpenAI Chat Completions |
+| [Kimi Code](https://github.com/MoonshotAI/kimi-code) | Built-in connector | OpenAI Chat Completions |
+| [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | Built-in connector (developer preview upstream) | OpenAI Chat Completions |
 | <a href="https://github.com/NousResearch/hermes-agent"><img src="apps/desktop/public/agents/hermes.png" width="20" height="20" alt=""> Hermes Agent</a> | Built-in connector | OpenAI Chat Completions |
 | <a href="https://github.com/openclaw/openclaw"><img src="docs/assets/agents/openclaw.svg" width="20" height="20" alt=""> OpenClaw</a> | Built-in connector | OpenAI Chat Completions |
 | <a href="https://www.workbuddy.ai/"><img src="apps/desktop/public/agents/workbuddy.png" width="20" height="20" alt=""> WorkBuddy</a> | Built-in connector | OpenAI Chat Completions |
@@ -88,7 +91,9 @@ Background mode means that the desktop process remains alive after its window is
 
 Claude Desktop does not currently have a public product repository; its link opens Anthropic's official GitHub organization.
 
-For the eight built-in connectors, clicking **Connect** is consent to immediately apply a bounded plan. Token Station starts the gateway when needed and shows the fields changed by the first connection. Connector availability depends on the agent and operating system, and does not imply that Token Station publishes an installer for that platform.
+DeepSeek Harness discovery covers both a normal `dsh` command and the bounded npm cache layout created by the upstream-recommended `npx @deepseek-ai/dsh web` command. Token Station reads existing cache entries only; it never runs `npx` or installs the package during a scan.
+
+For the eleven built-in connectors, clicking **Connect** is consent to immediately apply a bounded plan. Token Station starts the gateway when needed and shows the fields changed by the first connection. Connector availability depends on the agent and operating system, and does not imply that Token Station publishes an installer for that platform.
 
 Cursor uses a separate path on macOS and Windows. Quit Cursor first. Token Station privately backs up the relevant SQLite records, transactionally writes the OpenAI-compatible endpoint, virtual key, and enablement flag, verifies the result, and restores the previous values if verification fails. Restart Cursor afterward and choose a model that supports its custom OpenAI key path. This path is not covered by standard connector ownership or managed disconnect.
 

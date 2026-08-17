@@ -1671,6 +1671,9 @@ fn agent_namespaces_select_custom_or_inherited_routers_and_strip_paths() {
         "nous-hermes-agent",
         "workbuddy",
         "cursor",
+        "grok-build",
+        "kimi-code",
+        "deepseek-harness",
     ] {
         let (status, _) = post_scoped(
             &proxy,
@@ -1706,7 +1709,7 @@ fn agent_namespaces_select_custom_or_inherited_routers_and_strip_paths() {
     assert_eq!(status, 200);
 
     assert_eq!(custom.hits(), 1, "only Codex uses its custom route");
-    assert_eq!(home.hits(), 8, "home plus seven inherited Agent requests");
+    assert_eq!(home.hits(), 11, "home plus ten inherited Agent requests");
     assert!(
         custom
             .seen()

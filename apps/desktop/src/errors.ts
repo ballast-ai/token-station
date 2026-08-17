@@ -267,6 +267,11 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     zh: "代理已经运行，但一个已接管 Agent 的模型元数据刷新失败。请打开 Agent 页面重新扫描，并修复该 Agent 后再使用它的路由。",
   },
   {
+    matches: /Kimi Code.*(?:positive|正数).*(?:context|max_context_size)|Kimi Code.*(?:context|max_context_size).*(?:missing|required|需要|缺少)/i,
+    en: "Kimi Code needs a verified context-window limit for the active route. Complete that model's context window in Providers, restart the proxy, then connect again.",
+    zh: "Kimi Code 需要当前路由模型具备可信的上下文上限。请在供应商页面补全该模型的上下文窗口，重启代理后再次接入。",
+  },
+  {
     matches: /\bVERSION_PROBE_TIMEOUT\b/i,
     en: "Agent version detection timed out. Rescan; if it still fails, check that the Agent installation is complete.",
     zh: "Agent 版本检测超时。请重新扫描；如果仍然失败，请检查该 Agent 的安装是否完整。",

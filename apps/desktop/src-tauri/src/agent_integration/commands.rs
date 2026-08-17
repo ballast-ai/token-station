@@ -453,10 +453,18 @@ fn agent_model_metadata(
     config: &token_station_cli::config::ClientConfig,
     agent_id: &str,
 ) -> Result<Option<AgentModelMetadata>, String> {
-    let router = config
-        .custom_router_for_agent(agent_id)?
-        .unwrap_or_else(|| config.router.clone());
+    let router = configured_router_for_agent(config, agent_id)?;
     agent_model_metadata_for_router(config, &router)
+}
+
+fn configured_router_for_agent(
+    config: &token_station_cli::config::ClientConfig,
+    agent_id: &str,
+) -> Result<token_station_router_core::RouterConfig, String> {
+    match config.custom_router_for_agent(agent_id)? {
+        Some(router) => Ok(router),
+        None => config.home_router_config(),
+    }
 }
 
 fn agent_model_metadata_for_router(
@@ -688,10 +696,8 @@ fn serving_router_for_agent(
     let config = server.serving_config();
     match server.agent_router_override(agent_id) {
         Some(Some(router)) => Ok(router.clone()),
-        Some(None) => Ok(config.router.clone()),
-        None => config
-            .custom_router_for_agent(agent_id)
-            .map(|router| router.unwrap_or_else(|| config.router.clone())),
+        Some(None) => config.home_router_config(),
+        None => configured_router_for_agent(config, agent_id),
     }
 }
 
@@ -712,9 +718,7 @@ fn opencode_issue_from_inner(
         ))),
         crate::ServerLifecycle::Stopped { .. } | crate::ServerLifecycle::Failed { .. } => {
             let config = inner.materialize()?;
-            let router = config
-                .custom_router_for_agent("opencode")?
-                .unwrap_or_else(|| config.router.clone());
+            let router = configured_router_for_agent(&config, "opencode")?;
             Ok(opencode_connection_issue(&config, &router))
         }
     }
@@ -936,11 +940,19 @@ fn validate_force_forget_reconnect(
     let owned_paths = connector.owned_paths();
     prepare_owned_paths_for_write(&mut projected, &owned_paths)?;
     connector.validate_source(&projected)?;
+    let metadata = AgentModelMetadata {
+        context: 131_072,
+        output: 8_192,
+        vision: true,
+        tools: true,
+        reasoning: true,
+        cost: None,
+    };
     let input = ConnectInput {
         base_url: RECONNECT_BASE_URL,
         token: Some(RECONNECT_TOKEN),
         adapter_ready: true,
-        model_metadata: None,
+        model_metadata: Some(&metadata),
     };
     let reconnect = connector.connect_patch_for_document(&projected, &input)?;
     validate_patch_ownership(&reconnect, &owned_paths)?;
@@ -2635,6 +2647,9 @@ mod tests {
             ("claude-desktop-3p-v1", DocumentFormat::Json, "{}"),
             ("codex-v1", DocumentFormat::Toml, "[model_providers]\n"),
             ("gemini-cli-v1", DocumentFormat::Dotenv, ""),
+            ("grok-build-v1", DocumentFormat::Toml, ""),
+            ("kimi-code-v1", DocumentFormat::Toml, ""),
+            ("deepseek-harness-v1", DocumentFormat::Yaml, "{}\n"),
             ("hermes-v1", DocumentFormat::Yaml, "model:\n"),
             (
                 "openclaw-v1",
@@ -2770,6 +2785,7 @@ mod tests {
     fn agent_projection_uses_each_effective_route_safe_limits_and_uniform_costs() {
         let root = scratch("opencode-model-metadata");
         let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("tiered");
         for (name, context, output) in [
             ("provider_a", 257_550, 32_768),
             ("provider_b", 128_000, 16_384),
@@ -2837,6 +2853,7 @@ mod tests {
     fn agent_projection_falls_back_to_complete_configured_price_for_partial_catalog_costs() {
         let root = scratch("partial-catalog-price-fallback");
         let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("tiered");
         for name in ["provider_a", "provider_b"] {
             draft["upstreams"][name] = json!({
                 "provider": "openai-compatible",
@@ -2886,6 +2903,7 @@ mod tests {
     fn incomplete_limits_do_not_discard_verified_capabilities_or_price() {
         let root = scratch("partial-limits-keep-capabilities");
         let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("tiered");
         draft["upstreams"]["provider_a"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://provider-a.example/v1",
@@ -2919,6 +2937,7 @@ mod tests {
     fn opencode_refuses_assumed_context_and_reports_the_exact_missing_target() {
         let root = scratch("opencode-fail-closed-limits");
         let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("tiered");
         draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://provider.example/v1",
@@ -2948,6 +2967,7 @@ mod tests {
     fn opencode_accepts_a_trusted_context_with_the_safe_default_output() {
         let root = scratch("opencode-safe-default-output");
         let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("tiered");
         draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://provider.example/v1",
@@ -2972,9 +2992,45 @@ mod tests {
     }
 
     #[test]
+    fn kimi_inherited_direct_route_projects_its_configured_context_window() {
+        let root = scratch("kimi-direct-route-context");
+        let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["upstreams"]["deepseek"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://deepseek.example/v1",
+            "models": [{
+                "model": "deepseek-v4-flash",
+                "context_window": 128_000,
+                "tool": true,
+                "vision": false
+            }]
+        });
+        draft["routing"] = json!({
+            "mode": "direct",
+            "direct_target": {
+                "upstream": "deepseek",
+                "model": "deepseek-v4-flash"
+            }
+        });
+        draft["agent_routes"]["kimi-code"] = json!({
+            "mode": "inherit",
+            "routing_mode": "direct"
+        });
+        let config: token_station_cli::config::ClientConfig =
+            serde_json::from_value(draft).unwrap();
+
+        let metadata = agent_model_metadata(&config, "kimi-code")
+            .unwrap()
+            .expect("the inherited direct route has one configured model");
+
+        assert_eq!(metadata.context, 128_000);
+    }
+
+    #[test]
     fn opencode_rejects_the_safe_default_when_it_leaves_no_input_budget() {
         let root = scratch("opencode-default-output-too-large");
         let mut draft = crate::template(&root.join("data"), &root.join("plugins"));
+        draft["routing"]["mode"] = json!("tiered");
         draft["upstreams"]["provider"] = json!({
             "provider": "openai-compatible",
             "base_url": "https://provider.example/v1",
@@ -3516,7 +3572,7 @@ mod tests {
     fn commands_installation_path_is_only_an_exact_scan_lookup_key() {
         let state = state("lookup");
         let registry_metadata = state.registry_metadata();
-        assert_eq!(registry_metadata.len(), 9);
+        assert_eq!(registry_metadata.len(), 12);
         assert_eq!(registry_metadata[0].agent_id, "claude-code");
         let target = scratch("lookup-target").join("settings.json");
         let registry = AgentRegistry::builtin().unwrap();
@@ -3550,7 +3606,7 @@ mod tests {
             records: Vec::new(),
         };
         let views = state.views(&empty, None, None).unwrap();
-        assert_eq!(views.len(), 9);
+        assert_eq!(views.len(), 12);
         assert!(views.iter().all(|view| {
             view.status == CompatibilityStatus::NotDetected && view.installations.is_empty()
         }));
@@ -3588,7 +3644,7 @@ mod tests {
 
         let views = state.cached_views_with_runtime(None, None).unwrap();
 
-        assert_eq!(views.len(), 9);
+        assert_eq!(views.len(), 12);
         assert!(views.iter().all(|view| view.installations.is_empty()));
         assert!(state.scan_in_progress.load(Ordering::Acquire));
     }
@@ -3739,7 +3795,7 @@ mod tests {
                         .collect(),
                 },
                 &RuntimeAdmission {
-                    compatibility_sequence: 1,
+                    compatibility_sequence: taken.prepared.view.compatibility_sequence,
                     status: CompatibilityStatus::DetectedVerified,
                 },
                 now_ms,
@@ -3988,6 +4044,15 @@ mod tests {
             ),
             ("codex-v1", "http://127.0.0.1:8787/agents/codex/v1"),
             ("gemini-cli-v1", "http://127.0.0.1:8787/agents/gemini-cli"),
+            (
+                "grok-build-v1",
+                "http://127.0.0.1:8787/agents/grok-build/v1",
+            ),
+            ("kimi-code-v1", "http://127.0.0.1:8787/agents/kimi-code/v1"),
+            (
+                "deepseek-harness-v1",
+                "http://127.0.0.1:8787/agents/deepseek-harness/v1",
+            ),
             ("opencode-v1", "http://127.0.0.1:8787/agents/opencode/v1"),
             ("openclaw-v1", "http://127.0.0.1:8787/agents/openclaw/v1"),
             ("workbuddy-v1", "http://127.0.0.1:8787/agents/workbuddy/v1"),
@@ -4281,7 +4346,7 @@ mod tests {
         assert_eq!(error.code, "read_only_preflight_failed");
 
         let scanned = state.scan().unwrap();
-        assert_eq!(scanned.len(), 9);
+        assert_eq!(scanned.len(), 12);
         assert!(state.session.lock().unwrap().scan.is_some());
     }
 
@@ -4421,7 +4486,7 @@ mod tests {
                         .collect(),
                 },
                 &RuntimeAdmission {
-                    compatibility_sequence: 1,
+                    compatibility_sequence: taken.prepared.view.compatibility_sequence,
                     status: CompatibilityStatus::DetectedVerified,
                 },
                 now_ms,
@@ -4887,6 +4952,62 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_harness_connects_from_stock_settings_without_a_credentials_file() {
+        let root = scratch("dsh-stock");
+        let case = LifecycleCase {
+            label: "deepseek-harness",
+            agent_id: "deepseek-harness",
+            connector_id: "deepseek-harness-v1",
+            version: "0.1.0-rc.6",
+            installation_path: root.join("install/dsh").to_string_lossy().into_owned(),
+            primary: LifecycleFileFixture {
+                path: root.join("home/.dsh/settings.yaml"),
+                baseline: b"ui-onboarding:\n  welcomeNoticeVersion: 2026-08-13.1\n",
+                format: DocumentFormat::Yaml,
+                marker: "welcomeNoticeVersion",
+            },
+            companions: vec![LifecycleFileFixture {
+                path: root.join("home/.dsh/.credentials.yaml"),
+                baseline: b"",
+                format: DocumentFormat::Yaml,
+                marker: "TOKENSTATION_API_KEY",
+            }],
+        };
+        std::fs::create_dir_all(case.primary.path.parent().unwrap()).unwrap();
+        std::fs::write(&case.primary.path, case.primary.baseline).unwrap();
+        assert!(!case.companions[0].path.exists());
+
+        let state = state("dsh-stock");
+        let catalog = CompatibilityCatalog::builtin(&state.registry).unwrap();
+        install_scan(&state, catalog, vec![lifecycle_record(&case)]);
+        let fixture_runtime = runtime("vk-dsh-stock-connection");
+
+        apply_lifecycle_connection(&state, &case, &fixture_runtime, "dsh-main");
+        assert!(case.companions[0].path.exists());
+        assert_lifecycle_ownership(&state, &case, 1);
+        let settings = std::fs::read_to_string(&case.primary.path).unwrap();
+        assert!(settings.contains("welcomeNoticeVersion"));
+        assert!(settings.contains("TOKENSTATION_API_KEY"));
+        assert!(!settings.contains(fixture_runtime.virtual_key()));
+        let credentials = std::fs::read_to_string(&case.companions[0].path).unwrap();
+        assert!(credentials.contains(fixture_runtime.virtual_key()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&case.companions[0].path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
+        clean_lifecycle_case(&state, &root);
+    }
+
+    #[test]
     fn concurrent_non_codex_connection_plans_leave_one_consistent_owner() {
         const CONTENDERS: usize = 8;
         let root = scratch("race");
@@ -5300,7 +5421,7 @@ mod tests {
                         .collect(),
                 },
                 &RuntimeAdmission {
-                    compatibility_sequence: 1,
+                    compatibility_sequence: taken.prepared.view.compatibility_sequence,
                     status: CompatibilityStatus::DetectedVerified,
                 },
                 now_ms,

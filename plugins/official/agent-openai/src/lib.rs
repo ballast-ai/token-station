@@ -253,6 +253,9 @@ impl Guest for OpenAiClient {
                     "cursor".to_owned(),
                     "continue".to_owned(),
                     "workbuddy".to_owned(),
+                    "grok-build".to_owned(),
+                    "kimi-code".to_owned(),
+                    "deepseek-harness".to_owned(),
                 ],
             },
         ]
@@ -430,14 +433,28 @@ impl Guest for OpenAiClient {
         }))
     }
 
-    fn render_stream_event(event: String, _context: String) -> Result<String, String> {
+    fn render_stream_event(event: String, context: String) -> Result<String, String> {
         let event: StreamEvent = parse_input(&event)?;
+        let context: Value = parse_input(&context)?;
+        let response_id = context
+            .get("response_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("stream render context declares no response_id"))?;
+        let model = context
+            .get("model")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("stream render context declares no model"))?;
+        let stream_identity = format!(
+            "\"id\":{},\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":{},",
+            serde_json::to_string(response_id).map_err(internal)?,
+            serde_json::to_string(model).map_err(internal)?,
+        );
 
         // Templated rather than serialized: the entry protocol's key order is
         // part of its wire format, and a `Map` would sort it.
         let data = match &event {
             StreamEvent::Delta { index, content } => format!(
-                "data: {{\"choices\":[{{\"index\":{index},\"delta\":{{\"content\":{}}}}}]}}\n\n",
+                "data: {{{stream_identity}\"choices\":[{{\"index\":{index},\"delta\":{{\"content\":{}}}}}]}}\n\n",
                 serde_json::to_string(content).map_err(internal)?
             ),
             StreamEvent::ToolCallDelta {
@@ -456,19 +473,19 @@ impl Guest for OpenAiClient {
                         serde_json::to_string(name).map_err(internal)?
                     );
                 }
-                let identity = match id {
+                let tool_identity = match id {
                     Some(id) => {
                         format!("\"id\":{},", serde_json::to_string(id).map_err(internal)?)
                     }
                     None => String::new(),
                 };
                 format!(
-                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":\
-                     [{{\"index\":{index},{identity}\"function\":{{{function}}}}}]}}}}]}}\n\n"
+                    "data: {{{stream_identity}\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":\
+                     [{{\"index\":{index},{tool_identity}\"function\":{{{function}}}}}]}}}}]}}\n\n"
                 )
             }
             StreamEvent::Usage { usage } => format!(
-                "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{},\
+                "data: {{{stream_identity}\"choices\":[],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{},\
                  \"total_tokens\":{},\"prompt_tokens_details\":{{\"cached_tokens\":{},\
                  \"cache_write_tokens\":{}}},\"completion_tokens_details\":{{\"reasoning_tokens\":{}}}}}}}\n\n",
                 usage.input_tokens,
@@ -485,7 +502,7 @@ impl Guest for OpenAiClient {
                 index,
                 thinking_delta,
             } => format!(
-                "data: {{\"choices\":[{{\"index\":{index},\"delta\":{{\"reasoning_content\":{}}}}}]}}\n\n",
+                "data: {{{stream_identity}\"choices\":[{{\"index\":{index},\"delta\":{{\"reasoning_content\":{}}}}}]}}\n\n",
                 serde_json::to_string(thinking_delta).map_err(internal)?
             ),
             StreamEvent::ThinkingSignatureDelta { .. } => String::new(),
@@ -499,7 +516,7 @@ impl Guest for OpenAiClient {
                     None => "null".to_owned(),
                 };
                 format!(
-                    "data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":{reason}}}]}}\n\n"
+                    "data: {{{stream_identity}\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":{reason}}}]}}\n\n"
                 )
             }
             StreamEvent::Done {
@@ -513,7 +530,7 @@ impl Guest for OpenAiClient {
                 };
                 if finish_reason.is_some() {
                     format!(
-                        "data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":{reason}}}]}}\
+                        "data: {{{stream_identity}\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":{reason}}}]}}\
                          \n\ndata: [DONE]\n\n"
                     )
                 } else {
@@ -652,19 +669,53 @@ mod tests {
             }
         });
 
-        let rendered = OpenAiClient::render_stream_event(event.to_string(), String::new())
+        let context = json!({
+            "response_id": "chatcmpl-usage",
+            "model": "routed-model"
+        });
+        let rendered = OpenAiClient::render_stream_event(event.to_string(), context.to_string())
             .expect("canonical usage event renders");
         let rendered: Value = serde_json::from_str(&rendered).expect("stream wrapper is JSON");
 
         assert_eq!(
             rendered["data"],
             json!(concat!(
-                "data: {\"choices\":[],\"usage\":{",
+                "data: {\"id\":\"chatcmpl-usage\",\"object\":\"chat.completion.chunk\",",
+                "\"created\":0,\"model\":\"routed-model\",\"choices\":[],\"usage\":{",
                 "\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":120,",
                 "\"prompt_tokens_details\":{\"cached_tokens\":60,\"cache_write_tokens\":10},",
                 "\"completion_tokens_details\":{\"reasoning_tokens\":5}}}\n\n"
             ))
         );
+    }
+
+    #[test]
+    fn reasoning_stream_chunks_include_the_chat_completion_identity() {
+        let event = json!({
+            "type": "thinking_delta",
+            "index": 0,
+            "thinking_delta": "checking"
+        });
+        let context = json!({
+            "stream_id": "stream-7",
+            "response_id": "chatcmpl-token-station-7",
+            "model": "routed-model"
+        });
+
+        let rendered = OpenAiClient::render_stream_event(event.to_string(), context.to_string())
+            .expect("canonical reasoning event renders");
+        let wrapper: Value = serde_json::from_str(&rendered).expect("stream wrapper is JSON");
+        let data = wrapper["data"]
+            .as_str()
+            .expect("stream wrapper contains SSE data")
+            .strip_prefix("data: ")
+            .and_then(|value| value.strip_suffix("\n\n"))
+            .expect("one complete SSE data frame");
+        let chunk: Value = serde_json::from_str(data).expect("SSE payload is JSON");
+
+        assert_eq!(chunk["id"], json!("chatcmpl-token-station-7"));
+        assert_eq!(chunk["object"], json!("chat.completion.chunk"));
+        assert_eq!(chunk["model"], json!("routed-model"));
     }
 
     #[test]
@@ -686,8 +737,13 @@ mod tests {
         let data = events
             .into_iter()
             .map(|event| {
-                let rendered = OpenAiClient::render_stream_event(event.to_string(), String::new())
-                    .expect("canonical stream event renders");
+                let context = json!({
+                    "response_id": "chatcmpl-order",
+                    "model": "routed-model"
+                });
+                let rendered =
+                    OpenAiClient::render_stream_event(event.to_string(), context.to_string())
+                        .expect("canonical stream event renders");
                 let rendered: Value =
                     serde_json::from_str(&rendered).expect("stream wrapper is JSON");
                 rendered["data"]

@@ -4554,17 +4554,64 @@ fn restart_agent_route(
 }
 
 #[tauri::command]
-fn apply_home_route_to_all_agents(state: State<'_, AppStateManaged>) -> Result<StateView, String> {
-    let mut inner = state.0.lock().unwrap();
-    inner.edit_validated_draft(|candidate| {
-        for agent_id in supported_agent_ids() {
-            candidate.set_agent_inherit_value(&agent_id);
+fn apply_home_route_to_all_agents(
+    state: State<'_, AppStateManaged>,
+    agents: State<'_, AgentCommandState>,
+) -> Result<StateView, String> {
+    let snapshot = {
+        let mut inner = state.0.lock().unwrap();
+        if matches!(
+            inner.server,
+            ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. }
+        ) {
+            return Err(
+                "apply_in_progress: Finish the current config apply before you apply the Home route."
+                    .to_owned(),
+            );
         }
-        Ok(())
-    })?;
-    inner.save_draft()?;
-    inner.agent_route_drafts.clear();
-    Ok(inner.snapshot())
+        inner.edit_validated_draft(|candidate| {
+            for agent_id in supported_agent_ids() {
+                candidate.set_agent_inherit_value(&agent_id);
+            }
+            Ok(())
+        })?;
+        let prepared = match &inner.server {
+            ServerLifecycle::Running { server, .. } => supported_agent_ids()
+                .into_iter()
+                .map(|agent_id| {
+                    server
+                        .prepare_agent_router_reload(&agent_id, None)
+                        .map_err(|error| format!("Failed to hot-reload the Agent route: {error}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            ServerLifecycle::Stopped { .. }
+            | ServerLifecycle::Failed { .. }
+            | ServerLifecycle::Stopping { .. } => Vec::new(),
+            ServerLifecycle::Starting { .. } | ServerLifecycle::Applying { .. } => {
+                unreachable!("transitional lifecycles were rejected before editing")
+            }
+        };
+
+        inner.save_draft()?;
+        inner.agent_route_drafts.clear();
+        if let ServerLifecycle::Running { server, .. } = &mut inner.server {
+            for prepared in prepared {
+                server.install_prevalidated_agent_router(prepared);
+            }
+        }
+        inner.snapshot()
+    };
+    if let Ok(runtime) = runtime_from_app(state.inner()) {
+        agents
+            .refresh_model_metadata(None, &runtime)
+            .map_err(|error| {
+                format!(
+                    "The Home route was applied, but the model metadata refresh failed: {}",
+                    error.message
+                )
+            })?;
+    }
+    Ok(snapshot)
 }
 
 /// Validate and write atomically. Return validation errors without writing, matching config edit semantics.
@@ -9345,6 +9392,7 @@ mod tests {
         }
         let app = tauri::test::mock_app();
         assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        manage_test_agent_state(&app, &root);
 
         let custom =
             set_agent_route_mode(app.state(), "codex".to_string(), "custom".to_string()).unwrap();
@@ -9360,7 +9408,7 @@ mod tests {
             .unwrap();
             set_routing_mode(app.state(), "direct".to_owned(), Some(agent_id.to_owned())).unwrap();
         }
-        let inherited = apply_home_route_to_all_agents(app.state()).unwrap();
+        let inherited = apply_home_route_to_all_agents(app.state(), app.state()).unwrap();
         assert!(inherited
             .agent_routes
             .values()
@@ -9375,6 +9423,64 @@ mod tests {
             assert!(saved.agent_routes[agent_id].routing_mode.is_none());
             assert!(saved.agent_routes[agent_id].direct_target.is_none());
         }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn applying_home_routes_replaces_running_agent_overrides() {
+        let root = scratch_home("agent-routes-apply-home-running");
+        let config_path = root.join("token-station.json");
+        let (serving_draft, mut running) = published_agent_route_fixture(&root);
+        let mut custom_draft = serving_draft.clone();
+        custom_draft["agent_routes"]["opencode"] = json!({
+            "mode": "inherit",
+            "routing_mode": "direct",
+            "direct_target": {"upstream": "local", "model": "small"}
+        });
+        let custom_config: ClientConfig = serde_json::from_value(custom_draft.clone()).unwrap();
+        custom_config.save(&config_path).unwrap();
+        let custom_router = custom_config
+            .custom_router_for_agent("opencode")
+            .unwrap()
+            .expect("the fixture has one custom Agent router");
+        let prepared = running
+            .prepare_agent_router_reload("opencode", Some(custom_router))
+            .unwrap();
+        running.install_prevalidated_agent_router(prepared);
+
+        let mut inner =
+            AppInner::new_with_saved(config_path.clone(), custom_draft, serving_draft, None);
+        inner.server = ServerLifecycle::Running {
+            generation: 7,
+            server: running,
+            apply_error: None,
+        };
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(inner))));
+        manage_test_agent_state(&app, &root);
+
+        apply_home_route_to_all_agents(app.state(), app.state()).unwrap();
+
+        let state = app.state::<AppStateManaged>();
+        let mut inner = state.0.lock().unwrap();
+        let override_after = match &inner.server {
+            ServerLifecycle::Running { server, .. } => server
+                .agent_router_override("opencode")
+                .map(|router| router.cloned()),
+            _ => panic!("applying Home routes must leave the proxy running"),
+        };
+        assert_eq!(override_after, Some(None));
+        let persisted = ClientConfig::load(&config_path).unwrap();
+        assert_eq!(persisted.custom_router_for_agent("opencode").unwrap(), None);
+        let lifecycle = std::mem::replace(
+            &mut inner.server,
+            ServerLifecycle::Stopped { generation: 8 },
+        );
+        drop(inner);
+        let ServerLifecycle::Running { server, .. } = lifecycle else {
+            unreachable!()
+        };
+        server.drain_and_shutdown();
         std::fs::remove_dir_all(root).ok();
     }
 

@@ -160,6 +160,13 @@ pub(crate) fn executable_candidates(
         candidates.extend(macos_python_user_candidates(environment, "hermes"));
     }
 
+    if descriptor.agent_id == "deepseek-harness" {
+        candidates.extend(npm_npx_cache_candidates(
+            environment,
+            &descriptor.executable_candidates,
+        ));
+    }
+
     for (path_order, directory) in environment.path_entries.iter().enumerate() {
         for executable in &descriptor.executable_candidates {
             let names = path_executable_names(executable, environment.platform);
@@ -273,6 +280,63 @@ fn macos_workbuddy_app_candidates(environment: &ScanEnvironment) -> Vec<PathBuf>
 
 const MAX_USER_CONFIG_BYTES: u64 = 65_536;
 const MAX_PYTHON_USER_VERSIONS: usize = 32;
+const MAX_NPX_CACHE_ENTRIES: usize = 256;
+
+fn npm_npx_cache_root(environment: &ScanEnvironment) -> Option<PathBuf> {
+    match environment.platform {
+        Platform::Macos | Platform::Linux | Platform::Wsl => environment
+            .variables
+            .get("HOME")
+            .filter(|home| is_absolute_for(environment.platform, home))
+            .map(|home| PathBuf::from(home).join(".npm/_npx")),
+        Platform::Windows => environment
+            .variables
+            .get("LOCALAPPDATA")
+            .filter(|root| is_absolute_for(Platform::Windows, root))
+            .map(|root| PathBuf::from(normalize_separators(root)).join("npm-cache/_npx")),
+    }
+}
+
+fn npm_npx_cache_candidates(
+    environment: &ScanEnvironment,
+    executables: &[String],
+) -> Vec<ExecutableCandidate> {
+    let Some(root) = npm_npx_cache_root(environment) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut cache_entries = entries
+        .take(MAX_NPX_CACHE_ENTRIES)
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            (8..=64).contains(&name.len())
+                && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && entry
+                    .file_type()
+                    .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+        })
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    cache_entries.sort();
+    cache_entries
+        .into_iter()
+        .flat_map(|cache| {
+            executables
+                .iter()
+                .map(move |executable| ExecutableCandidate {
+                    path: cache.join("node_modules/.bin").join(executable),
+                    source: DiscoverySource::KnownPath,
+                    path_order: None,
+                })
+        })
+        .collect()
+}
 
 fn macos_npm_prefix(environment: &ScanEnvironment) -> Option<PathBuf> {
     let home = environment.variables.get("HOME")?;
@@ -905,6 +969,41 @@ mod tests {
         ] {
             assert!(safe_absolute_user_prefix(value).is_none(), "{value}");
         }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn deepseek_harness_discovers_the_bounded_official_npx_cache_entry() {
+        let root = std::env::temp_dir().join(format!(
+            "token-station-dsh-npx-platform-{}",
+            std::process::id()
+        ));
+        let expected = root.join(".npm/_npx/0123456789abcdef/node_modules/.bin/dsh");
+        let rejected_name = root.join(".npm/_npx/not-a-cache-id/node_modules/.bin/dsh");
+        fs::create_dir_all(expected.parent().unwrap()).unwrap();
+        fs::create_dir_all(rejected_name.parent().unwrap()).unwrap();
+        fs::write(&expected, b"fixture").unwrap();
+        fs::write(&rejected_name, b"fixture").unwrap();
+
+        let mut context = environment(Platform::Macos);
+        context
+            .variables
+            .insert("HOME".to_string(), root.to_string_lossy().into_owned());
+        let registry = super::super::registry::AgentRegistry::builtin().unwrap();
+        let descriptor = registry
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.agent_id == "deepseek-harness")
+            .unwrap();
+        let candidates = executable_candidates(descriptor, &context);
+
+        assert!(candidates.iter().any(|candidate| {
+            candidate.path == expected && candidate.source == DiscoverySource::KnownPath
+        }));
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.path != rejected_name));
+        fs::remove_dir_all(root).ok();
     }
 
     // Same as above: it builds a macOS-style HOME on the real filesystem and

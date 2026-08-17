@@ -110,6 +110,9 @@ const AGENT_ICONS: Record<string, BrandIcon> = {
   "claude-code": ClaudeCode,
   "claude-desktop": Claude,
   "gemini-cli": Gemini,
+  "grok-build": Grok,
+  "kimi-code": Kimi,
+  "deepseek-harness": DeepSeek,
   codex: Codex,
   opencode: OpenCode,
   openclaw: OpenClaw,
@@ -161,6 +164,27 @@ function BrandImage({
   );
 }
 
+/** Kimi's white mark needs its black field, sized relative to the responsive Agent slot. */
+function KimiAgentGlyph({ size }: { size: number }) {
+  return (
+    <span
+      data-kimi-avatar="true"
+      style={{
+        width: "100%",
+        height: "100%",
+        display: "inline-grid",
+        placeItems: "center",
+        overflow: "hidden",
+        borderRadius: "50%",
+        background: "#000",
+        lineHeight: 0,
+      }}
+    >
+      <Kimi.Color size={size} style={{ width: "62%", height: "62%" }} />
+    </span>
+  );
+}
+
 /** Provider brand logo that falls back to the label's initial when unmatched. */
 export function ProviderIcon({ id, label, size = 28 }: { id?: string | null; label: string; size?: number }) {
   const Icon = id ? PROVIDER_ICONS[id] : undefined;
@@ -192,6 +216,8 @@ export function AgentIcon({ id, fallback, size = 24 }: { id: string; fallback: s
     >
       {image ? (
         <BrandImage src={image.src} fallback={fallback} size={size} shape={image.shape} />
+      ) : id === "kimi-code" ? (
+        <KimiAgentGlyph size={size} />
       ) : Glyph ? (
         <Glyph size={size} />
       ) : (

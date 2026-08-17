@@ -1060,6 +1060,9 @@ fn insert_missing_yaml_scalar(
     path: &ConfigPath,
     value: &Value,
 ) -> Result<String, String> {
+    if path.segments.len() != 2 {
+        return insert_missing_yaml_nested_value(rendered, path, value);
+    }
     let [root, child] = path.segments.as_slice() else {
         return Err(format!(
             "配置路径 '{}' 暂不支持安全地新增 YAML 嵌套字段",
@@ -1150,9 +1153,16 @@ fn is_plain_yaml_key(key: &str) -> bool {
 }
 
 fn yaml_scalar(value: &Value, path: &ConfigPath) -> Result<String, String> {
+    if value.is_array() || value.is_object() {
+        return serde_json::to_string(value)
+            .map_err(|_| format!("配置路径 '{}' 的 YAML flow value 序列化失败", path));
+    }
     if !matches!(value, Value::Null | Value::String(_) | Value::Bool(_)) && value.as_i64().is_none()
     {
-        return Err(format!("配置路径 '{}' 只允许 YAML 标量", path));
+        return Err(format!(
+            "配置路径 '{}' 只允许 YAML 标量或 flow collection",
+            path
+        ));
     }
     let rendered = serde_norway::to_string(value)
         .map_err(|_| format!("配置路径 '{}' 的 YAML 标量序列化失败", path))?;
@@ -1168,6 +1178,9 @@ fn replace_existing_yaml_scalar(
     path: &ConfigPath,
     value: &Value,
 ) -> Result<String, String> {
+    if path.segments.len() > 2 {
+        return replace_existing_yaml_nested_value(rendered, path, value);
+    }
     if let [root] = path.segments.as_slice() {
         if !is_plain_yaml_key(root) {
             return Err(format!("配置路径 '{}' 包含不安全的 YAML 键", path));
@@ -1296,6 +1309,9 @@ fn yaml_inline_comment_start(value_and_comment: &str) -> Option<usize> {
 }
 
 fn remove_existing_yaml_scalar(rendered: &str, path: &ConfigPath) -> Result<String, String> {
+    if path.segments.len() > 2 {
+        return remove_existing_yaml_nested_value(rendered, path);
+    }
     if let [root] = path.segments.as_slice() {
         if !is_plain_yaml_key(root) {
             return Err(format!("配置路径 '{}' 包含不安全的 YAML 键", path));
@@ -1303,6 +1319,12 @@ fn remove_existing_yaml_scalar(rendered: &str, path: &ConfigPath) -> Result<Stri
         let (start, end, _) = yaml_root_block(rendered, root, path)?;
         let mut updated = rendered.to_string();
         updated.replace_range(start..end, "");
+        // A YAML document with no remaining fields must stay an object. An
+        // empty string has null semantics, which makes the reversible plan
+        // fail closed when a newly-created companion contains one owned key.
+        if updated.trim().is_empty() {
+            updated = "{}\n".to_string();
+        }
         return Ok(updated);
     }
     let [root, child] = path.segments.as_slice() else {
@@ -1362,6 +1384,194 @@ fn remove_existing_yaml_scalar(rendered: &str, path: &ConfigPath) -> Result<Stri
     };
     let mut updated = rendered.to_string();
     updated.replace_range(start..end, "");
+    Ok(updated)
+}
+
+#[derive(Clone, Copy)]
+struct YamlBlockEntry {
+    start: usize,
+    line_end: usize,
+    end: usize,
+    indent: usize,
+    block_mapping: bool,
+}
+
+fn yaml_block_entry(rendered: &str, target: &[String]) -> Option<YamlBlockEntry> {
+    let lines = rendered
+        .split_inclusive('\n')
+        .scan(0usize, |cursor, line| {
+            let start = *cursor;
+            *cursor += line.len();
+            Some((start, line))
+        })
+        .collect::<Vec<_>>();
+    let mut stack: Vec<(usize, String)> = Vec::new();
+    for (index, (start, line)) in lines.iter().enumerate() {
+        let without_newline = line.trim_end_matches(['\r', '\n']);
+        let trimmed = without_newline.trim_start_matches(' ');
+        if trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("---")
+            || trimmed.starts_with("...")
+        {
+            continue;
+        }
+        let indent = without_newline.len() - trimmed.len();
+        while stack.last().is_some_and(|(level, _)| *level >= indent) {
+            stack.pop();
+        }
+        let key = target.get(stack.len())?;
+        let prefix = format!("{key}:");
+        let Some(rest) = trimmed.strip_prefix(&prefix) else {
+            continue;
+        };
+        if !rest.is_empty() && !rest.starts_with([' ', '\t']) {
+            continue;
+        }
+        let mut current = stack.iter().map(|(_, key)| key).collect::<Vec<_>>();
+        current.push(key);
+        if current
+            .iter()
+            .map(|key| key.as_str())
+            .eq(target.iter().map(String::as_str))
+        {
+            let end = lines[index + 1..]
+                .iter()
+                .find_map(|(next_start, next_line)| {
+                    let next_without_newline = next_line.trim_end_matches(['\r', '\n']);
+                    let next_trimmed = next_without_newline.trim_start_matches(' ');
+                    if next_trimmed.is_empty() || next_trimmed.starts_with('#') {
+                        return None;
+                    }
+                    let next_indent = next_without_newline.len() - next_trimmed.len();
+                    (next_indent <= indent).then_some(*next_start)
+                })
+                .unwrap_or(rendered.len());
+            return Some(YamlBlockEntry {
+                start: *start,
+                line_end: start + line.len(),
+                end,
+                indent,
+                block_mapping: {
+                    let suffix = rest.trim();
+                    suffix.is_empty() || suffix.starts_with('#')
+                },
+            });
+        }
+        let suffix = rest.trim();
+        if suffix.is_empty() || suffix.starts_with('#') {
+            stack.push((indent, key.clone()));
+        }
+    }
+    None
+}
+
+fn insert_missing_yaml_nested_value(
+    rendered: &str,
+    path: &ConfigPath,
+    value: &Value,
+) -> Result<String, String> {
+    if path
+        .segments
+        .iter()
+        .any(|segment| !is_plain_yaml_key(segment))
+    {
+        return Err(format!("配置路径 '{}' 包含不安全的 YAML 键", path));
+    }
+    let scalar = yaml_scalar(value, path)?;
+    let semantic = strict_yaml_semantic(rendered, "YAML nested patch")?;
+    let mut parent = None;
+    for length in (1..path.segments.len()).rev() {
+        let prefix = &path.segments[..length];
+        let pointer = format!("/{}", prefix.join("/"));
+        if semantic.pointer(&pointer).is_some() {
+            let entry = yaml_block_entry(rendered, prefix)
+                .ok_or_else(|| format!("配置路径 '{}' 的父级必须使用 YAML 块映射", path))?;
+            if !entry.block_mapping {
+                return Err(format!("配置路径 '{}' 的父级必须使用 YAML 块映射", path));
+            }
+            parent = Some((length, entry));
+            break;
+        }
+    }
+
+    let (missing_from, insertion, base_indent) = if let Some((length, entry)) = parent {
+        let first_child_indent = rendered[entry.line_end..entry.end]
+            .lines()
+            .find_map(|line| {
+                let trimmed = line.trim_start_matches(' ');
+                (!trimmed.is_empty() && !trimmed.starts_with('#'))
+                    .then_some(line.len() - trimmed.len())
+            })
+            .unwrap_or(entry.indent + 2);
+        (length, entry.end, first_child_indent)
+    } else {
+        (0, rendered.len(), 0)
+    };
+
+    let mut block = String::new();
+    for (offset, segment) in path.segments[missing_from..].iter().enumerate() {
+        let indent = base_indent + offset * 2;
+        block.push_str(&" ".repeat(indent));
+        block.push_str(segment);
+        if missing_from + offset + 1 == path.segments.len() {
+            block.push_str(": ");
+            block.push_str(&scalar);
+        } else {
+            block.push(':');
+        }
+        block.push('\n');
+    }
+    let mut updated = rendered.to_string();
+    if missing_from == 0 && updated.trim() == "{}" {
+        updated.clear();
+    }
+    if insertion == updated.len() && !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    let insertion = if insertion == rendered.len() {
+        updated.len()
+    } else {
+        insertion
+    };
+    updated.insert_str(insertion, &block);
+    Ok(updated)
+}
+
+fn replace_existing_yaml_nested_value(
+    rendered: &str,
+    path: &ConfigPath,
+    value: &Value,
+) -> Result<String, String> {
+    if path
+        .segments
+        .iter()
+        .any(|segment| !is_plain_yaml_key(segment))
+    {
+        return Err(format!("配置路径 '{}' 包含不安全的 YAML 键", path));
+    }
+    let entry = yaml_block_entry(rendered, &path.segments)
+        .ok_or_else(|| format!("配置路径 '{}' 不是可安全替换的 YAML 块字段", path))?;
+    let scalar = yaml_scalar(value, path)?;
+    let key = path.segments.last().expect("validated non-empty YAML path");
+    let replacement = format!("{}{key}: {scalar}\n", " ".repeat(entry.indent));
+    let mut updated = rendered.to_string();
+    updated.replace_range(entry.start..entry.end, &replacement);
+    Ok(updated)
+}
+
+fn remove_existing_yaml_nested_value(rendered: &str, path: &ConfigPath) -> Result<String, String> {
+    if path
+        .segments
+        .iter()
+        .any(|segment| !is_plain_yaml_key(segment))
+    {
+        return Err(format!("配置路径 '{}' 包含不安全的 YAML 键", path));
+    }
+    let entry = yaml_block_entry(rendered, &path.segments)
+        .ok_or_else(|| format!("配置路径 '{}' 不是可安全移除的 YAML 块字段", path))?;
+    let mut updated = rendered.to_string();
+    updated.replace_range(entry.start..entry.end, "");
     Ok(updated)
 }
 
@@ -2418,15 +2628,16 @@ mod tests {
             )]
         )
         .is_err());
-        assert!(apply_patch(
+        apply_patch(
             &mut yaml,
             &[operation(
                 PatchKind::Add,
                 &["model", "nested", "field"],
-                Some(json!(1))
-            )]
+                Some(json!(1)),
+            )],
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(semantic_json(&yaml).unwrap()["model"]["nested"]["field"], 1);
         assert!(apply_patch(
             &mut yaml,
             &[operation(PatchKind::Add, &["model", ":"], Some(json!(1)))]
@@ -2757,6 +2968,91 @@ display:
         assert!(apply_patch(&mut invalid, &patch)
             .expect_err("a non-null scalar parent remains invalid")
             .contains("父级必须使用 YAML 块映射"));
+    }
+
+    #[test]
+    fn yaml_patch_manages_a_deep_namespaced_flow_collection_without_touching_siblings() {
+        let source = "# keep root comment\nllm-pi-ai:\n  providers:\n    user:\n      api: anthropic-messages\nkeep: true\n";
+        let managed = ConfigPath {
+            segments: vec![
+                "llm-pi-ai".to_string(),
+                "providers".to_string(),
+                "tokenstation".to_string(),
+            ],
+        };
+        let mut document = parse_rendered(source, DocumentFormat::Yaml, "DeepSeek").unwrap();
+        apply_patch(
+            &mut document,
+            &[PatchOperation {
+                operation: PatchKind::Replace,
+                path: managed.clone(),
+                value: Some(json!({
+                    "api": "openai-completions",
+                    "models": [{"id": "auto"}]
+                })),
+            }],
+        )
+        .unwrap();
+        let connected = render_document(&document, "DeepSeek").unwrap();
+        assert!(connected.contains("# keep root comment"), "{connected}");
+        let semantic = semantic_json(&document).unwrap();
+        assert_eq!(
+            semantic["llm-pi-ai"]["providers"]["user"]["api"],
+            "anthropic-messages"
+        );
+        assert_eq!(
+            semantic["llm-pi-ai"]["providers"]["tokenstation"]["models"][0]["id"],
+            "auto"
+        );
+
+        apply_patch(
+            &mut document,
+            &[PatchOperation {
+                operation: PatchKind::Replace,
+                path: managed.clone(),
+                value: Some(json!({"api": "openai-completions", "baseURL": "http://new/v1"})),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            semantic_json(&document).unwrap()["llm-pi-ai"]["providers"]["tokenstation"]["baseURL"],
+            "http://new/v1"
+        );
+
+        apply_patch(
+            &mut document,
+            &[PatchOperation {
+                operation: PatchKind::Remove,
+                path: managed,
+                value: None,
+            }],
+        )
+        .unwrap();
+        let disconnected = semantic_json(&document).unwrap();
+        assert!(disconnected["llm-pi-ai"]["providers"]
+            .get("tokenstation")
+            .is_none());
+        assert_eq!(
+            disconnected["llm-pi-ai"]["providers"]["user"]["api"],
+            "anthropic-messages"
+        );
+
+        let mut flow_parent = parse_rendered(
+            "llm-pi-ai: {providers: {}}\n",
+            DocumentFormat::Yaml,
+            "DeepSeek",
+        )
+        .unwrap();
+        let error = apply_patch(
+            &mut flow_parent,
+            &[operation(
+                PatchKind::Replace,
+                &["llm-pi-ai", "providers", "tokenstation"],
+                Some(json!({"api": "openai-completions"})),
+            )],
+        )
+        .unwrap_err();
+        assert!(error.contains("父级必须使用 YAML 块映射"), "{error}");
     }
 
     #[test]
