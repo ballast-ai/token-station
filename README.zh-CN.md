@@ -93,6 +93,8 @@ Claude Desktop 目前没有公开的产品仓库；该链接指向 Anthropic 官
 
 DeepSeek Harness 扫描同时覆盖常规 `dsh` 命令，以及上游推荐的 `npx @deepseek-ai/dsh web` 所生成的有界 npm 缓存目录。Token Station 只读取已有缓存入口，扫描时不会运行 `npx`，也不会安装软件包。
 
+Grok Build 使用 `~/.grok/config.toml`；设置 `GROK_HOME` 后，使用 `$GROK_HOME/config.toml`。Kimi Code 使用 `~/.kimi-code/config.toml`；设置 `KIMI_CODE_HOME` 后，使用 `$KIMI_CODE_HOME/config.toml`。DeepSeek Harness 使用 `~/.dsh/settings.yaml` 和伴随文件 `~/.dsh/.credentials.yaml`；设置 `DSH_HOME` 后，两个文件都位于该目录。三个 Connector 都通过内置 `agent-openai` 入站适配器转发 OpenAI Chat Completions。
+
 对十一种内置 Connector，点击“一键接入”即代表同意立即应用一份边界明确的计划。Token Station 会在需要时启动网关，并在首次接入后展示已改动字段。Connector 的可用平台取决于对应 Agent 和操作系统，并不代表 Token Station 已为该平台发布安装包。
 
 Cursor 在 macOS 与 Windows 上使用独立接入路径。请先退出 Cursor。Token Station 会私有备份相关 SQLite 记录，以事务方式写入 OpenAI 兼容端点、虚拟 Key 和启用标记，回读校验失败时恢复原值。完成后重新启动 Cursor，并选择支持自定义 OpenAI Key 路径的模型。该路径不受标准 Connector 的字段归属和应用内断开流程管理。

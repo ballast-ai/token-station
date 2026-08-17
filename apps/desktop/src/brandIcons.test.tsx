@@ -25,6 +25,12 @@ describe("AgentIcon", () => {
     expect(glyph?.querySelector('path[fill="#fff"]')).toBeInTheDocument();
   });
 
+  it("hides decorative Agent artwork from assistive technology", () => {
+    const { container } = render(<AgentIcon id="grok-build" fallback="G" size={22} />);
+
+    expect(container.querySelector('[data-agent-brand="grok-build"]')).toHaveAttribute("aria-hidden", "true");
+  });
+
   it("uses the bundled WorkBuddy app icon instead of the WB placeholder", () => {
     const { container } = render(<AgentIcon id="workbuddy" fallback="WB" size={22} />);
 

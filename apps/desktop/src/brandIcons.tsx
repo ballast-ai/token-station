@@ -212,6 +212,7 @@ export function AgentIcon({ id, fallback, size = 24 }: { id: string; fallback: s
     <span
       className="agent-brand-glyph"
       data-agent-brand={id}
+      aria-hidden="true"
       style={{ width: size, height: size }}
     >
       {image ? (

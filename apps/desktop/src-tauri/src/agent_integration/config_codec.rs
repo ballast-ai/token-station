@@ -1155,12 +1155,12 @@ fn is_plain_yaml_key(key: &str) -> bool {
 fn yaml_scalar(value: &Value, path: &ConfigPath) -> Result<String, String> {
     if value.is_array() || value.is_object() {
         return serde_json::to_string(value)
-            .map_err(|_| format!("配置路径 '{}' 的 YAML flow value 序列化失败", path));
+            .map_err(|_| format!("Cannot serialize the YAML flow value at config path '{}'.", path));
     }
     if !matches!(value, Value::Null | Value::String(_) | Value::Bool(_)) && value.as_i64().is_none()
     {
         return Err(format!(
-            "配置路径 '{}' 只允许 YAML 标量或 flow collection",
+            "Config path '{}' accepts only a YAML scalar or flow collection.",
             path
         ));
     }
@@ -1199,7 +1199,7 @@ fn replace_existing_yaml_scalar(
         ));
     };
     if !is_plain_yaml_key(root) || !is_plain_yaml_key(child) {
-        return Err(format!("配置路径 '{}' 包含不安全的 YAML 键", path));
+        return Err(format!("Config path '{}' contains an unsafe YAML key.", path));
     }
     let scalar = yaml_scalar(value, path)?;
     let root_prefix = format!("{root}:");
@@ -1420,6 +1420,9 @@ fn yaml_block_entry(rendered: &str, target: &[String]) -> Option<YamlBlockEntry>
         while stack.last().is_some_and(|(level, _)| *level >= indent) {
             stack.pop();
         }
+        if stack.is_empty() && indent != 0 {
+            continue;
+        }
         let key = target.get(stack.len())?;
         let prefix = format!("{key}:");
         let Some(rest) = trimmed.strip_prefix(&prefix) else {
@@ -1476,7 +1479,7 @@ fn insert_missing_yaml_nested_value(
         .iter()
         .any(|segment| !is_plain_yaml_key(segment))
     {
-        return Err(format!("配置路径 '{}' 包含不安全的 YAML 键", path));
+        return Err(format!("Config path '{}' contains an unsafe YAML key.", path));
     }
     let scalar = yaml_scalar(value, path)?;
     let semantic = strict_yaml_semantic(rendered, "YAML nested patch")?;
@@ -1486,9 +1489,9 @@ fn insert_missing_yaml_nested_value(
         let pointer = format!("/{}", prefix.join("/"));
         if semantic.pointer(&pointer).is_some() {
             let entry = yaml_block_entry(rendered, prefix)
-                .ok_or_else(|| format!("配置路径 '{}' 的父级必须使用 YAML 块映射", path))?;
+                .ok_or_else(|| format!("The parent of config path '{}' must use a YAML block mapping.", path))?;
             if !entry.block_mapping {
-                return Err(format!("配置路径 '{}' 的父级必须使用 YAML 块映射", path));
+                return Err(format!("The parent of config path '{}' must use a YAML block mapping.", path));
             }
             parent = Some((length, entry));
             break;
@@ -1548,10 +1551,10 @@ fn replace_existing_yaml_nested_value(
         .iter()
         .any(|segment| !is_plain_yaml_key(segment))
     {
-        return Err(format!("配置路径 '{}' 包含不安全的 YAML 键", path));
+        return Err(format!("Config path '{}' contains an unsafe YAML key.", path));
     }
     let entry = yaml_block_entry(rendered, &path.segments)
-        .ok_or_else(|| format!("配置路径 '{}' 不是可安全替换的 YAML 块字段", path))?;
+        .ok_or_else(|| format!("Config path '{}' is not a safe YAML block field to replace.", path))?;
     let scalar = yaml_scalar(value, path)?;
     let key = path.segments.last().expect("validated non-empty YAML path");
     let replacement = format!("{}{key}: {scalar}\n", " ".repeat(entry.indent));
@@ -1566,10 +1569,10 @@ fn remove_existing_yaml_nested_value(rendered: &str, path: &ConfigPath) -> Resul
         .iter()
         .any(|segment| !is_plain_yaml_key(segment))
     {
-        return Err(format!("配置路径 '{}' 包含不安全的 YAML 键", path));
+        return Err(format!("Config path '{}' contains an unsafe YAML key.", path));
     }
     let entry = yaml_block_entry(rendered, &path.segments)
-        .ok_or_else(|| format!("配置路径 '{}' 不是可安全移除的 YAML 块字段", path))?;
+        .ok_or_else(|| format!("Config path '{}' is not a safe YAML block field to remove.", path))?;
     let mut updated = rendered.to_string();
     updated.replace_range(entry.start..entry.end, "");
     Ok(updated)
@@ -2638,6 +2641,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(semantic_json(&yaml).unwrap()["model"]["nested"]["field"], 1);
+
+        let mut yaml_with_shadow_path = parse_rendered(
+            "other:\n  llm-pi-ai:\n    providers:\n      tokenstation:\n        baseURL: nested\nllm-pi-ai:\n  providers:\n    tokenstation:\n      baseURL: root\n",
+            DocumentFormat::Yaml,
+            "fixture",
+        )
+        .unwrap();
+        apply_patch(
+            &mut yaml_with_shadow_path,
+            &[operation(
+                PatchKind::Replace,
+                &["llm-pi-ai", "providers", "tokenstation", "baseURL"],
+                Some(json!("updated")),
+            )],
+        )
+        .unwrap();
+        let semantic = semantic_json(&yaml_with_shadow_path).unwrap();
+        assert_eq!(semantic["llm-pi-ai"]["providers"]["tokenstation"]["baseURL"], "updated");
+        assert_eq!(semantic["other"]["llm-pi-ai"]["providers"]["tokenstation"]["baseURL"], "nested");
+
         assert!(apply_patch(
             &mut yaml,
             &[operation(PatchKind::Add, &["model", ":"], Some(json!(1)))]
@@ -3052,7 +3075,7 @@ display:
             )],
         )
         .unwrap_err();
-        assert!(error.contains("父级必须使用 YAML 块映射"), "{error}");
+        assert!(error.contains("must use a YAML block mapping"), "{error}");
     }
 
     #[test]

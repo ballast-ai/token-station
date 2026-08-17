@@ -93,6 +93,8 @@ Claude Desktop does not currently have a public product repository; its link ope
 
 DeepSeek Harness discovery covers both a normal `dsh` command and the bounded npm cache layout created by the upstream-recommended `npx @deepseek-ai/dsh web` command. Token Station reads existing cache entries only; it never runs `npx` or installs the package during a scan.
 
+Grok Build uses `~/.grok/config.toml`, or `$GROK_HOME/config.toml` when `GROK_HOME` is set. Kimi Code uses `~/.kimi-code/config.toml`, or `$KIMI_CODE_HOME/config.toml` when `KIMI_CODE_HOME` is set. DeepSeek Harness uses `~/.dsh/settings.yaml` and the companion `~/.dsh/.credentials.yaml` file. When `DSH_HOME` is set, both DeepSeek Harness files use that directory. All three Connectors route OpenAI Chat Completions through the built-in `agent-openai` ingress.
+
 For the eleven built-in connectors, clicking **Connect** is consent to immediately apply a bounded plan. Token Station starts the gateway when needed and shows the fields changed by the first connection. Connector availability depends on the agent and operating system, and does not imply that Token Station publishes an installer for that platform.
 
 Cursor uses a separate path on macOS and Windows. Quit Cursor first. Token Station privately backs up the relevant SQLite records, transactionally writes the OpenAI-compatible endpoint, virtual key, and enablement flag, verifies the result, and restores the previous values if verification fails. Restart Cursor afterward and choose a model that supports its custom OpenAI key path. This path is not covered by standard connector ownership or managed disconnect.
