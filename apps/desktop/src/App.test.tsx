@@ -787,7 +787,7 @@ it("一键接入后只通过缓存状态刷新确认 CONNECTED", async () => {
   }));
 
   await screen.findByRole("dialog", { name: "选择一个 Agent" });
-  expect(screen.getByRole("region", { name: "Agent 选择列表" }))
+  expect(screen.getByRole("region", { name: "客户端选择列表" }))
     .toHaveAttribute("data-onboarding-active", "true");
   await user.click(screen.getByRole("button", { name: "Claude Code" }));
 
@@ -1323,10 +1323,13 @@ describe("desktop station navigation", () => {
     await openAgents(user);
     await user.click(navigation().getByRole("button", { name: "供应商" }));
     expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
+    expect(screen.queryByText("UPSTREAM CATALOG")).toBeNull();
     await user.click(navigation().getByRole("button", { name: "用量" }));
+    expect(screen.queryByText("LOCAL RECEIPT LEDGER")).toBeNull();
     const usageNavigation = await screen.findByRole("tablist", { name: "用量视图" });
     await user.click(within(usageNavigation).getByRole("tab", { name: "请求日志" }));
     expect(await screen.findByRole("heading", { name: "请求日志", level: 1 })).toBeInTheDocument();
+    expect(screen.queryByText("LOCAL RECEIPTS")).toBeNull();
     expect(await screen.findByText("当前筛选范围没有请求日志。")).toBeInTheDocument();
     expect(navigation().getByRole("button", { name: "用量" })).toHaveAttribute("aria-current", "page");
   });
@@ -1336,10 +1339,14 @@ describe("desktop station navigation", () => {
     render(<App />);
 
     await openAgents(user);
-    const agentNavigation = screen.getByRole("navigation", { name: "Agent 列表" });
+    const agentNavigation = screen.getByRole("navigation", { name: "客户端列表" });
     const claudeCodeButton = within(agentNavigation).getByRole("button", { name: "Claude Code" });
+    expect(screen.queryByText("AGENT FLEET")).toBeNull();
+    expect(screen.getByText("选择全局路由或本机客户端，在右侧完成配置。")).toBeInTheDocument();
+    expect(screen.queryByText("这是所有 Agent 的默认路由。Agent 自定义路由只覆盖它自身。")).toBeNull();
     expect(within(agentNavigation).getByRole("button", { name: "全局路由" }))
       .toHaveAttribute("aria-current", "page");
+    expect(within(claudeCodeButton).queryByText("claude-code")).toBeNull();
     expect(claudeCodeButton).not.toHaveAttribute("aria-current");
     const centeredBrand = claudeCodeButton.querySelector('[data-agent-brand="claude-code"]');
     expect(centeredBrand).toBeInTheDocument();
@@ -1347,11 +1354,13 @@ describe("desktop station navigation", () => {
     expect(claudeCodeButton.querySelector('[style*="background"]')).toBeNull();
     await user.click(claudeCodeButton);
     expect(await screen.findByRole("heading", { name: "Claude Code", level: 2 })).toBeInTheDocument();
+    expect(screen.queryByText("AGENT ROUTE")).toBeNull();
+    expect(screen.queryByText("DIRECT · ONE PROVIDER")).toBeNull();
 
-    const updatedAgentNavigation = screen.getByRole("navigation", { name: "Agent 列表" });
+    const updatedAgentNavigation = screen.getByRole("navigation", { name: "客户端列表" });
     await user.click(within(updatedAgentNavigation).getByRole("button", { name: "Codex" }));
     expect(await screen.findByRole("heading", { name: "Codex", level: 2 })).toBeInTheDocument();
-    expect(within(screen.getByRole("navigation", { name: "Agent 列表" })).getByRole("button", { name: "Codex" })).toHaveAttribute("aria-current", "page");
+    expect(within(screen.getByRole("navigation", { name: "客户端列表" })).getByRole("button", { name: "Codex" })).toHaveAttribute("aria-current", "page");
   });
 
   it("changes the selected Agent routing strategy from the detail workspace", async () => {
@@ -2817,15 +2826,15 @@ describe("desktop station navigation", () => {
 
     render(<App />);
     await openAgents(user);
-    const navigation = screen.getByRole("navigation", { name: "Agent 列表" });
+    const navigation = screen.getByRole("navigation", { name: "客户端列表" });
     await user.click(within(navigation).getByRole("button", { name: "Claude Code" }));
     await user.click(await screen.findByRole("button", { name: "选择版本" }));
     await user.click(screen.getByRole("option", { name: "claude-preview · v10.0.0" }));
 
     expect(screen.getByRole("button", { name: "一键接入" })).toBeEnabled();
-    await user.click(within(screen.getByRole("navigation", { name: "Agent 列表" })).getByRole("button", { name: "Codex" }));
+    await user.click(within(screen.getByRole("navigation", { name: "客户端列表" })).getByRole("button", { name: "Codex" }));
     expect(await screen.findByRole("heading", { name: "Codex", level: 2 })).toBeInTheDocument();
-    await user.click(within(screen.getByRole("navigation", { name: "Agent 列表" })).getByRole("button", { name: "Claude Code" }));
+    await user.click(within(screen.getByRole("navigation", { name: "客户端列表" })).getByRole("button", { name: "Claude Code" }));
     expect(await screen.findByRole("heading", { name: "Claude Code", level: 2 })).toBeInTheDocument();
 
     await user.click(await screen.findByRole("button", { name: "选择版本" }));

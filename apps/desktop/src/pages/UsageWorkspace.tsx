@@ -18,7 +18,6 @@ export default function UsageWorkspace({ section, onSectionChange }: UsageWorksp
     <div className="page-stack usage-workspace-page">
       <header className="overview-heading usage-workspace-heading">
         <div>
-          <span className="page-eyebrow">LOCAL RECEIPT LEDGER</span>
           <h1>{logs ? copy("Request logs", "请求日志") : copy("Usage", "用量统计")}</h1>
           <p>{logs
             ? copy("Inspect routing outcomes, failures, and locally retained plaintext bodies.", "查看路由结果、失败原因和本地保留的明文正文。")

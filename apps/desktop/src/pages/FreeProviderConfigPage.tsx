@@ -114,7 +114,6 @@ export default function FreeProviderConfigPage({
             <ProviderIcon id={preset.id} label={providerName} size={42} />
           </span>
           <div>
-            <span className="eyebrow">FREE UPSTREAM</span>
             <h1>{providerName}</h1>
             <p><code>{preset.upstream_name}</code> · {preset.base_url}</p>
           </div>

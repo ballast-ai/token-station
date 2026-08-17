@@ -13,7 +13,6 @@ export default function RequestLogsPage({ embedded = false }: { embedded?: boole
     <div className={`page-stack request-logs-page ${embedded ? "request-logs-embedded" : ""}`}>
       {!embedded && <header className="overview-heading">
         <div>
-          <span className="page-eyebrow">LOCAL RECEIPTS</span>
           <h1>{copy("Request logs", "请求日志")}</h1>
           <p>{copy("Inspect routing outcomes, failures, and locally retained plaintext bodies.", "查看路由结果、失败原因和本地保留的明文正文。")}</p>
         </div>

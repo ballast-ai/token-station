@@ -45,11 +45,10 @@ export default function ProviderList({
     <section className="panel provider-panel">
       <div className="panel-head split-heading">
         <div>
-          <span className="eyebrow">UPSTREAMS</span>
           <h2>{copy("Providers", "供应商")}</h2>
           <p className="sub">{copy(
             "Manage providers and available models in one catalog shared by Home and every Agent.",
-            "统一维护供应商和可用模型，主页与所有 Agent 共用这一份目录。",
+            "统一维护供应商和可用模型，主页与所有客户端共用这一份目录。",
           )}</p>
         </div>
         <span className="count-badge">

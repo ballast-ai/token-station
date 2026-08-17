@@ -22,6 +22,13 @@ import ModelPicker, { CatalogStatus } from "./ModelPicker";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { humanizeAppError } from "../errors";
 import { useErrorToast } from "./ErrorToast";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "./ui/select";
 
 interface ProviderModelManagerProps {
   provider: ProviderView;
@@ -409,7 +416,7 @@ export default function ProviderModelManager({
     <div className="provider-model-manager">
       <div className="provider-detail-summary">
         <div>
-          <strong>{copy("Provider details", "Provider 详情")}</strong>
+          <strong>{copy("Provider details", "供应商详情")}</strong>
           <span>{usage}</span>
         </div>
         <div className="provider-health-actions">
@@ -417,7 +424,7 @@ export default function ProviderModelManager({
             className={`provider-health-badge ${providerHealth(testResults)}`}
             aria-label={copy(
               `Provider health: ${healthLabel[providerHealth(testResults)]}`,
-              `Provider 健康状态：${healthLabel[providerHealth(testResults)]}`,
+              `供应商健康状态：${healthLabel[providerHealth(testResults)]}`,
             )}
           >
             <i aria-hidden="true" />
@@ -441,22 +448,28 @@ export default function ProviderModelManager({
           disabled={operationDisabled}
           onChange={(event) => setEditBaseUrl(event.target.value)}
         />
-        <select
-          className="input"
-          aria-label={copy("Edit credential source", "编辑凭据来源")}
+        <Select
           value={credentialSource}
           disabled={operationDisabled}
-          onChange={(event) => {
-            setCredentialSource(event.target.value as typeof credentialSource);
+          onValueChange={(value) => {
+            setCredentialSource(value as typeof credentialSource);
             setEditKey("");
             setCredentialReference("");
           }}
         >
-          <option value="store">{copy("Local store (default)", "本地存储（默认）")}</option>
-          <option value="env">{copy("Environment variable", "环境变量")}</option>
-          <option value="file">{copy("Credential file", "凭据文件")}</option>
-          <option value="none">{copy("No authentication", "无鉴权")}</option>
-        </select>
+          <SelectTrigger
+            className="provider-credential-select"
+            aria-label={copy("Edit credential source", "编辑凭据来源")}
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent position="popper" align="start">
+            <SelectItem value="store">{copy("Local store (default)", "本地存储（默认）")}</SelectItem>
+            <SelectItem value="env">{copy("Environment variable", "环境变量")}</SelectItem>
+            <SelectItem value="file">{copy("Credential file", "凭据文件")}</SelectItem>
+            <SelectItem value="none">{copy("No authentication", "无鉴权")}</SelectItem>
+          </SelectContent>
+        </Select>
         {credentialSource === "store" && (
           <input className="input mono" aria-label={copy("Update API key", "更新 API Key")} type="password" value={editKey} disabled={operationDisabled} placeholder={copy("Leave blank to keep the current key", "留空则保留现有 Key")} onChange={(event) => setEditKey(event.target.value)} />
         )}
@@ -482,14 +495,14 @@ export default function ProviderModelManager({
         </p>
       )}
       {endpointPreview && (
-        <div className="provider-endpoint-list" aria-label={copy("Final provider URLs", "Provider 最终 URL")}>
+        <div className="provider-endpoint-list" aria-label={copy("Final provider URLs", "供应商最终地址")}>
           <code>{endpointPreview.chat}</code>
           <code>{endpointPreview.responses}</code>
           <code>{endpointPreview.messages}</code>
         </div>
       )}
       {testResults.length > 0 && (
-        <div className="provider-test-results" aria-label={copy("Provider layered test results", "Provider 分层测试结果")}>
+        <div className="provider-test-results" aria-label={copy("Provider layered test results", "供应商分层测试结果")}>
           <p>{copy(
             "The five base layers show cumulative timing (≤) for one live generation probe; capability layers show their own request timing.",
             "基础五层显示同一次真实生成探测的累计耗时（≤）；能力层显示各自真实请求耗时。",

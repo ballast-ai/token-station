@@ -575,6 +575,27 @@ describe("model selection and provider model management", () => {
     expect(within(screen.getByText(/代理运行中/).parentElement!).getByRole("button")).toBeEnabled();
   });
 
+  it("uses the shared Select for the provider credential source", async () => {
+    const user = userEvent.setup();
+    const provider: ProviderView = {
+      name: "openai", provider: "openai", base_url: "https://api.example/v1",
+      models: ["gpt-test"], has_auth: true,
+    };
+
+    const { container } = render(
+      <ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />,
+    );
+
+    expect(container.querySelector('select[aria-label="编辑凭据来源"]')).toBeNull();
+    const trigger = screen.getByRole("combobox", { name: "编辑凭据来源" });
+    expect(trigger).toHaveAttribute("data-slot", "select-trigger");
+    await user.click(trigger);
+    expect(screen.getByRole("option", { name: "本地存储（默认）" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "环境变量" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "凭据文件" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "无鉴权" })).toBeInTheDocument();
+  });
+
   it("keeps provider endpoint resolution failures accessibly linked for provider names with spaces", async () => {
     const provider: ProviderView = {
       name: "深度 seek 供应商", provider: "openai", base_url: "https://api.example/v1",
@@ -879,7 +900,7 @@ describe("model selection and provider model management", () => {
     expect(screen.getByText("Tool · pass · 16ms")).toBeInTheDocument();
     expect(screen.getByText("JSON Schema · pass · 17ms")).toBeInTheDocument();
     expect(screen.getByText("DNS / 网络 · pass · ≤37ms")).toBeInTheDocument();
-    expect(screen.getByLabelText("Provider 健康状态：健康")).toBeInTheDocument();
+    expect(screen.getByLabelText("供应商健康状态：健康")).toBeInTheDocument();
     expect(screen.getByText(/最近测试/)).toBeInTheDocument();
     expect(screen.queryByText(/未执行/)).not.toBeInTheDocument();
   });
@@ -921,9 +942,9 @@ describe("model selection and provider model management", () => {
     render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "运行分层测试" }));
-    expect(await screen.findByLabelText("Provider 健康状态：不可用")).toBeInTheDocument();
+    expect(await screen.findByLabelText("供应商健康状态：不可用")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "运行分层测试" }));
-    expect(await screen.findByLabelText("Provider 健康状态：能力退化")).toBeInTheDocument();
+    expect(await screen.findByLabelText("供应商健康状态：能力退化")).toBeInTheDocument();
   });
 });
 

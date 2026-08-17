@@ -399,7 +399,6 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
       {!embedded && <header className="usage-page-head">
         <div>
           {onBack && <PageBackButton onClick={onBack} />}
-          <span className="usage-eyebrow">LOCAL RECEIPT LEDGER</span>
           <h1>{copy("Usage", "用量统计")}</h1>
           <p>{copy(
             "Review model usage, cost, and reliability. Only local request metadata is aggregated; prompt and response content is never included.",

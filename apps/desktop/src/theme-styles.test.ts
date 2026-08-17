@@ -65,4 +65,17 @@ describe("retained page theme styles", () => {
     expect(appCss).toMatch(/\.error-toast\.is-success\s*\{[^}]*--toast-soft:\s*var\(--success-soft\)/s);
     expect(appCss).toMatch(/\.error-toast\.is-error\s*\{[^}]*--toast-soft:\s*var\(--danger-soft\)/s);
   });
+
+  it("keeps the global route row neutral until it is selected", () => {
+    const permanentGlobalRouteRule = appCss.match(
+      /\.agent-master-home\[data-slot="button"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const selectedAgentRule = appCss.match(
+      /\.agent-master-item\[data-slot="button"\]\[aria-current="page"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(permanentGlobalRouteRule).not.toMatch(/background:/);
+    expect(permanentGlobalRouteRule).not.toMatch(/border:/);
+    expect(selectedAgentRule).toMatch(/background:\s*var\(--signal-soft\)/);
+  });
 });

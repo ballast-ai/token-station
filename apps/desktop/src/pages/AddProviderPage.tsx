@@ -393,7 +393,6 @@ export default function AddProviderPage({
         <header className="page-title-row provider-catalog-title-row">
           <div>
             <PageBackButton onClick={onCancel} />
-            <span className="eyebrow">NEW UPSTREAM</span>
             <h1>{copy("Add provider", "添加供应商")}</h1>
             <p>{copy(
               "Choose a standard or free API from one catalog.",
@@ -643,7 +642,6 @@ export default function AddProviderPage({
       <header className="page-title-row">
         <div>
           <PageBackButton onClick={leaveRegularConfig} disabled={disabled} />
-          <span className="eyebrow">STANDARD UPSTREAM</span>
           <h1>{preset?.label ?? copy("Custom configuration", "自定义配置")}</h1>
           <p>{copy(
             "Enter credentials and choose models to create a standard API instance.",

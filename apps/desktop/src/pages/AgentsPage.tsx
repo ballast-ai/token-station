@@ -57,9 +57,8 @@ export default function AgentsPage({
     <div className="page-stack agents-page agent-workspace-page">
       <header className="overview-heading">
         <div>
-          <span className="page-eyebrow">AGENT FLEET</span>
           <h1>{copy("Home", "主页")}</h1>
-          <p>{copy("Choose global routing or a visible Agent, then configure it on the right.", "选择全局路由或主页中显示的 Agent，在右侧完成配置。")}</p>
+          <p>{copy("Choose global routing or a local client, then configure it on the right.", "选择全局路由或本机客户端，在右侧完成配置。")}</p>
         </div>
       </header>
 
@@ -67,12 +66,11 @@ export default function AgentsPage({
         <Card
           className="agent-master-list-card"
           role="region"
-          aria-label={copy("Agent selector", "Agent 选择列表")}
+          aria-label={copy("Agent selector", "客户端选择列表")}
           data-onboarding-target="agent-list"
         >
           <CardHeader>
             <div>
-              <span className="page-eyebrow">AGENTS</span>
               <CardTitle><h2>{copy("Local clients", "本机客户端")}</h2></CardTitle>
             </div>
             <div className="agent-master-actions">
@@ -98,14 +96,14 @@ export default function AgentsPage({
             <ScrollArea className="agent-master-scroll">
               <nav
                 className="agent-master-nav"
-                aria-label={copy("Agent list", "Agent 列表")}
+                aria-label={copy("Agent list", "客户端列表")}
               >
                 <Button
                   className="agent-master-item agent-master-home"
                   variant="ghost"
                   type="button"
                   aria-label={copy("Global routing", "全局路由")}
-                  title={copy("Global routing · fixed first row", "全局路由 · 固定首行")}
+                  title={copy("Global routing - fixed first row", "全局路由 - 固定首行")}
                   aria-current={homeSelected ? "page" : undefined}
                   data-onboarding-target="routing"
                   onClick={onOpenHome}
@@ -113,7 +111,7 @@ export default function AgentsPage({
                   <span className="agent-master-icon global-route-mark" aria-hidden="true">
                     <TokenStationMark size={36} />
                   </span>
-                  <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由")}</strong><small>{copy("Local default", "本机默认")}</small></span>
+                  <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由")}</strong></span>
                   <Badge variant={homeSelected ? "default" : "outline"}>{copy("Default", "默认")}</Badge>
                 </Button>
                 {registry.map((metadata) => {
@@ -134,7 +132,7 @@ export default function AgentsPage({
                       <span className="agent-master-icon" aria-hidden="true">
                         <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={40} />
                       </span>
-                      <span className="agent-master-copy"><strong>{metadata.display_name}</strong><small>{metadata.agent_id}</small></span>
+                      <span className="agent-master-copy"><strong>{metadata.display_name}</strong></span>
                       <Badge variant={agent?.status === "CONNECTED" ? "default" : "outline"}>{navStatusCopy(agent?.status, copy)}</Badge>
                     </Button>
                   );

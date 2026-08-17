@@ -119,10 +119,6 @@ export default function HomePage({
           {embedded
             ? <h2>{copy("Global routing", "全局路由")}</h2>
             : <h1>{copy("Global routing", "全局路由")}</h1>}
-          <p>{copy(
-            "This is the default route for every Agent. Agent-specific routes override only that Agent.",
-            "这是所有 Agent 的默认路由。Agent 自定义路由只覆盖它自身。",
-          )}</p>
         </div>
       </header>
 
@@ -273,8 +269,7 @@ export default function HomePage({
       <section className="panel keyword-panel">
         <div className="panel-head split-heading">
           <div>
-            <span className="eyebrow">KEYWORD OVERRIDE · YOU'RE IN CONTROL</span>
-            <h2>{copy("Keyword routing", "关键词路由 · 你说了算")}</h2>
+            <h2>{copy("Keyword routing", "关键词路由")}</h2>
             <p className="sub">
               {copy(
                 "Add a keyword to a tier to override automatic classification whenever a request contains it. Save and apply when finished.",
@@ -297,8 +292,7 @@ export default function HomePage({
       <section className="panel local-routing-panel">
         <div className="panel-head split-heading">
           <div>
-            <span className="eyebrow">LOCAL-ONLY · DATA STAYS HOME</span>
-            <h2>{copy("Local only", "只走本地 · 数据不出本机")}</h2>
+            <h2>{copy("Local only", "只走本地")}</h2>
             <p className="sub">
               {hasLocalProvider
                 ? copy(

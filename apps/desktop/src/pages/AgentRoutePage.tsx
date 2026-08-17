@@ -507,7 +507,6 @@ export default function AgentRoutePage({
             />
           </span>
           <div>
-            <span className="eyebrow">AGENT ROUTE</span>
             {embedded ? <h2>{metadata.display_name}</h2> : <h1>{metadata.display_name}</h1>}
           </div>
         </div>
@@ -578,7 +577,6 @@ export default function AgentRoutePage({
           <section className="panel connect-diff-card">
             <div className="connect-diff-head">
               <div>
-                <span className="eyebrow">{copy("FIRST CONNECTION · WHAT CHANGED", "首次接入 · 我们动了什么")}</span>
                 <h2>{copy(
                   `${metadata.display_name.replace(" Agent", "")} is connected. Here is exactly what changed.`,
                   `已接入 ${metadata.display_name.replace(" Agent", "")}，改动如实告知`,
@@ -647,11 +645,10 @@ export default function AgentRoutePage({
       <section className="panel route-panel">
         <div className="panel-head split-heading">
           <div>
-            <span className="eyebrow">ROUTING PROFILE</span>
             <h2>{copy("Three-tier routing", "三档路由")}</h2>
             <p className="sub">{copy(
               "Provider and model selection matches Home. This only determines whether the Agent uses a custom configuration.",
-              "供应商和模型选择与主页完全一致；只决定此 Agent 是否使用独立配置。",
+              "供应商和模型选择与主页一致，只决定当前客户端是否使用独立配置。",
             )}</p>
           </div>
           <div className="mode-switch" role="radiogroup" aria-label={copy("Agent routing mode", "Agent 路由模式")}>

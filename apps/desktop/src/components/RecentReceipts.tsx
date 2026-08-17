@@ -383,7 +383,6 @@ export default function RecentReceipts() {
     <section className="panel receipt-panel" aria-labelledby="recent-receipts-heading">
       <div className="panel-head split-heading">
         <div>
-          <span className="eyebrow">REQUEST RECEIPTS</span>
           <h2 id="recent-receipts-heading">{copy("Recent requests", "最近 5 次请求")}</h2>
           <p className="sub">{copy(
             "Receipts retain route, final status, and usage metadata. Plaintext bodies are stored separately for 7 days by default.",

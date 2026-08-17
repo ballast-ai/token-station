@@ -342,14 +342,13 @@ export default function DirectRoutePanel({
     >
       <div className="panel-head split-heading direct-route-heading">
         <div>
-          <span className="eyebrow">DIRECT · ONE PROVIDER</span>
-          <h2>{copy("Direct routing", "单独路由 · 默认")}</h2>
+          <h2>{copy("Direct routing", "单独路由")}</h2>
           <p className="sub">{copy(
             agent
               ? "Send this Agent to exactly one provider and managed model."
               : "Send every request to exactly one provider and managed model.",
             agent
-              ? "将该 Agent 的请求固定发送给一个供应商及其已管理模型。"
+              ? "将当前客户端的请求固定发送给一个供应商及其已管理模型。"
               : "将请求固定发送给你明确选择的一个供应商及其已管理模型。",
           )}</p>
         </div>

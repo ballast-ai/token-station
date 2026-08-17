@@ -87,7 +87,6 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
     >
       <header className="overview-heading">
         <div>
-          <span className="page-eyebrow">RUNTIME STATUS</span>
           <h1>{copy("Overview", "概览")}</h1>
           <p>{copy(
             "Proxy status, current routing, requests, and cost at a glance.",

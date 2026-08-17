@@ -155,7 +155,6 @@ function StartupHome({ error, onReload }: { error: string; onReload: () => void 
     <div className="startup-home agent-workspace-page">
       <header className="startup-heading">
         <div>
-          <span className="startup-eyebrow">AGENT FLEET</span>
           <h1>{copy("Home", "主页")}</h1>
           <p>{copy(
             "Preparing the local Agent and routing workspace.",
@@ -171,7 +170,6 @@ function StartupHome({ error, onReload }: { error: string; onReload: () => void 
         >
           <header className="startup-agent-card-header">
             <div>
-              <span className="startup-eyebrow">AGENTS</span>
               <h2>{copy("Local clients", "本机客户端")}</h2>
             </div>
             <span className="startup-count" aria-hidden="true">—</span>
@@ -201,7 +199,6 @@ function StartupHome({ error, onReload }: { error: string; onReload: () => void 
           aria-busy={!failed}
           aria-label={statusLabel}
         >
-          <span className="startup-eyebrow">LOCAL DISCOVERY</span>
           <h2>{statusLabel}</h2>
           <p>{failed
             ? copy(

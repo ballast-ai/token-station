@@ -83,7 +83,6 @@ function VirtualKeyCard({ serve }: { serve: ServeView }) {
     <Card className="settings-card key-settings-card">
       <CardHeader className="panel-head split-heading">
         <div>
-          <span className="eyebrow">{t("key.eyebrow")}</span>
           <CardTitle><h2>{t("key.title")}</h2></CardTitle>
           <p className="sub">{t("key.description")}</p>
         </div>
@@ -123,7 +122,6 @@ function AppearancePanel() {
   return (
     <Card className="settings-card appearance-panel">
       <CardHeader className="panel-head">
-        <span className="eyebrow">{t("appearance.eyebrow")}</span>
         <CardTitle><h2>{t("appearance.title")}</h2></CardTitle>
         <p className="sub">{t("appearance.description")}</p>
       </CardHeader>
@@ -235,7 +233,6 @@ function LanguagePanel() {
   return (
     <Card className="settings-card language-panel">
       <CardHeader className="panel-head">
-        <span className="eyebrow">{t("language.eyebrow")}</span>
         <CardTitle><h2>{t("language.title")}</h2></CardTitle>
         <p className="sub">{t("language.description")}</p>
       </CardHeader>
@@ -289,7 +286,6 @@ function SettingsHubContent({
     <div className="page-stack settings-page">
       <header className="overview-heading settings-heading">
         <div>
-          <span className="page-eyebrow">{t("settings.controlRoom")}</span>
           <h1>{t("settings.title")}</h1>
           <p>{t("settings.generalHint")}</p>
         </div>
