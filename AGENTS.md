@@ -14,6 +14,16 @@ complete Simplified Chinese text after it.
 Write commit messages in English. Use a short imperative subject. Describe one logical change in each
 commit.
 
+## Commit directly to main
+
+Work on the `main` branch. Commit authorized changes directly to `main` and push them to `origin/main`.
+
+Do not create feature, topic, release, or migration branches unless the user explicitly requests one.
+Do not create a pull request unless the user explicitly requests one.
+
+Before each commit, verify that the current branch is `main`. Stage only the files authorized for that
+commit. Keep unrelated working-tree changes unstaged.
+
 ## Use Simplified Technical English
 
 Use strict Simplified Technical English for procedures, runbooks, safety warnings, and error messages.
@@ -44,8 +54,12 @@ Create or update a design record in the private `ballast-ai/token-station-doc` r
 - Frontend and backend contracts.
 - Release behavior.
 
-Review the design record in the private repository before implementation. Do not copy internal design
-records into the public source repository or its pull requests.
+Review the design record in the private repository before implementation. Keep all non-public design,
+planning, review, incident, and operational documents in that private repository.
+
+Do not create `docs/design/` in this public repository. Do not copy internal documents into this public
+repository, its commits, its branches, or its pull requests. Keep only user-facing documentation and
+source-required public records in this repository.
 
 Include these sections in the design document:
 
