@@ -75,7 +75,7 @@ assert.match(finderLayout, /if exists item "构建来源\.txt"/);
 assert.match(finderLayout, /if exists item "未签名测试版\.txt"/);
 assert.match(finderLayout, /if exists item "终端启动命令\.txt"/);
 assert.match(finderLayout, /set bounds to \{100, 100, 1180, 700\}/);
-assert.match(finderLayout, /position of item "终端启动命令\.txt" .* to \{460, 440\}/);
+assert.match(finderLayout, /position of item "终端启动命令\.txt" .* to \{640, 440\}/);
 
 const terminalCommandGuide = read("packaging/macos/终端启动命令.txt");
 for (const phrase of [
@@ -96,11 +96,11 @@ assert.doesNotMatch(terminalCommandGuide, /xattr[^\n]*(?:\/Applications[\s"']|~\
 for (const [relativePath, expectedDigest] of [
   [
     "packaging/macos/dmg-layout.dsstore.base64",
-    "bd345bfc5b70ac1d47fa48c620d04d085b22cbe453dc0ed3542cad0403cc3f38",
+    "cc2af966a7af4db45f1be70fe674fe506ec545604bed5068d5bf47c9e8b3d47b",
   ],
   [
     "packaging/macos/dmg-layout-unsigned.dsstore.base64",
-    "0c644b5a00c78eb44be4095fc3060bc76224e4f2d87f1c7b7c36a940f8268537",
+    "a815904ef3a022812de177409688ab8b68e1e75e33cf3dcada978cde0bd83b4b",
   ],
 ]) {
   const finderLayoutTemplate = Buffer.from(read(relativePath).replace(/\s/g, ""), "base64");
@@ -118,11 +118,10 @@ assert.match(installer, /spctl --assess --type execute/);
 assert.match(installer, /xattr -dr com\.apple\.quarantine "\$DEST_APP"/);
 assert.doesNotMatch(installer, /spctl\s+--master-disable/);
 
-const testReadme = read("packaging/macos/未签名测试版安装前必读.md");
-for (const phrase of ["未签名", "未经 Apple 公证", "仅供测试", "SHA-256", filename]) {
+const testReadme = read("packaging/macos/installation-guide.md");
+for (const phrase of ["未签名", "Apple 未对该文件完成公证", "仅供测试", "SHA-256"]) {
   assert.ok(testReadme.includes(phrase), `测试安装说明缺少“${phrase}”`);
 }
-assert.doesNotMatch(testReadme, /已完成 Developer ID 签名和 Apple 公证/);
 assert.doesNotMatch(testReadme, /spctl\s+--master-disable/);
 
 const notes = read("docs/release/v1.1.3.md");

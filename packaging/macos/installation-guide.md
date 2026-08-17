@@ -27,7 +27,7 @@ replaces an earlier Token Station app. It tries to restore that backup if instal
 Drag `token-station.app` to the `Applications` shortcut. In Finder, right-click
 `/Applications/token-station.app` and select **Open**. Select **Open** again in the macOS message.
 
-If macOS still blocks the app, read `macOS-无法打开怎么办.md`. Do not disable Gatekeeper or SIP.
+If macOS still blocks the app, read `macos-troubleshooting.md`. Do not disable Gatekeeper or SIP.
 
 ---
 
@@ -60,4 +60,4 @@ Gatekeeper 可能拦截它。该文件仅供测试。
 把 `token-station.app` 拖到 `Applications` 快捷方式。在 Finder 中右键点击
 `/Applications/token-station.app`，选择“打开”，再在 macOS 提示中点击“打开”。
 
-如果 macOS 仍然拦截 App，请阅读 `macOS-无法打开怎么办.md`。不要关闭 Gatekeeper 或 SIP。
+如果 macOS 仍然拦截 App，请阅读 `macos-troubleshooting.md`。不要关闭 Gatekeeper 或 SIP。

@@ -63,8 +63,8 @@ mounted=true
 
 readonly mounted_app="$mount_point/token-station.app"
 readonly mounted_applications="$mount_point/Applications"
-readonly mounted_readme="$mount_point/安装前必读.md"
-readonly mounted_troubleshooting_guide="$mount_point/macOS-无法打开怎么办.md"
+readonly mounted_readme="$mount_point/installation-guide.md"
+readonly mounted_troubleshooting_guide="$mount_point/macos-troubleshooting.md"
 readonly mounted_installer="$mount_point/安装 Token Station.command"
 readonly mounted_unsigned_test_marker="$mount_point/未签名测试版.txt"
 readonly mounted_provenance="$mount_point/构建来源.txt"
@@ -89,8 +89,8 @@ if [[ "$unsigned_test" == "true" ]]; then
   expected_entries=$(printf '%s\n' \
     token-station.app \
     Applications \
-    '安装前必读.md' \
-    'macOS-无法打开怎么办.md' \
+    'installation-guide.md' \
+    'macos-troubleshooting.md' \
     '安装 Token Station.command' \
     '未签名测试版.txt' \
     '构建来源.txt' \

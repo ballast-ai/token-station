@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const requiredFiles = [
-  "packaging/macos/安装前必读.md",
-  "macOS-无法打开怎么办.md",
+  "packaging/macos/installation-guide.md",
+  "macos-troubleshooting.md",
   "packaging/macos/安装 Token Station.command",
   "packaging/macos/终端启动命令.txt",
   "packaging/macos/configure-dmg-layout.applescript",
@@ -75,7 +75,7 @@ if (installer) {
   }
 }
 
-const readmePath = "packaging/macos/安装前必读.md";
+const readmePath = "packaging/macos/installation-guide.md";
 const readme = read(readmePath);
 if (readme) {
   const requiredReadmePhrases = [
@@ -94,7 +94,7 @@ if (readme) {
   }
 }
 
-const troubleshootingPath = "macOS-无法打开怎么办.md";
+const troubleshootingPath = "macos-troubleshooting.md";
 const troubleshootingGuide = read(troubleshootingPath);
 if (troubleshootingGuide) {
   for (const phrase of [
@@ -143,9 +143,9 @@ const packager = read(packagerPath);
 if (packager) {
   const requiredPackagerPatterns = [
     ["Applications 精确链接", /ln -s \/Applications .*Applications/],
-    ["安装说明", /安装前必读\.md/],
+    ["安装说明", /installation-guide\.md/],
     ["安装脚本", /安装 Token Station\.command/],
-    ["无法打开说明", /macOS-无法打开怎么办\.md/],
+    ["无法打开说明", /macos-troubleshooting\.md/],
     ["DMG 创建", /hdiutil create/],
     ["DMG 签名", /codesign .*--sign/],
     ["DMG 公证", /notarytool submit/],
@@ -184,11 +184,11 @@ if (packager) {
 for (const [finderLayoutTemplatePath, expectedDigest] of [
   [
     "packaging/macos/dmg-layout.dsstore.base64",
-    "bd345bfc5b70ac1d47fa48c620d04d085b22cbe453dc0ed3542cad0403cc3f38",
+    "cc2af966a7af4db45f1be70fe674fe506ec545604bed5068d5bf47c9e8b3d47b",
   ],
   [
     "packaging/macos/dmg-layout-unsigned.dsstore.base64",
-    "0c644b5a00c78eb44be4095fc3060bc76224e4f2d87f1c7b7c36a940f8268537",
+    "a815904ef3a022812de177409688ab8b68e1e75e33cf3dcada978cde0bd83b4b",
   ],
 ]) {
   const finderLayoutTemplate = read(finderLayoutTemplatePath);
@@ -249,10 +249,10 @@ if (finderLayout) {
     ["App 固定坐标", /position of item "token-station\.app" .* to \{310, 170\}/],
     ["Applications 固定坐标", /position of item "Applications" .* to \{610, 170\}/],
     ["安装脚本固定坐标", /position of item "安装 Token Station\.command"/],
-    ["安装说明固定坐标", /position of item "安装前必读\.md"/],
+    ["安装说明固定坐标", /position of item "installation-guide\.md"/],
     ["构建来源固定坐标", /position of item "构建来源\.txt"/],
     ["未签名提示固定坐标", /position of item "未签名测试版\.txt"/],
-    ["无法打开说明固定坐标", /position of item "macOS-无法打开怎么办\.md" .* to \{460, 440\}/],
+    ["无法打开说明固定坐标", /position of item "macos-troubleshooting\.md" .* to \{460, 440\}/],
     ["终端启动命令固定坐标", /position of item "终端启动命令\.txt" .* to \{640, 440\}/],
     ["正式包可省略构建来源", /if exists item "构建来源\.txt"[\s\S]*set position of item "构建来源\.txt"/],
     ["正式包可省略未签名提示", /if exists item "未签名测试版\.txt"[\s\S]*set position of item "未签名测试版\.txt"/],

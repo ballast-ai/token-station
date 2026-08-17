@@ -5,6 +5,9 @@
 Use English for new and modified technical content. This rule applies to code comments, documentation,
 design records, test names, commit messages, pull requests, release notes, and contributor instructions.
 
+Use ASCII English words for technical-document filenames. Locale suffixes such as `zh-CN` are allowed,
+but localized words are not.
+
 Keep commands, paths, protocol fields, API names, and code identifiers unchanged. Keep required localized
 user-interface text in its target language. You can quote an error or log entry in its original language.
 

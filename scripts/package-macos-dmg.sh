@@ -47,8 +47,8 @@ done
 readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly expected_bundle_id="com.tokenstation.desktop"
 readonly installer="$root/packaging/macos/安装 Token Station.command"
-readonly readme="$root/packaging/macos/安装前必读.md"
-readonly troubleshooting_guide="$root/macOS-无法打开怎么办.md"
+readonly readme="$root/packaging/macos/installation-guide.md"
+readonly troubleshooting_guide="$root/macos-troubleshooting.md"
 readonly unsigned_terminal_command="$root/packaging/macos/终端启动命令.txt"
 readonly formal_finder_layout_template="$root/packaging/macos/dmg-layout.dsstore.base64"
 readonly unsigned_finder_layout_template="$root/packaging/macos/dmg-layout-unsigned.dsstore.base64"
@@ -143,14 +143,14 @@ trap cleanup EXIT
 
 /usr/bin/ditto "$app_path" "$stage/token-station.app"
 ln -s /Applications "$stage/Applications"
-/bin/cp "$readme" "$stage/安装前必读.md"
-/bin/cp "$troubleshooting_guide" "$stage/macOS-无法打开怎么办.md"
+/bin/cp "$readme" "$stage/installation-guide.md"
+/bin/cp "$troubleshooting_guide" "$stage/macos-troubleshooting.md"
 /bin/cp "$installer" "$stage/安装 Token Station.command"
 /bin/chmod 755 "$stage/安装 Token Station.command"
 if [[ "$unsigned_test" == "true" ]]; then
   /bin/cp "$unsigned_terminal_command" "$stage/终端启动命令.txt"
   printf '%s\n' \
-    '警告：此 DMG 未签名、未经 Apple 公证，仅供测试。安装前请先阅读“安装前必读.md”并核对 SHA-256。' \
+    '警告：此 DMG 未签名、未经 Apple 公证，仅供测试。安装前请先阅读“installation-guide.md”并核对 SHA-256。' \
     >"$stage/未签名测试版.txt"
   printf 'App source tag: v%s\nApp source commit: %s\nPackaging source commit: %s\n' \
     "$version" "$app_source_commit" "$packaging_source_commit" \
