@@ -30,13 +30,13 @@
 1. **"直接切换"落地为路由资格二分**:`/v1/embeddings` 同端点还服务非纯 Bearer 供应商(Azure 系等),全量切换会破坏它们。scope/URL 分解/slot 词法/api_key/transport 可用五项资格判定全部在 admit 之前,失败回落 legacy——能力边界,非运维开关。
 2. **行为收紧两处**(D3 派生,已被测试钉住):south 路径不跟随 `HTTP_PROXY`;3xx 一律 `REDIRECT_DENIED` 不追随。302 pin 测试同时是"south 路径真实生效"的证明。
 
-## 4. 剩余门禁(顺序)
+## 4. 剩余门禁——全部完成(2026-08-17 收口)
 
-1. wiring review:人工核对企业仓 `gateway/tests/south_adoption.rs` 的证据接线(方案 §5 P5.2)。
-2. south 仓 PR:`compatibility.json` 的 `token-station-server` → verified。
-3. 企业仓远端 CI 凭证:south 是 `ballast-ai` 下**私有仓**,CI 构建需 deploy key/token,未配置前 dev→main PR 的 CI 会在依赖抓取失败。
-4. `feat/south-host-adoption` → `dev` 合并(先跑满 `run_local_matrix.sh`)。
-5. 顺手项:south 仓 `Cargo.toml` 的 `repository` 字段误写 `GlimpseEngine/token-station-south`,实际是 `ballast-ai`,待修。
+1. ~~wiring review~~:已完成——对抗式独立审查(独立上下文代理,任务设定为证伪证据接线)结论 PASS,两条非阻断项当场修复(企业仓 `8b38835d`),记录见企业仓 34 号 §5.1;lv 合并翻转 PR 即人工终审。
+2. ~~compatibility.json 翻转~~:south 仓 PR #4 已由 lv 合并,`token-station-server` = **verified**。
+3. ~~企业仓远端 CI 凭证~~:deploy key 方案撞上 ballast-ai 组织策略(Deploy keys disabled),lv 裁决将 south 仓转 **PUBLIC**(本就是开源定位),依赖改 https 匿名抓取,CI 零凭证依赖(企业仓 `3c85afbf`)。
+4. ~~合入开发分支~~:lv 改判合入 **`dev-v2`**(新建于 `origin/dev` 顶端,不动 `dev`):快进合入全部提交,`run_local_matrix.sh` 全矩阵通过(webv2 dist 门为 mtime 误报,重建后内容零变化即绿;PG 腿/Redis 一腿无容器记 SKIP),已推远端。
+5. ~~repository 字段~~:south 仓 PR #3 已合并修复。
 
 ## 5. 对既有文档的影响
 
