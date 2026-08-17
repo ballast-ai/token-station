@@ -1,4 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-labelledby="title">
   <title id="title">OpenCode</title>
+  <rect x=".5" y=".5" width="23" height="23" rx="5" fill="#F6F8FA" stroke="#D0D7DE"/>
   <path fill="#24292F" fill-rule="evenodd" d="M16 6H8v12h8V6zm4 16H4V2h16v20z"/>
 </svg>

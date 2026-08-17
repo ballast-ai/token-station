@@ -80,9 +80,9 @@ Token Station 在 AI Agent 与模型供应商之间保留一个本地网关。�
 | <a href="https://github.com/anthropics"><img src="docs/assets/agents/claude-desktop.svg" width="20" height="20" alt=""> Claude Desktop</a> | 内置 Connector | Anthropic Messages |
 | <a href="https://github.com/openai/codex"><img src="docs/assets/agents/codex.svg" width="20" height="20" alt=""> Codex</a> | 内置 Connector | OpenAI Responses |
 | <a href="https://github.com/google-gemini/gemini-cli"><img src="docs/assets/agents/gemini-cli.svg" width="20" height="20" alt=""> Gemini CLI</a> | 内置 Connector | Gemini |
-| [Grok Build](https://github.com/xai-org/grok-cli) | 内置 Connector | OpenAI Chat Completions |
-| [Kimi Code](https://github.com/MoonshotAI/kimi-code) | 内置 Connector | OpenAI Chat Completions |
-| [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | 内置 Connector（上游处于开发者预览） | OpenAI Chat Completions |
+| <a href="https://github.com/xai-org/grok-cli"><img src="docs/assets/agents/grok-build.svg" width="20" height="20" alt=""> Grok Build</a> | 内置 Connector | OpenAI Chat Completions |
+| <a href="https://github.com/MoonshotAI/kimi-code"><img src="docs/assets/agents/kimi-code.svg" width="20" height="20" alt=""> Kimi Code</a> | 内置 Connector | OpenAI Chat Completions |
+| <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="docs/assets/agents/deepseek-harness.svg" width="20" height="20" alt=""> DeepSeek Harness</a> | 内置 Connector（上游处于开发者预览） | OpenAI Chat Completions |
 | <a href="https://github.com/NousResearch/hermes-agent"><img src="apps/desktop/public/agents/hermes.png" width="20" height="20" alt=""> Hermes Agent</a> | 内置 Connector | OpenAI Chat Completions |
 | <a href="https://github.com/openclaw/openclaw"><img src="docs/assets/agents/openclaw.svg" width="20" height="20" alt=""> OpenClaw</a> | 内置 Connector | OpenAI Chat Completions |
 | <a href="https://www.workbuddy.ai/"><img src="apps/desktop/public/agents/workbuddy.png" width="20" height="20" alt=""> WorkBuddy</a> | 内置 Connector | OpenAI Chat Completions |
