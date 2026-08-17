@@ -4276,7 +4276,7 @@ pre.block {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 9px;
-  background: color-mix(in srgb, var(--surface-2) 72%, #08101d);
+  background: var(--surface-2);
 }
 .request-plaintext > header {
   min-height: 36px;
@@ -4362,10 +4362,10 @@ pre.block {
   margin: 0;
   overflow: auto;
   padding: 11px 12px;
-  border: 1px solid color-mix(in srgb, var(--line-strong) 76%, transparent);
+  border: 1px solid var(--line-strong);
   border-radius: 7px;
-  color: color-mix(in srgb, var(--ink) 92%, #fff);
-  background: #0b1220;
+  color: var(--ink);
+  background: var(--canvas);
   font: 10px/1.62 "IBM Plex Mono", "SF Mono", Menlo, monospace;
   white-space: pre;
   tab-size: 2;
@@ -4384,9 +4384,9 @@ pre.block {
 .request-semantic-block {
   overflow: hidden;
   flex: 0 0 auto;
-  border: 1px solid color-mix(in srgb, var(--line-strong) 58%, transparent);
+  border: 1px solid var(--line-strong);
   border-radius: 6px;
-  background: color-mix(in srgb, var(--surface-2) 70%, #08101d);
+  background: var(--surface);
 }
 .request-semantic-block > div {
   padding: 6px 9px;
@@ -4400,7 +4400,7 @@ pre.block {
   margin: 0;
   padding: 9px;
   overflow-wrap: anywhere;
-  color: color-mix(in srgb, var(--ink) 94%, #fff);
+  color: var(--ink);
   font: 10px/1.62 "IBM Plex Mono", "SF Mono", Menlo, monospace;
   white-space: pre-wrap;
 }

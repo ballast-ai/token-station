@@ -78,4 +78,23 @@ describe("retained page theme styles", () => {
     expect(permanentGlobalRouteRule).not.toMatch(/border:/);
     expect(selectedAgentRule).toMatch(/background:\s*var\(--signal-soft\)/);
   });
+
+  it("uses active theme surfaces for the usage plaintext inspector", () => {
+    const plaintextRule = appCss.match(/\.request-plaintext\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const scrollRule = appCss.match(/\.request-plaintext-scroll\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const semanticBlockRule = appCss.match(/\.request-semantic-block\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const semanticBodyRule = appCss.match(/\.request-semantic-block > pre\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(plaintextRule).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(scrollRule).toMatch(/border:\s*1px solid var\(--line-strong\)/);
+    expect(scrollRule).toMatch(/color:\s*var\(--ink\)/);
+    expect(scrollRule).toMatch(/background:\s*var\(--canvas\)/);
+    expect(semanticBlockRule).toMatch(/border:\s*1px solid var\(--line-strong\)/);
+    expect(semanticBlockRule).toMatch(/background:\s*var\(--surface\)/);
+    expect(semanticBodyRule).toMatch(/color:\s*var\(--ink\)/);
+
+    for (const rule of [plaintextRule, scrollRule, semanticBlockRule, semanticBodyRule]) {
+      expect(rule).not.toMatch(/#08101d|#0b1220|#fff\b/i);
+    }
+  });
 });
