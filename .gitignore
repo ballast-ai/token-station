@@ -18,6 +18,9 @@ dist/
 # 私有文档仓的本地软链，不入库
 /all_docs
 
+# Internal design records belong in the private token-station-doc repository.
+/docs/design/
+
 # plugin build 把 adapter.wasm 放到 manifest 旁以便直接 install——产物不入库。
 plugins/official/*/adapter.wasm
 
