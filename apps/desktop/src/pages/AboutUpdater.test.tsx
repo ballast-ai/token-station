@@ -71,6 +71,15 @@ describe("desktop in-app update", () => {
       .toHaveTextContent("无法打开外部页面");
   });
 
+  it("keeps update trust facts free of decorative route furniture", () => {
+    render(<About desktopVersion="1.1.2" coreVersion="0.2.0" />);
+
+    expect(screen.getByText("按需检查")).toBeInTheDocument();
+    expect(screen.getByText("签名验证")).toBeInTheDocument();
+    expect(screen.getByText("平稳交接")).toBeInTheDocument();
+    expect(screen.queryByText("Release → signature → local gateway")).not.toBeInTheDocument();
+  });
+
   it("更新进度监听注册失败时进入全局错误弹窗", async () => {
     vi.mocked(listenDesktopUpdateProgress).mockRejectedValue(
       new Error("update progress subscription failed"),

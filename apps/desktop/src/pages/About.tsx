@@ -32,7 +32,6 @@ import { Badge } from "../components/ui/badge";
 import {
   Card,
   CardContent,
-  CardFooter,
   CardHeader,
 } from "../components/ui/card";
 import { Progress } from "../components/ui/progress";
@@ -336,10 +335,6 @@ function AboutContent({
             </div>
           </div>
         </CardContent>
-        <CardFooter className="about-trust-foot">
-          <span className="about-route-line" aria-hidden="true" />
-          <span>{t("about.routeCaption")}</span>
-        </CardFooter>
       </Card>
 
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
