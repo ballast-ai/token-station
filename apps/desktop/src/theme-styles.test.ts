@@ -79,6 +79,20 @@ describe("retained page theme styles", () => {
     expect(selectedAgentRule).toMatch(/background:\s*var\(--signal-soft\)/);
   });
 
+  it("keeps the proxy control width stable across runtime states", () => {
+    const baseRuntimeRules = Array.from(
+      appCss.matchAll(/\.station-runtime-pill\[data-slot="button"\]\s*\{([^}]*)\}/g),
+      (match) => match[1],
+    ).join("\n");
+    const stateRuntimeRules = Array.from(
+      appCss.matchAll(/\.station-runtime-pill\[data-slot="button"\](?:\.healthy|:hover)[^{]*\{([^}]*)\}/g),
+      (match) => match[1],
+    ).join("\n");
+
+    expect(baseRuntimeRules).toMatch(/width:\s*160px/);
+    expect(stateRuntimeRules).not.toMatch(/(?:^|;)\s*width:/);
+  });
+
   it("removes Agent discovery motion when reduced motion is requested", () => {
     const revealRule = appCss.match(
       /\.agent-master-item-revealing\[data-slot="button"\]\s*\{([^}]*)\}/s,

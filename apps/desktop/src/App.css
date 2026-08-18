@@ -5498,8 +5498,9 @@ pre.block {
 }
 
 .station-runtime-pill[data-slot="button"] {
+  width: 160px;
   height: 34px;
-  max-width: 190px;
+  max-width: 160px;
   display: inline-flex;
   align-items: center;
   gap: 7px;
