@@ -11,7 +11,8 @@ use crate::{
 };
 use south_contracts::{
     BufferedHttpResponseV1, ContractErrorV1, CredentialSlotV1, MAX_JSON_REQUEST_BODY_BYTES,
-    PreparationErrorV1, TransportErrorV1,
+    MAX_PROVIDER_QUOTA_METADATA_VALUE_BYTES, PreparationErrorV1, ProviderQuotaMetadataFieldV1,
+    ProviderQuotaMetadataV1, StreamRejectedV1, StreamingResponseHeadV1, TransportErrorV1,
 };
 use south_core::{
     AsyncHttpTransport, CredentialResolutionFuture, CredentialResolver, PreparedHttpRequestV1,
@@ -19,18 +20,25 @@ use south_core::{
 };
 use south_provider_conformance::{
     FAKE_BEARER_SECRET_V1, PROVIDER_CALL_CONFORMANCE_DEADLINE_OFFSET_V1, ProviderCallControlV1,
-    ProviderCallFailureCodeV1, ProviderCallFixtureV1, ProviderCallUpstreamV1,
+    ProviderCallFailureCodeV1, ProviderCallFixtureV1, ProviderCallInputV1, ProviderCallUpstreamV1,
+    ProviderQuotaMetadataFixtureV1,
 };
 use south_testkit::{
-    AssembledExecutionFutureV1, AssembledProviderCallExecutorV1, ProviderCallEvidenceV1,
-    ProviderCallObservationV1, run_provider_call_conformance_v1,
+    AssembledExecutionFutureV1, AssembledProviderCallExecutorV1,
+    AssembledProviderQuotaMetadataExecutionFutureV1, AssembledProviderQuotaMetadataExecutorV1,
+    ProviderCallEvidenceV1, ProviderCallObservationV1, ProviderQuotaMetadataEvidenceV1,
+    ProviderQuotaMetadataObservationV1, run_provider_call_conformance_v1,
+    run_provider_quota_metadata_conformance_v1,
 };
 use std::{
     future::pending,
+    io::{Read, Write},
+    net::TcpListener,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    thread,
     time::Duration,
 };
 use token_station_protocol::{
@@ -493,11 +501,50 @@ impl AsyncHttpTransport for InspectingTransport {
         assert_eq!(request.headers().get("x-trace-id"), Some("trace-1"));
         assert_eq!(request.bearer_secret(), b"synthetic-test-secret");
         Box::pin(async {
-            BufferedHttpResponseV1::try_from_parts(
+            let quota_metadata = ProviderQuotaMetadataV1::try_from_iter([
+                (
+                    ProviderQuotaMetadataFieldV1::XRateLimitLimitTokens,
+                    "1000".to_owned(),
+                ),
+                (
+                    ProviderQuotaMetadataFieldV1::XRateLimitRemainingTokens,
+                    "900".to_owned(),
+                ),
+                (
+                    ProviderQuotaMetadataFieldV1::XRateLimitResetTokens,
+                    "10s".to_owned(),
+                ),
+                (
+                    ProviderQuotaMetadataFieldV1::AnthropicRateLimitTokensLimit,
+                    "2000".to_owned(),
+                ),
+                (
+                    ProviderQuotaMetadataFieldV1::AnthropicRateLimitTokensRemaining,
+                    "1500".to_owned(),
+                ),
+                (
+                    ProviderQuotaMetadataFieldV1::AnthropicRateLimitTokensReset,
+                    "20s".to_owned(),
+                ),
+                (
+                    ProviderQuotaMetadataFieldV1::AnthropicRateLimitUnifiedLimit,
+                    "3000".to_owned(),
+                ),
+                (
+                    ProviderQuotaMetadataFieldV1::AnthropicRateLimitUnifiedRemaining,
+                    "2500".to_owned(),
+                ),
+                (
+                    ProviderQuotaMetadataFieldV1::AnthropicRateLimitUnifiedReset,
+                    "1970-01-01T00:00:30Z".to_owned(),
+                ),
+            ])?;
+            BufferedHttpResponseV1::try_from_parts_with_provider_quota_metadata(
                 201_u16.try_into().expect("test status is valid"),
                 br#"{"ok":true}"#.to_vec(),
                 Some("application/json".to_owned()),
                 Some("2".to_owned()),
+                quota_metadata,
             )
         })
     }
@@ -541,6 +588,42 @@ async fn assembled_execution_uses_real_south_core_and_projects_the_response() {
     assert_eq!(
         response.headers.get("retry-after").map(String::as_str),
         Some("2")
+    );
+    assert_eq!(
+        response.headers,
+        [
+            (
+                "anthropic-ratelimit-tokens-limit".to_owned(),
+                "2000".to_owned()
+            ),
+            (
+                "anthropic-ratelimit-tokens-remaining".to_owned(),
+                "1500".to_owned(),
+            ),
+            (
+                "anthropic-ratelimit-tokens-reset".to_owned(),
+                "20s".to_owned()
+            ),
+            (
+                "anthropic-ratelimit-unified-limit".to_owned(),
+                "3000".to_owned()
+            ),
+            (
+                "anthropic-ratelimit-unified-remaining".to_owned(),
+                "2500".to_owned(),
+            ),
+            (
+                "anthropic-ratelimit-unified-reset".to_owned(),
+                "1970-01-01T00:00:30Z".to_owned(),
+            ),
+            ("content-type".to_owned(), "application/json".to_owned()),
+            ("retry-after".to_owned(), "2".to_owned()),
+            ("x-ratelimit-limit-tokens".to_owned(), "1000".to_owned()),
+            ("x-ratelimit-remaining-tokens".to_owned(), "900".to_owned()),
+            ("x-ratelimit-reset-tokens".to_owned(), "10s".to_owned()),
+        ]
+        .into_iter()
+        .collect()
     );
     assert!(response.extensions.is_empty());
 }
@@ -684,6 +767,28 @@ fn every_south_v1_transport_failure_has_a_closed_community_mapping() {
     }
 }
 
+#[test]
+fn streaming_rejection_fails_closed_in_the_buffered_adapter() {
+    let head = StreamingResponseHeadV1::try_from_parts(
+        "503".parse().expect("fixture status is valid"),
+        Some("application/json".to_owned()),
+        None,
+    )
+    .expect("fixture streaming head is valid");
+    let rejection = StreamRejectedV1::new(head, b"streaming-body-sentinel".to_vec());
+
+    let mapped = map_failure_v1(
+        StableProviderCallFailureV1::Provider(ProviderCallErrorV1::Rejected(rejection)),
+        CancellationDispositionV1::Deadline,
+    );
+
+    assert_eq!(
+        (mapped.code, mapped.http_status),
+        (ErrorCode::ProviderProtocolError, 502)
+    );
+    assert!(!mapped.message.contains("streaming-body-sentinel"));
+}
+
 fn store_resolver(value: &str) -> (SecretStore, std::path::PathBuf) {
     let directory = std::env::temp_dir().join(format!(
         "token-station-south-adapter-{}-{}",
@@ -785,7 +890,12 @@ struct CommunityConformanceExecutorV1 {
 fn prepare_conformance_fixture(
     fixture: &ProviderCallFixtureV1,
 ) -> Result<PreparedCommunityProviderCallV1, PrepareProviderCallErrorV1> {
-    let input = fixture.input();
+    prepare_conformance_input(fixture.input())
+}
+
+fn prepare_conformance_input(
+    input: &ProviderCallInputV1,
+) -> Result<PreparedCommunityProviderCallV1, PrepareProviderCallErrorV1> {
     let mut provider = ProviderConfig::new(
         "openai-compatible",
         ProviderEndpoint::try_new(input.endpoint()).expect("canonical endpoint is valid"),
@@ -924,7 +1034,7 @@ impl CommunityConformanceExecutorV1 {
                 ProviderCallObservationV1::response(bounded, evidence)
             }
             Err(error) => {
-                ProviderCallObservationV1::failure(map_stable_failure_code(error), evidence)
+                ProviderCallObservationV1::failure(map_stable_failure_code(&error), evidence)
             }
         }
     }
@@ -1033,11 +1143,11 @@ fn map_prepare_failure_code(error: PrepareProviderCallErrorV1) -> ProviderCallFa
     }
 }
 
-fn map_stable_failure_code(error: StableProviderCallFailureV1) -> ProviderCallFailureCodeV1 {
+fn map_stable_failure_code(error: &StableProviderCallFailureV1) -> ProviderCallFailureCodeV1 {
     match error {
-        StableProviderCallFailureV1::Contract(error) => map_contract_failure_code(error),
+        StableProviderCallFailureV1::Contract(error) => map_contract_failure_code(*error),
         StableProviderCallFailureV1::Provider(ProviderCallErrorV1::Preparation(error)) => {
-            map_preparation_failure_code(error)
+            map_preparation_failure_code(*error)
         }
         StableProviderCallFailureV1::Provider(ProviderCallErrorV1::Transport(error)) => match error
         {
@@ -1055,6 +1165,9 @@ fn map_stable_failure_code(error: StableProviderCallFailureV1) -> ProviderCallFa
             }
             TransportErrorV1::RedirectDenied => ProviderCallFailureCodeV1::RedirectDenied,
         },
+        StableProviderCallFailureV1::Provider(ProviderCallErrorV1::Rejected(_)) => {
+            ProviderCallFailureCodeV1::RequestFailed
+        }
     }
 }
 
@@ -1099,4 +1212,353 @@ async fn community_adapter_passes_all_seven_public_south_cases() {
         .expect("structured conformance watchdog expired");
     let report = report.expect("community adapter must pass the public suite");
     assert_eq!(report.passed_case_ids().len(), 7);
+}
+
+const QUOTA_METADATA_FIELDS_V1: [ProviderQuotaMetadataFieldV1; 9] = [
+    ProviderQuotaMetadataFieldV1::XRateLimitLimitTokens,
+    ProviderQuotaMetadataFieldV1::XRateLimitRemainingTokens,
+    ProviderQuotaMetadataFieldV1::XRateLimitResetTokens,
+    ProviderQuotaMetadataFieldV1::AnthropicRateLimitTokensLimit,
+    ProviderQuotaMetadataFieldV1::AnthropicRateLimitTokensRemaining,
+    ProviderQuotaMetadataFieldV1::AnthropicRateLimitTokensReset,
+    ProviderQuotaMetadataFieldV1::AnthropicRateLimitUnifiedLimit,
+    ProviderQuotaMetadataFieldV1::AnthropicRateLimitUnifiedRemaining,
+    ProviderQuotaMetadataFieldV1::AnthropicRateLimitUnifiedReset,
+];
+
+struct CommunityQuotaConformanceExecutorV1;
+
+impl CommunityQuotaConformanceExecutorV1 {
+    const fn new() -> Self {
+        Self
+    }
+
+    async fn execute_community_case(
+        &self,
+        fixture: &ProviderQuotaMetadataFixtureV1,
+    ) -> ProviderQuotaMetadataObservationV1 {
+        let prepared = match prepare_conformance_input(fixture.input()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return ProviderQuotaMetadataObservationV1::failure(
+                    map_prepare_failure_code(error),
+                    ProviderQuotaMetadataEvidenceV1::new(0, 0),
+                );
+            }
+        };
+        let resolver = ImmediateResolver {
+            calls: AtomicUsize::new(0),
+        };
+        let transport = QuotaConformanceTransport {
+            calls: AtomicUsize::new(0),
+            metadata: ProviderQuotaMetadataV1::try_from_iter(
+                QUOTA_METADATA_FIELDS_V1.into_iter().filter_map(|field| {
+                    fixture
+                        .upstream_metadata()
+                        .value(field)
+                        .map(|value| (field, value.to_owned()))
+                }),
+            )
+            .expect("canonical quota metadata is valid"),
+        };
+        let result = execute_prepared_provider_call_v1(
+            &prepared,
+            &resolver,
+            &transport,
+            tokio::time::Instant::now() + Duration::from_secs(30),
+            &CancellationToken::new(),
+        )
+        .await;
+        let evidence = ProviderQuotaMetadataEvidenceV1::new(
+            resolver.calls.load(Ordering::SeqCst),
+            transport.calls.load(Ordering::SeqCst),
+        );
+
+        match result {
+            Ok(response) => {
+                let projected = ProviderQuotaMetadataV1::try_from_iter(
+                    QUOTA_METADATA_FIELDS_V1.into_iter().filter_map(|field| {
+                        response
+                            .headers
+                            .get(field.as_header_name())
+                            .map(|value| (field, value.to_owned()))
+                    }),
+                )
+                .expect("host projection remains inside the quota contract");
+                ProviderQuotaMetadataObservationV1::response(projected, evidence)
+            }
+            Err(error) => ProviderQuotaMetadataObservationV1::failure(
+                map_stable_failure_code(&error),
+                evidence,
+            ),
+        }
+    }
+}
+
+impl AssembledProviderQuotaMetadataExecutorV1 for CommunityQuotaConformanceExecutorV1 {
+    fn execute_case<'a>(
+        &'a self,
+        fixture: &'a ProviderQuotaMetadataFixtureV1,
+    ) -> AssembledProviderQuotaMetadataExecutionFutureV1<'a> {
+        Box::pin(async move { self.execute_community_case(fixture).await })
+    }
+}
+
+struct QuotaConformanceTransport {
+    calls: AtomicUsize,
+    metadata: ProviderQuotaMetadataV1,
+}
+
+impl AsyncHttpTransport for QuotaConformanceTransport {
+    fn execute<'a>(
+        &'a self,
+        _request: &'a PreparedHttpRequestV1<'_>,
+        _remaining_timeout: Duration,
+    ) -> TransportFuture<'a> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            BufferedHttpResponseV1::try_from_parts_with_provider_quota_metadata(
+                200_u16.try_into().expect("test status is valid"),
+                br"{}".to_vec(),
+                None,
+                None,
+                self.metadata.clone(),
+            )
+        })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn community_adapter_passes_both_public_quota_metadata_cases() {
+    let executor = CommunityQuotaConformanceExecutorV1::new();
+    let report = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_provider_quota_metadata_conformance_v1(&executor),
+    )
+    .await
+    .expect("quota conformance watchdog expired")
+    .expect("community adapter must pass the public quota metadata suite");
+    assert_eq!(report.passed_case_ids().len(), 2);
+}
+
+const QUOTA_LOOPBACK_RESPONSE: &[u8] = concat!(
+    "HTTP/1.1 200 OK\r\n",
+    "content-type: application/json\r\n",
+    "x-ratelimit-limit-tokens: 1000\r\n",
+    "x-ratelimit-remaining-tokens: 900\r\n",
+    "x-ratelimit-reset-tokens: 10s\r\n",
+    "anthropic-ratelimit-tokens-limit: 2000\r\n",
+    "anthropic-ratelimit-tokens-remaining: 1500\r\n",
+    "anthropic-ratelimit-tokens-reset: 20s\r\n",
+    "anthropic-ratelimit-unified-limit: 3000\r\n",
+    "anthropic-ratelimit-unified-remaining: 2500\r\n",
+    "anthropic-ratelimit-unified-reset: 1970-01-01T00:00:30Z\r\n",
+    "x-private-sentinel: must-not-project\r\n",
+    "content-length: 2\r\n",
+    "connection: close\r\n",
+    "\r\n",
+    "{}",
+)
+.as_bytes();
+
+const NO_QUOTA_LOOPBACK_RESPONSE: &[u8] = concat!(
+    "HTTP/1.1 200 OK\r\n",
+    "content-type: application/json\r\n",
+    "content-length: 2\r\n",
+    "connection: close\r\n",
+    "\r\n",
+    "{}",
+)
+.as_bytes();
+
+struct QuotaFixtureResult {
+    windows: Vec<crate::quota_ledger::WindowSnapshot>,
+    response_headers: std::collections::BTreeMap<String, String>,
+    hit_count: usize,
+}
+
+fn start_quota_loopback(response: Vec<u8>) -> (String, thread::JoinHandle<usize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("quota loopback binds");
+    let address = listener
+        .local_addr()
+        .expect("quota loopback has an address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener
+            .accept()
+            .expect("quota loopback accepts one request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("quota loopback read timeout is configured");
+        let mut request = [0_u8; 8 * 1024];
+        let bytes_read = stream
+            .read(&mut request)
+            .expect("quota loopback reads request");
+        assert!(bytes_read != 0, "quota loopback received an empty request");
+        stream
+            .write_all(&response)
+            .expect("quota loopback writes the immutable response");
+        1
+    });
+    (format!("http://{address}/v1"), server)
+}
+
+fn execute_legacy_quota_fixture() -> QuotaFixtureResult {
+    let (base_url, server) = start_quota_loopback(QUOTA_LOOPBACK_RESPONSE.to_vec());
+    let response = ureq::get(format!("{base_url}/chat/completions"))
+        .call()
+        .expect("legacy loopback request succeeds");
+    let headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_owned(), value.to_owned()))
+        })
+        .collect();
+    let windows = crate::quota_headers::parse_quota_windows(&headers, 0);
+    QuotaFixtureResult {
+        windows,
+        response_headers: headers,
+        hit_count: server.join().expect("legacy loopback joins"),
+    }
+}
+
+async fn execute_south_quota_fixture() -> QuotaFixtureResult {
+    let (response, hit_count) =
+        execute_south_quota_fixture_with_response(QUOTA_LOOPBACK_RESPONSE.to_vec()).await;
+    let windows = crate::quota_headers::parse_quota_windows(&response.headers, 0);
+    QuotaFixtureResult {
+        windows,
+        response_headers: response.headers,
+        hit_count,
+    }
+}
+
+async fn execute_south_quota_fixture_with_response(
+    raw_response: Vec<u8>,
+) -> (token_station_protocol::HttpResponseParts, usize) {
+    let (base_url, server) = start_quota_loopback(raw_response);
+    let mut provider = ProviderConfig::new(
+        "openai-compatible",
+        ProviderEndpoint::try_new(&base_url).expect("South loopback endpoint is valid"),
+    );
+    provider.auth = Some(SecretRef::new("provider_api_key"));
+    let mut descriptor =
+        HttpRequestDescriptor::new(HttpMethod::Post, format!("{base_url}/chat/completions"));
+    descriptor.headers =
+        SafeHeaders::try_new([("content-type", "application/json")]).expect("header is valid");
+    descriptor.body = Some(serde_json::json!({"model": "quota-parity"}));
+    descriptor.auth = Some(Auth::bearer(SecretRef::new("provider_api_key")));
+    let prepared =
+        prepare_provider_call_v1(eligible_policy(), &provider, &auth_config(), &descriptor)
+            .expect("South loopback request projects");
+    let resolver = ImmediateResolver {
+        calls: AtomicUsize::new(0),
+    };
+    let transport = build_direct_reqwest_transport_v1(
+        Duration::from_secs(5),
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+    )
+    .expect("South loopback transport builds");
+    let response = execute_prepared_provider_call_v1(
+        &prepared,
+        &resolver,
+        &transport,
+        tokio::time::Instant::now() + Duration::from_secs(5),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("South loopback request succeeds");
+    let hit_count = server.join().expect("South loopback joins");
+    (response, hit_count)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_and_south_produce_identical_quota_windows_from_independent_loopbacks() {
+    let legacy = execute_legacy_quota_fixture();
+    let south = execute_south_quota_fixture().await;
+
+    assert_eq!(legacy.hit_count, 1);
+    assert_eq!(south.hit_count, 1);
+    assert_eq!(legacy.windows, south.windows);
+    assert_eq!(south.windows.len(), 3);
+    assert!(legacy.response_headers.contains_key("x-private-sentinel"));
+    assert!(!south.response_headers.contains_key("x-private-sentinel"));
+}
+
+fn malformed_quota_loopback_response() -> Vec<u8> {
+    let oversized = "x".repeat(MAX_PROVIDER_QUOTA_METADATA_VALUE_BYTES + 1);
+    let mut response = format!(
+        concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "content-type: application/json\r\n",
+            "x-ratelimit-limit-tokens: 1000\r\n",
+            "x-ratelimit-limit-tokens: 1000\r\n",
+            "x-ratelimit-remaining-tokens: {oversized}\r\n",
+            "x-ratelimit-reset-tokens: "
+        ),
+        oversized = oversized,
+    )
+    .into_bytes();
+    response.push(0xff);
+    response.extend_from_slice(
+        concat!(
+            "\r\n",
+            "anthropic-ratelimit-tokens-limit: 2000\r\n",
+            "anthropic-ratelimit-tokens-remaining: 1500\r\n",
+            "anthropic-ratelimit-tokens-reset: 20s\r\n",
+            "anthropic-ratelimit-unified-limit: 3000\r\n",
+            "content-length: 2\r\n",
+            "connection: close\r\n",
+            "\r\n",
+            "{}"
+        )
+        .as_bytes(),
+    );
+    response
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn south_quota_projection_is_fail_soft_for_absent_partial_and_malformed_fields() {
+    let (absent, absent_hits) =
+        execute_south_quota_fixture_with_response(NO_QUOTA_LOOPBACK_RESPONSE.to_vec()).await;
+    assert_eq!(absent_hits, 1);
+    assert_eq!(absent.status, 200);
+    assert_eq!(absent.body, "{}");
+    assert!(crate::quota_headers::parse_quota_windows(&absent.headers, 0).is_empty());
+
+    let (malformed, malformed_hits) =
+        execute_south_quota_fixture_with_response(malformed_quota_loopback_response()).await;
+    assert_eq!(malformed_hits, 1);
+    assert_eq!(malformed.status, 200);
+    assert_eq!(malformed.body, "{}");
+    assert!(!malformed.headers.contains_key("x-ratelimit-limit-tokens"));
+    assert!(
+        !malformed
+            .headers
+            .contains_key("x-ratelimit-remaining-tokens")
+    );
+    assert!(!malformed.headers.contains_key("x-ratelimit-reset-tokens"));
+    assert_eq!(
+        malformed
+            .headers
+            .get("anthropic-ratelimit-tokens-limit")
+            .map(String::as_str),
+        Some("2000")
+    );
+    assert_eq!(
+        malformed
+            .headers
+            .get("anthropic-ratelimit-unified-limit")
+            .map(String::as_str),
+        Some("3000")
+    );
+    assert_eq!(
+        crate::quota_headers::parse_quota_windows(&malformed.headers, 0).len(),
+        1,
+        "only the complete Anthropic token family may create a quota window"
+    );
 }

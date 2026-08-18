@@ -4,7 +4,8 @@ use std::{collections::BTreeMap, fmt, time::Duration};
 
 use south_contracts::{
     BearerAuthV1, ContractErrorV1, CredentialSlotV1, JsonBodyV1, JsonPostRequestV1,
-    PreparationErrorV1, ProviderEndpointV1, RelativePathV1, SafeHeaders,
+    PreparationErrorV1, ProviderEndpointV1, ProviderQuotaMetadataFieldV1, RelativePathV1,
+    SafeHeaders,
 };
 use south_core::{
     CredentialResolutionErrorV1, CredentialResolutionFuture, CredentialResolver, ProviderBindingV1,
@@ -25,6 +26,18 @@ use crate::{
 };
 
 const MAX_COMMUNITY_CREDENTIAL_BYTES_V1: usize = 16 * 1024;
+
+const PROVIDER_QUOTA_METADATA_FIELDS_V1: [ProviderQuotaMetadataFieldV1; 9] = [
+    ProviderQuotaMetadataFieldV1::XRateLimitLimitTokens,
+    ProviderQuotaMetadataFieldV1::XRateLimitRemainingTokens,
+    ProviderQuotaMetadataFieldV1::XRateLimitResetTokens,
+    ProviderQuotaMetadataFieldV1::AnthropicRateLimitTokensLimit,
+    ProviderQuotaMetadataFieldV1::AnthropicRateLimitTokensRemaining,
+    ProviderQuotaMetadataFieldV1::AnthropicRateLimitTokensReset,
+    ProviderQuotaMetadataFieldV1::AnthropicRateLimitUnifiedLimit,
+    ProviderQuotaMetadataFieldV1::AnthropicRateLimitUnifiedRemaining,
+    ProviderQuotaMetadataFieldV1::AnthropicRateLimitUnifiedReset,
+];
 
 /// Host-owned reasons why a call cannot enter the first South rollout slice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,7 +164,7 @@ pub(crate) struct PreparedCommunityProviderCallV1 {
 }
 
 /// The frozen South failure families that can leave this adapter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum StableProviderCallFailureV1 {
     Contract(ContractErrorV1),
     Provider(south_core::ProviderCallErrorV1),
@@ -337,6 +350,11 @@ where
     if let Some(retry_after) = response.retry_after() {
         headers.insert("retry-after".to_owned(), retry_after.to_owned());
     }
+    for field in PROVIDER_QUOTA_METADATA_FIELDS_V1 {
+        if let Some(value) = response.provider_quota_metadata().value(field) {
+            headers.insert(field.as_header_name().to_owned(), value.to_owned());
+        }
+    }
     Ok(HttpResponseParts {
         status: response.status().as_u16(),
         headers,
@@ -438,6 +456,11 @@ pub(crate) fn map_failure_v1(
                     "provider response contract rejected",
                 ),
             },
+            south_core::ProviderCallErrorV1::Rejected(_) => (
+                ErrorCode::ProviderProtocolError,
+                502,
+                "buffered provider call returned a streaming rejection",
+            ),
         },
     };
     ErrorEnvelope::new(code, status, message)

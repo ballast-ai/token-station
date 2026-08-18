@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const southRepository = "https://github.com/ballast-ai/token-station-south.git";
-const southRevision = "3b6c91fe3706757c2ea1891cee4399ab730f48c5";
+const southRevision = "2e11142d64c01d47acb291acd1bbfc809aacfb77";
 const expectedSouthPackages = new Set([
   "south-contracts",
   "south-core",
@@ -51,6 +51,14 @@ assert.match(
   /dtolnay\/rust-toolchain@1\.96\.0/,
   "CI must execute the declared Rust 1.96.0 minimum-version check",
 );
+
+for (const packageName of expectedSouthPackages) {
+  const exactDeclaration = `${packageName} = { version = "=0.2.0", git = "${southRepository}", rev = "${southRevision}" }`;
+  assert.ok(
+    rootManifest.split("\n").includes(exactDeclaration),
+    `${packageName} must use an exact manifest version and revision`,
+  );
+}
 
 for (const relativePath of southAccessActionPaths) {
   assert.equal(
@@ -103,7 +111,7 @@ assert.deepEqual(
 );
 
 for (const pkg of southPackages) {
-  assert.equal(pkg.version, "0.0.1", `${pkg.name} must stay on South 0.0.1`);
+  assert.equal(pkg.version, "0.2.0", `${pkg.name} must stay on South 0.2.0`);
   assert.ok(pkg.source, `${pkg.name} must come from the external South repository`);
   assert.ok(
     pkg.source.includes(southRepository) && pkg.source.includes(southRevision),
