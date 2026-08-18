@@ -25,6 +25,7 @@ import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Switch } from "../components/ui/switch";
 import { useErrorToast } from "../components/ErrorToast";
+import { useContentTransition } from "../components/useContentTransition";
 import About from "./About";
 import Settings from "./Settings";
 
@@ -312,6 +313,7 @@ function SettingsHubContent({
   const [section, setSection] = useState<SettingsSection>("general");
   const { t } = useLanguage();
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
+  const contentRef = useContentTransition<HTMLElement>(section);
   return (
     <div className="page-stack settings-page">
       <aside className="settings-sidebar">
@@ -343,7 +345,7 @@ function SettingsHubContent({
           })}
         </nav>
       </aside>
-      <main className="settings-content">
+      <main ref={contentRef} className="settings-content">
         {section === "general" && (
           <>
             <VirtualKeyCard serve={serve} />

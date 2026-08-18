@@ -4,6 +4,7 @@ import type { AgentUiMetadataView, AgentView, ServeView } from "../api";
 import { useLanguage } from "./LanguageProvider";
 import TokenStationMark from "./TokenStationMark";
 import { Button } from "./ui/button";
+import { useContentTransition } from "./useContentTransition";
 
 export type AppView =
   | "overview"
@@ -74,6 +75,7 @@ export default function AppShell({
               ? t("serve.retry")
               : t("serve.startProxy");
   const connectedAgents = agents.filter((agent) => agent.status === "CONNECTED").length;
+  const contentRef = useContentTransition<HTMLElement>(view, "first-child");
 
   return (
     <div className="station-shell station-shell-topnav">
@@ -156,7 +158,12 @@ export default function AppShell({
         </div>
       </header>
 
-      <main className={`station-content station-content-topnav${activePrimary === "home" ? " station-content-agent" : ""}`}>{children}</main>
+      <main
+        ref={contentRef}
+        className={`station-content station-content-topnav${activePrimary === "home" ? " station-content-agent" : ""}`}
+      >
+        {children}
+      </main>
 
       {!discoveryPending && (
         <span className="station-agent-summary" data-testid="agent-runtime-connection" aria-live="polite">

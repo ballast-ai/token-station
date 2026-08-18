@@ -50,6 +50,49 @@ const serve: ServeView = {
 const registry: AgentUiMetadataView[] = [];
 
 describe("SettingsHub clipboard feedback", () => {
+  it("animates the selected Settings category content", async () => {
+    const user = userEvent.setup();
+    const cancel = vi.fn();
+    const animate = vi.fn().mockReturnValue({ cancel } as unknown as Animation);
+    const originalAnimate = HTMLElement.prototype.animate;
+    Object.defineProperty(HTMLElement.prototype, "animate", {
+      configurable: true,
+      value: animate,
+    });
+
+    try {
+      render(
+        <ErrorToastProvider>
+          <SettingsHub
+            settings={settings}
+            serve={serve}
+            registry={registry}
+            visibleAgentIds={new Set()}
+            onAgentVisibilityChange={vi.fn()}
+            onOpenFirstRunGuide={vi.fn()}
+            onSaved={vi.fn()}
+          />
+        </ErrorToastProvider>,
+      );
+      expect(animate).not.toHaveBeenCalled();
+
+      await user.click(screen.getByRole("button", { name: /Agent 显示/ }));
+
+      expect(await screen.findByRole("heading", { name: "Agent 显示" })).toBeInTheDocument();
+      expect(animate).toHaveBeenCalledTimes(1);
+      expect(animate.mock.instances[0]).toHaveClass("settings-content");
+    } finally {
+      if (originalAnimate) {
+        Object.defineProperty(HTMLElement.prototype, "animate", {
+          configurable: true,
+          value: originalAnimate,
+        });
+      } else {
+        Reflect.deleteProperty(HTMLElement.prototype, "animate");
+      }
+    }
+  });
+
   it("复制虚拟 API Key 失败时只在左下角提示且不暴露密钥", async () => {
     const user = userEvent.setup();
     Object.defineProperty(navigator, "clipboard", {

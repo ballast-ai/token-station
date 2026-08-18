@@ -1001,6 +1001,40 @@ it("不显示仅存在于注册表但启动扫描未发现安装的 Agent", asyn
 });
 
 describe("desktop station navigation", () => {
+  it("animates the destination content without moving the fixed shell", async () => {
+    const user = userEvent.setup();
+    const cancel = vi.fn();
+    const animate = vi.fn().mockReturnValue({ cancel } as unknown as Animation);
+    const originalAnimate = HTMLElement.prototype.animate;
+    Object.defineProperty(HTMLElement.prototype, "animate", {
+      configurable: true,
+      value: animate,
+    });
+
+    try {
+      render(<App />);
+      await openAgents(user);
+      animate.mockClear();
+
+      await user.click(screen.getByRole("button", { name: "供应商" }));
+      const providersPage = (await screen.findByRole("heading", { name: "供应商" }))
+        .closest(".providers-page");
+
+      expect(animate).toHaveBeenCalledTimes(1);
+      expect(animate.mock.instances[0]).toBe(providersPage);
+      expect(document.querySelector(".station-header")).not.toBe(providersPage);
+    } finally {
+      if (originalAnimate) {
+        Object.defineProperty(HTMLElement.prototype, "animate", {
+          configurable: true,
+          value: originalAnimate,
+        });
+      } else {
+        Reflect.deleteProperty(HTMLElement.prototype, "animate");
+      }
+    }
+  });
+
   it("reveals startup Agent rows in stable order with a capped stagger", async () => {
     mockInvokeImplementation(async (command) => {
       if (command === "get_state") return stateFixture();
