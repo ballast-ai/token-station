@@ -1,7 +1,7 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import AgentRoutePage from "./AgentRoutePage";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import AgentRoutePage, { compactDiscoveryPath } from "./AgentRoutePage";
 import { ErrorToastProvider } from "../components/ErrorToast";
 import {
   applyAgentPlan,
@@ -35,6 +35,8 @@ vi.mock("../api", () => ({
   setAgentRouteMode: vi.fn(),
   setAgentTier: vi.fn(),
 }));
+
+afterEach(() => vi.useRealTimers());
 
 function installation(path: string, version: string): AgentInstallationView {
   return {
@@ -1184,6 +1186,20 @@ describe("AgentRoutePage multi-install admission", () => {
   });
 });
 
+describe("compactDiscoveryPath", () => {
+  it("does not alias another macOS user's directory as the current home", () => {
+    expect(compactDiscoveryPath(
+      "/Users/admin/.local/lib/node_modules/@anthropic-ai/claude-code/bin/claude",
+    )).toBe("/Users/admin/…/@anthropic-ai/claude-code/bin/claude");
+  });
+
+  it("preserves the Windows drive and user boundary when compacting", () => {
+    expect(compactDiscoveryPath(
+      "C:\\Users\\x\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe",
+    )).toBe("C:\\Users\\x\\…\\@anthropic-ai\\claude-code\\bin\\claude.exe");
+  });
+});
+
 describe("AgentRoutePage split page modes", () => {
   const route = {
     mode: "inherit" as const,
@@ -1278,12 +1294,85 @@ describe("AgentRoutePage split page modes", () => {
       </ErrorToastProvider>,
     );
 
-    const compactPath = screen.getByText("~/.local/…/@anthropic-ai/claude-code/bin/claude");
+    const compactPath = screen.getByText("/Users/liuwenhao/…/@anthropic-ai/claude-code/bin/claude");
     await user.hover(compactPath);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(fullPath);
     await user.click(screen.getByRole("button", { name: "复制发现路径" }));
     expect(writeText).toHaveBeenCalledWith(fullPath);
     expect(screen.getByRole("button", { name: "发现路径已复制" })).toBeInTheDocument();
+  });
+
+  it("does not carry copied feedback to another installation", async () => {
+    const user = userEvent.setup();
+    const firstPath = "/Users/x/.local/share/claude/versions/one/bin/claude";
+    const secondPath = "/Users/x/.local/share/claude/versions/two/bin/claude";
+    const multiAgent = {
+      ...agent,
+      installations: [installation(firstPath, "1.0.0"), installation(secondPath, "2.0.0")],
+    };
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const view = (selectedInstallationPath: string) => (
+      <ErrorToastProvider>
+        <AgentRoutePage
+          {...props}
+          agent={multiAgent}
+          selectedInstallationPath={selectedInstallationPath}
+          pageMode="connection"
+          embedded
+        />
+      </ErrorToastProvider>
+    );
+    const { rerender } = render(view(firstPath));
+
+    await user.click(screen.getByRole("button", { name: "复制发现路径" }));
+    expect(writeText).toHaveBeenCalledWith(firstPath);
+    expect(screen.getByRole("button", { name: "发现路径已复制" })).toBeInTheDocument();
+
+    rerender(view(secondPath));
+    expect(screen.getByRole("button", { name: "复制发现路径" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "发现路径已复制" })).toBeNull();
+  });
+
+  it("restarts copied feedback after repeating the same copy", async () => {
+    vi.useFakeTimers();
+    const fullPath = "/Users/x/.local/share/claude/versions/one/bin/claude";
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(
+      <ErrorToastProvider>
+        <AgentRoutePage
+          {...props}
+          agent={{ ...agent, installations: [installation(fullPath, "1.0.0")] }}
+          selectedInstallationPath={fullPath}
+          pageMode="connection"
+          embedded
+        />
+      </ErrorToastProvider>,
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "复制发现路径" }));
+      await Promise.resolve();
+    });
+    act(() => vi.advanceTimersByTime(1_000));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "发现路径已复制" }));
+      await Promise.resolve();
+    });
+    act(() => vi.advanceTimersByTime(700));
+
+    expect(writeText).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "发现路径已复制" })).toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(900));
+    expect(screen.getByRole("button", { name: "复制发现路径" })).toBeInTheDocument();
   });
 
   it("复制发现路径失败时使用现有错误提示", async () => {

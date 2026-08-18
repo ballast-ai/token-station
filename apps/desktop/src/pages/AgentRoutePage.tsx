@@ -91,19 +91,20 @@ function errorText(error: unknown) {
 }
 
 export function compactDiscoveryPath(path: string): string {
-  const homeMatch = path.match(/^\/(?:Users|home)\/[^/]+(?:\/|$)/);
-  const isAbsolute = path.startsWith("/");
-  const remainder = homeMatch ? path.slice(homeMatch[0].length) : path.replace(/^\//, "");
-  const segments = remainder.split("/").filter(Boolean);
-  const leadingSegments = homeMatch ? 1 : 2;
+  const hasWindowsDrive = /^[A-Za-z]:[\\/]/.test(path);
+  const isWindowsUnc = path.startsWith("\\\\");
+  const isPosixAbsolute = path.startsWith("/");
+  if (!hasWindowsDrive && !isWindowsUnc && !isPosixAbsolute) return path;
 
-  if (!isAbsolute || segments.length <= leadingSegments + 4) {
-    return homeMatch ? `~/${segments.join("/")}` : path;
-  }
+  const separator = hasWindowsDrive || isWindowsUnc ? "\\" : "/";
+  const segments = path.split(/[\\/]+/).filter(Boolean);
+  const leadingSegments = hasWindowsDrive ? 3 : 2;
+  if (segments.length <= leadingSegments + 4) return path;
 
-  const start = segments.slice(0, leadingSegments).join("/");
-  const end = segments.slice(-4).join("/");
-  return homeMatch ? `~/${start}/…/${end}` : `/${start}/…/${end}`;
+  const start = segments.slice(0, leadingSegments).join(separator);
+  const end = segments.slice(-4).join(separator);
+  const prefix = hasWindowsDrive ? "" : isWindowsUnc ? "\\\\" : "/";
+  return `${prefix}${start}${separator}…${separator}${end}`;
 }
 
 function statusCopy(
@@ -265,7 +266,7 @@ export default function AgentRoutePage({
   const [cursorStatus, setCursorStatus] = useState<CursorProviderStatusView | null>(null);
   // Show configuration changes after the first connection, then persist dismissal in localStorage.
   const [connectDiff, setConnectDiff] = useState<ConfigPlanView | null>(null);
-  const [discoveredPathCopied, setDiscoveredPathCopied] = useState(false);
+  const [copiedDiscoveryPath, setCopiedDiscoveryPath] = useState<{ path: string } | null>(null);
   const dismissConnectDiff = () => setConnectDiff(null);
 
   useEffect(() => {
@@ -293,10 +294,13 @@ export default function AgentRoutePage({
   }, [metadata.agent_id, showError]);
 
   useEffect(() => {
-    if (!discoveredPathCopied) return undefined;
-    const timer = window.setTimeout(() => setDiscoveredPathCopied(false), 1_600);
+    if (copiedDiscoveryPath === null) return undefined;
+    const copiedState = copiedDiscoveryPath;
+    const timer = window.setTimeout(() => {
+      setCopiedDiscoveryPath((current) => (current === copiedState ? null : current));
+    }, 1_600);
     return () => window.clearTimeout(timer);
-  }, [discoveredPathCopied]);
+  }, [copiedDiscoveryPath]);
 
   const installation = useMemo(
     () => agent?.installations.find((item) => item.discovery.canonical_path === selectedPath),
@@ -344,12 +348,14 @@ export default function AgentRoutePage({
   const ownedFields = metadata.connector_capabilities?.[0]?.owned_fields ?? [];
   const routeNeedsAttention = Boolean(route.config_error || !route.direct_target?.model);
   const discoveredPath = installation?.discovery.canonical_path;
+  const discoveredPathCopied = copiedDiscoveryPath?.path === discoveredPath;
 
   const copyDiscoveredPath = async () => {
-    if (!discoveredPath) return;
+    const pathToCopy = discoveredPath;
+    if (!pathToCopy) return;
     try {
-      await navigator.clipboard.writeText(discoveredPath);
-      setDiscoveredPathCopied(true);
+      await navigator.clipboard.writeText(pathToCopy);
+      setCopiedDiscoveryPath({ path: pathToCopy });
     } catch {
       showError(
         copy(

@@ -1344,6 +1344,28 @@ describe("desktop station navigation", () => {
     expect(getStatsMock).toHaveBeenCalledWith("24h", null);
   });
 
+  it("returns Home after cancelling a provider flow opened from the status menu", async () => {
+    let emitStatusMenuNavigate: ((target: string) => void) | undefined;
+    listenMock.mockImplementation(async (eventName, handler) => {
+      if (eventName === "status-menu-navigate") {
+        emitStatusMenuNavigate = (target) => handler({ payload: target } as Parameters<typeof handler>[0]);
+      }
+      return () => undefined;
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
+    await waitFor(() => expect(emitStatusMenuNavigate).toBeTypeOf("function"));
+    act(() => emitStatusMenuNavigate?.("add-provider"));
+    expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
+    expect(navigation().getByRole("button", { name: "主页" }))
+      .toHaveAttribute("aria-current", "page");
+  });
+
   it("概览的单独路由快照展示已应用目标而不是三档", async () => {
     const user = userEvent.setup();
     mockInvokeImplementation(async (command) => {
@@ -1447,11 +1469,11 @@ describe("desktop station navigation", () => {
     await screen.findByRole("heading", { name: "概览" });
 
     const systemSummary = await screen.findByRole("region", { name: "系统摘要" });
-    const costLabel = await within(systemSummary).findByText("今日成本");
+    const costLabel = await within(systemSummary).findByText("近 24 小时成本");
     const costCard = costLabel.closest('[data-slot="card"]');
-    expect(costCard).toHaveTextContent("今日成本$2.3412 次请求");
+    expect(costCard).toHaveTextContent("近 24 小时成本$2.3412 次请求");
     expect(costCard).toHaveTextContent("成功率 91.7% · P95 320ms");
-    expect(costCard).not.toHaveTextContent("近 24 小时口径");
+    expect(getStatsMock).toHaveBeenCalledWith("24h", null);
     expect(within(systemSummary).queryByText("今日请求")).toBeNull();
     expect(screen.getByText("快捷键")).toBeInTheDocument();
     expect(screen.queryByText("下一步处理")).toBeNull();

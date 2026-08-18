@@ -284,6 +284,7 @@ function StationApp() {
   const observedServeRef = useRef<{ ready: boolean; instanceId: string | null } | null>(null);
   const agentConnectInFlightRef = useRef(false);
   const pendingServeRef = useRef<ServeView | null>(null);
+  const viewRef = useRef(view);
   const viewHistoryRef = useRef<AppView[]>([]);
   const pendingApplyRevisionRef = useRef<number | null>(null);
   const pendingServeActionRef = useRef<"start" | "stop" | null>(null);
@@ -325,6 +326,7 @@ function StationApp() {
       .map(({ metadata }) => metadata),
     [registry],
   );
+  viewRef.current = view;
   const visibleAgentIds = useMemo(
     () => new Set(orderedRegistry
       .filter((metadata) => !hiddenAgentIds.has(metadata.agent_id) && (
@@ -348,7 +350,7 @@ function StationApp() {
       if (disposed) return;
       const next = resolveStatusMenuNavigation(target, statusMenuAgentIdsRef.current);
       if (!next) return;
-      viewHistoryRef.current = [];
+      viewHistoryRef.current = next === "add-provider" ? [viewRef.current] : [];
       setView(next);
     }).then((stop) => {
       if (disposed) stop();
@@ -770,7 +772,7 @@ function StationApp() {
   };
 
   const navigateBack = () => {
-    const previous = viewHistoryRef.current.pop() ?? "agents";
+    const previous = viewHistoryRef.current.pop() ?? "overview";
     if (
       previous.startsWith("agent:")
       && !visibleAgentIds.has(previous.slice("agent:".length))

@@ -108,7 +108,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
         </Card>
         <Card size="sm" className="overview-request-card">
           <CardHeader>
-            <span><WalletCards />{copy("Cost today", "今日成本")}</span>
+            <span><WalletCards />{copy("Cost in the last 24 hours", "近 24 小时成本")}</span>
             <CardTitle className="overview-cost-value">{requestCost ?? (stats ? copy("Cost unpriced", "成本未定价") : "—")}</CardTitle>
             <strong className="overview-request-count"><Clock3 />{stats ? copy(`${stats.total.requests} requests`, `${stats.total.requests} 次请求`) : "—"}</strong>
             <p>{statsSummary}</p>
