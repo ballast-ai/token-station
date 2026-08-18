@@ -5,7 +5,12 @@ import { expect, it, vi } from "vitest";
 import FirstRunGuide, {
   FIRST_RUN_GUIDE_STORAGE_KEY,
   FIRST_RUN_GUIDE_VERSION,
+  FIRST_RUN_TUTORIAL_CHOICE_STORAGE_KEY,
   FirstRunCompletionDialog,
+  FirstRunTutorialPrompt,
+  markFirstRunTutorialChoice,
+  readFirstRunTutorialChoice,
+  shouldShowFirstRunTutorialPrompt,
   shouldOpenFirstRunGuide,
 } from "./FirstRunGuide";
 import { LanguageProvider } from "./LanguageProvider";
@@ -30,6 +35,40 @@ it("升级教程版本，使只看过旧版的用户看到新增步骤", () => {
   expect(shouldOpenFirstRunGuide({ getItem: (key) => storage.get(key) ?? null })).toBe(true);
   storage.set(FIRST_RUN_GUIDE_STORAGE_KEY, FIRST_RUN_GUIDE_VERSION);
   expect(shouldOpenFirstRunGuide({ getItem: (key) => storage.get(key) ?? null })).toBe(false);
+});
+
+it("仅在从未处理过教程的新用户首次打开时询问是否需要", () => {
+  const storage = new Map<string, string>();
+  const reader = { getItem: (key: string) => storage.get(key) ?? null };
+  const writer = { setItem: (key: string, value: string) => storage.set(key, value) };
+
+  expect(shouldShowFirstRunTutorialPrompt(reader)).toBe(true);
+  markFirstRunTutorialChoice("started", writer);
+  expect(readFirstRunTutorialChoice(reader)).toBe("started");
+  expect(shouldShowFirstRunTutorialPrompt(reader)).toBe(false);
+
+  storage.clear();
+  storage.set(FIRST_RUN_GUIDE_STORAGE_KEY, "spotlight-setup-v3");
+  expect(shouldShowFirstRunTutorialPrompt(reader)).toBe(false);
+  expect(storage.has(FIRST_RUN_TUTORIAL_CHOICE_STORAGE_KEY)).toBe(false);
+});
+
+it("首次教程询问提供开始和暂不需要两个明确选择", async () => {
+  const onStart = vi.fn();
+  const onDecline = vi.fn();
+  const user = userEvent.setup();
+
+  render(
+    <LanguageProvider>
+      <FirstRunTutorialPrompt open onStart={onStart} onDecline={onDecline} />
+    </LanguageProvider>,
+  );
+
+  const dialog = screen.getByRole("dialog", { name: "需要新手教程吗？" });
+  expect(dialog).toHaveTextContent("只会在第一次打开时询问");
+  await user.click(within(dialog).getByRole("button", { name: "开始教程" }));
+  expect(onStart).toHaveBeenCalledOnce();
+  expect(onDecline).not.toHaveBeenCalled();
 });
 
 it("在选择 Agent 前区分本机发现结果与全部支持清单", async () => {
@@ -80,12 +119,12 @@ it("在选择 Agent 前区分本机发现结果与全部支持清单", async () 
   }
 });
 
-it("高亮左上角入口并说明之后如何切换回概览", async () => {
+it("高亮主页菜单并说明之后如何切换回主页", async () => {
   const onTargetAction = vi.fn();
   const getBoundingClientRect = vi
     .spyOn(HTMLElement.prototype, "getBoundingClientRect")
     .mockImplementation(function getBoundingClientRectMock(this: HTMLElement) {
-      if (this.getAttribute("data-onboarding-target") === "overview-entry") {
+      if (this.getAttribute("data-onboarding-target") === "home-entry") {
         return rect(16, 12, 148, 34);
       }
       return rect(0, 0, 0, 0);
@@ -94,8 +133,8 @@ it("高亮左上角入口并说明之后如何切换回概览", async () => {
   try {
     render(
       <LanguageProvider>
-        <button type="button" data-onboarding-target="overview-entry">
-          Token Station 概览
+        <button type="button" data-onboarding-target="home-entry">
+          主页
         </button>
         <main>概览真实内容</main>
         <FirstRunGuide
@@ -111,14 +150,14 @@ it("高亮左上角入口并说明之后如何切换回概览", async () => {
       </LanguageProvider>,
     );
 
-    const coachmark = await screen.findByRole("dialog", { name: "从这里随时回到概览" });
-    expect(coachmark).toHaveStyle({ left: "174px", top: "16px" });
+    const coachmark = await screen.findByRole("dialog", { name: "从这里随时回到主页" });
+    expect(coachmark).toHaveStyle({ left: "16px", top: "68px" });
     expect(coachmark).toHaveTextContent(
-      "无论当前在哪个页面，点击左上角 Token Station 标志都能切换到概览页",
+      "无论当前在哪个页面，点击顶部“主页”都能返回主页",
     );
     expect(coachmark).toHaveTextContent("代理状态、当前路由、请求与成本");
     expect(coachmark).not.toHaveTextContent("设置 → 关于 → 重新查看新手引导");
-    expect(screen.getByRole("button", { name: "Token Station 概览" })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "主页" })).toHaveAttribute(
       "data-onboarding-active",
       "true",
     );
@@ -142,7 +181,7 @@ it("在紧凑窗口中限制概览引导卡宽度并保持在可视区内", asyn
   const getBoundingClientRect = vi
     .spyOn(HTMLElement.prototype, "getBoundingClientRect")
     .mockImplementation(function getBoundingClientRectMock(this: HTMLElement) {
-      if (this.getAttribute("data-onboarding-target") === "overview-entry") {
+      if (this.getAttribute("data-onboarding-target") === "home-entry") {
         return rect(70, 80, 310, 66);
       }
       return rect(0, 0, 0, 0);
@@ -151,8 +190,8 @@ it("在紧凑窗口中限制概览引导卡宽度并保持在可视区内", asyn
   try {
     render(
       <LanguageProvider>
-        <button type="button" data-onboarding-target="overview-entry">
-          Token Station 概览
+        <button type="button" data-onboarding-target="home-entry">
+          主页
         </button>
         <FirstRunGuide
           open
@@ -167,8 +206,8 @@ it("在紧凑窗口中限制概览引导卡宽度并保持在可视区内", asyn
       </LanguageProvider>,
     );
 
-    const coachmark = await screen.findByRole("dialog", { name: "从这里随时回到概览" });
-    expect(coachmark).toHaveStyle({ width: "440px", left: "80px", top: "150px" });
+    const coachmark = await screen.findByRole("dialog", { name: "从这里随时回到主页" });
+    expect(coachmark).toHaveStyle({ width: "360px", left: "80px", top: "154px" });
     const left = Number.parseFloat(coachmark.style.left);
     const width = Number.parseFloat(coachmark.style.width);
     expect(left).toBeGreaterThanOrEqual(16);

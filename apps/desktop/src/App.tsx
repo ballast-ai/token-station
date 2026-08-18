@@ -37,8 +37,12 @@ import {
 import AppShell, { type AppView } from "./components/AppShell";
 import FirstRunGuide, {
   FirstRunCompletionDialog,
+  FirstRunTutorialPrompt,
   markFirstRunGuideDismissed,
+  markFirstRunTutorialChoice,
+  readFirstRunTutorialChoice,
   shouldOpenFirstRunGuide,
+  shouldShowFirstRunTutorialPrompt,
   type FirstRunMicroStep,
   type FirstRunSetupStep,
 } from "./components/FirstRunGuide";
@@ -236,7 +240,7 @@ function StationApp() {
   const { language, copy } = useLanguage();
   const { dismissToast, showError, showInfo, showSuccess } = useErrorToast();
   const [state, setState] = useState<StateView | null>(null);
-  const [view, setView] = useState<AppView>("agents");
+  const [view, setView] = useState<AppView>("overview");
   const [hiddenAgentIds, setHiddenAgentIds] = useState<Set<string>>(readHiddenAgentIds);
   const hiddenAgentIdsRef = useRef(hiddenAgentIds);
   const [shownUndetectedAgentIds, setShownUndetectedAgentIds] = useState<Set<string>>(
@@ -264,6 +268,7 @@ function StationApp() {
     region: "all",
   });
   const [providerCatalogMode, setProviderCatalogMode] = useState<ProviderCatalogMode>("regular");
+  const [firstRunTutorialPromptOpen, setFirstRunTutorialPromptOpen] = useState(false);
   const [firstRunGuideOpen, setFirstRunGuideOpen] = useState(false);
   const [firstRunSetupStep, setFirstRunSetupStep] = useState<FirstRunSetupStep | null>(null);
   const [firstRunMicroStep, setFirstRunMicroStep] = useState<FirstRunMicroStep | null>(null);
@@ -589,7 +594,14 @@ function StationApp() {
   useEffect(() => {
     if (!state || !scanSucceeded || firstRunGuideCheckedRef.current) return;
     firstRunGuideCheckedRef.current = true;
-    if (shouldOpenFirstRunGuide()) {
+    if (shouldShowFirstRunTutorialPrompt()) {
+      viewHistoryRef.current = [];
+      setView("overview");
+      setFirstRunTutorialPromptOpen(true);
+    } else if (
+      readFirstRunTutorialChoice() === "started"
+      && shouldOpenFirstRunGuide()
+    ) {
       viewHistoryRef.current = [];
       setView("overview");
       setFirstRunSetupStep(null);
@@ -1153,6 +1165,22 @@ function StationApp() {
           </section>
         );
       })()}
+      <FirstRunTutorialPrompt
+        open={firstRunTutorialPromptOpen}
+        onStart={() => {
+          markFirstRunTutorialChoice("started");
+          setFirstRunTutorialPromptOpen(false);
+          viewHistoryRef.current = [];
+          setView("overview");
+          setFirstRunSetupStep(null);
+          setFirstRunMicroStep("overview");
+          setFirstRunGuideOpen(true);
+        }}
+        onDecline={() => {
+          markFirstRunTutorialChoice("declined");
+          setFirstRunTutorialPromptOpen(false);
+        }}
+      />
       <FirstRunGuide
         open={firstRunGuideOpen}
         microStep={activeFirstRunMicroStep}

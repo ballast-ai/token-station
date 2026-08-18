@@ -82,13 +82,11 @@ export default function AppShell({
     <div className="station-shell station-shell-topnav">
       <header className="station-header">
         <button
-          data-onboarding-return-focus
-          data-onboarding-target="overview-entry"
           className="station-brand-top"
           type="button"
           disabled={commandBusy}
           onClick={() => onNavigate("overview")}
-          aria-label={copy("Token Station Overview", "Token Station 概览")}
+          aria-label={copy("Token Station Home", "Token Station 主页")}
         >
           <TokenStationMark className="station-brand-mark" size={28} />
           <span>Token Station</span>
@@ -108,8 +106,9 @@ export default function AppShell({
                 disabled={discoveryPending || (commandBusy && !selected)}
                 aria-current={selected ? "page" : undefined}
                 aria-label={label}
+                data-onboarding-return-focus={item.view === "overview" ? "" : undefined}
                 data-onboarding-target={
-                  item.view === "home"
+                  item.view === "overview"
                     ? "home-entry"
                     : item.view === "agents"
                       ? "agent-entry"

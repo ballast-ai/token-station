@@ -14,6 +14,8 @@ import {
 
 export const FIRST_RUN_GUIDE_STORAGE_KEY = "token-station-first-run-guide";
 export const FIRST_RUN_GUIDE_VERSION = "spotlight-setup-v4";
+export const FIRST_RUN_TUTORIAL_CHOICE_STORAGE_KEY = "token-station-first-run-tutorial-choice";
+export type FirstRunTutorialChoice = "started" | "declined";
 
 export type FirstRunSetupStep = "provider" | "route" | "agent" | "complete";
 export type FirstRunMicroStep =
@@ -52,6 +54,77 @@ export function markFirstRunGuideDismissed(
   } catch {
     // Onboarding is optional. A denied preference write must never block the App.
   }
+}
+
+export function readFirstRunTutorialChoice(
+  storage: Pick<Storage, "getItem"> = window.localStorage,
+): FirstRunTutorialChoice | null {
+  try {
+    const value = storage.getItem(FIRST_RUN_TUTORIAL_CHOICE_STORAGE_KEY);
+    return value === "started" || value === "declined" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function markFirstRunTutorialChoice(
+  choice: FirstRunTutorialChoice,
+  storage: Pick<Storage, "setItem"> = window.localStorage,
+) {
+  try {
+    storage.setItem(FIRST_RUN_TUTORIAL_CHOICE_STORAGE_KEY, choice);
+  } catch {
+    // The choice still applies to the current session when persistence is denied.
+  }
+}
+
+export function shouldShowFirstRunTutorialPrompt(
+  storage: Pick<Storage, "getItem"> = window.localStorage,
+) {
+  try {
+    return readFirstRunTutorialChoice(storage) === null
+      && storage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY) === null;
+  } catch {
+    return true;
+  }
+}
+
+interface FirstRunTutorialPromptProps {
+  open: boolean;
+  onStart: () => void;
+  onDecline: () => void;
+}
+
+export function FirstRunTutorialPrompt({
+  open,
+  onStart,
+  onDecline,
+}: FirstRunTutorialPromptProps) {
+  const { copy } = useLanguage();
+
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => {
+      if (!nextOpen && open) onDecline();
+    }}>
+      <DialogContent showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>{copy("Would you like a quick tutorial?", "需要新手教程吗？")}</DialogTitle>
+          <DialogDescription>{copy(
+            "This is asked only the first time you open Token Station. The tutorial explains Home, providers, routing, and Agent connection without changing your existing setup automatically.",
+            "只会在第一次打开时询问。教程会介绍主页、供应商、路由和 Agent 接入，不会自动修改现有配置。",
+          )}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onDecline}>
+            {copy("Not now", "暂不需要")}
+          </Button>
+          <Button type="button" onClick={onStart}>
+            {copy("Start tutorial", "开始教程")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 interface FirstRunGuideProps {
@@ -107,12 +180,12 @@ export default function FirstRunGuide({
   targetActionRef.current = onTargetAction;
   const content: CoachmarkContent = microStep === "overview"
     ? {
-        target: "overview-entry",
-        index: copy("GET ORIENTED · OVERVIEW", "认识 Token Station · 概览"),
-        title: copy("Return to Overview anytime", "从这里随时回到概览"),
+        target: "home-entry",
+        index: copy("GET ORIENTED · HOME", "认识 Token Station · 主页"),
+        title: copy("Return Home anytime", "从这里随时回到主页"),
         description: copy(
-          "Wherever you are, select the Token Station mark at the top left to switch to Overview. It brings proxy status, current routing, requests, cost, Agents, and providers together.",
-          "无论当前在哪个页面，点击左上角 Token Station 标志都能切换到概览页。这里汇总代理状态、当前路由、请求与成本，以及 Agent 和供应商规模。",
+          "Wherever you are, select Home in the top navigation to return. Home brings proxy status, current routing, requests, cost, Agents, and providers together.",
+          "无论当前在哪个页面，点击顶部“主页”都能返回主页。这里汇总代理状态、当前路由、请求与成本，以及 Agent 和供应商规模。",
         ),
         allowTargetInteraction: false,
         advanceOnTargetClick: false,
@@ -233,8 +306,8 @@ export default function FirstRunGuide({
                           index: copy("CONNECT AGENT · 1/4", "接入 Agent · 1/4"),
                           title: copy("Open Agent management", "打开 Agent 管理"),
                           description: copy(
-                            "Select a detected Agent on Home to continue.",
-                            "点击主页左侧扫描到的 Agent，查看本机接入配置。",
+                            "Select Agent in the top navigation to continue with a detected installation.",
+                            "点击顶部“Agent”，继续处理本机扫描到的安装。",
                           ),
                           advanceOnTargetClick: true,
                           continueLabel: null,
