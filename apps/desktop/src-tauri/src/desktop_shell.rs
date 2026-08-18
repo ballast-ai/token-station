@@ -634,6 +634,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn status_menu_template_uses_the_station_bar_mark() {
+        let image = Image::from_bytes(TRAY_ICON_PNG).expect("status menu icon must decode");
+        assert_eq!((image.width(), image.height()), (36, 36));
+
+        let rgba = image.rgba();
+        let pixel_at = |x: u32, y: u32| {
+            let offset = ((y * image.width() + x) * 4) as usize;
+            &rgba[offset..offset + 4]
+        };
+        for (x, y) in [(0, 0), (35, 0), (0, 35), (35, 35)] {
+            assert_eq!(
+                pixel_at(x, y)[3],
+                0,
+                "status menu icon corner must be transparent"
+            );
+        }
+
+        let center_run = (0..image.width())
+            .filter(|&x| pixel_at(x, 18)[3] > 200)
+            .count();
+        assert!(
+            center_run >= 24,
+            "status menu icon must contain the wide station bar"
+        );
+
+        for pixel in rgba.chunks_exact(4).filter(|pixel| pixel[3] > 0) {
+            assert_eq!(
+                pixel[0], pixel[1],
+                "template red and green channels must match"
+            );
+            assert_eq!(
+                pixel[1], pixel[2],
+                "template green and blue channels must match"
+            );
+        }
+    }
+
+    #[test]
     fn proxy_menu_exposes_a_native_toggle_and_compact_address_for_every_phase() {
         let cases = [
             (
