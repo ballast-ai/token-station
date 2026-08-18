@@ -190,7 +190,6 @@ pub(crate) struct PreparedCommunityProviderCallV1 {
 pub(crate) enum StableProviderCallFailureV1 {
     Contract(ContractErrorV1),
     Provider(south_core::ProviderCallErrorV1),
-    RejectedBodyNotUtf8,
 }
 
 /// A streaming open either returns a live 2xx pull stream or a bounded non-2xx response.
@@ -450,8 +449,7 @@ where
     {
         Ok(stream) => Ok(PreparedProviderStreamResultV1::Opened(stream)),
         Err(south_core::ProviderCallErrorV1::Rejected(rejected)) => {
-            let body = String::from_utf8(rejected.body().to_vec())
-                .map_err(|_| StableProviderCallFailureV1::RejectedBodyNotUtf8)?;
+            let body = String::from_utf8_lossy(rejected.body()).into_owned();
             Ok(PreparedProviderStreamResultV1::Rejected(
                 HttpResponseParts {
                     status: rejected.head().status().as_u16(),
@@ -529,11 +527,6 @@ pub(crate) fn map_failure_v1(
     cancellation: CancellationDispositionV1,
 ) -> ErrorEnvelope {
     let (code, status, message) = match failure {
-        StableProviderCallFailureV1::RejectedBodyNotUtf8 => (
-            ErrorCode::ProviderProtocolError,
-            502,
-            "provider rejection body is not UTF-8",
-        ),
         StableProviderCallFailureV1::Contract(error) => match error {
             ContractErrorV1::RequestBodyTooLarge => (
                 ErrorCode::InvalidRequest,

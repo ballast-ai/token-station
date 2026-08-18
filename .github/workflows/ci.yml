@@ -53,6 +53,14 @@ jobs:
       - run: scripts/check-rust-format.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Prepare official plugins for builtin South tests
+        run: scripts/prepare-desktop-test-plugins.sh
+      - name: Test builtin official South paths
+        run: >-
+          cargo test -p token-station-cli --features builtin-plugins
+          --lib --test proxy
+        env:
+          TOKEN_STATION_PLUGINS_DIST: ${{ github.workspace }}/plugins-dist
       # Keep the existing local rustdoc -D warnings gate enforceable in CI.
       - run: cargo doc --workspace --no-deps
         env:

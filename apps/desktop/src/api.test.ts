@@ -402,6 +402,42 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
+  it("refreshes plugin eligibility through IPC in the running Tauri shell", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    vi.resetModules();
+    const tauriApi = await import("./api");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ dir: "/runtime-plugins", agent: "a", dialects: [], listing: "" })),
+    );
+    invokeMock.mockResolvedValue({
+      dir: "/draft-plugins",
+      agent: "a",
+      dialects: ["openai-compatible"],
+      listing: "provider-openai-compatible",
+    });
+    tauriApi.setAdminEndpoint(serveFixture({
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      virtual_key: "virtual",
+    }));
+
+    let plugins: Awaited<ReturnType<typeof tauriApi.getPlugins>> | null = null;
+    try {
+      plugins = await tauriApi.getPlugins();
+    } finally {
+      delete (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+      vi.resetModules();
+    }
+
+    expect(plugins?.dir).toBe("/draft-plugins");
+    expect(invokeMock).toHaveBeenCalledWith("get_plugins");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("fails clearly in browser mode when HTTP is unavailable or stopped", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     setAdminEndpoint(serveFixture({ phase: "running", app_runtime: "running", listener_reachable: true }));

@@ -13,9 +13,9 @@ use crate::{
 };
 use south_contracts::{
     BufferedHttpResponseV1, ContractErrorV1, CredentialSlotV1, MAX_JSON_REQUEST_BODY_BYTES,
-    MAX_PROVIDER_QUOTA_METADATA_VALUE_BYTES, PreparationErrorV1, ProviderQuotaMetadataFieldV1,
-    ProviderQuotaMetadataV1, StreamChunkV1, StreamReadErrorV1, StreamRejectedV1,
-    StreamingResponseHeadV1, TransportErrorV1,
+    MAX_PROVIDER_QUOTA_METADATA_VALUE_BYTES, MAX_STREAM_ERROR_BODY_BYTES, PreparationErrorV1,
+    ProviderQuotaMetadataFieldV1, ProviderQuotaMetadataV1, StreamChunkV1, StreamReadErrorV1,
+    StreamRejectedV1, StreamingResponseHeadV1, TransportErrorV1,
 };
 use south_core::{
     AsyncHttpTransport, AsyncStreamingTransport, CredentialResolutionFuture, CredentialResolver,
@@ -1325,17 +1325,62 @@ async fn real_streaming_rejections_are_bounded_projected_and_never_become_live_s
     assert_eq!(server.join().expect("loopback joins"), 1);
 }
 
-#[test]
-fn invalid_utf8_streaming_rejection_maps_without_leaking_the_body() {
-    let mapped = map_failure_v1(
-        StableProviderCallFailureV1::RejectedBodyNotUtf8,
-        CancellationDispositionV1::Deadline,
+#[tokio::test(flavor = "current_thread")]
+async fn truncated_streaming_rejection_preserves_the_upstream_status() {
+    let mut body = vec![b'a'; MAX_STREAM_ERROR_BODY_BYTES - 1];
+    body.extend_from_slice("étail".as_bytes());
+    let mut response = format!(
+        concat!(
+            "HTTP/1.1 429 Too Many Requests\r\n",
+            "content-type: application/json\r\n",
+            "content-length: {}\r\n",
+            "connection: close\r\n",
+            "\r\n"
+        ),
+        body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(&body);
+    let (base_url, server) = start_quota_loopback(response);
+    let mut provider = ProviderConfig::new(
+        "openai-compatible",
+        ProviderEndpoint::try_new(&base_url).expect("loopback endpoint is valid"),
     );
-    assert_eq!(
-        (mapped.code, mapped.http_status),
-        (ErrorCode::ProviderProtocolError, 502)
-    );
-    assert!(!mapped.message.contains('\u{fffd}'));
+    provider.auth = Some(SecretRef::new("provider_api_key"));
+    let mut request = descriptor();
+    request.url = format!("{base_url}/chat/completions");
+    let prepared = prepare_provider_stream_v1(
+        eligible_streaming_policy(),
+        &provider,
+        &auth_config(),
+        &request,
+    )
+    .expect("streaming request projects");
+    let resolver = ImmediateResolver {
+        calls: AtomicUsize::new(0),
+    };
+    let transport = build_direct_reqwest_streaming_transport_v1(
+        None,
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+    )
+    .expect("streaming transport builds");
+
+    let result = open_prepared_provider_stream_v1(
+        &prepared,
+        &resolver,
+        &transport,
+        Some(tokio::time::Instant::now() + Duration::from_secs(5)),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("body decoding cannot replace the authoritative rejection status");
+    let PreparedProviderStreamResultV1::Rejected(rejected) = result else {
+        panic!("non-2xx must not create a live stream");
+    };
+    assert_eq!(rejected.status, 429);
+    assert!(rejected.body.ends_with('\u{fffd}'));
+    assert_eq!(server.join().expect("loopback joins"), 1);
 }
 
 #[test]
@@ -2275,8 +2320,7 @@ fn map_stable_failure_code(error: &StableProviderCallFailureV1) -> ProviderCallF
             }
             TransportErrorV1::RedirectDenied => ProviderCallFailureCodeV1::RedirectDenied,
         },
-        StableProviderCallFailureV1::RejectedBodyNotUtf8
-        | StableProviderCallFailureV1::Provider(ProviderCallErrorV1::Rejected(_)) => {
+        StableProviderCallFailureV1::Provider(ProviderCallErrorV1::Rejected(_)) => {
             ProviderCallFailureCodeV1::RequestFailed
         }
     }

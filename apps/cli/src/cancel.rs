@@ -83,7 +83,7 @@ impl CancelToken {
     }
 
     /// A clone of the same cancellation source for async provider transports.
-    /// Root cancellation cascades through Tokio's child-token relationship;
+    /// Root cancellation cascades through Tokio's child-token relationship.
     /// callers must use [`cancel_with`](Self::cancel_with) so the closed reason
     /// and the wake-up remain one operation.
     #[must_use]

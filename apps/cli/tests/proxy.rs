@@ -91,6 +91,7 @@ fn plugins_dir() -> &'static Path {
 
 /// What one upstream exchange looked like from the provider's side.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "builtin-plugins"), allow(dead_code))]
 struct Seen {
     path: String,
     authorization: Option<String>,
@@ -100,6 +101,7 @@ struct Seen {
 
 /// A provider played by a script: every connection gets the next response in
 /// the list; every request is recorded for the test to assert on.
+#[cfg_attr(not(feature = "builtin-plugins"), allow(dead_code))]
 struct MockUpstream {
     port: u16,
     seen: Arc<Mutex<Vec<Seen>>>,
@@ -202,6 +204,7 @@ impl Drop for ConnectionTrap {
     }
 }
 
+#[cfg_attr(not(feature = "builtin-plugins"), allow(dead_code))]
 impl MockUpstream {
     /// `responses`: raw HTTP/1.1 response bytes, possibly written in several
     /// TCP segments to force awkward split points (`Vec<Vec<u8>>` per
@@ -262,6 +265,112 @@ impl MockUpstream {
         Self::start_hanging_with_prefix(
             b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1024\r\nconnection: close\r\n\r\n{",
         )
+    }
+
+    fn start_response_then_hanging(
+        first_response: Vec<u8>,
+        response_prefix: &'static [u8],
+    ) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+        let port = listener.local_addr().expect("bound").port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let response_started = Arc::new(AtomicBool::new(false));
+        let peer_closed = Arc::new(AtomicBool::new(false));
+        let hanging_stop = Arc::new(AtomicBool::new(false));
+        let record = Arc::clone(&seen);
+        let counter = Arc::clone(&hits);
+        let started = Arc::clone(&response_started);
+        let closed = Arc::clone(&peer_closed);
+        let stop = Arc::clone(&hanging_stop);
+        let hanging_worker = std::thread::spawn(move || {
+            listener
+                .set_nonblocking(true)
+                .expect("retry listener becomes cancellable");
+            let accept_before_stop = |label: &str, deadline: Option<Instant>| {
+                loop {
+                    if stop.load(Ordering::SeqCst) {
+                        return None;
+                    }
+                    match listener.accept() {
+                        Ok((stream, _)) => return Some(stream),
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && deadline.is_none_or(|deadline| Instant::now() < deadline) =>
+                        {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            panic!("{label} did not arrive before the mock deadline");
+                        }
+                        Err(error) => panic!("{label} accept failed: {error}"),
+                    }
+                }
+            };
+            let Some(mut first) = accept_before_stop("first upstream request", None) else {
+                return;
+            };
+            record
+                .lock()
+                .expect("recorder")
+                .push(read_http_request(&mut first));
+            counter.fetch_add(1, Ordering::SeqCst);
+            first
+                .write_all(&first_response)
+                .expect("first response writes");
+            first.flush().expect("first response flushes");
+            drop(first);
+
+            let Some(mut second) = accept_before_stop(
+                "retry upstream request",
+                Some(Instant::now() + Duration::from_secs(5)),
+            ) else {
+                return;
+            };
+            record
+                .lock()
+                .expect("recorder")
+                .push(read_http_request(&mut second));
+            counter.fetch_add(1, Ordering::SeqCst);
+            second
+                .write_all(response_prefix)
+                .expect("retry response prefix writes");
+            second.flush().expect("retry response prefix flushes");
+            started.store(true, Ordering::SeqCst);
+            second
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .expect("read timeout sets");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut byte = [0_u8; 1];
+            while !stop.load(Ordering::SeqCst) && Instant::now() < deadline {
+                match second.read(&mut byte) {
+                    Ok(0) => {
+                        closed.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => {
+                        closed.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
+            let _ = second.shutdown(Shutdown::Both);
+        });
+        Self {
+            port,
+            seen,
+            hits,
+            response_started,
+            peer_closed,
+            hanging_stop: Some(hanging_stop),
+            hanging_worker: Some(hanging_worker),
+        }
     }
 
     fn start_hanging_with_prefix(response_prefix: &'static [u8]) -> Self {
@@ -4965,6 +5074,7 @@ fn probe_gateway(upstream: &MockUpstream, key_file: &Path) -> Gateway {
     gateway_for_base_url(&upstream.base_url(), key_file, plugins_dir())
 }
 
+#[cfg(feature = "builtin-plugins")]
 fn south_probe_gateway(upstream: &MockUpstream, secret: &str) -> (Gateway, PathBuf) {
     let (config_path, data_dir) = write_south_probe_config(upstream, secret, true);
     let config = ClientConfig::load(&config_path).expect("approved South probe config loads");
@@ -4973,6 +5083,7 @@ fn south_probe_gateway(upstream: &MockUpstream, secret: &str) -> (Gateway, PathB
     (gateway, data_dir)
 }
 
+#[cfg(feature = "builtin-plugins")]
 fn start_south_production_proxy(upstream: &MockUpstream, secret: &str) -> Proxy {
     let (config_path, _) = write_south_probe_config(upstream, secret, true);
     let mut config: Value = serde_json::from_slice(
@@ -4986,6 +5097,7 @@ fn start_south_production_proxy(upstream: &MockUpstream, secret: &str) -> Proxy 
     spawn_proxy(&config)
 }
 
+#[cfg(feature = "builtin-plugins")]
 fn start_south_streaming_production_proxy(upstream: &MockUpstream, secret: &str) -> Proxy {
     let (config_path, _) = write_south_probe_config(upstream, secret, true);
     let mut config: Value = serde_json::from_slice(
@@ -5000,6 +5112,7 @@ fn start_south_streaming_production_proxy(upstream: &MockUpstream, secret: &str)
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn production_buffered_opt_in_executes_south_once_and_records_the_actual_engine() {
     let answer = json!({
         "id": "chatcmpl-production-south", "model": "gpt-5.5",
@@ -5061,6 +5174,7 @@ fn production_buffered_opt_in_executes_south_once_and_records_the_actual_engine(
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn production_south_failures_are_fail_closed_and_never_replayed_by_legacy() {
     let provider_error = |status| {
         http_json(
@@ -5115,6 +5229,7 @@ fn production_south_failures_are_fail_closed_and_never_replayed_by_legacy() {
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn production_south_opt_in_keeps_streaming_on_legacy_and_records_the_fallback() {
     let sse = concat!(
         "data: {\"id\":\"chatcmpl-stream\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n",
@@ -5144,6 +5259,7 @@ fn production_south_opt_in_keeps_streaming_on_legacy_and_records_the_fallback() 
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn explicit_streaming_opt_in_executes_south_once_and_records_the_actual_engine() {
     let sse = concat!(
         "data: {\"id\":\"chatcmpl-stream\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"南向\"}}]}\n\n",
@@ -5195,6 +5311,7 @@ fn explicit_streaming_opt_in_executes_south_once_and_records_the_actual_engine()
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn south_streaming_open_failures_are_never_replayed_by_legacy() {
     let cases = [
         (
@@ -5232,6 +5349,7 @@ fn south_streaming_open_failures_are_never_replayed_by_legacy() {
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn south_midstream_truncation_is_postcommit_and_never_replayed() {
     let prefix = concat!(
         "HTTP/1.1 200 OK\r\n",
@@ -5264,6 +5382,7 @@ fn south_midstream_truncation_is_postcommit_and_never_replayed() {
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn production_south_server_drain_cancels_buffered_io_without_legacy_replay() {
     let mock = MockUpstream::start_hanging();
     let peer_closed = Arc::clone(&mock.peer_closed);
@@ -5331,6 +5450,7 @@ fn production_south_server_drain_cancels_buffered_io_without_legacy_replay() {
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn production_south_server_drain_cancels_streaming_pull_without_legacy_replay() {
     let mock = MockUpstream::start_hanging();
     let peer_closed = Arc::clone(&mock.peer_closed);
@@ -5395,6 +5515,7 @@ fn production_south_server_drain_cancels_streaming_pull_without_legacy_replay() 
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn production_south_client_disconnect_cancels_streaming_pull_without_replay() {
     let mock = MockUpstream::start_hanging();
     let peer_closed = Arc::clone(&mock.peer_closed);
@@ -5451,6 +5572,7 @@ fn production_south_client_disconnect_cancels_streaming_pull_without_replay() {
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn production_south_client_disconnect_cancels_buffered_io_without_legacy_replay() {
     let mock = MockUpstream::start_hanging();
     let peer_closed = Arc::clone(&mock.peer_closed);
@@ -5510,6 +5632,7 @@ fn production_south_client_disconnect_cancels_buffered_io_without_legacy_replay(
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn production_south_attempt_deadline_returns_504_without_wall_sleep_or_legacy_replay() {
     let mock = MockUpstream::start_hanging_buffered();
     let (config_path, data_dir) = write_south_probe_config(&mock, "sk-south-deadline", true);
@@ -5613,6 +5736,7 @@ fn production_south_attempt_deadline_returns_504_without_wall_sleep_or_legacy_re
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn south_stream_deadline_hides_host_private_policy_from_the_agent_renderer() {
     let mock = MockUpstream::start_hanging();
     let (config_path, data_dir) = write_south_probe_config(&mock, "sk-south-private-marker", true);
@@ -5693,6 +5817,137 @@ fn south_stream_deadline_hides_host_private_policy_from_the_agent_renderer() {
     std::fs::remove_dir_all(data_dir).ok();
 }
 
+#[test]
+#[cfg(feature = "builtin-plugins")]
+fn south_media_retry_deadline_hides_private_policy_and_stops_fallback() {
+    let refusal = json!({
+        "error": { "message": "This model does not support image attachments." }
+    });
+    let mock = MockUpstream::start_response_then_hanging(
+        http_json(501, &refusal.to_string()),
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+    );
+    let fallback = ConnectionTrap::start(Some(http_json(
+        500,
+        &json!({ "error": { "message": "fallback must not run" } }).to_string(),
+    )));
+    let (config_path, data_dir) =
+        write_south_probe_config(&mock, "sk-south-media-retry-marker", true);
+    token_station_cli::secrets::store_set(
+        &data_dir,
+        "mock_fallback",
+        "provider_api_key",
+        "sk-south-media-retry-fallback",
+    )
+    .expect("fallback test secret is stored");
+    let mut config: Value =
+        serde_json::from_slice(&std::fs::read(&config_path).expect("South marker config reads"))
+            .expect("South marker config is JSON");
+    config["upstreams"]["mock_primary"]["provider_call"] = json!("south_v1_buffered_streaming");
+    config["upstreams"]["mock_primary"]["models"][0]["vision"] = json!(true);
+    config["upstreams"]["mock_fallback"] = json!({
+        "provider": "openai-compatible",
+        "base_url": fallback.http_url(),
+        "auth": { "slot": "provider_api_key", "store": true },
+        "models": [ {
+            "model": "gpt-5.5",
+            "tool": true,
+            "vision": true,
+            "context_window": 400_000
+        } ]
+    });
+    config["router"]["pools"]["main"] = json!([
+        { "upstream": "mock_primary", "model": "gpt-5.5" },
+        { "upstream": "mock_fallback", "model": "gpt-5.5" }
+    ]);
+    config["plugins"]["agents"] = json!(["marker-agent"]);
+    config["plugins"]["allow_unsigned"] = json!(true);
+    let config: ClientConfig = serde_json::from_value(config).expect("South marker config parses");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime builds");
+    let gateway = Arc::new(
+        Gateway::new_with_provider_runtime(
+            &config,
+            Arc::new(token_station_metrics::NoopRecorder),
+            runtime.handle().clone(),
+        )
+        .expect("South marker gateway assembles"),
+    );
+    let replies = runtime.block_on(async {
+        let worker_gateway = Arc::clone(&gateway);
+        tokio::task::spawn_blocking(move || {
+            let ctx = token_station_cli::request_context::RequestContext::detached(
+                Duration::from_millis(1_400),
+                Duration::from_secs(1),
+            );
+            let mut replies = Vec::new();
+            worker_gateway.chat_scoped(
+                &ctx,
+                None,
+                None,
+                "POST",
+                "/v1/chat/completions",
+                &[],
+                json!({
+                    "model": "auto",
+                    "stream": true,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            { "type": "text", "text": "Continue without the attachment." },
+                            { "type": "image_url", "image_url": { "url": "https://example.test/cat.png" } }
+                        ]
+                    }]
+                })
+                .to_string()
+                .as_bytes(),
+                &mut |reply| {
+                    replies.push(reply);
+                    true
+                },
+            );
+            replies
+        })
+        .await
+        .expect("blocking worker joins")
+    });
+
+    let reply = match replies.first() {
+        Some(Reply::BeginJson(reply)) => reply,
+        Some(Reply::BeginStream) => panic!("expected JSON, stream began"),
+        Some(Reply::Chunk(chunk)) => panic!("expected JSON, got chunk: {chunk}"),
+        None => panic!("expected a rendered 504, got no reply"),
+    };
+    assert_eq!(reply.status, 504, "unexpected error: {}", reply.body);
+    let rendered: Value = serde_json::from_str(&reply.body).expect("marker renderer returns JSON");
+    assert_eq!(rendered["saw_private_marker"], json!(false));
+    assert_eq!(mock.hits(), 2, "the media retry reaches its deadline");
+    assert_eq!(
+        fallback.hits(),
+        0,
+        "the retry deadline forbids a fallback upstream attempt"
+    );
+    let seen = mock.seen();
+    assert_eq!(
+        seen[0].body["messages"][0]["content"][1]["type"],
+        "image_url"
+    );
+    assert_eq!(
+        seen[1].body["messages"][0]["content"],
+        json!(
+            "Continue without the attachment.[Image omitted: the current model does not support visual input.]"
+        )
+    );
+    drop(gateway);
+    drop(runtime);
+    mock.finish_hanging();
+    fallback.finish();
+    std::fs::remove_dir_all(data_dir).ok();
+}
+
 fn write_south_probe_config(
     upstream: &MockUpstream,
     secret: &str,
@@ -5713,7 +5968,7 @@ fn write_south_probe_config(
             "provider-openai-compatible": {
                 "package_digest": package_digest,
                 "suite": "provider-protocol-v1",
-                "publisher_signature_verified": false
+                "publisher_signature_verified": true
             }
         });
         std::fs::write(
@@ -5819,6 +6074,7 @@ fn an_upstream_probe_runs_the_real_southbound_path() {
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn south_v1_probe_runs_the_official_plugin_and_real_reqwest_transport_once() {
     let answer = json!({
         "id": "chatcmpl-south", "model": "gpt-5.5",
@@ -5857,6 +6113,7 @@ fn south_v1_probe_runs_the_official_plugin_and_real_reqwest_transport_once() {
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn south_v1_probe_preserves_provider_errors_and_transport_contract_failures() {
     let provider_cases = [
         (400, "InvalidRequest"),
@@ -5924,6 +6181,7 @@ fn south_v1_probe_preserves_provider_errors_and_transport_contract_failures() {
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn south_v1_probe_timeout_uses_structured_paused_time_and_closes_the_socket() {
     let mock = MockUpstream::start_hanging();
     let (gateway, data_dir) = south_probe_gateway(&mock, "sk-south-timeout");
@@ -5973,6 +6231,7 @@ fn south_v1_probe_timeout_uses_structured_paused_time_and_closes_the_socket() {
 }
 
 #[test]
+#[cfg(feature = "builtin-plugins")]
 fn cli_south_transport_reports_the_existing_success_shape() {
     let answer = json!({
         "id": "chatcmpl-cli-south", "model": "gpt-5.5",
@@ -6009,14 +6268,15 @@ fn cli_south_transport_reports_the_existing_success_shape() {
 }
 
 #[test]
-fn cli_south_transport_refuses_operator_vouched_package_before_network() {
+#[cfg(not(feature = "builtin-plugins"))]
+fn cli_south_transport_refuses_forged_publisher_receipt_before_network() {
     let answer = json!({
         "id": "chatcmpl-legacy-would-succeed", "model": "gpt-5.5",
         "choices": [{ "index": 0, "message": { "role": "assistant", "content": "p" }, "finish_reason": "length" }]
     });
     let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
     let secret = "sk-south-cli-must-not-leak";
-    let (config_path, data_dir) = write_south_probe_config(&mock, secret, false);
+    let (config_path, data_dir) = write_south_probe_config(&mock, secret, true);
 
     let output = Command::new(env!("CARGO_BIN_EXE_token-station-cli"))
         .args([
@@ -6035,7 +6295,7 @@ fn cli_south_transport_refuses_operator_vouched_package_before_network() {
 
     assert!(
         !output.status.success(),
-        "unsigned package must fail closed"
+        "a persisted publisher claim must fail closed"
     );
     assert_eq!(
         mock.hits(),

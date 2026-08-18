@@ -534,7 +534,12 @@ export default function ProviderModelManager({
           <small>
             {providerCall === "legacy"
               ? copy("Legacy active", "Legacy 已启用")
-              : copy("Experimental active", "实验运行时已启用")}
+              : southUnavailableReason
+                ? copy(
+                  "Experimental configured but unavailable",
+                  "实验运行时已配置但不可用",
+                )
+                : copy("Experimental active", "实验运行时已启用")}
           </small>
         </summary>
         <div className="provider-runtime-panel">

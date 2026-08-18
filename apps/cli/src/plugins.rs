@@ -296,14 +296,16 @@ impl PluginRegistry {
             .map(|binding| binding.package_verification)
     }
 
-    /// True only when `dialect` resolves to the named package and the exact
-    /// package bytes carry conformance evidence. Operator permission to load
-    /// unsigned bytes does not satisfy this rollout gate.
+    /// True only when `dialect` resolves to the named official package and the
+    /// exact bytes carry conformance evidence. The first South slice accepts
+    /// only packages embedded by the signed release pipeline. A persisted
+    /// publisher claim is not cryptographic identity.
     #[must_use]
-    pub fn provider_package_conformance_verified(&self, dialect: &str, package: &str) -> bool {
+    pub fn provider_package_south_approved(&self, dialect: &str, package: &str) -> bool {
         self.providers.get(dialect).is_some_and(|binding| {
             binding.package == package
                 && binding.package_verification == ProviderPackageVerificationV1::ConformancePassed
+                && binding.origin == Origin::Builtin
         })
     }
 
@@ -1439,6 +1441,69 @@ mod tests {
         assert!(
             registry.provider_binding("x").is_none(),
             "approval follows bytes"
+        );
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn discovered_receipts_never_prove_official_south_identity() {
+        let dir = scratch("south-official-identity");
+        write_package(
+            &dir,
+            "provider-openai-compatible",
+            &provider_manifest("provider-openai-compatible", &["forged-openai-compatible"]),
+        );
+        let package_dir = dir.join("provider-openai-compatible");
+        fs::write(package_dir.join("adapter.wasm"), b"component bytes")
+            .expect("temp dir is writable");
+        let data = dir.join("data");
+        let mut receipts = super::Receipts::load(&data).expect("missing file is empty");
+        receipts.record(
+            "provider-openai-compatible".to_owned(),
+            super::Receipt {
+                package_digest: token_station_release::plugin_package_digest(&package_dir)
+                    .expect("package exists"),
+                suite: "provider-protocol-v1".to_owned(),
+                publisher_signature_verified: false,
+            },
+        );
+        receipts.save().expect("data dir is writable");
+        let reloaded = super::Receipts::load(&data).expect("round-trips");
+        let registry = PluginRegistry::discover(&plugins(dir.clone(), &[]), &reloaded)
+            .expect("the conformant package remains available to Legacy");
+
+        assert!(
+            registry
+                .provider_binding("forged-openai-compatible")
+                .is_some()
+        );
+        assert!(
+            !registry.provider_package_south_approved(
+                "forged-openai-compatible",
+                "provider-openai-compatible",
+            ),
+            "local conformance does not prove official publisher identity"
+        );
+
+        receipts.record(
+            "provider-openai-compatible".to_owned(),
+            super::Receipt {
+                package_digest: token_station_release::plugin_package_digest(&package_dir)
+                    .expect("package exists"),
+                suite: "provider-protocol-v1".to_owned(),
+                publisher_signature_verified: true,
+            },
+        );
+        receipts.save().expect("data dir is writable");
+        let reloaded = super::Receipts::load(&data).expect("round-trips");
+        let registry = PluginRegistry::discover(&plugins(dir.clone(), &[]), &reloaded)
+            .expect("verified official package is available");
+        assert!(
+            !registry.provider_package_south_approved(
+                "forged-openai-compatible",
+                "provider-openai-compatible",
+            ),
+            "a persisted publisher claim is not cryptographic identity"
         );
         fs::remove_dir_all(dir).ok();
     }

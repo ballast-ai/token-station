@@ -670,6 +670,27 @@ describe("model selection and provider model management", () => {
     expect(screen.getByRole("radio", { name: /South buffered only/ })).toBeChecked();
   });
 
+  it("labels a retained unavailable South setting as configured, not active", () => {
+    window.localStorage.setItem("token-station-language", "en");
+    const provider: ProviderView = {
+      name: "openai",
+      provider: "openai-compatible",
+      base_url: "https://api.example/v1",
+      models: ["gpt-test"],
+      has_auth: true,
+      credential_source: "store",
+      provider_call: "south_v1_buffered_streaming",
+      south_v1_available: false,
+      south_v1_unavailable_reason: "provider_package",
+    };
+
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+
+    expect(screen.getByText("Experimental configured but unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("Experimental active")).not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /South buffered \+ streaming/ })).toBeDisabled();
+  });
+
   it("disables both experimental runtimes when host eligibility fails", async () => {
     window.localStorage.setItem("token-station-language", "en");
     const provider: ProviderView = {

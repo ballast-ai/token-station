@@ -1251,7 +1251,9 @@ export const getRouterTable = () =>
   );
 
 export const getPlugins = () =>
-  dataGet<PluginsView>("/admin/plugins", () => invoke<PluginsView>("get_plugins"));
+  IN_TAURI
+    ? invoke<PluginsView>("get_plugins")
+    : dataGet<PluginsView>("/admin/plugins", () => invoke<PluginsView>("get_plugins"));
 
 export const getEgress = () =>
   dataGet<EgressView>("/admin/egress", () => invoke<EgressView>("get_egress"));

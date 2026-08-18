@@ -23,7 +23,7 @@ mod recovery;
 mod serve_lifecycle;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -193,6 +193,8 @@ struct AppInner {
     pending_free_providers: BTreeSet<String>,
     /// Verified but unsaved provider keys. Clear them on exit to avoid orphaned keys without config references.
     pending_provider_keys: BTreeMap<String, Zeroizing<String>>,
+    /// Official provider dialects approved for South at startup or explicit plugin refresh.
+    south_approved_dialects: BTreeSet<String>,
 }
 
 pub struct AppStateManaged(Mutex<AppInner>);
@@ -1353,6 +1355,32 @@ fn settings_error(
     }
 }
 
+fn south_approved_dialects(registry: &PluginRegistry) -> BTreeSet<String> {
+    registry
+        .provider_dialects()
+        .into_iter()
+        .filter(|dialect| {
+            registry.provider_package_south_approved(dialect, "provider-openai-compatible")
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+fn south_approved_dialects_for_draft(draft: &Value) -> BTreeSet<String> {
+    let Ok(plugins) = serde_json::from_value::<PluginsConfig>(draft["plugins"].clone()) else {
+        return BTreeSet::new();
+    };
+    let Some(data_dir) = draft["data"]["dir"].as_str().map(PathBuf::from) else {
+        return BTreeSet::new();
+    };
+    let Ok(receipts) = Receipts::load(&data_dir) else {
+        return BTreeSet::new();
+    };
+    PluginRegistry::discover(&plugins, &receipts)
+        .map(|registry| south_approved_dialects(&registry))
+        .unwrap_or_default()
+}
+
 // ---- helpers ------------------------------------------------------------------
 
 impl AppInner {
@@ -1378,6 +1406,7 @@ impl AppInner {
                 draft = config_state.draft().clone();
             }
         }
+        let south_approved_dialects = south_approved_dialects_for_draft(&draft);
         Self {
             config_path,
             draft,
@@ -1387,6 +1416,7 @@ impl AppInner {
             server: ServerLifecycle::stopped(),
             pending_free_providers: BTreeSet::new(),
             pending_provider_keys: BTreeMap::new(),
+            south_approved_dialects,
         }
     }
 
@@ -1500,10 +1530,6 @@ impl AppInner {
         let Some(map) = self.draft["upstreams"].as_object() else {
             return vec![];
         };
-        let south_registry = self
-            .materialize()
-            .ok()
-            .and_then(|config| PluginRegistry::for_config(&config).ok());
         map.iter()
             .map(|(name, up)| {
                 let model_values = up["models"].as_array().cloned().unwrap_or_default();
@@ -1550,12 +1576,9 @@ impl AppInner {
                     &base_url,
                     &configured_capabilities,
                 );
-                let package_verified = south_registry.as_ref().is_some_and(|registry| {
-                    registry.provider_package_conformance_verified(
-                        up["provider"].as_str().unwrap_or_default(),
-                        "provider-openai-compatible",
-                    )
-                });
+                let package_verified = self
+                    .south_approved_dialects
+                    .contains(up["provider"].as_str().unwrap_or_default());
                 let south_v1_unavailable_reason =
                     south_v1_unavailable_reason(&self.draft, up, package_verified);
                 ProviderView {
@@ -6036,6 +6059,14 @@ fn get_plugins(state: State<'_, AppStateManaged>) -> Result<PluginsView, String>
     };
     let receipts = Receipts::load(&data_dir)?;
     let registry = PluginRegistry::discover(&plugins_cfg, &receipts)?;
+    let approved = south_approved_dialects(&registry);
+    {
+        let mut inner = state.0.lock().unwrap();
+        let current_plugins_dir = inner.draft["plugins"]["dir"].as_str().map(Path::new);
+        if current_plugins_dir == Some(plugins_cfg.dir.as_path()) && inner.data_dir() == data_dir {
+            inner.south_approved_dialects = approved;
+        }
+    }
     Ok(PluginsView {
         dir: plugins_cfg.dir.display().to_string(),
         agent: plugins_cfg.effective_agents().join(", "),
@@ -7199,6 +7230,34 @@ mod tests {
             .expect("config fixture is an object")
             .remove("routing");
         draft
+    }
+
+    #[test]
+    fn state_snapshot_uses_cached_south_eligibility() {
+        let root = scratch_home("cached-south-eligibility");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.example.test/v1",
+            "auth": { "slot": "provider_api_key", "store": true },
+            "models": [{ "model": "gpt-test" }],
+            "provider_call": "south_v1_buffered"
+        });
+        let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+        inner
+            .south_approved_dialects
+            .insert("openai-compatible".to_owned());
+        let invalid_package = root.join("plugins/broken");
+        std::fs::create_dir_all(&invalid_package).expect("plugin fixture directory is writable");
+        std::fs::write(invalid_package.join("manifest.json"), "not JSON")
+            .expect("plugin fixture is writable");
+
+        let view = inner.snapshot();
+
+        assert_eq!(view.providers.len(), 1);
+        assert!(view.providers[0].south_v1_available);
+        assert_eq!(view.providers[0].south_v1_unavailable_reason, None);
+        std::fs::remove_dir_all(root).ok();
     }
 
     fn gateway_template_for_test(root: &std::path::Path) -> Value {

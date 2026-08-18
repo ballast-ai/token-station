@@ -1126,6 +1126,25 @@ fn map_south_stream_failure_for_attempt(
     }
 }
 
+fn buffered_transport_timeout(
+    attempt_deadline: Instant,
+    now: Instant,
+) -> Result<Duration, ErrorEnvelope> {
+    let remaining = attempt_deadline.saturating_duration_since(now);
+    if remaining.is_zero() {
+        return Err(ErrorEnvelope::new(
+            ErrorCode::Timeout,
+            504,
+            "request deadline exceeded",
+        ));
+    }
+    let timeout = remaining
+        .checked_sub(Duration::from_millis(1))
+        .filter(|timeout| !timeout.is_zero())
+        .unwrap_or(remaining);
+    Ok(timeout)
+}
+
 fn attempt_receipt_for_result(
     target: &UpstreamModel,
     ordinal: u32,
@@ -1222,7 +1241,7 @@ struct Upstream {
 }
 
 /// Server-owned asynchronous capability borrowed by the synchronous gateway.
-/// It creates no task; each provider future stays on the calling blocking
+/// It creates no task. Each provider future stays on the calling blocking
 /// worker's stack until completion or cancellation.
 struct SouthProviderRuntime {
     handle: tokio::runtime::Handle,
@@ -2150,7 +2169,7 @@ impl Gateway {
                     plugin,
                     dialect: entry.api_dialect,
                     provider_call: entry.provider_call,
-                    south_package_approved: registry.provider_package_conformance_verified(
+                    south_package_approved: registry.provider_package_south_approved(
                         &entry.provider,
                         "provider-openai-compatible",
                     ),
@@ -2504,7 +2523,7 @@ impl Gateway {
     }
 
     /// Runs the explicit South v1 diagnostic path. This is a real, potentially
-    /// billable completion probe; it is never selected by production traffic
+    /// billable completion probe. It is never selected by production traffic
     /// and never falls back to legacy after a South attempt starts.
     ///
     /// The caller owns the Tokio runtime. Models run sequentially and share one
@@ -3782,7 +3801,7 @@ impl Gateway {
         );
         let retry_clock = Instant::now();
         let mut retry_status = None;
-        let mut retry_engine = RecordedProviderCallEngine::Legacy;
+        let mut retry_engine = RecordedProviderCallEngine::Unknown;
         let retry = self.try_upstream(
             ctx,
             budget.per_attempt_timeout,
@@ -3862,7 +3881,7 @@ impl Gateway {
             record_actual_attempt_target(record, decision, target);
             let attempt_clock = Instant::now();
             let mut upstream_http_status = None;
-            let mut provider_call_engine = RecordedProviderCallEngine::Legacy;
+            let mut provider_call_engine = RecordedProviderCallEngine::Unknown;
             let result = self.try_upstream(
                 ctx,
                 budget.per_attempt_timeout,
@@ -3900,7 +3919,6 @@ impl Gateway {
                         sanitize_attempt_error_for_render(&mut error);
                         return Err(error);
                     }
-                    let fallback_allowed = take_attempt_fallback_policy(&mut error);
                     if let Some(retry) = self.retry_without_media(
                         ctx,
                         agent,
@@ -3919,6 +3937,14 @@ impl Gateway {
                             Err(retry_error) => error = retry_error,
                         }
                     }
+                    if matches!(
+                        ctx.cancel_reason(),
+                        Some(CancelReason::ServerDrain | CancelReason::Deadline)
+                    ) {
+                        sanitize_attempt_error_for_render(&mut error);
+                        return Err(error);
+                    }
+                    let fallback_allowed = take_attempt_fallback_policy(&mut error);
                     self.observe(&target.upstream, &target.model, Err(&error));
                     let retriable = fallback_allowed && error.code.is_retriable_elsewhere();
                     eprintln!("upstream {target} failed ({:?})", error.code);
@@ -4825,13 +4851,16 @@ impl Gateway {
         actual_engine: &mut RecordedProviderCallEngine,
     ) -> Result<UpstreamResponse, ErrorEnvelope> {
         if upstream.provider_call == ConfiguredProviderCallEngine::Legacy {
+            *actual_engine = RecordedProviderCallEngine::Legacy;
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
         }
         if streaming && upstream.provider_call == ConfiguredProviderCallEngine::SouthV1Buffered {
+            *actual_engine = RecordedProviderCallEngine::Legacy;
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
         }
 
         let Some(auth_config) = upstream.auth_config.as_ref() else {
+            *actual_engine = RecordedProviderCallEngine::Legacy;
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
         };
         let approved = if upstream.south_package_approved {
@@ -4864,6 +4893,7 @@ impl Gateway {
         } {
             Ok(prepared) => prepared,
             Err(PrepareProviderCallErrorV1::Ineligible(_)) => {
+                *actual_engine = RecordedProviderCallEngine::Legacy;
                 return self.send(ctx, attempt_timeout, descriptor, upstream_name);
             }
             Err(failure) => {
@@ -4876,6 +4906,7 @@ impl Gateway {
         let Ok(resolver) =
             CommunityCredentialResolverV1::try_new(&self.secrets, upstream_name, auth_config)
         else {
+            *actual_engine = RecordedProviderCallEngine::Legacy;
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
         };
         let runtime = self.south_runtime.as_ref().ok_or_else(|| {
@@ -4901,20 +4932,17 @@ impl Gateway {
             );
         }
 
-        *actual_engine = RecordedProviderCallEngine::SouthV1Buffered;
-        // Let reqwest close its exchange before South's outer deadline drops
-        // the transport future. The one-millisecond lead preserves the caller's
-        // attempt bound and avoids a detached incomplete response body.
-        let remaining = attempt_deadline.saturating_duration_since(Instant::now());
-        let transport_timeout = remaining
-            .checked_sub(Duration::from_millis(1))
-            .unwrap_or(remaining);
+        // Give reqwest a best-effort one-millisecond lead over South's outer
+        // deadline. Per-attempt client ownership and drop provide the socket
+        // cleanup guarantee when scheduler timing removes that lead.
+        let transport_timeout = buffered_transport_timeout(attempt_deadline, Instant::now())?;
         let buffered_transport = build_direct_reqwest_transport_v1(
             transport_timeout,
             transport_timeout,
             transport_timeout,
         )
         .map_err(|failure| map_failure_v1(failure, Self::south_cancellation_disposition(ctx)))?;
+        *actual_engine = RecordedProviderCallEngine::SouthV1Buffered;
         let response = runtime.handle.block_on(execute_prepared_provider_call_v1(
             &prepared,
             &resolver,
@@ -6253,10 +6281,12 @@ mod upstream_response_tests {
 #[cfg(test)]
 mod south_stream_fallback_policy_tests {
     use super::{
-        CancellationDispositionV1, forbid_attempt_fallback, map_south_stream_failure_for_attempt,
-        sanitize_attempt_error_for_render, take_attempt_fallback_policy,
+        CancellationDispositionV1, buffered_transport_timeout, forbid_attempt_fallback,
+        map_south_stream_failure_for_attempt, sanitize_attempt_error_for_render,
+        take_attempt_fallback_policy,
     };
     use south_contracts::StreamReadErrorV1;
+    use std::time::{Duration, Instant};
     use token_station_protocol::{ErrorCode, ErrorEnvelope};
 
     #[test]
@@ -6291,6 +6321,21 @@ mod south_stream_fallback_policy_tests {
         assert!(
             error.extensions.is_empty(),
             "the plugin renderer must never observe host-private routing state"
+        );
+    }
+
+    #[test]
+    fn expired_buffered_transport_budget_is_a_deadline_error() {
+        let now = Instant::now();
+        let error = buffered_transport_timeout(now, now)
+            .expect_err("an expired attempt cannot build a zero-timeout client");
+
+        assert_eq!((error.code, error.http_status), (ErrorCode::Timeout, 504));
+        assert_eq!(error.message, "request deadline exceeded");
+        assert_eq!(
+            buffered_transport_timeout(now + Duration::from_millis(2), now)
+                .expect("a live attempt retains one millisecond"),
+            Duration::from_millis(1)
         );
     }
 }
