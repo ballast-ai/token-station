@@ -1226,7 +1226,6 @@ struct Upstream {
 /// worker's stack until completion or cancellation.
 struct SouthProviderRuntime {
     handle: tokio::runtime::Handle,
-    buffered_transport: south_transport_reqwest::ReqwestTransportV1,
     streaming_transport: south_transport_reqwest::ReqwestStreamingTransportV1,
 }
 
@@ -1278,11 +1277,6 @@ fn south_runtime_for(
     let handle = provider_runtime.ok_or_else(|| {
         "a South production opt-in requires a server-owned Tokio runtime".to_owned()
     })?;
-    let buffered_transport =
-        build_direct_reqwest_transport_v1(UPSTREAM_TIMEOUT, UPSTREAM_TIMEOUT, UPSTREAM_TIMEOUT)
-            .map_err(|failure| {
-                describe_south_failure(failure, CancellationDispositionV1::Deadline)
-            })?;
     let streaming_transport =
         build_direct_reqwest_streaming_transport_v1(None, UPSTREAM_TIMEOUT, UPSTREAM_TIMEOUT)
             .map_err(|failure| {
@@ -1290,7 +1284,6 @@ fn south_runtime_for(
             })?;
     Ok(Some(SouthProviderRuntime {
         handle,
-        buffered_transport,
         streaming_transport,
     }))
 }
@@ -2529,7 +2522,7 @@ impl Gateway {
     ) -> Result<Vec<ProbeOutcome>, String> {
         let upstream = self.upstreams.get(upstream_name).ok_or_else(|| {
             format!(
-                "no upstream `{upstream_name}`; configured: {}",
+                "no upstream `{upstream_name}`. Configured upstreams: {}",
                 self.upstreams
                     .keys()
                     .cloned()
@@ -2559,7 +2552,7 @@ impl Gateway {
         if let Some(only) = only_model {
             if !models.contains(&only) {
                 return Err(format!(
-                    "upstream `{upstream_name}` does not serve `{only}`; it serves: {}",
+                    "upstream `{upstream_name}` does not serve `{only}`. Available models: {}",
                     models.join(", ")
                 ));
             }
@@ -4909,18 +4902,30 @@ impl Gateway {
         }
 
         *actual_engine = RecordedProviderCallEngine::SouthV1Buffered;
-        let response = runtime
-            .handle
-            .block_on(execute_prepared_provider_call_v1(
-                &prepared,
-                &resolver,
-                &runtime.buffered_transport,
-                deadline,
-                &cancellation,
-            ))
-            .map_err(|failure| {
-                map_failure_v1(failure, Self::south_cancellation_disposition(ctx))
-            })?;
+        // Let reqwest close its exchange before South's outer deadline drops
+        // the transport future. The one-millisecond lead preserves the caller's
+        // attempt bound and avoids a detached incomplete response body.
+        let remaining = attempt_deadline.saturating_duration_since(Instant::now());
+        let transport_timeout = remaining
+            .checked_sub(Duration::from_millis(1))
+            .unwrap_or(remaining);
+        let buffered_transport = build_direct_reqwest_transport_v1(
+            transport_timeout,
+            transport_timeout,
+            transport_timeout,
+        )
+        .map_err(|failure| map_failure_v1(failure, Self::south_cancellation_disposition(ctx)))?;
+        let response = runtime.handle.block_on(execute_prepared_provider_call_v1(
+            &prepared,
+            &resolver,
+            &buffered_transport,
+            deadline,
+            &cancellation,
+        ));
+        drop(buffered_transport);
+        let response = response.map_err(|failure| {
+            map_failure_v1(failure, Self::south_cancellation_disposition(ctx))
+        })?;
         Ok(UpstreamResponse::from_parts(response))
     }
 
@@ -5344,7 +5349,7 @@ impl Gateway {
             Some(CancelReason::ServerDrain) => Some(ErrorEnvelope::new(
                 ErrorCode::UpstreamUnavailable,
                 503,
-                "Token Station is restarting; retry this request",
+                "Token Station is restarting. Retry this request.",
             )),
             Some(CancelReason::Deadline) => Some(ErrorEnvelope::new(
                 ErrorCode::Timeout,

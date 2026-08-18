@@ -621,10 +621,21 @@ describe("model selection and provider model management", () => {
     const disclosure = screen.getByText("Advanced runtime").closest("details");
     expect(disclosure).not.toHaveAttribute("open");
     await user.click(screen.getByText("Advanced runtime"));
-    expect(screen.getByRole("radio", { name: /^Legacy/ })).toBeChecked();
+    const legacy = screen.getByRole("radio", { name: /^Legacy/ });
+    const southBuffered = screen.getByRole("radio", { name: /South buffered only/ });
+    const southStreaming = screen.getByRole("radio", { name: /South buffered \+ streaming/ });
+    expect(legacy).toBeChecked();
     expect(screen.getAllByText("Experimental")).toHaveLength(2);
 
-    await user.click(screen.getByRole("radio", { name: /South buffered \+ streaming/ }));
+    legacy.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(southBuffered).toBeChecked();
+    await user.keyboard("{ArrowDown}");
+    expect(southStreaming).toBeChecked();
+    await user.keyboard("{ArrowDown}");
+    expect(legacy).toBeChecked();
+    await user.keyboard("{ArrowUp}");
+    expect(southStreaming).toBeChecked();
     await user.click(screen.getByRole("button", { name: "Save details" }));
     await waitFor(() => expect(editProvider).toHaveBeenCalledWith(
       "openai",

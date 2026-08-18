@@ -571,8 +571,8 @@ export default function ProviderModelManager({
               <span>
                 <strong>{copy("South buffered only", "South 仅非流式")}</strong>
                 <small>{copy(
-                  "South for eligible buffered requests; streams remain on Legacy.",
-                  "符合条件的非流式请求使用 South；流式请求仍使用 Legacy。",
+                  "South handles eligible buffered requests. Streams remain on Legacy.",
+                  "符合条件的非流式请求使用 South。流式请求仍使用 Legacy。",
                 )}</small>
               </span>
               <i>{copy("Experimental", "实验")}</i>

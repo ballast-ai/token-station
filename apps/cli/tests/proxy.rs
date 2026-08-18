@@ -1548,7 +1548,7 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(std::time::Duration::from_secs(15)))
+                .timeout_global(Some(std::time::Duration::from_secs(5)))
                 .http_status_as_error(false)
                 .build(),
         );
@@ -5532,7 +5532,8 @@ fn production_south_attempt_deadline_returns_504_without_wall_sleep_or_legacy_re
         )
         .expect("South deadline gateway assembles"),
     );
-    let replies = runtime.block_on(async {
+    let peer_closed = Arc::clone(&mock.peer_closed);
+    let (replies, peer_closed) = runtime.block_on(async {
         let worker_gateway = Arc::clone(&gateway);
         let worker = tokio::task::spawn_blocking(move || {
             let ctx = token_station_cli::request_context::RequestContext::detached(
@@ -5587,7 +5588,16 @@ fn production_south_attempt_deadline_returns_504_without_wall_sleep_or_legacy_re
         for _ in 0..32 {
             tokio::task::yield_now().await;
         }
-        replies
+        let peer_closed = tokio::task::spawn_blocking(move || {
+            let cleanup_deadline = Instant::now() + Duration::from_secs(1);
+            while !peer_closed.load(Ordering::SeqCst) && Instant::now() < cleanup_deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            peer_closed.load(Ordering::SeqCst)
+        })
+        .await
+        .expect("deadline cleanup observer joins");
+        (replies, peer_closed)
     });
 
     assert_eq!(mock.hits(), 1, "deadline cannot replay through legacy");
@@ -5595,6 +5605,7 @@ fn production_south_attempt_deadline_returns_504_without_wall_sleep_or_legacy_re
         replies.first(),
         Some(Reply::BeginJson(reply)) if reply.status == 504
     ));
+    assert!(peer_closed, "deadline closes the upstream socket promptly");
     drop(gateway);
     drop(runtime);
     mock.finish_hanging();

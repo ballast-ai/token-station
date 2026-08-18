@@ -567,7 +567,7 @@ pub(crate) fn map_failure_v1(
                     CancellationDispositionV1::ServerDrain => (
                         ErrorCode::UpstreamUnavailable,
                         503,
-                        "Token Station is restarting; retry this request",
+                        "Token Station is restarting. Retry this request.",
                     ),
                     CancellationDispositionV1::Deadline => {
                         (ErrorCode::Timeout, 504, "request deadline exceeded")
@@ -640,7 +640,7 @@ pub(crate) fn map_stream_read_failure_v1(
             CancellationDispositionV1::ServerDrain => (
                 ErrorCode::UpstreamUnavailable,
                 503,
-                "Token Station is restarting; retry this request",
+                "Token Station is restarting. Retry this request.",
             ),
             CancellationDispositionV1::Deadline => {
                 (ErrorCode::Timeout, 504, "request deadline exceeded")
