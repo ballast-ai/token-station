@@ -2347,6 +2347,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -4013,6 +4014,47 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reqwest"
+version = "0.12.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "quinn",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sync_wrapper",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-streams 0.4.2",
+ "web-sys",
+ "webpki-roots",
+]
+
+[[package]]
+name = "reqwest"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
@@ -4047,7 +4089,7 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
+ "wasm-streams 0.5.0",
  "web-sys",
 ]
 
@@ -4730,6 +4772,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "south-contracts"
+version = "0.0.1"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=3b6c91fe3706757c2ea1891cee4399ab730f48c5#3b6c91fe3706757c2ea1891cee4399ab730f48c5"
+dependencies = [
+ "http",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+]
+
+[[package]]
+name = "south-core"
+version = "0.0.1"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=3b6c91fe3706757c2ea1891cee4399ab730f48c5#3b6c91fe3706757c2ea1891cee4399ab730f48c5"
+dependencies = [
+ "http",
+ "south-contracts",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "url",
+ "zeroize",
+]
+
+[[package]]
+name = "south-transport-reqwest"
+version = "0.0.1"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=3b6c91fe3706757c2ea1891cee4399ab730f48c5#3b6c91fe3706757c2ea1891cee4399ab730f48c5"
+dependencies = [
+ "bytes",
+ "http",
+ "reqwest 0.12.28",
+ "south-contracts",
+ "south-core",
+ "zeroize",
+]
+
+[[package]]
 name = "sqlite-wasm-rs"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4964,7 +5045,7 @@ dependencies = [
  "percent-encoding",
  "plist",
  "raw-window-handle",
- "reqwest",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "serde_repr",
@@ -5101,7 +5182,7 @@ dependencies = [
  "minisign-verify",
  "osakit",
  "percent-encoding",
- "reqwest",
+ "reqwest 0.13.4",
  "rustls",
  "semver",
  "serde",
@@ -5374,6 +5455,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "south-contracts",
+ "south-core",
+ "south-transport-reqwest",
  "token-station-conformance",
  "token-station-metrics",
  "token-station-plugin-api",
@@ -5384,7 +5468,9 @@ dependencies = [
  "token-station-router-core",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "ureq",
+ "url",
 ]
 
 [[package]]
@@ -5414,7 +5500,7 @@ dependencies = [
  "objc2-foundation",
  "pbkdf2",
  "regex",
- "reqwest",
+ "reqwest 0.13.4",
  "ring",
  "rusqlite",
  "semver",
@@ -5569,6 +5655,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
@@ -6171,6 +6258,19 @@ checksum = "59972d6cd272259de647b7c1f1912e45e289c75ffd4be04e10695507cd7e1b59"
 dependencies = [
  "leb128fmt",
  "wasmparser 0.253.0",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

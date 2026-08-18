@@ -1,0 +1,166 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const southRepository = "https://github.com/ballast-ai/token-station-south.git";
+const southRevision = "3b6c91fe3706757c2ea1891cee4399ab730f48c5";
+const expectedSouthPackages = new Set([
+  "south-contracts",
+  "south-core",
+  "south-provider-conformance",
+  "south-testkit",
+  "south-transport-reqwest",
+]);
+
+const rootManifest = fs.readFileSync(path.join(root, "Cargo.toml"), "utf8");
+const runtimeManifest = fs.readFileSync(
+  path.join(root, "crates/plugin-runtime/Cargo.toml"),
+  "utf8",
+);
+const ciWorkflow = fs.readFileSync(
+  path.join(root, ".github/workflows/ci.yml"),
+  "utf8",
+);
+const cargoGitConfigPath = path.join(root, ".cargo/config.toml");
+const southAccessActionPaths = [
+  ".github/actions/setup-south-access/action.yml",
+  ".github/actions/cleanup-south-access/action.yml",
+];
+const workflowsDirectory = path.join(root, ".github/workflows");
+
+assert.match(
+  rootManifest,
+  /^rust-version = "1\.96"$/m,
+  "the workspace MSRV must match South's Rust 1.96 baseline",
+);
+assert.match(
+  runtimeManifest,
+  /^rust-version = "1\.96"$/m,
+  "the standalone plugin runtime MSRV must match the workspace",
+);
+assert.doesNotMatch(
+  ciWorkflow,
+  /1\.95(?:\.0)?|msrv-1\.95/,
+  "CI must not retain a stale Rust 1.95 MSRV promise",
+);
+assert.match(
+  ciWorkflow,
+  /dtolnay\/rust-toolchain@1\.96\.0/,
+  "CI must execute the declared Rust 1.96.0 minimum-version check",
+);
+
+for (const relativePath of southAccessActionPaths) {
+  assert.equal(
+    fs.existsSync(path.join(root, relativePath)),
+    false,
+    `${relativePath} is forbidden now that South is public`,
+  );
+}
+const cargoGitConfig = fs.existsSync(cargoGitConfigPath)
+  ? fs.readFileSync(cargoGitConfigPath, "utf8")
+  : "";
+assert.equal(
+  cargoGitConfig.includes("git-fetch-with-cli"),
+  false,
+  "public South dependencies must not force credential-aware CLI git fetches",
+);
+const southWorkflows = fs
+  .readdirSync(workflowsDirectory)
+  .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
+  .map((name) => fs.readFileSync(path.join(workflowsDirectory, name), "utf8"))
+  .join("\n");
+for (const forbiddenFragment of [
+  "setup-south-access",
+  "cleanup-south-access",
+  "SOUTH_READER_APP_ID",
+  "SOUTH_READER_APP_PRIVATE_KEY",
+  "actions/create-github-app-token",
+]) {
+  assert.equal(
+    southWorkflows.includes(forbiddenFragment),
+    false,
+    `public South workflows must not contain '${forbiddenFragment}'`,
+  );
+}
+
+const metadata = JSON.parse(
+  execFileSync(
+    "cargo",
+    ["metadata", "--locked", "--format-version", "1"],
+    { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+  ),
+);
+const southPackages = metadata.packages.filter((pkg) =>
+  pkg.source?.includes(southRepository),
+);
+assert.deepEqual(
+  new Set(southPackages.map((pkg) => pkg.name)),
+  expectedSouthPackages,
+  "the complete South source closure must contain exactly the five approved packages",
+);
+
+for (const pkg of southPackages) {
+  assert.equal(pkg.version, "0.0.1", `${pkg.name} must stay on South 0.0.1`);
+  assert.ok(pkg.source, `${pkg.name} must come from the external South repository`);
+  assert.ok(
+    pkg.source.includes(southRepository) && pkg.source.includes(southRevision),
+    `${pkg.name} must resolve from the one pinned South revision`,
+  );
+}
+
+const workspaceMemberIds = new Set(metadata.workspace_members);
+const nodeById = new Map(metadata.resolve.nodes.map((node) => [node.id, node]));
+for (const pkg of southPackages) {
+  const node = nodeById.get(pkg.id);
+  assert.ok(node, `${pkg.name} must have a resolved dependency node`);
+  const reverseHostDependencies = node.deps
+    .map((dependency) => dependency.pkg)
+    .filter((packageId) => workspaceMemberIds.has(packageId));
+  assert.deepEqual(
+    reverseHostDependencies,
+    [],
+    `${pkg.name} must not depend back on the community host workspace`,
+  );
+}
+
+const cli = metadata.packages.find((pkg) => pkg.name === "token-station-cli");
+assert.ok(cli, "token-station-cli must be present in workspace metadata");
+const cliSouthDependencies = new Map(
+  cli.dependencies
+    .filter((dependency) => expectedSouthPackages.has(dependency.name))
+    .map((dependency) => [dependency.name, dependency.kind ?? "normal"]),
+);
+assert.deepEqual(
+  cliSouthDependencies,
+  new Map([
+    ["south-contracts", "normal"],
+    ["south-core", "normal"],
+    ["south-provider-conformance", "dev"],
+    ["south-testkit", "dev"],
+    ["south-transport-reqwest", "normal"],
+  ]),
+  "the CLI must keep conformance/testkit test-only and only three South runtime dependencies",
+);
+
+const policyPackageIds = new Set([
+  ...metadata.workspace_members,
+  ...southPackages.map((pkg) => pkg.id),
+]);
+const reqwestOwners = metadata.packages
+  .filter(
+    (pkg) =>
+      policyPackageIds.has(pkg.id) &&
+      pkg.dependencies.some((dependency) => dependency.name === "reqwest"),
+  )
+  .map((pkg) => pkg.name)
+  .sort();
+assert.deepEqual(
+  reqwestOwners,
+  ["south-transport-reqwest"],
+  "only the dedicated South transport may directly own reqwest",
+);
+
+console.log("South dependency and MSRV policy check: PASS");

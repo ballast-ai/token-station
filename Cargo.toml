@@ -29,7 +29,7 @@ exclude = [
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/ballast-ai/token-station"
-rust-version = "1.95"
+rust-version = "1.96"
 # Path dependencies without versions cannot pass `cargo publish`; this merely
 # states that fact so cargo-deny can allow workspace-internal dependencies. When
 # conformance becomes an independent release artifact under architecture section
@@ -39,6 +39,11 @@ publish = false
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+south-contracts = { version = "=0.0.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "3b6c91fe3706757c2ea1891cee4399ab730f48c5" }
+south-core = { version = "=0.0.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "3b6c91fe3706757c2ea1891cee4399ab730f48c5" }
+south-provider-conformance = { version = "=0.0.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "3b6c91fe3706757c2ea1891cee4399ab730f48c5" }
+south-testkit = { version = "=0.0.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "3b6c91fe3706757c2ea1891cee4399ab730f48c5" }
+south-transport-reqwest = { version = "=0.0.1", git = "https://github.com/ballast-ai/token-station-south.git", rev = "3b6c91fe3706757c2ea1891cee4399ab730f48c5" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -45,6 +45,7 @@ jobs:
           workspaces: |
             .
             crates/plugin-runtime/tests/guests/test-provider
+      - run: node tests/south-dependency-policy.mjs
       - name: Fetch the locked scaffold dependency set
         run: >-
           cargo fetch --locked --target wasm32-wasip2
@@ -220,21 +221,21 @@ jobs:
       - run: tests/desktop-updater-release.sh
 
   msrv:
-    name: Rust 1.95 minimum-version check
+    name: Rust 1.96 minimum-version check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
-          key: msrv-1.95
+          key: msrv-1.96
       - run: cargo check --workspace --all-targets
 
   frontend:

@@ -74,6 +74,7 @@ fn plugins_dir() -> &'static Path {
 struct Seen {
     path: String,
     authorization: Option<String>,
+    content_type: Option<String>,
     body: Value,
 }
 
@@ -84,6 +85,7 @@ struct MockUpstream {
     seen: Arc<Mutex<Vec<Seen>>>,
     hits: Arc<AtomicUsize>,
     peer_closed: Arc<AtomicBool>,
+    hanging_worker: Option<std::thread::JoinHandle<()>>,
 }
 
 /// A bounded local endpoint that distinguishes a direct TLS connection from
@@ -215,6 +217,7 @@ impl MockUpstream {
             seen,
             hits,
             peer_closed,
+            hanging_worker: None,
         }
     }
 
@@ -230,7 +233,7 @@ impl MockUpstream {
         let record = Arc::clone(&seen);
         let counter = Arc::clone(&hits);
         let closed = Arc::clone(&peer_closed);
-        std::thread::spawn(move || {
+        let hanging_worker = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("hanging upstream accepts");
             record
                 .lock()
@@ -273,6 +276,7 @@ impl MockUpstream {
             seen,
             hits,
             peer_closed,
+            hanging_worker: Some(hanging_worker),
         }
     }
 
@@ -290,6 +294,12 @@ impl MockUpstream {
 
     fn peer_closed(&self) -> bool {
         self.peer_closed.load(Ordering::SeqCst)
+    }
+
+    fn finish_hanging(mut self) {
+        if let Some(worker) = self.hanging_worker.take() {
+            worker.join().expect("hanging upstream exits cleanly");
+        }
     }
 }
 
@@ -340,11 +350,17 @@ fn read_http_request(stream: &mut TcpStream) -> Seen {
             .starts_with("authorization:")
             .then(|| line.split_once(':').expect("header").1.trim().to_owned())
     });
+    let content_type = head.lines().find_map(|line| {
+        line.to_ascii_lowercase()
+            .starts_with("content-type:")
+            .then(|| line.split_once(':').expect("header").1.trim().to_owned())
+    });
     let body = serde_json::from_slice(&buffer[end..end + content_length]).unwrap_or(Value::Null);
 
     Seen {
         path,
         authorization,
+        content_type,
         body,
     }
 }
@@ -1477,7 +1493,7 @@ fn a_server_drained_non_stream_body_returns_503_without_hanging() {
     let client = std::thread::spawn(move || {
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(std::time::Duration::from_secs(5)))
+                .timeout_global(Some(std::time::Duration::from_secs(15)))
                 .http_status_as_error(false)
                 .build(),
         );
@@ -4894,6 +4910,77 @@ fn probe_gateway(upstream: &MockUpstream, key_file: &Path) -> Gateway {
     gateway_for_base_url(&upstream.base_url(), key_file, plugins_dir())
 }
 
+fn south_probe_gateway(upstream: &MockUpstream, secret: &str) -> (Gateway, PathBuf) {
+    let (config_path, data_dir) = write_south_probe_config(upstream, secret, true);
+    let config = ClientConfig::load(&config_path).expect("approved South probe config loads");
+    let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder))
+        .expect("South probe gateway assembles");
+    (gateway, data_dir)
+}
+
+fn write_south_probe_config(
+    upstream: &MockUpstream,
+    secret: &str,
+    conformance_approved: bool,
+) -> (PathBuf, PathBuf) {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let data_dir = std::env::temp_dir().join(format!(
+        "ts-south-cli-data-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&data_dir).expect("South CLI data dir is writable");
+    if conformance_approved {
+        let provider_dir = plugins_dir().join("provider-openai-compatible");
+        let package_digest = token_station_release::plugin_package_digest(&provider_dir)
+            .expect("assembled official provider package has a stable digest");
+        let receipts = json!({
+            "provider-openai-compatible": {
+                "package_digest": package_digest,
+                "suite": "provider-protocol-v1",
+                "publisher_signature_verified": false
+            }
+        });
+        std::fs::write(
+            data_dir.join("plugin-receipts.json"),
+            serde_json::to_vec_pretty(&receipts).expect("receipt JSON serializes"),
+        )
+        .expect("receipt file is writable");
+    }
+    token_station_cli::secrets::store_set(&data_dir, "mock_primary", "provider_api_key", secret)
+        .expect("test secret is stored");
+    let config = json!({
+        "version": 1,
+        "server": { "listen": "127.0.0.1:0" },
+        "data": { "dir": data_dir, "metrics": false },
+        "plugins": {
+            "dir": plugins_dir(),
+            "agent": "agent-openai",
+            "providers": { "openai-compatible": "provider-openai-compatible" }
+        },
+        "upstreams": {
+            "mock_primary": {
+                "provider": "openai-compatible",
+                "base_url": upstream.base_url(),
+                "auth": { "slot": "provider_api_key", "store": true },
+                "models": [ { "model": "gpt-5.5", "tool": true, "context_window": 400_000 } ]
+            }
+        },
+        "router": {
+            "version": 1,
+            "pools": { "main": [ { "upstream": "mock_primary", "model": "gpt-5.5" } ] },
+            "default_pool": "main"
+        }
+    });
+    let config_path = data_dir.join("token-station.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).expect("config JSON serializes"),
+    )
+    .expect("config file is writable");
+    (config_path, data_dir)
+}
+
 fn gateway_for_base_url(base_url: &str, key_file: &Path, plugin_dir: &Path) -> Gateway {
     let config = json!({
         "version": 1,
@@ -4954,6 +5041,241 @@ fn an_upstream_probe_runs_the_real_southbound_path() {
     assert_eq!(seen[0].body["max_tokens"], json!(1));
 
     std::fs::remove_file(key).ok();
+}
+
+#[test]
+fn south_v1_probe_runs_the_official_plugin_and_real_reqwest_transport_once() {
+    let answer = json!({
+        "id": "chatcmpl-south", "model": "gpt-5.5",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "p" }, "finish_reason": "length" }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(201, &answer.to_string())]]);
+    let (gateway, data_dir) = south_probe_gateway(&mock, "sk-south-loopback");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread diagnostic runtime builds");
+
+    let outcomes = runtime
+        .block_on(gateway.probe_south_v1("mock_primary", Some("gpt-5.5")))
+        .expect("South diagnostic probe runs");
+
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].latency_ms.is_ok(), "{outcomes:?}");
+    let seen = mock.seen();
+    assert_eq!(
+        seen.len(),
+        1,
+        "South failure must never replay through legacy"
+    );
+    assert_eq!(seen[0].path, "/v1/chat/completions");
+    assert_eq!(
+        seen[0].authorization.as_deref(),
+        Some("Bearer sk-south-loopback")
+    );
+    assert_eq!(seen[0].content_type.as_deref(), Some("application/json"));
+    assert_eq!(seen[0].body["model"], json!("gpt-5.5"));
+    assert_eq!(seen[0].body["max_tokens"], json!(1));
+
+    std::fs::remove_dir_all(data_dir).ok();
+}
+
+#[test]
+fn south_v1_probe_preserves_provider_errors_and_transport_contract_failures() {
+    let provider_cases = [
+        (400, "InvalidRequest"),
+        (429, "RateLimit"),
+        (500, "UpstreamUnavailable"),
+    ];
+    for (status, expected_code) in provider_cases {
+        let body = json!({ "error": { "message": "bounded fixture" } }).to_string();
+        let mock = MockUpstream::start(vec![vec![http_json(status, &body)]]);
+        let (gateway, data_dir) = south_probe_gateway(&mock, "sk-south-provider-error");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread diagnostic runtime builds");
+
+        let outcomes = runtime
+            .block_on(gateway.probe_south_v1("mock_primary", Some("gpt-5.5")))
+            .expect("provider HTTP status is an assembled outcome");
+        let error = outcomes[0]
+            .latency_ms
+            .as_ref()
+            .expect_err("provider error status cannot be a successful probe");
+        assert!(error.contains(expected_code), "{status}: {error}");
+        assert_eq!(mock.hits(), 1, "{status} cannot trigger a legacy replay");
+        std::fs::remove_dir_all(data_dir).ok();
+    }
+
+    let transport_cases = [
+        (
+            b"HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1/second-hop\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec(),
+            "UpstreamUnavailable",
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1\r\nconnection: close\r\n\r\n\xff".to_vec(),
+            "ProviderProtocolError",
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 33554433\r\nconnection: close\r\n\r\n".to_vec(),
+            "ProviderProtocolError",
+        ),
+    ];
+    for (response, expected_code) in transport_cases {
+        let mock = MockUpstream::start(vec![vec![response]]);
+        let (gateway, data_dir) = south_probe_gateway(&mock, "sk-south-transport-error");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread diagnostic runtime builds");
+
+        let outcomes = runtime
+            .block_on(gateway.probe_south_v1("mock_primary", Some("gpt-5.5")))
+            .expect("transport contract failure is a per-model outcome");
+        let error = outcomes[0]
+            .latency_ms
+            .as_ref()
+            .expect_err("invalid transport response cannot be successful");
+        assert!(error.contains(expected_code), "{error}");
+        assert_eq!(
+            mock.hits(),
+            1,
+            "South failure cannot trigger a legacy replay"
+        );
+        std::fs::remove_dir_all(data_dir).ok();
+    }
+}
+
+#[test]
+fn south_v1_probe_timeout_uses_structured_paused_time_and_closes_the_socket() {
+    let mock = MockUpstream::start_hanging();
+    let (gateway, data_dir) = south_probe_gateway(&mock, "sk-south-timeout");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("paused current-thread diagnostic runtime builds");
+
+    let outcomes = runtime.block_on(async {
+        let driver = async {
+            let mut started = false;
+            for _ in 0..100_000 {
+                if mock.hits() == 1 {
+                    started = true;
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(started, "the real South request must reach loopback");
+            for _ in 0..32 {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::advance(Duration::from_secs(16)).await;
+        };
+        let (outcomes, ()) = tokio::join!(
+            gateway.probe_south_v1("mock_primary", Some("gpt-5.5")),
+            driver
+        );
+        outcomes.expect("timeout is a per-model diagnostic outcome")
+    });
+
+    let error = outcomes[0]
+        .latency_ms
+        .as_ref()
+        .expect_err("a hanging response must time out");
+    assert!(error.contains("Timeout"), "{error}");
+    assert_eq!(mock.hits(), 1, "timeout cannot replay through legacy");
+    drop(runtime);
+    let peer_closed = Arc::clone(&mock.peer_closed);
+    mock.finish_hanging();
+    assert!(
+        peer_closed.load(Ordering::SeqCst),
+        "dropping the South future must close I/O"
+    );
+    std::fs::remove_dir_all(data_dir).ok();
+}
+
+#[test]
+fn cli_south_transport_reports_the_existing_success_shape() {
+    let answer = json!({
+        "id": "chatcmpl-cli-south", "model": "gpt-5.5",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "p" }, "finish_reason": "length" }]
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(201, &answer.to_string())]]);
+    let (config_path, data_dir) = write_south_probe_config(&mock, "sk-south-cli-success", true);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_token-station-cli"))
+        .args([
+            "--config",
+            config_path.to_str().expect("test path is UTF-8"),
+            "upstream",
+            "test",
+            "mock_primary",
+            "--model",
+            "gpt-5.5",
+            "--transport",
+            "south-v1",
+        ])
+        .output()
+        .expect("CLI process runs");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.starts_with("gpt-5.5: ok ("), "{stdout}");
+    assert!(stdout.ends_with(" ms)\n"), "{stdout}");
+    assert_eq!(mock.hits(), 1);
+    std::fs::remove_dir_all(data_dir).ok();
+}
+
+#[test]
+fn cli_south_transport_refuses_operator_vouched_package_before_network() {
+    let answer = json!({
+        "id": "chatcmpl-legacy-would-succeed", "model": "gpt-5.5",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "p" }, "finish_reason": "length" }]
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let secret = "sk-south-cli-must-not-leak";
+    let (config_path, data_dir) = write_south_probe_config(&mock, secret, false);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_token-station-cli"))
+        .args([
+            "--config",
+            config_path.to_str().expect("test path is UTF-8"),
+            "upstream",
+            "test",
+            "mock_primary",
+            "--model",
+            "gpt-5.5",
+            "--transport",
+            "south-v1",
+        ])
+        .output()
+        .expect("CLI process runs");
+
+    assert!(
+        !output.status.success(),
+        "unsigned package must fail closed"
+    );
+    assert_eq!(
+        mock.hits(),
+        0,
+        "ineligible South probe cannot replay via legacy"
+    );
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(rendered.contains("ProviderPackageUnapproved"), "{rendered}");
+    assert!(!rendered.contains(secret), "credential leaked: {rendered}");
+
+    std::fs::remove_dir_all(data_dir).ok();
 }
 
 #[test]

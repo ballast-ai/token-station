@@ -91,7 +91,7 @@
 
 ## 从源码安装
 
-桌面开发需要 Rust Stable（MSRV 1.95）、Node.js 22.23.1，以及 `wasm32-wasip2` Target。
+桌面开发需要 Rust Stable（MSRV 1.96）、Node.js 22.23.1，以及 `wasm32-wasip2` Target。
 
 ```bash
 git clone https://github.com/ballast-ai/token-station.git

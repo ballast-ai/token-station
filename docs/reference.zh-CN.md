@@ -91,7 +91,7 @@ Provider 标签和模型名称本身不能证明请求留在本机。回环端�
 
 下列命令块使用 POSIX 兼容 Shell。在 Windows 上，请通过 Git Bash 运行仓库脚本，或把环境变量赋值方式改写为 PowerShell 语法。
 
-桌面开发需要 Rust Stable（MSRV 1.95）、Node.js 22.23.1、npm、`wasm32-wasip2` Target，以及 Tauri 平台依赖。
+桌面开发需要 Rust Stable（MSRV 1.96）、Node.js 22.23.1、npm、`wasm32-wasip2` Target，以及 Tauri 平台依赖。
 
 ```bash
 git clone https://github.com/ballast-ai/token-station.git

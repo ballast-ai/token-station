@@ -50,6 +50,9 @@ unmaintained = "workspace"
 yanked = "deny"
 
 [sources]
-# Trust crates.io only. Git dependencies create a non-reproducible trust chain that conflicts with C1#7.
+# Trust crates.io plus the one independently versioned South repository. Require
+# an immutable revision so no branch movement can change the locked source.
 unknown-registry = "deny"
 unknown-git = "deny"
+required-git-spec = "rev"
+allow-git = ["https://github.com/ballast-ai/token-station-south"]

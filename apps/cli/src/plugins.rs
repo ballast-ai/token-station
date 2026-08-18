@@ -164,9 +164,16 @@ impl Receipts {
         Ok(Self { path, entries })
     }
 
-    fn matching(&self, package: &str, package_digest: &str) -> Option<&Receipt> {
+    fn matching(
+        &self,
+        package: &str,
+        package_digest: &str,
+        required_suite: &str,
+    ) -> Option<&Receipt> {
         self.entries.get(package).filter(|receipt| {
-            !receipt.package_digest.is_empty() && receipt.package_digest == package_digest
+            !receipt.package_digest.is_empty()
+                && receipt.package_digest == package_digest
+                && receipt.suite == required_suite
         })
     }
 
@@ -198,6 +205,15 @@ pub enum Origin {
     Configured,
 }
 
+/// Whether the exact package bytes bound to a provider dialect passed the
+/// local provider conformance suite. Operator permission to load unsigned
+/// bytes is deliberately a different state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderPackageVerificationV1 {
+    ConformancePassed,
+    NotConformanceVerified,
+}
+
 /// Where a provider dialect resolves to.
 #[derive(Debug)]
 pub struct ProviderBinding {
@@ -206,6 +222,7 @@ pub struct ProviderBinding {
     pub package: String,
     pub source: PackageSource,
     pub origin: Origin,
+    package_verification: ProviderPackageVerificationV1,
 }
 
 /// The provider dialects this installation can speak, and the packages that
@@ -263,6 +280,19 @@ impl PluginRegistry {
     #[must_use]
     pub fn provider_binding(&self, dialect: &str) -> Option<&ProviderBinding> {
         self.providers.get(dialect)
+    }
+
+    /// Returns byte-bound conformance evidence for the package serving a
+    /// provider dialect. A configured or globally allowed unsigned package
+    /// remains loadable, but is not eligible for the first South slice.
+    #[must_use]
+    pub(crate) fn provider_package_verification(
+        &self,
+        dialect: &str,
+    ) -> Option<ProviderPackageVerificationV1> {
+        self.providers
+            .get(dialect)
+            .map(|binding| binding.package_verification)
     }
 
     /// Every dialect an `upstream add --provider` may name, sorted.
@@ -432,6 +462,11 @@ fn bind_declared_dialects(
                             package: name.clone(),
                             source: package.source.clone(),
                             origin,
+                            package_verification: if package.conformance_passed {
+                                ProviderPackageVerificationV1::ConformancePassed
+                            } else {
+                                ProviderPackageVerificationV1::NotConformanceVerified
+                            },
                         },
                     );
                 }
@@ -507,6 +542,7 @@ fn merge_explicit_entries(
                         package: package.clone(),
                         source: PackageSource::Dir(dir),
                         origin: Origin::Configured,
+                        package_verification: ProviderPackageVerificationV1::NotConformanceVerified,
                     },
                 );
             }
@@ -543,7 +579,11 @@ fn scan(dir: &Path, receipts: &Receipts) -> Result<Vec<DiscoveredPackage>, Strin
         // receipts without a package digest fail closed and require reinstall.
         let matching_receipt = plugin_package_digest(&package_dir).ok().and_then(|digest| {
             receipts
-                .matching(&package_dir_name(&package_dir), &digest)
+                .matching(
+                    &package_dir_name(&package_dir),
+                    &digest,
+                    &manifest.conformance.required_suite,
+                )
                 .cloned()
         });
         packages.push(DiscoveredPackage {
@@ -1119,7 +1159,7 @@ mod tests {
 
     use crate::config::PluginsConfig;
 
-    use super::{PackageSource, PluginRegistry};
+    use super::{PackageSource, PluginRegistry, ProviderPackageVerificationV1};
 
     fn provider_manifest(name: &str, dialects: &[&str]) -> String {
         serde_json::json!({
@@ -1368,6 +1408,11 @@ mod tests {
         let reloaded = super::Receipts::load(&data).expect("round-trips");
         let registry = PluginRegistry::discover(&config, &reloaded).expect("a receipt vouches");
         assert!(registry.provider_binding("x").is_some());
+        assert_eq!(
+            registry.provider_package_verification("x"),
+            Some(ProviderPackageVerificationV1::ConformancePassed),
+            "a matching full-package receipt is eligible evidence for South"
+        );
         assert!(
             registry
                 .package("provider-x")
@@ -1382,6 +1427,40 @@ mod tests {
         assert!(
             registry.provider_binding("x").is_none(),
             "approval follows bytes"
+        );
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_digest_matching_receipt_for_the_wrong_suite_is_not_conformance_evidence() {
+        let dir = scratch("receipt-wrong-suite");
+        write_package(&dir, "provider-x", &provider_manifest("provider-x", &["x"]));
+        let package_dir = dir.join("provider-x");
+        fs::write(package_dir.join("adapter.wasm"), b"component bytes")
+            .expect("temp dir is writable");
+        let data = dir.join("data");
+        let mut receipts = super::Receipts::load(&data).expect("missing file is empty");
+        receipts.record(
+            "provider-x".to_owned(),
+            super::Receipt {
+                package_digest: token_station_release::plugin_package_digest(&package_dir)
+                    .expect("package exists"),
+                suite: "some-other-suite".to_owned(),
+                publisher_signature_verified: false,
+            },
+        );
+        receipts.save().expect("data dir is writable");
+        let mut config = plugins(dir.clone(), &[("x", "provider-x")]);
+        config.allow_unsigned = false;
+
+        let reloaded = super::Receipts::load(&data).expect("receipt reloads");
+        let registry = PluginRegistry::discover(&config, &reloaded)
+            .expect("operator entry may still bind the package");
+
+        assert_eq!(
+            registry.provider_package_verification("x"),
+            Some(ProviderPackageVerificationV1::NotConformanceVerified),
+            "suite identity is part of conformance evidence"
         );
         fs::remove_dir_all(dir).ok();
     }
@@ -1474,6 +1553,11 @@ mod tests {
 
         let registry = discover(&config).expect("the hand-written entry is the confirmation");
         assert!(registry.provider_binding("x").is_some());
+        assert_eq!(
+            registry.provider_package_verification("x"),
+            Some(ProviderPackageVerificationV1::NotConformanceVerified),
+            "operator permission to load is not South conformance evidence"
+        );
         fs::remove_dir_all(dir).ok();
     }
 

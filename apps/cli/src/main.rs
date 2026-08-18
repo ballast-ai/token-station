@@ -128,6 +128,9 @@ enum UpstreamCommand {
         /// Probe only this model.
         #[arg(long)]
         model: Option<String>,
+        /// HTTP engine for this real, potentially billable completion probe.
+        #[arg(long, value_enum, default_value_t = ProbeTransportArg::Legacy)]
+        transport: ProbeTransportArg,
     },
     /// Layered health for an upstream: DNS/TLS, HTTP, auth, model, generation —
     /// each reported separately, so "reachable" is never shown as "usable".
@@ -137,6 +140,13 @@ enum UpstreamCommand {
         #[arg(long)]
         model: Option<String>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum ProbeTransportArg {
+    #[default]
+    Legacy,
+    SouthV1,
 }
 
 #[derive(Subcommand)]
@@ -304,9 +314,11 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Upstream(UpstreamCommand::Remove { name }) => {
             mutate(&cli.config, |config| manage::upstream_remove(config, &name))
         }
-        Command::Upstream(UpstreamCommand::Test { name, model }) => {
-            probe(&cli.config, &name, model.as_deref())
-        }
+        Command::Upstream(UpstreamCommand::Test {
+            name,
+            model,
+            transport,
+        }) => probe(&cli.config, &name, model.as_deref(), transport),
         Command::Upstream(UpstreamCommand::Diagnose { name, model }) => {
             diagnose(&cli.config, &name, model.as_deref())
         }
@@ -546,13 +558,27 @@ fn read_secret_from_stdin() -> Result<String, String> {
     }
 }
 
-fn probe(config_path: &Path, name: &str, model: Option<&str>) -> Result<(), String> {
+fn probe(
+    config_path: &Path,
+    name: &str,
+    model: Option<&str>,
+    transport: ProbeTransportArg,
+) -> Result<(), String> {
     let config = load(config_path)?;
     // No recorder: a probe is operator diagnostics, not served traffic, and it
     // must not skew `stats`.
     let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder))?;
 
-    let outcomes = gateway.probe(name, model)?;
+    let outcomes = match transport {
+        ProbeTransportArg::Legacy => gateway.probe(name, model)?,
+        ProbeTransportArg::SouthV1 => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("South v1 diagnostic runtime: {error}"))?;
+            runtime.block_on(gateway.probe_south_v1(name, model))?
+        }
+    };
     let mut failed = 0usize;
     for outcome in &outcomes {
         match &outcome.latency_ms {
@@ -683,12 +709,43 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
     /// clap's own coherence check: conflicting flags, broken defaults and the
     /// like fail here instead of at first use in the field.
     #[test]
     fn the_command_tree_is_coherent() {
         super::Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn upstream_test_accepts_an_explicit_south_transport_and_keeps_legacy_default() {
+        let explicit = super::Cli::try_parse_from([
+            "token-station-cli",
+            "upstream",
+            "test",
+            "example",
+            "--transport",
+            "south-v1",
+        ])
+        .expect("south-v1 is a documented diagnostic transport");
+        let defaulted =
+            super::Cli::try_parse_from(["token-station-cli", "upstream", "test", "example"])
+                .expect("legacy remains the backwards-compatible default");
+
+        assert!(matches!(
+            explicit.command,
+            super::Command::Upstream(super::UpstreamCommand::Test {
+                transport: super::ProbeTransportArg::SouthV1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            defaulted.command,
+            super::Command::Upstream(super::UpstreamCommand::Test {
+                transport: super::ProbeTransportArg::Legacy,
+                ..
+            })
+        ));
     }
 }

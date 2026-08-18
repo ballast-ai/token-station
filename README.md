@@ -91,7 +91,7 @@ On macOS, closing the window hides the app. The gateway keeps running until you 
 
 ## Install from source
 
-Desktop development needs Rust stable (MSRV 1.95), Node.js 22.23.1, and the `wasm32-wasip2` target.
+Desktop development needs Rust stable (MSRV 1.96), Node.js 22.23.1, and the `wasm32-wasip2` target.
 
 ```bash
 git clone https://github.com/ballast-ai/token-station.git

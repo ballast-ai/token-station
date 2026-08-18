@@ -38,11 +38,15 @@ pub mod request_context;
 pub mod scaffold;
 pub mod secrets;
 pub mod server;
+pub(crate) mod south_provider_call;
 mod sse;
 pub mod stats;
 pub mod store;
 pub mod upgrade;
 pub mod virtual_key;
+
+#[cfg(test)]
+mod south_provider_call_tests;
 
 /// The example configuration shipped with the binary, kept loadable by tests.
 pub const EXAMPLE_CONFIG: &str = include_str!("../example-config.json");

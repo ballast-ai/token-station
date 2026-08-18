@@ -91,7 +91,7 @@ Private file permissions isolate local state from other operating-system account
 
 The command blocks below use a POSIX-compatible shell. On Windows, run the repository scripts from Git Bash or adapt environment-variable assignments for PowerShell.
 
-Desktop development requires Rust stable with MSRV 1.95, Node.js 22.23.1, npm, the `wasm32-wasip2` Rust target, and the platform-specific Tauri dependencies.
+Desktop development requires Rust stable with MSRV 1.96, Node.js 22.23.1, npm, the `wasm32-wasip2` Rust target, and the platform-specific Tauri dependencies.
 
 ```bash
 git clone https://github.com/ballast-ai/token-station.git

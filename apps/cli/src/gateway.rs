@@ -54,8 +54,15 @@ use crate::cancel::{CancelReason, CancelToken};
 use crate::request_context::RequestContext;
 use crate::sse::SseFrameDecoder;
 
-use crate::config::{ApiDialect, ClientConfig, EgressConfig};
+use crate::config::{ApiDialect, AuthConfig, ClientConfig, EgressConfig};
 use crate::secrets::SecretStore;
+use crate::south_provider_call::{
+    CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1, IneligibleV1,
+    PrepareProviderCallErrorV1, ProviderPackageEligibilityV1, RequestBodyModeV1,
+    ResponseMetadataEligibilityV1, RolloutEligibilityV1, StableProviderCallFailureV1,
+    build_direct_reqwest_transport_v1, execute_prepared_provider_call_v1, map_failure_v1,
+    prepare_provider_call_v1,
+};
 
 /// Caps on what crosses the proxy, applied by the host per architecture section 6.
 pub(crate) const MAX_INBOUND_BODY: usize = 10 * 1024 * 1024;
@@ -1149,11 +1156,13 @@ fn record_actual_attempt_target(
 /// One configured upstream, resolved and ready to serve.
 struct Upstream {
     config: ProviderConfig,
+    auth_config: Option<AuthConfig>,
     plugin: Arc<ProviderPlugin>,
     /// The wire dialect, carried host-side only (never enters a WASM plugin).
     /// `AnthropicNative` diverts an anthropic-messages request onto the verbatim
     /// passthrough path instead of the Canonical-IR provider render.
     dialect: ApiDialect,
+    south_package_approved: bool,
 }
 
 enum AttemptTerminal {
@@ -1551,6 +1560,32 @@ pub struct ProbeOutcome {
     pub latency_ms: Result<u64, String>,
 }
 
+fn describe_south_failure(
+    failure: StableProviderCallFailureV1,
+    cancellation: CancellationDispositionV1,
+) -> String {
+    let envelope = map_failure_v1(failure, cancellation);
+    format!("{} ({:?})", envelope.message, envelope.code)
+}
+
+fn describe_prepare_failure(failure: PrepareProviderCallErrorV1) -> String {
+    match failure {
+        PrepareProviderCallErrorV1::Ineligible(reason) => {
+            format!("South v1 ineligible: {reason:?}")
+        }
+        PrepareProviderCallErrorV1::Contract(error) => describe_south_failure(
+            StableProviderCallFailureV1::Contract(error),
+            CancellationDispositionV1::Deadline,
+        ),
+        PrepareProviderCallErrorV1::Preparation(error) => describe_south_failure(
+            StableProviderCallFailureV1::Provider(south_core::ProviderCallErrorV1::Preparation(
+                error,
+            )),
+            CancellationDispositionV1::Deadline,
+        ),
+    }
+}
+
 /// The layers a request passes through, deepest last. A layered probe reports
 /// each separately so "the port answered" is never shown as "the model works".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -1939,8 +1974,18 @@ impl Gateway {
                 name.clone(),
                 Upstream {
                     config: provider_config,
+                    auth_config: entry.auth.clone(),
                     plugin,
                     dialect: entry.api_dialect,
+                    south_package_approved: registry
+                        .provider_binding(&entry.provider)
+                        .is_some_and(|binding| {
+                            binding.package == "provider-openai-compatible"
+                                && registry.provider_package_verification(&entry.provider)
+                                    == Some(
+                                        crate::plugins::ProviderPackageVerificationV1::ConformancePassed,
+                                    )
+                        }),
                 },
             );
         }
@@ -2287,6 +2332,154 @@ impl Gateway {
                 latency_ms: self.probe_model(upstream_name, upstream, model, &http),
             })
             .collect())
+    }
+
+    /// Runs the explicit South v1 diagnostic path. This is a real, potentially
+    /// billable completion probe; it is never selected by production traffic
+    /// and never falls back to legacy after a South attempt starts.
+    ///
+    /// The caller owns the Tokio runtime. Models run sequentially and share one
+    /// hardened reqwest transport for the command.
+    ///
+    /// # Errors
+    ///
+    /// An unknown upstream/model, an unusable transport configuration, or a
+    /// missing eligible credential source. Per-model provider failures remain
+    /// inside [`ProbeOutcome`], matching [`Self::probe`].
+    pub async fn probe_south_v1(
+        &self,
+        upstream_name: &str,
+        only_model: Option<&str>,
+    ) -> Result<Vec<ProbeOutcome>, String> {
+        let upstream = self.upstreams.get(upstream_name).ok_or_else(|| {
+            format!(
+                "no upstream `{upstream_name}`; configured: {}",
+                self.upstreams
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+        let auth_config = upstream
+            .auth_config
+            .as_ref()
+            .ok_or_else(|| format!("South v1 ineligible: {:?}", IneligibleV1::Auth))?;
+        let resolver =
+            CommunityCredentialResolverV1::try_new(&self.secrets, upstream_name, auth_config)
+                .map_err(|reason| format!("South v1 ineligible: {reason:?}"))?;
+        let transport =
+            build_direct_reqwest_transport_v1(PROBE_TIMEOUT, PROBE_TIMEOUT, PROBE_TIMEOUT)
+                .map_err(|failure| {
+                    describe_south_failure(failure, CancellationDispositionV1::Deadline)
+                })?;
+
+        let mut models: Vec<&str> = self
+            .catalog
+            .iter()
+            .filter(|(target, _)| target.upstream.as_str() == upstream_name)
+            .map(|(target, _)| target.model.as_str())
+            .collect();
+        if let Some(only) = only_model {
+            if !models.contains(&only) {
+                return Err(format!(
+                    "upstream `{upstream_name}` does not serve `{only}`; it serves: {}",
+                    models.join(", ")
+                ));
+            }
+            models = vec![only];
+        }
+        if models.is_empty() {
+            return Err(format!("upstream `{upstream_name}` declares no models"));
+        }
+
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let mut outcomes = Vec::with_capacity(models.len());
+        for model in models {
+            outcomes.push(ProbeOutcome {
+                model: model.to_owned(),
+                latency_ms: self
+                    .probe_model_south_v1(
+                        upstream,
+                        model,
+                        auth_config,
+                        &resolver,
+                        &transport,
+                        &cancellation,
+                    )
+                    .await,
+            });
+        }
+        Ok(outcomes)
+    }
+
+    async fn probe_model_south_v1(
+        &self,
+        upstream: &Upstream,
+        model: &str,
+        auth_config: &AuthConfig,
+        resolver: &CommunityCredentialResolverV1<'_>,
+        transport: &south_transport_reqwest::ReqwestTransportV1,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> Result<u64, String> {
+        let mut request = ChatRequest::new(
+            model,
+            vec![token_station_protocol::Message::text(
+                token_station_protocol::Role::User,
+                "ping",
+            )],
+        );
+        request.sampling.max_output_tokens = Some(1);
+        let describe =
+            |envelope: ErrorEnvelope| format!("{} ({:?})", envelope.message, envelope.code);
+        let descriptor = upstream
+            .plugin
+            .build_http_request(&request, &upstream.config)
+            .map_err(describe)?;
+        let approved = if upstream.south_package_approved {
+            ProviderPackageEligibilityV1::Approved
+        } else {
+            ProviderPackageEligibilityV1::Unapproved
+        };
+        let metadata = if upstream.south_package_approved {
+            ResponseMetadataEligibilityV1::Compatible
+        } else {
+            ResponseMetadataEligibilityV1::Incompatible
+        };
+        let policy = CommunityCallPolicyV1::new(
+            RolloutEligibilityV1::Enabled,
+            approved,
+            upstream.dialect,
+            self.egress.policy.mode,
+            RequestBodyModeV1::Buffered,
+            metadata,
+        );
+        let prepared = prepare_provider_call_v1(policy, &upstream.config, auth_config, &descriptor)
+            .map_err(describe_prepare_failure)?;
+
+        let clock = std::time::Instant::now();
+        let response = execute_prepared_provider_call_v1(
+            &prepared,
+            resolver,
+            transport,
+            tokio::time::Instant::now() + PROBE_TIMEOUT,
+            cancellation,
+        )
+        .await
+        .map_err(|failure| describe_south_failure(failure, CancellationDispositionV1::Deadline))?;
+        let status = response.status;
+        if status >= 400 {
+            let envelope = upstream
+                .plugin
+                .map_provider_error(&response)
+                .map_err(describe)?;
+            return Err(format!("HTTP {status}: {}", describe(envelope)));
+        }
+        upstream
+            .plugin
+            .parse_response(&response)
+            .map_err(describe)?;
+        Ok(u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX))
     }
 
     /// One probe exchange. The error string is operator-facing and, like every
