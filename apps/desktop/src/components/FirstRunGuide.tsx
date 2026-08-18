@@ -547,8 +547,12 @@ export default function FirstRunGuide({
       : { ...hole, borderRadius: undefined }
     : null;
   const isOverviewEntry = content.target === "overview-entry";
-  const cardWidth = Math.min(isOverviewEntry ? 720 : 360, viewportWidth - 32);
-  const estimatedCardHeight = isOverviewEntry ? 176 : 230;
+  // The overview copy does not benefit from a banner-sized coachmark. Keeping
+  // it close to the regular step width also leaves room at high OS/browser
+  // zoom levels, where the effective CSS viewport can be much narrower than
+  // the native desktop window.
+  const cardWidth = Math.min(isOverviewEntry ? 440 : 360, viewportWidth - 32);
+  const estimatedCardHeight = isOverviewEntry ? 210 : 230;
   const cardGap = isOverviewEntry ? 14 : 18;
   const overviewRightWidth = targetRect
     ? viewportWidth - targetRect.right - cardGap - 16

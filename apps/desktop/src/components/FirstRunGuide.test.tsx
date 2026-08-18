@@ -134,6 +134,52 @@ it("高亮左上角入口并说明之后如何切换回概览", async () => {
   }
 });
 
+it("在紧凑窗口中限制概览引导卡宽度并保持在可视区内", async () => {
+  const originalInnerWidth = window.innerWidth;
+  const originalInnerHeight = window.innerHeight;
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 580 });
+  Object.defineProperty(window, "innerHeight", { configurable: true, value: 432 });
+  const getBoundingClientRect = vi
+    .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+    .mockImplementation(function getBoundingClientRectMock(this: HTMLElement) {
+      if (this.getAttribute("data-onboarding-target") === "overview-entry") {
+        return rect(70, 80, 310, 66);
+      }
+      return rect(0, 0, 0, 0);
+    });
+
+  try {
+    render(
+      <LanguageProvider>
+        <button type="button" data-onboarding-target="overview-entry">
+          Token Station 概览
+        </button>
+        <FirstRunGuide
+          open
+          microStep="overview"
+          canSkipAgent={false}
+          onTargetAction={() => {}}
+          onBack={() => {}}
+          onSkipAgent={() => {}}
+          onPause={() => {}}
+          onDismiss={() => {}}
+        />
+      </LanguageProvider>,
+    );
+
+    const coachmark = await screen.findByRole("dialog", { name: "从这里随时回到概览" });
+    expect(coachmark).toHaveStyle({ width: "440px", left: "80px", top: "150px" });
+    const left = Number.parseFloat(coachmark.style.left);
+    const width = Number.parseFloat(coachmark.style.width);
+    expect(left).toBeGreaterThanOrEqual(16);
+    expect(left + width).toBeLessThanOrEqual(window.innerWidth - 16);
+  } finally {
+    getBoundingClientRect.mockRestore();
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+  }
+});
+
 it("在两种完成状态下都说明教程重看路径", () => {
   const view = render(
     <LanguageProvider>
