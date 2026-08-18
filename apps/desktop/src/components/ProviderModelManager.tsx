@@ -12,6 +12,7 @@ import {
   getStats,
   previewProviderEndpoints,
   ProviderEndpointPreview,
+  ProviderCallEngine,
   ProviderTestResult,
   setProviderModelLimits,
   setProviderModelVision,
@@ -129,6 +130,7 @@ export default function ProviderModelManager({
   const { copy, language } = useLocalizedCopy();
   const { showError, showSuccess } = useErrorToast();
   const endpointErrorId = useId();
+  const providerCallName = useId();
   const [models, setModels] = useState(provider.models);
   const [selected, setSelected] = useState(provider.models);
   const [status, setStatus] = useState<CatalogStatus>({
@@ -160,6 +162,11 @@ export default function ProviderModelManager({
   const [credentialReference, setCredentialReference] = useState(
     provider.credential_reference ?? "",
   );
+  const [providerCall, setProviderCall] = useState<ProviderCallEngine>(
+    provider.provider_call ?? "legacy",
+  );
+  const [runtimeOpen, setRuntimeOpen] = useState(provider.provider_call !== undefined
+    && provider.provider_call !== "legacy");
   const [editing, setEditing] = useState(false);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
   const capabilities = useMemo(() => {
@@ -217,6 +224,29 @@ export default function ProviderModelManager({
     degraded: copy("Degraded capabilities", "能力退化"),
     unavailable: copy("Unavailable", "不可用"),
   };
+  const reportedSouthReason = provider.south_v1_unavailable_reason
+    ?? (provider.south_v1_available === true ? null : "provider_package");
+  const fixedSouthReason = reportedSouthReason === "auth" ? null : reportedSouthReason;
+  const southUnavailableReason = fixedSouthReason
+    ?? ((credentialSource === "store" || credentialSource === "env") ? null : "auth");
+  const southUnavailableCopy = {
+    provider_package: copy(
+      "South requires the verified official OpenAI-compatible provider package.",
+      "South 需要已验证的官方 OpenAI-compatible Provider 包。",
+    ),
+    api_dialect: copy(
+      "South is available only for the translated API dialect.",
+      "South 仅支持 translated API dialect。",
+    ),
+    egress: copy(
+      "South currently requires direct egress.",
+      "South 当前仅支持 direct egress。",
+    ),
+    auth: copy(
+      "South requires Bearer credentials from the local store or an environment variable.",
+      "South 需要来自本地存储或环境变量的 Bearer 凭据。",
+    ),
+  } as const;
 
   useEffect(() => {
     let active = true;
@@ -326,6 +356,7 @@ export default function ProviderModelManager({
         credentialSource === "env" || credentialSource === "file"
           ? credentialReference.trim()
           : null,
+        providerCall,
       ));
       setEditKey("");
       showSuccess(
@@ -452,7 +483,11 @@ export default function ProviderModelManager({
           value={credentialSource}
           disabled={operationDisabled}
           onValueChange={(value) => {
-            setCredentialSource(value as typeof credentialSource);
+            const nextSource = value as typeof credentialSource;
+            setCredentialSource(nextSource);
+            if (nextSource !== "store" && nextSource !== "env") {
+              setProviderCall("legacy");
+            }
             setEditKey("");
             setCredentialReference("");
           }}
@@ -489,6 +524,93 @@ export default function ProviderModelManager({
           {editing ? copy("Saving…", "保存中…") : copy("Save details", "保存基本信息")}
         </button>
       </div>
+      <details
+        className={`provider-runtime-advanced ${providerCall === "legacy" ? "stable" : "experimental"}`}
+        open={runtimeOpen}
+        onToggle={(event) => setRuntimeOpen(event.currentTarget.open)}
+      >
+        <summary>
+          <span>{copy("Advanced runtime", "高级运行时")}</span>
+          <small>
+            {providerCall === "legacy"
+              ? copy("Legacy active", "Legacy 已启用")
+              : copy("Experimental active", "实验运行时已启用")}
+          </small>
+        </summary>
+        <div className="provider-runtime-panel">
+          <p>{copy(
+            "Choose how this provider sends requests. Legacy remains the stable default.",
+            "选择此 Provider 发送请求的方式。Legacy 始终是稳定默认项。",
+          )}</p>
+          <fieldset className="provider-runtime-options">
+            <legend>{copy("Provider runtime", "Provider 运行时")}</legend>
+            <label className={providerCall === "legacy" ? "selected" : ""}>
+              <input
+                type="radio"
+                name={providerCallName}
+                value="legacy"
+                checked={providerCall === "legacy"}
+                disabled={operationDisabled}
+                onChange={() => setProviderCall("legacy")}
+              />
+              <span>
+                <strong>Legacy</strong>
+                <small>{copy("Stable default · broad compatibility", "稳定默认 · 兼容性最广")}</small>
+              </span>
+              <i>{copy("Stable", "稳定")}</i>
+            </label>
+            <label className={providerCall === "south_v1_buffered" ? "selected" : ""}>
+              <input
+                type="radio"
+                name={providerCallName}
+                value="south_v1_buffered"
+                checked={providerCall === "south_v1_buffered"}
+                disabled={operationDisabled || southUnavailableReason !== null}
+                onChange={() => setProviderCall("south_v1_buffered")}
+              />
+              <span>
+                <strong>{copy("South buffered only", "South 仅非流式")}</strong>
+                <small>{copy(
+                  "South for eligible buffered requests; streams remain on Legacy.",
+                  "符合条件的非流式请求使用 South；流式请求仍使用 Legacy。",
+                )}</small>
+              </span>
+              <i>{copy("Experimental", "实验")}</i>
+            </label>
+            <label className={providerCall === "south_v1_buffered_streaming" ? "selected" : ""}>
+              <input
+                type="radio"
+                name={providerCallName}
+                value="south_v1_buffered_streaming"
+                checked={providerCall === "south_v1_buffered_streaming"}
+                disabled={operationDisabled || southUnavailableReason !== null}
+                onChange={() => setProviderCall("south_v1_buffered_streaming")}
+              />
+              <span>
+                <strong>{copy("South buffered + streaming", "South 非流式 + 流式")}</strong>
+                <small>{copy(
+                  "South for eligible buffered and streaming requests.",
+                  "符合条件的非流式和流式请求均使用 South。",
+                )}</small>
+              </span>
+              <i>{copy("Experimental", "实验")}</i>
+            </label>
+          </fieldset>
+          <p className={`provider-runtime-note ${providerCall === "legacy" ? "" : "warning"}`}>
+            {southUnavailableReason
+              ? southUnavailableCopy[southUnavailableReason]
+              : providerCall === "legacy"
+                ? copy(
+                  "South is eligible for this provider. Enable it only for a controlled canary.",
+                  "此 Provider 符合 South 条件。仅在受控 canary 中启用。",
+                )
+                : copy(
+                  "South never replays an attempt through Legacy once South execution begins.",
+                  "South 一旦开始执行，就不会再通过 Legacy 重放该次尝试。",
+                )}
+          </p>
+        </div>
+      </details>
       {endpointError && (
         <p id={endpointErrorId} className="error-text" role="alert">
           {endpointError}

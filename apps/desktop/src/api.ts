@@ -19,12 +19,22 @@ export interface ProviderView {
   has_auth: boolean;
   credential_source?: "store" | "env" | "file" | "none";
   credential_reference?: string;
+  provider_call?: ProviderCallEngine;
+  south_v1_available?: boolean;
+  south_v1_unavailable_reason?: SouthUnavailableReason | null;
   /** Locally hosted provider, such as Ollama. Local-only routing uses this to keep traffic on the machine. */
   local?: boolean;
   access_tier?: "free" | "paid";
   /** Declared quota plan for local estimates; absent means non-windowed or usage-based. */
   quota_plan?: QuotaPlanView | null;
 }
+
+export type ProviderCallEngine =
+  | "legacy"
+  | "south_v1_buffered"
+  | "south_v1_buffered_streaming";
+
+export type SouthUnavailableReason = "provider_package" | "api_dialect" | "egress" | "auth";
 
 export interface QuotaPlanView {
   len_ms: number;
@@ -887,6 +897,7 @@ export const editProvider = (
   api_key: string | null,
   credential_source?: "store" | "env" | "file" | "none",
   credential_reference?: string | null,
+  provider_call?: ProviderCallEngine,
 ) => credential_source
   ? invoke<StateView>("edit_provider_with_credential", {
     name,
@@ -894,6 +905,7 @@ export const editProvider = (
     apiKey: api_key,
     credentialSource: credential_source,
     credentialReference: credential_reference ?? null,
+    providerCall: provider_call ?? "legacy",
   })
   : invoke<StateView>("edit_provider", { name, baseUrl: base_url, apiKey: api_key });
 

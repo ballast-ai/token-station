@@ -597,6 +597,92 @@ describe("model selection and provider model management", () => {
     expect(screen.getByRole("option", { name: "无鉴权" })).toBeInTheDocument();
   });
 
+  it("keeps Legacy selected while placing South behind an experimental disclosure", async () => {
+    window.localStorage.setItem("token-station-language", "en");
+    const provider: ProviderView = {
+      name: "openai",
+      provider: "openai-compatible",
+      base_url: "https://api.example/v1",
+      models: ["gpt-test"],
+      has_auth: true,
+      credential_source: "store",
+      provider_call: "legacy",
+      south_v1_available: true,
+      south_v1_unavailable_reason: null,
+    };
+    const user = userEvent.setup();
+
+    render(
+      <ErrorToastProvider>
+        <ProviderModelManager provider={provider} serveRunning onSaved={vi.fn()} />
+      </ErrorToastProvider>,
+    );
+
+    const disclosure = screen.getByText("Advanced runtime").closest("details");
+    expect(disclosure).not.toHaveAttribute("open");
+    await user.click(screen.getByText("Advanced runtime"));
+    expect(screen.getByRole("radio", { name: /^Legacy/ })).toBeChecked();
+    expect(screen.getAllByText("Experimental")).toHaveLength(2);
+
+    await user.click(screen.getByRole("radio", { name: /South buffered \+ streaming/ }));
+    await user.click(screen.getByRole("button", { name: "Save details" }));
+    await waitFor(() => expect(editProvider).toHaveBeenCalledWith(
+      "openai",
+      "https://api.example/v1",
+      null,
+      "store",
+      null,
+      "south_v1_buffered_streaming",
+    ));
+    expect(screen.getByText(/South never replays an attempt through Legacy/)).toBeInTheDocument();
+    expect(screen.getByText(/Restart after saving to apply/)).toBeInTheDocument();
+  });
+
+  it("opens the advanced runtime disclosure for an active South setting", () => {
+    window.localStorage.setItem("token-station-language", "en");
+    const provider: ProviderView = {
+      name: "openai",
+      provider: "openai-compatible",
+      base_url: "https://api.example/v1",
+      models: ["gpt-test"],
+      has_auth: true,
+      credential_source: "env",
+      credential_reference: "OPENAI_API_KEY",
+      provider_call: "south_v1_buffered",
+      south_v1_available: true,
+      south_v1_unavailable_reason: null,
+    };
+
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+
+    expect(screen.getByText("Advanced runtime").closest("details")).toHaveAttribute("open");
+    expect(screen.getByRole("radio", { name: /South buffered only/ })).toBeChecked();
+  });
+
+  it("disables both experimental runtimes when host eligibility fails", async () => {
+    window.localStorage.setItem("token-station-language", "en");
+    const provider: ProviderView = {
+      name: "local",
+      provider: "openai-compatible",
+      base_url: "http://127.0.0.1:11434/v1",
+      models: ["local"],
+      has_auth: false,
+      credential_source: "none",
+      provider_call: "legacy",
+      south_v1_available: false,
+      south_v1_unavailable_reason: "auth",
+    };
+    const user = userEvent.setup();
+
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+    await user.click(screen.getByText("Advanced runtime"));
+
+    expect(screen.getByRole("radio", { name: /South buffered only/ })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: /South buffered \+ streaming/ })).toBeDisabled();
+    expect(screen.getByText(/requires Bearer credentials from the local store or an environment variable/))
+      .toBeInTheDocument();
+  });
+
   it("keeps provider endpoint resolution failures accessibly linked for provider names with spaces", async () => {
     const provider: ProviderView = {
       name: "深度 seek 供应商", provider: "openai", base_url: "https://api.example/v1",
