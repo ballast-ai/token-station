@@ -1,4 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import {
+  Bot,
+  Info,
+  Languages,
+  Palette,
+  Settings2,
+  type LucideIcon,
+} from "lucide-react";
 import type {
   AgentUiMetadataView,
   ServeView,
@@ -31,16 +39,38 @@ const SECTIONS: Array<{
   id: SettingsSection;
   label: TranslationKey;
   description: TranslationKey;
+  icon: LucideIcon;
 }> = [
-  { id: "general", label: "settings.general", description: "settings.generalHint" },
+  {
+    id: "general",
+    label: "settings.general",
+    description: "settings.generalHint",
+    icon: Settings2,
+  },
   {
     id: "agent-visibility",
     label: "settings.agentVisibility",
     description: "settings.agentVisibilityHint",
+    icon: Bot,
   },
-  { id: "appearance", label: "settings.appearance", description: "settings.appearanceHint" },
-  { id: "language", label: "settings.language", description: "settings.languageHint" },
-  { id: "about", label: "settings.about", description: "settings.aboutHint" },
+  {
+    id: "appearance",
+    label: "settings.appearance",
+    description: "settings.appearanceHint",
+    icon: Palette,
+  },
+  {
+    id: "language",
+    label: "settings.language",
+    description: "settings.languageHint",
+    icon: Languages,
+  },
+  {
+    id: "about",
+    label: "settings.about",
+    description: "settings.aboutHint",
+    icon: Info,
+  },
 ];
 
 function VirtualKeyCard({ serve }: { serve: ServeView }) {
@@ -284,30 +314,36 @@ function SettingsHubContent({
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   return (
     <div className="page-stack settings-page">
-      <header className="overview-heading settings-heading">
-        <div>
-          <h1>{t("settings.title")}</h1>
-          <p>{t("settings.generalHint")}</p>
-        </div>
-      </header>
-      <nav className="settings-subnav" aria-label={t("settings.navLabel")}>
-        {SECTIONS.map((item) => (
-          <Button
-            key={item.id}
-            className="settings-subnav-item"
-            variant={section === item.id ? "secondary" : "ghost"}
-            type="button"
-            aria-current={section === item.id ? "page" : undefined}
-            onClick={() => setSection(item.id)}
-          >
-            <span>
-              <strong>{t(item.label)}</strong>
-              <small>{t(item.description)}</small>
-            </span>
-          </Button>
-        ))}
-      </nav>
-      <div className="settings-content">
+      <aside className="settings-sidebar">
+        <header className="overview-heading settings-heading">
+          <div>
+            <h1>{t("settings.title")}</h1>
+            <p>{t("settings.generalHint")}</p>
+          </div>
+        </header>
+        <nav className="settings-subnav" aria-label={t("settings.navLabel")}>
+          {SECTIONS.map((item) => {
+            const Icon = item.icon;
+            return (
+              <Button
+                key={item.id}
+                className="settings-subnav-item"
+                variant={section === item.id ? "secondary" : "ghost"}
+                type="button"
+                aria-current={section === item.id ? "page" : undefined}
+                onClick={() => setSection(item.id)}
+              >
+                <Icon className="settings-subnav-icon" aria-hidden="true" />
+                <span>
+                  <strong>{t(item.label)}</strong>
+                  <small>{t(item.description)}</small>
+                </span>
+              </Button>
+            );
+          })}
+        </nav>
+      </aside>
+      <main className="settings-content">
         {section === "general" && (
           <>
             <VirtualKeyCard serve={serve} />
@@ -330,7 +366,7 @@ function SettingsHubContent({
             onOpenFirstRunGuide={onOpenFirstRunGuide}
           />
         )}
-      </div>
+      </main>
     </div>
   );
 }
