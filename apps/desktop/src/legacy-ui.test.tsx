@@ -220,6 +220,7 @@ describe("legacy desktop read-only pages", () => {
     render(<Stats />);
     expect(await screen.findByText("1.2500")).toBeInTheDocument();
     expect(screen.getAllByText("openai").length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("button", { name: "筛选" }));
     await user.click(screen.getByRole("combobox", { name: "时间范围" }));
     await user.click(within(screen.getByRole("listbox")).getByRole("option", { name: "近 7 天" }));
     await user.click(screen.getByRole("combobox", { name: "供应商过滤" }));

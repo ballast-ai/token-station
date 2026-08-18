@@ -1085,9 +1085,10 @@ describe("desktop station navigation", () => {
     expect(screen.getByRole("heading", { name: "主页" })).toBeInTheDocument();
     expect(screen.getByText("全局路由")).toBeInTheDocument();
     const startupNavigation = within(screen.getByLabelText("主导航"));
-    for (const name of ["主页", "供应商", "用量", "设置"]) {
+    for (const name of ["主页", "供应商", "用量"]) {
       expect(startupNavigation.getByRole("button", { name })).toBeDisabled();
     }
+    expect(screen.getByRole("button", { name: "设置" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "切换颜色主题" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
     expect(screen.queryByRole("dialog", { name: "添加你的第一个供应商" })).toBeNull();
@@ -1109,13 +1110,15 @@ describe("desktop station navigation", () => {
     await act(async () => resolveScan([scannedClaude]));
 
     await continueFromOverview(user);
+    expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "不再提示" }));
+    await user.click(navigation().getByRole("button", { name: "主页" }));
     expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
     const nav = within(screen.getByLabelText("主导航"));
     expect(nav.getAllByRole("button").map((item) => item.getAttribute("aria-label"))).toEqual([
       "主页",
       "供应商",
       "用量",
-      "设置",
     ]);
     expect(screen.getByRole("button", { name: "全局路由" })).toHaveAttribute("aria-current", "page");
     const globalRouteButton = screen.getByRole("button", { name: "全局路由" });
@@ -1127,7 +1130,7 @@ describe("desktop station navigation", () => {
     expect(screen.getByText("代理运行中")).toBeInTheDocument();
     expect(screen.getByTestId("agent-runtime-connection")).toHaveTextContent("0 / 1 个已接管");
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
-    expect(await screen.findByRole("dialog", { name: "添加你的第一个供应商" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "添加你的第一个供应商" })).toBeNull();
   });
 
   it("serve 事件早于 get_state 返回时保留最新运行代次并只扫描一次", async () => {
@@ -1226,15 +1229,17 @@ describe("desktop station navigation", () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
   });
 
-  it("默认进入主页，顶栏只保留四个入口且 Logo 打开概览", async () => {
+  it("默认进入主页，主导航保留三个入口且右上角显示设置", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
     const nav = within(screen.getByLabelText("主导航"));
-    for (const name of ["主页", "供应商", "用量", "设置"]) {
+    for (const name of ["主页", "供应商", "用量"]) {
       expect(nav.getByRole("button", { name })).toBeInTheDocument();
     }
+    expect(nav.queryByRole("button", { name: "设置" })).toBeNull();
+    expect(screen.getByRole("button", { name: "设置" })).toHaveClass("station-settings-button");
     expect(nav.queryByRole("button", { name: "概览" })).toBeNull();
     expect(nav.queryByRole("button", { name: "路由" })).toBeNull();
     expect(nav.queryByRole("button", { name: "Agent" })).toBeNull();
@@ -1369,10 +1374,11 @@ describe("desktop station navigation", () => {
     expect(screen.queryByText("下一步处理")).toBeNull();
     expect(screen.queryByRole("button", { name: "管理供应商" })).toBeNull();
     expect(screen.queryByRole("button", { name: "重新扫描 Agent" })).toBeNull();
-    expect(screen.getByRole("button", { name: /启动代理.*127\.0\.0\.1:8787/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /启动代理.*127\.0\.0\.1:8787/ }))
+      .toHaveAttribute("data-variant", "outline");
   });
 
-  it("opens request logs as a secondary view inside Usage", async () => {
+  it("keeps Request logs in Settings and opens Usage management as a dedicated page", async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -1383,12 +1389,18 @@ describe("desktop station navigation", () => {
     expect(screen.queryByText("UPSTREAM CATALOG")).toBeNull();
     await user.click(navigation().getByRole("button", { name: "用量" }));
     expect(screen.queryByText("LOCAL RECEIPT LEDGER")).toBeNull();
-    const usageNavigation = await screen.findByRole("tablist", { name: "用量视图" });
-    await user.click(within(usageNavigation).getByRole("tab", { name: "请求日志" }));
+    expect(screen.queryByRole("tablist", { name: "用量视图" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "预算与定价" }));
+    expect(await screen.findByRole("heading", { name: "预算与定价管理" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /返回/ })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const settingsNavigation = screen.getByRole("navigation", { name: "设置分类" });
+    await user.click(within(settingsNavigation).getByRole("button", { name: /请求日志/ }));
     expect(await screen.findByRole("heading", { name: "请求日志", level: 1 })).toBeInTheDocument();
     expect(screen.queryByText("LOCAL RECEIPTS")).toBeNull();
     expect(await screen.findByText("当前筛选范围没有请求日志。")).toBeInTheDocument();
-    expect(navigation().getByRole("button", { name: "用量" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "设置" })).toHaveAttribute("aria-current", "page");
   });
 
   it("keeps the Agent list visible while editing the selected Agent on the right", async () => {
@@ -2219,6 +2231,10 @@ describe("desktop station navigation", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "主页" });
 
+    const primaryNavigation = navigation();
+    expect(primaryNavigation.queryByRole("button", { name: "设置" })).toBeNull();
+    expect(screen.getByRole("button", { name: "设置" })).toHaveClass("station-settings-button");
+
     await user.click(screen.getByRole("button", { name: "用量" }));
     expect(await screen.findByRole("heading", { name: "用量统计" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "设置" }));
@@ -2230,6 +2246,7 @@ describe("desktop station navigation", () => {
     expect(within(settingsNavigation).getByRole("button", { name: /Agent 显示/ })).toBeInTheDocument();
     expect(within(settingsNavigation).getByRole("button", { name: /外观/ })).toBeInTheDocument();
     expect(within(settingsNavigation).getByRole("button", { name: /语言/ })).toBeInTheDocument();
+    expect(within(settingsNavigation).getByRole("button", { name: /请求日志/ })).toBeInTheDocument();
     expect(within(settingsNavigation).getByRole("button", { name: /关于/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /返回/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /用量/ })).not.toBeNull();
@@ -2251,6 +2268,8 @@ describe("desktop station navigation", () => {
     expect(screen.getByRole("button", { name: "Save and apply" })).toBeInTheDocument();
     await user.click(navigation().getByRole("button", { name: "Providers" }));
     expect(await screen.findByRole("heading", { name: "Providers", level: 1 })).toBeInTheDocument();
+    expect(navigation().queryByRole("button", { name: "Add provider" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Add provider" })).toBeInTheDocument();
     expect(screen.queryByText("主页路由")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Usage" }));
@@ -2282,11 +2301,14 @@ describe("desktop station navigation", () => {
     expect(screen.getByRole("heading", { name: "Interface language" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /English/ })).toHaveAttribute("aria-checked", "true");
 
-    await user.click(screen.getByRole("radio", { name: /简体中文/ }));
+    await user.click(screen.getByRole("radio", { name: /Simplified Chinese/ }));
 
     expect(screen.getByRole("heading", { name: "设置", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /简体中文/ })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: /Simplified Chinese/ })).toHaveAttribute("aria-checked", "true");
+    const languagePanel = document.querySelector(".language-panel");
+    expect(languagePanel).not.toBeNull();
+    expect(languagePanel?.textContent).not.toMatch(/[\u3400-\u9fff]/u);
     await user.click(screen.getByRole("button", { name: /Agent 显示/ }));
     expect(await screen.findByRole("heading", { name: "Agent 显示" })).toBeInTheDocument();
     expect(screen.getByText(
@@ -2585,7 +2607,8 @@ describe("desktop station navigation", () => {
       throw new Error(`unexpected IPC command: ${command}`);
     });
     render(<App />);
-    await openAgent(user, "OpenCode");
+    await openAgents(user);
+    await user.click(navigation().getByRole("button", { name: "供应商" }));
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "添加供应商" })).toBeNull();
@@ -2594,7 +2617,7 @@ describe("desktop station navigation", () => {
     expect(screen.getByRole("button", { name: "添加供应商" })).toBeInTheDocument();
     await user.type(screen.getByLabelText("API Key"), "secret-test");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
-    expect(await screen.findByRole("heading", { name: "OpenCode" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
     expect(within(screen.getByTestId("error-toast-viewport")).getByText("供应商已添加"))
       .toBeInTheDocument();
   }, 15_000);
@@ -2635,7 +2658,8 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
-    await user.click(await screen.findByRole("button", { name: "添加供应商" }));
+    await user.click((await screen.findByRole("navigation", { name: "主导航" })).querySelector<HTMLButtonElement>('button[aria-label="供应商"]')!);
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
     expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /常规 API/ })).toHaveAttribute("aria-pressed", "true");
 

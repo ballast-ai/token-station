@@ -4,6 +4,7 @@ import {
   Info,
   Languages,
   Palette,
+  ScrollText,
   Settings2,
   type LucideIcon,
 } from "lucide-react";
@@ -28,18 +29,24 @@ import { useErrorToast } from "../components/ErrorToast";
 import { useContentTransition } from "../components/useContentTransition";
 import About from "./About";
 import Settings from "./Settings";
+import RequestLogsPage from "./RequestLogsPage";
 
 type SettingsSection =
   | "general"
   | "agent-visibility"
   | "appearance"
   | "language"
+  | "request-logs"
   | "about";
 
 const SECTIONS: Array<{
   id: SettingsSection;
   label: TranslationKey;
   description: TranslationKey;
+  englishLabel?: string;
+  chineseLabel?: string;
+  englishDescription?: string;
+  chineseDescription?: string;
   icon: LucideIcon;
 }> = [
   {
@@ -65,6 +72,16 @@ const SECTIONS: Array<{
     label: "settings.language",
     description: "settings.languageHint",
     icon: Languages,
+  },
+  {
+    id: "request-logs",
+    label: "settings.general",
+    description: "settings.generalHint",
+    englishLabel: "Request logs",
+    chineseLabel: "请求日志",
+    englishDescription: "Routing outcomes and local receipts",
+    chineseDescription: "路由结果与本地回执",
+    icon: ScrollText,
   },
   {
     id: "about",
@@ -253,21 +270,21 @@ const LANGUAGE_OPTIONS: Array<{
   value: Language;
   label: string;
   mark: string;
-  hint: TranslationKey;
+  hint: string;
 }> = [
-  { value: "en", label: "English", mark: "EN", hint: "language.enHint" },
-  { value: "zh-CN", label: "简体中文", mark: "简", hint: "language.zhCNHint" },
+  { value: "en", label: "English", mark: "EN", hint: "Use the English interface" },
+  { value: "zh-CN", label: "Simplified Chinese", mark: "ZH", hint: "Use the Simplified Chinese interface" },
 ];
 
 function LanguagePanel() {
-  const { language, setLanguage, t } = useLanguage();
+  const { language, setLanguage } = useLanguage();
   return (
     <Card className="settings-card language-panel">
       <CardHeader className="panel-head">
-        <CardTitle><h2>{t("language.title")}</h2></CardTitle>
-        <p className="sub">{t("language.description")}</p>
+        <CardTitle><h2>Interface language</h2></CardTitle>
+        <p className="sub">Changes apply immediately. Restart is not required.</p>
       </CardHeader>
-      <CardContent className="language-options" role="radiogroup" aria-label={t("language.groupLabel")}>
+      <CardContent className="language-options" role="radiogroup" aria-label="Interface language">
         {LANGUAGE_OPTIONS.map((option) => (
           <Button
             key={option.value}
@@ -281,7 +298,7 @@ function LanguagePanel() {
             <span className="language-mark" aria-hidden="true">{option.mark}</span>
             <span>
               <strong>{option.label}</strong>
-              <small>{t(option.hint)}</small>
+              <small>{option.hint}</small>
             </span>
             <i className="language-selected-dot" aria-hidden="true" />
           </Button>
@@ -299,6 +316,7 @@ interface SettingsHubProps {
   onAgentVisibilityChange: (agentId: string, visible: boolean) => void;
   onOpenFirstRunGuide: () => void;
   onSaved: (state: StateView) => void;
+  initialSection?: SettingsSection;
 }
 
 function SettingsHubContent({
@@ -309,11 +327,13 @@ function SettingsHubContent({
   onAgentVisibilityChange,
   onOpenFirstRunGuide,
   onSaved,
+  initialSection = "general",
 }: SettingsHubProps) {
-  const [section, setSection] = useState<SettingsSection>("general");
-  const { t } = useLanguage();
+  const [section, setSection] = useState<SettingsSection>(initialSection);
+  const { t, copy } = useLanguage();
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   const contentRef = useContentTransition<HTMLElement>(section);
+  useEffect(() => setSection(initialSection), [initialSection]);
   return (
     <div className="page-stack settings-page">
       <aside className="settings-sidebar">
@@ -337,8 +357,8 @@ function SettingsHubContent({
               >
                 <Icon className="settings-subnav-icon" aria-hidden="true" />
                 <span>
-                  <strong>{t(item.label)}</strong>
-                  <small>{t(item.description)}</small>
+                  <strong>{item.englishLabel ? copy(item.englishLabel, item.chineseLabel ?? item.englishLabel) : t(item.label)}</strong>
+                  <small>{item.englishDescription ? copy(item.englishDescription, item.chineseDescription ?? item.englishDescription) : t(item.description)}</small>
                 </span>
               </Button>
             );
@@ -361,6 +381,20 @@ function SettingsHubContent({
         )}
         {section === "appearance" && <AppearancePanel />}
         {section === "language" && <LanguagePanel />}
+        {section === "request-logs" && (
+          <section className="settings-request-logs">
+            <header className="overview-heading">
+              <div>
+                <h1>{copy("Request logs", "请求日志")}</h1>
+                <p>{copy(
+                  "Inspect routing outcomes, failures, and locally retained plaintext bodies.",
+                  "查看路由结果、失败原因和本地保留的明文正文。",
+                )}</p>
+              </div>
+            </header>
+            <RequestLogsPage embedded />
+          </section>
+        )}
         {section === "about" && (
           <About
             desktopVersion={settings.desktop_version ?? settings.version}

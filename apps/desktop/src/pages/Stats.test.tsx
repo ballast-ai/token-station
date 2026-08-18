@@ -10,6 +10,7 @@ import {
   setAgentBudget,
 } from "../api";
 import Stats, { formatBudgetAmount } from "./Stats";
+import BudgetPricingPage from "./BudgetPricingPage";
 import { ErrorToastProvider } from "../components/ErrorToast";
 
 vi.mock("../components/PricingEditor", () => ({ default: () => null }));
@@ -136,7 +137,13 @@ describe("usage dashboard and display-only Agent budgets", () => {
   it("applies Agent, upstream, and model filters to the whole dashboard", async () => {
     const user = userEvent.setup();
     render(<Stats />);
+    await screen.findByText(/Codex 已使用 85\.0%/);
+    expect(screen.queryByRole("combobox", { name: "Agent 过滤" })).toBeNull();
+    const filters = screen.getByRole("button", { name: "筛选" });
+    expect(filters).toHaveAttribute("aria-expanded", "false");
+    await user.click(filters);
     expect(await screen.findByRole("combobox", { name: "Agent 过滤" })).toBeInTheDocument();
+    expect(filters).toHaveAttribute("aria-expanded", "true");
 
     await user.click(screen.getByRole("combobox", { name: "Agent 过滤" }));
     await user.click(within(screen.getByRole("listbox")).getByRole("option", { name: "Codex" }));
@@ -153,6 +160,11 @@ describe("usage dashboard and display-only Agent budgets", () => {
       "openai",
       "gpt-5",
     ));
+
+    await user.click(filters);
+    expect(screen.queryByRole("combobox", { name: "模型过滤" })).toBeNull();
+    await user.click(filters);
+    expect(screen.getByRole("combobox", { name: "模型过滤" })).toHaveAttribute("title", "gpt-5");
   });
 
   it("keeps cache and reasoning as subsets instead of double-counting total tokens", async () => {
@@ -180,6 +192,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
 
   it("does not overlap automatic dashboard refreshes", async () => {
     render(<Stats />);
+    fireEvent.click(await screen.findByRole("button", { name: "筛选" }));
     await screen.findByRole("combobox", { name: "自动刷新" });
 
     vi.useFakeTimers();
@@ -207,6 +220,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
   it("commits a slow refresh result before running one coalesced follow-up", async () => {
     const { unmount } = render(<Stats />);
     await screen.findByText("1,500");
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
 
     vi.useFakeTimers();
     try {
@@ -250,6 +264,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
   it("keeps a failed request batch in flight until every sibling settles", async () => {
     render(<ErrorToastProvider><Stats /></ErrorToastProvider>);
     await screen.findByText("1,500");
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
 
     const siblings = Array.from(
       { length: 3 },
@@ -283,6 +298,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
   it("does not start a queued refresh after the page unmounts", async () => {
     const { unmount } = render(<Stats />);
     await screen.findByText("1,500");
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
 
     vi.useFakeTimers();
     try {
@@ -341,7 +357,7 @@ describe("usage dashboard and display-only Agent budgets", () => {
     expect(await screen.findByText(/Codex 已使用 85\.0%/)).toBeInTheDocument();
     expect(screen.getByText(/仅提醒，不影响路由/)).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Future Agent" })).not.toBeInTheDocument();
-    expect(screen.getAllByRole("option", { name: "Codex" })).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "筛选" }));
     await user.click(screen.getByRole("combobox", { name: "Agent 过滤" }));
     expect(within(screen.getByRole("listbox")).getByRole("option", { name: "Codex" })).toBeInTheDocument();
     expect(within(screen.getByRole("listbox")).queryByRole("option", { name: "Future Agent" })).not.toBeInTheDocument();
@@ -366,8 +382,8 @@ describe("usage dashboard and display-only Agent budgets", () => {
 
   it("persists and removes a per-Agent budget through exact named fields", async () => {
     const user = userEvent.setup();
-    render(<ErrorToastProvider><Stats /></ErrorToastProvider>);
-    await screen.findByText(/Codex 已使用 85\.0%/);
+    render(<ErrorToastProvider><BudgetPricingPage onBack={vi.fn()} /></ErrorToastProvider>);
+    await screen.findByRole("heading", { name: "Agent 预算预警" });
 
     const limit = screen.getByRole("spinbutton", { name: "预算上限" });
     await user.clear(limit);
@@ -397,8 +413,8 @@ describe("usage dashboard and display-only Agent budgets", () => {
   it("把预算保存请求失败放到全局错误弹窗", async () => {
     vi.mocked(setAgentBudget).mockRejectedValue(new Error("budget write failed"));
     const user = userEvent.setup();
-    render(<ErrorToastProvider><Stats /></ErrorToastProvider>);
-    await screen.findByText(/Codex 已使用 85\.0%/);
+    render(<ErrorToastProvider><BudgetPricingPage onBack={vi.fn()} /></ErrorToastProvider>);
+    await screen.findByRole("heading", { name: "Agent 预算预警" });
 
     await user.click(screen.getByRole("button", { name: "保存预算" }));
 

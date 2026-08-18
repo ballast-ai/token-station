@@ -7,16 +7,14 @@ import {
   getAgentBudgets,
   getStats,
   listAgentRegistry,
-  removeAgentBudget,
-  setAgentBudget,
 } from "../api";
-import PricingEditor from "../components/PricingEditor";
 import PageBackButton from "../components/PageBackButton";
 import CompactCombobox from "../components/CompactCombobox";
 import UsageTrendChart, { type UsageTrendRange } from "../components/UsageTrendChart";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { humanizeAppError } from "../errors";
 import { useErrorToast } from "../components/ErrorToast";
+import { SlidersHorizontal } from "lucide-react";
 
 export function formatBudgetAmount(micros: number): string {
   if (micros === 0) return "0.00";
@@ -66,13 +64,6 @@ function cacheRate(aggregate: AggView): string {
 function latency(ms: number): string {
   if (ms >= 1000) return `${(ms / 1000).toFixed(ms >= 10_000 ? 0 : 1)}s`;
   return `${ms}ms`;
-}
-
-function localDateTime(ms: number | null): string {
-  if (ms == null) return "";
-  const date = new Date(ms);
-  const shifted = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
-  return shifted.toISOString().slice(0, 16);
 }
 
 function budgetWarning(
@@ -163,7 +154,7 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
 
 export default function Stats({ onBack, embedded = false }: { onBack?: () => void; embedded?: boolean }) {
   const { language, copy } = useLocalizedCopy();
-  const { showError, showSuccess } = useErrorToast();
+  const { showError } = useErrorToast();
   const sinceOptions = [
     { value: "24h", label: copy("Last 24 hours", "近 24 小时") },
     { value: "7d", label: copy("Last 7 days", "近 7 天") },
@@ -182,6 +173,7 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
   const [upstreamFilter, setUpstreamFilter] = useState("");
   const [modelFilter, setModelFilter] = useState("");
   const [refreshInterval, setRefreshInterval] = useState(0);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [data, setData] = useState<StatsView | null>(null);
   const [trend, setTrend] = useState<StatsView | null>(null);
   const [upstreams, setUpstreams] = useState<string[]>([]);
@@ -198,22 +190,6 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
 
   const [agents, setAgents] = useState<AgentUiMetadataView[]>([]);
   const [budgets, setBudgets] = useState<BudgetStatus[]>([]);
-  const [budgetErr, setBudgetErr] = useState("");
-  const [agentId, setAgentId] = useState("");
-  const [limit, setLimit] = useState("10");
-  const [warningPercent, setWarningPercent] = useState("80");
-  const [periodStart, setPeriodStart] = useState("");
-  const [periodEnd, setPeriodEnd] = useState("");
-  const [expiryWarningDays, setExpiryWarningDays] = useState("7");
-
-  const loadForm = useCallback((selected: string, statuses: BudgetStatus[]) => {
-    const status = statuses.find((candidate) => candidate.agent_id === selected);
-    setLimit(status ? String(status.limit_micros / 1_000_000) : "10");
-    setWarningPercent(status ? String(status.warning_percent) : "80");
-    setPeriodStart(status ? localDateTime(status.period_start_ms) : "");
-    setPeriodEnd(status ? localDateTime(status.period_end_ms) : "");
-    setExpiryWarningDays(status ? String(status.expiry_warning_days) : "7");
-  }, []);
 
   useEffect(() => {
     dashboardMounted.current = true;
@@ -230,12 +206,9 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
         const supported = registry.filter((agent) => agent.admission === "supported");
         setAgents(supported);
         setBudgets(statuses);
-        const selected = supported[0]?.agent_id ?? "";
-        setAgentId(selected);
-        loadForm(selected, statuses);
       })
-      .catch((error) => setBudgetErr(humanizeAppError(error)));
-  }, [loadForm]);
+      .catch((error) => showError(humanizeAppError(error), "usage-budget-status"));
+  }, [showError]);
 
   const loadDashboard = useCallback(async (background = false) => {
     const requestKey = JSON.stringify([
@@ -319,67 +292,6 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
     return () => window.clearInterval(timer);
   }, [loadDashboard, refreshInterval]);
 
-  const saveBudget = async () => {
-    setBudgetErr("");
-    const limitValue = Number(limit);
-    const limitMicros = Math.round(limitValue * 1_000_000);
-    const warning = Number(warningPercent);
-    const expiryDays = Number(expiryWarningDays);
-    const startMs = periodStart ? new Date(periodStart).getTime() : null;
-    const endMs = periodEnd ? new Date(periodEnd).getTime() : null;
-    if (!agentId
-        || !/^\d+(?:\.\d{1,6})?$/.test(limit)
-        || !Number.isFinite(limitValue)
-        || limitValue > 9_000_000_000
-        || !Number.isSafeInteger(limitMicros)
-        || limitMicros <= 0) {
-      setBudgetErr(copy(
-        "Budget limit must be greater than 0, no more than 9 billion, and use at most 6 decimal places.",
-        "预算上限必须是大于 0、不超过 90 亿且最多 6 位小数的金额。",
-      ));
-      return;
-    }
-    if (!Number.isInteger(warning) || warning < 1 || warning > 100) {
-      setBudgetErr(copy("Warning threshold must be an integer from 1 to 100.", "预警阈值必须是 1–100 的整数。"));
-      return;
-    }
-    if (!Number.isInteger(expiryDays) || expiryDays < 0 || expiryDays > 365) {
-      setBudgetErr(copy("Expiry warning days must be an integer from 0 to 365.", "到期预警天数必须是 0–365 的整数。"));
-      return;
-    }
-    if ((startMs != null && !Number.isFinite(startMs)) || (endMs != null && !Number.isFinite(endMs))) {
-      setBudgetErr(copy("Budget period date is invalid.", "预算周期时间无效。"));
-      return;
-    }
-    if (startMs != null && endMs != null && startMs >= endMs) {
-      setBudgetErr(copy("Budget period end must be later than its start.", "预算周期结束时间必须晚于开始时间。"));
-      return;
-    }
-    try {
-      const statuses = await setAgentBudget(agentId, limitMicros, warning, startMs, endMs, expiryDays);
-      setBudgets(statuses);
-      loadForm(agentId, statuses);
-      showSuccess(
-        copy("Budget saved · Alerts only", "预算已保存 · 仅用于展示与预警"),
-        `agent-budget-save:${agentId}`,
-      );
-    } catch (error) {
-      showError(humanizeAppError(error), `agent-budget-save:${agentId}`);
-    }
-  };
-
-  const deleteBudget = async () => {
-    setBudgetErr("");
-    try {
-      const statuses = await removeAgentBudget(agentId);
-      setBudgets(statuses);
-      loadForm(agentId, statuses);
-      showSuccess(copy("Budget deleted", "预算已删除"), `agent-budget-remove:${agentId}`);
-    } catch (error) {
-      showError(humanizeAppError(error), `agent-budget-remove:${agentId}`);
-    }
-  };
-
   const aggregate = data?.total ?? EMPTY_AGG;
   const totalTokens = aggregate.input_tokens + aggregate.output_tokens;
   const hasFilters = Boolean(agentFilter || upstreamFilter || modelFilter);
@@ -388,7 +300,6 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
   const selectedBudgets = agentFilter
     ? budgets.filter((budget) => budget.agent_id === agentFilter)
     : budgets;
-  const hasSelectedBudget = budgets.some((budget) => budget.agent_id === agentId);
   const groupLabel = groups.find((group) => group.value === activeGroup)?.label
     ?? copy("Details", "明细");
   const visibleUpstreams = useMemo(() => upstreams, [upstreams]);
@@ -407,7 +318,28 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
         </div>
       </header>}
 
-      <div className="usage-toolbar" aria-label={copy("Usage filters", "用量筛选")}>
+      <div className="usage-filter-disclosure">
+        <button
+          className="usage-filter-toggle"
+          type="button"
+          aria-label={copy("Filters", "筛选")}
+          aria-expanded={filtersOpen}
+          aria-controls="usage-filter-panel"
+          onClick={() => setFiltersOpen((current) => !current)}
+        >
+          <SlidersHorizontal aria-hidden="true" />
+          <strong>{copy("Filters", "筛选")}</strong>
+          <span aria-hidden="true">{sinceOptions.find((range) => range.value === since)?.label}</span>
+          {hasFilters && <em aria-hidden="true">{[agentFilter, upstreamFilter, modelFilter].filter(Boolean).length}</em>}
+        </button>
+        {hasFilters && (
+          <button className="usage-clear-filters" type="button" onClick={() => { setAgentFilter(""); setUpstreamFilter(""); setModelFilter(""); }}>
+            {copy("Clear filters", "清除筛选")}
+          </button>
+        )}
+      </div>
+
+      {filtersOpen && <div id="usage-filter-panel" className="usage-toolbar" aria-label={copy("Usage filters", "用量筛选")}>
         <div className="usage-filter-field">
           <span>Agent</span>
           <CompactCombobox
@@ -484,7 +416,7 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
             onChange={setSince}
           />
         </div>
-      </div>
+      </div>}
 
       {err && <div className="banner err usage-error">{err}</div>}
 
@@ -632,61 +564,6 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
         </section>
       )}
 
-      <details className="usage-management">
-        <summary>
-          <span aria-hidden="true">＋</span>
-          <div><strong>{copy("Budget and pricing", "预算与定价管理")}</strong><small>{copy(
-            "Configure budget alerts and versioned model prices",
-            "配置展示型预算预警和版本化模型价格",
-          )}</small></div>
-          <em>{copy("Management", "管理与口径")}</em>
-        </summary>
-        <div className="usage-management-body">
-          <section className="budget-section">
-            <div className="budget-title-row">
-              <div><h3>{copy("Agent budget alerts", "Agent 预算预警")}</h3><p>{copy(
-                "Calculated from stored receipt prices. Unknown prices are reported separately.",
-                "按已落库 Receipt 的历史价格统计；未知价格单独提示。",
-              )}</p></div>
-              <span className="budget-observe-badge">{copy("ALERTS ONLY · ROUTING UNCHANGED", "仅提醒 · 不影响路由")}</span>
-            </div>
-            <div className="budget-form">
-              <label className="field-label">Agent
-                <select aria-label="Agent" className="select" value={agentId} onChange={(event) => { setAgentId(event.target.value); loadForm(event.target.value, budgets); }}>
-                  {agents.map((agent) => <option key={agent.agent_id} value={agent.agent_id}>{agent.display_name}</option>)}
-                </select>
-              </label>
-              <label className="field-label">{copy("Budget limit", "预算上限")}
-                <input aria-label={copy("Budget limit", "预算上限")} className="input" type="number" min="0.000001" step="0.000001" value={limit} onChange={(event) => setLimit(event.target.value)} />
-              </label>
-              <label className="field-label">{copy("Warning threshold (%)", "预警阈值 (%)")}
-                <input aria-label={copy("Warning threshold", "预警阈值")} className="input" type="number" min="1" max="100" step="1" value={warningPercent} onChange={(event) => setWarningPercent(event.target.value)} />
-              </label>
-              <label className="field-label">{copy("Period start (optional)", "周期开始（可选）")}
-                <input aria-label={copy("Period start", "周期开始")} className="input" type="datetime-local" value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} />
-              </label>
-              <label className="field-label">{copy("Period end (optional)", "周期结束（可选）")}
-                <input aria-label={copy("Period end", "周期结束")} className="input" type="datetime-local" value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} />
-              </label>
-              <label className="field-label">{copy("Expiry warning (days)", "到期前预警（天）")}
-                <input aria-label={copy("Expiry warning", "到期前预警")} className="input" type="number" min="0" max="365" step="1" value={expiryWarningDays} onChange={(event) => setExpiryWarningDays(event.target.value)} />
-              </label>
-              <div className="budget-actions">
-                <button className="btn primary" disabled={!agentId} onClick={saveBudget}>{copy("Save budget", "保存预算")}</button>
-                <button className="btn danger" disabled={!hasSelectedBudget} onClick={deleteBudget}>{copy("Delete budget", "删除预算")}</button>
-              </div>
-            </div>
-            {budgetErr && <div className="banner err">{budgetErr}</div>}
-          </section>
-          <PricingEditor />
-        </div>
-      </details>
-
-      {hasFilters && (
-        <button className="usage-clear-filters" type="button" onClick={() => { setAgentFilter(""); setUpstreamFilter(""); setModelFilter(""); }}>
-          {copy("Clear all filters", "清除全部筛选")}
-        </button>
-      )}
     </section>
   );
 }

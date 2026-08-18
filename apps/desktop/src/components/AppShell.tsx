@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Activity, Plus } from "lucide-react";
+import { Activity, Settings } from "lucide-react";
 import type { AgentUiMetadataView, AgentView, ServeView } from "../api";
 import { useLanguage } from "./LanguageProvider";
 import TokenStationMark from "./TokenStationMark";
@@ -13,6 +13,7 @@ export type AppView =
   | "providers"
   | "usage"
   | "logs"
+  | "usage-management"
   | "quota-usage"
   | "settings"
   | "add-provider"
@@ -35,13 +36,12 @@ const PRIMARY_NAV: Array<{ view: AppView; en: string; zh: string }> = [
   { view: "home", en: "Home", zh: "主页" },
   { view: "providers", en: "Providers", zh: "供应商" },
   { view: "usage", en: "Usage", zh: "用量" },
-  { view: "settings", en: "Settings", zh: "设置" },
 ];
 
 function primaryView(view: AppView): AppView {
   if (view.startsWith("agent:") || view === "agents") return "home";
-  if (view === "logs") return "usage";
-  if (view === "quota-usage") return "usage";
+  if (view === "logs" || view === "settings") return "settings";
+  if (view === "quota-usage" || view === "usage-management") return "usage";
   if (view === "add-provider" || view.startsWith("free-provider:")) return "providers";
   return view;
 }
@@ -61,7 +61,6 @@ export default function AppShell({
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   const taskRunning = serve.app_runtime === "running";
   const activePrimary = primaryView(view);
-  const needsBack = view === "add-provider" || view === "quota-usage" || view.startsWith("free-provider:");
   const serveLabel =
     taskRunning && !serve.listener_reachable
       ? t("serve.unknown")
@@ -128,7 +127,7 @@ export default function AppShell({
         <div className="station-header-actions">
           <Button
             className={`station-runtime-pill ${runtimeHealthy ? "healthy" : ""}`}
-            variant={runtimeHealthy ? "secondary" : "default"}
+            variant="outline"
             size="lg"
             type="button"
             disabled={commandBusy || serve.phase === "stopping"}
@@ -140,21 +139,20 @@ export default function AppShell({
             <span className="station-runtime-copy"><strong>{serveLabel}</strong><small>{serve.listen}</small></span>
             {serve.running_revision != null && <code>rev {serve.running_revision}</code>}
           </Button>
-          {!needsBack && (
-            <Button
-              className="station-add-provider-button"
-              data-onboarding-target="add-provider"
-              variant="default"
-              size="icon-lg"
-              type="button"
-              disabled={commandBusy}
-              aria-label={t("nav.addProvider")}
-              title={t("nav.addProvider")}
-              onClick={() => onNavigate("add-provider")}
-            >
-              <Plus aria-hidden="true" />
-            </Button>
-          )}
+          <Button
+            className="station-settings-button"
+            data-onboarding-target="settings"
+            variant="ghost"
+            size="icon-lg"
+            type="button"
+            disabled={commandBusy}
+            aria-current={activePrimary === "settings" ? "page" : undefined}
+            aria-label={t("nav.settings")}
+            title={t("nav.settings")}
+            onClick={() => onNavigate("settings")}
+          >
+            <Settings aria-hidden="true" />
+          </Button>
         </div>
       </header>
 

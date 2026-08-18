@@ -71,6 +71,7 @@ import ProvidersPage from "./pages/ProvidersPage";
 import QuotaUsagePage from "./pages/QuotaUsagePage";
 import SettingsHub from "./pages/SettingsHub";
 import UsageWorkspace from "./pages/UsageWorkspace";
+import BudgetPricingPage from "./pages/BudgetPricingPage";
 import "./App.css";
 import { humanizeAppError } from "./errors";
 import { resolveStatusMenuNavigation } from "./statusMenuNavigation";
@@ -745,8 +746,10 @@ function StationApp() {
     if (next === view) return;
     if (
       next === "usage" ||
+      next === "usage-management" ||
       next === "quota-usage" ||
       next === "settings" ||
+      next === "logs" ||
       next === "add-provider"
     ) {
       viewHistoryRef.current.push(view);
@@ -1051,19 +1054,20 @@ function StationApp() {
             copy("Provider restored from the recycle bin", "供应商已从回收站恢复"),
           )}
           onStateChange={showState}
+          onAddProvider={() => navigate("add-provider")}
         />
       )}
 
-      {(view === "usage" || view === "logs") && (
-        <UsageWorkspace
-          section={view === "logs" ? "logs" : "overview"}
-          onSectionChange={(section) => navigate(section === "logs" ? "logs" : "usage")}
-        />
+      {view === "usage" && (
+        <UsageWorkspace onOpenManagement={() => navigate("usage-management")} />
+      )}
+      {view === "usage-management" && (
+        <BudgetPricingPage onBack={navigateBack} />
       )}
       {view === "quota-usage" && (
         <QuotaUsagePage providers={state.providers} onBack={navigateBack} />
       )}
-      {view === "settings" && (
+      {(view === "settings" || view === "logs") && (
         <SettingsHub
           settings={state.settings}
           serve={state.serve}
@@ -1078,6 +1082,7 @@ function StationApp() {
             setFirstRunGuideOpen(true);
           }}
           onSaved={showState}
+          initialSection={view === "logs" ? "request-logs" : "general"}
         />
       )}
       {view === "add-provider" && (
@@ -1176,7 +1181,7 @@ function StationApp() {
         onTargetAction={() => {
           if (activeFirstRunMicroStep === "overview") {
             viewHistoryRef.current = [];
-            setView("home");
+            setView(recommendedFirstRunStep === "provider" ? "providers" : "home");
             setFirstRunSetupStep(null);
             setFirstRunMicroStep(null);
           } else if (activeFirstRunMicroStep === "provider-entry") {
