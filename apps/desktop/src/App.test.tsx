@@ -1031,7 +1031,7 @@ describe("desktop station navigation", () => {
     for (const name of ["主页", "供应商", "用量", "设置"]) {
       expect(startupNavigation.getByRole("button", { name })).toBeDisabled();
     }
-    expect(screen.getByRole("button", { name: "切换颜色主题" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "切换颜色主题" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
     expect(screen.queryByRole("dialog", { name: "添加你的第一个供应商" })).toBeNull();
     expect(screen.queryByTestId("agent-runtime-connection")).toBeNull();

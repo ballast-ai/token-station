@@ -5354,8 +5354,10 @@ pre.block {
 }
 
 .station-brand-top {
+  height: 40px;
   min-width: max-content;
   display: inline-flex;
+  align-self: center;
   align-items: center;
   gap: 10px;
   padding: 0;
@@ -5451,21 +5453,61 @@ pre.block {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 7px;
+}
+
+.station-add-provider-button[data-slot="button"] {
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  color: #fff;
+  background: var(--signal);
+  box-shadow:
+    0 5px 12px color-mix(in srgb, var(--signal) 25%, transparent),
+    0 1px 3px rgb(28 39 102 / 12%);
+}
+
+.station-add-provider-button[data-slot="button"]:hover {
+  background: color-mix(in srgb, var(--signal) 88%, #fff);
+  box-shadow:
+    0 7px 15px color-mix(in srgb, var(--signal) 32%, transparent),
+    0 2px 5px rgb(28 39 102 / 14%);
+  transform: translateY(-1px);
+}
+
+.station-add-provider-button[data-slot="button"]:active {
+  background: color-mix(in srgb, var(--signal) 86%, #000);
+  box-shadow: 0 5px 12px color-mix(in srgb, var(--signal) 28%, transparent);
+  transform: translateY(1px);
+}
+
+.station-add-provider-button[data-slot="button"]:focus-visible {
+  border-color: transparent;
+  box-shadow:
+    0 0 0 3px var(--surface),
+    0 0 0 5px color-mix(in srgb, var(--signal) 70%, transparent),
+    0 5px 12px color-mix(in srgb, var(--signal) 25%, transparent);
+}
+
+.station-add-provider-button[data-slot="button"] svg {
+  width: 20px !important;
+  height: 20px !important;
+  stroke-width: 2;
 }
 
 .station-runtime-pill[data-slot="button"] {
-  height: 38px;
-  max-width: 205px;
+  height: 34px;
+  max-width: 190px;
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 0 10px;
+  padding: 0 9px;
   overflow: hidden;
   border-radius: 8px;
   font-size: 12px;
   white-space: nowrap;
-  box-shadow: 0 3px 10px color-mix(in srgb, var(--signal) 14%, transparent);
+  box-shadow: 0 2px 7px color-mix(in srgb, var(--signal) 12%, transparent);
 }
 
 .station-runtime-pill[data-slot="button"].healthy {
@@ -5476,8 +5518,8 @@ pre.block {
 }
 
 .station-runtime-pill svg {
-  width: 16px !important;
-  height: 16px !important;
+  width: 14px !important;
+  height: 14px !important;
   flex: 0 0 auto;
 }
 

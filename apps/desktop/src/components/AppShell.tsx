@@ -1,9 +1,8 @@
 import type { ReactNode } from "react";
-import { Activity, Moon, Plus, Sun } from "lucide-react";
+import { Activity, Plus } from "lucide-react";
 import type { AgentUiMetadataView, AgentView, ServeView } from "../api";
 import { useLanguage } from "./LanguageProvider";
 import TokenStationMark from "./TokenStationMark";
-import { useTheme } from "./ThemeProvider";
 import { Button } from "./ui/button";
 
 export type AppView =
@@ -58,7 +57,6 @@ export default function AppShell({
   children,
 }: AppShellProps) {
   const { t, copy } = useLanguage();
-  const { resolvedTheme, setTheme } = useTheme();
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   const taskRunning = serve.app_runtime === "running";
   const activePrimary = primaryView(view);
@@ -140,19 +138,19 @@ export default function AppShell({
             <span className="station-runtime-copy"><strong>{serveLabel}</strong><small>{serve.listen}</small></span>
             {serve.running_revision != null && <code>rev {serve.running_revision}</code>}
           </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            type="button"
-            aria-label={copy("Toggle color theme", "切换颜色主题")}
-            title={copy("Toggle color theme", "切换颜色主题")}
-            onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
-          >
-            {resolvedTheme === "dark" ? <Sun /> : <Moon />}
-          </Button>
           {!needsBack && (
-            <Button data-onboarding-target="add-provider" variant="outline" size="sm" type="button" disabled={commandBusy} onClick={() => onNavigate("add-provider")}>
-              <Plus />{t("nav.addProvider")}
+            <Button
+              className="station-add-provider-button"
+              data-onboarding-target="add-provider"
+              variant="default"
+              size="icon-lg"
+              type="button"
+              disabled={commandBusy}
+              aria-label={t("nav.addProvider")}
+              title={t("nav.addProvider")}
+              onClick={() => onNavigate("add-provider")}
+            >
+              <Plus aria-hidden="true" />
             </Button>
           )}
         </div>
