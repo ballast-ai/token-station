@@ -1,0 +1,17 @@
+{
+  "name": "marker-agent",
+  "version": "1.0.0",
+  "kind": "agent-adapter",
+  "api_version": "agent-adapter-v1",
+  "agent_protocols": ["marker-test"],
+  "capabilities": ["chat", "stream"],
+  "permissions": {
+    "network": false,
+    "filesystem": false,
+    "secrets": []
+  },
+  "conformance": {
+    "required_suite": "agent-protocol-v1",
+    "fixtures": "fixtures/"
+  }
+}

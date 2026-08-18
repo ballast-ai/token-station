@@ -62,10 +62,12 @@ use crate::config::{
 use crate::secrets::SecretStore;
 use crate::south_provider_call::{
     CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1, IneligibleV1,
-    PrepareProviderCallErrorV1, ProviderPackageEligibilityV1, RequestBodyModeV1,
-    ResponseMetadataEligibilityV1, RolloutEligibilityV1, StableProviderCallFailureV1,
+    PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1, PreparedProviderStreamResultV1,
+    ProviderPackageEligibilityV1, RequestBodyModeV1, ResponseMetadataEligibilityV1,
+    RolloutEligibilityV1, StableProviderCallFailureV1, build_direct_reqwest_streaming_transport_v1,
     build_direct_reqwest_transport_v1, execute_prepared_provider_call_v1, map_failure_v1,
-    prepare_provider_call_v1,
+    map_stream_read_failure_v1, open_prepared_provider_stream_v1, prepare_provider_call_v1,
+    prepare_provider_stream_v1, project_open_stream_head_v1,
 };
 
 /// Caps on what crosses the proxy, applied by the host per architecture section 6.
@@ -105,6 +107,7 @@ const CANONICAL_CHAT_PROTOCOL: &str = "token-station-chat";
 const CONTINUATION_KEY_EXTENSION: &str = "token_station_private_continuation_key";
 const CONTINUATION_SCOPE_EXTENSION: &str = "token_station_continuation_scope";
 const TOOL_NAMESPACES_EXTENSION: &str = "responses_tool_namespaces";
+const NO_ATTEMPT_FALLBACK_EXTENSION: &str = "token_station_private_no_attempt_fallback";
 
 /// One logical request's fallback limits. Count, wall-clock and per-attempt
 /// timeout are always active. Cost is optional until the router has a trusted
@@ -1076,8 +1079,50 @@ fn attempt_receipt(
             error_code: Some(error.code),
             stream_outcome: Some(StreamOutcome::FailedBeforeOutput),
             provider_call_engine,
-            fallback_allowed: error.code.is_retriable_elsewhere(),
+            fallback_allowed: attempt_fallback_allowed(error),
         },
+    }
+}
+
+/// Marks a host-owned terminal attempt without changing the public error
+/// catalog. Dispatch consumes this private marker before the error can be
+/// rendered, persisted or returned to a caller.
+fn forbid_attempt_fallback(mut error: ErrorEnvelope) -> ErrorEnvelope {
+    error.extensions.insert(
+        NO_ATTEMPT_FALLBACK_EXTENSION.to_owned(),
+        serde_json::Value::Bool(true),
+    );
+    error
+}
+
+fn attempt_fallback_allowed(error: &ErrorEnvelope) -> bool {
+    error.code.is_retriable_elsewhere()
+        && !matches!(
+            error.extensions.get(NO_ATTEMPT_FALLBACK_EXTENSION),
+            Some(serde_json::Value::Bool(true))
+        )
+}
+
+fn sanitize_attempt_error_for_render(error: &mut ErrorEnvelope) {
+    error.extensions.remove(NO_ATTEMPT_FALLBACK_EXTENSION);
+}
+
+/// Returns the routing decision and erases its host-private carrier.
+fn take_attempt_fallback_policy(error: &mut ErrorEnvelope) -> bool {
+    let allowed = attempt_fallback_allowed(error);
+    sanitize_attempt_error_for_render(error);
+    allowed
+}
+
+fn map_south_stream_failure_for_attempt(
+    failure: south_contracts::StreamReadErrorV1,
+    cancellation: CancellationDispositionV1,
+) -> ErrorEnvelope {
+    let error = map_stream_read_failure_v1(failure, cancellation);
+    if failure == south_contracts::StreamReadErrorV1::StreamDeadlineExceeded {
+        forbid_attempt_fallback(error)
+    } else {
+        error
     }
 }
 
@@ -1181,29 +1226,73 @@ struct Upstream {
 /// worker's stack until completion or cancellation.
 struct SouthProviderRuntime {
     handle: tokio::runtime::Handle,
-    transport: south_transport_reqwest::ReqwestTransportV1,
+    buffered_transport: south_transport_reqwest::ReqwestTransportV1,
+    streaming_transport: south_transport_reqwest::ReqwestStreamingTransportV1,
+}
+
+impl SouthProviderRuntime {
+    fn open_stream(
+        &self,
+        prepared: &PreparedCommunityProviderCallV1,
+        resolver: &CommunityCredentialResolverV1<'_>,
+        deadline: tokio::time::Instant,
+        cancellation: &tokio_util::sync::CancellationToken,
+        disposition: CancellationDispositionV1,
+    ) -> Result<UpstreamResponse, ErrorEnvelope> {
+        let opened = self
+            .handle
+            .block_on(open_prepared_provider_stream_v1(
+                prepared,
+                resolver,
+                &self.streaming_transport,
+                Some(deadline),
+                cancellation,
+            ))
+            .map_err(|failure| map_failure_v1(failure, disposition))?;
+        Ok(match opened {
+            PreparedProviderStreamResultV1::Opened(stream) => {
+                let (status, headers) = project_open_stream_head_v1(&stream);
+                UpstreamResponse::from_south_stream(status, headers, self.handle.clone(), stream)
+            }
+            PreparedProviderStreamResultV1::Rejected(response) => {
+                UpstreamResponse::from_parts(response)
+            }
+        })
+    }
 }
 
 fn south_runtime_for(
     config: &ClientConfig,
     provider_runtime: Option<tokio::runtime::Handle>,
 ) -> Result<Option<SouthProviderRuntime>, String> {
-    let uses_south = config
-        .upstreams
-        .values()
-        .any(|entry| entry.provider_call == ConfiguredProviderCallEngine::SouthV1Buffered);
+    let uses_south = config.upstreams.values().any(|entry| {
+        matches!(
+            entry.provider_call,
+            ConfiguredProviderCallEngine::SouthV1Buffered
+                | ConfiguredProviderCallEngine::SouthV1BufferedStreaming
+        )
+    });
     if !uses_south {
         return Ok(None);
     }
     let handle = provider_runtime.ok_or_else(|| {
         "a South production opt-in requires a server-owned Tokio runtime".to_owned()
     })?;
-    let transport =
+    let buffered_transport =
         build_direct_reqwest_transport_v1(UPSTREAM_TIMEOUT, UPSTREAM_TIMEOUT, UPSTREAM_TIMEOUT)
             .map_err(|failure| {
                 describe_south_failure(failure, CancellationDispositionV1::Deadline)
             })?;
-    Ok(Some(SouthProviderRuntime { handle, transport }))
+    let streaming_transport =
+        build_direct_reqwest_streaming_transport_v1(None, UPSTREAM_TIMEOUT, UPSTREAM_TIMEOUT)
+            .map_err(|failure| {
+                describe_south_failure(failure, CancellationDispositionV1::Deadline)
+            })?;
+    Ok(Some(SouthProviderRuntime {
+        handle,
+        buffered_transport,
+        streaming_transport,
+    }))
 }
 
 enum AttemptTerminal {
@@ -3815,8 +3904,10 @@ impl Gateway {
                         ctx.cancel_reason(),
                         Some(CancelReason::ServerDrain | CancelReason::Deadline)
                     ) {
+                        sanitize_attempt_error_for_render(&mut error);
                         return Err(error);
                     }
+                    let fallback_allowed = take_attempt_fallback_policy(&mut error);
                     if let Some(retry) = self.retry_without_media(
                         ctx,
                         agent,
@@ -3836,7 +3927,7 @@ impl Gateway {
                         }
                     }
                     self.observe(&target.upstream, &target.model, Err(&error));
-                    let retriable = error.code.is_retriable_elsewhere();
+                    let retriable = fallback_allowed && error.code.is_retriable_elsewhere();
                     eprintln!("upstream {target} failed ({:?})", error.code);
                     if !retriable {
                         last_error = Some(error);
@@ -4743,6 +4834,9 @@ impl Gateway {
         if upstream.provider_call == ConfiguredProviderCallEngine::Legacy {
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
         }
+        if streaming && upstream.provider_call == ConfiguredProviderCallEngine::SouthV1Buffered {
+            return self.send(ctx, attempt_timeout, descriptor, upstream_name);
+        }
 
         let Some(auth_config) = upstream.auth_config.as_ref() else {
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
@@ -4770,19 +4864,22 @@ impl Gateway {
             body_mode,
             metadata,
         );
-        let prepared =
-            match prepare_provider_call_v1(policy, &upstream.config, auth_config, descriptor) {
-                Ok(prepared) => prepared,
-                Err(PrepareProviderCallErrorV1::Ineligible(_)) => {
-                    return self.send(ctx, attempt_timeout, descriptor, upstream_name);
-                }
-                Err(failure) => {
-                    return Err(map_prepare_failure(
-                        failure,
-                        Self::south_cancellation_disposition(ctx),
-                    ));
-                }
-            };
+        let prepared = match if streaming {
+            prepare_provider_stream_v1(policy, &upstream.config, auth_config, descriptor)
+        } else {
+            prepare_provider_call_v1(policy, &upstream.config, auth_config, descriptor)
+        } {
+            Ok(prepared) => prepared,
+            Err(PrepareProviderCallErrorV1::Ineligible(_)) => {
+                return self.send(ctx, attempt_timeout, descriptor, upstream_name);
+            }
+            Err(failure) => {
+                return Err(map_prepare_failure(
+                    failure,
+                    Self::south_cancellation_disposition(ctx),
+                ));
+            }
+        };
         let Ok(resolver) =
             CommunityCredentialResolverV1::try_new(&self.secrets, upstream_name, auth_config)
         else {
@@ -4800,13 +4897,24 @@ impl Gateway {
 
         // Crossing this line may resolve a credential or perform network I/O.
         // From here onward the actual attempt is South and legacy replay is forbidden.
+        if streaming {
+            *actual_engine = RecordedProviderCallEngine::SouthV1Streaming;
+            return runtime.open_stream(
+                &prepared,
+                &resolver,
+                deadline,
+                &cancellation,
+                Self::south_cancellation_disposition(ctx),
+            );
+        }
+
         *actual_engine = RecordedProviderCallEngine::SouthV1Buffered;
         let response = runtime
             .handle
             .block_on(execute_prepared_provider_call_v1(
                 &prepared,
                 &resolver,
-                &runtime.transport,
+                &runtime.buffered_transport,
                 deadline,
                 &cancellation,
             ))
@@ -5067,7 +5175,7 @@ impl Gateway {
                     );
                 }
                 Ok(read) => read,
-                Err(_) => {
+                Err(error) => {
                     if ctx.is_cancelled() {
                         if let Some(envelope) = Self::lifecycle_cancellation(ctx) {
                             return Self::terminate_stream(
@@ -5085,11 +5193,24 @@ impl Gateway {
                         }
                         return Ok(StreamOutcome::ClientCancelled);
                     }
-                    let envelope = ErrorEnvelope::new(
-                        ErrorCode::TransportTruncated,
-                        502,
-                        "upstream connection broke while streaming",
-                    );
+                    let envelope = error
+                        .get_ref()
+                        .and_then(|source| source.downcast_ref::<SouthStreamReadFailure>())
+                        .map_or_else(
+                            || {
+                                ErrorEnvelope::new(
+                                    ErrorCode::TransportTruncated,
+                                    502,
+                                    "upstream connection broke while streaming",
+                                )
+                            },
+                            |failure| {
+                                map_south_stream_failure_for_attempt(
+                                    failure.0,
+                                    Self::south_cancellation_disposition(ctx),
+                                )
+                            },
+                        );
                     return Self::terminate_stream(
                         agent,
                         render_context,
@@ -5200,13 +5321,14 @@ impl Gateway {
         render_context: &Value,
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
-        envelope: ErrorEnvelope,
+        mut envelope: ErrorEnvelope,
         committed: bool,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         if !committed {
             Self::clear_stream_state(agent, render_context);
             return Err(envelope);
         }
+        sanitize_attempt_error_for_render(&mut envelope);
         record.error_code = Some(envelope.code);
         let rendered = Self::render_stream_error(agent, &envelope, render_context);
         if !emit(Reply::Chunk(rendered)) {
@@ -5317,6 +5439,51 @@ enum UpstreamBody {
     Buffered(String),
 }
 
+struct SouthStreamReader {
+    handle: tokio::runtime::Handle,
+    stream: south_core::StreamingCallV1,
+    pending: Option<(south_contracts::StreamChunkV1, usize)>,
+}
+
+#[derive(Debug)]
+struct SouthStreamReadFailure(south_contracts::StreamReadErrorV1);
+
+impl fmt::Display for SouthStreamReadFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("South stream pull failed")
+    }
+}
+
+impl std::error::Error for SouthStreamReadFailure {}
+
+impl Read for SouthStreamReader {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if let Some((chunk, offset)) = self.pending.as_mut() {
+                let remaining = &chunk.as_bytes()[*offset..];
+                let copied = remaining.len().min(output.len());
+                output[..copied].copy_from_slice(&remaining[..copied]);
+                *offset += copied;
+                if *offset == chunk.len() {
+                    self.pending = None;
+                }
+                return Ok(copied);
+            }
+
+            match self.handle.block_on(self.stream.next_chunk()) {
+                Some(Ok(chunk)) => self.pending = Some((chunk, 0)),
+                Some(Err(error)) => {
+                    return Err(io::Error::other(SouthStreamReadFailure(error)));
+                }
+                None => return Ok(0),
+            }
+        }
+    }
+}
+
 impl UpstreamResponse {
     fn from(response: ureq::http::Response<ureq::Body>) -> Self {
         let status = response.status().as_u16();
@@ -5343,6 +5510,23 @@ impl UpstreamResponse {
             status: parts.status,
             headers: parts.headers,
             body: UpstreamBody::Buffered(parts.body),
+        }
+    }
+
+    fn from_south_stream(
+        status: u16,
+        headers: BTreeMap<String, String>,
+        handle: tokio::runtime::Handle,
+        stream: south_core::StreamingCallV1,
+    ) -> Self {
+        Self {
+            status,
+            headers,
+            body: UpstreamBody::Streaming(Box::new(SouthStreamReader {
+                handle,
+                stream,
+                pending: None,
+            })),
         }
     }
 
@@ -6058,5 +6242,50 @@ mod upstream_response_tests {
         let restored = response.into_parts().expect("buffered body remains valid");
 
         assert_eq!(restored.body.as_ptr(), original);
+    }
+}
+
+#[cfg(test)]
+mod south_stream_fallback_policy_tests {
+    use super::{
+        CancellationDispositionV1, forbid_attempt_fallback, map_south_stream_failure_for_attempt,
+        sanitize_attempt_error_for_render, take_attempt_fallback_policy,
+    };
+    use south_contracts::StreamReadErrorV1;
+    use token_station_protocol::{ErrorCode, ErrorEnvelope};
+
+    #[test]
+    fn south_stream_deadline_policy_is_consumed_before_the_error_leaves_dispatch() {
+        let mut error = map_south_stream_failure_for_attempt(
+            StreamReadErrorV1::StreamDeadlineExceeded,
+            CancellationDispositionV1::Deadline,
+        );
+
+        assert!(!take_attempt_fallback_policy(&mut error));
+        assert!(
+            error.extensions.is_empty(),
+            "the host-private routing marker must not reach clients or receipts"
+        );
+        let mut idle = map_south_stream_failure_for_attempt(
+            StreamReadErrorV1::StreamIdleTimeout,
+            CancellationDispositionV1::Deadline,
+        );
+        assert!(take_attempt_fallback_policy(&mut idle));
+    }
+
+    #[test]
+    fn host_private_fallback_policy_never_reaches_the_postcommit_renderer() {
+        let mut error = forbid_attempt_fallback(ErrorEnvelope::new(
+            ErrorCode::Timeout,
+            504,
+            "request deadline exceeded",
+        ));
+
+        sanitize_attempt_error_for_render(&mut error);
+
+        assert!(
+            error.extensions.is_empty(),
+            "the plugin renderer must never observe host-private routing state"
+        );
     }
 }

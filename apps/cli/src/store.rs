@@ -102,9 +102,10 @@ pub fn snapshot_database(source: &Path, destination: &Path) -> Result<(), String
 
 /// The ordered migration registry. An older store is brought up to
 /// [`SCHEMA_VERSION`] by applying every migration whose `to` it has not yet
-/// reached — never by re-creating the schema and losing the rows. Each step is
-/// idempotent (`IF NOT EXISTS`, additive `ALTER`) and stamps `user_version` as
-/// it lands, so an interrupted upgrade resumes rather than re-runs.
+/// reached — never by re-creating the whole store and losing rows. Each step
+/// runs in its own transaction and stamps `user_version` only on commit, so an
+/// interrupted additive or table-rebuild migration resumes from the prior
+/// version rather than observing a partial schema.
 const MIGRATIONS: &[Migration] = &[
     Migration {
         // v1 → v2: the stable accounting id (see B-6). Existing rows keep the
@@ -329,6 +330,43 @@ const MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE attempts ADD COLUMN provider_call_engine TEXT NOT NULL DEFAULT 'unknown'
                 CHECK (provider_call_engine IN ('legacy', 'south_v1_buffered', 'unknown'));",
     },
+    Migration {
+        // v9 -> v10: widen the closed engine set. SQLite cannot alter a CHECK
+        // constraint in place, so preserve every attempt through a named copy.
+        to: 10,
+        sql: "
+            CREATE TABLE attempts_v10 (
+                request_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                upstream TEXT NOT NULL,
+                model TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                http_status INTEGER,
+                error_code TEXT,
+                stream_outcome TEXT CHECK (
+                    stream_outcome IS NULL OR stream_outcome IN (
+                        'complete', 'failed_after_partial', 'failed_before_output', 'client_cancelled'
+                    )
+                ),
+                provider_call_engine TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK (provider_call_engine IN (
+                        'legacy', 'south_v1_buffered', 'south_v1_streaming', 'unknown'
+                    )),
+                fallback_allowed INTEGER NOT NULL,
+                PRIMARY KEY (request_id, ordinal)
+            );
+            INSERT INTO attempts_v10 (
+                request_id, ordinal, upstream, model, latency_ms, http_status,
+                error_code, stream_outcome, provider_call_engine, fallback_allowed
+            )
+            SELECT
+                request_id, ordinal, upstream, model, latency_ms, http_status,
+                error_code, stream_outcome, provider_call_engine, fallback_allowed
+            FROM attempts;
+            DROP TABLE attempts;
+            ALTER TABLE attempts_v10 RENAME TO attempts;
+        ",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -446,7 +484,9 @@ CREATE TABLE IF NOT EXISTS attempts (
         )
     ),
     provider_call_engine TEXT NOT NULL DEFAULT 'unknown'
-        CHECK (provider_call_engine IN ('legacy', 'south_v1_buffered', 'unknown')),
+        CHECK (provider_call_engine IN (
+            'legacy', 'south_v1_buffered', 'south_v1_streaming', 'unknown'
+        )),
     fallback_allowed INTEGER NOT NULL,
     PRIMARY KEY (request_id, ordinal)
 );
@@ -1194,6 +1234,7 @@ fn provider_call_engine(column: usize, value: &str) -> Result<ProviderCallEngine
     match value {
         "legacy" => Ok(ProviderCallEngine::Legacy),
         "south_v1_buffered" => Ok(ProviderCallEngine::SouthV1Buffered),
+        "south_v1_streaming" => Ok(ProviderCallEngine::SouthV1Streaming),
         "unknown" => Ok(ProviderCallEngine::Unknown),
         other => Err(invalid_enum(column, "provider call engine", other)),
     }
@@ -1983,6 +2024,70 @@ mod tests {
         drop(store);
         std::fs::remove_file(&path).ok();
         std::fs::remove_file(path.with_extension("v8.bak")).ok();
+    }
+
+    #[test]
+    fn a_v9_store_preserves_existing_engines_and_admits_south_streaming() {
+        let path = scratch("migrate-v9-streaming-engine");
+        std::fs::remove_file(&path).ok();
+        {
+            let connection = rusqlite::Connection::open(&path).expect("opens");
+            connection.execute_batch(V3_SCHEMA).expect("v3 schema");
+            for migration in super::MIGRATIONS
+                .iter()
+                .filter(|migration| (4..=9).contains(&migration.to))
+            {
+                connection
+                    .execute_batch(migration.sql)
+                    .expect("migrates to v9");
+            }
+            connection
+                .execute(
+                    "INSERT INTO attempts (
+                        request_id, ordinal, upstream, model, latency_ms,
+                        provider_call_engine, fallback_allowed
+                     ) VALUES
+                        ('legacy-attempt', 1, 'old', 'old-model', 7, 'legacy', 0),
+                        ('buffered-attempt', 1, 'old', 'old-model', 8, 'south_v1_buffered', 0)",
+                    [],
+                )
+                .expect("v9 attempts insert");
+            connection
+                .pragma_update(None, "user_version", 9)
+                .expect("stamps v9");
+        }
+
+        let store = SqliteStore::open(&path).expect("v9 migrates");
+        {
+            let connection = store.connection.lock().expect("lock");
+            let version: u32 = connection
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("version");
+            assert_eq!(version, 10);
+            let mut engines = connection
+                .prepare("SELECT provider_call_engine FROM attempts ORDER BY request_id")
+                .expect("query prepares")
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("query runs")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("engines read");
+            engines.sort();
+            assert_eq!(engines, ["legacy", "south_v1_buffered"]);
+            connection
+                .execute(
+                    "INSERT INTO attempts (
+                        request_id, ordinal, upstream, model, latency_ms,
+                        provider_call_engine, fallback_allowed
+                     ) VALUES ('streaming-attempt', 1, 'new', 'new-model', 9,
+                               'south_v1_streaming', 0)",
+                    [],
+                )
+                .expect("v10 admits South streaming engine");
+        }
+
+        drop(store);
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(path.with_extension("v9.bak")).ok();
     }
 
     #[test]

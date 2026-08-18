@@ -63,6 +63,26 @@ fn plugins_dir() -> &'static Path {
             )
             .expect("wasm copies");
         }
+
+        let marker_agent = repo_root().join("apps/cli/tests/guests/marker-agent");
+        let status = Command::new("cargo")
+            .args(["build", "--target", "wasm32-wasip2"])
+            .current_dir(&marker_agent)
+            .status()
+            .expect("cargo is on PATH");
+        assert!(status.success(), "marker-agent must build");
+        let package = dir.join("marker-agent");
+        std::fs::create_dir_all(&package).expect("temp dir writable");
+        std::fs::copy(
+            marker_agent.join("manifest.json"),
+            package.join("manifest.json"),
+        )
+        .expect("marker-agent manifest copies");
+        std::fs::copy(
+            marker_agent.join("target/wasm32-wasip2/debug/marker_agent.wasm"),
+            package.join("adapter.wasm"),
+        )
+        .expect("marker-agent wasm copies");
         dir
     })
 }
@@ -4966,6 +4986,19 @@ fn start_south_production_proxy(upstream: &MockUpstream, secret: &str) -> Proxy 
     spawn_proxy(&config)
 }
 
+fn start_south_streaming_production_proxy(upstream: &MockUpstream, secret: &str) -> Proxy {
+    let (config_path, _) = write_south_probe_config(upstream, secret, true);
+    let mut config: Value = serde_json::from_slice(
+        &std::fs::read(&config_path).expect("South production config reads"),
+    )
+    .expect("South production config is JSON");
+    config["data"]["metrics"] = json!(true);
+    config["upstreams"]["mock_primary"]["provider_call"] = json!("south_v1_buffered_streaming");
+    let config: ClientConfig =
+        serde_json::from_value(config).expect("South streaming production config parses");
+    spawn_proxy(&config)
+}
+
 #[test]
 fn production_buffered_opt_in_executes_south_once_and_records_the_actual_engine() {
     let answer = json!({
@@ -5111,6 +5144,126 @@ fn production_south_opt_in_keeps_streaming_on_legacy_and_records_the_fallback() 
 }
 
 #[test]
+fn explicit_streaming_opt_in_executes_south_once_and_records_the_actual_engine() {
+    let sse = concat!(
+        "data: {\"id\":\"chatcmpl-stream\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"南向\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let head = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nx-ratelimit-limit-tokens: 1000\r\nx-ratelimit-remaining-tokens: 900\r\nx-ratelimit-reset-tokens: 1s\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        sse.len()
+    )
+    .into_bytes();
+    let split = sse
+        .as_bytes()
+        .windows("南".len())
+        .position(|bytes| bytes == "南".as_bytes())
+        .expect("fixture contains the multibyte token")
+        + 1;
+    let mock = MockUpstream::start(vec![vec![
+        head,
+        sse.as_bytes()[..split].to_vec(),
+        sse.as_bytes()[split..].to_vec(),
+    ]]);
+    let proxy = start_south_streaming_production_proxy(&mock, "sk-south-streaming-production");
+
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("南向"), "{body}");
+    assert!(body.contains("data: [DONE]"), "{body}");
+    assert_eq!(mock.hits(), 1, "one streaming attempt issues one request");
+
+    settle();
+    let (_, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["provider_call_engine"],
+        json!("south_v1_streaming")
+    );
+    let (_, _, quota_body) = admin_get(&proxy, "/admin/quota", Some(&proxy.virtual_key), None);
+    let quota: Value = serde_json::from_str(&quota_body).expect("quota snapshot is JSON");
+    let account = quota["accounts"]
+        .as_array()
+        .and_then(|accounts| {
+            accounts
+                .iter()
+                .find(|account| account["upstream"] == "mock_primary")
+        })
+        .expect("South streaming quota account is projected");
+    assert_eq!(account["source"], json!("authoritative"));
+}
+
+#[test]
+fn south_streaming_open_failures_are_never_replayed_by_legacy() {
+    let cases = [
+        (
+            "provider-429",
+            http_json(
+                429,
+                &json!({"error": {"message": "fixture", "code": "fixture"}}).to_string(),
+            ),
+            429,
+        ),
+        (
+            "redirect",
+            b"HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1/second-hop\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec(),
+            502,
+        ),
+    ];
+
+    for (name, response, expected_status) in cases {
+        let mock = MockUpstream::start(vec![vec![response]]);
+        let proxy = start_south_streaming_production_proxy(&mock, &format!("sk-stream-{name}"));
+        let (status, body) = post_chat_stream(&proxy);
+        assert_eq!(status, expected_status, "{name}: {body}");
+        assert_eq!(mock.hits(), 1, "{name}: South failure cannot replay");
+
+        settle();
+        let (_, _, receipts_body) =
+            admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+        let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+        assert_eq!(
+            receipts[0]["attempt_records"][0]["provider_call_engine"],
+            json!("south_v1_streaming"),
+            "{name}: failed open records the engine that performed the attempt"
+        );
+    }
+}
+
+#[test]
+fn south_midstream_truncation_is_postcommit_and_never_replayed() {
+    let prefix = concat!(
+        "HTTP/1.1 200 OK\r\n",
+        "content-type: text/event-stream\r\n",
+        "connection: close\r\n",
+        "\r\n",
+        "data: {\"id\":\"chatcmpl-cut\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+    let mock = MockUpstream::start(vec![vec![prefix]]);
+    let proxy = start_south_streaming_production_proxy(&mock, "sk-stream-truncated");
+
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(
+        status, 200,
+        "the valid first event commits the stream: {body}"
+    );
+    assert!(body.contains("partial"), "{body}");
+    assert_eq!(mock.hits(), 1, "a committed stream can never replay");
+
+    settle();
+    let (_, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    let attempt = &receipts[0]["attempt_records"][0];
+    assert_eq!(attempt["provider_call_engine"], json!("south_v1_streaming"));
+    assert_eq!(attempt["stream_outcome"], json!("failed_after_partial"));
+    assert_eq!(attempt["error_code"], json!("transport_truncated"));
+}
+
+#[test]
 fn production_south_server_drain_cancels_buffered_io_without_legacy_replay() {
     let mock = MockUpstream::start_hanging();
     let peer_closed = Arc::clone(&mock.peer_closed);
@@ -5174,6 +5327,126 @@ fn production_south_server_drain_cancels_buffered_io_without_legacy_replay() {
     assert_eq!(
         receipts[0]["attempt_records"][0]["provider_call_engine"],
         json!("south_v1_buffered")
+    );
+}
+
+#[test]
+fn production_south_server_drain_cancels_streaming_pull_without_legacy_replay() {
+    let mock = MockUpstream::start_hanging();
+    let peer_closed = Arc::clone(&mock.peer_closed);
+    let proxy = start_south_streaming_production_proxy(&mock, "sk-south-stream-drain");
+    let url = proxy.url.clone();
+    let virtual_key = proxy.virtual_key.clone();
+    let client = std::thread::spawn(move || {
+        let agent = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(15)))
+                .http_status_as_error(false)
+                .build(),
+        );
+        agent
+            .post(format!("{url}/v1/chat/completions"))
+            .header("authorization", &format!("Bearer {virtual_key}"))
+            .send(
+                &json!({
+                    "model": "auto",
+                    "stream": true,
+                    "messages": [{ "role": "user", "content": "hang" }]
+                })
+                .to_string(),
+            )
+            .expect("proxy answers the drained South stream")
+            .status()
+            .as_u16()
+    });
+
+    let arrival_deadline = Instant::now() + Duration::from_secs(3);
+    while (mock.hits() == 0 || proxy.control.in_flight() == 0) && Instant::now() < arrival_deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(mock.hits(), 1, "South stream reached the upstream once");
+    proxy.control.cancel_in_flight();
+    assert_eq!(client.join().expect("client joins"), 503);
+
+    let cleanup_deadline = Instant::now() + Duration::from_secs(3);
+    while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
+        && Instant::now() < cleanup_deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(proxy.control.in_flight(), 0, "stream worker is accounted");
+    assert!(
+        peer_closed.load(Ordering::SeqCst),
+        "cancel drops stream I/O"
+    );
+    assert_eq!(mock.hits(), 1, "drain cannot replay through legacy");
+    mock.finish_hanging();
+
+    settle();
+    let (_, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    assert_eq!(receipts[0]["status"], json!(503));
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["provider_call_engine"],
+        json!("south_v1_streaming")
+    );
+}
+
+#[test]
+fn production_south_client_disconnect_cancels_streaming_pull_without_replay() {
+    let mock = MockUpstream::start_hanging();
+    let peer_closed = Arc::clone(&mock.peer_closed);
+    let proxy = start_south_streaming_production_proxy(&mock, "sk-south-stream-disconnect");
+    let host = proxy.url.strip_prefix("http://").expect("loopback URL");
+    let body = json!({
+        "model": "auto",
+        "stream": true,
+        "messages": [{ "role": "user", "content": "disconnect" }]
+    })
+    .to_string();
+    let mut client = TcpStream::connect(host).expect("client connects");
+    write!(
+        client,
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        proxy.virtual_key,
+        body.len()
+    )
+    .expect("request writes");
+    client.flush().expect("request flushes");
+
+    let arrival_deadline = Instant::now() + Duration::from_secs(3);
+    while (mock.hits() == 0 || proxy.control.in_flight() == 0) && Instant::now() < arrival_deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(mock.hits(), 1, "South stream reached the upstream once");
+    client.shutdown(Shutdown::Both).expect("client disconnects");
+    drop(client);
+
+    let cleanup_deadline = Instant::now() + Duration::from_secs(3);
+    while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
+        && Instant::now() < cleanup_deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(proxy.control.in_flight(), 0, "stream worker is accounted");
+    assert!(
+        peer_closed.load(Ordering::SeqCst),
+        "disconnect drops streaming reqwest I/O"
+    );
+    assert_eq!(mock.hits(), 1, "disconnect cannot replay the stream");
+    mock.finish_hanging();
+
+    settle();
+    let (_, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    assert_eq!(receipts[0]["status"], json!(499));
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["provider_call_engine"],
+        json!("south_v1_streaming")
     );
 }
 
@@ -5322,6 +5595,87 @@ fn production_south_attempt_deadline_returns_504_without_wall_sleep_or_legacy_re
         replies.first(),
         Some(Reply::BeginJson(reply)) if reply.status == 504
     ));
+    drop(gateway);
+    drop(runtime);
+    mock.finish_hanging();
+    std::fs::remove_dir_all(data_dir).ok();
+}
+
+#[test]
+fn south_stream_deadline_hides_host_private_policy_from_the_agent_renderer() {
+    let mock = MockUpstream::start_hanging();
+    let (config_path, data_dir) = write_south_probe_config(&mock, "sk-south-private-marker", true);
+    let mut config: Value =
+        serde_json::from_slice(&std::fs::read(&config_path).expect("South marker config reads"))
+            .expect("South marker config is JSON");
+    config["upstreams"]["mock_primary"]["provider_call"] = json!("south_v1_buffered_streaming");
+    config["plugins"]["agents"] = json!(["marker-agent"]);
+    config["plugins"]["allow_unsigned"] = json!(true);
+    let config: ClientConfig = serde_json::from_value(config).expect("South marker config parses");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime builds");
+    let gateway = Arc::new(
+        Gateway::new_with_provider_runtime(
+            &config,
+            Arc::new(token_station_metrics::NoopRecorder),
+            runtime.handle().clone(),
+        )
+        .expect("South marker gateway assembles"),
+    );
+    let replies = runtime.block_on(async {
+        let worker_gateway = Arc::clone(&gateway);
+        let worker = tokio::task::spawn_blocking(move || {
+            let ctx = token_station_cli::request_context::RequestContext::detached(
+                Duration::from_millis(1_200),
+                Duration::from_secs(1),
+            );
+            let mut replies = Vec::new();
+            worker_gateway.chat_scoped(
+                &ctx,
+                None,
+                None,
+                "POST",
+                "/v1/chat/completions",
+                &[],
+                json!({
+                    "model": "auto",
+                    "stream": true,
+                    "messages": [{ "role": "user", "content": "deadline" }]
+                })
+                .to_string()
+                .as_bytes(),
+                &mut |reply| {
+                    replies.push(reply);
+                    true
+                },
+            );
+            replies
+        });
+        worker.await.expect("blocking worker joins")
+    });
+
+    let reply = match replies.first() {
+        Some(Reply::BeginJson(reply)) => reply,
+        Some(Reply::BeginStream) => panic!("expected JSON, stream began"),
+        Some(Reply::Chunk(chunk)) => panic!("expected JSON, got chunk: {chunk}"),
+        None => panic!("expected a rendered 504, got no reply"),
+    };
+    assert_eq!(
+        reply.status, 504,
+        "unexpected rendered error: {}",
+        reply.body
+    );
+    let body = &reply.body;
+    let rendered: Value = serde_json::from_str(body).expect("marker renderer returns JSON");
+    assert_eq!(
+        rendered["saw_private_marker"],
+        json!(false),
+        "host-private fallback policy crossed the Agent WASM boundary: {body}"
+    );
+    assert_eq!(mock.hits(), 1, "deadline cannot replay through legacy");
     drop(gateway);
     drop(runtime);
     mock.finish_hanging();

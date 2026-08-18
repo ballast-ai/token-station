@@ -5,13 +5,15 @@ use std::{collections::BTreeMap, fmt, time::Duration};
 use south_contracts::{
     BearerAuthV1, ContractErrorV1, CredentialSlotV1, JsonBodyV1, JsonPostRequestV1,
     PreparationErrorV1, ProviderEndpointV1, ProviderQuotaMetadataFieldV1, RelativePathV1,
-    SafeHeaders,
+    SafeHeaders, StreamTransportConfigV1,
 };
 use south_core::{
     CredentialResolutionErrorV1, CredentialResolutionFuture, CredentialResolver, ProviderBindingV1,
-    SecretValue,
+    SecretValue, StreamingCallV1,
 };
-use south_transport_reqwest::{ReqwestTransportConfigV1, ReqwestTransportV1};
+use south_transport_reqwest::{
+    ReqwestStreamingTransportV1, ReqwestTransportConfigV1, ReqwestTransportV1,
+};
 use token_station_protocol::{
     Auth, DescriptorError, ErrorCode, ErrorEnvelope, HttpMethod, HttpRequestDescriptor,
     HttpResponseParts, ProviderConfig,
@@ -164,6 +166,13 @@ pub(crate) struct PreparedCommunityProviderCallV1 {
 pub(crate) enum StableProviderCallFailureV1 {
     Contract(ContractErrorV1),
     Provider(south_core::ProviderCallErrorV1),
+    RejectedBodyNotUtf8,
+}
+
+/// A streaming open either returns a live 2xx pull stream or a bounded non-2xx response.
+pub(crate) enum PreparedProviderStreamResultV1 {
+    Opened(StreamingCallV1),
+    Rejected(HttpResponseParts),
 }
 
 /// Host lifecycle context used only to interpret South's context-free `CANCELLED` code.
@@ -262,7 +271,45 @@ pub(crate) fn prepare_provider_call_v1(
     auth_config: &AuthConfig,
     descriptor: &HttpRequestDescriptor,
 ) -> Result<PreparedCommunityProviderCallV1, PrepareProviderCallErrorV1> {
-    check_static_eligibility(policy, provider, auth_config, descriptor)?;
+    prepare_provider_call_for_mode_v1(
+        policy,
+        RequestBodyModeV1::Buffered,
+        provider,
+        auth_config,
+        descriptor,
+    )
+}
+
+/// Projects an explicitly streaming-eligible descriptor into the same bounded request contract.
+pub(crate) fn prepare_provider_stream_v1(
+    policy: CommunityCallPolicyV1,
+    provider: &ProviderConfig,
+    auth_config: &AuthConfig,
+    descriptor: &HttpRequestDescriptor,
+) -> Result<PreparedCommunityProviderCallV1, PrepareProviderCallErrorV1> {
+    prepare_provider_call_for_mode_v1(
+        policy,
+        RequestBodyModeV1::Streaming,
+        provider,
+        auth_config,
+        descriptor,
+    )
+}
+
+fn prepare_provider_call_for_mode_v1(
+    policy: CommunityCallPolicyV1,
+    expected_body_mode: RequestBodyModeV1,
+    provider: &ProviderConfig,
+    auth_config: &AuthConfig,
+    descriptor: &HttpRequestDescriptor,
+) -> Result<PreparedCommunityProviderCallV1, PrepareProviderCallErrorV1> {
+    check_static_eligibility(
+        policy,
+        expected_body_mode,
+        provider,
+        auth_config,
+        descriptor,
+    )?;
 
     let endpoint = ProviderEndpointV1::parse(&provider.base_url.as_str())?;
     let relative_path = project_relative_path(&endpoint, &descriptor.url)?;
@@ -348,6 +395,73 @@ where
     })
 }
 
+/// Opens the real South stream and projects a bounded non-2xx rejection for host classification.
+pub(crate) async fn open_prepared_provider_stream_v1<R, T>(
+    prepared: &PreparedCommunityProviderCallV1,
+    resolver: &R,
+    transport: &T,
+    deadline: Option<Instant>,
+    cancellation: &CancellationToken,
+) -> Result<PreparedProviderStreamResultV1, StableProviderCallFailureV1>
+where
+    R: south_core::CredentialResolver + ?Sized,
+    T: south_core::AsyncStreamingTransport + ?Sized,
+{
+    match south_core::open_streaming_provider_call_v1(
+        &prepared.binding,
+        &prepared.request,
+        resolver,
+        transport,
+        deadline,
+        cancellation,
+    )
+    .await
+    {
+        Ok(stream) => Ok(PreparedProviderStreamResultV1::Opened(stream)),
+        Err(south_core::ProviderCallErrorV1::Rejected(rejected)) => {
+            let body = String::from_utf8(rejected.body().to_vec())
+                .map_err(|_| StableProviderCallFailureV1::RejectedBodyNotUtf8)?;
+            Ok(PreparedProviderStreamResultV1::Rejected(
+                HttpResponseParts {
+                    status: rejected.head().status().as_u16(),
+                    headers: project_stream_head_headers(rejected.head()),
+                    body,
+                    extensions: BTreeMap::new(),
+                },
+            ))
+        }
+        Err(error) => Err(StableProviderCallFailureV1::Provider(error)),
+    }
+}
+
+fn project_stream_head_headers(
+    head: &south_contracts::StreamingResponseHeadV1,
+) -> BTreeMap<String, String> {
+    let mut headers = BTreeMap::new();
+    if let Some(content_type) = head.content_type() {
+        headers.insert("content-type".to_owned(), content_type.to_owned());
+    }
+    if let Some(retry_after) = head.retry_after() {
+        headers.insert("retry-after".to_owned(), retry_after.to_owned());
+    }
+    for field in PROVIDER_QUOTA_METADATA_FIELDS_V1 {
+        if let Some(value) = head.provider_quota_metadata().value(field) {
+            headers.insert(field.as_header_name().to_owned(), value.to_owned());
+        }
+    }
+    headers
+}
+
+/// Projects the content-free head fields needed by the host before body streaming begins.
+pub(crate) fn project_open_stream_head_v1(
+    stream: &StreamingCallV1,
+) -> (u16, BTreeMap<String, String>) {
+    (
+        stream.head().status().as_u16(),
+        project_stream_head_headers(stream.head()),
+    )
+}
+
 /// Builds the only real transport shape permitted by the first community rollout slice.
 pub(crate) fn build_direct_reqwest_transport_v1(
     total_timeout: Duration,
@@ -363,12 +477,32 @@ pub(crate) fn build_direct_reqwest_transport_v1(
     })
 }
 
+/// Builds the dedicated streaming transport with mandatory connect and idle guards.
+pub(crate) fn build_direct_reqwest_streaming_transport_v1(
+    total_timeout: Option<Duration>,
+    connect_timeout: Duration,
+    idle_timeout: Duration,
+) -> Result<ReqwestStreamingTransportV1, StableProviderCallFailureV1> {
+    let config = StreamTransportConfigV1::try_new(total_timeout, connect_timeout, idle_timeout)
+        .map_err(|error| {
+            StableProviderCallFailureV1::Provider(south_core::ProviderCallErrorV1::Transport(error))
+        })?;
+    ReqwestStreamingTransportV1::new(config).map_err(|error| {
+        StableProviderCallFailureV1::Provider(south_core::ProviderCallErrorV1::Transport(error))
+    })
+}
+
 /// Maps every frozen South v1 code to the community host's existing error catalog.
 pub(crate) fn map_failure_v1(
     failure: StableProviderCallFailureV1,
     cancellation: CancellationDispositionV1,
 ) -> ErrorEnvelope {
     let (code, status, message) = match failure {
+        StableProviderCallFailureV1::RejectedBodyNotUtf8 => (
+            ErrorCode::ProviderProtocolError,
+            502,
+            "provider rejection body is not UTF-8",
+        ),
         StableProviderCallFailureV1::Contract(error) => match error {
             ContractErrorV1::RequestBodyTooLarge => (
                 ErrorCode::InvalidRequest,
@@ -451,8 +585,48 @@ pub(crate) fn map_failure_v1(
     ErrorEnvelope::new(code, status, message)
 }
 
+/// Maps a terminal South stream pull code without inspecting response bytes.
+pub(crate) fn map_stream_read_failure_v1(
+    failure: south_contracts::StreamReadErrorV1,
+    cancellation: CancellationDispositionV1,
+) -> ErrorEnvelope {
+    let (code, status, message) = match failure {
+        south_contracts::StreamReadErrorV1::StreamReadFailed => (
+            ErrorCode::TransportTruncated,
+            502,
+            "provider response was truncated",
+        ),
+        south_contracts::StreamReadErrorV1::StreamIdleTimeout => {
+            (ErrorCode::Timeout, 504, "provider stream became idle")
+        }
+        south_contracts::StreamReadErrorV1::StreamDeadlineExceeded => {
+            (ErrorCode::Timeout, 504, "request deadline exceeded")
+        }
+        south_contracts::StreamReadErrorV1::StreamCancelled => match cancellation {
+            CancellationDispositionV1::ClientDisconnected => {
+                (ErrorCode::Internal, 499, "request cancelled")
+            }
+            CancellationDispositionV1::ServerDrain => (
+                ErrorCode::UpstreamUnavailable,
+                503,
+                "Token Station is restarting; retry this request",
+            ),
+            CancellationDispositionV1::Deadline => {
+                (ErrorCode::Timeout, 504, "request deadline exceeded")
+            }
+        },
+        south_contracts::StreamReadErrorV1::ChunkNotDeliverable => (
+            ErrorCode::ProviderProtocolError,
+            502,
+            "provider stream chunk was rejected",
+        ),
+    };
+    ErrorEnvelope::new(code, status, message)
+}
+
 fn check_static_eligibility(
     policy: CommunityCallPolicyV1,
+    expected_body_mode: RequestBodyModeV1,
     provider: &ProviderConfig,
     auth_config: &AuthConfig,
     descriptor: &HttpRequestDescriptor,
@@ -473,7 +647,7 @@ fn check_static_eligibility(
     if policy.egress_mode != EgressMode::Direct {
         return ineligible(IneligibleV1::Egress);
     }
-    if policy.body_mode != RequestBodyModeV1::Buffered {
+    if policy.body_mode != expected_body_mode {
         return ineligible(IneligibleV1::Streaming);
     }
     if policy.response_metadata != ResponseMetadataEligibilityV1::Compatible {

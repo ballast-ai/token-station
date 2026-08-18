@@ -494,6 +494,7 @@ pub enum ProviderCallEngine {
     #[default]
     Legacy,
     SouthV1Buffered,
+    SouthV1BufferedStreaming,
 }
 
 impl ProviderCallEngine {
@@ -1178,6 +1179,26 @@ mod tests {
             "models": [{ "model": "deepseek-chat" }]
         }));
         assert!(unknown.is_err(), "unknown engines must fail closed");
+    }
+
+    #[test]
+    fn provider_call_engine_requires_an_explicit_streaming_opt_in() {
+        let opted_in: UpstreamConfig = serde_json::from_value(serde_json::json!({
+            "provider": "openai-compatible",
+            "provider_call": "south_v1_buffered_streaming",
+            "base_url": "https://api.deepseek.com/v1",
+            "models": [{ "model": "deepseek-chat" }]
+        }))
+        .expect("the cumulative South streaming opt-in parses");
+
+        assert_eq!(
+            opted_in.provider_call,
+            ProviderCallEngine::SouthV1BufferedStreaming
+        );
+        assert_eq!(
+            serde_json::to_value(&opted_in).expect("serializes")["provider_call"],
+            serde_json::json!("south_v1_buffered_streaming")
+        );
     }
 
     fn scratch(name: &str, contents: &str) -> PathBuf {

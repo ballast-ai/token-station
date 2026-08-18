@@ -3452,6 +3452,7 @@ fn edit_provider_impl(
         None => None,
         Some("legacy") => Some(None),
         Some("south_v1_buffered") => Some(Some("south_v1_buffered")),
+        Some("south_v1_buffered_streaming") => Some(Some("south_v1_buffered_streaming")),
         Some(_) => return Err("Provider call engine 不受支持".to_owned()),
     };
     let previous_auth = previous.get("auth").filter(|value| !value.is_null());
@@ -10660,7 +10661,7 @@ mod tests {
             None,
             "env".to_owned(),
             Some("FIXTURE_API_KEY".to_owned()),
-            "south_v1_buffered".to_owned(),
+            "south_v1_buffered_streaming".to_owned(),
         )
         .expect("submitting unchanged provider details is a no-op identity update");
 
@@ -10671,7 +10672,7 @@ mod tests {
         assert!(pricing.models.contains_key("fixture/shared"));
         assert_eq!(
             inner.draft["upstreams"]["fixture"]["provider_call"],
-            json!("south_v1_buffered")
+            json!("south_v1_buffered_streaming")
         );
         drop(inner);
         std::fs::remove_dir_all(root).ok();

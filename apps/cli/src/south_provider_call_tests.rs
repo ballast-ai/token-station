@@ -4,31 +4,40 @@ use crate::{
     south_provider_call::{
         CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1,
         IneligibleV1, PrepareProviderCallErrorV1, PreparedCommunityProviderCallV1,
-        ProviderPackageEligibilityV1, RequestBodyModeV1, ResponseMetadataEligibilityV1,
-        RolloutEligibilityV1, StableProviderCallFailureV1, build_direct_reqwest_transport_v1,
-        execute_prepared_provider_call_v1, map_failure_v1, prepare_provider_call_v1,
+        PreparedProviderStreamResultV1, ProviderPackageEligibilityV1, RequestBodyModeV1,
+        ResponseMetadataEligibilityV1, RolloutEligibilityV1, StableProviderCallFailureV1,
+        build_direct_reqwest_streaming_transport_v1, build_direct_reqwest_transport_v1,
+        execute_prepared_provider_call_v1, map_failure_v1, map_stream_read_failure_v1,
+        open_prepared_provider_stream_v1, prepare_provider_call_v1, prepare_provider_stream_v1,
     },
 };
 use south_contracts::{
     BufferedHttpResponseV1, ContractErrorV1, CredentialSlotV1, MAX_JSON_REQUEST_BODY_BYTES,
     MAX_PROVIDER_QUOTA_METADATA_VALUE_BYTES, PreparationErrorV1, ProviderQuotaMetadataFieldV1,
-    ProviderQuotaMetadataV1, StreamRejectedV1, StreamingResponseHeadV1, TransportErrorV1,
+    ProviderQuotaMetadataV1, StreamChunkV1, StreamReadErrorV1, StreamRejectedV1,
+    StreamingResponseHeadV1, TransportErrorV1,
 };
 use south_core::{
-    AsyncHttpTransport, CredentialResolutionFuture, CredentialResolver, PreparedHttpRequestV1,
-    ProviderCallErrorV1, SecretValue, TransportFuture,
+    AsyncHttpTransport, AsyncStreamingTransport, CredentialResolutionFuture, CredentialResolver,
+    OpenedByteStreamV1, PreparedHttpRequestV1, ProviderCallErrorV1, SecretValue,
+    StreamByteSourceV1, StreamChunkFutureV1, StreamOpenErrorV1, StreamingOpenFutureV1,
+    TransportFuture,
 };
 use south_provider_conformance::{
-    FAKE_BEARER_SECRET_V1, PROVIDER_CALL_CONFORMANCE_DEADLINE_OFFSET_V1, ProviderCallControlV1,
-    ProviderCallFailureCodeV1, ProviderCallFixtureV1, ProviderCallInputV1, ProviderCallUpstreamV1,
-    ProviderQuotaMetadataFixtureV1,
+    FAKE_BEARER_SECRET_V1, PROVIDER_CALL_CONFORMANCE_DEADLINE_OFFSET_V1,
+    PROVIDER_STREAM_CONFORMANCE_DEADLINE_OFFSET_V1, PROVIDER_STREAM_CONFORMANCE_IDLE_TIMEOUT_V1,
+    ProviderCallControlV1, ProviderCallFailureCodeV1, ProviderCallFixtureV1, ProviderCallInputV1,
+    ProviderCallUpstreamV1, ProviderQuotaMetadataFixtureV1, ProviderStreamControlV1,
+    ProviderStreamFixtureV1, ProviderStreamRawHeadV1, ProviderStreamTerminalV1,
+    ProviderStreamUpstreamV1,
 };
 use south_testkit::{
     AssembledExecutionFutureV1, AssembledProviderCallExecutorV1,
     AssembledProviderQuotaMetadataExecutionFutureV1, AssembledProviderQuotaMetadataExecutorV1,
-    ProviderCallEvidenceV1, ProviderCallObservationV1, ProviderQuotaMetadataEvidenceV1,
-    ProviderQuotaMetadataObservationV1, run_provider_call_conformance_v1,
-    run_provider_quota_metadata_conformance_v1,
+    AssembledProviderStreamExecutorV1, AssembledStreamExecutionFutureV1, ProviderCallEvidenceV1,
+    ProviderCallObservationV1, ProviderQuotaMetadataEvidenceV1, ProviderQuotaMetadataObservationV1,
+    ProviderStreamEvidenceV1, ProviderStreamObservationV1, run_provider_call_conformance_v1,
+    run_provider_quota_metadata_conformance_v1, run_provider_stream_conformance_v1,
 };
 use std::{
     future::pending,
@@ -55,6 +64,17 @@ fn eligible_policy() -> CommunityCallPolicyV1 {
         ApiDialect::Translated,
         EgressMode::Direct,
         RequestBodyModeV1::Buffered,
+        ResponseMetadataEligibilityV1::Compatible,
+    )
+}
+
+fn eligible_streaming_policy() -> CommunityCallPolicyV1 {
+    CommunityCallPolicyV1::new(
+        RolloutEligibilityV1::Enabled,
+        ProviderPackageEligibilityV1::Approved,
+        ApiDialect::Translated,
+        EgressMode::Direct,
+        RequestBodyModeV1::Streaming,
         ResponseMetadataEligibilityV1::Compatible,
     )
 }
@@ -101,6 +121,22 @@ fn eligible_descriptor_projects_into_the_south_contract() {
         &descriptor(),
     )
     .expect("eligible descriptor should project");
+
+    assert_eq!(prepared.relative_path(), "chat/completions");
+    assert_eq!(prepared.credential_slot(), "provider_api_key");
+    assert_eq!(prepared.header_count(), 2);
+    assert_eq!(prepared.body(), r#"{"model":"test"}"#);
+}
+
+#[test]
+fn eligible_streaming_descriptor_projects_into_the_same_bounded_contract() {
+    let prepared = prepare_provider_stream_v1(
+        eligible_streaming_policy(),
+        &provider_config(),
+        &auth_config(),
+        &descriptor(),
+    )
+    .expect("eligible streaming descriptor should project");
 
     assert_eq!(prepared.relative_path(), "chat/completions");
     assert_eq!(prepared.credential_slot(), "provider_api_key");
@@ -883,6 +919,541 @@ fn direct_reqwest_transport_is_built_only_from_explicit_bounded_timeouts() {
     );
 }
 
+#[test]
+fn direct_streaming_transport_requires_connect_and_idle_guards_without_a_total_cap() {
+    let transport = build_direct_reqwest_streaming_transport_v1(
+        None,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    )
+    .expect("valid explicit guards should build a dedicated streaming transport");
+    assert_eq!(
+        format!("{transport:?}"),
+        "ReqwestStreamingTransportV1 { .. }"
+    );
+
+    let failure =
+        build_direct_reqwest_streaming_transport_v1(None, Duration::from_secs(1), Duration::ZERO)
+            .expect_err("zero idle timeout must fail closed");
+    assert_eq!(
+        failure,
+        StableProviderCallFailureV1::Provider(ProviderCallErrorV1::Transport(
+            TransportErrorV1::ClientBuildFailed,
+        ))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_streaming_adapter_opens_at_headers_and_pulls_the_exact_body_once() {
+    let body = b"data: {\"delta\":\"hello\"}\n\ndata: [DONE]\n\n";
+    let response = format!(
+        concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "content-type: text/event-stream\r\n",
+            "x-ratelimit-limit-tokens: 1000\r\n",
+            "content-length: {}\r\n",
+            "connection: close\r\n",
+            "\r\n"
+        ),
+        body.len()
+    )
+    .into_bytes();
+    let mut response = response;
+    response.extend_from_slice(body);
+    let (base_url, server) = start_quota_loopback(response);
+    let mut provider = ProviderConfig::new(
+        "openai-compatible",
+        ProviderEndpoint::try_new(&base_url).expect("loopback endpoint is valid"),
+    );
+    provider.auth = Some(SecretRef::new("provider_api_key"));
+    let mut request = descriptor();
+    request.url = format!("{base_url}/chat/completions");
+    let prepared = prepare_provider_stream_v1(
+        eligible_streaming_policy(),
+        &provider,
+        &auth_config(),
+        &request,
+    )
+    .expect("streaming request projects");
+    let resolver = ImmediateResolver {
+        calls: AtomicUsize::new(0),
+    };
+    let transport = build_direct_reqwest_streaming_transport_v1(
+        None,
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+    )
+    .expect("streaming transport builds");
+
+    let mut stream = match open_prepared_provider_stream_v1(
+        &prepared,
+        &resolver,
+        &transport,
+        Some(tokio::time::Instant::now() + Duration::from_secs(5)),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("stream opens")
+    {
+        PreparedProviderStreamResultV1::Opened(stream) => stream,
+        PreparedProviderStreamResultV1::Rejected(_) => panic!("2xx must open a stream"),
+    };
+    assert_eq!(stream.head().status().as_u16(), 200);
+    assert_eq!(stream.head().content_type(), Some("text/event-stream"));
+    assert_eq!(
+        stream
+            .head()
+            .provider_quota_metadata()
+            .value(ProviderQuotaMetadataFieldV1::XRateLimitLimitTokens),
+        Some("1000")
+    );
+    let mut delivered = Vec::new();
+    while let Some(chunk) = stream.next_chunk().await {
+        delivered.extend_from_slice(chunk.expect("loopback chunk is valid").as_bytes());
+    }
+    assert_eq!(delivered, body);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(server.join().expect("loopback joins"), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_streaming_rejections_are_bounded_projected_and_never_become_live_streams() {
+    let body = br#"{"error":{"message":"rate limited"}}"#;
+    let mut response = format!(
+        concat!(
+            "HTTP/1.1 429 Too Many Requests\r\n",
+            "content-type: application/json\r\n",
+            "retry-after: 2\r\n",
+            "content-length: {}\r\n",
+            "connection: close\r\n",
+            "\r\n"
+        ),
+        body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(body);
+    let (base_url, server) = start_quota_loopback(response);
+    let mut provider = ProviderConfig::new(
+        "openai-compatible",
+        ProviderEndpoint::try_new(&base_url).expect("loopback endpoint is valid"),
+    );
+    provider.auth = Some(SecretRef::new("provider_api_key"));
+    let mut request = descriptor();
+    request.url = format!("{base_url}/chat/completions");
+    let prepared = prepare_provider_stream_v1(
+        eligible_streaming_policy(),
+        &provider,
+        &auth_config(),
+        &request,
+    )
+    .expect("streaming request projects");
+    let resolver = ImmediateResolver {
+        calls: AtomicUsize::new(0),
+    };
+    let transport = build_direct_reqwest_streaming_transport_v1(
+        None,
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+    )
+    .expect("streaming transport builds");
+
+    let rejected = open_prepared_provider_stream_v1(
+        &prepared,
+        &resolver,
+        &transport,
+        Some(tokio::time::Instant::now() + Duration::from_secs(5)),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("bounded rejection is a valid open outcome");
+    let PreparedProviderStreamResultV1::Rejected(rejected) = rejected else {
+        panic!("non-2xx must not create a live stream");
+    };
+    assert_eq!(rejected.status, 429);
+    assert_eq!(rejected.body.as_bytes(), body);
+    assert_eq!(
+        rejected.headers.get("retry-after").map(String::as_str),
+        Some("2")
+    );
+    assert_eq!(server.join().expect("loopback joins"), 1);
+}
+
+#[test]
+fn invalid_utf8_streaming_rejection_maps_without_leaking_the_body() {
+    let mapped = map_failure_v1(
+        StableProviderCallFailureV1::RejectedBodyNotUtf8,
+        CancellationDispositionV1::Deadline,
+    );
+    assert_eq!(
+        (mapped.code, mapped.http_status),
+        (ErrorCode::ProviderProtocolError, 502)
+    );
+    assert!(!mapped.message.contains('\u{fffd}'));
+}
+
+#[test]
+fn every_midstream_failure_maps_to_the_existing_closed_host_catalog() {
+    let cases = [
+        (
+            StreamReadErrorV1::StreamReadFailed,
+            CancellationDispositionV1::ClientDisconnected,
+            ErrorCode::TransportTruncated,
+            502,
+        ),
+        (
+            StreamReadErrorV1::StreamIdleTimeout,
+            CancellationDispositionV1::ClientDisconnected,
+            ErrorCode::Timeout,
+            504,
+        ),
+        (
+            StreamReadErrorV1::StreamDeadlineExceeded,
+            CancellationDispositionV1::Deadline,
+            ErrorCode::Timeout,
+            504,
+        ),
+        (
+            StreamReadErrorV1::StreamCancelled,
+            CancellationDispositionV1::ClientDisconnected,
+            ErrorCode::Internal,
+            499,
+        ),
+        (
+            StreamReadErrorV1::StreamCancelled,
+            CancellationDispositionV1::ServerDrain,
+            ErrorCode::UpstreamUnavailable,
+            503,
+        ),
+        (
+            StreamReadErrorV1::ChunkNotDeliverable,
+            CancellationDispositionV1::ClientDisconnected,
+            ErrorCode::ProviderProtocolError,
+            502,
+        ),
+    ];
+
+    for (failure, disposition, expected_code, expected_status) in cases {
+        let mapped = map_stream_read_failure_v1(failure, disposition);
+        assert_eq!(
+            (mapped.code, mapped.http_status),
+            (expected_code, expected_status)
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn community_streaming_adapter_passes_the_public_south_suite() {
+    let executor = CommunityStreamConformanceExecutorV1::new();
+    let run = run_provider_stream_conformance_v1(&executor);
+    let drive_clock = async {
+        executor.idle_stall_started().await;
+        tokio::time::advance(PROVIDER_STREAM_CONFORMANCE_IDLE_TIMEOUT_V1).await;
+        executor.deadline_chunk_started().await;
+        tokio::time::advance(PROVIDER_STREAM_CONFORMANCE_DEADLINE_OFFSET_V1).await;
+    };
+    let structured = async { tokio::join!(run, drive_clock) };
+    let (report, ()) = tokio::time::timeout(Duration::from_secs(5), structured)
+        .await
+        .expect("structured conformance watchdog must not expire");
+    let report = report.expect("community streaming adapter must pass the public suite");
+
+    assert_eq!(report.suite_id(), "south.provider-stream.v1");
+    assert_eq!(report.suite_version(), 1);
+    assert_eq!(report.passed_case_ids().len(), 9);
+}
+
+struct CommunityStreamConformanceExecutorV1 {
+    idle_stall_started: Arc<Notify>,
+    deadline_chunk_started: Arc<Notify>,
+}
+
+impl CommunityStreamConformanceExecutorV1 {
+    fn new() -> Self {
+        Self {
+            idle_stall_started: Arc::new(Notify::new()),
+            deadline_chunk_started: Arc::new(Notify::new()),
+        }
+    }
+
+    async fn idle_stall_started(&self) {
+        self.idle_stall_started.notified().await;
+    }
+
+    async fn deadline_chunk_started(&self) {
+        self.deadline_chunk_started.notified().await;
+    }
+
+    #[allow(clippy::too_many_lines)] // one canonical case keeps setup, driving and evidence together
+    async fn execute_community_stream_case(
+        &self,
+        fixture: &ProviderStreamFixtureV1,
+    ) -> ProviderStreamObservationV1 {
+        let resolver_calls = Arc::new(AtomicUsize::new(0));
+        let transport_calls = Arc::new(AtomicUsize::new(0));
+        let resolver_dropped = Arc::new(AtomicBool::new(false));
+        let transport_dropped = Arc::new(AtomicBool::new(false));
+        let prepared = match prepare_stream_conformance_input(fixture.input()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return ProviderStreamObservationV1::failure(
+                    map_prepare_failure_code(error),
+                    ProviderStreamEvidenceV1::new(0, 0, false, false, 0, None),
+                );
+            }
+        };
+
+        let cancellation = CancellationToken::new();
+        let cancel_signal = Arc::new(Notify::new());
+        let stall_started = match fixture.control() {
+            ProviderStreamControlV1::CancelWhileChunkPending => Arc::clone(&cancel_signal),
+            ProviderStreamControlV1::AdvanceIdleWhileChunkPending => {
+                Arc::clone(&self.idle_stall_started)
+            }
+            ProviderStreamControlV1::ExpireWhileChunkPending => {
+                Arc::clone(&self.deadline_chunk_started)
+            }
+            ProviderStreamControlV1::Complete => Arc::new(Notify::new()),
+        };
+        let resolver = ConformanceResolver {
+            calls: Arc::clone(&resolver_calls),
+            pending: false,
+            started: Mutex::new(None),
+            dropped: Arc::clone(&resolver_dropped),
+        };
+        let transport = ConformanceStreamTransport {
+            calls: Arc::clone(&transport_calls),
+            upstream: *fixture.upstream(),
+            stall_started,
+            dropped: Arc::clone(&transport_dropped),
+        };
+        let deadline = matches!(
+            fixture.control(),
+            ProviderStreamControlV1::ExpireWhileChunkPending
+        )
+        .then(|| tokio::time::Instant::now() + PROVIDER_STREAM_CONFORMANCE_DEADLINE_OFFSET_V1);
+        let evidence = |chunks_pulled, poststream_error_code| {
+            ProviderStreamEvidenceV1::new(
+                resolver_calls.load(Ordering::SeqCst),
+                transport_calls.load(Ordering::SeqCst),
+                resolver_dropped.load(Ordering::SeqCst),
+                transport_dropped.load(Ordering::SeqCst),
+                chunks_pulled,
+                poststream_error_code,
+            )
+        };
+
+        let opened = open_prepared_provider_stream_v1(
+            &prepared,
+            &resolver,
+            &transport,
+            deadline,
+            &cancellation,
+        )
+        .await;
+        let mut stream = match opened {
+            Ok(PreparedProviderStreamResultV1::Opened(stream)) => stream,
+            Ok(PreparedProviderStreamResultV1::Rejected(response)) => {
+                let head = StreamingResponseHeadV1::try_from_parts(
+                    response
+                        .status
+                        .try_into()
+                        .expect("canonical rejection status is valid"),
+                    response.headers.get("content-type").cloned(),
+                    response.headers.get("retry-after").cloned(),
+                )
+                .expect("adapter rejection remains in the South contract");
+                return ProviderStreamObservationV1::rejected(
+                    StreamRejectedV1::new(head, response.body.into_bytes()),
+                    evidence(0, None),
+                );
+            }
+            Err(error) => {
+                return ProviderStreamObservationV1::failure(
+                    map_stable_failure_code(&error),
+                    evidence(0, None),
+                );
+            }
+        };
+
+        let head = stream.head().clone();
+        let mut chunks = Vec::new();
+        let mut poststream_error = None;
+        let pull =
+            pull_community_stream_until_terminal(&mut stream, &mut chunks, &mut poststream_error);
+        if matches!(
+            fixture.control(),
+            ProviderStreamControlV1::CancelWhileChunkPending
+        ) {
+            let cancel = async {
+                cancel_signal.notified().await;
+                cancellation.cancel();
+            };
+            let ((), ()) = tokio::join!(pull, cancel);
+        } else {
+            pull.await;
+        }
+
+        let observed_evidence = evidence(chunks.len(), poststream_error);
+        ProviderStreamObservationV1::opened(head, chunks, observed_evidence)
+    }
+}
+
+impl AssembledProviderStreamExecutorV1 for CommunityStreamConformanceExecutorV1 {
+    fn execute_case<'a>(
+        &'a self,
+        fixture: &'a ProviderStreamFixtureV1,
+    ) -> AssembledStreamExecutionFutureV1<'a> {
+        Box::pin(async move { self.execute_community_stream_case(fixture).await })
+    }
+}
+
+fn prepare_stream_conformance_input(
+    input: &ProviderCallInputV1,
+) -> Result<PreparedCommunityProviderCallV1, PrepareProviderCallErrorV1> {
+    let mut provider = ProviderConfig::new(
+        "openai-compatible",
+        ProviderEndpoint::try_new(input.endpoint()).expect("canonical endpoint is valid"),
+    );
+    provider.auth = Some(SecretRef::new(input.bound_credential_slot()));
+    let auth = AuthConfig {
+        slot: input.bound_credential_slot().to_owned(),
+        store: true,
+        env: None,
+        file: None,
+    };
+    let mut descriptor = HttpRequestDescriptor::new(
+        HttpMethod::Post,
+        format!(
+            "{}/{}",
+            input.endpoint().trim_end_matches('/'),
+            input.relative_path()
+        ),
+    );
+    descriptor.headers =
+        SafeHeaders::try_new(input.headers().iter().copied()).expect("canonical headers are valid");
+    descriptor.body =
+        Some(serde_json::from_str(input.json_body()).expect("canonical request body is valid"));
+    descriptor.auth = Some(Auth::bearer(SecretRef::new(
+        input.requested_credential_slot(),
+    )));
+
+    prepare_provider_stream_v1(eligible_streaming_policy(), &provider, &auth, &descriptor)
+}
+
+async fn pull_community_stream_until_terminal(
+    stream: &mut south_core::StreamingCallV1,
+    chunks: &mut Vec<StreamChunkV1>,
+    poststream_error: &mut Option<StreamReadErrorV1>,
+) {
+    loop {
+        match stream.next_chunk().await {
+            Some(Ok(chunk)) => chunks.push(chunk),
+            Some(Err(error)) => {
+                *poststream_error = Some(error);
+                assert!(
+                    stream.next_chunk().await.is_none(),
+                    "a terminal stream failure must stick"
+                );
+                break;
+            }
+            None => break,
+        }
+    }
+}
+
+struct ConformanceStreamTransport {
+    calls: Arc<AtomicUsize>,
+    upstream: ProviderStreamUpstreamV1,
+    stall_started: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+}
+
+impl AsyncStreamingTransport for ConformanceStreamTransport {
+    fn open<'a>(&'a self, _request: &'a PreparedHttpRequestV1<'_>) -> StreamingOpenFutureV1<'a> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        match self.upstream {
+            ProviderStreamUpstreamV1::Stream(raw) => {
+                let head = conformance_stream_head(raw.head());
+                let source = ConformanceStreamSource {
+                    chunks: raw.chunks(),
+                    next_index: 0,
+                    terminal: raw.terminal(),
+                    stall_started: Arc::clone(&self.stall_started),
+                    dropped: Arc::clone(&self.dropped),
+                };
+                Box::pin(async move {
+                    OpenedByteStreamV1::try_new(head?, Box::new(source))
+                        .map_err(StreamOpenErrorV1::Transport)
+                })
+            }
+            ProviderStreamUpstreamV1::Rejected(raw) => {
+                let head = conformance_stream_head(raw.head());
+                let body = raw.body().to_vec();
+                Box::pin(async move {
+                    Err(StreamOpenErrorV1::Rejected(StreamRejectedV1::new(
+                        head?, body,
+                    )))
+                })
+            }
+            ProviderStreamUpstreamV1::TransportFailure(error) => {
+                Box::pin(async move { Err(StreamOpenErrorV1::Transport(error)) })
+            }
+            ProviderStreamUpstreamV1::NotReached => Box::pin(async {
+                Err(StreamOpenErrorV1::Transport(
+                    TransportErrorV1::RequestFailed,
+                ))
+            }),
+        }
+    }
+}
+
+fn conformance_stream_head(
+    raw: &ProviderStreamRawHeadV1,
+) -> Result<StreamingResponseHeadV1, TransportErrorV1> {
+    StreamingResponseHeadV1::try_from_parts(
+        raw.status()
+            .try_into()
+            .map_err(|_| TransportErrorV1::RequestFailed)?,
+        raw.content_type().map(str::to_owned),
+        raw.retry_after().map(str::to_owned),
+    )
+}
+
+struct ConformanceStreamSource {
+    chunks: &'static [&'static [u8]],
+    next_index: usize,
+    terminal: ProviderStreamTerminalV1,
+    stall_started: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+}
+
+impl StreamByteSourceV1 for ConformanceStreamSource {
+    fn next_chunk(&mut self) -> StreamChunkFutureV1<'_> {
+        Box::pin(async move {
+            if let Some(chunk) = self.chunks.get(self.next_index).copied() {
+                self.next_index += 1;
+                return Some(StreamChunkV1::try_new(chunk.into()));
+            }
+            match self.terminal {
+                ProviderStreamTerminalV1::CleanEof => None,
+                ProviderStreamTerminalV1::BreakWithReadFailure => {
+                    Some(Err(StreamReadErrorV1::StreamReadFailed))
+                }
+                ProviderStreamTerminalV1::IdleStall => {
+                    self.stall_started.notify_one();
+                    tokio::time::sleep(PROVIDER_STREAM_CONFORMANCE_IDLE_TIMEOUT_V1).await;
+                    Some(Err(StreamReadErrorV1::StreamIdleTimeout))
+                }
+                ProviderStreamTerminalV1::PendingForever => {
+                    let _drop_probe = PendingDropProbe(Arc::clone(&self.dropped));
+                    self.stall_started.notify_one();
+                    pending().await
+                }
+            }
+        })
+    }
+}
+
 struct CommunityConformanceExecutorV1 {
     deadline_transport_started: Arc<Notify>,
 }
@@ -1165,7 +1736,8 @@ fn map_stable_failure_code(error: &StableProviderCallFailureV1) -> ProviderCallF
             }
             TransportErrorV1::RedirectDenied => ProviderCallFailureCodeV1::RedirectDenied,
         },
-        StableProviderCallFailureV1::Provider(ProviderCallErrorV1::Rejected(_)) => {
+        StableProviderCallFailureV1::RejectedBodyNotUtf8
+        | StableProviderCallFailureV1::Provider(ProviderCallErrorV1::Rejected(_)) => {
             ProviderCallFailureCodeV1::RequestFailed
         }
     }

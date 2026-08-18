@@ -55,7 +55,7 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 /// - v8: adds content-free transport diagnostics and closed conversion
 ///   outcome/reason fields.
 /// - v9: records the closed provider-call engine used by each real attempt.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// The content-free transport path classification recorded for diagnostics.
 /// Raw, caller-controlled URL paths never enter the receipt.
@@ -231,6 +231,7 @@ pub struct AttemptRecord {
 pub enum ProviderCallEngine {
     Legacy,
     SouthV1Buffered,
+    SouthV1Streaming,
     #[default]
     Unknown,
 }
@@ -241,6 +242,7 @@ impl ProviderCallEngine {
         match self {
             Self::Legacy => "legacy",
             Self::SouthV1Buffered => "south_v1_buffered",
+            Self::SouthV1Streaming => "south_v1_streaming",
             Self::Unknown => "unknown",
         }
     }
@@ -575,7 +577,7 @@ impl Recorder for NoopRecorder {
 
 #[cfg(test)]
 mod tests {
-    use super::{RequestRecord, RoutingRecord};
+    use super::{ProviderCallEngine, RequestRecord, RoutingRecord};
     use token_station_protocol::Usage;
     use token_station_router_core::{
         DecidedBy, Decision, RequestFeatures, UpstreamModel, UpstreamRef,
@@ -639,5 +641,18 @@ mod tests {
 
         assert!(!encoded.contains("usage"), "{encoded}");
         assert!(!encoded.contains("cost_micros"), "{encoded}");
+    }
+
+    #[test]
+    fn south_streaming_engine_has_an_exact_content_free_token() {
+        assert_eq!(
+            ProviderCallEngine::SouthV1Streaming.as_str(),
+            "south_v1_streaming"
+        );
+        assert_eq!(
+            serde_json::to_value(ProviderCallEngine::SouthV1Streaming)
+                .expect("provider call engine serializes"),
+            serde_json::json!("south_v1_streaming")
+        );
     }
 }
