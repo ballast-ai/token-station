@@ -1001,7 +1001,7 @@ it("不显示仅存在于注册表但启动扫描未发现安装的 Agent", asyn
 });
 
 describe("desktop station navigation", () => {
-  it("animates the destination content without moving the fixed shell", async () => {
+  it("keeps destination content and the fixed shell stable without entrance motion", async () => {
     const user = userEvent.setup();
     const cancel = vi.fn();
     const animate = vi.fn().mockReturnValue({ cancel } as unknown as Animation);
@@ -1017,12 +1017,10 @@ describe("desktop station navigation", () => {
       animate.mockClear();
 
       await user.click(screen.getByRole("button", { name: "供应商" }));
-      const providersPage = (await screen.findByRole("heading", { name: "供应商" }))
-        .closest(".providers-page");
+      expect(await screen.findByRole("heading", { name: "供应商" })).toBeInTheDocument();
 
-      expect(animate).toHaveBeenCalledTimes(1);
-      expect(animate.mock.instances[0]).toBe(providersPage);
-      expect(document.querySelector(".station-header")).not.toBe(providersPage);
+      expect(animate).not.toHaveBeenCalled();
+      expect(document.querySelector(".station-header")).toBeInTheDocument();
     } finally {
       if (originalAnimate) {
         Object.defineProperty(HTMLElement.prototype, "animate", {
@@ -2297,18 +2295,18 @@ describe("desktop station navigation", () => {
     render(<App />);
 
     await user.click(await screen.findByRole("button", { name: "Settings" }));
-    await user.click(screen.getByRole("button", { name: /Language/ }));
+    const languageButton = screen.getByRole("button", { name: /Language/ });
+    expect(languageButton.querySelector(".lucide-globe")).not.toBeNull();
+    expect(languageButton.querySelector(".lucide-languages")).toBeNull();
+    await user.click(languageButton);
     expect(screen.getByRole("heading", { name: "Interface language" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /English/ })).toHaveAttribute("aria-checked", "true");
 
-    await user.click(screen.getByRole("radio", { name: /Simplified Chinese/ }));
+    await user.click(screen.getByRole("radio", { name: /简体中文/ }));
 
     expect(screen.getByRole("heading", { name: "设置", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /Simplified Chinese/ })).toHaveAttribute("aria-checked", "true");
-    const languagePanel = document.querySelector(".language-panel");
-    expect(languagePanel).not.toBeNull();
-    expect(languagePanel?.textContent).not.toMatch(/[\u3400-\u9fff]/u);
+    expect(screen.getByRole("radio", { name: /简体中文/ })).toHaveAttribute("aria-checked", "true");
     await user.click(screen.getByRole("button", { name: /Agent 显示/ }));
     expect(await screen.findByRole("heading", { name: "Agent 显示" })).toBeInTheDocument();
     expect(screen.getByText(

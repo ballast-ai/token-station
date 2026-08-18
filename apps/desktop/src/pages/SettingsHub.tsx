@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Bot,
+  Globe,
   Info,
-  Languages,
   Palette,
   ScrollText,
   Settings2,
@@ -26,7 +26,6 @@ import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Switch } from "../components/ui/switch";
 import { useErrorToast } from "../components/ErrorToast";
-import { useContentTransition } from "../components/useContentTransition";
 import About from "./About";
 import Settings from "./Settings";
 import RequestLogsPage from "./RequestLogsPage";
@@ -71,7 +70,7 @@ const SECTIONS: Array<{
     id: "language",
     label: "settings.language",
     description: "settings.languageHint",
-    icon: Languages,
+    icon: Globe,
   },
   {
     id: "request-logs",
@@ -270,21 +269,21 @@ const LANGUAGE_OPTIONS: Array<{
   value: Language;
   label: string;
   mark: string;
-  hint: string;
+  hint: TranslationKey;
 }> = [
-  { value: "en", label: "English", mark: "EN", hint: "Use the English interface" },
-  { value: "zh-CN", label: "Simplified Chinese", mark: "ZH", hint: "Use the Simplified Chinese interface" },
+  { value: "en", label: "English", mark: "EN", hint: "language.enHint" },
+  { value: "zh-CN", label: "简体中文", mark: "简", hint: "language.zhCNHint" },
 ];
 
 function LanguagePanel() {
-  const { language, setLanguage } = useLanguage();
+  const { language, setLanguage, t } = useLanguage();
   return (
     <Card className="settings-card language-panel">
       <CardHeader className="panel-head">
-        <CardTitle><h2>Interface language</h2></CardTitle>
-        <p className="sub">Changes apply immediately. Restart is not required.</p>
+        <CardTitle><h2>{t("language.title")}</h2></CardTitle>
+        <p className="sub">{t("language.description")}</p>
       </CardHeader>
-      <CardContent className="language-options" role="radiogroup" aria-label="Interface language">
+      <CardContent className="language-options" role="radiogroup" aria-label={t("language.groupLabel")}>
         {LANGUAGE_OPTIONS.map((option) => (
           <Button
             key={option.value}
@@ -298,7 +297,7 @@ function LanguagePanel() {
             <span className="language-mark" aria-hidden="true">{option.mark}</span>
             <span>
               <strong>{option.label}</strong>
-              <small>{option.hint}</small>
+              <small>{t(option.hint)}</small>
             </span>
             <i className="language-selected-dot" aria-hidden="true" />
           </Button>
@@ -332,7 +331,6 @@ function SettingsHubContent({
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const { t, copy } = useLanguage();
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
-  const contentRef = useContentTransition<HTMLElement>(section);
   useEffect(() => setSection(initialSection), [initialSection]);
   return (
     <div className="page-stack settings-page">
@@ -365,7 +363,7 @@ function SettingsHubContent({
           })}
         </nav>
       </aside>
-      <main ref={contentRef} className="settings-content">
+      <main className="settings-content">
         {section === "general" && (
           <>
             <VirtualKeyCard serve={serve} />

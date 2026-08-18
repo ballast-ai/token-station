@@ -50,7 +50,7 @@ const serve: ServeView = {
 const registry: AgentUiMetadataView[] = [];
 
 describe("SettingsHub clipboard feedback", () => {
-  it("animates the selected Settings category content", async () => {
+  it("switches Settings categories without entrance motion", async () => {
     const user = userEvent.setup();
     const cancel = vi.fn();
     const animate = vi.fn().mockReturnValue({ cancel } as unknown as Animation);
@@ -79,8 +79,7 @@ describe("SettingsHub clipboard feedback", () => {
       await user.click(screen.getByRole("button", { name: /Agent 显示/ }));
 
       expect(await screen.findByRole("heading", { name: "Agent 显示" })).toBeInTheDocument();
-      expect(animate).toHaveBeenCalledTimes(1);
-      expect(animate.mock.instances[0]).toHaveClass("settings-content");
+      expect(animate).not.toHaveBeenCalled();
     } finally {
       if (originalAnimate) {
         Object.defineProperty(HTMLElement.prototype, "animate", {
