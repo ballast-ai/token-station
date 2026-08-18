@@ -13,6 +13,7 @@ import { cn } from "../lib/utils";
 interface AgentsPageProps {
   registry: AgentUiMetadataView[];
   agents: AgentView[];
+  revealingAgentIds: ReadonlySet<string>;
   selectedAgentId?: string;
   homeSelected: boolean;
   scanBusy: boolean;
@@ -43,6 +44,7 @@ function navStatusCopy(status: AgentView["status"] | undefined, copy: (en: strin
 export default function AgentsPage({
   registry,
   agents,
+  revealingAgentIds,
   selectedAgentId,
   homeSelected,
   scanBusy,
@@ -52,6 +54,11 @@ export default function AgentsPage({
   children,
 }: AgentsPageProps) {
   const { copy } = useLocalizedCopy();
+  const revealOrder = new Map(
+    registry
+      .filter((metadata) => revealingAgentIds.has(metadata.agent_id))
+      .map((metadata, index) => [metadata.agent_id, index]),
+  );
 
   return (
     <div className="page-stack agents-page agent-workspace-page">
@@ -117,10 +124,17 @@ export default function AgentsPage({
                 {registry.map((metadata) => {
                   const agent = agents.find((candidate) => candidate.metadata.agent_id === metadata.agent_id);
                   const selected = metadata.agent_id === selectedAgentId;
+                  const revealIndex = revealOrder.get(metadata.agent_id);
                   return (
                     <Button
                       key={metadata.agent_id}
-                      className="agent-master-item"
+                      className={cn(
+                        "agent-master-item",
+                        revealIndex !== undefined && "agent-master-item-revealing",
+                      )}
+                      style={revealIndex === undefined ? undefined : {
+                        animationDelay: `${Math.min(revealIndex * 50, 300)}ms`,
+                      }}
                       variant="ghost"
                       type="button"
                       aria-label={metadata.display_name}

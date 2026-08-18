@@ -97,6 +97,8 @@ function hasConnectedAgent(agents: AgentView[]): boolean {
   );
 }
 
+const AGENT_REVEAL_CLEAR_MS = 520;
+
 function firstIncompleteSetupStep(state: StateView, agents: AgentView[]): FirstRunSetupStep {
   if (!state.providers.some((provider) => provider.models.length > 0)) return "provider";
   const routeConfigured = state.routing_mode === "quota_first"
@@ -243,6 +245,9 @@ function StationApp() {
   const shownUndetectedAgentIdsRef = useRef(shownUndetectedAgentIds);
   const [registry, setRegistry] = useState<AgentUiMetadataView[]>([]);
   const [agents, setAgents] = useState<AgentView[]>([]);
+  const [revealingAgentIds, setRevealingAgentIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [selectedInstallationPaths, setSelectedInstallationPaths] = useState<Record<string, string>>({});
   const [scanBusy, setScanBusy] = useState(false);
   const [scanSucceeded, setScanSucceeded] = useState(false);
@@ -279,6 +284,25 @@ function StationApp() {
   const pendingServeActionRef = useRef<"start" | "stop" | null>(null);
   const firstRunGuideCheckedRef = useRef(false);
   const startupLoadStartedRef = useRef(false);
+  const agentRevealTimerRef = useRef<number | null>(null);
+
+  const revealAgents = useCallback((agentIds: string[]) => {
+    if (agentIds.length === 0) return;
+    if (agentRevealTimerRef.current !== null) {
+      window.clearTimeout(agentRevealTimerRef.current);
+    }
+    setRevealingAgentIds(new Set(agentIds));
+    agentRevealTimerRef.current = window.setTimeout(() => {
+      agentRevealTimerRef.current = null;
+      setRevealingAgentIds(new Set());
+    }, AGENT_REVEAL_CLEAR_MS);
+  }, []);
+
+  useEffect(() => () => {
+    if (agentRevealTimerRef.current !== null) {
+      window.clearTimeout(agentRevealTimerRef.current);
+    }
+  }, []);
 
   const orderedRegistry = useMemo(
     () => registry
@@ -394,18 +418,23 @@ function StationApp() {
     try {
       const scannedAgents = await scanAgents();
       const detectedAgents = scannedAgents.filter((agent) => agent.installations.length > 0);
+      const previousDetectedIds = detectedAgentIdsRef.current;
+      const newlyDetectedIds = detectedAgents
+        .filter((agent) => !previousDetectedIds.has(agent.metadata.agent_id))
+        .map((agent) => agent.metadata.agent_id);
       detectedAgentIdsRef.current = new Set(
         detectedAgents.map((agent) => agent.metadata.agent_id),
       );
       setAgents(detectedAgents);
       setScanSucceeded(true);
+      revealAgents(newlyDetectedIds);
     } catch (caught) {
       showError(errorText(caught), "agent-rescan");
     } finally {
       scanBusyRef.current = false;
       setScanBusy(false);
     }
-  }, [showError]);
+  }, [revealAgents, showError]);
 
   const refreshCachedAgents = useCallback(async () => {
     const refreshGeneration = ++cachedAgentRefreshGenerationRef.current;
@@ -480,6 +509,7 @@ function StationApp() {
         setRegistry(nextRegistry);
         setAgents(detectedAgents);
         setScanSucceeded(true);
+        revealAgents(detectedAgents.map((agent) => agent.metadata.agent_id));
       } catch (caught) {
         if (!disposed) setError(errorText(caught));
       }
@@ -501,7 +531,7 @@ function StationApp() {
       disposed = true;
       unlisten?.();
     };
-  }, [observeServeRuntime, showError]);
+  }, [observeServeRuntime, revealAgents, showError]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -852,6 +882,7 @@ function StationApp() {
         <AgentsPage
           registry={visibleRegistry}
           agents={agents}
+          revealingAgentIds={revealingAgentIds}
           homeSelected
           scanBusy={scanBusy}
           onOpenHome={() => navigate("home")}
@@ -927,6 +958,7 @@ function StationApp() {
         <AgentsPage
           registry={visibleRegistry}
           agents={agents}
+          revealingAgentIds={revealingAgentIds}
           selectedAgentId={selectedAgentId}
           homeSelected={false}
           scanBusy={scanBusy}

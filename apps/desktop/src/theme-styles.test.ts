@@ -79,6 +79,21 @@ describe("retained page theme styles", () => {
     expect(selectedAgentRule).toMatch(/background:\s*var\(--signal-soft\)/);
   });
 
+  it("removes Agent discovery motion when reduced motion is requested", () => {
+    const revealRule = appCss.match(
+      /\.agent-master-item-revealing\[data-slot="button"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const reducedMotion = Array.from(
+      appCss.matchAll(/@media \(prefers-reduced-motion: reduce\)\s*\{([\s\S]*?)\n\}/g),
+      (match) => match[1],
+    ).join("\n");
+
+    expect(revealRule).toMatch(/animation:\s*agent-discovery-reveal/);
+    expect(reducedMotion).toMatch(
+      /\.agent-master-item-revealing\[data-slot="button"\][^}]*animation:\s*none/,
+    );
+  });
+
   it("uses active theme surfaces for the usage plaintext inspector", () => {
     const plaintextRule = appCss.match(/\.request-plaintext\s*\{([^}]*)\}/s)?.[1] ?? "";
     const scrollRule = appCss.match(/\.request-plaintext-scroll\s*\{([^}]*)\}/s)?.[1] ?? "";

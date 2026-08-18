@@ -6567,6 +6567,28 @@ pre.block {
   color: var(--muted);
 }
 
+.agent-master-item-revealing[data-slot="button"] {
+  animation: agent-discovery-reveal 180ms cubic-bezier(.22, 1, .36, 1) both;
+}
+
+@keyframes agent-discovery-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-master-item-revealing[data-slot="button"] {
+    animation: none;
+  }
+}
+
 .agent-master-icon {
   width: 42px;
   height: 42px;

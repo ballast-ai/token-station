@@ -1001,6 +1001,29 @@ it("不显示仅存在于注册表但启动扫描未发现安装的 Agent", asyn
 });
 
 describe("desktop station navigation", () => {
+  it("reveals startup Agent rows in stable order with a capped stagger", async () => {
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return stateFixture();
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return detectedAgentsFixture;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+
+    const firstAgent = await screen.findByRole("button", { name: "Claude Code" });
+    const lastAgent = await screen.findByRole("button", { name: "Hermes Agent" });
+    expect(firstAgent).toHaveClass("agent-master-item-revealing");
+    expect(firstAgent).toHaveStyle({ animationDelay: "0ms" });
+    expect(lastAgent).toHaveClass("agent-master-item-revealing");
+    expect(lastAgent).toHaveStyle({ animationDelay: "300ms" });
+
+    await waitFor(() => {
+      expect(firstAgent).not.toHaveClass("agent-master-item-revealing");
+      expect(lastAgent).not.toHaveClass("agent-master-item-revealing");
+    }, { timeout: 1_000 });
+  });
+
   it("等启动扫描完成后一次性显示合并主页与已发现 Agent", async () => {
     window.localStorage.removeItem(FIRST_RUN_GUIDE_STORAGE_KEY);
     const user = userEvent.setup();
@@ -1841,8 +1864,10 @@ describe("desktop station navigation", () => {
     render(<App />);
     await openAgents(user);
 
-    expect(screen.getByRole("button", { name: "Claude Code" })).toBeInTheDocument();
+    const claudeButton = screen.getByRole("button", { name: "Claude Code" });
+    expect(claudeButton).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Gemini CLI" })).toBeNull();
+    await waitFor(() => expect(claudeButton).not.toHaveClass("agent-master-item-revealing"));
 
     await user.click(screen.getByRole("button", { name: "重新扫描" }));
     const scanningButton = screen.getByRole("button", { name: "扫描中…" });
@@ -1850,7 +1875,10 @@ describe("desktop station navigation", () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(2);
 
     await act(async () => resolveRescan([scannedClaude, scannedGemini]));
-    expect(await screen.findByRole("button", { name: "Gemini CLI" })).toBeInTheDocument();
+    const geminiButton = await screen.findByRole("button", { name: "Gemini CLI" });
+    expect(geminiButton).toHaveClass("agent-master-item-revealing");
+    expect(geminiButton).toHaveStyle({ animationDelay: "0ms" });
+    expect(claudeButton).not.toHaveClass("agent-master-item-revealing");
     expect(screen.getByRole("button", { name: "重新扫描" })).toBeEnabled();
 
     await user.click(screen.getByRole("button", { name: "重新扫描" }));
