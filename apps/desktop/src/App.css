@@ -6726,43 +6726,30 @@ pre.block {
   place-items: center;
 }
 
-.agent-route-select-field {
+.agent-route-disclosure {
   margin-top: 6px;
   display: grid;
-  gap: 7px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
+  gap: 4px;
 }
 
-.agent-route-select-field label {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.agent-route-select-field select {
+.agent-route-disclosure-trigger[data-slot="button"] {
   width: 100%;
   min-height: 40px;
-  padding: 0 34px 0 12px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--canvas);
-  color: var(--ink);
-  font: inherit;
+  justify-content: space-between;
+  padding-inline: 12px;
 }
 
-.agent-connection-actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 8px;
+.agent-route-disclosure-trigger svg {
+  transition: transform 120ms ease;
 }
 
-.agent-connection-actions .btn {
-  flex: 0 0 auto;
-  white-space: nowrap;
+.agent-route-disclosure-trigger[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.agent-route-list {
+  display: grid;
+  gap: 2px;
 }
 
 .agent-connection-detail {
@@ -9585,19 +9572,34 @@ samp {
 }
 
 /* 2026-08 navigation and usage hierarchy */
-.station-runtime-pill[data-slot="button"],
-.station-runtime-pill[data-slot="button"].healthy {
+.station-runtime-pill[data-slot="button"] {
   border-color: color-mix(in srgb, var(--signal) 72%, var(--line));
   color: var(--signal);
   background: var(--surface);
   box-shadow: none;
 }
 
-.station-runtime-pill[data-slot="button"]:hover,
-.station-runtime-pill[data-slot="button"].healthy:hover {
+.station-runtime-pill[data-slot="button"]:hover {
   border-color: var(--signal);
   color: var(--signal);
   background: color-mix(in srgb, var(--signal) 6%, var(--surface));
+}
+
+.station-runtime-pill[data-slot="button"].healthy {
+  border-color: color-mix(in srgb, var(--success) 38%, var(--line));
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, var(--surface));
+}
+
+.station-runtime-pill[data-slot="button"].healthy:hover {
+  border-color: var(--success);
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 15%, var(--surface));
+}
+
+.quota-panel .split-heading > .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .station-settings-button[data-slot="button"] {

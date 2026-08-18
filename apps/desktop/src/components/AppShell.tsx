@@ -33,6 +33,7 @@ interface AppShellProps {
 }
 
 const PRIMARY_NAV: Array<{ view: AppView; en: string; zh: string }> = [
+  { view: "overview", en: "Home", zh: "主页" },
   { view: "agents", en: "Agent", zh: "Agent" },
   { view: "home", en: "Routing", zh: "路由" },
   { view: "providers", en: "Providers", zh: "供应商" },

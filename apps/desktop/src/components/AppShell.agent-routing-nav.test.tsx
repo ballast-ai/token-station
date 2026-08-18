@@ -39,11 +39,18 @@ describe("AppShell Agent and routing navigation", () => {
   it("exposes Agent and routing as separate primary pages", () => {
     const navigation = renderShell("agents");
 
+    expect(navigation.getByRole("button", { name: "主页" })).not.toHaveAttribute("aria-current");
     expect(navigation.getByRole("button", { name: "Agent" })).toHaveAttribute("aria-current", "page");
     expect(navigation.getByRole("button", { name: "路由" })).not.toHaveAttribute("aria-current");
     expect(navigation.getByRole("button", { name: "供应商" })).toBeInTheDocument();
     expect(navigation.getByRole("button", { name: "用量" })).toBeInTheDocument();
-    expect(navigation.queryByRole("button", { name: "主页" })).toBeNull();
+  });
+
+  it("marks Home as the current primary page on Overview", () => {
+    const navigation = renderShell("overview");
+
+    expect(navigation.getByRole("button", { name: "主页" })).toHaveAttribute("aria-current", "page");
+    expect(navigation.getByRole("button", { name: "Agent" })).not.toHaveAttribute("aria-current");
   });
 
   it("maps connection details to Agent and route details to routing", () => {

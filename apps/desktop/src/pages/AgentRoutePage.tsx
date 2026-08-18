@@ -545,57 +545,29 @@ export default function AgentRoutePage({
               onInstallationSelected?.();
             }}
           />
-          {pageMode === "connection" ? (
-            <div className="agent-connection-actions">
-              <button
-                className="btn"
-                type="button"
-                disabled={busy || !installation || !managed}
-                onClick={() => void restoreOfficial()}
-              >
-                {copy("Restore official configuration and disconnect", "恢复官方配置并断开")}
-              </button>
-              <button
-                className="btn primary agent-primary-action"
-                type="button"
-                data-onboarding-target={!managed ? "agent-connect" : undefined}
-                disabled={busy || !canOperate}
-                onClick={() => void applyConnection()}
-              >
-                {busy
-                  ? copy("Working…", "处理中…")
-                  : managed
-                    ? copy("Reconnect", "重新接入")
-                    : metadata.agent_id === "cursor"
-                      ? copy("Connect & launch", "一键接入并启动")
-                      : copy("Connect", "一键接入")}
-              </button>
-            </div>
-          ) : (
-            <button
-              className={`btn agent-primary-action ${managed ? "" : "primary"}`}
-              type="button"
-              data-onboarding-target={!managed ? "agent-connect" : undefined}
-              disabled={busy || !canOperate}
-              onClick={() => void (managed ? restoreOfficial() : applyConnection())}
-              title={managed
-                ? copy(
-                  "Strip the fields Token Station injected and return the Agent to its official default configuration, then clear the management record.",
-                  "剥掉 Token Station 注入的字段，让 Agent 回到官方默认配置，并清除接管记录。",
-                )
-                : undefined}
-            >
-              {busy
-                ? copy("Working…", "处理中…")
-                : managed
-                  ? copy("Restore official configuration & disconnect", "恢复官方配置并断开")
-                  : cursorRepairRequired
-                    ? copy("Reconnect & launch", "重新接入并启动")
-                    : metadata.agent_id === "cursor"
-                      ? copy("Connect & launch", "一键接入并启动")
-                      : copy("Connect", "一键接入")}
-            </button>
-          )}
+          <button
+            className={`btn agent-primary-action ${managed ? "" : "primary"}`}
+            type="button"
+            data-onboarding-target={!managed ? "agent-connect" : undefined}
+            disabled={busy || !canOperate}
+            onClick={() => void (managed ? restoreOfficial() : applyConnection())}
+            title={managed
+              ? copy(
+                "Strip the fields Token Station injected and return the Agent to its official default configuration, then clear the management record.",
+                "剥掉 Token Station 注入的字段，让 Agent 回到官方默认配置，并清除接管记录。",
+              )
+              : undefined}
+          >
+            {busy
+              ? copy("Working…", "处理中…")
+              : managed
+                ? copy("Restore official configuration & disconnect", "恢复官方配置并断开")
+                : cursorRepairRequired
+                  ? copy("Reconnect & launch", "重新接入并启动")
+                  : metadata.agent_id === "cursor"
+                    ? copy("Connect & launch", "一键接入并启动")
+                    : copy("Connect", "一键接入")}
+          </button>
           {pageMode !== "connection" && cursorRepairRequired ? (
             <button
               className="btn agent-secondary-action"

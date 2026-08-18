@@ -57,18 +57,24 @@ describe("AgentsPage split workspaces", () => {
     expect(onOpenAgent).toHaveBeenCalledWith("kimi-code");
   });
 
-  it("keeps global routing visible and hides Agent routes in one dropdown", async () => {
+  it("keeps global routing visible and reveals every scanned Agent from one button", async () => {
     const user = userEvent.setup();
     const onOpenAgent = renderPage("routing");
     const selector = screen.getByRole("region", { name: "路由范围" });
 
     expect(screen.getByRole("heading", { name: "路由配置" })).toBeInTheDocument();
     expect(within(selector).getByRole("button", { name: "全局路由" })).toBeVisible();
-    const routeSelect = within(selector).getByRole("combobox", { name: "选择 Agent 路由" });
-    expect(routeSelect).toHaveValue("claude-code");
+    expect(within(selector).queryByText("所有 Agent 的默认策略")).toBeNull();
+    const disclosure = within(selector).getByRole("button", { name: "Agent 路由" });
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
     expect(within(selector).queryByRole("button", { name: "Claude Code" })).toBeNull();
 
-    await user.selectOptions(routeSelect, "kimi-code");
+    await user.click(disclosure);
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
+    expect(within(selector).getByRole("button", { name: "Claude Code" })).toBeVisible();
+    expect(within(selector).getByRole("button", { name: "Kimi Code" })).toBeVisible();
+
+    await user.click(within(selector).getByRole("button", { name: "Kimi Code" }));
     expect(onOpenAgent).toHaveBeenCalledWith("kimi-code");
   });
 });

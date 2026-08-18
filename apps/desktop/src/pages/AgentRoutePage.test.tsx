@@ -367,7 +367,7 @@ describe("AgentRoutePage multi-install admission", () => {
     }
   });
 
-  it("Cursor 接入后显示恢复按钮，恢复后回到一键接入", async () => {
+  it("connection mode uses one action that becomes Restore after Cursor connects", async () => {
     const user = userEvent.setup();
     const found = installation("/Applications/Cursor.app/Contents/MacOS/Cursor", "1.0.0");
     found.discovery.agent_id = "cursor";
@@ -425,18 +425,21 @@ describe("AgentRoutePage multi-install admission", () => {
           onSaveQuota={vi.fn()}
           onSaveQuotaPlan={vi.fn()}
           onViewQuotaUsage={vi.fn()}
+          pageMode="connection"
         />
       </ErrorToastProvider>,
     );
 
     expect(screen.getByText("可接入")).toBeInTheDocument();
     expect(screen.queryByText("暂不可接入")).toBeNull();
+    expect(screen.queryByRole("button", { name: "恢复官方配置并断开" })).toBeNull();
     const connectButton = await screen.findByRole("button", { name: "一键接入并启动" });
     await user.click(connectButton);
 
     const toastViewport = screen.getByTestId("error-toast-viewport");
     expect(await within(toastViewport).findByRole("status")).toHaveTextContent("Cursor 已配置");
     const restoreButton = await screen.findByRole("button", { name: "恢复官方配置并断开" });
+    expect(screen.queryByRole("button", { name: "重新接入" })).toBeNull();
     await user.click(restoreButton);
 
     expect(restoreCursorProvider).toHaveBeenCalledOnce();
