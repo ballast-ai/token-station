@@ -410,6 +410,44 @@ describe("usage dashboard and display-only Agent budgets", () => {
     expect(screen.queryByText("预算已删除", { selector: ".banner" })).toBeNull();
   });
 
+  it("uses the shared Select component and loads the selected Agent budget", async () => {
+    vi.mocked(listAgentRegistry).mockResolvedValueOnce([
+      {
+        agent_id: "codex",
+        legacy_kind: null,
+        display_name: "Codex",
+        icon_key: "codex",
+        admission: "supported",
+      },
+      {
+        agent_id: "claude-code",
+        legacy_kind: null,
+        display_name: "Claude Code",
+        icon_key: "claude-code",
+        admission: "supported",
+      },
+    ]);
+    vi.mocked(getAgentBudgets).mockResolvedValueOnce([
+      approaching,
+      {
+        ...approaching,
+        agent_id: "claude-code",
+        limit_micros: 25_000_000,
+        warning_percent: 70,
+      },
+    ]);
+    const user = userEvent.setup();
+    render(<ErrorToastProvider><BudgetPricingPage onBack={vi.fn()} /></ErrorToastProvider>);
+
+    const trigger = await screen.findByRole("combobox", { name: "Agent" });
+    expect(trigger).toHaveAttribute("data-slot", "select-trigger");
+    await user.click(trigger);
+    await user.click(within(screen.getByRole("listbox")).getByRole("option", { name: "Claude Code" }));
+
+    expect(screen.getByRole("spinbutton", { name: "预算上限" })).toHaveValue(25);
+    expect(screen.getByRole("spinbutton", { name: "预警阈值" })).toHaveValue(70);
+  });
+
   it("把预算保存请求失败放到全局错误弹窗", async () => {
     vi.mocked(setAgentBudget).mockRejectedValue(new Error("budget write failed"));
     const user = userEvent.setup();

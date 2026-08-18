@@ -11,6 +11,14 @@ import { useErrorToast } from "../components/ErrorToast";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import PageBackButton from "../components/PageBackButton";
 import PricingEditor from "../components/PricingEditor";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select";
 import { humanizeAppError } from "../errors";
 
 function localDateTime(ms: number | null): string {
@@ -137,11 +145,23 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
           <span className="budget-observe-badge">{copy("ALERTS ONLY · ROUTING UNCHANGED", "仅提醒 · 不影响路由")}</span>
         </div>
         <div className="budget-form">
-          <label className="field-label">Agent
-            <select aria-label="Agent" className="select" value={agentId} onChange={(event) => { setAgentId(event.target.value); loadForm(event.target.value, budgets); }}>
-              {agents.map((agent) => <option key={agent.agent_id} value={agent.agent_id}>{agent.display_name}</option>)}
-            </select>
-          </label>
+          <div className="field-label">
+            <span>Agent</span>
+            <Select value={agentId} onValueChange={(selected) => { setAgentId(selected); loadForm(selected, budgets); }}>
+              <SelectTrigger aria-label="Agent" className="w-full min-h-[34px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper">
+                <SelectGroup>
+                  {agents.map((agent) => (
+                    <SelectItem key={agent.agent_id} value={agent.agent_id}>
+                      {agent.display_name}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </div>
           <label className="field-label">{copy("Budget limit", "预算上限")}
             <input aria-label={copy("Budget limit", "预算上限")} className="input" type="number" min="0.000001" step="0.000001" value={limit} onChange={(event) => setLimit(event.target.value)} />
           </label>
