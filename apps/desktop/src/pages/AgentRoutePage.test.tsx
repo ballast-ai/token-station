@@ -1249,6 +1249,9 @@ describe("AgentRoutePage split page modes", () => {
     expect(screen.getByText("2.1.211")).toBeInTheDocument();
     expect(screen.getByText("/Users/x/.claude/settings.json")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "一键接入" })).toBeInTheDocument();
+    const routePreview = screen.getByText("接入后的路由预览").closest(".agent-default-route-state");
+    expect(routePreview).not.toBeNull();
+    expect(within(routePreview as HTMLElement).queryByText("✓")).not.toBeInTheDocument();
     expect(screen.queryByText("选择请求如何分配")).toBeNull();
   });
 

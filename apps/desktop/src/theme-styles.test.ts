@@ -89,8 +89,17 @@ describe("retained page theme styles", () => {
       (match) => match[1],
     ).join("\n");
 
-    expect(baseRuntimeRules).toMatch(/width:\s*160px/);
+    expect(baseRuntimeRules).toMatch(/width:\s*112px/);
     expect(stateRuntimeRules).not.toMatch(/(?:^|;)\s*width:/);
+  });
+
+  it("styles the pre-connection route card as a neutral preview", () => {
+    const previewRule = appCss.match(/\.agent-default-route-state\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const previewIconRule = appCss.match(/\.agent-default-route-state\s*>\s*span\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(previewRule).toMatch(/var\(--signal\)/);
+    expect(previewIconRule).toMatch(/var\(--signal-soft\)/);
+    expect(`${previewRule}\n${previewIconRule}`).not.toMatch(/var\(--success\)/);
   });
 
   it("removes Agent discovery motion when reduced motion is requested", () => {

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Route as RouteIcon } from "lucide-react";
 import {
   applyAgentPlan,
   configureCursorProvider,
@@ -311,6 +312,7 @@ export default function AgentRoutePage({
     ?? metadata.connector_capabilities?.[0]?.config_path_template
     ?? copy("Resolved during connection", "接入时确定");
   const ownedFields = metadata.connector_capabilities?.[0]?.owned_fields ?? [];
+  const routeNeedsAttention = Boolean(route.config_error || !route.direct_target?.model);
 
   const runState = async (action: () => Promise<StateView>, message?: string) => {
     if (busy) return;
@@ -602,10 +604,10 @@ export default function AgentRoutePage({
               : copy("The exact non-sensitive changes appear after the connection plan is created.", "生成接入计划后会显示确切的非敏感改动。")}</small>
           </div>
         </div>
-        <div className={`agent-default-route-state ${route.config_error || !route.direct_target?.model ? "warning" : ""}`}>
-          <span aria-hidden="true">{route.config_error || !route.direct_target?.model ? "!" : "✓"}</span>
+        <div className={`agent-default-route-state ${routeNeedsAttention ? "warning" : ""}`}>
+          <span aria-hidden="true">{routeNeedsAttention ? "!" : <RouteIcon />}</span>
           <div>
-            <strong>{copy("Route used after connection", "接入后使用的默认路由")}</strong>
+            <strong>{copy("Route preview after connection", "接入后的路由预览")}</strong>
             <code>{route.direct_target?.upstream && route.direct_target.model
               ? `${route.direct_target.upstream} / ${route.direct_target.model}`
               : copy("Complete global routing before connection", "请先完成全局路由")}</code>

@@ -1207,7 +1207,8 @@ describe("desktop station navigation", () => {
     })));
 
     expect(await screen.findByText("代理运行中")).toBeInTheDocument();
-    expect(screen.getByText("rev 9")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /代理运行中.*rev 9/ }))
+      .toHaveAttribute("title", expect.stringContaining("rev 9"));
     expect(screen.getByRole("button", { name: "Claude Code" })).toBeInTheDocument();
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
 

@@ -5498,9 +5498,9 @@ pre.block {
 }
 
 .station-runtime-pill[data-slot="button"] {
-  width: 160px;
+  width: 112px;
   height: 34px;
-  max-width: 160px;
+  max-width: 112px;
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -6826,10 +6826,10 @@ pre.block {
   align-items: center;
   gap: 11px;
   padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--success) 32%, var(--line));
+  border: 1px solid color-mix(in srgb, var(--signal) 28%, var(--line));
   border-radius: 9px;
-  color: var(--success);
-  background: color-mix(in srgb, var(--success) 7%, var(--surface));
+  color: var(--signal);
+  background: color-mix(in srgb, var(--signal) 5%, var(--surface));
 }
 .agent-default-route-state > span {
   width: 24px;
@@ -6838,10 +6838,11 @@ pre.block {
   display: grid;
   place-items: center;
   border-radius: 50%;
-  color: #fff;
-  background: var(--success);
+  color: var(--signal);
+  background: var(--signal-soft);
   font-weight: 700;
 }
+.agent-default-route-state > span svg { width: 13px; height: 13px; }
 .agent-default-route-state > div { display: grid; gap: 3px; }
 .agent-default-route-state strong { color: var(--ink); font-size: 11px; }
 .agent-default-route-state code { color: inherit; font-size: 9.5px; }
@@ -6850,7 +6851,7 @@ pre.block {
   color: var(--warning);
   background: color-mix(in srgb, var(--warning) 8%, var(--surface));
 }
-.agent-default-route-state.warning > span { background: var(--warning); }
+.agent-default-route-state.warning > span { color: #fff; background: var(--warning); }
 
 @media (max-width: 980px) {
   .station-content-topnav > .overview-page,

@@ -16,12 +16,15 @@ const serve: ServeView = {
   instance_id: null,
 };
 
-function renderShell(view: Parameters<typeof AppShell>[0]["view"]) {
+function renderShell(
+  view: Parameters<typeof AppShell>[0]["view"],
+  serveOverride: Partial<ServeView> = {},
+) {
   render(
     <LanguageProvider>
       <AppShell
         view={view}
-        serve={serve}
+        serve={{ ...serve, ...serveOverride }}
         registry={[]}
         agents={[]}
         commandBusy={false}
@@ -60,5 +63,18 @@ describe("AppShell Agent and routing navigation", () => {
     cleanup();
     navigation = renderShell("agent-route:claude-code");
     expect(navigation.getByRole("button", { name: "路由" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("keeps runtime revision metadata out of the compact button content", () => {
+    renderShell("overview", {
+      phase: "running",
+      app_runtime: "running",
+      listener_reachable: true,
+      running_revision: 141,
+    });
+
+    const runtimeButton = screen.getByRole("button", { name: /代理运行中.*停止/ });
+    expect(runtimeButton).toHaveAttribute("title", expect.stringContaining("rev 141"));
+    expect(within(runtimeButton).queryByText("rev 141")).not.toBeInTheDocument();
   });
 });

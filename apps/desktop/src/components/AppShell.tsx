@@ -136,12 +136,11 @@ export default function AppShell({
             type="button"
             disabled={commandBusy || serve.phase === "stopping"}
             onClick={onToggleServe}
-            aria-label={`${serveLabel} · ${serve.listen} · ${taskRunning ? t("serve.stop") : t("serve.start")}`}
-            title={`${serveLabel} · ${serve.listen}`}
+            aria-label={`${serveLabel} · ${serve.listen}${serve.running_revision != null ? ` · rev ${serve.running_revision}` : ""} · ${taskRunning ? t("serve.stop") : t("serve.start")}`}
+            title={`${serveLabel} · ${serve.listen}${serve.running_revision != null ? ` · rev ${serve.running_revision}` : ""}`}
           >
             <Activity aria-hidden="true" />
             <span className="station-runtime-copy"><strong>{serveLabel}</strong><small>{serve.listen}</small></span>
-            {serve.running_revision != null && <code>rev {serve.running_revision}</code>}
           </Button>
           <Button
             className="station-settings-button"
