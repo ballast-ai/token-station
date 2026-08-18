@@ -24,6 +24,10 @@ Work on the `main` branch. Commit authorized changes directly to `main` and push
 Do not create feature, topic, release, or migration branches unless the user explicitly requests one.
 Do not create a pull request unless the user explicitly requests one.
 
+After you complete a feature or task, commit all authorized changes locally. Use an English commit
+message. Before delivery, synchronize the local `main` branch with
+[`origin/main`](https://github.com/ballast-ai/token-station/tree/main).
+
 Before each commit, verify that the current branch is `main`. Stage only the files authorized for that
 commit. Keep unrelated working-tree changes unstaged.
 
