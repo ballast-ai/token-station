@@ -484,6 +484,25 @@ pub enum AccessTier {
     Paid,
 }
 
+/// Which host-owned HTTP engine may execute eligible provider calls.
+///
+/// Legacy remains the default and is omitted from serialized configs so an
+/// upgrade does not silently opt in or rewrite existing documents.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCallEngine {
+    #[default]
+    Legacy,
+    SouthV1Buffered,
+}
+
+impl ProviderCallEngine {
+    #[must_use]
+    pub const fn is_legacy(&self) -> bool {
+        matches!(self, Self::Legacy)
+    }
+}
+
 impl AccessTier {
     #[must_use]
     pub fn is_paid(&self) -> bool {
@@ -529,6 +548,10 @@ pub struct UpstreamConfig {
     /// `…/anthropic/v1/messages`.
     #[serde(default, skip_serializing_if = "ApiDialect::is_default")]
     pub api_dialect: ApiDialect,
+    /// Opt-in engine for eligible buffered provider calls. Ineligible calls
+    /// remain on the legacy path before credentials or network I/O begin.
+    #[serde(default, skip_serializing_if = "ProviderCallEngine::is_legacy")]
+    pub provider_call: ProviderCallEngine,
     /// What this upstream serves. The provider adapter may refine it; with no
     /// network of its own it cannot replace it.
     pub models: Vec<ModelCapability>,
@@ -1080,7 +1103,8 @@ impl ConfigSource for FileRouterSource {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccessTier, ApiDialect, ClientConfig, EgressConfig, EgressMode, RoutingMode, UpstreamConfig,
+        AccessTier, ApiDialect, ClientConfig, EgressConfig, EgressMode, ProviderCallEngine,
+        RoutingMode, UpstreamConfig,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1115,6 +1139,45 @@ mod tests {
             serde_json::to_value(&native).expect("serializes")["api_dialect"],
             serde_json::json!("anthropic-native")
         );
+    }
+
+    #[test]
+    fn provider_call_engine_defaults_to_legacy_and_round_trips_the_opt_in() {
+        let legacy: UpstreamConfig = serde_json::from_value(serde_json::json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.deepseek.com/v1",
+            "models": [{ "model": "deepseek-chat" }]
+        }))
+        .expect("legacy upstream parses");
+        assert_eq!(legacy.provider_call, ProviderCallEngine::Legacy);
+        assert!(
+            serde_json::to_value(&legacy)
+                .expect("serializes")
+                .get("provider_call")
+                .is_none(),
+            "the legacy default must not rewrite old configs"
+        );
+
+        let opted_in: UpstreamConfig = serde_json::from_value(serde_json::json!({
+            "provider": "openai-compatible",
+            "provider_call": "south_v1_buffered",
+            "base_url": "https://api.deepseek.com/v1",
+            "models": [{ "model": "deepseek-chat" }]
+        }))
+        .expect("the only South production opt-in parses");
+        assert_eq!(opted_in.provider_call, ProviderCallEngine::SouthV1Buffered);
+        assert_eq!(
+            serde_json::to_value(&opted_in).expect("serializes")["provider_call"],
+            serde_json::json!("south_v1_buffered")
+        );
+
+        let unknown = serde_json::from_value::<UpstreamConfig>(serde_json::json!({
+            "provider": "openai-compatible",
+            "provider_call": "future_engine",
+            "base_url": "https://api.deepseek.com/v1",
+            "models": [{ "model": "deepseek-chat" }]
+        }));
+        assert!(unknown.is_err(), "unknown engines must fail closed");
     }
 
     fn scratch(name: &str, contents: &str) -> PathBuf {

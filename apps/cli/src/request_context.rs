@@ -69,6 +69,28 @@ impl RequestContext {
         self.per_attempt_timeout
     }
 
+    /// The immutable overall request deadline.
+    #[must_use]
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    /// Freezes the current attempt's absolute deadline from one clock sample.
+    #[must_use]
+    pub fn attempt_deadline(&self) -> Instant {
+        self.attempt_deadline_for(self.per_attempt_timeout)
+    }
+
+    /// Freezes an absolute deadline for a caller-supplied attempt cap.
+    #[must_use]
+    pub fn attempt_deadline_for(&self, attempt_timeout: Duration) -> Instant {
+        let started_at = Instant::now();
+        let attempt_cap = started_at
+            .checked_add(attempt_timeout)
+            .unwrap_or(self.deadline);
+        self.deadline.min(attempt_cap)
+    }
+
     /// A handle to hand an upstream client for abort/read-timeout slicing.
     #[must_use]
     pub fn token(&self) -> CancelToken {
@@ -106,5 +128,19 @@ mod tests {
         drain.cancel_with(CancelReason::ServerDrain);
         assert!(ctx.is_cancelled());
         assert_eq!(ctx.cancel_reason(), Some(CancelReason::ServerDrain));
+    }
+
+    #[test]
+    fn attempt_deadline_is_capped_by_the_request_and_attempt_budgets() {
+        let short_attempt =
+            RequestContext::detached(Duration::from_mins(1), Duration::from_secs(10));
+        let before = std::time::Instant::now() + Duration::from_secs(9);
+        let deadline = short_attempt.attempt_deadline();
+        let after = std::time::Instant::now() + Duration::from_secs(11);
+        assert!(deadline >= before && deadline <= after);
+
+        let short_request =
+            RequestContext::detached(Duration::from_secs(1), Duration::from_mins(1));
+        assert!(short_request.attempt_deadline() <= short_request.deadline());
     }
 }

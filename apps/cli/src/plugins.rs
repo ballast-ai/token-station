@@ -285,6 +285,7 @@ impl PluginRegistry {
     /// Returns byte-bound conformance evidence for the package serving a
     /// provider dialect. A configured or globally allowed unsigned package
     /// remains loadable, but is not eligible for the first South slice.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn provider_package_verification(
         &self,
@@ -293,6 +294,17 @@ impl PluginRegistry {
         self.providers
             .get(dialect)
             .map(|binding| binding.package_verification)
+    }
+
+    /// True only when `dialect` resolves to the named package and the exact
+    /// package bytes carry conformance evidence. Operator permission to load
+    /// unsigned bytes does not satisfy this rollout gate.
+    #[must_use]
+    pub fn provider_package_conformance_verified(&self, dialect: &str, package: &str) -> bool {
+        self.providers.get(dialect).is_some_and(|binding| {
+            binding.package == package
+                && binding.package_verification == ProviderPackageVerificationV1::ConformancePassed
+        })
     }
 
     /// Every dialect an `upstream add --provider` may name, sorted.

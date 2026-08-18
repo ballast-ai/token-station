@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use tokio_util::sync::CancellationToken as AsyncCancellationToken;
 
 /// Why a request stopped. The value is closed so lifecycle, protocol rendering
 /// and metrics cannot silently disagree about cancellation semantics.
@@ -28,6 +29,7 @@ pub enum CancelReason {
 pub struct CancelToken {
     reason: Arc<AtomicU8>,
     parent: Option<Arc<AtomicU8>>,
+    async_signal: AsyncCancellationToken,
 }
 
 impl CancelToken {
@@ -37,6 +39,7 @@ impl CancelToken {
         Self {
             reason: Arc::new(AtomicU8::new(0)),
             parent: None,
+            async_signal: AsyncCancellationToken::new(),
         }
     }
 
@@ -46,6 +49,7 @@ impl CancelToken {
         Self {
             reason: Arc::new(AtomicU8::new(0)),
             parent: Some(Arc::clone(&self.reason)),
+            async_signal: self.async_signal.child_token(),
         }
     }
 
@@ -59,6 +63,7 @@ impl CancelToken {
         let _ = self
             .reason
             .compare_exchange(0, reason as u8, Ordering::SeqCst, Ordering::SeqCst);
+        self.async_signal.cancel();
     }
 
     /// True once this token or its parent has been cancelled.
@@ -75,6 +80,15 @@ impl CancelToken {
                 .as_ref()
                 .and_then(|parent| decode(parent.load(Ordering::SeqCst)))
         })
+    }
+
+    /// A clone of the same cancellation source for async provider transports.
+    /// Root cancellation cascades through Tokio's child-token relationship;
+    /// callers must use [`cancel_with`](Self::cancel_with) so the closed reason
+    /// and the wake-up remain one operation.
+    #[must_use]
+    pub fn async_token(&self) -> AsyncCancellationToken {
+        self.async_signal.clone()
     }
 }
 
@@ -125,6 +139,30 @@ mod tests {
         let draining = root.child();
         disconnected.cancel();
         root.cancel_with(CancelReason::ServerDrain);
+        assert_eq!(
+            disconnected.cancel_reason(),
+            Some(CancelReason::ClientDisconnect)
+        );
+        assert_eq!(draining.cancel_reason(), Some(CancelReason::ServerDrain));
+    }
+
+    #[tokio::test]
+    async fn async_cancellation_uses_the_same_child_and_root_signal() {
+        let root = CancelToken::root();
+        let disconnected = root.child();
+        let draining = root.child();
+        let untouched = root.child();
+        let disconnected_async = disconnected.async_token();
+        let draining_async = draining.async_token();
+        let untouched_async = untouched.async_token();
+
+        disconnected.cancel();
+        disconnected_async.cancelled().await;
+        assert!(!untouched_async.is_cancelled());
+
+        root.cancel_with(CancelReason::ServerDrain);
+        draining_async.cancelled().await;
+        untouched_async.cancelled().await;
         assert_eq!(
             disconnected.cancel_reason(),
             Some(CancelReason::ClientDisconnect)

@@ -405,6 +405,11 @@ impl StartFailure {
 /// Performs every potentially blocking preflight step without binding the
 /// listener, so a running instance keeps serving throughout preparation.
 pub(crate) fn prepare_server(config: ClientConfig) -> Result<PreparedServer, StartFailure> {
+    let runtime = timed_stage("runtime_init", || {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+    })?;
     let mut sinks: Vec<Box<dyn Recorder>> = vec![Box::new(timed_stage("log_open", || {
         FileLog::open(&config.data.dir)
     })?)];
@@ -418,8 +423,12 @@ pub(crate) fn prepare_server(config: ClientConfig) -> Result<PreparedServer, Sta
         BodyLog::open(&config.data.dir)
     })?);
     let gateway = Arc::new(timed_stage("gateway_init", || {
-        Gateway::new(&config, Arc::new(Recorders(sinks)))
-            .map(|gateway| gateway.with_body_log(body_log))
+        Gateway::new_with_provider_runtime(
+            &config,
+            Arc::new(Recorders(sinks)),
+            runtime.handle().clone(),
+        )
+        .map(|gateway| gateway.with_body_log(body_log))
     })?);
     let admin = Arc::new(timed_stage("admin_snapshot", || {
         token_station_cli::admin::AdminContext::from_config(&config)
@@ -433,11 +442,6 @@ pub(crate) fn prepare_server(config: ClientConfig) -> Result<PreparedServer, Sta
         None
     };
 
-    let runtime = timed_stage("runtime_init", || {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-    })?;
     let app_state = server::AppState::new(gateway, virtual_key.clone().map(Arc::from), admin);
 
     Ok(PreparedServer {

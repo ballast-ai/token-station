@@ -77,10 +77,6 @@ pub(crate) enum ProviderPackageEligibilityV1 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RequestBodyModeV1 {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "streaming remains outside South provider-call v1")
-    )]
     Streaming,
     Buffered,
 }
@@ -173,18 +169,7 @@ pub(crate) enum StableProviderCallFailureV1 {
 /// Host lifecycle context used only to interpret South's context-free `CANCELLED` code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CancellationDispositionV1 {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "client cancellation is wired with production traffic"
-        )
-    )]
     ClientDisconnected,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "server drain is wired with production traffic")
-    )]
     ServerDrain,
     Deadline,
 }

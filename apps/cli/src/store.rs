@@ -21,9 +21,9 @@ use rusqlite::{
 };
 use token_station_metrics::{
     AttemptRecord, ConversionOutcome, ConversionReasonCode, ConversionReasonDetail,
-    ConversionRecord, ConversionStage, CostKind, DecisionRecord, QuotaDecisionSnapshot,
-    ReceiptView, RecordedDecidedBy, Recorder, RequestPathKind, RequestRecord, RoutingRecord,
-    SCHEMA_VERSION,
+    ConversionRecord, ConversionStage, CostKind, DecisionRecord, ProviderCallEngine,
+    QuotaDecisionSnapshot, ReceiptView, RecordedDecidedBy, Recorder, RequestPathKind,
+    RequestRecord, RoutingRecord, SCHEMA_VERSION,
 };
 use token_station_protocol::{ErrorCode, HintKind, StreamOutcome, Usage};
 use token_station_router_core::RequestFeatures;
@@ -322,6 +322,13 @@ const MIGRATIONS: &[Migration] = &[
              WHERE outcome = 'unknown';
         ",
     },
+    Migration {
+        // v8 -> v9: the actual engine for each attempt. Existing rows predate
+        // the distinction and remain explicitly unknown rather than guessed.
+        to: 9,
+        sql: "ALTER TABLE attempts ADD COLUMN provider_call_engine TEXT NOT NULL DEFAULT 'unknown'
+                CHECK (provider_call_engine IN ('legacy', 'south_v1_buffered', 'unknown'));",
+    },
 ];
 
 /// One row per exchange, flattened from `RequestRecord`.
@@ -438,6 +445,8 @@ CREATE TABLE IF NOT EXISTS attempts (
             'complete', 'failed_after_partial', 'failed_before_output', 'client_cancelled'
         )
     ),
+    provider_call_engine TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (provider_call_engine IN ('legacy', 'south_v1_buffered', 'unknown')),
     fallback_allowed INTEGER NOT NULL,
     PRIMARY KEY (request_id, ordinal)
 );
@@ -971,8 +980,8 @@ impl SqliteStore {
             transaction.execute(
                 "INSERT INTO attempts (
                     request_id, ordinal, upstream, model, latency_ms, http_status,
-                    error_code, stream_outcome, fallback_allowed
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    error_code, stream_outcome, provider_call_engine, fallback_allowed
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
                     record.request_id,
                     attempt.ordinal,
@@ -982,6 +991,7 @@ impl SqliteStore {
                     attempt.http_status,
                     attempt.error_code.map(ErrorCode::as_str),
                     attempt.stream_outcome.map(stream_outcome_name),
+                    attempt.provider_call_engine.as_str(),
                     attempt.fallback_allowed,
                 ],
             )?;
@@ -1177,6 +1187,15 @@ fn stream_outcome(column: usize, value: &str) -> Result<StreamOutcome, rusqlite:
         "failed_before_output" => Ok(StreamOutcome::FailedBeforeOutput),
         "client_cancelled" => Ok(StreamOutcome::ClientCancelled),
         other => Err(invalid_enum(column, "stream outcome", other)),
+    }
+}
+
+fn provider_call_engine(column: usize, value: &str) -> Result<ProviderCallEngine, rusqlite::Error> {
+    match value {
+        "legacy" => Ok(ProviderCallEngine::Legacy),
+        "south_v1_buffered" => Ok(ProviderCallEngine::SouthV1Buffered),
+        "unknown" => Ok(ProviderCallEngine::Unknown),
+        other => Err(invalid_enum(column, "provider call engine", other)),
     }
 }
 
@@ -1509,7 +1528,7 @@ fn read_attempts(
 ) -> Result<Vec<AttemptRecord>, rusqlite::Error> {
     let mut statement = connection.prepare(
         "SELECT ordinal, upstream, model, latency_ms, http_status, error_code,
-                stream_outcome, fallback_allowed
+                stream_outcome, fallback_allowed, provider_call_engine
            FROM attempts WHERE request_id = ?1 ORDER BY ordinal",
     )?;
     statement
@@ -1528,6 +1547,7 @@ fn read_attempts(
                 http_status: row.get(4)?,
                 error_code: optional_error_code(5, raw_error_code.as_deref())?,
                 stream_outcome: outcome,
+                provider_call_engine: provider_call_engine(8, &row.get::<_, String>(8)?)?,
                 fallback_allowed: row.get(7)?,
             })
         })?
@@ -1584,8 +1604,8 @@ mod tests {
     use super::{ReceiptQuery, SqliteStore, recent_receipts};
     use token_station_metrics::{
         AttemptRecord, ConversionOutcome, ConversionRecord, ConversionStage, CostKind,
-        DecisionRecord, QuotaDecisionSnapshot, RecordedDecidedBy, Recorder, RequestRecord,
-        RoutingRecord,
+        DecisionRecord, ProviderCallEngine, QuotaDecisionSnapshot, RecordedDecidedBy, Recorder,
+        RequestRecord, RoutingRecord,
     };
     use token_station_protocol::{ErrorCode, StreamOutcome, Usage};
     use token_station_router_core::RequestFeatures;
@@ -1679,6 +1699,7 @@ mod tests {
                 http_status: Some(503),
                 error_code: Some(ErrorCode::UpstreamUnavailable),
                 stream_outcome: Some(StreamOutcome::FailedBeforeOutput),
+                provider_call_engine: ProviderCallEngine::Legacy,
                 fallback_allowed: true,
             },
             AttemptRecord {
@@ -1689,6 +1710,7 @@ mod tests {
                 http_status: Some(200),
                 error_code: None,
                 stream_outcome: Some(StreamOutcome::Complete),
+                provider_call_engine: ProviderCallEngine::SouthV1Buffered,
                 fallback_allowed: false,
             },
         ];
@@ -1817,6 +1839,7 @@ mod tests {
             http_status: None,
             error_code: Some(ErrorCode::Internal),
             stream_outcome: None,
+            provider_call_engine: ProviderCallEngine::Legacy,
             fallback_allowed: false,
         });
         store.record(&replay);
@@ -1917,6 +1940,52 @@ mod tests {
     }
 
     #[test]
+    fn a_v8_attempt_migrates_to_an_explicit_unknown_provider_call_engine() {
+        let path = scratch("migrate-v8-engine");
+        std::fs::remove_file(&path).ok();
+        {
+            let connection = rusqlite::Connection::open(&path).expect("opens");
+            connection.execute_batch(V3_SCHEMA).expect("v3 schema");
+            for migration in super::MIGRATIONS
+                .iter()
+                .filter(|migration| (4..=8).contains(&migration.to))
+            {
+                connection
+                    .execute_batch(migration.sql)
+                    .expect("migrates to v8");
+            }
+            connection
+                .execute(
+                    "INSERT INTO attempts (
+                        request_id, ordinal, upstream, model, latency_ms, fallback_allowed
+                     ) VALUES ('legacy-attempt', 1, 'old', 'old-model', 7, 0)",
+                    [],
+                )
+                .expect("v8 attempt inserts");
+            connection
+                .pragma_update(None, "user_version", 8)
+                .expect("stamps v8");
+        }
+
+        let store = SqliteStore::open(&path).expect("v8 migrates");
+        let engine: String = store
+            .connection
+            .lock()
+            .expect("lock")
+            .query_row(
+                "SELECT provider_call_engine FROM attempts WHERE request_id='legacy-attempt'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("engine reads");
+        assert_eq!(engine, "unknown");
+
+        drop(store);
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(path.with_extension("v8.bak")).ok();
+    }
+
+    #[test]
     fn a_child_failure_rolls_the_whole_receipt_back() {
         let path = scratch("transaction-rollback");
         std::fs::remove_file(&path).ok();
@@ -1957,6 +2026,14 @@ mod tests {
         assert_eq!(recent[4].request_id, "req-2");
         let newest = &recent[0];
         assert_eq!(newest.agent_id.as_deref(), Some("codex"));
+        assert_eq!(
+            newest.attempt_records[0].provider_call_engine,
+            ProviderCallEngine::Legacy
+        );
+        assert_eq!(
+            newest.attempt_records[1].provider_call_engine,
+            ProviderCallEngine::SouthV1Buffered
+        );
         assert_eq!(newest.running_revision, Some(7));
         assert_eq!(newest.attempts, 2);
         assert_eq!(newest.attempt_records.len(), 2);

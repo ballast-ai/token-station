@@ -33,8 +33,9 @@ use serde_json::{Value, json};
 use token_station_conformance::{AgentAdapter, ProviderAdapter};
 use token_station_metrics::{
     AttemptRecord, ConversionOutcome, ConversionReasonCode, ConversionReasonDetail,
-    ConversionRecord, ConversionStage, CostKind, DecisionRecord, Recorder, RequestPathKind,
-    RequestRecord, RoutingRecord,
+    ConversionRecord, ConversionStage, CostKind, DecisionRecord,
+    ProviderCallEngine as RecordedProviderCallEngine, Recorder, RequestPathKind, RequestRecord,
+    RoutingRecord,
 };
 use token_station_plugin_runtime::{AgentPlugin, NoSecrets, PluginRuntime, ProviderPlugin};
 use token_station_protocol::{
@@ -54,7 +55,10 @@ use crate::cancel::{CancelReason, CancelToken};
 use crate::request_context::RequestContext;
 use crate::sse::SseFrameDecoder;
 
-use crate::config::{ApiDialect, AuthConfig, ClientConfig, EgressConfig};
+use crate::config::{
+    ApiDialect, AuthConfig, ClientConfig, EgressConfig,
+    ProviderCallEngine as ConfiguredProviderCallEngine,
+};
 use crate::secrets::SecretStore;
 use crate::south_provider_call::{
     CancellationDispositionV1, CommunityCallPolicyV1, CommunityCredentialResolverV1, IneligibleV1,
@@ -1038,6 +1042,7 @@ fn attempt_receipt(
     ordinal: u32,
     latency_ms: u64,
     upstream_http_status: Option<u16>,
+    provider_call_engine: RecordedProviderCallEngine,
     result: Result<StreamOutcome, &ErrorEnvelope>,
     record: &RequestRecord,
 ) -> AttemptRecord {
@@ -1057,6 +1062,7 @@ fn attempt_receipt(
                 http_status: upstream_http_status,
                 error_code,
                 stream_outcome: Some(outcome),
+                provider_call_engine,
                 fallback_allowed: matches!(outcome, StreamOutcome::FailedBeforeOutput)
                     && error_code.is_some_and(ErrorCode::is_retriable_elsewhere),
             }
@@ -1069,6 +1075,7 @@ fn attempt_receipt(
             http_status: upstream_http_status,
             error_code: Some(error.code),
             stream_outcome: Some(StreamOutcome::FailedBeforeOutput),
+            provider_call_engine,
             fallback_allowed: error.code.is_retriable_elsewhere(),
         },
     }
@@ -1079,6 +1086,7 @@ fn attempt_receipt_for_result(
     ordinal: u32,
     latency_ms: u64,
     upstream_http_status: Option<u16>,
+    provider_call_engine: RecordedProviderCallEngine,
     result: &Result<StreamOutcome, ErrorEnvelope>,
     record: &RequestRecord,
 ) -> AttemptRecord {
@@ -1088,6 +1096,7 @@ fn attempt_receipt_for_result(
             ordinal,
             latency_ms,
             upstream_http_status,
+            provider_call_engine,
             Ok(*outcome),
             record,
         ),
@@ -1096,6 +1105,7 @@ fn attempt_receipt_for_result(
             ordinal,
             latency_ms,
             upstream_http_status,
+            provider_call_engine,
             Err(error),
             record,
         ),
@@ -1162,7 +1172,38 @@ struct Upstream {
     /// `AnthropicNative` diverts an anthropic-messages request onto the verbatim
     /// passthrough path instead of the Canonical-IR provider render.
     dialect: ApiDialect,
+    provider_call: ConfiguredProviderCallEngine,
     south_package_approved: bool,
+}
+
+/// Server-owned asynchronous capability borrowed by the synchronous gateway.
+/// It creates no task; each provider future stays on the calling blocking
+/// worker's stack until completion or cancellation.
+struct SouthProviderRuntime {
+    handle: tokio::runtime::Handle,
+    transport: south_transport_reqwest::ReqwestTransportV1,
+}
+
+fn south_runtime_for(
+    config: &ClientConfig,
+    provider_runtime: Option<tokio::runtime::Handle>,
+) -> Result<Option<SouthProviderRuntime>, String> {
+    let uses_south = config
+        .upstreams
+        .values()
+        .any(|entry| entry.provider_call == ConfiguredProviderCallEngine::SouthV1Buffered);
+    if !uses_south {
+        return Ok(None);
+    }
+    let handle = provider_runtime.ok_or_else(|| {
+        "a South production opt-in requires a server-owned Tokio runtime".to_owned()
+    })?;
+    let transport =
+        build_direct_reqwest_transport_v1(UPSTREAM_TIMEOUT, UPSTREAM_TIMEOUT, UPSTREAM_TIMEOUT)
+            .map_err(|failure| {
+                describe_south_failure(failure, CancellationDispositionV1::Deadline)
+            })?;
+    Ok(Some(SouthProviderRuntime { handle, transport }))
 }
 
 enum AttemptTerminal {
@@ -1527,6 +1568,7 @@ pub struct Gateway {
     pricing: crate::pricing::PriceTable,
     secrets: SecretStore,
     egress: EgressPolicy,
+    south_runtime: Option<SouthProviderRuntime>,
     recorder: Arc<dyn Recorder>,
     /// Optional Desktop-only body sink. It is separate from every [`Recorder`]
     /// so `RequestRecord`, `SQLite`, and the JSONL request log remain body-free.
@@ -1582,6 +1624,28 @@ fn describe_prepare_failure(failure: PrepareProviderCallErrorV1) -> String {
                 error,
             )),
             CancellationDispositionV1::Deadline,
+        ),
+    }
+}
+
+fn map_prepare_failure(
+    failure: PrepareProviderCallErrorV1,
+    cancellation: CancellationDispositionV1,
+) -> ErrorEnvelope {
+    match failure {
+        PrepareProviderCallErrorV1::Ineligible(_) => ErrorEnvelope::new(
+            ErrorCode::Internal,
+            500,
+            "ineligible provider call crossed the legacy fallback boundary",
+        ),
+        PrepareProviderCallErrorV1::Contract(error) => {
+            map_failure_v1(StableProviderCallFailureV1::Contract(error), cancellation)
+        }
+        PrepareProviderCallErrorV1::Preparation(error) => map_failure_v1(
+            StableProviderCallFailureV1::Provider(south_core::ProviderCallErrorV1::Preparation(
+                error,
+            )),
+            cancellation,
         ),
     }
 }
@@ -1903,6 +1967,30 @@ impl Gateway {
     /// Never for a [`ClientConfig`] that came through [`ClientConfig::load`]:
     /// the `expect`s below restate what its validation already proved.
     pub fn new(config: &ClientConfig, recorder: Arc<dyn Recorder>) -> Result<Self, String> {
+        Self::new_inner(config, recorder, None)
+    }
+
+    /// Builds a serving Gateway with the runtime that owns all asynchronous
+    /// South provider calls. The caller must keep that runtime alive until the
+    /// server's in-flight blocking workers have drained.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted configuration, plugin, runtime, or transport setup
+    /// error. No provider credential or network request is touched.
+    pub fn new_with_provider_runtime(
+        config: &ClientConfig,
+        recorder: Arc<dyn Recorder>,
+        provider_runtime: tokio::runtime::Handle,
+    ) -> Result<Self, String> {
+        Self::new_inner(config, recorder, Some(provider_runtime))
+    }
+
+    fn new_inner(
+        config: &ClientConfig,
+        recorder: Arc<dyn Recorder>,
+        provider_runtime: Option<tokio::runtime::Handle>,
+    ) -> Result<Self, String> {
         // Compile host routing before plugin or network setup. A Direct config
         // without a target therefore fails closed even when its ClientConfig
         // was constructed directly instead of loaded from disk.
@@ -1931,6 +2019,8 @@ impl Gateway {
         supported_agent_ids.extend(config.agent_routes.keys().cloned());
 
         let provider_plugins = load_provider_plugins(&runtime, &registry, config)?;
+
+        let south_runtime = south_runtime_for(config, provider_runtime)?;
 
         let mut upstreams = BTreeMap::new();
         let mut catalog = Vec::new();
@@ -1977,15 +2067,11 @@ impl Gateway {
                     auth_config: entry.auth.clone(),
                     plugin,
                     dialect: entry.api_dialect,
-                    south_package_approved: registry
-                        .provider_binding(&entry.provider)
-                        .is_some_and(|binding| {
-                            binding.package == "provider-openai-compatible"
-                                && registry.provider_package_verification(&entry.provider)
-                                    == Some(
-                                        crate::plugins::ProviderPackageVerificationV1::ConformancePassed,
-                                    )
-                        }),
+                    provider_call: entry.provider_call,
+                    south_package_approved: registry.provider_package_conformance_verified(
+                        &entry.provider,
+                        "provider-openai-compatible",
+                    ),
                 },
             );
         }
@@ -2024,6 +2110,7 @@ impl Gateway {
             pricing: config.pricing.clone(),
             secrets: SecretStore::from_config(config, &config.data.dir),
             egress: EgressPolicy::new(config.egress.clone()),
+            south_runtime,
             recorder,
             body_log: None,
         })
@@ -2783,7 +2870,7 @@ impl Gateway {
             .config
             .authorize(&descriptor)
             .map_err(|refusal| refusal.to_string())?;
-        let mut response = self
+        let response = self
             .send_with(http, &descriptor, upstream_name)
             .map_err(describe)?;
         if response.status >= 400 {
@@ -2798,10 +2885,10 @@ impl Gateway {
 
         let mut parser = upstream.plugin.stream_parser();
         let mut decoder = SseFrameDecoder::default();
+        let mut reader = response.into_reader();
         let mut buffer = [0u8; STREAM_READ];
         loop {
-            let read = response
-                .reader
+            let read = reader
                 .read(&mut buffer)
                 .map_err(|_| "upstream connection broke while streaming".to_owned())?;
             if read == 0 {
@@ -3613,6 +3700,7 @@ impl Gateway {
         );
         let retry_clock = Instant::now();
         let mut retry_status = None;
+        let mut retry_engine = RecordedProviderCallEngine::Legacy;
         let retry = self.try_upstream(
             ctx,
             budget.per_attempt_timeout,
@@ -3623,6 +3711,7 @@ impl Gateway {
             emit,
             record,
             &mut retry_status,
+            &mut retry_engine,
         );
         let retry_latency = u64::try_from(retry_clock.elapsed().as_millis()).unwrap_or(u64::MAX);
         let attempt = attempt_receipt_for_result(
@@ -3630,6 +3719,7 @@ impl Gateway {
             budget.attempts,
             retry_latency,
             retry_status,
+            retry_engine,
             &retry,
             record,
         );
@@ -3640,6 +3730,7 @@ impl Gateway {
     /// Tries the decision's targets in order; moves on only while the error
     /// says another upstream is worth trying, and only before first byte out.
     #[allow(clippy::too_many_arguments)] // one dispatch keeps request + render context explicit
+    #[allow(clippy::too_many_lines)] // routing, fallback and receipt state are one attempt machine
     fn dispatch(
         &self,
         ctx: &RequestContext,
@@ -3689,6 +3780,7 @@ impl Gateway {
             record_actual_attempt_target(record, decision, target);
             let attempt_clock = Instant::now();
             let mut upstream_http_status = None;
+            let mut provider_call_engine = RecordedProviderCallEngine::Legacy;
             let result = self.try_upstream(
                 ctx,
                 budget.per_attempt_timeout,
@@ -3699,6 +3791,7 @@ impl Gateway {
                 emit,
                 record,
                 &mut upstream_http_status,
+                &mut provider_call_engine,
             );
             let latency_ms = u64::try_from(attempt_clock.elapsed().as_millis()).unwrap_or(u64::MAX);
             let attempt = attempt_receipt_for_result(
@@ -3706,6 +3799,7 @@ impl Gateway {
                 budget.attempts,
                 latency_ms,
                 upstream_http_status,
+                provider_call_engine,
                 &result,
                 record,
             );
@@ -4151,7 +4245,11 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
         upstream_http_status: &mut Option<u16>,
+        provider_call_engine: &mut RecordedProviderCallEngine,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
+        // Freeze the attempt budget before provider rendering or eligibility
+        // work so those stages cannot extend the caller-owned deadline.
+        let attempt_deadline = ctx.attempt_deadline_for(attempt_timeout);
         let upstream = self
             .upstreams
             .get(target.upstream.as_str())
@@ -4168,8 +4266,16 @@ impl Gateway {
         request.model.clone_from(&target.model);
         let descriptor = Self::build_provider_request(upstream, &request, record)?;
 
-        let response = match self.send(ctx, attempt_timeout, &descriptor, target.upstream.as_str())
-        {
+        let response = match self.send_provider_call(
+            ctx,
+            attempt_timeout,
+            upstream,
+            &descriptor,
+            target.upstream.as_str(),
+            request.stream,
+            attempt_deadline,
+            provider_call_engine,
+        ) {
             Err(_) if ctx.is_cancelled() => {
                 record_conversion_cancelled(
                     record,
@@ -4538,7 +4644,7 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
-        let mut reader = response.reader;
+        let mut reader = response.into_reader();
         let mut buffer = [0u8; STREAM_READ];
         let mut committed = false;
         loop {
@@ -4622,6 +4728,102 @@ impl Gateway {
     ///
     /// The credential is read here, written into one header, and goes out of
     /// scope with the request. It never touches a log, an error, or the guest.
+    #[allow(clippy::too_many_arguments)] // the engine boundary keeps every eligibility fact explicit
+    fn send_provider_call(
+        &self,
+        ctx: &RequestContext,
+        attempt_timeout: Duration,
+        upstream: &Upstream,
+        descriptor: &HttpRequestDescriptor,
+        upstream_name: &str,
+        streaming: bool,
+        attempt_deadline: std::time::Instant,
+        actual_engine: &mut RecordedProviderCallEngine,
+    ) -> Result<UpstreamResponse, ErrorEnvelope> {
+        if upstream.provider_call == ConfiguredProviderCallEngine::Legacy {
+            return self.send(ctx, attempt_timeout, descriptor, upstream_name);
+        }
+
+        let Some(auth_config) = upstream.auth_config.as_ref() else {
+            return self.send(ctx, attempt_timeout, descriptor, upstream_name);
+        };
+        let approved = if upstream.south_package_approved {
+            ProviderPackageEligibilityV1::Approved
+        } else {
+            ProviderPackageEligibilityV1::Unapproved
+        };
+        let metadata = if upstream.south_package_approved {
+            ResponseMetadataEligibilityV1::Compatible
+        } else {
+            ResponseMetadataEligibilityV1::Incompatible
+        };
+        let body_mode = if streaming {
+            RequestBodyModeV1::Streaming
+        } else {
+            RequestBodyModeV1::Buffered
+        };
+        let policy = CommunityCallPolicyV1::new(
+            RolloutEligibilityV1::Enabled,
+            approved,
+            upstream.dialect,
+            self.egress.policy.mode,
+            body_mode,
+            metadata,
+        );
+        let prepared =
+            match prepare_provider_call_v1(policy, &upstream.config, auth_config, descriptor) {
+                Ok(prepared) => prepared,
+                Err(PrepareProviderCallErrorV1::Ineligible(_)) => {
+                    return self.send(ctx, attempt_timeout, descriptor, upstream_name);
+                }
+                Err(failure) => {
+                    return Err(map_prepare_failure(
+                        failure,
+                        Self::south_cancellation_disposition(ctx),
+                    ));
+                }
+            };
+        let Ok(resolver) =
+            CommunityCredentialResolverV1::try_new(&self.secrets, upstream_name, auth_config)
+        else {
+            return self.send(ctx, attempt_timeout, descriptor, upstream_name);
+        };
+        let runtime = self.south_runtime.as_ref().ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorCode::Internal,
+                500,
+                "South provider runtime is unavailable",
+            )
+        })?;
+        let cancellation = ctx.token().async_token();
+        let deadline = tokio::time::Instant::from_std(attempt_deadline);
+
+        // Crossing this line may resolve a credential or perform network I/O.
+        // From here onward the actual attempt is South and legacy replay is forbidden.
+        *actual_engine = RecordedProviderCallEngine::SouthV1Buffered;
+        let response = runtime
+            .handle
+            .block_on(execute_prepared_provider_call_v1(
+                &prepared,
+                &resolver,
+                &runtime.transport,
+                deadline,
+                &cancellation,
+            ))
+            .map_err(|failure| {
+                map_failure_v1(failure, Self::south_cancellation_disposition(ctx))
+            })?;
+        Ok(UpstreamResponse::from_parts(response))
+    }
+
+    fn south_cancellation_disposition(ctx: &RequestContext) -> CancellationDispositionV1 {
+        match ctx.cancel_reason() {
+            Some(CancelReason::ClientDisconnect) => CancellationDispositionV1::ClientDisconnected,
+            Some(CancelReason::ServerDrain) => CancellationDispositionV1::ServerDrain,
+            Some(CancelReason::Deadline) | None => CancellationDispositionV1::Deadline,
+        }
+    }
+
     fn send(
         &self,
         ctx: &RequestContext,
@@ -4751,7 +4953,7 @@ impl Gateway {
         record: &mut RequestRecord,
     ) -> Result<StreamOutcome, ErrorEnvelope> {
         let mut parser = upstream.plugin.stream_parser();
-        let mut reader = response.reader;
+        let mut reader = response.into_reader();
         let mut decoder = SseFrameDecoder::default();
         let mut committed = false;
         let mut buffer = [0u8; STREAM_READ];
@@ -5107,7 +5309,12 @@ impl Gateway {
 struct UpstreamResponse {
     status: u16,
     headers: BTreeMap<String, String>,
-    reader: Box<dyn Read + Send>,
+    body: UpstreamBody,
+}
+
+enum UpstreamBody {
+    Streaming(Box<dyn Read + Send>),
+    Buffered(String),
 }
 
 impl UpstreamResponse {
@@ -5127,32 +5334,52 @@ impl UpstreamResponse {
         Self {
             status,
             headers,
-            reader: Box::new(reader),
+            body: UpstreamBody::Streaming(Box::new(reader)),
         }
     }
 
-    fn into_parts(mut self) -> Result<HttpResponseParts, ErrorEnvelope> {
-        let mut bytes = Vec::new();
-        self.reader.read_to_end(&mut bytes).map_err(|_| {
-            ErrorEnvelope::new(
-                ErrorCode::TransportTruncated,
-                502,
-                "upstream connection closed before the response body completed",
-            )
-        })?;
-        let body = String::from_utf8(bytes).map_err(|_| {
-            ErrorEnvelope::new(
-                ErrorCode::ProviderProtocolError,
-                502,
-                "upstream response body is not valid UTF-8",
-            )
-        })?;
+    fn from_parts(parts: HttpResponseParts) -> Self {
+        Self {
+            status: parts.status,
+            headers: parts.headers,
+            body: UpstreamBody::Buffered(parts.body),
+        }
+    }
+
+    fn into_parts(self) -> Result<HttpResponseParts, ErrorEnvelope> {
+        let body = match self.body {
+            UpstreamBody::Buffered(body) => body,
+            UpstreamBody::Streaming(mut reader) => {
+                let mut bytes = Vec::new();
+                reader.read_to_end(&mut bytes).map_err(|_| {
+                    ErrorEnvelope::new(
+                        ErrorCode::TransportTruncated,
+                        502,
+                        "upstream connection closed before the response body completed",
+                    )
+                })?;
+                String::from_utf8(bytes).map_err(|_| {
+                    ErrorEnvelope::new(
+                        ErrorCode::ProviderProtocolError,
+                        502,
+                        "upstream response body is not valid UTF-8",
+                    )
+                })?
+            }
+        };
         Ok(HttpResponseParts {
             status: self.status,
             headers: self.headers,
             body,
             extensions: token_station_protocol::Extensions::new(),
         })
+    }
+
+    fn into_reader(self) -> Box<dyn Read + Send> {
+        match self.body {
+            UpstreamBody::Streaming(reader) => reader,
+            UpstreamBody::Buffered(body) => Box::new(std::io::Cursor::new(body.into_bytes())),
+        }
     }
 }
 
@@ -5809,5 +6036,27 @@ mod unsupported_media_tests {
                 }
             }]
         })));
+    }
+}
+
+#[cfg(test)]
+mod upstream_response_tests {
+    use super::{HttpResponseParts, UpstreamResponse};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn a_buffered_south_body_keeps_its_allocation_through_host_handoff() {
+        let body = "x".repeat(1024);
+        let original = body.as_ptr();
+        let response = UpstreamResponse::from_parts(HttpResponseParts {
+            status: 200,
+            headers: BTreeMap::new(),
+            body,
+            extensions: token_station_protocol::Extensions::new(),
+        });
+
+        let restored = response.into_parts().expect("buffered body remains valid");
+
+        assert_eq!(restored.body.as_ptr(), original);
     }
 }

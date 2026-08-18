@@ -54,7 +54,8 @@ use token_station_router_core::{DecidedBy, Decision, RequestFeatures};
 ///   picked its account: reset/headroom/pressured/exhausted).
 /// - v8: adds content-free transport diagnostics and closed conversion
 ///   outcome/reason fields.
-pub const SCHEMA_VERSION: u32 = 8;
+/// - v9: records the closed provider-call engine used by each real attempt.
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// The content-free transport path classification recorded for diagnostics.
 /// Raw, caller-controlled URL paths never enter the receipt.
@@ -219,7 +220,30 @@ pub struct AttemptRecord {
     pub error_code: Option<ErrorCode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_outcome: Option<StreamOutcome>,
+    #[serde(default)]
+    pub provider_call_engine: ProviderCallEngine,
     pub fallback_allowed: bool,
+}
+
+/// The content-free HTTP engine that actually performed one upstream attempt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCallEngine {
+    Legacy,
+    SouthV1Buffered,
+    #[default]
+    Unknown,
+}
+
+impl ProviderCallEngine {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::SouthV1Buffered => "south_v1_buffered",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// The only conversion phases a receipt may name. Keeping this closed prevents

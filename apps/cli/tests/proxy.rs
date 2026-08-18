@@ -84,7 +84,9 @@ struct MockUpstream {
     port: u16,
     seen: Arc<Mutex<Vec<Seen>>>,
     hits: Arc<AtomicUsize>,
+    response_started: Arc<AtomicBool>,
     peer_closed: Arc<AtomicBool>,
+    hanging_stop: Option<Arc<AtomicBool>>,
     hanging_worker: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -189,6 +191,7 @@ impl MockUpstream {
         let port = listener.local_addr().expect("bound").port();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let hits = Arc::new(AtomicUsize::new(0));
+        let response_started = Arc::new(AtomicBool::new(false));
         let peer_closed = Arc::new(AtomicBool::new(false));
 
         let record = Arc::clone(&seen);
@@ -216,7 +219,9 @@ impl MockUpstream {
             port,
             seen,
             hits,
+            response_started,
             peer_closed,
+            hanging_stop: None,
             hanging_worker: None,
         }
     }
@@ -225,14 +230,33 @@ impl MockUpstream {
     /// close the upstream socket. This is the real blocked-read case used by
     /// the drain/cancellation acceptance test.
     fn start_hanging() -> Self {
+        Self::start_hanging_with_prefix(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+        )
+    }
+
+    /// Starts a valid buffered JSON response whose declared body never
+    /// completes, so deadline cancellation can be observed after response
+    /// headers have definitely been accepted.
+    fn start_hanging_buffered() -> Self {
+        Self::start_hanging_with_prefix(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1024\r\nconnection: close\r\n\r\n{",
+        )
+    }
+
+    fn start_hanging_with_prefix(response_prefix: &'static [u8]) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
         let port = listener.local_addr().expect("bound").port();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let hits = Arc::new(AtomicUsize::new(0));
+        let response_started = Arc::new(AtomicBool::new(false));
         let peer_closed = Arc::new(AtomicBool::new(false));
+        let hanging_stop = Arc::new(AtomicBool::new(false));
         let record = Arc::clone(&seen);
         let counter = Arc::clone(&hits);
+        let started = Arc::clone(&response_started);
         let closed = Arc::clone(&peer_closed);
+        let stop = Arc::clone(&hanging_stop);
         let hanging_worker = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("hanging upstream accepts");
             record
@@ -241,17 +265,16 @@ impl MockUpstream {
                 .push(read_http_request(&mut stream));
             counter.fetch_add(1, Ordering::SeqCst);
             stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
-                )
-                .expect("stream headers write");
-            stream.flush().expect("stream headers flush");
+                .write_all(response_prefix)
+                .expect("response prefix writes");
+            stream.flush().expect("response prefix flushes");
+            started.store(true, Ordering::SeqCst);
             stream
                 .set_read_timeout(Some(std::time::Duration::from_millis(100)))
                 .expect("read timeout sets");
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             let mut byte = [0_u8; 1];
-            while std::time::Instant::now() < deadline {
+            while !stop.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
                 match stream.read(&mut byte) {
                     Ok(0) => {
                         closed.store(true, Ordering::SeqCst);
@@ -275,7 +298,9 @@ impl MockUpstream {
             port,
             seen,
             hits,
+            response_started,
             peer_closed,
+            hanging_stop: Some(hanging_stop),
             hanging_worker: Some(hanging_worker),
         }
     }
@@ -292,11 +317,18 @@ impl MockUpstream {
         self.hits.load(Ordering::SeqCst)
     }
 
+    fn response_started(&self) -> bool {
+        self.response_started.load(Ordering::SeqCst)
+    }
+
     fn peer_closed(&self) -> bool {
         self.peer_closed.load(Ordering::SeqCst)
     }
 
     fn finish_hanging(mut self) {
+        if let Some(stop) = self.hanging_stop.take() {
+            stop.store(true, Ordering::SeqCst);
+        }
         if let Some(worker) = self.hanging_worker.take() {
             worker.join().expect("hanging upstream exits cleanly");
         }
@@ -559,6 +591,11 @@ fn start_proxy_with_agents_budgets_catalog_price_and_parameters(
 /// background server bound to a loopback port.
 fn spawn_proxy(config: &ClientConfig) -> Proxy {
     let data_dir = config.data.dir.clone();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio builds");
     let mut sinks: Vec<Box<dyn token_station_metrics::Recorder>> = vec![Box::new(
         token_station_cli::filelog::FileLog::open(&config.data.dir).expect("log opens"),
     )];
@@ -569,7 +606,10 @@ fn spawn_proxy(config: &ClientConfig) -> Proxy {
         ));
     }
     let recorder = Arc::new(token_station_cli::filelog::Recorders(sinks));
-    let gateway = Arc::new(Gateway::new(config, recorder).expect("gateway assembles"));
+    let gateway = Arc::new(
+        Gateway::new_with_provider_runtime(config, recorder, runtime.handle().clone())
+            .expect("gateway assembles"),
+    );
 
     // Auth on, exactly as a real first start would set it up.
     let (virtual_key, created) =
@@ -590,11 +630,6 @@ fn spawn_proxy(config: &ClientConfig) -> Proxy {
     let address = listener.local_addr().expect("bound");
 
     std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("tokio builds");
         runtime.block_on(async move {
             let listener = tokio::net::TcpListener::from_std(listener).expect("listener converts");
             server::serve(state, listener).await.expect("server runs");
@@ -4916,6 +4951,381 @@ fn south_probe_gateway(upstream: &MockUpstream, secret: &str) -> (Gateway, PathB
     let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder))
         .expect("South probe gateway assembles");
     (gateway, data_dir)
+}
+
+fn start_south_production_proxy(upstream: &MockUpstream, secret: &str) -> Proxy {
+    let (config_path, _) = write_south_probe_config(upstream, secret, true);
+    let mut config: Value = serde_json::from_slice(
+        &std::fs::read(&config_path).expect("South production config reads"),
+    )
+    .expect("South production config is JSON");
+    config["data"]["metrics"] = json!(true);
+    config["upstreams"]["mock_primary"]["provider_call"] = json!("south_v1_buffered");
+    let config: ClientConfig =
+        serde_json::from_value(config).expect("South production config parses");
+    spawn_proxy(&config)
+}
+
+#[test]
+fn production_buffered_opt_in_executes_south_once_and_records_the_actual_engine() {
+    let answer = json!({
+        "id": "chatcmpl-production-south", "model": "gpt-5.5",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "south" }, "finish_reason": "stop" }],
+        "usage": { "prompt_tokens": 2, "completion_tokens": 1 }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json_with_headers(
+        200,
+        &answer.to_string(),
+        &[
+            ("x-ratelimit-limit-tokens", "1000"),
+            ("x-ratelimit-remaining-tokens", "900"),
+            ("x-ratelimit-reset-tokens", "1s"),
+        ],
+    )]]);
+    let proxy = start_south_production_proxy(&mock, "sk-south-production");
+
+    let (status, body) = post_chat(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "messages": [{ "role": "user", "content": "hi" }]
+        }),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(mock.hits(), 1, "one attempt must issue one request");
+    let seen = mock.seen();
+    assert_eq!(seen[0].path, "/v1/chat/completions");
+    assert_eq!(
+        seen[0].authorization.as_deref(),
+        Some("Bearer sk-south-production")
+    );
+
+    settle();
+    let (admin_status, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    assert_eq!(admin_status, 200, "{receipts_body}");
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["provider_call_engine"],
+        json!("south_v1_buffered"),
+        "the receipt records the engine that actually performed the attempt: {receipts}"
+    );
+
+    let (_, _, quota_body) = admin_get(&proxy, "/admin/quota", Some(&proxy.virtual_key), None);
+    let quota: Value = serde_json::from_str(&quota_body).expect("quota snapshot is JSON");
+    let account = quota["accounts"]
+        .as_array()
+        .and_then(|accounts| {
+            accounts
+                .iter()
+                .find(|account| account["upstream"] == "mock_primary")
+        })
+        .expect("South quota account is projected");
+    assert_eq!(account["source"], json!("authoritative"));
+    assert_eq!(account["windows"][0]["limit"], json!(1000));
+    assert_eq!(account["windows"][0]["remaining_permille"], json!(900));
+}
+
+#[test]
+fn production_south_failures_are_fail_closed_and_never_replayed_by_legacy() {
+    let provider_error = |status| {
+        http_json(
+            status,
+            &json!({"error": {"message": "fixture", "code": "fixture"}}).to_string(),
+        )
+    };
+    let cases = [
+        ("provider-401", provider_error(401), 401),
+        ("provider-500", provider_error(500), 500),
+        (
+            "redirect",
+            b"HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1/second-hop\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec(),
+            502,
+        ),
+        (
+            "invalid-utf8",
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1\r\nconnection: close\r\n\r\n\xff".to_vec(),
+            502,
+        ),
+        (
+            "oversized",
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 33554433\r\nconnection: close\r\n\r\n".to_vec(),
+            502,
+        ),
+    ];
+
+    for (name, response, expected_status) in cases {
+        let mock = MockUpstream::start(vec![vec![response]]);
+        let proxy = start_south_production_proxy(&mock, &format!("sk-south-{name}"));
+        let (status, body) = post_chat(
+            &proxy,
+            &json!({
+                "model": "auto",
+                "messages": [{ "role": "user", "content": "fail closed" }]
+            }),
+            None,
+        );
+
+        assert_eq!(status, expected_status, "{name}: {body}");
+        assert_eq!(mock.hits(), 1, "{name}: South failure cannot replay");
+        settle();
+        let (_, _, receipts_body) =
+            admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+        let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+        assert_eq!(
+            receipts[0]["attempt_records"][0]["provider_call_engine"],
+            json!("south_v1_buffered"),
+            "{name}: the failed attempt still records its actual engine"
+        );
+    }
+}
+
+#[test]
+fn production_south_opt_in_keeps_streaming_on_legacy_and_records_the_fallback() {
+    let sse = concat!(
+        "data: {\"id\":\"chatcmpl-stream\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let proxy = start_south_production_proxy(&mock, "sk-south-stream-fallback");
+
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(mock.hits(), 1, "stream fallback cannot double-send");
+    assert!(body.contains("data: [DONE]"), "{body}");
+
+    settle();
+    let (_, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["provider_call_engine"],
+        json!("legacy")
+    );
+}
+
+#[test]
+fn production_south_server_drain_cancels_buffered_io_without_legacy_replay() {
+    let mock = MockUpstream::start_hanging();
+    let peer_closed = Arc::clone(&mock.peer_closed);
+    let proxy = start_south_production_proxy(&mock, "sk-south-drain");
+    let url = proxy.url.clone();
+    let virtual_key = proxy.virtual_key.clone();
+    let client = std::thread::spawn(move || {
+        let agent = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(15)))
+                .http_status_as_error(false)
+                .build(),
+        );
+        agent
+            .post(format!("{url}/v1/chat/completions"))
+            .header("authorization", &format!("Bearer {virtual_key}"))
+            .send(
+                &json!({
+                    "model": "auto",
+                    "messages": [{ "role": "user", "content": "hang" }]
+                })
+                .to_string(),
+            )
+            .expect("proxy answers the drained South request")
+            .status()
+            .as_u16()
+    });
+
+    let arrival_deadline = Instant::now() + Duration::from_secs(3);
+    while (mock.hits() == 0 || proxy.control.in_flight() == 0) && Instant::now() < arrival_deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(mock.hits(), 1, "South request reached the upstream once");
+    proxy.control.cancel_in_flight();
+    assert_eq!(client.join().expect("client joins"), 503);
+
+    let cleanup_deadline = Instant::now() + Duration::from_secs(3);
+    while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
+        && Instant::now() < cleanup_deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        proxy.control.in_flight(),
+        0,
+        "the blocking worker is accounted"
+    );
+    assert!(
+        peer_closed.load(Ordering::SeqCst),
+        "cancel drops reqwest I/O"
+    );
+    assert_eq!(mock.hits(), 1, "drain cannot replay through legacy");
+    mock.finish_hanging();
+
+    settle();
+    let (_, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    assert_eq!(receipts[0]["status"], json!(503));
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["provider_call_engine"],
+        json!("south_v1_buffered")
+    );
+}
+
+#[test]
+fn production_south_client_disconnect_cancels_buffered_io_without_legacy_replay() {
+    let mock = MockUpstream::start_hanging();
+    let peer_closed = Arc::clone(&mock.peer_closed);
+    let proxy = start_south_production_proxy(&mock, "sk-south-disconnect");
+    let host = proxy.url.strip_prefix("http://").expect("loopback URL");
+    let body = json!({
+        "model": "auto",
+        "messages": [{ "role": "user", "content": "disconnect" }]
+    })
+    .to_string();
+    let mut client = TcpStream::connect(host).expect("client connects");
+    write!(
+        client,
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        proxy.virtual_key,
+        body.len()
+    )
+    .expect("request writes");
+    client.flush().expect("request flushes");
+
+    let arrival_deadline = Instant::now() + Duration::from_secs(3);
+    while (mock.hits() == 0 || proxy.control.in_flight() == 0) && Instant::now() < arrival_deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(mock.hits(), 1, "South request reached the upstream once");
+    client.shutdown(Shutdown::Both).expect("client disconnects");
+    drop(client);
+
+    let cleanup_deadline = Instant::now() + Duration::from_secs(3);
+    while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
+        && Instant::now() < cleanup_deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        proxy.control.in_flight(),
+        0,
+        "disconnect releases the worker"
+    );
+    assert!(
+        peer_closed.load(Ordering::SeqCst),
+        "disconnect drops reqwest I/O"
+    );
+    assert_eq!(mock.hits(), 1, "disconnect cannot replay through legacy");
+    mock.finish_hanging();
+
+    settle();
+    let (_, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    assert_eq!(receipts[0]["status"], json!(499));
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["provider_call_engine"],
+        json!("south_v1_buffered")
+    );
+}
+
+#[test]
+fn production_south_attempt_deadline_returns_504_without_wall_sleep_or_legacy_replay() {
+    let mock = MockUpstream::start_hanging_buffered();
+    let (config_path, data_dir) = write_south_probe_config(&mock, "sk-south-deadline", true);
+    let mut config: Value =
+        serde_json::from_slice(&std::fs::read(&config_path).expect("South deadline config reads"))
+            .expect("South deadline config is JSON");
+    config["upstreams"]["mock_primary"]["provider_call"] = json!("south_v1_buffered");
+    let config: ClientConfig =
+        serde_json::from_value(config).expect("South deadline config parses");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("paused runtime builds");
+    let gateway = Arc::new(
+        Gateway::new_with_provider_runtime(
+            &config,
+            Arc::new(token_station_metrics::NoopRecorder),
+            runtime.handle().clone(),
+        )
+        .expect("South deadline gateway assembles"),
+    );
+    let replies = runtime.block_on(async {
+        let worker_gateway = Arc::clone(&gateway);
+        let worker = tokio::task::spawn_blocking(move || {
+            let ctx = token_station_cli::request_context::RequestContext::detached(
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            );
+            let mut replies = Vec::new();
+            worker_gateway.chat_scoped(
+                &ctx,
+                None,
+                None,
+                "POST",
+                "/v1/chat/completions",
+                &[],
+                json!({
+                    "model": "auto",
+                    "messages": [{ "role": "user", "content": "deadline" }]
+                })
+                .to_string()
+                .as_bytes(),
+                &mut |reply| {
+                    replies.push(reply);
+                    true
+                },
+            );
+            replies
+        });
+        let driver = async {
+            for _ in 0..100_000 {
+                if mock.response_started() {
+                    // The explicit server-side handshake proves the response
+                    // head was flushed. Give the current-thread I/O driver a
+                    // bounded virtual-time slice and polls to enter the
+                    // blocked body read before crossing the attempt deadline.
+                    tokio::time::advance(Duration::from_secs(1)).await;
+                    for _ in 0..32 {
+                        tokio::task::yield_now().await;
+                    }
+                    tokio::time::advance(Duration::from_secs(5)).await;
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+            panic!("South deadline response never reached the loopback socket");
+        };
+        let (replies, ()) = tokio::join!(worker, driver);
+        let replies = replies.expect("blocking worker joins");
+        // A production server keeps polling its multi-thread runtime after the
+        // blocking gateway worker returns. Mirror that lifecycle here so
+        // runtime-owned cleanup is not starved by this current-thread fixture.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        replies
+    });
+
+    assert_eq!(mock.hits(), 1, "deadline cannot replay through legacy");
+    assert!(matches!(
+        replies.first(),
+        Some(Reply::BeginJson(reply)) if reply.status == 504
+    ));
+    drop(gateway);
+    drop(runtime);
+    mock.finish_hanging();
+    std::fs::remove_dir_all(data_dir).ok();
 }
 
 fn write_south_probe_config(

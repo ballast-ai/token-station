@@ -918,6 +918,9 @@ struct ProviderView {
     has_auth: bool,
     credential_source: String,
     credential_reference: String,
+    provider_call: String,
+    south_v1_available: bool,
+    south_v1_unavailable_reason: Option<&'static str>,
     /// This upstream runs on the local machine; `local_only` routing keeps to it.
     local: bool,
     access_tier: String,
@@ -1007,6 +1010,38 @@ fn provider_brand_id(
     PROVIDER_BRANDS_BY_BASE_URL
         .iter()
         .find_map(|(known_url, brand_id)| (*known_url == normalized).then_some(*brand_id))
+}
+
+fn south_v1_unavailable_reason(
+    draft: &Value,
+    upstream: &Value,
+    package_verified: bool,
+) -> Option<&'static str> {
+    if !package_verified
+        || upstream["provider"].as_str() != Some("openai-compatible")
+        || draft["plugins"]["providers"]["openai-compatible"]
+            .as_str()
+            .is_some_and(|package| package != "provider-openai-compatible")
+    {
+        return Some("provider_package");
+    }
+    if upstream
+        .get("api_dialect")
+        .and_then(Value::as_str)
+        .is_some_and(|dialect| dialect != "translated")
+    {
+        return Some("api_dialect");
+    }
+    if draft["egress"]["mode"]
+        .as_str()
+        .is_some_and(|mode| mode != "direct")
+    {
+        return Some("egress");
+    }
+    if upstream["auth"]["store"].as_bool() != Some(true) && !upstream["auth"]["env"].is_string() {
+        return Some("auth");
+    }
+    None
 }
 
 /// A provider's declared quota plan, flattened to its primary reset window for
@@ -1465,6 +1500,10 @@ impl AppInner {
         let Some(map) = self.draft["upstreams"].as_object() else {
             return vec![];
         };
+        let south_registry = self
+            .materialize()
+            .ok()
+            .and_then(|config| PluginRegistry::for_config(&config).ok());
         map.iter()
             .map(|(name, up)| {
                 let model_values = up["models"].as_array().cloned().unwrap_or_default();
@@ -1511,6 +1550,14 @@ impl AppInner {
                     &base_url,
                     &configured_capabilities,
                 );
+                let package_verified = south_registry.as_ref().is_some_and(|registry| {
+                    registry.provider_package_conformance_verified(
+                        up["provider"].as_str().unwrap_or_default(),
+                        "provider-openai-compatible",
+                    )
+                });
+                let south_v1_unavailable_reason =
+                    south_v1_unavailable_reason(&self.draft, up, package_verified);
                 ProviderView {
                     name: name.clone(),
                     brand_id: provider_brand_id(name, &base_url, access_tier),
@@ -1536,6 +1583,13 @@ impl AppInner {
                         .or_else(|| up["auth"]["file"].as_str())
                         .unwrap_or_default()
                         .to_owned(),
+                    provider_call: up
+                        .get("provider_call")
+                        .and_then(Value::as_str)
+                        .unwrap_or("legacy")
+                        .to_owned(),
+                    south_v1_available: south_v1_unavailable_reason.is_none(),
+                    south_v1_unavailable_reason,
                     local: up.get("local").and_then(Value::as_bool).unwrap_or(false),
                     access_tier: access_tier.to_owned(),
                     quota_plan: up["quota_plan"]["windows"][0].as_object().map(|window| {
@@ -3339,7 +3393,7 @@ fn edit_provider(
     base_url: String,
     api_key: Option<String>,
 ) -> Result<StateView, String> {
-    edit_provider_impl(state, name, base_url, api_key, None, None)
+    edit_provider_impl(state, name, base_url, api_key, None, None, None)
 }
 
 #[tauri::command]
@@ -3350,6 +3404,7 @@ fn edit_provider_with_credential(
     api_key: Option<String>,
     credential_source: String,
     credential_reference: Option<String>,
+    provider_call: String,
 ) -> Result<StateView, String> {
     edit_provider_impl(
         state,
@@ -3358,6 +3413,7 @@ fn edit_provider_with_credential(
         api_key,
         Some(credential_source.trim()),
         credential_reference.as_deref(),
+        Some(provider_call.trim()),
     )
 }
 
@@ -3368,6 +3424,7 @@ fn edit_provider_impl(
     api_key: Option<String>,
     credential_source: Option<&str>,
     credential_reference: Option<&str>,
+    provider_call: Option<&str>,
 ) -> Result<StateView, String> {
     let name = name.trim().to_owned();
     let base_url = ProviderEndpoint::try_new(base_url.trim())
@@ -3391,6 +3448,12 @@ fn edit_provider_impl(
     if credential_source.is_some_and(|source| source != "store") && api_key.is_some() {
         return Err("env/file 凭据只保存引用，不能同时提交 API Key 明文".to_owned());
     }
+    let provider_call = match provider_call {
+        None => None,
+        Some("legacy") => Some(None),
+        Some("south_v1_buffered") => Some(Some("south_v1_buffered")),
+        Some(_) => return Err("Provider call engine 不受支持".to_owned()),
+    };
     let previous_auth = previous.get("auth").filter(|value| !value.is_null());
     let auth_changed = auth
         .as_ref()
@@ -3406,6 +3469,19 @@ fn edit_provider_impl(
         // presenting the old account's catalog as trusted is not.
         model_catalog::remove_provider(&inner.data_dir(), &name)?;
         clear_provider_scoped_prices(&mut inner, &name)?;
+    }
+    if let Some(provider_call) = provider_call {
+        match provider_call {
+            Some(provider_call) => {
+                inner.draft["upstreams"][&name]["provider_call"] = json!(provider_call);
+            }
+            None => {
+                inner.draft["upstreams"][&name]
+                    .as_object_mut()
+                    .expect("upstream is an object")
+                    .remove("provider_call");
+            }
+        }
     }
     inner.draft["upstreams"][&name]["base_url"] = json!(base_url);
     if let Some(auth) = auth {
@@ -3735,9 +3811,10 @@ async fn test_provider(
         }
         (inner.materialize()?, name)
     };
+    let provider_runtime = tokio::runtime::Handle::current();
     tauri::async_runtime::spawn_blocking(move || {
         let recorder = Arc::new(token_station_cli::filelog::Recorders(Vec::new()));
-        let gateway = Gateway::new(&config, recorder)?;
+        let gateway = Gateway::new_with_provider_runtime(&config, recorder, provider_runtime)?;
         let probes = gateway.probe_layered(&name, None)?;
         Ok(probes
             .into_iter()
@@ -6582,6 +6659,67 @@ mod tests {
             desktop_update_platform_unsupported_message(),
             Some(desktop_update::MACOS_ONLY_FIRST_RELEASE_UNSUPPORTED_MESSAGE)
         );
+    }
+
+    #[test]
+    fn south_selector_reports_each_static_ineligibility_without_exposing_secrets() {
+        let eligible_draft = json!({
+            "plugins": {"providers": {"openai-compatible": "provider-openai-compatible"}},
+            "egress": {"mode": "direct"}
+        });
+        let eligible = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://provider.example/v1",
+            "auth": {"slot": "provider_api_key", "store": true}
+        });
+        assert_eq!(
+            south_v1_unavailable_reason(&eligible_draft, &eligible, true),
+            None
+        );
+        assert_eq!(
+            south_v1_unavailable_reason(&eligible_draft, &eligible, false),
+            Some("provider_package")
+        );
+
+        let cases = [
+            (
+                json!({"provider": "anthropic", "auth": {"store": true}}),
+                eligible_draft.clone(),
+                "provider_package",
+            ),
+            (
+                json!({
+                    "provider": "openai-compatible",
+                    "api_dialect": "anthropic_native",
+                    "auth": {"store": true}
+                }),
+                eligible_draft.clone(),
+                "api_dialect",
+            ),
+            (
+                eligible.clone(),
+                json!({
+                    "plugins": {"providers": {"openai-compatible": "provider-openai-compatible"}},
+                    "egress": {"mode": "proxy", "proxy": "http://secret.example"}
+                }),
+                "egress",
+            ),
+            (
+                json!({
+                    "provider": "openai-compatible",
+                    "auth": {"slot": "provider_api_key", "file": "/private/key"}
+                }),
+                eligible_draft,
+                "auth",
+            ),
+        ];
+
+        for (upstream, draft, expected) in cases {
+            assert_eq!(
+                south_v1_unavailable_reason(&draft, &upstream, true),
+                Some(expected)
+            );
+        }
     }
 
     #[test]
@@ -10522,6 +10660,7 @@ mod tests {
             None,
             "env".to_owned(),
             Some("FIXTURE_API_KEY".to_owned()),
+            "south_v1_buffered".to_owned(),
         )
         .expect("submitting unchanged provider details is a no-op identity update");
 
@@ -10530,6 +10669,80 @@ mod tests {
         let pricing = draft_price_table(&inner).unwrap();
         assert_eq!(pricing.version, 7);
         assert!(pricing.models.contains_key("fixture/shared"));
+        assert_eq!(
+            inner.draft["upstreams"]["fixture"]["provider_call"],
+            json!("south_v1_buffered")
+        );
+        drop(inner);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_identity_cleanup_does_not_apply_the_provider_call_engine() {
+        let root = scratch_home("provider-engine-rollback");
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).expect("data directory exists");
+        let cache_target = root.join("catalog-target.json");
+        std::fs::write(
+            &cache_target,
+            r#"{
+                "version": 3,
+                "providers": {
+                    "fixture": {
+                        "base_url": "https://old.example/v1",
+                        "revision": 1,
+                        "models": [],
+                        "fetched_at_ms": 0
+                    }
+                }
+            }"#,
+        )
+        .expect("catalog target writes");
+        std::os::unix::fs::symlink(&cache_target, data_dir.join("model-catalog-cache.json"))
+            .expect("catalog symlink writes");
+
+        let mut draft = template_for_test(&root);
+        draft["data"]["dir"] = json!(data_dir);
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://old.example/v1",
+            "auth": {"slot": "provider_api_key", "env": "FIXTURE_API_KEY"},
+            "models": [{"model": "shared", "context_window": 128000}]
+        });
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            draft,
+            None,
+        )))));
+
+        let error = match edit_provider_with_credential(
+            app.state(),
+            "fixture".to_owned(),
+            "https://new.example/v1".to_owned(),
+            None,
+            "env".to_owned(),
+            Some("FIXTURE_API_KEY".to_owned()),
+            "south_v1_buffered".to_owned(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a catalog symlink makes identity cleanup fail closed"),
+        };
+        assert!(error.contains("保存模型缓存失败"), "{error}");
+
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
+        assert!(
+            inner.draft["upstreams"]["fixture"]
+                .get("provider_call")
+                .is_none(),
+            "a failed save must preserve the previous engine"
+        );
+        assert_eq!(
+            inner.draft["upstreams"]["fixture"]["base_url"],
+            json!("https://old.example/v1")
+        );
         drop(inner);
         std::fs::remove_dir_all(root).ok();
     }

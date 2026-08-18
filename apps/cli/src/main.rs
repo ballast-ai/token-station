@@ -565,19 +565,21 @@ fn probe(
     transport: ProbeTransportArg,
 ) -> Result<(), String> {
     let config = load(config_path)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("provider diagnostic runtime: {error}"))?;
     // No recorder: a probe is operator diagnostics, not served traffic, and it
     // must not skew `stats`.
-    let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder))?;
+    let gateway = Gateway::new_with_provider_runtime(
+        &config,
+        Arc::new(token_station_metrics::NoopRecorder),
+        runtime.handle().clone(),
+    )?;
 
     let outcomes = match transport {
         ProbeTransportArg::Legacy => gateway.probe(name, model)?,
-        ProbeTransportArg::SouthV1 => {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| format!("South v1 diagnostic runtime: {error}"))?;
-            runtime.block_on(gateway.probe_south_v1(name, model))?
-        }
+        ProbeTransportArg::SouthV1 => runtime.block_on(gateway.probe_south_v1(name, model))?,
     };
     let mut failed = 0usize;
     for outcome in &outcomes {
@@ -598,8 +600,16 @@ fn probe(
 
 fn diagnose(config_path: &Path, name: &str, model: Option<&str>) -> Result<(), String> {
     let config = load(config_path)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("provider diagnostic runtime: {error}"))?;
     // Diagnostics, like a probe: no recorder, must not skew `stats`.
-    let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder))?;
+    let gateway = Gateway::new_with_provider_runtime(
+        &config,
+        Arc::new(token_station_metrics::NoopRecorder),
+        runtime.handle().clone(),
+    )?;
 
     let probes = gateway.probe_layered(name, model)?;
     let mut unhealthy = 0usize;
@@ -641,6 +651,10 @@ fn diagnose(config_path: &Path, name: &str, model: Option<&str>) -> Result<(), S
 fn serve(config_path: &Path) -> Result<(), String> {
     let config = load(config_path)?;
     let listen = config.server.listen.clone();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("tokio runtime: {error}"))?;
 
     // The file log is always written; the metrics store is on unless the
     // operator turned it off. Both hold the same content-free record.
@@ -650,7 +664,11 @@ fn serve(config_path: &Path) -> Result<(), String> {
             &config.data.dir.join("metrics.sqlite"),
         )?));
     }
-    let gateway = Arc::new(Gateway::new(&config, Arc::new(Recorders(sinks)))?);
+    let gateway = Arc::new(Gateway::new_with_provider_runtime(
+        &config,
+        Arc::new(Recorders(sinks)),
+        runtime.handle().clone(),
+    )?);
 
     // The `/admin/*` data plane answers from this snapshot of the running
     // config — taken here, before anything moves out of `config`.
@@ -683,11 +701,6 @@ fn serve(config_path: &Path) -> Result<(), String> {
         config.upstreams.len(),
         gateway.catalog_size(),
     );
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("tokio runtime: {error}"))?;
 
     runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind(&listen)
