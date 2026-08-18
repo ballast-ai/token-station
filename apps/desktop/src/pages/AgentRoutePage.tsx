@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Route as RouteIcon } from "lucide-react";
+import { Check as CheckIcon, Copy as CopyIcon, Route as RouteIcon } from "lucide-react";
 import {
   applyAgentPlan,
   configureCursorProvider,
@@ -42,6 +42,13 @@ import {
 import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { humanizeAppError } from "../errors";
+import { Button } from "../components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "../components/ui/tooltip";
 
 interface AgentRoutePageProps {
   metadata: AgentUiMetadataView;
@@ -81,6 +88,22 @@ const KEY_CHANGE_HINT = /url|base|token|key|auth|endpoint|host|proxy/i;
 
 function errorText(error: unknown) {
   return humanizeAppError(error);
+}
+
+export function compactDiscoveryPath(path: string): string {
+  const homeMatch = path.match(/^\/(?:Users|home)\/[^/]+(?:\/|$)/);
+  const isAbsolute = path.startsWith("/");
+  const remainder = homeMatch ? path.slice(homeMatch[0].length) : path.replace(/^\//, "");
+  const segments = remainder.split("/").filter(Boolean);
+  const leadingSegments = homeMatch ? 1 : 2;
+
+  if (!isAbsolute || segments.length <= leadingSegments + 4) {
+    return homeMatch ? `~/${segments.join("/")}` : path;
+  }
+
+  const start = segments.slice(0, leadingSegments).join("/");
+  const end = segments.slice(-4).join("/");
+  return homeMatch ? `~/${start}/…/${end}` : `/${start}/…/${end}`;
 }
 
 function statusCopy(
@@ -242,6 +265,7 @@ export default function AgentRoutePage({
   const [cursorStatus, setCursorStatus] = useState<CursorProviderStatusView | null>(null);
   // Show configuration changes after the first connection, then persist dismissal in localStorage.
   const [connectDiff, setConnectDiff] = useState<ConfigPlanView | null>(null);
+  const [discoveredPathCopied, setDiscoveredPathCopied] = useState(false);
   const dismissConnectDiff = () => setConnectDiff(null);
 
   useEffect(() => {
@@ -267,6 +291,12 @@ export default function AgentRoutePage({
       cancelled = true;
     };
   }, [metadata.agent_id, showError]);
+
+  useEffect(() => {
+    if (!discoveredPathCopied) return undefined;
+    const timer = window.setTimeout(() => setDiscoveredPathCopied(false), 1_600);
+    return () => window.clearTimeout(timer);
+  }, [discoveredPathCopied]);
 
   const installation = useMemo(
     () => agent?.installations.find((item) => item.discovery.canonical_path === selectedPath),
@@ -313,6 +343,23 @@ export default function AgentRoutePage({
     ?? copy("Resolved during connection", "接入时确定");
   const ownedFields = metadata.connector_capabilities?.[0]?.owned_fields ?? [];
   const routeNeedsAttention = Boolean(route.config_error || !route.direct_target?.model);
+  const discoveredPath = installation?.discovery.canonical_path;
+
+  const copyDiscoveredPath = async () => {
+    if (!discoveredPath) return;
+    try {
+      await navigator.clipboard.writeText(discoveredPath);
+      setDiscoveredPathCopied(true);
+    } catch {
+      showError(
+        copy(
+          "Unable to copy the discovered path. Check system clipboard permissions and try again.",
+          "无法复制发现路径，请检查系统剪贴板权限后重试。",
+        ),
+        `agent-discovery-path-copy:${metadata.agent_id}`,
+      );
+    }
+  };
 
   const runState = async (action: () => Promise<StateView>, message?: string) => {
     if (busy) return;
@@ -589,7 +636,48 @@ export default function AgentRoutePage({
 
       <section className="panel agent-connection-detail" aria-label={copy("Agent connection details", "Agent 接入详情")}>
         <dl className="agent-connection-facts">
-          <div><dt>{copy("Discovered path", "发现路径")}</dt><dd><code>{installation?.discovery.canonical_path ?? ((agent?.installations.length ?? 0) > 1 ? copy("Choose a version above", "请先选择版本") : copy("Not found", "未发现"))}</code></dd></div>
+          <div className="agent-discovered-path-fact">
+            <dt>{copy("Discovered path", "发现路径")}</dt>
+            <dd>
+              {discoveredPath ? (
+                <>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <code className="agent-discovered-path" tabIndex={0}>
+                          {compactDiscoveryPath(discoveredPath)}
+                        </code>
+                      </TooltipTrigger>
+                      <TooltipContent className="agent-discovered-path-tooltip">
+                        <code>{discoveredPath}</code>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                  <Button
+                    className="agent-discovered-path-copy"
+                    variant="ghost"
+                    size="icon-sm"
+                    type="button"
+                    aria-label={discoveredPathCopied
+                      ? copy("Discovered path copied", "发现路径已复制")
+                      : copy("Copy discovered path", "复制发现路径")}
+                    title={discoveredPathCopied
+                      ? copy("Copied", "已复制")
+                      : copy("Copy full path", "复制完整路径")}
+                    onClick={() => void copyDiscoveredPath()}
+                  >
+                    {discoveredPathCopied
+                      ? <CheckIcon data-icon="inline-start" aria-hidden="true" />
+                      : <CopyIcon data-icon="inline-start" aria-hidden="true" />}
+                  </Button>
+                </>
+              ) : (
+                <code>{(agent?.installations.length ?? 0) > 1
+                  ? copy("Choose a version above", "请先选择版本")
+                  : copy("Not found", "未发现")}</code>
+              )}
+            </dd>
+          </div>
           <div><dt>{copy("Version", "版本")}</dt><dd><strong>{installation?.discovery.version_normalized ?? installation?.discovery.version_raw ?? ((agent?.installations.length ?? 0) > 1 ? copy("Not selected", "未选择") : copy("Unknown", "未知"))}</strong></dd></div>
         </dl>
         <div className="agent-connection-change">

@@ -1255,6 +1255,63 @@ describe("AgentRoutePage split page modes", () => {
     expect(screen.queryByText("选择请求如何分配")).toBeNull();
   });
 
+  it("语义缩略长发现路径，并在提示与复制中保留完整绝对路径", async () => {
+    const user = userEvent.setup();
+    const fullPath = "/Users/liuwenhao/.local/lib/node_modules/@anthropic-ai/claude-code/bin/claude";
+    const longInstallation = installation(fullPath, "2.1.211");
+    const longAgent = { ...agent, installations: [longInstallation] };
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(
+      <ErrorToastProvider>
+        <AgentRoutePage
+          {...props}
+          agent={longAgent}
+          selectedInstallationPath={fullPath}
+          pageMode="connection"
+          embedded
+        />
+      </ErrorToastProvider>,
+    );
+
+    const compactPath = screen.getByText("~/.local/…/@anthropic-ai/claude-code/bin/claude");
+    await user.hover(compactPath);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(fullPath);
+    await user.click(screen.getByRole("button", { name: "复制发现路径" }));
+    expect(writeText).toHaveBeenCalledWith(fullPath);
+    expect(screen.getByRole("button", { name: "发现路径已复制" })).toBeInTheDocument();
+  });
+
+  it("复制发现路径失败时使用现有错误提示", async () => {
+    const user = userEvent.setup();
+    const fullPath = "/Users/liuwenhao/.local/lib/node_modules/@anthropic-ai/claude-code/bin/claude";
+    const longInstallation = installation(fullPath, "2.1.211");
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error("clipboard denied")) },
+    });
+
+    render(
+      <ErrorToastProvider>
+        <AgentRoutePage
+          {...props}
+          agent={{ ...agent, installations: [longInstallation] }}
+          selectedInstallationPath={fullPath}
+          pageMode="connection"
+          embedded
+        />
+      </ErrorToastProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "复制发现路径" }));
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByRole("alert"))
+      .toHaveTextContent("无法复制发现路径，请检查系统剪贴板权限后重试。");
+  });
+
   it("shows routing controls without connection or recovery controls", () => {
     render(<ErrorToastProvider><AgentRoutePage {...props} pageMode="routing" embedded /></ErrorToastProvider>);
 

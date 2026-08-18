@@ -6785,6 +6785,49 @@ pre.block {
   margin: 0;
 }
 
+.agent-discovered-path-fact dd {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.agent-discovered-path {
+  min-width: 0;
+  flex: 1;
+  border-radius: 4px;
+}
+
+.agent-discovered-path:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+.agent-discovered-path-copy[data-slot="button"] {
+  flex: 0 0 auto;
+  opacity: 0;
+  color: var(--muted);
+  transition: color 120ms ease, opacity 120ms ease;
+}
+
+.agent-discovered-path-fact:hover .agent-discovered-path-copy[data-slot="button"],
+.agent-discovered-path-fact:focus-within .agent-discovered-path-copy[data-slot="button"] {
+  opacity: 1;
+}
+
+.agent-discovered-path-copy[data-slot="button"]:hover,
+.agent-discovered-path-copy[data-slot="button"]:focus-visible {
+  color: var(--ink);
+}
+
+.agent-discovered-path-tooltip[data-slot="tooltip-content"] {
+  max-width: min(720px, calc(100vw - 32px));
+}
+
+.agent-discovered-path-tooltip code {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .agent-connection-facts code,
 .agent-connection-facts strong {
   display: block;
