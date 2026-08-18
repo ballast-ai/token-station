@@ -171,7 +171,18 @@ describe("usage dashboard and display-only Agent budgets", () => {
     render(<Stats />);
 
     expect(await screen.findByText("1,500")).toBeInTheDocument();
-    expect(screen.getByText(/缓存读 400 · 缓存写 100 · 推理 80/)).toBeInTheDocument();
+    const composition = screen.getByRole("group", { name: "Token 构成" });
+    expect(within(composition).getByText("输入")).toBeInTheDocument();
+    expect(within(composition).getByText("输出")).toBeInTheDocument();
+    expect(within(composition).getByText("缓存读")).toBeInTheDocument();
+    expect(within(composition).getByText("缓存写")).toBeInTheDocument();
+    expect(within(composition).getByText("推理")).toBeInTheDocument();
+    expect(within(composition).getByText("缓存复用率")).toBeInTheDocument();
+    expect(within(composition).getByText("40.0%")).toBeInTheDocument();
+    expect(within(composition).getByText("总 Token = 输入 + 输出；缓存和推理为子项，不重复计数。"))
+      .toBeInTheDocument();
+    expect(within(composition).getByLabelText("输入占 66.7%，输出占 33.3%"))
+      .toBeInTheDocument();
     expect(screen.getByRole("img", { name: /用量趋势/ })).toBeInTheDocument();
   });
 

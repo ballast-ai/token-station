@@ -135,4 +135,46 @@ describe("retained page theme styles", () => {
       expect(rule).not.toMatch(/#08101d|#0b1220|#fff\b/i);
     }
   });
+
+  it("keeps usage filter popovers in viewport coordinates above the overview", () => {
+    const toolbarRules = Array.from(
+      appCss.matchAll(/\.usage-toolbar\s*\{([^}]*)\}/g),
+      (match) => match[1],
+    ).join("\n");
+    const revealFrames = appCss.match(
+      /@keyframes usage-filter-enter\s*\{([\s\S]*?)\n\}/,
+    )?.[1] ?? "";
+
+    expect(toolbarRules).toMatch(/position:\s*relative/);
+    expect(toolbarRules).toMatch(/z-index:\s*\d+/);
+    expect(toolbarRules).toMatch(/display:\s*grid/);
+    expect(revealFrames).toMatch(/opacity:/);
+    expect(revealFrames).not.toMatch(/transform:/);
+    expect(appCss).not.toMatch(/@media \(max-width: 1120px\)\s*\{\s*\.usage-toolbar/);
+  });
+
+  it("groups the usage overview without internal dashboard dividers", () => {
+    const primaryRule = appCss.match(/\.usage-primary-metric\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const healthRule = appCss.match(/\.usage-kpi-grid\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const healthItemRule = appCss.match(/\.usage-kpi-grid\s*>\s*div\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const compositionRule = appCss.match(/\.usage-token-rail\s*\{([^}]*)\}/s)?.[1] ?? "";
+    const detailRule = appCss.match(/\.usage-token-details\s*\{([^}]*)\}/s)?.[1] ?? "";
+
+    expect(primaryRule).not.toMatch(/border-(?:right|bottom|left|top):/);
+    expect(healthRule).toMatch(/gap:/);
+    expect(healthItemRule).toMatch(/border-radius:/);
+    expect(healthItemRule).not.toMatch(/border-(?:right|bottom|left|top):/);
+    expect(compositionRule).toMatch(/border-radius:/);
+    expect(compositionRule).not.toMatch(/border-(?:right|bottom|left|top):/);
+    expect(detailRule).not.toMatch(/border:/);
+  });
+
+  it("reserves intrinsic space for Overview routing badges", () => {
+    const routeRowRule = appCss.match(
+      /\.overview-route-list\s*>\s*div\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(routeRowRule).toMatch(/grid-template-columns:\s*max-content minmax\(0, 1fr\)/);
+    expect(routeRowRule).toMatch(/column-gap:/);
+  });
 });

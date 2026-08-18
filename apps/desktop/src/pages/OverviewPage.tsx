@@ -111,7 +111,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             <span><WalletCards />{copy("Cost today", "今日成本")}</span>
             <CardTitle className="overview-cost-value">{requestCost ?? (stats ? copy("Cost unpriced", "成本未定价") : "—")}</CardTitle>
             <strong className="overview-request-count"><Clock3 />{stats ? copy(`${stats.total.requests} requests`, `${stats.total.requests} 次请求`) : "—"}</strong>
-            <p>{statsSummary} · {copy("rolling 24h", "近 24 小时口径")}</p>
+            <p>{statsSummary}</p>
           </CardHeader>
         </Card>
         <Card size="sm"><CardHeader><span><Bot />{copy("Managed Agents", "已接管 Agent")}</span><CardTitle>{connectedAgents} <small>/ {registry.length}</small></CardTitle><p>{copy(`${pendingAgents} detected and pending`, `${pendingAgents} 个已检测待接入`)}</p></CardHeader></Card>

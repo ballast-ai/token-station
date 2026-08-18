@@ -118,10 +118,24 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
     ? Math.min(100, (aggregate.cache_read_tokens / aggregate.input_tokens) * 100)
     : 0;
   return (
-    <div className="usage-token-rail">
+    <div
+      className="usage-token-rail"
+      role="group"
+      aria-label={copy("Token composition", "Token 构成")}
+    >
+      <div className="usage-composition-head">
+        <div>
+          <span>{copy("Token composition", "Token 构成")}</span>
+          <small>{copy("Input and output form the total", "输入与输出组成总量")}</small>
+        </div>
+        <p>{copy(
+          "Total Tokens = input + output; cache and reasoning are nested and are not counted twice.",
+          "总 Token = 输入 + 输出；缓存和推理为子项，不重复计数。",
+        )}</p>
+      </div>
       <div className="usage-rail-labels">
-        <span><i className="tone-input" />{copy("Input", "输入")} <strong>{compact(aggregate.input_tokens, language)}</strong></span>
-        <span><i className="tone-output" />{copy("Output", "输出")} <strong>{compact(aggregate.output_tokens, language)}</strong></span>
+        <span><i className="tone-input" /><em>{copy("Input", "输入")}</em><strong>{compact(aggregate.input_tokens, language)}</strong></span>
+        <span><i className="tone-output" /><em>{copy("Output", "输出")}</em><strong>{compact(aggregate.output_tokens, language)}</strong></span>
       </div>
       <div
         className="usage-rail-track"
@@ -137,16 +151,23 @@ function TokenRail({ aggregate }: { aggregate: AggView }) {
         </div>
         <div className="usage-rail-output" style={{ width: `${outputPercent}%` }} />
       </div>
-      <div className="usage-rail-foot">
-        <span><i className="tone-cache" />{copy("Cache hits cover", "缓存命中覆盖输入的")} <strong>{cacheRate(aggregate)}</strong> {copy("of input", "")}</span>
-        <span>{copy(
-          `Cache read ${compact(aggregate.cache_read_tokens, language)} · Cache write ${compact(aggregate.cache_write_tokens, language)} · Reasoning ${compact(aggregate.reasoning_tokens, language)}`,
-          `缓存读 ${compact(aggregate.cache_read_tokens, language)} · 缓存写 ${compact(aggregate.cache_write_tokens, language)} · 推理 ${compact(aggregate.reasoning_tokens, language)}`,
-        )}</span>
-        <small>{copy(
-          "Cache is part of input and reasoning is part of output; neither is counted twice in total tokens.",
-          "缓存属于输入、推理属于输出，均不重复计入总 Token。",
-        )}</small>
+      <div className="usage-token-details">
+        <div>
+          <span><i className="tone-cache" />{copy("Cache read", "缓存读")}</span>
+          <strong>{compact(aggregate.cache_read_tokens, language)}</strong>
+        </div>
+        <div>
+          <span><i className="tone-cache-write" />{copy("Cache write", "缓存写")}</span>
+          <strong>{compact(aggregate.cache_write_tokens, language)}</strong>
+        </div>
+        <div>
+          <span><i className="tone-reasoning" />{copy("Reasoning", "推理")}</span>
+          <strong>{compact(aggregate.reasoning_tokens, language)}</strong>
+        </div>
+        <div className="usage-cache-rate">
+          <span>{copy("Cache reuse rate", "缓存复用率")}</span>
+          <strong>{cacheRate(aggregate)}</strong>
+        </div>
       </div>
     </div>
   );
@@ -383,30 +404,31 @@ export default function Stats({ onBack, embedded = false }: { onBack?: () => voi
             onChange={setModelFilter}
           />
         </div>
-        <div className="usage-toolbar-spacer" />
-        <div className="usage-filter-field usage-refresh-select">
-          <span>{copy("Auto-refresh", "自动刷新")}</span>
-          <CompactCombobox
-            ariaLabel={copy("Auto-refresh", "自动刷新")}
-            value={String(refreshInterval)}
-            options={[
-              { value: "0", label: copy("Off", "关闭") },
-              { value: "30000", label: copy("30 seconds", "30 秒") },
-              { value: "60000", label: copy("60 seconds", "60 秒") },
-            ]}
-            onChange={(value) => setRefreshInterval(Number(value))}
-          />
+        <div className="usage-refresh-control">
+          <div className="usage-filter-field usage-refresh-select">
+            <span>{copy("Auto-refresh", "自动刷新")}</span>
+            <CompactCombobox
+              ariaLabel={copy("Auto-refresh", "自动刷新")}
+              value={String(refreshInterval)}
+              options={[
+                { value: "0", label: copy("Off", "关闭") },
+                { value: "30000", label: copy("30 seconds", "30 秒") },
+                { value: "60000", label: copy("60 seconds", "60 秒") },
+              ]}
+              onChange={(value) => setRefreshInterval(Number(value))}
+            />
+          </div>
+          <button
+            className={`usage-refresh-button ${refreshing ? "busy" : ""}`}
+            type="button"
+            aria-label={copy("Refresh usage", "刷新用量")}
+            title={copy("Refresh usage", "刷新用量")}
+            disabled={refreshing}
+            onClick={() => void loadDashboard(true)}
+          >
+            <span aria-hidden="true">↻</span>
+          </button>
         </div>
-        <button
-          className={`usage-refresh-button ${refreshing ? "busy" : ""}`}
-          type="button"
-          aria-label={copy("Refresh usage", "刷新用量")}
-          title={copy("Refresh usage", "刷新用量")}
-          disabled={refreshing}
-          onClick={() => void loadDashboard(true)}
-        >
-          <span aria-hidden="true">↻</span>
-        </button>
         <div className="usage-filter-field usage-range-select">
           <span>{copy("Time range", "时间范围")}</span>
           <CompactCombobox

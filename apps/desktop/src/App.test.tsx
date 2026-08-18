@@ -1450,6 +1450,8 @@ describe("desktop station navigation", () => {
     const costLabel = await within(systemSummary).findByText("今日成本");
     const costCard = costLabel.closest('[data-slot="card"]');
     expect(costCard).toHaveTextContent("今日成本$2.3412 次请求");
+    expect(costCard).toHaveTextContent("成功率 91.7% · P95 320ms");
+    expect(costCard).not.toHaveTextContent("近 24 小时口径");
     expect(within(systemSummary).queryByText("今日请求")).toBeNull();
     expect(screen.getByText("快捷键")).toBeInTheDocument();
     expect(screen.queryByText("下一步处理")).toBeNull();
