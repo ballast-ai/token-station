@@ -4,8 +4,8 @@ use std::{collections::BTreeMap, fmt, time::Duration};
 
 use south_contracts::{
     BearerAuthV1, ContractErrorV1, CredentialSlotV1, JsonBodyV1, JsonPostRequestV1,
-    PreparationErrorV1, ProviderEndpointV1, ProviderQuotaMetadataFieldV1, RelativePathV1,
-    SafeHeaders, StreamTransportConfigV1,
+    PreparationErrorV1, ProviderAuthV1, ProviderEndpointV1, ProviderQuotaMetadataFieldV1,
+    RelativePathV1, SafeHeaders, SecretHeaderV1, StreamTransportConfigV1,
 };
 use south_core::{
     CredentialResolutionErrorV1, CredentialResolutionFuture, CredentialResolver, ProviderBindingV1,
@@ -89,6 +89,12 @@ pub(crate) enum ResponseMetadataEligibilityV1 {
     Compatible,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthenticationEligibilityV1 {
+    BearerOnly,
+    BearerAndHeaderSecret,
+}
+
 /// Static host facts used before any credential lookup or transport call.
 #[derive(Clone, Copy)]
 pub(crate) struct CommunityCallPolicyV1 {
@@ -98,6 +104,7 @@ pub(crate) struct CommunityCallPolicyV1 {
     egress_mode: EgressMode,
     body_mode: RequestBodyModeV1,
     response_metadata: ResponseMetadataEligibilityV1,
+    authentication: AuthenticationEligibilityV1,
 }
 
 impl CommunityCallPolicyV1 {
@@ -117,7 +124,23 @@ impl CommunityCallPolicyV1 {
             egress_mode,
             body_mode,
             response_metadata,
+            authentication: AuthenticationEligibilityV1::BearerOnly,
         }
+    }
+
+    /// Enables the isolated Header Auth compatibility path without changing any production
+    /// configuration value. Production callers keep the constructor's Bearer-only default.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the compatibility path remains production-disabled until a later opt-in"
+        )
+    )]
+    #[must_use]
+    pub(crate) const fn with_header_secret_auth(mut self) -> Self {
+        self.authentication = AuthenticationEligibilityV1::BearerAndHeaderSecret;
+        self
     }
 }
 
@@ -131,6 +154,7 @@ impl fmt::Debug for CommunityCallPolicyV1 {
             .field("egress_mode", &self.egress_mode)
             .field("body_mode", &self.body_mode)
             .field("response_metadata", &self.response_metadata)
+            .field("authentication", &self.authentication)
             .finish()
     }
 }
@@ -318,8 +342,20 @@ fn prepare_provider_call_for_mode_v1(
         .as_ref()
         .ok_or(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth))?;
     let bound_slot = CredentialSlotV1::parse(bound_slot.as_str())?;
-    let requested_slot = match descriptor.auth.as_ref() {
-        Some(Auth::Bearer { secret }) => CredentialSlotV1::parse(secret.as_str())?,
+    let requested_auth = match descriptor.auth.as_ref() {
+        Some(Auth::Bearer { secret }) => {
+            ProviderAuthV1::from(BearerAuthV1::new(CredentialSlotV1::parse(secret.as_str())?))
+        }
+        Some(Auth::Header { name, secret })
+            if policy.authentication == AuthenticationEligibilityV1::BearerAndHeaderSecret =>
+        {
+            let header = sanctioned_secret_header(name)
+                .ok_or(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth))?;
+            ProviderAuthV1::HeaderSecret {
+                header,
+                slot: BearerAuthV1::new(CredentialSlotV1::parse(secret.as_str())?),
+            }
+        }
         _ => return Err(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)),
     };
 
@@ -343,12 +379,7 @@ fn prepare_provider_call_for_mode_v1(
 
     Ok(PreparedCommunityProviderCallV1 {
         binding: ProviderBindingV1::new(endpoint, bound_slot),
-        request: JsonPostRequestV1::new(
-            relative_path,
-            headers,
-            body,
-            BearerAuthV1::new(requested_slot),
-        ),
+        request: JsonPostRequestV1::new(relative_path, headers, body, requested_auth),
     })
 }
 
@@ -659,7 +690,15 @@ fn check_static_eligibility(
     if descriptor.body.is_none() {
         return ineligible(IneligibleV1::Body);
     }
-    if !matches!(descriptor.auth, Some(Auth::Bearer { .. })) || provider.auth.is_none() {
+    let supported_auth = match descriptor.auth.as_ref() {
+        Some(Auth::Bearer { .. }) => true,
+        Some(Auth::Header { name, .. }) => {
+            policy.authentication == AuthenticationEligibilityV1::BearerAndHeaderSecret
+                && sanctioned_secret_header(name).is_some()
+        }
+        _ => false,
+    };
+    if !supported_auth || provider.auth.is_none() {
         return ineligible(IneligibleV1::Auth);
     }
     if !has_supported_secret_source(auth_config) {
@@ -674,6 +713,12 @@ fn check_static_eligibility(
         return Err(PreparationErrorV1::CredentialBindingMismatch.into());
     }
     Ok(())
+}
+
+fn sanctioned_secret_header(name: &str) -> Option<SecretHeaderV1> {
+    SecretHeaderV1::ALL
+        .into_iter()
+        .find(|header| header.header_name().eq_ignore_ascii_case(name))
 }
 
 fn has_supported_secret_source(auth_config: &AuthConfig) -> bool {

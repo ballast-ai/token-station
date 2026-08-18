@@ -4773,8 +4773,8 @@ dependencies = [
 
 [[package]]
 name = "south-contracts"
-version = "0.2.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=2e11142d64c01d47acb291acd1bbfc809aacfb77#2e11142d64c01d47acb291acd1bbfc809aacfb77"
+version = "0.3.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=b472526a9702e17d09b7ebdca0e5c84e724d6d40#b472526a9702e17d09b7ebdca0e5c84e724d6d40"
 dependencies = [
  "bytes",
  "http",
@@ -4786,8 +4786,8 @@ dependencies = [
 
 [[package]]
 name = "south-core"
-version = "0.2.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=2e11142d64c01d47acb291acd1bbfc809aacfb77#2e11142d64c01d47acb291acd1bbfc809aacfb77"
+version = "0.3.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=b472526a9702e17d09b7ebdca0e5c84e724d6d40#b472526a9702e17d09b7ebdca0e5c84e724d6d40"
 dependencies = [
  "http",
  "south-contracts",
@@ -4800,8 +4800,8 @@ dependencies = [
 
 [[package]]
 name = "south-transport-reqwest"
-version = "0.2.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=2e11142d64c01d47acb291acd1bbfc809aacfb77#2e11142d64c01d47acb291acd1bbfc809aacfb77"
+version = "0.3.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=b472526a9702e17d09b7ebdca0e5c84e724d6d40#b472526a9702e17d09b7ebdca0e5c84e724d6d40"
 dependencies = [
  "bytes",
  "http",

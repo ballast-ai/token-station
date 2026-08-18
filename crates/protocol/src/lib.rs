@@ -89,6 +89,8 @@ pub(crate) const CREDENTIAL_HEADERS: &[&str] = &[
     "x-api-key",
     "api-key",
     "x-goog-api-key",
+    "xi-api-key",
+    "ocp-apim-subscription-key",
     "cookie",
     "set-cookie",
 ];

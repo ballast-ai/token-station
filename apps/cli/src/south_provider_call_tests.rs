@@ -24,19 +24,21 @@ use south_core::{
     TransportFuture,
 };
 use south_provider_conformance::{
-    FAKE_BEARER_SECRET_V1, PROVIDER_CALL_CONFORMANCE_DEADLINE_OFFSET_V1,
-    PROVIDER_STREAM_CONFORMANCE_DEADLINE_OFFSET_V1, PROVIDER_STREAM_CONFORMANCE_IDLE_TIMEOUT_V1,
-    ProviderCallControlV1, ProviderCallFailureCodeV1, ProviderCallFixtureV1, ProviderCallInputV1,
-    ProviderCallUpstreamV1, ProviderQuotaMetadataFixtureV1, ProviderStreamControlV1,
-    ProviderStreamFixtureV1, ProviderStreamRawHeadV1, ProviderStreamTerminalV1,
-    ProviderStreamUpstreamV1,
+    FAKE_BEARER_SECRET_V1, FAKE_HEADER_SECRET_V1, HeaderAuthFixtureV1, HeaderAuthUpstreamV1,
+    PROVIDER_CALL_CONFORMANCE_DEADLINE_OFFSET_V1, PROVIDER_STREAM_CONFORMANCE_DEADLINE_OFFSET_V1,
+    PROVIDER_STREAM_CONFORMANCE_IDLE_TIMEOUT_V1, ProviderCallControlV1, ProviderCallFailureCodeV1,
+    ProviderCallFixtureV1, ProviderCallInputV1, ProviderCallUpstreamV1,
+    ProviderQuotaMetadataFixtureV1, ProviderStreamControlV1, ProviderStreamFixtureV1,
+    ProviderStreamRawHeadV1, ProviderStreamTerminalV1, ProviderStreamUpstreamV1,
 };
 use south_testkit::{
-    AssembledExecutionFutureV1, AssembledProviderCallExecutorV1,
+    AssembledExecutionFutureV1, AssembledHeaderAuthExecutionFutureV1,
+    AssembledHeaderAuthExecutorV1, AssembledProviderCallExecutorV1,
     AssembledProviderQuotaMetadataExecutionFutureV1, AssembledProviderQuotaMetadataExecutorV1,
-    AssembledProviderStreamExecutorV1, AssembledStreamExecutionFutureV1, ProviderCallEvidenceV1,
-    ProviderCallObservationV1, ProviderQuotaMetadataEvidenceV1, ProviderQuotaMetadataObservationV1,
-    ProviderStreamEvidenceV1, ProviderStreamObservationV1, run_provider_call_conformance_v1,
+    AssembledProviderStreamExecutorV1, AssembledStreamExecutionFutureV1, HeaderAuthEvidenceV1,
+    HeaderAuthObservationV1, ProviderCallEvidenceV1, ProviderCallObservationV1,
+    ProviderQuotaMetadataEvidenceV1, ProviderQuotaMetadataObservationV1, ProviderStreamEvidenceV1,
+    ProviderStreamObservationV1, run_header_auth_conformance_v1, run_provider_call_conformance_v1,
     run_provider_quota_metadata_conformance_v1, run_provider_stream_conformance_v1,
 };
 use std::{
@@ -112,6 +114,15 @@ fn descriptor() -> HttpRequestDescriptor {
     descriptor
 }
 
+fn header_descriptor(name: &str, slot: &str) -> HttpRequestDescriptor {
+    let mut descriptor = descriptor();
+    descriptor.auth = Some(
+        Auth::header(name, SecretRef::new(slot))
+            .expect("the test header must be covered by host redaction"),
+    );
+    descriptor
+}
+
 #[test]
 fn eligible_descriptor_projects_into_the_south_contract() {
     let prepared = prepare_provider_call_v1(
@@ -142,6 +153,73 @@ fn eligible_streaming_descriptor_projects_into_the_same_bounded_contract() {
     assert_eq!(prepared.credential_slot(), "provider_api_key");
     assert_eq!(prepared.header_count(), 2);
     assert_eq!(prepared.body(), r#"{"model":"test"}"#);
+}
+
+#[test]
+fn header_auth_requires_an_independent_explicit_capability() {
+    let error = prepare_provider_call_v1(
+        eligible_policy(),
+        &provider_config(),
+        &auth_config(),
+        &header_descriptor("x-api-key", "provider_api_key"),
+    )
+    .expect_err("the existing South opt-in must remain Bearer-only");
+
+    assert_eq!(
+        error,
+        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn explicit_header_auth_maps_only_the_five_south_sanctioned_names() {
+    for (input_name, canonical_name) in [
+        ("api-key", "api-key"),
+        ("X-API-Key", "x-api-key"),
+        ("x-goog-api-key", "x-goog-api-key"),
+        ("xi-api-key", "xi-api-key"),
+        ("ocp-apim-subscription-key", "ocp-apim-subscription-key"),
+    ] {
+        let prepared = prepare_provider_call_v1(
+            eligible_policy().with_header_secret_auth(),
+            &provider_config(),
+            &auth_config(),
+            &header_descriptor(input_name, "provider_api_key"),
+        )
+        .expect("a sanctioned header must project when the capability is explicit");
+        let resolver = ImmediateResolver {
+            calls: AtomicUsize::new(0),
+        };
+        let transport = HeaderInspectingTransport {
+            calls: AtomicUsize::new(0),
+            expected_name: canonical_name,
+        };
+
+        execute_prepared_provider_call_v1(
+            &prepared,
+            &resolver,
+            &transport,
+            tokio::time::Instant::now() + Duration::from_secs(30),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("the projected header-secret request must execute");
+
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+    }
+
+    let error = prepare_provider_call_v1(
+        eligible_policy().with_header_secret_auth(),
+        &provider_config(),
+        &auth_config(),
+        &header_descriptor("cookie", "provider_api_key"),
+    )
+    .expect_err("a credential header outside South's closed set must fail locally");
+    assert_eq!(
+        error,
+        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
+    );
 }
 
 #[test]
@@ -507,6 +585,11 @@ struct InspectingTransport {
     calls: AtomicUsize,
 }
 
+struct HeaderInspectingTransport<'name> {
+    calls: AtomicUsize,
+    expected_name: &'name str,
+}
+
 struct NeverTransport {
     calls: AtomicUsize,
 }
@@ -535,7 +618,10 @@ impl AsyncHttpTransport for InspectingTransport {
         );
         assert_eq!(request.body().as_str(), r#"{"model":"test"}"#);
         assert_eq!(request.headers().get("x-trace-id"), Some("trace-1"));
-        assert_eq!(request.bearer_secret(), b"synthetic-test-secret");
+        assert_eq!(
+            request.auth_header(),
+            ("authorization", b"Bearer synthetic-test-secret".as_slice())
+        );
         Box::pin(async {
             let quota_metadata = ProviderQuotaMetadataV1::try_from_iter([
                 (
@@ -581,6 +667,28 @@ impl AsyncHttpTransport for InspectingTransport {
                 Some("application/json".to_owned()),
                 Some("2".to_owned()),
                 quota_metadata,
+            )
+        })
+    }
+}
+
+impl AsyncHttpTransport for HeaderInspectingTransport<'_> {
+    fn execute<'a>(
+        &'a self,
+        request: &'a PreparedHttpRequestV1<'_>,
+        _remaining_timeout: Duration,
+    ) -> TransportFuture<'a> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            request.auth_header(),
+            (self.expected_name, b"synthetic-test-secret".as_slice())
+        );
+        Box::pin(async {
+            BufferedHttpResponseV1::try_from_parts(
+                204_u16.try_into().expect("test status is valid"),
+                Vec::new(),
+                None,
+                None,
             )
         })
     }
@@ -1017,6 +1125,145 @@ async fn real_streaming_adapter_opens_at_headers_and_pulls_the_exact_body_once()
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn real_reqwest_transports_inject_only_the_sanctioned_header_secret() {
+    let buffered_request = run_real_buffered_header_auth().await;
+    assert_header_auth_wire(&buffered_request, "x-api-key");
+
+    let streaming_request = run_real_streaming_header_auth().await;
+    assert_header_auth_wire(&streaming_request, "x-goog-api-key");
+}
+
+async fn run_real_buffered_header_auth() -> String {
+    let buffered_body = br#"{"ok":true}"#;
+    let mut buffered_response = format!(
+        concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "content-type: application/json\r\n",
+            "content-length: {}\r\n",
+            "connection: close\r\n",
+            "\r\n"
+        ),
+        buffered_body.len()
+    )
+    .into_bytes();
+    buffered_response.extend_from_slice(buffered_body);
+    let (base_url, buffered_server) = start_header_auth_loopback(buffered_response);
+    let mut provider = ProviderConfig::new(
+        "openai-compatible",
+        ProviderEndpoint::try_new(&base_url).expect("loopback endpoint is valid"),
+    );
+    provider.auth = Some(SecretRef::new("provider_api_key"));
+    let mut request = header_descriptor("x-api-key", "provider_api_key");
+    request.url = format!("{base_url}/chat/completions");
+    let prepared = prepare_provider_call_v1(
+        eligible_policy().with_header_secret_auth(),
+        &provider,
+        &auth_config(),
+        &request,
+    )
+    .expect("buffered Header Auth request projects");
+    let resolver = ImmediateResolver {
+        calls: AtomicUsize::new(0),
+    };
+    let transport = build_direct_reqwest_transport_v1(
+        Duration::from_secs(5),
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+    )
+    .expect("buffered transport builds");
+    execute_prepared_provider_call_v1(
+        &prepared,
+        &resolver,
+        &transport,
+        tokio::time::Instant::now() + Duration::from_secs(5),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("buffered Header Auth request succeeds");
+    buffered_server.join().expect("buffered loopback joins")
+}
+
+async fn run_real_streaming_header_auth() -> String {
+    let streaming_body = b"data: [DONE]\n\n";
+    let mut streaming_response = format!(
+        concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "content-type: text/event-stream\r\n",
+            "content-length: {}\r\n",
+            "connection: close\r\n",
+            "\r\n"
+        ),
+        streaming_body.len()
+    )
+    .into_bytes();
+    streaming_response.extend_from_slice(streaming_body);
+    let (base_url, streaming_server) = start_header_auth_loopback(streaming_response);
+    let mut provider = ProviderConfig::new(
+        "openai-compatible",
+        ProviderEndpoint::try_new(&base_url).expect("loopback endpoint is valid"),
+    );
+    provider.auth = Some(SecretRef::new("provider_api_key"));
+    let mut request = header_descriptor("x-goog-api-key", "provider_api_key");
+    request.url = format!("{base_url}/chat/completions");
+    let prepared = prepare_provider_stream_v1(
+        eligible_streaming_policy().with_header_secret_auth(),
+        &provider,
+        &auth_config(),
+        &request,
+    )
+    .expect("streaming Header Auth request projects");
+    let resolver = ImmediateResolver {
+        calls: AtomicUsize::new(0),
+    };
+    let transport = build_direct_reqwest_streaming_transport_v1(
+        None,
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+    )
+    .expect("streaming transport builds");
+    let mut stream = match open_prepared_provider_stream_v1(
+        &prepared,
+        &resolver,
+        &transport,
+        Some(tokio::time::Instant::now() + Duration::from_secs(5)),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("streaming Header Auth request opens")
+    {
+        PreparedProviderStreamResultV1::Opened(stream) => stream,
+        PreparedProviderStreamResultV1::Rejected(_) => panic!("2xx must open a stream"),
+    };
+    let mut delivered = Vec::new();
+    while let Some(chunk) = stream.next_chunk().await {
+        delivered.extend_from_slice(chunk.expect("streaming chunk is valid").as_bytes());
+    }
+    assert_eq!(delivered, streaming_body);
+    streaming_server.join().expect("streaming loopback joins")
+}
+
+fn assert_header_auth_wire(request: &str, expected_name: &str) {
+    let expected_value = "synthetic-test-secret";
+    let actual_value = request.lines().find_map(|line| {
+        let (name, value) = line.trim_end_matches('\r').split_once(':')?;
+        name.eq_ignore_ascii_case(expected_name)
+            .then_some(value.trim_start())
+    });
+    assert_eq!(
+        actual_value,
+        Some(expected_value),
+        "the sanctioned header must carry the exact synthetic secret"
+    );
+    assert!(
+        !request.lines().any(|line| {
+            line.split_once(':')
+                .is_some_and(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        }),
+        "a Header Auth request must not also carry Authorization"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn real_streaming_rejections_are_bounded_projected_and_never_become_live_streams() {
     let body = br#"{"error":{"message":"rate limited"}}"#;
     let mut response = format!(
@@ -1160,6 +1407,298 @@ async fn community_streaming_adapter_passes_the_public_south_suite() {
     assert_eq!(report.suite_id(), "south.provider-stream.v1");
     assert_eq!(report.suite_version(), 1);
     assert_eq!(report.passed_case_ids().len(), 9);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn community_adapter_passes_the_public_header_auth_suite() {
+    let executor = CommunityHeaderAuthConformanceExecutorV1;
+    let report = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_header_auth_conformance_v1(&executor),
+    )
+    .await
+    .expect("structured header-auth conformance watchdog must not expire")
+    .expect("community adapter must pass the public Header Auth suite");
+
+    assert_eq!(report.suite_id(), "south.header-auth.v1");
+    assert_eq!(report.suite_version(), 1);
+    assert_eq!(report.passed_case_ids().len(), 3);
+}
+
+struct CommunityHeaderAuthConformanceExecutorV1;
+
+struct HeaderAuthProbe {
+    resolver_calls: AtomicUsize,
+    transport_calls: AtomicUsize,
+    sanctioned_header_exact: AtomicBool,
+    authorization_header_absent: AtomicBool,
+}
+
+impl HeaderAuthProbe {
+    fn new() -> Self {
+        Self {
+            resolver_calls: AtomicUsize::new(0),
+            transport_calls: AtomicUsize::new(0),
+            sanctioned_header_exact: AtomicBool::new(false),
+            authorization_header_absent: AtomicBool::new(true),
+        }
+    }
+
+    fn inspect(&self, request: &PreparedHttpRequestV1<'_>, fixture: &HeaderAuthFixtureV1) {
+        let (name, value) = request.auth_header();
+        self.sanctioned_header_exact.store(
+            name == fixture.secret_header().header_name()
+                && value == FAKE_HEADER_SECRET_V1.as_bytes(),
+            Ordering::SeqCst,
+        );
+        self.authorization_header_absent
+            .store(name != "authorization", Ordering::SeqCst);
+    }
+
+    fn evidence(&self) -> HeaderAuthEvidenceV1 {
+        HeaderAuthEvidenceV1::new(
+            self.resolver_calls.load(Ordering::SeqCst),
+            self.transport_calls.load(Ordering::SeqCst),
+            self.sanctioned_header_exact.load(Ordering::SeqCst),
+            self.authorization_header_absent.load(Ordering::SeqCst),
+        )
+    }
+}
+
+struct HeaderAuthConformanceResolver<'probe> {
+    probe: &'probe HeaderAuthProbe,
+}
+
+impl CredentialResolver for HeaderAuthConformanceResolver<'_> {
+    fn resolve<'a>(&'a self, _slot: &'a CredentialSlotV1) -> CredentialResolutionFuture<'a> {
+        self.probe.resolver_calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(SecretValue::new(FAKE_HEADER_SECRET_V1.to_owned())) })
+    }
+}
+
+struct HeaderAuthConformanceTransport<'fixture, 'probe> {
+    fixture: &'fixture HeaderAuthFixtureV1,
+    probe: &'probe HeaderAuthProbe,
+}
+
+impl AsyncHttpTransport for HeaderAuthConformanceTransport<'_, '_> {
+    fn execute<'a>(
+        &'a self,
+        request: &'a PreparedHttpRequestV1<'_>,
+        _remaining_timeout: Duration,
+    ) -> TransportFuture<'a> {
+        self.probe.transport_calls.fetch_add(1, Ordering::SeqCst);
+        self.probe.inspect(request, self.fixture);
+        let upstream = *self.fixture.upstream();
+        Box::pin(async move {
+            match upstream {
+                HeaderAuthUpstreamV1::Response(raw) => BufferedHttpResponseV1::try_from_parts(
+                    raw.status()
+                        .try_into()
+                        .map_err(|_| TransportErrorV1::ResponseMetadataInvalid)?,
+                    raw.body().as_bytes().to_vec(),
+                    raw.content_type().map(str::to_owned),
+                    raw.retry_after().map(str::to_owned),
+                ),
+                HeaderAuthUpstreamV1::Stream(_) | HeaderAuthUpstreamV1::NotReached => {
+                    Err(TransportErrorV1::RequestFailed)
+                }
+            }
+        })
+    }
+}
+
+struct HeaderAuthConformanceStreamingTransport<'fixture, 'probe> {
+    fixture: &'fixture HeaderAuthFixtureV1,
+    probe: &'probe HeaderAuthProbe,
+}
+
+impl AsyncStreamingTransport for HeaderAuthConformanceStreamingTransport<'_, '_> {
+    fn open<'a>(&'a self, request: &'a PreparedHttpRequestV1<'_>) -> StreamingOpenFutureV1<'a> {
+        self.probe.transport_calls.fetch_add(1, Ordering::SeqCst);
+        self.probe.inspect(request, self.fixture);
+        let upstream = *self.fixture.upstream();
+        Box::pin(async move {
+            match upstream {
+                HeaderAuthUpstreamV1::Stream(raw) => {
+                    let source = ConformanceStreamSource {
+                        chunks: raw.chunks(),
+                        next_index: 0,
+                        terminal: raw.terminal(),
+                        stall_started: Arc::new(Notify::new()),
+                        dropped: Arc::new(AtomicBool::new(false)),
+                    };
+                    OpenedByteStreamV1::try_new(
+                        conformance_stream_head(raw.head())?,
+                        Box::new(source),
+                    )
+                    .map_err(StreamOpenErrorV1::Transport)
+                }
+                HeaderAuthUpstreamV1::Response(_) | HeaderAuthUpstreamV1::NotReached => Err(
+                    StreamOpenErrorV1::Transport(TransportErrorV1::RequestFailed),
+                ),
+            }
+        })
+    }
+}
+
+fn prepare_header_auth_conformance_fixture(
+    fixture: &HeaderAuthFixtureV1,
+    streaming: bool,
+) -> Result<PreparedCommunityProviderCallV1, PrepareProviderCallErrorV1> {
+    let input = fixture.input();
+    let mut provider = ProviderConfig::new(
+        "openai-compatible",
+        ProviderEndpoint::try_new(input.endpoint()).expect("canonical endpoint is valid"),
+    );
+    provider.auth = Some(SecretRef::new(input.bound_credential_slot()));
+    let auth = AuthConfig {
+        slot: input.bound_credential_slot().to_owned(),
+        store: true,
+        env: None,
+        file: None,
+    };
+    let mut descriptor = HttpRequestDescriptor::new(
+        HttpMethod::Post,
+        format!(
+            "{}/{}",
+            input.endpoint().trim_end_matches('/'),
+            input.relative_path()
+        ),
+    );
+    descriptor.headers =
+        SafeHeaders::try_new(input.headers().iter().copied()).expect("canonical headers are valid");
+    descriptor.body =
+        Some(serde_json::from_str(input.json_body()).expect("canonical request body is valid"));
+    descriptor.auth = Some(
+        Auth::header(
+            fixture.secret_header().header_name(),
+            SecretRef::new(input.requested_credential_slot()),
+        )
+        .expect("canonical Header Auth fixture uses a host-redacted name"),
+    );
+    let policy = if streaming {
+        eligible_streaming_policy()
+    } else {
+        eligible_policy()
+    }
+    .with_header_secret_auth();
+
+    if streaming {
+        prepare_provider_stream_v1(policy, &provider, &auth, &descriptor)
+    } else {
+        prepare_provider_call_v1(policy, &provider, &auth, &descriptor)
+    }
+}
+
+impl CommunityHeaderAuthConformanceExecutorV1 {
+    async fn execute_community_case(
+        &self,
+        fixture: &HeaderAuthFixtureV1,
+    ) -> HeaderAuthObservationV1 {
+        let probe = HeaderAuthProbe::new();
+        let streaming = matches!(fixture.upstream(), HeaderAuthUpstreamV1::Stream(_));
+        let prepared = match prepare_header_auth_conformance_fixture(fixture, streaming) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return HeaderAuthObservationV1::failure(
+                    map_prepare_failure_code(error),
+                    probe.evidence(),
+                );
+            }
+        };
+        let resolver = HeaderAuthConformanceResolver { probe: &probe };
+        let cancellation = CancellationToken::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+
+        if streaming {
+            let transport = HeaderAuthConformanceStreamingTransport {
+                fixture,
+                probe: &probe,
+            };
+            return match open_prepared_provider_stream_v1(
+                &prepared,
+                &resolver,
+                &transport,
+                Some(deadline),
+                &cancellation,
+            )
+            .await
+            {
+                Ok(PreparedProviderStreamResultV1::Opened(mut stream)) => {
+                    let head = stream.head().clone();
+                    let mut chunks = Vec::new();
+                    let mut failed = false;
+                    while let Some(next) = stream.next_chunk().await {
+                        if let Ok(chunk) = next {
+                            chunks.push(chunk);
+                        } else {
+                            failed = true;
+                            break;
+                        }
+                    }
+                    if failed {
+                        HeaderAuthObservationV1::failure(
+                            ProviderCallFailureCodeV1::RequestFailed,
+                            probe.evidence(),
+                        )
+                    } else {
+                        HeaderAuthObservationV1::opened(head, chunks, probe.evidence())
+                    }
+                }
+                Ok(PreparedProviderStreamResultV1::Rejected(_)) => {
+                    HeaderAuthObservationV1::failure(
+                        ProviderCallFailureCodeV1::RequestFailed,
+                        probe.evidence(),
+                    )
+                }
+                Err(error) => HeaderAuthObservationV1::failure(
+                    map_stable_failure_code(&error),
+                    probe.evidence(),
+                ),
+            };
+        }
+
+        let transport = HeaderAuthConformanceTransport {
+            fixture,
+            probe: &probe,
+        };
+        match execute_prepared_provider_call_v1(
+            &prepared,
+            &resolver,
+            &transport,
+            deadline,
+            &cancellation,
+        )
+        .await
+        {
+            Ok(response) => {
+                let bounded = BufferedHttpResponseV1::try_from_parts(
+                    response
+                        .status
+                        .try_into()
+                        .expect("canonical response status is valid"),
+                    response.body.into_bytes(),
+                    response.headers.get("content-type").cloned(),
+                    response.headers.get("retry-after").cloned(),
+                )
+                .expect("adapter response remains inside the South response contract");
+                HeaderAuthObservationV1::response(bounded, probe.evidence())
+            }
+            Err(error) => {
+                HeaderAuthObservationV1::failure(map_stable_failure_code(&error), probe.evidence())
+            }
+        }
+    }
+}
+
+impl AssembledHeaderAuthExecutorV1 for CommunityHeaderAuthConformanceExecutorV1 {
+    fn execute_case<'a>(
+        &'a self,
+        fixture: &'a HeaderAuthFixtureV1,
+    ) -> AssembledHeaderAuthExecutionFutureV1<'a> {
+        Box::pin(async move { self.execute_community_case(fixture).await })
+    }
 }
 
 struct CommunityStreamConformanceExecutorV1 {
@@ -1947,6 +2486,52 @@ struct QuotaFixtureResult {
     windows: Vec<crate::quota_ledger::WindowSnapshot>,
     response_headers: std::collections::BTreeMap<String, String>,
     hit_count: usize,
+}
+
+fn start_header_auth_loopback(response: Vec<u8>) -> (String, thread::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("Header Auth loopback binds");
+    let address = listener
+        .local_addr()
+        .expect("Header Auth loopback has an address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener
+            .accept()
+            .expect("Header Auth loopback accepts one request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("Header Auth loopback read timeout is configured");
+        let mut received = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let expected_len = loop {
+            let read = stream
+                .read(&mut buffer)
+                .expect("Header Auth loopback reads request");
+            assert!(read != 0, "Header Auth request ended before its headers");
+            received.extend_from_slice(&buffer[..read]);
+            if let Some(header_end) = received.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&received[..header_end]);
+                let content_length = headers.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                });
+                break header_end + 4 + content_length.unwrap_or(0);
+            }
+        };
+        while received.len() < expected_len {
+            let read = stream
+                .read(&mut buffer)
+                .expect("Header Auth loopback reads request body");
+            assert!(read != 0, "Header Auth request body ended early");
+            received.extend_from_slice(&buffer[..read]);
+        }
+        stream
+            .write_all(&response)
+            .expect("Header Auth loopback writes the immutable response");
+        String::from_utf8(received).expect("Header Auth request is valid UTF-8")
+    });
+    (format!("http://{address}/v1"), server)
 }
 
 fn start_quota_loopback(response: Vec<u8>) -> (String, thread::JoinHandle<usize>) {

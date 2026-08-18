@@ -406,6 +406,21 @@ mod tests {
     }
 
     #[test]
+    fn auth_header_accepts_every_south_sanctioned_name() {
+        for name in [
+            "api-key",
+            "x-api-key",
+            "x-goog-api-key",
+            "xi-api-key",
+            "ocp-apim-subscription-key",
+        ] {
+            let auth = Auth::header(name, SecretRef::new("provider_api_key"))
+                .expect("every South sanctioned header must be covered by host redaction");
+            assert_eq!(auth.secret().as_str(), "provider_api_key");
+        }
+    }
+
+    #[test]
     fn auth_header_placement_is_checked_on_deserialization() {
         let smuggled: Result<Auth, _> =
             serde_json::from_str(r#"{"scheme":"header","name":"x-trace-id","secret":"k"}"#);

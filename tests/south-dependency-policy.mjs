@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const southRepository = "https://github.com/ballast-ai/token-station-south.git";
-const southRevision = "2e11142d64c01d47acb291acd1bbfc809aacfb77";
+const southRevision = "b472526a9702e17d09b7ebdca0e5c84e724d6d40";
 const expectedSouthPackages = new Set([
   "south-contracts",
   "south-core",
@@ -53,7 +53,7 @@ assert.match(
 );
 
 for (const packageName of expectedSouthPackages) {
-  const exactDeclaration = `${packageName} = { version = "=0.2.0", git = "${southRepository}", rev = "${southRevision}" }`;
+  const exactDeclaration = `${packageName} = { version = "=0.3.0", git = "${southRepository}", rev = "${southRevision}" }`;
   assert.ok(
     rootManifest.split("\n").includes(exactDeclaration),
     `${packageName} must use an exact manifest version and revision`,
@@ -111,7 +111,7 @@ assert.deepEqual(
 );
 
 for (const pkg of southPackages) {
-  assert.equal(pkg.version, "0.2.0", `${pkg.name} must stay on South 0.2.0`);
+  assert.equal(pkg.version, "0.3.0", `${pkg.name} must stay on South 0.3.0`);
   assert.ok(pkg.source, `${pkg.name} must come from the external South repository`);
   assert.ok(
     pkg.source.includes(southRepository) && pkg.source.includes(southRevision),

@@ -158,11 +158,15 @@ mod tests {
     fn digest_keeps_credential_names_but_drops_their_values() {
         let digest = HeaderDigest::redacting([
             ("authorization", "Bearer sk-live-abc"),
+            ("xi-api-key", "synthetic-elevenlabs-secret"),
+            ("ocp-apim-subscription-key", "synthetic-azure-secret"),
             ("content-type", "application/json"),
         ]);
 
         assert!(digest.contains("authorization"));
         assert_eq!(digest.value("authorization"), None);
+        assert_eq!(digest.value("xi-api-key"), None);
+        assert_eq!(digest.value("ocp-apim-subscription-key"), None);
         assert_eq!(digest.value("content-type"), Some("application/json"));
     }
 
