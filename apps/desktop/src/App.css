@@ -1598,6 +1598,7 @@ body[data-first-run-guide-active="true"] [data-onboarding-floating="true"] {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 9px;
 }
 .agent-connect-box small { max-width: 150px; color: var(--muted); font-size: 10px; }
@@ -6696,6 +6697,21 @@ pre.block {
   gap: 14px;
 }
 
+.agent-route-routing-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 22px;
+}
+
+.agent-route-routing-heading h2,
+.agent-route-routing-heading h1 {
+  margin: 3px 0 0;
+  font-size: 22px;
+  letter-spacing: -.035em;
+}
+
 .agent-route-embedded .agent-route-hero h2 {
   margin: 3px 0 0;
   color: var(--ink);
@@ -6709,6 +6725,144 @@ pre.block {
   display: grid;
   place-items: center;
 }
+
+.agent-route-select-field {
+  margin-top: 6px;
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.agent-route-select-field label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.agent-route-select-field select {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 34px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--canvas);
+  color: var(--ink);
+  font: inherit;
+}
+
+.agent-connection-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-connection-actions .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.agent-connection-detail {
+  display: grid;
+  gap: 14px;
+  padding: 20px 22px;
+}
+
+.agent-connection-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 160px;
+  gap: 10px;
+  margin: 0;
+}
+
+.agent-connection-facts > div {
+  min-width: 0;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+
+.agent-connection-facts dt {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 9.5px;
+}
+
+.agent-connection-facts dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.agent-connection-facts code,
+.agent-connection-facts strong {
+  display: block;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-connection-change {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.agent-connection-change > div:first-child {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.agent-connection-change h3 { margin: 0; font-size: 13px; }
+.agent-connection-change p { margin: 0; color: var(--muted); font-size: 10px; }
+.agent-connection-file {
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.agent-connection-file code { overflow-wrap: anywhere; color: var(--ink); font-size: 11px; }
+.agent-connection-file small { color: var(--muted); font-size: 9.5px; }
+
+.agent-default-route-state {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--success) 32%, var(--line));
+  border-radius: 9px;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 7%, var(--surface));
+}
+.agent-default-route-state > span {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: var(--success);
+  font-weight: 700;
+}
+.agent-default-route-state > div { display: grid; gap: 3px; }
+.agent-default-route-state strong { color: var(--ink); font-size: 11px; }
+.agent-default-route-state code { color: inherit; font-size: 9.5px; }
+.agent-default-route-state.warning {
+  border-color: color-mix(in srgb, var(--warning) 34%, var(--line));
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+}
+.agent-default-route-state.warning > span { background: var(--warning); }
 
 @media (max-width: 980px) {
   .station-content-topnav > .overview-page,
@@ -6774,6 +6928,9 @@ pre.block {
     overflow: visible;
     padding-right: 0;
   }
+
+  .agent-connection-facts { grid-template-columns: 1fr; }
+  .agent-connect-box { align-items: flex-end; flex-direction: column; }
 }
 @media (max-width: 560px) {
   .provider-catalog-grid { grid-template-columns: 1fr; }

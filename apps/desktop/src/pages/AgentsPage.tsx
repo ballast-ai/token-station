@@ -11,6 +11,7 @@ import { ScrollArea } from "../components/ui/scroll-area";
 import { cn } from "../lib/utils";
 
 interface AgentsPageProps {
+  mode: "connections" | "routing";
   registry: AgentUiMetadataView[];
   agents: AgentView[];
   revealingAgentIds: ReadonlySet<string>;
@@ -42,6 +43,7 @@ function navStatusCopy(status: AgentView["status"] | undefined, copy: (en: strin
 }
 
 export default function AgentsPage({
+  mode,
   registry,
   agents,
   revealingAgentIds,
@@ -54,6 +56,7 @@ export default function AgentsPage({
   children,
 }: AgentsPageProps) {
   const { copy } = useLocalizedCopy();
+  const connections = mode === "connections";
   const revealOrder = new Map(
     registry
       .filter((metadata) => revealingAgentIds.has(metadata.agent_id))
@@ -64,8 +67,10 @@ export default function AgentsPage({
     <div className="page-stack agents-page agent-workspace-page">
       <header className="overview-heading">
         <div>
-          <h1>{copy("Home", "主页")}</h1>
-          <p>{copy("Choose global routing or a local client, then configure it on the right.", "选择全局路由或本机客户端，在右侧完成配置。")}</p>
+          <h1>{connections ? copy("Agent connection", "Agent 接入") : copy("Routing", "路由配置")}</h1>
+          <p>{connections
+            ? copy("Select a detected Agent to manage its connection.", "选择一个已发现的 Agent，查看详情并管理接入。")
+            : copy("Configure global routing or open one Agent route.", "配置全局路由，或打开一个 Agent 的独立路由。")}</p>
         </div>
       </header>
 
@@ -73,12 +78,12 @@ export default function AgentsPage({
         <Card
           className="agent-master-list-card"
           role="region"
-          aria-label={copy("Agent selector", "客户端选择列表")}
+          aria-label={connections ? copy("Agent selector", "Agent 选择列表") : copy("Routing scopes", "路由范围")}
           data-onboarding-target="agent-list"
         >
           <CardHeader>
             <div>
-              <CardTitle><h2>{copy("Local clients", "本机客户端")}</h2></CardTitle>
+              <CardTitle><h2>{connections ? copy("Detected Agents", "发现 Agents") : copy("Routing scopes", "路由范围")}</h2></CardTitle>
             </div>
             <div className="agent-master-actions">
               <Badge variant="outline">{registry.length}</Badge>
@@ -103,25 +108,27 @@ export default function AgentsPage({
             <ScrollArea className="agent-master-scroll">
               <nav
                 className="agent-master-nav"
-                aria-label={copy("Agent list", "客户端列表")}
+                aria-label={connections ? copy("Detected Agent list", "发现 Agent 列表") : copy("Routing scope list", "路由范围列表")}
               >
-                <Button
-                  className="agent-master-item agent-master-home"
-                  variant="ghost"
-                  type="button"
-                  aria-label={copy("Global routing", "全局路由")}
-                  title={copy("Global routing - fixed first row", "全局路由 - 固定首行")}
-                  aria-current={homeSelected ? "page" : undefined}
-                  data-onboarding-target="routing"
-                  onClick={onOpenHome}
-                >
-                  <span className="agent-master-icon global-route-mark" aria-hidden="true">
-                    <TokenStationMark size={36} />
-                  </span>
-                  <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由")}</strong></span>
-                  <Badge variant={homeSelected ? "default" : "outline"}>{copy("Default", "默认")}</Badge>
-                </Button>
-                {registry.map((metadata) => {
+                {!connections && (
+                  <Button
+                    className="agent-master-item agent-master-home"
+                    variant="ghost"
+                    type="button"
+                    aria-label={copy("Global routing", "全局路由")}
+                    title={copy("Global routing", "全局路由")}
+                    aria-current={homeSelected ? "page" : undefined}
+                    data-onboarding-target="routing"
+                    onClick={onOpenHome}
+                  >
+                    <span className="agent-master-icon global-route-mark" aria-hidden="true">
+                      <TokenStationMark size={36} />
+                    </span>
+                    <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由")}</strong><small>{copy("Default for every Agent", "所有 Agent 的默认策略")}</small></span>
+                    <Badge variant={homeSelected ? "default" : "outline"}>{copy("Default", "默认")}</Badge>
+                  </Button>
+                )}
+                {connections ? registry.map((metadata) => {
                   const agent = agents.find((candidate) => candidate.metadata.agent_id === metadata.agent_id);
                   const selected = metadata.agent_id === selectedAgentId;
                   const revealIndex = revealOrder.get(metadata.agent_id);
@@ -150,13 +157,35 @@ export default function AgentsPage({
                       <Badge variant={agent?.status === "CONNECTED" ? "default" : "outline"}>{navStatusCopy(agent?.status, copy)}</Badge>
                     </Button>
                   );
-                })}
+                }) : (
+                  <div className="agent-route-select-field">
+                    <label htmlFor="agent-route-select">{copy("Agent routes", "Agent 路由")}</label>
+                    <select
+                      id="agent-route-select"
+                      aria-label={copy("Choose an Agent route", "选择 Agent 路由")}
+                      value={selectedAgentId ?? ""}
+                      onChange={(event) => {
+                        if (event.target.value) onOpenAgent(event.target.value);
+                      }}
+                    >
+                      <option value="">{copy("Choose an Agent…", "选择 Agent…")}</option>
+                      {registry.map((metadata) => {
+                        const agent = agents.find((candidate) => candidate.metadata.agent_id === metadata.agent_id);
+                        return (
+                          <option key={metadata.agent_id} value={metadata.agent_id}>
+                            {metadata.display_name} · {statusCopy(agent?.status, copy)}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+                )}
               </nav>
             </ScrollArea>
           </CardContent>
         </Card>
 
-        <section className="agent-master-content" aria-label={copy("Selected Home configuration", "当前主页配置")}>
+        <section className="agent-master-content" aria-label={connections ? copy("Selected Agent details", "当前 Agent 详情") : copy("Selected routing configuration", "当前路由配置")}>
           {children}
         </section>
       </div>

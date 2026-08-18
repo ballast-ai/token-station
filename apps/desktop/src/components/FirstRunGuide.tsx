@@ -326,7 +326,7 @@ export default function FirstRunGuide({
                       "无需重复配置。需要重看教程时，前往“设置 → 关于 → 重新查看新手引导”。",
                     ),
                     advanceOnTargetClick: false,
-                    continueLabel: copy("Back to Home", "返回主页"),
+                    continueLabel: copy("Open Agents", "前往 Agent"),
                   };
   const lockWorkspaceScroll = content.target === "route-mode"
     || content.target === "route-config"
@@ -727,7 +727,7 @@ export function FirstRunCompletionDialog({
         </DialogHeader>
         <DialogFooter>
           <Button type="button" onClick={onFinish}>
-            {copy("Back to Home", "返回主页")}
+            {copy("Open Agents", "前往 Agent")}
           </Button>
         </DialogFooter>
       </DialogContent>

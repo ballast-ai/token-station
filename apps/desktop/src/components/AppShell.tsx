@@ -17,7 +17,8 @@ export type AppView =
   | "settings"
   | "add-provider"
   | `free-provider:${string}`
-  | `agent:${string}`;
+  | `agent:${string}`
+  | `agent-route:${string}`;
 
 interface AppShellProps {
   view: AppView;
@@ -32,13 +33,15 @@ interface AppShellProps {
 }
 
 const PRIMARY_NAV: Array<{ view: AppView; en: string; zh: string }> = [
-  { view: "home", en: "Home", zh: "主页" },
+  { view: "agents", en: "Agent", zh: "Agent" },
+  { view: "home", en: "Routing", zh: "路由" },
   { view: "providers", en: "Providers", zh: "供应商" },
   { view: "usage", en: "Usage", zh: "用量" },
 ];
 
 function primaryView(view: AppView): AppView {
-  if (view.startsWith("agent:") || view === "agents") return "home";
+  if (view.startsWith("agent:")) return "agents";
+  if (view.startsWith("agent-route:")) return "home";
   if (view === "logs" || view === "settings") return "settings";
   if (view === "quota-usage" || view === "usage-management") return "usage";
   if (view === "add-provider" || view.startsWith("free-provider:")) return "providers";
@@ -107,6 +110,8 @@ export default function AppShell({
                 data-onboarding-target={
                   item.view === "home"
                     ? "home-entry"
+                    : item.view === "agents"
+                      ? "agent-entry"
                     : undefined
                 }
                 onClick={() => onNavigate(item.view)}
@@ -114,7 +119,7 @@ export default function AppShell({
                 <span data-onboarding-target={item.view === "settings" ? "settings" : undefined}>
                   {label}
                 </span>
-                {item.view === "home" && agents.length > connectedAgents && (
+                {item.view === "agents" && agents.length > connectedAgents && (
                   <span className="station-nav-alert" aria-hidden="true" />
                 )}
               </Button>
@@ -154,7 +159,7 @@ export default function AppShell({
         </div>
       </header>
 
-      <main className={`station-content station-content-topnav${activePrimary === "home" ? " station-content-agent" : ""}`}>
+      <main className={`station-content station-content-topnav${activePrimary === "home" || activePrimary === "agents" ? " station-content-agent" : ""}`}>
         {children}
       </main>
 

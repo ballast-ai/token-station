@@ -1180,3 +1180,80 @@ describe("AgentRoutePage multi-install admission", () => {
     expect(screen.getByRole("button", { name: "一键接入并启动" })).toBeDisabled();
   });
 });
+
+describe("AgentRoutePage split page modes", () => {
+  const route = {
+    mode: "inherit" as const,
+    tiers: {
+      high: { upstream: null, model: null },
+      mid: { upstream: null, model: null },
+      low: { upstream: null, model: null },
+    },
+    config_error: null,
+    profile: null,
+    routing_mode: "direct" as const,
+    direct_target: { upstream: "deepseek", model: "deepseek-v4-flash" },
+  };
+  const metadata = {
+    agent_id: "claude-code",
+    legacy_kind: "cc",
+    display_name: "Claude Code",
+    icon_key: "claude",
+    admission: "supported" as const,
+    connector_capabilities: [{
+      connector_id: "claude-code-v1",
+      adapter_id: "anthropic",
+      base_url_shape: "origin" as const,
+      platforms: ["macos" as const],
+      config_format: "json",
+      config_path_template: "~/.claude/settings.json",
+      owned_fields: ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"],
+      requires_virtual_key: true,
+      restart_required: false,
+    }],
+  };
+  const found = installation("/opt/homebrew/bin/claude", "2.1.211");
+  const agent: AgentView = {
+    metadata,
+    installations: [found],
+    status: "DETECTED_VERIFIED",
+    catalog_sequence: 1,
+    catalog_expires_at_ms: null,
+    catalog_source: "builtin",
+    catalog_warning: null,
+  };
+  const props = {
+    metadata,
+    agent,
+    route,
+    providers: [],
+    profiles: [],
+    quotaAccounts: [],
+    serveRunning: true,
+    applying: false,
+    selectedInstallationPath: found.discovery.canonical_path,
+    onStateChange: vi.fn(),
+    onRefreshAgents: vi.fn(),
+    onSaveQuota: vi.fn(),
+    onSaveQuotaPlan: vi.fn(),
+    onViewQuotaUsage: vi.fn(),
+  };
+
+  it("shows discovery and connection controls without routing controls", () => {
+    render(<ErrorToastProvider><AgentRoutePage {...props} pageMode="connection" embedded /></ErrorToastProvider>);
+
+    expect(screen.getByText("/opt/homebrew/bin/claude")).toBeInTheDocument();
+    expect(screen.getByText("2.1.211")).toBeInTheDocument();
+    expect(screen.getByText("/Users/x/.claude/settings.json")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "一键接入" })).toBeInTheDocument();
+    expect(screen.queryByText("选择请求如何分配")).toBeNull();
+  });
+
+  it("shows routing controls without connection or recovery controls", () => {
+    render(<ErrorToastProvider><AgentRoutePage {...props} pageMode="routing" embedded /></ErrorToastProvider>);
+
+    expect(screen.getByText("选择请求如何分配")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "一键接入" })).toBeNull();
+    expect(screen.queryByText("发现路径")).toBeNull();
+  });
+});

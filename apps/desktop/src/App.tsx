@@ -35,7 +35,6 @@ import {
   type TierSlot,
 } from "./api";
 import AppShell, { type AppView } from "./components/AppShell";
-import TokenStationMark from "./components/TokenStationMark";
 import FirstRunGuide, {
   FirstRunCompletionDialog,
   markFirstRunGuideDismissed,
@@ -147,6 +146,16 @@ export function configSaveStatus(state: StateView, language: Language = "en"): s
   return chinese ? "无改动" : "No changes";
 }
 
+export function firstProviderDefaultTarget(
+  previousProviderCount: number,
+  next: StateView,
+): { upstream: string; model: string } | null {
+  if (previousProviderCount !== 0 || next.direct_target?.upstream || next.direct_target?.model) return null;
+  const provider = next.providers[0];
+  const model = provider?.models[0];
+  return provider && model ? { upstream: provider.name, model } : null;
+}
+
 function StartupHome({ error, onReload }: { error: string; onReload: () => void }) {
   const { copy } = useLanguage();
   const failed = Boolean(error);
@@ -158,10 +167,10 @@ function StartupHome({ error, onReload }: { error: string; onReload: () => void 
     <div className="startup-home agent-workspace-page">
       <header className="startup-heading">
         <div>
-          <h1>{copy("Home", "主页")}</h1>
+          <h1>{copy("Agent connection", "Agent 接入")}</h1>
           <p>{copy(
-            "Preparing the local Agent and routing workspace.",
-            "正在准备本机 Agent 与路由工作区。",
+            "Discovering local Agents and preparing connection details.",
+            "正在发现本机 Agent 并准备接入详情。",
           )}</p>
         </div>
       </header>
@@ -169,25 +178,15 @@ function StartupHome({ error, onReload }: { error: string; onReload: () => void 
       <div className="startup-layout">
         <section
           className="startup-agent-card"
-          aria-label={copy("Local clients", "本机客户端")}
+          aria-label={copy("Detected Agents", "发现 Agents")}
         >
           <header className="startup-agent-card-header">
             <div>
-              <h2>{copy("Local clients", "本机客户端")}</h2>
+              <h2>{copy("Detected Agents", "发现 Agents")}</h2>
             </div>
             <span className="startup-count" aria-hidden="true">—</span>
           </header>
           <div className="startup-agent-card-body">
-            <div className="startup-global-route-row">
-              <span className="startup-global-route-mark" aria-hidden="true">
-                <TokenStationMark size={36} />
-              </span>
-              <span className="startup-global-route-copy">
-                <strong>{copy("Global routing", "全局路由")}</strong>
-                <small>{copy("Local default", "本机默认")}</small>
-              </span>
-              <span className="startup-default-badge">{copy("Default", "默认")}</span>
-            </div>
             <p className="startup-agent-pending-copy">{copy(
               "Detected Agents appear together when this startup check finishes.",
               "启动检查完成后，已发现的 Agent 会一次性出现。",
@@ -216,7 +215,7 @@ function StartupHome({ error, onReload }: { error: string; onReload: () => void 
             <div className="startup-discovery-track" aria-hidden="true">
               <span>{copy("ENTRY", "入口")}</span>
               <i><b /></i>
-              <span>{copy("HOME", "主页")}</span>
+              <span>AGENT</span>
             </div>
           )}
           {failed && (
@@ -237,7 +236,7 @@ function StationApp() {
   const { language, copy } = useLanguage();
   const { dismissToast, showError, showInfo, showSuccess } = useErrorToast();
   const [state, setState] = useState<StateView | null>(null);
-  const [view, setView] = useState<AppView>("home");
+  const [view, setView] = useState<AppView>("agents");
   const [hiddenAgentIds, setHiddenAgentIds] = useState<Set<string>>(readHiddenAgentIds);
   const hiddenAgentIdsRef = useRef(hiddenAgentIds);
   const [shownUndetectedAgentIds, setShownUndetectedAgentIds] = useState<Set<string>>(
@@ -363,7 +362,7 @@ function StationApp() {
     const selectedId = view.slice("agent:".length);
     if (!visibleRegistry.some((metadata) => metadata.agent_id === selectedId)) {
       viewHistoryRef.current = [];
-      setView("home");
+      setView("agents");
     }
   }, [scanSucceeded, view, visibleRegistry]);
 
@@ -637,7 +636,7 @@ function StationApp() {
             ? "agent-select"
             : "agent-scan-empty",
         );
-        setView(agents[0] ? `agent:${agents[0].metadata.agent_id}` : "home");
+        setView(agents[0] ? `agent:${agents[0].metadata.agent_id}` : "agents");
         showSuccess(copy(
           "Routing is running. Connect an Agent next.",
           "路由已运行，接下来接入 Agent。",
@@ -742,7 +741,6 @@ function StationApp() {
 
   const navigate = (next: AppView) => {
     if (freeProviderBusy) return;
-    if (next === "agents") next = "home";
     if (next === view) return;
     if (
       next === "usage" ||
@@ -760,13 +758,13 @@ function StationApp() {
   };
 
   const navigateBack = () => {
-    const previous = viewHistoryRef.current.pop() ?? "home";
+    const previous = viewHistoryRef.current.pop() ?? "agents";
     if (
       previous.startsWith("agent:")
       && !visibleAgentIds.has(previous.slice("agent:".length))
     ) {
       viewHistoryRef.current = [];
-      setView("home");
+      setView("agents");
     } else {
       setView(previous);
     }
@@ -828,8 +826,16 @@ function StationApp() {
     );
   }
 
-  const agentId = view.startsWith("agent:") ? view.slice("agent:".length) : null;
-  const selectedAgentId = agentId ?? undefined;
+  const connectionAgentId = view.startsWith("agent:") ? view.slice("agent:".length) : null;
+  const routeAgentId = view.startsWith("agent-route:") ? view.slice("agent-route:".length) : null;
+  const selectedAgentId = connectionAgentId
+    ?? routeAgentId
+    ?? (view === "agents" ? visibleRegistry[0]?.agent_id : undefined);
+  const agentWorkspaceMode = view === "home" || routeAgentId ? "routing" : "connections";
+  const showAgentWorkspace = view === "home"
+    || view === "agents"
+    || Boolean(connectionAgentId)
+    || Boolean(routeAgentId);
   const metadata = selectedAgentId ? orderedRegistry.find((item) => item.agent_id === selectedAgentId) : undefined;
   const agent = selectedAgentId ? agents.find((item) => item.metadata.agent_id === selectedAgentId) : undefined;
   const route = selectedAgentId ? (state.agent_routes?.[selectedAgentId] ?? emptyAgentRoute(state)) : undefined;
@@ -862,6 +868,42 @@ function StationApp() {
     unit: "tokens" | "requests",
   ) => void run(() => setQuotaPlan(upstream, lenMs, limit, unit, null));
 
+  const handleProviderAdded = (next: StateView, message: string) => {
+    const defaultTarget = firstProviderDefaultTarget(state.providers.length, next);
+    if (!defaultTarget) {
+      if (firstRunSetupStep === "provider") {
+        showState(next, copy(
+          "Provider added. Configure routing next.",
+          "供应商已添加，接下来配置路由。",
+        ));
+        viewHistoryRef.current = [];
+        setFirstRunSetupStep("route");
+        setFirstRunMicroStep("route-mode");
+        setView("home");
+      } else {
+        showState(next, message);
+        setView(viewHistoryRef.current.pop() ?? "home");
+      }
+      return;
+    }
+
+    showState(next);
+    void run(async () => {
+      await setRoutingMode("direct");
+      await setDirectRoute(defaultTarget.upstream, defaultTarget.model);
+      return serveStart();
+    }, copy(
+      `Provider added. Global routing now uses ${defaultTarget.upstream} / ${defaultTarget.model}.`,
+      `供应商已添加，全局路由已默认使用 ${defaultTarget.upstream} / ${defaultTarget.model}。`,
+    ), true);
+    viewHistoryRef.current = [];
+    if (firstRunSetupStep === "provider") {
+      setFirstRunSetupStep("agent");
+      setFirstRunMicroStep(agentDetected ? "agent-select" : "agent-scan-empty");
+    }
+    setView("agents");
+  };
+
   return (
     <AppShell
       view={view}
@@ -881,95 +923,20 @@ function StationApp() {
         />
       )}
 
-      {view === "home" && (
+      {showAgentWorkspace && (
         <AgentsPage
-          registry={visibleRegistry}
-          agents={agents}
-          revealingAgentIds={revealingAgentIds}
-          homeSelected
-          scanBusy={scanBusy}
-          onOpenHome={() => navigate("home")}
-          onRescan={() => void rescanAgents()}
-          onOpenAgent={(id) => {
-            navigate(`agent:${id}`);
-            if (firstRunGuideOpen && activeFirstRunMicroStep === "agent-select") {
-              const selected = agents.find((item) => item.metadata.agent_id === id);
-              setFirstRunMicroStep(
-                (selected?.installations.length ?? 0) > 1
-                  ? "agent-installation"
-                  : "agent-connect",
-              );
-            }
-          }}
-        >
-        <HomePage
-          providers={state.providers}
-          tiers={state.tiers}
-          profiles={state.profiles ?? []}
-          routingMode={state.routing_mode}
-          directTarget={state.direct_target ?? null}
-          onSetRoutingMode={(mode) => void run(() => setRoutingMode(mode))}
-          onApplyDirect={(upstream, model) => void run(async () => {
-            await setDirectRoute(upstream, model);
-            return serveStart();
-          }, undefined, true)}
-          quotaAccounts={state.quota_accounts ?? []}
-          onSaveQuota={saveQuota}
-          onSaveQuotaPlan={saveQuotaPlan}
-          onViewQuotaUsage={() => navigate("quota-usage")}
-          busy={busy}
-          applying={state.serve.phase === "starting"}
-          configError={state.config_error ? humanizeAppError(state.config_error, language) : null}
-          keywords={state.keywords}
-          saveStatus={saveStatus}
-          localOnly={state.local_only}
-          allowCloudFallback={state.allow_cloud_fallback}
-          onSetLocalRouting={(localOnly, allowCloudFallback) => void run(() => setLocalRouting(localOnly, allowCloudFallback))}
-          onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
-          onSaveProfile={(name) => run(
-            () => saveHomeRouteAsProfile(name),
-            copy(
-              `Profile "${name}" added to the draft. Save and apply to activate it.`,
-              `策略组“${name}”已加入草稿，请保存并应用。`,
-            ),
-          )}
-          onDeleteProfile={(name) => run(
-            () => deleteProfile(name),
-            copy(
-              `Profile "${name}" removed from the draft. Save and apply to activate the change.`,
-              `策略组“${name}”已从草稿删除，请保存并应用。`,
-            ),
-          )}
-          onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
-          onRemoveKeyword={(slot, keyword) => void run(() => removeKeyword(slot, keyword))}
-          onSave={() => void run(serveStart, undefined, true)}
-          onApplyAll={() => void run(
-            applyHomeRouteToAllAgents,
-            runtimeHealthy
-              ? copy(
-                  "All Agents now follow Home · pending apply",
-                  "全部 Agent 已恢复跟随主页 · 尚待应用",
-                )
-              : copy("All Agents now follow Home", "全部 Agent 已恢复跟随主页"),
-          )}
-          embedded
-        />
-        </AgentsPage>
-      )}
-
-      {agentId && (
-        <AgentsPage
+          mode={agentWorkspaceMode}
           registry={visibleRegistry}
           agents={agents}
           revealingAgentIds={revealingAgentIds}
           selectedAgentId={selectedAgentId}
-          homeSelected={false}
+          homeSelected={view === "home"}
           scanBusy={scanBusy}
           onOpenHome={() => navigate("home")}
           onRescan={() => void rescanAgents()}
           onOpenAgent={(id) => {
-            navigate(`agent:${id}`);
-            if (firstRunGuideOpen && activeFirstRunMicroStep === "agent-select") {
+            navigate(agentWorkspaceMode === "routing" ? `agent-route:${id}` : `agent:${id}`);
+            if (agentWorkspaceMode === "connections" && firstRunGuideOpen && activeFirstRunMicroStep === "agent-select") {
               const selected = agents.find((item) => item.metadata.agent_id === id);
               setFirstRunMicroStep(
                 (selected?.installations.length ?? 0) > 1
@@ -979,6 +946,60 @@ function StationApp() {
             }
           }}
         >
+          {agentWorkspaceMode === "routing" && !routeAgentId && (
+            <HomePage
+              providers={state.providers}
+              tiers={state.tiers}
+              profiles={state.profiles ?? []}
+              routingMode={state.routing_mode}
+              directTarget={state.direct_target ?? null}
+              onSetRoutingMode={(mode) => void run(() => setRoutingMode(mode))}
+              onApplyDirect={(upstream, model) => void run(async () => {
+                await setDirectRoute(upstream, model);
+                return serveStart();
+              }, undefined, true)}
+              quotaAccounts={state.quota_accounts ?? []}
+              onSaveQuota={saveQuota}
+              onSaveQuotaPlan={saveQuotaPlan}
+              onViewQuotaUsage={() => navigate("quota-usage")}
+              busy={busy}
+              applying={state.serve.phase === "starting"}
+              configError={state.config_error ? humanizeAppError(state.config_error, language) : null}
+              keywords={state.keywords}
+              saveStatus={saveStatus}
+              localOnly={state.local_only}
+              allowCloudFallback={state.allow_cloud_fallback}
+              onSetLocalRouting={(localOnly, allowCloudFallback) => void run(() => setLocalRouting(localOnly, allowCloudFallback))}
+              onTierChange={(slot: TierSlot, upstream, model) => void run(() => setTier(slot, upstream, model))}
+              onSaveProfile={(name) => run(
+                () => saveHomeRouteAsProfile(name),
+                copy(
+                  `Profile "${name}" added to the draft. Save and apply to activate it.`,
+                  `策略组“${name}”已加入草稿，请保存并应用。`,
+                ),
+              )}
+              onDeleteProfile={(name) => run(
+                () => deleteProfile(name),
+                copy(
+                  `Profile "${name}" removed from the draft. Save and apply to activate the change.`,
+                  `策略组“${name}”已从草稿删除，请保存并应用。`,
+                ),
+              )}
+              onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
+              onRemoveKeyword={(slot, keyword) => void run(() => removeKeyword(slot, keyword))}
+              onSave={() => void run(serveStart, undefined, true)}
+              onApplyAll={() => void run(
+                applyHomeRouteToAllAgents,
+                runtimeHealthy
+                  ? copy(
+                      "All Agents now follow global routing · pending apply",
+                      "全部 Agent 已恢复跟随全局路由 · 尚待应用",
+                    )
+                  : copy("All Agents now follow global routing", "全部 Agent 已恢复跟随全局路由"),
+              )}
+              embedded
+            />
+          )}
           {metadata && route && (
             <AgentRoutePage
               key={metadata.agent_id}
@@ -1020,18 +1041,19 @@ function StationApp() {
                 setSelectedInstallationPaths((current) => ({ ...current, [metadata.agent_id]: path }));
               }}
               onInstallationSelected={() => {
-                if (firstRunGuideOpen && activeFirstRunMicroStep === "agent-installation") {
+                if (agentWorkspaceMode === "connections" && firstRunGuideOpen && activeFirstRunMicroStep === "agent-installation") {
                   setFirstRunMicroStep("agent-connect-multiple");
                 }
               }}
+              pageMode={agentWorkspaceMode === "connections" ? "connection" : "routing"}
               embedded
             />
           )}
-          {!metadata && (
+          {!metadata && (agentWorkspaceMode === "connections" || Boolean(routeAgentId)) && (
             <section className="panel agent-master-empty">
               <div className="panel-head">
                 <h2>{copy("No Agent selected", "未选择 Agent")}</h2>
-                <p className="sub">{copy("Choose a visible Agent to manage its connection and route.", "请选择一个可见 Agent 管理接入和路由。")}</p>
+                <p className="sub">{copy("Choose a visible Agent.", "请选择一个可见 Agent。")}</p>
               </div>
             </section>
           )}
@@ -1105,21 +1127,7 @@ function StationApp() {
             }
           }}
           onSelectFree={(preset) => setView(`free-provider:${preset.id}`)}
-          onAdded={(next, message) => {
-            if (firstRunSetupStep === "provider") {
-              showState(next, copy(
-                "Provider added. Configure routing next.",
-                "供应商已添加，接下来配置路由。",
-              ));
-              viewHistoryRef.current = [];
-              setFirstRunSetupStep("route");
-              setFirstRunMicroStep("route-mode");
-              setView("home");
-            } else {
-              showState(next, message);
-              setView(viewHistoryRef.current.pop() ?? "home");
-            }
-          }}
+          onAdded={handleProviderAdded}
         />
       )}
       {view.startsWith("free-provider:") && (() => {
@@ -1131,19 +1139,7 @@ function StationApp() {
             preset={preset}
             onBack={() => setView("add-provider")}
             onBusyChange={setFreeProviderBusy}
-            onAdded={(next, nextMessage) => {
-              showState(next, firstRunSetupStep === "provider"
-                ? copy(
-                    "Provider added. Configure routing next.",
-                    "供应商已添加，接下来配置路由。",
-                  )
-                : nextMessage);
-              if (firstRunSetupStep === "provider") {
-                setFirstRunSetupStep("route");
-                setFirstRunMicroStep("route-mode");
-              }
-              setView("home");
-            }}
+            onAdded={handleProviderAdded}
           />
         ) : (
           <section className="panel free-catalog-state">
@@ -1181,7 +1177,13 @@ function StationApp() {
         onTargetAction={() => {
           if (activeFirstRunMicroStep === "overview") {
             viewHistoryRef.current = [];
-            setView(recommendedFirstRunStep === "provider" ? "providers" : "home");
+            setView(
+              recommendedFirstRunStep === "provider"
+                ? "providers"
+                : recommendedFirstRunStep === "agent"
+                  ? "agents"
+                  : "home",
+            );
             setFirstRunSetupStep(null);
             setFirstRunMicroStep(null);
           } else if (activeFirstRunMicroStep === "provider-entry") {
@@ -1209,7 +1211,7 @@ function StationApp() {
             setFirstRunSetupStep(null);
             setFirstRunMicroStep(null);
             viewHistoryRef.current = [];
-            setView("home");
+            setView("agents");
           }
         }}
         onSkipAgent={() => {
@@ -1240,7 +1242,7 @@ function StationApp() {
         onFinish={() => {
           setFirstRunCompletion(null);
           viewHistoryRef.current = [];
-          setView("home");
+          setView("agents");
         }}
       />
     </AppShell>

@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import App, { configSaveStatus, firstRunRouteApplyComplete } from "./App";
+import App, { configSaveStatus, firstProviderDefaultTarget, firstRunRouteApplyComplete } from "./App";
 import { getStats } from "./api";
 import type { AgentRouteView, AgentUiMetadataView, AgentView, ServeView, StateView } from "./api";
 import {
@@ -80,6 +80,27 @@ const agentDisplayNames = supportedRegistryFixture.map(
   (metadata) => metadata.display_name,
 );
 const agentNavigationNames = agentDisplayNames;
+
+it("selects the first model as the default global route only for the first provider", () => {
+  const next = stateFixture({
+    providers: [{
+      name: "deepseek",
+      brand_id: "deepseek",
+      provider: "openai-compatible",
+      base_url: "https://api.deepseek.com/v1",
+      models: ["deepseek-v4-flash", "deepseek-v4"],
+      has_auth: true,
+    }],
+    direct_target: null,
+  });
+
+  expect(firstProviderDefaultTarget(0, next)).toEqual({
+    upstream: "deepseek",
+    model: "deepseek-v4-flash",
+  });
+  expect(firstProviderDefaultTarget(1, next)).toBeNull();
+  expect(firstProviderDefaultTarget(0, { ...next, direct_target: { upstream: "kept", model: "model" } })).toBeNull();
+});
 
 const statsFixture = {
   total: {
@@ -259,19 +280,28 @@ function navigation() {
 }
 
 async function openRouting(user: ReturnType<typeof userEvent.setup>) {
-  await user.click((await screen.findByRole("navigation", { name: /主导航|Main navigation/ })).querySelector<HTMLButtonElement>('button[aria-label="主页"], button[aria-label="Home"]')!);
+  await user.click((await screen.findByRole("navigation", { name: /主导航|Main navigation/ })).querySelector<HTMLButtonElement>('button[aria-label="路由"], button[aria-label="Routing"]')!);
   await user.click(await screen.findByRole("button", { name: /全局路由|Global routing/ }));
   await screen.findByRole("heading", { name: /全局路由|Global routing/ });
 }
 
 async function openAgents(user: ReturnType<typeof userEvent.setup>) {
-  await user.click((await screen.findByRole("navigation", { name: /主导航|Main navigation/ })).querySelector<HTMLButtonElement>('button[aria-label="主页"], button[aria-label="Home"]')!);
-  await screen.findByRole("heading", { name: /主页|Home/ });
+  await user.click((await screen.findByRole("navigation", { name: /主导航|Main navigation/ })).querySelector<HTMLButtonElement>('button[aria-label="Agent"]')!);
+  await screen.findByRole("heading", { name: /Agent 接入|Agent connections/ });
 }
 
 async function openAgent(user: ReturnType<typeof userEvent.setup>, name: string) {
   await openAgents(user);
   await user.click(screen.getByRole("button", { name }));
+  await screen.findByRole("heading", { name });
+}
+
+async function openAgentRoute(user: ReturnType<typeof userEvent.setup>, name: string) {
+  await openRouting(user);
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: /选择 Agent 路由|Choose an Agent route/ }),
+    screen.getByRole("option", { name: new RegExp(`^${name} ·`) }),
+  );
   await screen.findByRole("heading", { name });
 }
 
@@ -381,6 +411,12 @@ it("walks through provider configuration and advances only after a real save", a
       if (saveAttempts === 1) throw new Error("credential rejected");
       return added;
     }
+    if (command === "set_routing_mode" || command === "set_direct_route") return added;
+    if (command === "serve_start") return {
+      ...added,
+      routing_mode: "direct",
+      direct_target: { upstream: "openai", model: "gpt-5.1" },
+    };
     throw new Error(`unexpected IPC command: ${command}`);
   });
 
@@ -425,8 +461,10 @@ it("walks through provider configuration and advances only after a real save", a
 
   await user.click(saveProvider);
 
-  expect(await screen.findByRole("heading", { name: "全局路由" })).toBeInTheDocument();
-  expect(await screen.findByRole("dialog", { name: "选择路由模式" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
+  expect(screen.queryByRole("dialog", { name: "选择路由模式" })).toBeNull();
+  expect(invokeMock).toHaveBeenCalledWith("set_routing_mode", { mode: "direct", agentId: null });
+  expect(invokeMock).toHaveBeenCalledWith("set_direct_route", { upstream: "openai", model: "gpt-5.1", agentId: null });
 });
 
 it("spotlights routing controls and advances only when the requested revision is really running", async () => {
@@ -525,7 +563,7 @@ it("spotlights routing controls and advances only when the requested revision is
     running_revision: 2,
   })));
 
-  expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
   expect(await screen.findByRole("dialog", { name: "未检测到可接入 Agent" })).toBeInTheDocument();
 });
 
@@ -718,8 +756,8 @@ it("启动未扫到 Agent 时可直接完成基础设置并回到主页", async 
   expect(screen.getByRole("dialog", { name: "基础设置完成" }))
     .toHaveTextContent("设置 → 关于 → 重新查看新手引导");
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(FIRST_RUN_GUIDE_VERSION);
-  await user.click(screen.getByRole("button", { name: "返回主页" }));
-  expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "前往 Agent" }));
+  expect(await screen.findByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
 });
 
 it("一键接入后只通过缓存状态刷新确认 CONNECTED", async () => {
@@ -775,7 +813,7 @@ it("一键接入后只通过缓存状态刷新确认 CONNECTED", async () => {
   render(<App />);
   await continueFromOverview(user);
   await screen.findByRole("dialog", { name: "打开 Agent 管理" });
-  await user.click(screen.getByRole("button", { name: "Claude Code" }));
+  await user.click(screen.getByRole("button", { name: "Agent" }));
 
   const discoveryScope = await screen.findByRole("dialog", {
     name: "这里仅显示扫描到的 Agent",
@@ -787,7 +825,7 @@ it("一键接入后只通过缓存状态刷新确认 CONNECTED", async () => {
   }));
 
   await screen.findByRole("dialog", { name: "选择一个 Agent" });
-  expect(screen.getByRole("region", { name: "客户端选择列表" }))
+  expect(screen.getByRole("region", { name: "Agent 选择列表" }))
     .toHaveAttribute("data-onboarding-active", "true");
   await user.click(screen.getByRole("button", { name: "Claude Code" }));
 
@@ -855,7 +893,7 @@ it("requires an exact installation choice before connecting a multi-installation
   render(<App />);
   await continueFromOverview(user);
   await screen.findByRole("dialog", { name: "打开 Agent 管理" });
-  await user.click(screen.getByRole("button", { name: "Claude Code" }));
+  await user.click(screen.getByRole("button", { name: "Agent" }));
   const discoveryScope = await screen.findByRole("dialog", {
     name: "这里仅显示扫描到的 Agent",
   });
@@ -925,10 +963,10 @@ it("shows an already-complete summary without asking for repeated setup", async 
   expect(await screen.findByRole("dialog", { name: "首次设置已完成" })).toBeInTheDocument();
   expect(screen.getByRole("dialog", { name: "首次设置已完成" }))
     .toHaveTextContent("设置 → 关于 → 重新查看新手引导");
-  await user.click(screen.getByRole("button", { name: "返回主页" }));
+  await user.click(screen.getByRole("button", { name: "前往 Agent" }));
 
   expect(screen.queryByRole("dialog")).toBeNull();
-  expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
   expect(window.localStorage.getItem(FIRST_RUN_GUIDE_STORAGE_KEY)).toBe(FIRST_RUN_GUIDE_VERSION);
 });
 
@@ -945,7 +983,7 @@ it("persists a skipped guide and does not show it on the next App session", asyn
   );
   firstSession.unmount();
   render(<App />);
-  await screen.findByRole("heading", { name: "主页" });
+  await screen.findByRole("heading", { name: "Agent 接入" });
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
@@ -1080,10 +1118,10 @@ describe("desktop station navigation", () => {
     render(<App />);
     const startupStatus = await screen.findByRole("status", { name: "正在检查本机 Agent" });
     expect(startupStatus).toHaveAttribute("aria-busy", "true");
-    expect(screen.getByRole("heading", { name: "主页" })).toBeInTheDocument();
-    expect(screen.getByText("全局路由")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
+    expect(screen.getByText("发现 Agents")).toBeInTheDocument();
     const startupNavigation = within(screen.getByLabelText("主导航"));
-    for (const name of ["主页", "供应商", "用量"]) {
+    for (const name of ["Agent", "路由", "供应商", "用量"]) {
       expect(startupNavigation.getByRole("button", { name })).toBeDisabled();
     }
     expect(screen.getByRole("button", { name: "设置" })).toBeDisabled();
@@ -1110,19 +1148,16 @@ describe("desktop station navigation", () => {
     await continueFromOverview(user);
     expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "不再提示" }));
-    await user.click(navigation().getByRole("button", { name: "主页" }));
-    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+    await user.click(navigation().getByRole("button", { name: "Agent" }));
+    expect(await screen.findByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
     const nav = within(screen.getByLabelText("主导航"));
     expect(nav.getAllByRole("button").map((item) => item.getAttribute("aria-label"))).toEqual([
-      "主页",
+      "Agent",
+      "路由",
       "供应商",
       "用量",
     ]);
-    expect(screen.getByRole("button", { name: "全局路由" })).toHaveAttribute("aria-current", "page");
-    const globalRouteButton = screen.getByRole("button", { name: "全局路由" });
-    expect(globalRouteButton.querySelector('[data-testid="token-station-mark"]')).toBeInTheDocument();
-    expect(globalRouteButton.querySelector(".agent-master-copy")).toBeInTheDocument();
-    expect(within(globalRouteButton).queryByText("TS")).toBeNull();
+    expect(screen.queryByRole("button", { name: "全局路由" })).toBeNull();
     expect(screen.getByRole("button", { name: "Claude Code" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Codex" })).toBeNull();
     expect(screen.getByText("代理运行中")).toBeInTheDocument();
@@ -1201,7 +1236,7 @@ describe("desktop station navigation", () => {
 
     const startupStatus = await screen.findByRole("status", { name: "无法检查本机 Agent" });
     expect(startupStatus).toHaveAttribute("aria-busy", "false");
-    expect(screen.getByRole("heading", { name: "主页" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
     expect(screen.getByText("启动检查未完成，当前不会把失败结果当作空 Agent 列表。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新进入 Token Station" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
@@ -1219,28 +1254,28 @@ describe("desktop station navigation", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "全局路由" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "全局路由" })).toBeNull();
     expect(screen.queryByRole("status", { name: /检查本机 Agent/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "重新进入 Token Station" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
   });
 
-  it("默认进入主页，主导航保留三个入口且右上角显示设置", async () => {
+  it("默认进入 Agent 页，主导航分开 Agent 与路由入口", async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
     const nav = within(screen.getByLabelText("主导航"));
-    for (const name of ["主页", "供应商", "用量"]) {
+    for (const name of ["Agent", "路由", "供应商", "用量"]) {
       expect(nav.getByRole("button", { name })).toBeInTheDocument();
     }
     expect(nav.queryByRole("button", { name: "设置" })).toBeNull();
     expect(screen.getByRole("button", { name: "设置" })).toHaveClass("station-settings-button");
     expect(nav.queryByRole("button", { name: "概览" })).toBeNull();
-    expect(nav.queryByRole("button", { name: "路由" })).toBeNull();
-    expect(nav.queryByRole("button", { name: "Agent" })).toBeNull();
+    expect(nav.getByRole("button", { name: "路由" })).toBeInTheDocument();
+    expect(nav.getByRole("button", { name: "Agent" })).toHaveAttribute("aria-current", "page");
     expect(nav.queryByRole("button", { name: "日志" })).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Token Station 概览" }));
@@ -1341,7 +1376,7 @@ describe("desktop station navigation", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert.parentElement).toHaveClass("error-toast-viewport");
-    expect(screen.getByRole("heading", { name: "主页" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
     await user.click(within(alert).getByRole("button", { name: "关闭提示" }));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
@@ -1360,7 +1395,7 @@ describe("desktop station navigation", () => {
 
     render(<App />);
 
-    await screen.findByRole("heading", { name: "主页" });
+    await screen.findByRole("heading", { name: "Agent 接入" });
     await user.click(screen.getByRole("button", { name: "Token Station 概览" }));
 
     const systemSummary = await screen.findByRole("region", { name: "系统摘要" });
@@ -1406,15 +1441,13 @@ describe("desktop station navigation", () => {
     render(<App />);
 
     await openAgents(user);
-    const agentNavigation = screen.getByRole("navigation", { name: "客户端列表" });
+    const agentNavigation = screen.getByRole("navigation", { name: "发现 Agent 列表" });
     const claudeCodeButton = within(agentNavigation).getByRole("button", { name: "Claude Code" });
     expect(screen.queryByText("AGENT FLEET")).toBeNull();
-    expect(screen.getByText("选择全局路由或本机客户端，在右侧完成配置。")).toBeInTheDocument();
-    expect(screen.queryByText("这是所有 Agent 的默认路由。Agent 自定义路由只覆盖它自身。")).toBeNull();
-    expect(within(agentNavigation).getByRole("button", { name: "全局路由" }))
-      .toHaveAttribute("aria-current", "page");
+    expect(screen.getByText("选择一个已发现的 Agent，查看详情并管理接入。")).toBeInTheDocument();
+    expect(within(agentNavigation).queryByRole("button", { name: "全局路由" })).toBeNull();
     expect(within(claudeCodeButton).queryByText("claude-code")).toBeNull();
-    expect(claudeCodeButton).not.toHaveAttribute("aria-current");
+    expect(claudeCodeButton).toHaveAttribute("aria-current", "page");
     const centeredBrand = claudeCodeButton.querySelector('[data-agent-brand="claude-code"]');
     expect(centeredBrand).toBeInTheDocument();
     expect(centeredBrand?.querySelector("svg")).toBeInTheDocument();
@@ -1424,10 +1457,10 @@ describe("desktop station navigation", () => {
     expect(screen.queryByText("AGENT ROUTE")).toBeNull();
     expect(screen.queryByText("DIRECT · ONE PROVIDER")).toBeNull();
 
-    const updatedAgentNavigation = screen.getByRole("navigation", { name: "客户端列表" });
+    const updatedAgentNavigation = screen.getByRole("navigation", { name: "发现 Agent 列表" });
     await user.click(within(updatedAgentNavigation).getByRole("button", { name: "Codex" }));
     expect(await screen.findByRole("heading", { name: "Codex", level: 2 })).toBeInTheDocument();
-    expect(within(screen.getByRole("navigation", { name: "客户端列表" })).getByRole("button", { name: "Codex" })).toHaveAttribute("aria-current", "page");
+    expect(within(screen.getByRole("navigation", { name: "发现 Agent 列表" })).getByRole("button", { name: "Codex" })).toHaveAttribute("aria-current", "page");
   });
 
   it("changes the selected Agent routing strategy from the detail workspace", async () => {
@@ -1448,7 +1481,7 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
-    await openAgent(user, "Claude Code");
+    await openAgentRoute(user, "Claude Code");
     const strategyTabs = screen.getByRole("tablist", { name: "Agent 路由策略" });
     await user.click(within(strategyTabs).getByRole("tab", { name: "额度优先" }));
 
@@ -1689,7 +1722,7 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
-    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
     expect(within(screen.getByTestId("error-toast-viewport")).queryByText("正在应用配置…"))
       .toBeNull();
     expect(document.querySelector(".global-banner")).toBeNull();
@@ -1750,7 +1783,7 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
-    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
     await waitFor(() => expect(
       invokeMock.mock.calls.filter(([command]) => command === "get_runtime_state").length,
     ).toBeGreaterThanOrEqual(2), { timeout: 1_800 });
@@ -1936,7 +1969,7 @@ describe("desktop station navigation", () => {
   it("lets the user hide and restore a sidebar Agent from Settings without rescanning", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByRole("heading", { name: "主页" });
+    await screen.findByRole("heading", { name: "Agent 接入" });
     await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1));
 
     await openAgentVisibility(user);
@@ -2003,7 +2036,7 @@ describe("desktop station navigation", () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents"))
       .toHaveLength(1);
 
-    await user.click(navigation().getByRole("button", { name: "主页" }));
+    await user.click(navigation().getByRole("button", { name: "Agent" }));
     const gemini = await screen.findByRole("button", { name: "Gemini CLI" });
     expect(gemini).toHaveAttribute("title", "Gemini CLI · 未检测");
     expect(within(gemini).getByText("未检测")).toBeInTheDocument();
@@ -2169,9 +2202,9 @@ describe("desktop station navigation", () => {
 
     await openAgentVisibility(user);
     await user.click(screen.getByRole("switch", { name: "Codex", checked: true }));
-    await user.click(navigation().getByRole("button", { name: "主页" }));
+    await user.click(navigation().getByRole("button", { name: "Agent" }));
 
-    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Codex" })).toBeNull();
   });
 
@@ -2206,7 +2239,8 @@ describe("desktop station navigation", () => {
     for (const name of agentNavigationNames) {
       expect(screen.queryByRole("button", { name })).toBeNull();
     }
-    expect(navigation().getByRole("button", { name: "主页" })).toBeInTheDocument();
+    expect(navigation().getByRole("button", { name: "Agent" })).toBeInTheDocument();
+    expect(navigation().getByRole("button", { name: "路由" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "用量" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(`0 / ${agentIds.length} 已显示`);
@@ -2227,7 +2261,7 @@ describe("desktop station navigation", () => {
       throw new Error(`unexpected IPC command: ${command}`);
     });
     render(<App />);
-    await screen.findByRole("heading", { name: "主页" });
+    await screen.findByRole("heading", { name: "Agent 接入" });
 
     const primaryNavigation = navigation();
     expect(primaryNavigation.queryByRole("button", { name: "设置" })).toBeNull();
@@ -2251,8 +2285,8 @@ describe("desktop station navigation", () => {
 
     await user.click(navigation().getByRole("button", { name: "用量" }));
     expect(await screen.findByRole("heading", { name: "用量统计" })).toBeInTheDocument();
-    await user.click(navigation().getByRole("button", { name: "主页" }));
-    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+    await user.click(navigation().getByRole("button", { name: "Agent" }));
+    expect(await screen.findByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
   });
 
   it("renders the primary desktop surface in English by default", async () => {
@@ -2260,7 +2294,7 @@ describe("desktop station navigation", () => {
     window.localStorage.removeItem(LANGUAGE_STORAGE_KEY);
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Home" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Agent connection" })).toBeInTheDocument();
     await openRouting(user);
     expect(screen.getByRole("heading", { name: "Smart routing" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save and apply" })).toBeInTheDocument();
@@ -2314,8 +2348,8 @@ describe("desktop station navigation", () => {
     )).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length} / ${agentIds.length} 已显示`);
     expect(screen.getByRole("group", { name: "Agent 显示选项" })).toBeInTheDocument();
-    await user.click(navigation().getByRole("button", { name: "主页" }));
-    expect(await screen.findByRole("heading", { name: "主页" })).toBeInTheDocument();
+    await user.click(navigation().getByRole("button", { name: "Agent" }));
+    expect(await screen.findByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
     expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("zh-CN");
     expect(document.documentElement).toHaveAttribute("lang", "zh-CN");
   });
@@ -2404,7 +2438,7 @@ describe("desktop station navigation", () => {
     await openRouting(user);
     await user.click(await screen.findByRole("button", { name: "应用到全部 Agent" }));
     expect(invokeMock).toHaveBeenCalledWith("apply_home_route_to_all_agents");
-    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("全部 Agent 已恢复跟随主页"))
+    expect(await within(screen.getByTestId("error-toast-viewport")).findByText("全部 Agent 已恢复跟随全局路由"))
       .toBeInTheDocument();
   });
 
@@ -2425,7 +2459,7 @@ describe("desktop station navigation", () => {
       throw new Error(`unexpected IPC command: ${command}`);
     });
     render(<App />);
-    await openAgent(user, "Codex");
+    await openAgentRoute(user, "Codex");
     await user.click(screen.getByRole("radio", { name: "自定义三档" }));
     await user.click(screen.getByLabelText("上档供应商"));
     await user.click(screen.getByRole("option", { name: "deepseek" }));
@@ -2465,17 +2499,17 @@ describe("desktop station navigation", () => {
     });
     render(<App />);
 
-    await openAgent(user, "Codex");
+    await openAgentRoute(user, "Codex");
     await user.click(screen.getByRole("radio", { name: "自定义三档" }));
     expect(screen.getByText("有一个路由尚未配置完整。请同时选择供应商和模型，然后重新保存。")).toBeInTheDocument();
 
-    await user.click(navigation().getByRole("button", { name: "主页" }));
+    await user.click(navigation().getByRole("button", { name: "路由" }));
 
     expect(await screen.findByRole("heading", { name: "全局路由" })).toBeInTheDocument();
     expect(screen.queryByText(/配置结构不合法/)).toBeNull();
     expect(invokeMock).not.toHaveBeenCalledWith("save_agent_routes");
 
-    await openAgent(user, "Codex");
+    await openAgentRoute(user, "Codex");
     expect(screen.getByRole("radio", { name: "自定义三档" })).toHaveAttribute(
       "aria-checked",
       "true",
@@ -2524,7 +2558,7 @@ describe("desktop station navigation", () => {
     expect(await within(screen.getByTestId("error-toast-viewport")).findByText("策略组“日常开发”已加入草稿，请保存并应用。"))
       .toBeInTheDocument();
 
-    await openAgent(user, "Codex");
+    await openAgentRoute(user, "Codex");
     await user.click(screen.getByRole("radio", { name: "挂载策略组" }));
     expect(invokeMock).toHaveBeenCalledWith("mount_agent_profile", { agentId: "codex", profile: "日常开发" });
     expect(await within(screen.getByTestId("error-toast-viewport")).findByText("已挂载策略组「日常开发」· 尚待保存并应用"))
@@ -2910,15 +2944,15 @@ describe("desktop station navigation", () => {
 
     render(<App />);
     await openAgents(user);
-    const navigation = screen.getByRole("navigation", { name: "客户端列表" });
+    const navigation = screen.getByRole("navigation", { name: "发现 Agent 列表" });
     await user.click(within(navigation).getByRole("button", { name: "Claude Code" }));
     await user.click(await screen.findByRole("button", { name: "选择版本" }));
     await user.click(screen.getByRole("option", { name: "claude-preview · v10.0.0" }));
 
     expect(screen.getByRole("button", { name: "一键接入" })).toBeEnabled();
-    await user.click(within(screen.getByRole("navigation", { name: "客户端列表" })).getByRole("button", { name: "Codex" }));
+    await user.click(within(screen.getByRole("navigation", { name: "发现 Agent 列表" })).getByRole("button", { name: "Codex" }));
     expect(await screen.findByRole("heading", { name: "Codex", level: 2 })).toBeInTheDocument();
-    await user.click(within(screen.getByRole("navigation", { name: "客户端列表" })).getByRole("button", { name: "Claude Code" }));
+    await user.click(within(screen.getByRole("navigation", { name: "发现 Agent 列表" })).getByRole("button", { name: "Claude Code" }));
     expect(await screen.findByRole("heading", { name: "Claude Code", level: 2 })).toBeInTheDocument();
 
     await user.click(await screen.findByRole("button", { name: "选择版本" }));

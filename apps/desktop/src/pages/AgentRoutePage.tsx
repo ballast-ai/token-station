@@ -69,6 +69,7 @@ interface AgentRoutePageProps {
   selectedInstallationPath?: string;
   onInstallationPathChange?: (path: string) => void;
   embedded?: boolean;
+  pageMode?: "combined" | "connection" | "routing";
 }
 
 /** Per-Agent key recording that connection changes were shown; localStorage makes it appear only once. */
@@ -230,6 +231,7 @@ export default function AgentRoutePage({
   selectedInstallationPath,
   onInstallationPathChange,
   embedded = false,
+  pageMode = "combined",
 }: AgentRoutePageProps) {
   const { copy, language } = useLocalizedCopy();
   const { showError, showSuccess } = useErrorToast();
@@ -305,6 +307,10 @@ export default function AgentRoutePage({
         || isExactMultiInstallSelection(agent, installation)),
   );
   const canOperate = managed ? Boolean(installation) : canConnect;
+  const connectionTarget = installation?.discovery.config_candidates[0]
+    ?? metadata.connector_capabilities?.[0]?.config_path_template
+    ?? copy("Resolved during connection", "接入时确定");
+  const ownedFields = metadata.connector_capabilities?.[0]?.owned_fields ?? [];
 
   const runState = async (action: () => Promise<StateView>, message?: string) => {
     if (busy) return;
@@ -497,6 +503,17 @@ export default function AgentRoutePage({
 
   return (
     <div className={`page-stack agent-route-page ${embedded ? "agent-route-embedded" : ""}`}>
+      {pageMode === "routing" && (
+        <header className="agent-route-routing-heading panel">
+          <div>
+            <p className="eyebrow">{copy("Agent route", "Agent 路由")}</p>
+            {embedded ? <h2>{metadata.display_name}</h2> : <h1>{metadata.display_name}</h1>}
+          </div>
+          <span className="status-chip neutral">{route.mode === "inherit" ? copy("Follows global", "跟随全局") : copy("Independent", "独立路由")}</span>
+        </header>
+      )}
+      {pageMode !== "routing" && (
+        <>
       <header className="agent-route-hero panel">
         <div className="agent-identity">
           <span className="agent-large-mark" aria-hidden="true">
@@ -528,30 +545,58 @@ export default function AgentRoutePage({
               onInstallationSelected?.();
             }}
           />
-          <button
-            className={`btn agent-primary-action ${managed ? "" : "primary"}`}
-            type="button"
-            data-onboarding-target={!managed ? "agent-connect" : undefined}
-            disabled={busy || !canOperate}
-            onClick={() => void (managed ? restoreOfficial() : applyConnection())}
-            title={managed
-              ? copy(
-                "Strip the fields Token Station injected and return the Agent to its official default configuration, then clear the management record.",
-                "剥掉 Token Station 注入的字段，让 Agent 回到官方默认配置，并清除接管记录。",
-              )
-              : undefined}
-          >
-            {busy
-              ? copy("Working…", "处理中…")
-              : managed
-                ? copy("Restore official configuration & disconnect", "恢复官方配置并断开")
-                : cursorRepairRequired
-                  ? copy("Reconnect & launch", "重新接入并启动")
-                : metadata.agent_id === "cursor"
-                  ? copy("Connect & launch", "一键接入并启动")
-                  : copy("Connect", "一键接入")}
-          </button>
-          {cursorRepairRequired ? (
+          {pageMode === "connection" ? (
+            <div className="agent-connection-actions">
+              <button
+                className="btn"
+                type="button"
+                disabled={busy || !installation || !managed}
+                onClick={() => void restoreOfficial()}
+              >
+                {copy("Restore official configuration and disconnect", "恢复官方配置并断开")}
+              </button>
+              <button
+                className="btn primary agent-primary-action"
+                type="button"
+                data-onboarding-target={!managed ? "agent-connect" : undefined}
+                disabled={busy || !canOperate}
+                onClick={() => void applyConnection()}
+              >
+                {busy
+                  ? copy("Working…", "处理中…")
+                  : managed
+                    ? copy("Reconnect", "重新接入")
+                    : metadata.agent_id === "cursor"
+                      ? copy("Connect & launch", "一键接入并启动")
+                      : copy("Connect", "一键接入")}
+              </button>
+            </div>
+          ) : (
+            <button
+              className={`btn agent-primary-action ${managed ? "" : "primary"}`}
+              type="button"
+              data-onboarding-target={!managed ? "agent-connect" : undefined}
+              disabled={busy || !canOperate}
+              onClick={() => void (managed ? restoreOfficial() : applyConnection())}
+              title={managed
+                ? copy(
+                  "Strip the fields Token Station injected and return the Agent to its official default configuration, then clear the management record.",
+                  "剥掉 Token Station 注入的字段，让 Agent 回到官方默认配置，并清除接管记录。",
+                )
+                : undefined}
+            >
+              {busy
+                ? copy("Working…", "处理中…")
+                : managed
+                  ? copy("Restore official configuration & disconnect", "恢复官方配置并断开")
+                  : cursorRepairRequired
+                    ? copy("Reconnect & launch", "重新接入并启动")
+                    : metadata.agent_id === "cursor"
+                      ? copy("Connect & launch", "一键接入并启动")
+                      : copy("Connect", "一键接入")}
+            </button>
+          )}
+          {pageMode !== "connection" && cursorRepairRequired ? (
             <button
               className="btn agent-secondary-action"
               type="button"
@@ -567,6 +612,34 @@ export default function AgentRoutePage({
           ) : null}
         </div>
       </header>
+
+      <section className="panel agent-connection-detail" aria-label={copy("Agent connection details", "Agent 接入详情")}>
+        <dl className="agent-connection-facts">
+          <div><dt>{copy("Discovered path", "发现路径")}</dt><dd><code>{installation?.discovery.canonical_path ?? ((agent?.installations.length ?? 0) > 1 ? copy("Choose a version above", "请先选择版本") : copy("Not found", "未发现"))}</code></dd></div>
+          <div><dt>{copy("Version", "版本")}</dt><dd><strong>{installation?.discovery.version_normalized ?? installation?.discovery.version_raw ?? ((agent?.installations.length ?? 0) > 1 ? copy("Not selected", "未选择") : copy("Unknown", "未知"))}</strong></dd></div>
+        </dl>
+        <div className="agent-connection-change">
+          <div>
+            <h3>{copy("Connection changes", "接入将修改")}</h3>
+            <p>{copy("Token Station backs up the original file before it writes managed routing fields.", "Token Station 写入受管路由字段前会备份原文件。")}</p>
+          </div>
+          <div className="agent-connection-file">
+            <code>{connectionTarget}</code>
+            <small>{ownedFields.length > 0
+              ? copy(`Managed fields: ${ownedFields.join(", ")}`, `受管字段：${ownedFields.join("、")}`)
+              : copy("The exact non-sensitive changes appear after the connection plan is created.", "生成接入计划后会显示确切的非敏感改动。")}</small>
+          </div>
+        </div>
+        <div className={`agent-default-route-state ${route.config_error || !route.direct_target?.model ? "warning" : ""}`}>
+          <span aria-hidden="true">{route.config_error || !route.direct_target?.model ? "!" : "✓"}</span>
+          <div>
+            <strong>{copy("Route used after connection", "接入后使用的默认路由")}</strong>
+            <code>{route.direct_target?.upstream && route.direct_target.model
+              ? `${route.direct_target.upstream} / ${route.direct_target.model}`
+              : copy("Complete global routing before connection", "请先完成全局路由")}</code>
+          </div>
+        </div>
+      </section>
 
       {connectDiff && (() => {
         const changes = connectDiff.changes ?? [];
@@ -613,6 +686,10 @@ export default function AgentRoutePage({
           </section>
         );
       })()}
+        </>
+      )}
+      {pageMode !== "connection" && (
+        <>
       <RoutingModeSelector
         value={route.routing_mode}
         disabled={busy}
@@ -734,6 +811,8 @@ export default function AgentRoutePage({
           {route.config_error && <span className="foot-hint error-text">{humanizeAppError(route.config_error)}</span>}
         </footer>
       </section>
+      )}
+        </>
       )}
     </div>
   );
