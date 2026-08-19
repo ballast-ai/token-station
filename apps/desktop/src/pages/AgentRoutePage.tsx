@@ -560,8 +560,14 @@ export default function AgentRoutePage({
     <div className={`page-stack agent-route-page ${embedded ? "agent-route-embedded" : ""}`}>
       {pageMode === "routing" && (
         <header className="agent-route-routing-heading panel">
-          <div>
-            <p className="eyebrow">{copy("Agent route", "Agent 路由")}</p>
+          <div className="agent-route-heading-identity">
+            <span className="agent-large-mark" aria-hidden="true">
+              <AgentIcon
+                id={metadata.agent_id}
+                fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)}
+                size={42}
+              />
+            </span>
             {embedded ? <h2>{metadata.display_name}</h2> : <h1>{metadata.display_name}</h1>}
           </div>
           <span className="status-chip neutral">{route.mode === "inherit" ? copy("Follows global", "跟随全局") : copy("Independent", "独立路由")}</span>

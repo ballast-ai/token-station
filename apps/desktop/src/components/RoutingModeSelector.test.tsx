@@ -17,6 +17,9 @@ describe("RoutingModeSelector", () => {
       "智能分档",
       "额度优先",
     ]);
+    expect(screen.queryByText("路由策略")).toBeNull();
+    expect(screen.queryByText("选择请求如何分配")).toBeNull();
+    expect(screen.queryByText("可固定一个目标，也可按任务复杂度或供应商额度分配。")).toBeNull();
 
     await user.click(tabs[0]);
     expect(onValueChange).toHaveBeenCalledWith("direct");

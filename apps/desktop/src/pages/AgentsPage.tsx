@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { ChevronDown, RefreshCw } from "lucide-react";
+import { Building2, ChevronDown, RefreshCw } from "lucide-react";
 import type { AgentUiMetadataView, AgentView } from "../api";
 import { AgentIcon } from "../brandIcons";
 import { useLocalizedCopy } from "../components/LanguageProvider";
@@ -17,8 +17,10 @@ interface AgentsPageProps {
   revealingAgentIds: ReadonlySet<string>;
   selectedAgentId?: string;
   homeSelected: boolean;
+  enterpriseSelected?: boolean;
   scanBusy: boolean;
   onOpenHome: () => void;
+  onOpenEnterprise?: () => void;
   onOpenAgent: (agentId: string) => void;
   onRescan: () => void;
   children: ReactNode;
@@ -49,8 +51,10 @@ export default function AgentsPage({
   revealingAgentIds,
   selectedAgentId,
   homeSelected,
+  enterpriseSelected = false,
   scanBusy,
   onOpenHome,
+  onOpenEnterprise = onOpenHome,
   onOpenAgent,
   onRescan,
   children,
@@ -88,21 +92,23 @@ export default function AgentsPage({
             </div>
             <div className="agent-master-actions">
               <Badge variant="outline">{registry.length}</Badge>
-              <Button
-                variant="outline"
-                size="sm"
-                type="button"
-                data-onboarding-target="agent-rescan"
-                onClick={onRescan}
-                disabled={scanBusy}
-              >
-                <RefreshCw
-                  data-icon="inline-start"
-                  className={cn(scanBusy && "is-spinning")}
-                  aria-hidden="true"
-                />
-                {scanBusy ? copy("Scanning…", "扫描中…") : copy("Rescan", "重新扫描")}
-              </Button>
+              {connections && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  type="button"
+                  data-onboarding-target="agent-rescan"
+                  onClick={onRescan}
+                  disabled={scanBusy}
+                >
+                  <RefreshCw
+                    data-icon="inline-start"
+                    className={cn(scanBusy && "is-spinning")}
+                    aria-hidden="true"
+                  />
+                  {scanBusy ? copy("Scanning…", "扫描中…") : copy("Rescan", "重新扫描")}
+                </Button>
+              )}
             </div>
           </CardHeader>
           <CardContent>
@@ -112,22 +118,39 @@ export default function AgentsPage({
                 aria-label={connections ? copy("Detected Agent list", "发现 Agent 列表") : copy("Routing scope list", "路由范围列表")}
               >
                 {!connections && (
-                  <Button
-                    className="agent-master-item agent-master-home"
-                    variant="ghost"
-                    type="button"
-                    aria-label={copy("Global routing", "全局路由")}
-                    title={copy("Global routing", "全局路由")}
-                    aria-current={homeSelected ? "page" : undefined}
-                    data-onboarding-target="routing"
-                    onClick={onOpenHome}
-                  >
-                    <span className="agent-master-icon global-route-mark" aria-hidden="true">
-                      <TokenStationMark size={36} />
-                    </span>
-                    <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由")}</strong></span>
-                    <Badge variant={homeSelected ? "default" : "outline"}>{copy("Default", "默认")}</Badge>
-                  </Button>
+                  <>
+                    <Button
+                      className="agent-master-item agent-master-home"
+                      variant="ghost"
+                      type="button"
+                      aria-label={copy("Global routing", "全局路由")}
+                      title={copy("Global routing", "全局路由")}
+                      aria-current={homeSelected ? "page" : undefined}
+                      data-onboarding-target="routing"
+                      onClick={onOpenHome}
+                    >
+                      <span className="agent-master-icon global-route-mark" aria-hidden="true">
+                        <TokenStationMark size={36} />
+                      </span>
+                      <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由")}</strong></span>
+                      <Badge variant={homeSelected ? "default" : "outline"}>{copy("Default", "默认")}</Badge>
+                    </Button>
+                    <Button
+                      className="agent-master-item agent-master-enterprise"
+                      variant="ghost"
+                      type="button"
+                      aria-label={copy("Enterprise routing", "企业路由")}
+                      title={copy("Enterprise quota routing", "企业额度路由")}
+                      aria-current={enterpriseSelected ? "page" : undefined}
+                      onClick={onOpenEnterprise}
+                    >
+                      <span className="agent-master-icon enterprise-route-mark" aria-hidden="true">
+                        <Building2 />
+                      </span>
+                      <span className="agent-master-copy"><strong>{copy("Enterprise routing", "企业路由")}</strong></span>
+                      <Badge variant={enterpriseSelected ? "default" : "outline"}>{copy("Quota", "额度")}</Badge>
+                    </Button>
+                  </>
                 )}
                 {connections ? registry.map((metadata) => {
                   const agent = agents.find((candidate) => candidate.metadata.agent_id === metadata.agent_id);

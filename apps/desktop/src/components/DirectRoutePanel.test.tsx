@@ -107,6 +107,52 @@ describe("DirectRoutePanel", () => {
     expect(onApply).toHaveBeenCalledWith("openai-account", "gpt-5.6-mini");
   });
 
+  it("keeps an un-applied model selection across an equivalent provider refresh", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <DirectRoutePanel
+        providers={providers}
+        target={{ upstream: "openai-account", model: "gpt-5.6" }}
+        busy={false}
+        applying={false}
+        onApply={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: "openai-account 模型" }));
+    await user.click(screen.getByRole("option", { name: "gpt-5.6-mini" }));
+    expect(screen.getByRole("combobox", { name: "openai-account 模型" }))
+      .toHaveTextContent("gpt-5.6-mini");
+
+    rerender(
+      <DirectRoutePanel
+        providers={structuredClone(providers)}
+        target={{ upstream: "openai-account", model: "gpt-5.6" }}
+        busy={false}
+        applying={false}
+        onApply={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("combobox", { name: "openai-account 模型" }))
+      .toHaveTextContent("gpt-5.6-mini");
+
+    rerender(
+      <DirectRoutePanel
+        providers={providers.map((provider) => provider.name === "openai-account"
+          ? { ...provider, models: [...provider.models, "gpt-5.7"] }
+          : provider)}
+        target={{ upstream: "openai-account", model: "gpt-5.6" }}
+        busy={false}
+        applying={false}
+        onApply={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("combobox", { name: "openai-account 模型" }))
+      .toHaveTextContent("gpt-5.6-mini");
+  });
+
   it("uses one accessible sortable handle and keeps the provider model bound while moving", async () => {
     const onApply = vi.fn();
     const user = userEvent.setup();

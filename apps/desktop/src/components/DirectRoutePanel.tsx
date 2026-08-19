@@ -160,18 +160,9 @@ function SortableDirectProviderRow({
           name="direct-provider"
           checked={selected}
           disabled={busy || !hasModels}
-          aria-label={`${provider.name} · ${modelLabel} · ${selectionLabel}`}
+          aria-label={`${modelLabel} · ${provider.name} · ${selectionLabel}`}
           onChange={onSelect}
         />
-        <span className="direct-provider-brand" aria-hidden="true">
-          <ProviderIcon id={provider.brand_id} label={provider.name} size={34} />
-        </span>
-        <span className="direct-provider-copy">
-          <strong>{provider.name}</strong>
-          <small>{hasModels
-            ? copy(`${provider.models.length} managed models`, `${provider.models.length} 个已管理模型`)
-            : copy("Manage a model before selecting", "请先添加已管理模型")}</small>
-        </span>
         <CompactCombobox
           ariaLabel={copy(`${provider.name} model`, `${provider.name} 模型`)}
           value={model}
@@ -179,6 +170,15 @@ function SortableDirectProviderRow({
           options={provider.models.map((providerModel) => ({ value: providerModel, label: providerModel }))}
           onChange={onModelChange}
         />
+        <span className="direct-provider-brand" aria-hidden="true">
+          <ProviderIcon id={provider.brand_id} label={provider.name} size={34} />
+        </span>
+        <span className="direct-provider-copy">
+          <strong>{provider.name}</strong>
+          <small>{hasModels
+            ? copy("Provider", "供应商")
+            : copy("Manage a model before selecting", "请先添加已管理模型")}</small>
+        </span>
         <CheckCircle2 className="direct-selected-mark" aria-hidden="true" />
       </div>
     </div>
@@ -196,6 +196,9 @@ export default function DirectRoutePanel({
   const { copy, language } = useLocalizedCopy();
   const { showError } = useErrorToast();
   const providerNamesKey = providers.map((provider) => provider.name).join("\u0000");
+  const providerModelsKey = providers
+    .map((provider) => `${provider.name}\u0001${provider.models.join("\u0002")}`)
+    .join("\u0000");
   const providerNames = useMemo(() => providers.map((provider) => provider.name), [providerNamesKey]);
   const [providerOrder, setProviderOrder] = useState(() => reconcileOrder(storedOrder(), providerNames));
   const [selectedProvider, setSelectedProvider] = useState(() => (
@@ -218,21 +221,21 @@ export default function DirectRoutePanel({
     });
     setModelByProvider((current) => Object.fromEntries(providers.map((provider) => {
       const currentModel = current[provider.name];
+      if (currentModel && provider.models.includes(currentModel)) {
+        return [provider.name, currentModel];
+      }
       if (target?.upstream === provider.name) {
         return [
           provider.name,
           target.model && provider.models.includes(target.model) ? target.model : "",
         ];
       }
-      return [
-        provider.name,
-        currentModel && provider.models.includes(currentModel) ? currentModel : (provider.models[0] ?? ""),
-      ];
+      return [provider.name, provider.models[0] ?? ""];
     })));
     setSelectedProvider((current) => providerNames.includes(current) ? current : "");
-    // providerNamesKey is a stable content key; Provider arrays may be recreated after every IPC result.
+    // providerModelsKey is a stable content key; Provider arrays may be recreated after every IPC result.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providerNamesKey]);
+  }, [providerModelsKey]);
 
   useEffect(() => {
     try {
@@ -263,7 +266,9 @@ export default function DirectRoutePanel({
         ? (target.model ?? "")
         : "",
     }));
-  }, [providerNames, providers, target, targetKey]);
+    // Equivalent provider arrays must not overwrite an un-applied model draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerModelsKey, targetKey]);
 
   const orderedProviders = providerOrder
     .map((name) => providers.find((provider) => provider.name === name))

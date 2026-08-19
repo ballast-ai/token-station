@@ -64,6 +64,8 @@ describe("AgentsPage split workspaces", () => {
 
     expect(screen.getByRole("heading", { name: "路由配置" })).toBeInTheDocument();
     expect(within(selector).getByRole("button", { name: "全局路由" })).toBeVisible();
+    expect(within(selector).getByRole("button", { name: "企业路由" })).toBeVisible();
+    expect(within(selector).queryByRole("button", { name: "重新扫描" })).toBeNull();
     expect(within(selector).queryByText("所有 Agent 的默认策略")).toBeNull();
     const disclosure = within(selector).getByRole("button", { name: "Agent 路由" });
     expect(disclosure).toHaveAttribute("aria-expanded", "false");
@@ -73,6 +75,8 @@ describe("AgentsPage split workspaces", () => {
     expect(disclosure).toHaveAttribute("aria-expanded", "true");
     expect(within(selector).getByRole("button", { name: "Claude Code" })).toBeVisible();
     expect(within(selector).getByRole("button", { name: "Kimi Code" })).toBeVisible();
+    expect(within(selector).getByRole("button", { name: "Claude Code" })
+      .querySelector('[data-agent-brand="claude-code"]')).toBeInTheDocument();
 
     await user.click(within(selector).getByRole("button", { name: "Kimi Code" }));
     expect(onOpenAgent).toHaveBeenCalledWith("kimi-code");

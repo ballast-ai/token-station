@@ -112,6 +112,7 @@ const freePresets: FreeProviderPresetView[] = [
 function renderPage(overrides: {
   existingNames?: string[];
   catalogMode?: ProviderCatalogMode;
+  entryMode?: "provider-first" | "model-first";
 } = {}) {
   return render(
     <AddProviderPage
@@ -129,6 +130,7 @@ function renderPage(overrides: {
       onFreeFiltersChange={vi.fn()}
       onLoadFree={vi.fn()}
       onSelectFree={vi.fn()}
+      entryMode={overrides.entryMode}
     />,
   );
 }
@@ -178,6 +180,23 @@ function RegularCatalogHarness() {
 }
 
 describe("AddProviderPage", () => {
+  it("searches models first and then opens the selected provider with only that model selected", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage({ entryMode: "model-first" });
+
+    await user.type(screen.getByRole("searchbox", { name: "搜索模型" }), "gpt-5.6-sol");
+    const results = screen.getByRole("list", { name: "模型与供应商" });
+    const result = within(results).getByRole("button", { name: /gpt-5.6-sol.*OpenAI/ });
+    expect(result.textContent?.indexOf("gpt-5.6-sol"))
+      .toBeLessThan(result.textContent?.indexOf("OpenAI") ?? -1);
+
+    await user.click(result);
+    expect(screen.getByRole("heading", { name: "OpenAI" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /gpt-5.6-sol/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /gpt-5.6-terra/ })).toHaveAttribute("aria-pressed", "false");
+  });
+
   it("filters standard providers by a model name across punctuation boundaries", async () => {
     window.localStorage.setItem("token-station-language", "en");
     const user = userEvent.setup();

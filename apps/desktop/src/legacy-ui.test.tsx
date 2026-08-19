@@ -1167,7 +1167,9 @@ describe("provider deletion lifecycle", () => {
 
     expect(document.querySelector('[data-provider-brand="openai"]')).toBeInTheDocument();
     expect(document.querySelector(".provider-monogram")?.getAttribute("aria-hidden")).toBe("true");
-    expect(screen.getByText("team-openai")).toBeInTheDocument();
+    const modelList = screen.getByRole("list", { name: "team-openai 模型" });
+    expect(within(modelList).getByRole("listitem"))
+      .toHaveTextContent("gpt-5.6供应商 · team-openai");
   });
 
   it("供应商管理不根据自定义 deepseek 名称伪造官方品牌", () => {
@@ -1191,7 +1193,7 @@ describe("provider deletion lifecycle", () => {
       />,
     );
 
-    const providerCard = screen.getByText("deepseek").closest(".provider-card");
+    const providerCard = screen.getByRole("list", { name: "deepseek 模型" }).closest(".provider-card");
     if (!providerCard) throw new Error("custom provider card missing");
     expect(providerCard.querySelector('[data-provider-brand="deepseek"]')).toBeNull();
     expect(within(providerCard as HTMLElement).getByText("D", { selector: ".brand-fallback" }))

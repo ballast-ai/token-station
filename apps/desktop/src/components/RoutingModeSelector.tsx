@@ -27,16 +27,6 @@ export default function RoutingModeSelector({
       aria-label={label}
       data-onboarding-target={agent ? undefined : "route-mode"}
     >
-      <div className="routing-mode-copy">
-        <span>{copy("ROUTING STRATEGY", "路由策略")}</span>
-        <div>
-          <h2>{copy("Choose how requests are assigned", "选择请求如何分配")}</h2>
-          <p>{copy(
-            "Choose one exact target, task-complexity tiers, or provider quota priority.",
-            "可固定一个目标，也可按任务复杂度或供应商额度分配。",
-          )}</p>
-        </div>
-      </div>
       <Tabs
         className="routing-mode-tabs"
         value={value}

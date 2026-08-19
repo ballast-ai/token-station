@@ -47,6 +47,7 @@ interface HomePageProps {
   onSave: () => void;
   onApplyAll: () => void;
   embedded?: boolean;
+  scope?: "global" | "enterprise";
 }
 
 export default function HomePage({
@@ -77,6 +78,7 @@ export default function HomePage({
   onSave,
   onApplyAll,
   embedded = false,
+  scope = "global",
 }: HomePageProps) {
   const { copy } = useLocalizedCopy();
   const tierConfigured: Record<TierSlot, boolean> = {
@@ -88,6 +90,7 @@ export default function HomePage({
   const [profileName, setProfileName] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const enterprise = scope === "enterprise";
 
   const saveProfile = async () => {
     const name = profileName.trim();
@@ -117,18 +120,30 @@ export default function HomePage({
       <header className="page-title-row">
         <div>
           {embedded
-            ? <h2>{copy("Global routing", "全局路由")}</h2>
-            : <h1>{copy("Global routing", "全局路由")}</h1>}
+            ? <h2>{enterprise ? copy("Enterprise routing", "企业路由") : copy("Global routing", "全局路由")}</h2>
+            : <h1>{enterprise ? copy("Enterprise routing", "企业路由") : copy("Global routing", "全局路由")}</h1>}
         </div>
       </header>
 
-      <RoutingModeSelector
-        value={routingMode}
-        disabled={busy}
-        onValueChange={onSetRoutingMode}
-      />
+      {!enterprise && (
+        <RoutingModeSelector
+          value={routingMode}
+          disabled={busy}
+          onValueChange={onSetRoutingMode}
+        />
+      )}
 
-      {routingMode === "direct" ? (
+      {enterprise ? (
+        <QuotaPriorityPanel
+          providers={providers}
+          accounts={quotaAccounts}
+          busy={busy}
+          applying={applying}
+          onSave={onSaveQuota}
+          onViewUsage={onViewQuotaUsage}
+          onSavePlan={onSaveQuotaPlan}
+        />
+      ) : routingMode === "direct" ? (
         <DirectRoutePanel
           providers={providers}
           target={directTarget}

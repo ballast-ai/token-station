@@ -265,7 +265,7 @@ it("aligns the compact add-provider spotlight outline to the button bounds", asy
       </LanguageProvider>,
     );
 
-    await screen.findByRole("dialog", { name: "添加你的第一个供应商" });
+    await screen.findByRole("dialog", { name: "添加你的第一个模型" });
     const outline = document.querySelector<HTMLElement>(".first-run-spotlight-outline");
     expect(outline).not.toBeNull();
     expect(outline).toHaveStyle({

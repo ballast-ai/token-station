@@ -56,6 +56,7 @@ interface AddProviderPageProps {
   onLoadFree: () => void;
   onSelectFree: (preset: FreeProviderPresetView) => void;
   onProviderSelected?: () => void;
+  entryMode?: "provider-first" | "model-first";
 }
 
 const regularRegion = (preset: ProviderPreset): "china" | "global" =>
@@ -113,6 +114,7 @@ export default function AddProviderPage({
   onLoadFree,
   onSelectFree,
   onProviderSelected,
+  entryMode = "provider-first",
 }: AddProviderPageProps) {
   const { showError } = useErrorToast();
   const { copy, language } = useLocalizedCopy();
@@ -142,6 +144,7 @@ export default function AddProviderPage({
   const [error, setError] = useState("");
   const [endpointPreview, setEndpointPreview] = useState<ProviderEndpointPreview | null>(null);
   const [endpointError, setEndpointError] = useState("");
+  const [modelFirstQuery, setModelFirstQuery] = useState("");
 
   const preset: ProviderPreset | null = useMemo(
     () => PROVIDER_CATALOG.find((item) => item.id === presetId) ?? null,
@@ -193,6 +196,17 @@ export default function AddProviderPage({
       return matchesCatalogSearch(searchableFree(item), query);
     });
   }, [freeFilters, freePresets]);
+
+  const visibleModelChoices = useMemo(() => {
+    const query = modelFirstQuery.trim();
+    return PROVIDER_CATALOG.flatMap((provider) => provider.models.map((model) => ({
+      provider,
+      model,
+    }))).filter(({ provider, model }) => matchesCatalogSearch(
+      `${model} ${provider.id} ${provider.label}`,
+      query,
+    ));
+  }, [modelFirstQuery]);
 
   useEffect(() => {
     const baseUrl = url.trim();
@@ -257,7 +271,7 @@ export default function AddProviderPage({
               tone: "idle",
             };
 
-  const selectPreset = (id: string) => {
+  const selectPreset = (id: string, preferredModel?: string) => {
     setPresetId(id);
     const selected = PROVIDER_CATALOG.find((item) => item.id === id);
     setName(selected?.id ?? "");
@@ -266,7 +280,11 @@ export default function AddProviderPage({
     setCredentialSource("store");
     setProviderDialect("openai-compatible");
     setCredentialReference("");
-    setPicked(selected ? [...selected.models] : []);
+    setPicked(selected
+      ? preferredModel && selected.models.includes(preferredModel)
+        ? [preferredModel]
+        : [...selected.models]
+      : []);
     setExtraModels([]);
     setDiscoveredModels([]);
     setDiscovery(null);
@@ -405,6 +423,68 @@ export default function AddProviderPage({
   };
 
   const disabled = saving || discovering;
+
+  if (!configuringRegular && entryMode === "model-first") {
+    return (
+      <div className="page-stack add-provider-page model-first-page">
+        <header className="page-title-row provider-catalog-title-row">
+          <div>
+            <PageBackButton onClick={onCancel} />
+            <h1>{copy("Search models", "搜索模型")}</h1>
+            <p>{copy(
+              "Search for a model, then choose the provider that will deliver it.",
+              "先搜索模型，再选择提供该模型的供应商。",
+            )}</p>
+          </div>
+          <span className="provider-catalog-total">
+            {copy(`${visibleModelChoices.length} choices`, `${visibleModelChoices.length} 个可选组合`)}
+          </span>
+        </header>
+
+        <section className="panel model-first-catalog" aria-label={copy("Model search", "模型搜索")}>
+          <label className="provider-catalog-search model-first-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              autoFocus
+              type="search"
+              aria-label={copy("Search models", "搜索模型")}
+              placeholder={copy("Enter a model name", "输入模型名称")}
+              value={modelFirstQuery}
+              onChange={(event) => setModelFirstQuery(event.target.value)}
+            />
+          </label>
+
+          {visibleModelChoices.length > 0 ? (
+            <div className="model-first-results" role="list" aria-label={copy("Models and providers", "模型与供应商")}>
+              {visibleModelChoices.map(({ provider, model }) => {
+                const displayName = providerName(provider.id, provider.label);
+                return (
+                  <article role="listitem" key={`${provider.id}:${model}`}>
+                    <button
+                      type="button"
+                      aria-label={`${model} · ${displayName}`}
+                      onClick={() => selectPreset(provider.id, model)}
+                    >
+                      <span className="model-first-name">{model}</span>
+                      <span className="model-first-provider">
+                        <ProviderIcon id={provider.id} label={displayName} size={26} />
+                        <span><small>{copy("Provider", "供应商")}</small><strong>{displayName}</strong></span>
+                      </span>
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="provider-catalog-empty">
+              <strong>{copy("No matching models", "没有匹配的模型")}</strong>
+              <p>{copy("Try another model name.", "请尝试其他模型名称。")}</p>
+            </div>
+          )}
+        </section>
+      </div>
+    );
+  }
 
   if (!configuringRegular) {
     const filtersEmpty = catalogMode === "regular"

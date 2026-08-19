@@ -194,11 +194,11 @@ export default function FirstRunGuide({
     : microStep === "provider-entry"
     ? {
         target: "add-provider",
-        index: copy("ADD PROVIDER · 1/5", "添加供应商 · 1/5"),
-        title: copy("Add your first provider", "添加你的第一个供应商"),
+        index: copy("ADD MODEL · 1/5", "添加模型 · 1/5"),
+        title: copy("Add your first model", "添加你的第一个模型"),
         description: copy(
-          "Select this button to open provider setup. The guide continues after the real action.",
-          "点击这里进入供应商配置，完成操作后引导会自动继续。",
+          "Select this button to open model setup. The guide continues after the real action.",
+          "点击这里进入模型配置，完成操作后引导会自动继续。",
         ),
         advanceOnTargetClick: true,
         continueLabel: null,
@@ -206,7 +206,7 @@ export default function FirstRunGuide({
     : microStep === "provider-choice"
       ? {
           target: "provider-choice",
-          index: copy("ADD PROVIDER · 2/5", "添加供应商 · 2/5"),
+          index: copy("ADD MODEL · 2/5", "添加模型 · 2/5"),
           title: copy("Choose a model provider", "选择一个模型供应商"),
           description: copy(
             "Choose the provider you want to configure. You remain in control of the provider and model choice.",
@@ -218,7 +218,7 @@ export default function FirstRunGuide({
       : microStep === "provider-credential"
         ? {
             target: "provider-credential",
-            index: copy("ADD PROVIDER · 3/5", "添加供应商 · 3/5"),
+            index: copy("ADD MODEL · 3/5", "添加模型 · 3/5"),
             title: copy("Enter provider credentials", "填写供应商凭据"),
             description: copy(
               "Enter the credential required by this provider. The guide never reads or displays its value.",
@@ -230,7 +230,7 @@ export default function FirstRunGuide({
         : microStep === "provider-models"
           ? {
               target: "provider-models",
-              index: copy("ADD PROVIDER · 4/5", "添加供应商 · 4/5"),
+              index: copy("ADD MODEL · 4/5", "添加模型 · 4/5"),
               title: copy("Choose at least one model", "选择至少一个模型"),
               description: copy(
                 "Keep or choose the models that this provider should expose, then continue to the real save action.",
@@ -243,7 +243,7 @@ export default function FirstRunGuide({
           : microStep === "provider-save"
             ? {
                 target: "provider-save",
-                index: copy("ADD PROVIDER · 5/5", "添加供应商 · 5/5"),
+                index: copy("ADD MODEL · 5/5", "添加模型 · 5/5"),
                 title: copy("Save the provider", "保存供应商"),
                 description: copy(
                   "Select the real save button. Routing begins only after the provider is saved successfully.",
