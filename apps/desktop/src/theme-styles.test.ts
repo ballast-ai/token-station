@@ -32,10 +32,15 @@ describe("retained page theme styles", () => {
     const summaryLinkRule = appCss.match(
       /\.station-content-overview \.overview-summary-link\s*\{([^}]*)\}/s,
     )?.[1] ?? "";
+    const summaryListRule = appCss.match(
+      /\.station-content-overview \.overview-summary-list\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
     expect(summaryHeaderRule).toMatch(/padding:\s*16px 52px 8px 16px/);
     expect(summaryLinkRule).toMatch(/top:\s*14px/);
     expect(summaryLinkRule).toMatch(/right:\s*14px/);
     expect(summaryLinkRule).toMatch(/bottom:\s*auto/);
+    expect(summaryListRule).toMatch(/flex:\s*1/);
+    expect(summaryListRule).toMatch(/grid-template-rows:\s*repeat\(5, minmax\(0, 1fr\)\)/);
   });
 
   it("uses theme tokens for router JSON code blocks", () => {

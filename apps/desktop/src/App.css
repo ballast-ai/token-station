@@ -10368,8 +10368,9 @@ samp {
 }
 
 .station-content-overview .overview-summary-list {
+  flex: 1;
   min-height: 0;
-  grid-template-rows: repeat(5, minmax(38px, 1fr));
+  grid-template-rows: repeat(5, minmax(0, 1fr));
 }
 
 .station-content-overview .overview-summary-link {
