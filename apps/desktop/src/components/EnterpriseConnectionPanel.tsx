@@ -6,6 +6,7 @@ import {
   type StateView,
 } from "../api";
 import { humanizeAppError } from "../errors";
+import { ProviderIcon } from "../brandIcons";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { Input } from "./ui/input";
 
@@ -43,6 +44,7 @@ export default function EnterpriseConnectionPanel({
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState("");
+  const [completedName, setCompletedName] = useState("");
   const suggestedName = useMemo(
     () => endpointProviderName(baseUrl.trim(), providers),
     [baseUrl, providers],
@@ -63,6 +65,7 @@ export default function EnterpriseConnectionPanel({
     }
     setWorking(true);
     setMessage("");
+    setCompletedName("");
     setModels([]);
     setSelectedModels([]);
     try {
@@ -101,6 +104,7 @@ export default function EnterpriseConnectionPanel({
       );
       const connectedModels = [...selectedModels];
       onConnected(next, resolvedName, connectedModels);
+      setCompletedName(resolvedName);
       setApiKey("");
       setBaseUrl("");
       setAccountName("");
@@ -132,6 +136,21 @@ export default function EnterpriseConnectionPanel({
           {working && models.length === 0 ? copy("Verifying…", "验证中…") : copy("Verify connection", "验证连接")}
         </button>
       </div>
+
+      <ol className="enterprise-connection-steps" aria-label={copy("Connection flow", "接入流程")}>
+        <li data-state={models.length > 0 || completedName ? "complete" : "active"}>
+          <span>1</span>
+          <div><strong>{copy("Verify endpoint", "验证接口")}</strong><small>{copy("Check URL and credentials", "检查地址与凭据")}</small></div>
+        </li>
+        <li data-state={completedName ? "complete" : models.length > 0 ? "active" : "upcoming"}>
+          <span>2</span>
+          <div><strong>{copy("Choose models", "选择模型")}</strong><small>{copy("Connect only what you need", "只接入需要的模型")}</small></div>
+        </li>
+        <li data-state={completedName ? "complete" : "upcoming"}>
+          <span>3</span>
+          <div><strong>{copy("Finish connection", "完成接入")}</strong><small>{copy("Store the key locally", "密钥保存到本机")}</small></div>
+        </li>
+      </ol>
 
       <div className="enterprise-credential-grid">
         <label>
@@ -201,6 +220,41 @@ export default function EnterpriseConnectionPanel({
         "The API key is stored in the local credential store and is not shown again.",
         "API Key 仅保存到本机凭据存储，接入后不会再次显示。",
       )}</p>
+
+      <div className="enterprise-endpoints" role="region" aria-label={copy("Available endpoints", "可用端点")}>
+        <div className="enterprise-endpoints-head">
+          <div>
+            <strong>{copy("Available endpoints", "可用端点")}</strong>
+            <span>{copy(
+              "Connected endpoints can be selected from the normal route editors.",
+              "已接入端点可直接在全局路由或 Agent 路由中选择。",
+            )}</span>
+          </div>
+          <small>{copy(`${providers.length} connected`, `已接入 ${providers.length} 个`)}</small>
+        </div>
+        {providers.length > 0 ? (
+          <div className="enterprise-endpoint-list">
+            {providers.slice(0, 5).map((provider) => (
+              <article key={provider.name}>
+                <ProviderIcon id={provider.brand_id} label={provider.name} size={28} />
+                <div>
+                  <strong>{provider.name}</strong>
+                  <code title={provider.base_url}>{provider.base_url}</code>
+                </div>
+                <small>{copy(
+                  `${provider.models.length} ${provider.models.length === 1 ? "model" : "models"}`,
+                  `${provider.models.length} 个模型`,
+                )}</small>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="enterprise-endpoints-empty">
+            <strong>{copy("No endpoint connected", "还没有可用端点")}</strong>
+            <span>{copy("Enter a URL and API key above to start.", "在上方填写 URL 和 API Key 开始接入。")}</span>
+          </div>
+        )}
+      </div>
     </section>
   );
 }

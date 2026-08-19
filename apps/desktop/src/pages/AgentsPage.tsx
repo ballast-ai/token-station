@@ -140,7 +140,7 @@ export default function AgentsPage({
                       variant="ghost"
                       type="button"
                       aria-label={copy("Enterprise routing", "企业路由")}
-                      title={copy("Enterprise quota routing", "企业额度路由")}
+                      title={copy("Enterprise endpoint connection", "企业端点接入")}
                       aria-current={enterpriseSelected ? "page" : undefined}
                       onClick={onOpenEnterprise}
                     >
@@ -148,7 +148,7 @@ export default function AgentsPage({
                         <Building2 />
                       </span>
                       <span className="agent-master-copy"><strong>{copy("Enterprise routing", "企业路由")}</strong></span>
-                      <Badge variant={enterpriseSelected ? "default" : "outline"}>{copy("Quota", "额度")}</Badge>
+                      <Badge variant={enterpriseSelected ? "default" : "outline"}>{copy("Endpoint", "端点")}</Badge>
                     </Button>
                   </>
                 )}

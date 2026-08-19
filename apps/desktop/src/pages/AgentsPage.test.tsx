@@ -65,6 +65,7 @@ describe("AgentsPage split workspaces", () => {
     expect(screen.getByRole("heading", { name: "路由配置" })).toBeInTheDocument();
     expect(within(selector).getByRole("button", { name: "全局路由" })).toBeVisible();
     expect(within(selector).getByRole("button", { name: "企业路由" })).toBeVisible();
+    expect(within(selector).getByRole("button", { name: "企业路由" })).toHaveTextContent("端点");
     expect(within(selector).queryByRole("button", { name: "重新扫描" })).toBeNull();
     expect(within(selector).queryByText("所有 Agent 的默认策略")).toBeNull();
     const disclosure = within(selector).getByRole("button", { name: "Agent 路由" });

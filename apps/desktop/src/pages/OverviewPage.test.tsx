@@ -58,7 +58,7 @@ const routeOverride = {
   },
   config_error: null,
   profile: null,
-  routing_mode: "direct" as const,
+  routing_mode: "tiered" as const,
   direct_target: { upstream: "deepseek-main", model: "deepseek-v4-flash" },
 };
 
@@ -140,13 +140,13 @@ describe("OverviewPage summaries", () => {
 
     const routeSummary = screen.getByRole("region", { name: "路由概览" });
     expect(within(routeSummary).queryByTestId("revision-chain")).toBeNull();
-    expect(within(routeSummary).getAllByRole("listitem")).toHaveLength(5);
+    expect(within(routeSummary).getAllByRole("listitem")).toHaveLength(2);
     const globalRoute = within(routeSummary).getByText("Claude Code", { selector: "strong" }).closest("li");
     const customRoute = within(routeSummary).getByText("Agent 1", { selector: "strong" }).closest("li");
     expect(globalRoute).toHaveTextContent("全局 · 简单路由");
-    expect(globalRoute).toHaveTextContent("gpt-5.6-sol");
-    expect(customRoute).toHaveTextContent("独立 · 简单路由");
-    expect(customRoute).toHaveTextContent("deepseek-v4-flash");
+    expect(globalRoute).not.toHaveTextContent("gpt-5.6-sol");
+    expect(customRoute).toHaveTextContent("独立 · 智能路由");
+    expect(customRoute).not.toHaveTextContent("deepseek-v4");
 
     const modelSummary = screen.getByRole("region", { name: "模型概览" });
     expect(within(modelSummary).getByText("6 个模型")).toBeInTheDocument();
@@ -158,5 +158,26 @@ describe("OverviewPage summaries", () => {
     expect(screen.getByRole("button", { name: "打开 Agent" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "打开路由" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "打开模型" })).toBeInTheDocument();
+  });
+
+  it("shows only the global route snapshot when no Agent is connected", () => {
+    render(
+      <LanguageProvider>
+        <OverviewPage
+          state={state}
+          registry={registry}
+          agents={agents.map((agent) => ({ ...agent, status: "DETECTED_VERIFIED" }))}
+          onNavigate={vi.fn()}
+        />
+      </LanguageProvider>,
+    );
+
+    const routeSummary = screen.getByRole("region", { name: "路由概览" });
+    expect(within(routeSummary).getByText("全局路由")).toBeInTheDocument();
+    expect(within(routeSummary).getByText("简单路由")).toBeInTheDocument();
+    expect(within(routeSummary).getByText("gpt-5.6-sol")).toBeInTheDocument();
+    expect(within(routeSummary).getByText("openai-main")).toBeInTheDocument();
+    expect(within(routeSummary).queryByRole("listitem")).toBeNull();
+    expect(within(routeSummary).queryByText("Claude Code", { selector: "strong" })).toBeNull();
   });
 });

@@ -140,22 +140,11 @@ export default function HomePage({
       )}
 
       {enterprise ? (
-        <>
-          <EnterpriseConnectionPanel
-            providers={providers}
-            busy={busy}
-            onConnected={onEnterpriseProviderConnected}
-          />
-          <QuotaPriorityPanel
-            providers={providers}
-            accounts={quotaAccounts}
-            busy={busy}
-            applying={applying}
-            onSave={onSaveQuota}
-            onViewUsage={onViewQuotaUsage}
-            onSavePlan={onSaveQuotaPlan}
-          />
-        </>
+        <EnterpriseConnectionPanel
+          providers={providers}
+          busy={busy}
+          onConnected={onEnterpriseProviderConnected}
+        />
       ) : routingMode === "direct" ? (
         <DirectRoutePanel
           providers={providers}

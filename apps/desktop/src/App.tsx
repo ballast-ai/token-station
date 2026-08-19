@@ -876,13 +876,6 @@ function StationApp() {
       return serveStart();
     }, undefined, true);
 
-  const saveEnterpriseQuota = (accounts: QuotaAccount[]) =>
-    void run(async () => {
-      await setQuotaAccounts(accounts);
-      await setRoutingMode("quota_first");
-      return serveStart();
-    }, undefined, true);
-
   // Store provider quota plans in the draft for local estimates; the next Save and Apply activates them.
   const saveQuotaPlan = (
     upstream: string,
@@ -984,7 +977,7 @@ function StationApp() {
                 return serveStart();
               }, undefined, true)}
               quotaAccounts={state.quota_accounts ?? []}
-              onSaveQuota={view === "enterprise-routing" ? saveEnterpriseQuota : saveQuota}
+              onSaveQuota={saveQuota}
               onSaveQuotaPlan={saveQuotaPlan}
               onViewQuotaUsage={() => navigate("quota-usage")}
               busy={busy}

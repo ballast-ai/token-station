@@ -1340,8 +1340,10 @@ describe("desktop station navigation", () => {
     expect(nav.getByRole("button", { name: "主页" })).toHaveAttribute("aria-current", "page");
     const snapshot = screen.getByRole("region", { name: "路由概览" });
     expect(within(snapshot).queryByTestId("revision-chain")).toBeNull();
-    expect(within(snapshot).getAllByRole("listitem")).toHaveLength(5);
-    expect(within(snapshot).getAllByText("全局 · 智能路由")).toHaveLength(5);
+    expect(within(snapshot).getByText("全局路由")).toBeInTheDocument();
+    for (const tier of ["上档", "中档", "下档"]) {
+      expect(within(snapshot).getByText(tier)).toBeInTheDocument();
+    }
     expect(within(snapshot).queryByText("简单路由")).toBeNull();
     expect(within(snapshot).queryByText("额度优先")).toBeNull();
     expect(await screen.findByText(/成功率 91\.7% · P95 320ms/)).toBeInTheDocument();
@@ -1386,8 +1388,9 @@ describe("desktop station navigation", () => {
     await user.click(await screen.findByRole("button", { name: "Token Station 主页" }));
     const snapshot = screen.getByRole("region", { name: "路由概览" });
 
-    expect(within(snapshot).getByText("全局 · 简单路由")).toBeInTheDocument();
-    expect(within(snapshot).getByText("team-openai / gpt-5.6")).toBeInTheDocument();
+    expect(within(snapshot).getByText("简单路由")).toBeInTheDocument();
+    expect(within(snapshot).getByText("gpt-5.6")).toBeInTheDocument();
+    expect(within(snapshot).getByText("team-openai")).toBeInTheDocument();
     expect(within(snapshot).queryByText("上档")).toBeNull();
     expect(within(snapshot).queryByText("未配置")).toBeNull();
   });
@@ -1407,7 +1410,8 @@ describe("desktop station navigation", () => {
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Token Station 主页" }));
     const snapshot = screen.getByRole("region", { name: "路由概览" });
-    expect(within(snapshot).getByText("待选择供应商 / 待选择模型")).toBeInTheDocument();
+    expect(within(snapshot).getByText("待选择供应商")).toBeInTheDocument();
+    expect(within(snapshot).getByText("待选择模型")).toBeInTheDocument();
   });
 
   it("概览的额度优先快照展示账户数与实际目标", async () => {
@@ -1428,7 +1432,8 @@ describe("desktop station navigation", () => {
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Token Station 主页" }));
     const snapshot = screen.getByRole("region", { name: "路由概览" });
-    expect(within(snapshot).getByText("全局 · 额度优先")).toBeInTheDocument();
+    expect(within(snapshot).getByText("额度优先")).toBeInTheDocument();
+    expect(within(snapshot).getByText("2 个账户")).toBeInTheDocument();
     expect(within(snapshot).getByText("deepseek/deepseek-chat · team-openai/gpt-5.6"))
       .toBeInTheDocument();
     expect(within(snapshot).queryByText("上档")).toBeNull();
@@ -1591,7 +1596,7 @@ describe("desktop station navigation", () => {
     expect(within(modeTabs).getByRole("tab", { name: "额度优先" })).toHaveAttribute("aria-selected", "true");
   });
 
-  it("企业路由作为固定入口，只在保存时切换全局额度路由", async () => {
+  it("企业路由只提供端点接入，不显示或切换额度路由", async () => {
     const user = userEvent.setup();
     const account = { upstream: "kimi", model: "kimi-k3" };
     const initial = stateFixture({
@@ -1609,13 +1614,6 @@ describe("desktop station navigation", () => {
       if (command === "get_state") return initial;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return detectedAgentsFixture;
-      if (command === "set_routing_mode") return { ...initial, routing_mode: "quota_first" };
-      if (command === "set_quota_accounts") return { ...initial, routing_mode: "quota_first" };
-      if (command === "serve_start") return {
-        ...initial,
-        routing_mode: "quota_first",
-        serve: serveFixture({ app_runtime: "running", listener_reachable: true, phase: "running" }),
-      };
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
@@ -1626,19 +1624,11 @@ describe("desktop station navigation", () => {
 
     expect(await screen.findByRole("heading", { name: "企业路由" })).toBeInTheDocument();
     expect(screen.queryByRole("tablist", { name: "路由模式" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Base URL" })).toBeInTheDocument();
+    expect(screen.getByLabelText("API Key")).toBeInTheDocument();
+    expect(screen.queryByText("额度优先")).toBeNull();
+    expect(screen.queryByRole("button", { name: "保存并应用" })).toBeNull();
     expect(invokeMock).not.toHaveBeenCalledWith("set_routing_mode", expect.anything());
-
-    const enterpriseApply = screen.getByRole("button", { name: "保存并应用" });
-    expect(enterpriseApply.closest(".panel-head")).toBeInTheDocument();
-    await user.click(enterpriseApply);
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_routing_mode", { mode: "quota_first", agentId: null });
-      expect(invokeMock).toHaveBeenCalledWith("set_quota_accounts", { accounts: [account] });
-      expect(invokeMock).toHaveBeenCalledWith("serve_start");
-    });
-    const commands = invokeMock.mock.calls.map(([command]) => command);
-    expect(commands.indexOf("set_quota_accounts")).toBeLessThan(commands.indexOf("set_routing_mode"));
-    expect(commands.indexOf("set_routing_mode")).toBeLessThan(commands.indexOf("serve_start"));
   });
 
   it("maps the four revision relationships to stable save copy", () => {
