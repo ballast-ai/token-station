@@ -1067,11 +1067,9 @@ export const suggestModelPrice = (providerId: string | null, modelId: string) =>
 
 export const importModelPricesForProvider = (
   upstreamName: string,
-  catalogProviderId: string | null,
   modelIds: string[],
 ) => invoke<ModelPriceImportResultView>("import_model_prices_for_provider", {
   upstreamName,
-  catalogProviderId,
   modelIds,
 });
 

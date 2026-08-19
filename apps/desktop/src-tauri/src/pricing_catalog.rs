@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +18,29 @@ const CATALOG_URL: &str = "https://models.dev/api.json";
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+const FETCH_COALESCE_TTL: Duration = Duration::from_secs(2);
+
+static CACHE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static CATALOG_FETCH_STATE: OnceLock<Mutex<Option<SharedCatalogFetch>>> = OnceLock::new();
+static CATALOG_OBSERVATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone)]
+struct CatalogFetch {
+    body: String,
+    observation_id: String,
+}
+
+struct SharedCatalogFetch {
+    egress: token_station_cli::config::EgressConfig,
+    completed_at: Instant,
+    result: Result<CatalogFetch, String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct PendingCatalogObservation {
+    observation_id: String,
+    body: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct ModelPriceSuggestionView {
@@ -89,10 +114,43 @@ struct CatalogCost {
     reasoning: Option<f64>,
 }
 
+fn validate_unique_provider_namespaces(
+    providers: &BTreeMap<String, CatalogProvider>,
+) -> Result<(), String> {
+    let mut owners = BTreeMap::<String, &str>::new();
+    for (key, provider) in providers {
+        // The catalog's explicit ID owns an entry when present; the raw key is
+        // only its fallback identity. Regional aliases may normalize to the
+        // same desktop channel, so validating normalized aliases here would
+        // reject legitimate sibling entries such as `siliconflow` and
+        // `siliconflow-cn`.
+        let namespace = if provider.id.trim().is_empty() {
+            key.trim()
+        } else {
+            provider.id.trim()
+        }
+        .to_ascii_lowercase();
+        if let Some(existing) = owners.insert(namespace.clone(), key.as_str()) {
+            if existing != key {
+                return Err(format!(
+                    "Public catalog Provider namespace `{namespace}` is ambiguous"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 struct CachedCatalog {
     body: String,
     fetched_at_ms: u64,
     fresh: bool,
+}
+
+#[derive(Clone, Copy)]
+enum CatalogCacheKind {
+    Models,
+    Prices,
 }
 
 pub(crate) fn list_public_provider_models_with_cache_egress(
@@ -101,7 +159,7 @@ pub(crate) fn list_public_provider_models_with_cache_egress(
     egress: &token_station_cli::config::EgressConfig,
     secrets: &token_station_cli::secrets::SecretStore,
 ) -> Result<PublicProviderModelsView, String> {
-    let cache = read_cache(data_dir);
+    let cache = read_cache(data_dir, CatalogCacheKind::Models);
     if let Some(cached) = cache.as_ref().filter(|cache| cache.fresh) {
         if let Ok(result) = public_provider_models_from_json(
             &cached.body,
@@ -109,14 +167,22 @@ pub(crate) fn list_public_provider_models_with_cache_egress(
             cached.fetched_at_ms,
             "cache",
         ) {
-            return Ok(result);
+            if result.unavailable_provider_ids.is_empty() {
+                return Ok(result);
+            }
         }
     }
 
-    let live = fetch_catalog(egress, secrets).and_then(|body| {
+    let live = fetch_catalog(egress, secrets).and_then(|fetch| {
         let fetched_at_ms = now_ms();
-        let result = public_provider_models_from_json(&body, provider_ids, fetched_at_ms, "live")?;
-        let _ = write_cache(data_dir, body.as_bytes());
+        let result =
+            public_provider_models_from_json(&fetch.body, provider_ids, fetched_at_ms, "live")?;
+        let _ = commit_cache_if_preserves(
+            data_dir,
+            CatalogCacheKind::Models,
+            &fetch.body,
+            &fetch.observation_id,
+        );
         Ok(result)
     });
     match live {
@@ -146,6 +212,10 @@ fn public_provider_models_from_json(
 ) -> Result<PublicProviderModelsView, String> {
     let providers: BTreeMap<String, CatalogProvider> =
         serde_json::from_str(body).map_err(|error| format!("公共模型目录格式无效：{error}"))?;
+    validate_unique_provider_namespaces(&providers)?;
+    if providers.is_empty() && !provider_ids.is_empty() {
+        return Err("The public model catalog contains no Provider entries".to_owned());
+    }
     let mut resolved = BTreeMap::new();
     let mut unavailable = Vec::new();
 
@@ -193,6 +263,12 @@ fn public_provider_models_from_json(
             continue;
         }
         resolved.insert(requested_id.clone(), models.into_iter().collect());
+    }
+
+    if !provider_ids.is_empty() && resolved.is_empty() {
+        return Err(
+            "The public model catalog contains no usable requested Provider entries".to_owned(),
+        );
     }
 
     Ok(PublicProviderModelsView {
@@ -269,21 +345,27 @@ pub(crate) fn suggest_many_with_cache_egress(
     egress: &token_station_cli::config::EgressConfig,
     secrets: &token_station_cli::secrets::SecretStore,
 ) -> Result<Vec<RequestedModelPriceSuggestion>, String> {
-    let cache = read_cache(data_dir);
+    let cache = read_cache(data_dir, CatalogCacheKind::Prices);
     if let Some(cached) = cache.as_ref().filter(|cache| cache.fresh) {
         if let Ok(suggestions) =
             suggest_many_from_json(&cached.body, provider_id, model_ids, cached.fetched_at_ms)
         {
-            return Ok(with_catalog_sources(suggestions, "cache"));
+            if price_suggestions_cover_every_request(&suggestions, model_ids) {
+                return Ok(with_catalog_sources(suggestions, "cache"));
+            }
         }
     }
 
-    let live = fetch_catalog(egress, secrets).and_then(|body| {
+    let live = fetch_catalog(egress, secrets).and_then(|fetch| {
         let fetched_at_ms = now_ms();
-        let suggestions = suggest_many_from_json(&body, provider_id, model_ids, fetched_at_ms)?;
-        // Never replace a known-good cache with an invalid catalog. Parsing and
-        // price validation above are part of a successful refresh.
-        let _ = write_cache(data_dir, body.as_bytes());
+        let suggestions =
+            suggest_many_from_json(&fetch.body, provider_id, model_ids, fetched_at_ms)?;
+        let _ = commit_cache_if_preserves(
+            data_dir,
+            CatalogCacheKind::Prices,
+            &fetch.body,
+            &fetch.observation_id,
+        );
         Ok(with_catalog_sources(suggestions, "live"))
     });
     match live {
@@ -299,6 +381,38 @@ pub(crate) fn suggest_many_with_cache_egress(
                 })
         }
     }
+}
+
+pub(crate) fn suggest_many_live_with_egress(
+    data_dir: &Path,
+    provider_id: Option<&str>,
+    model_ids: &[String],
+    egress: &token_station_cli::config::EgressConfig,
+    secrets: &token_station_cli::secrets::SecretStore,
+) -> Result<Vec<RequestedModelPriceSuggestion>, String> {
+    let fetch = fetch_catalog(egress, secrets)?;
+    let fetched_at_ms = now_ms();
+    let suggestions = suggest_many_from_json(&fetch.body, provider_id, model_ids, fetched_at_ms)?;
+    let _ = commit_cache_if_preserves(
+        data_dir,
+        CatalogCacheKind::Prices,
+        &fetch.body,
+        &fetch.observation_id,
+    );
+    Ok(with_catalog_sources(suggestions, "live"))
+}
+
+fn price_suggestions_cover_every_request(
+    suggestions: &[RequestedModelPriceSuggestion],
+    model_ids: &[String],
+) -> bool {
+    let covered = suggestions
+        .iter()
+        .map(|value| value.requested_model_id.as_str())
+        .collect::<BTreeSet<_>>();
+    model_ids
+        .iter()
+        .all(|model| covered.contains(model.as_str()))
 }
 
 fn with_catalog_sources(
@@ -323,6 +437,96 @@ fn with_catalog_source(
 }
 
 #[cfg(test)]
+fn cache_candidate_preserves_semantics(
+    candidate: &str,
+    current: Option<&str>,
+    kind: CatalogCacheKind,
+) -> bool {
+    let entries = |body: &str| match kind {
+        CatalogCacheKind::Models => semantic_model_entries(body),
+        CatalogCacheKind::Prices => semantic_price_entries(body),
+    };
+    let Some(candidate_entries) = entries(candidate) else {
+        return false;
+    };
+    if candidate_entries.is_empty() {
+        return false;
+    }
+    let Some(current_entries) = current.and_then(entries) else {
+        return true;
+    };
+    current_entries.is_subset(&candidate_entries)
+}
+
+fn semantic_model_entries(body: &str) -> Option<BTreeSet<(String, String)>> {
+    let providers: BTreeMap<String, CatalogProvider> = serde_json::from_str(body).ok()?;
+    validate_unique_provider_namespaces(&providers).ok()?;
+    let mut entries = BTreeSet::new();
+    for (provider_key, provider) in &providers {
+        let provider_id = if provider.id.trim().is_empty() {
+            normalize_provider_id(provider_key)
+        } else {
+            normalize_provider_id(&provider.id)
+        };
+        for (model_key, model) in &provider.models {
+            if model.status.as_deref().is_some_and(|status| {
+                status.eq_ignore_ascii_case("deprecated") || status.eq_ignore_ascii_case("retired")
+            }) || !is_chat_compatible_model(model_key, model)
+            {
+                continue;
+            }
+            let model_id = if model.id.trim().is_empty() {
+                model_key.trim()
+            } else {
+                model.id.trim()
+            };
+            if !model_id.is_empty()
+                && model_id.len() <= 512
+                && model_id
+                    .chars()
+                    .all(|character| character.is_ascii_graphic())
+            {
+                entries.insert((provider_id.clone(), model_id.to_owned()));
+            }
+        }
+    }
+    Some(entries)
+}
+
+fn semantic_price_entries(body: &str) -> Option<BTreeSet<(String, String)>> {
+    let providers: BTreeMap<String, CatalogProvider> = serde_json::from_str(body).ok()?;
+    validate_unique_provider_namespaces(&providers).ok()?;
+    let mut entries = BTreeSet::new();
+    for (provider_key, provider) in &providers {
+        let provider_id = if provider.id.trim().is_empty() {
+            normalize_provider_id(provider_key)
+        } else {
+            normalize_provider_id(&provider.id)
+        };
+        for (model_key, model) in &provider.models {
+            let Some(cost) = model.cost.as_ref() else {
+                continue;
+            };
+            let complete = [cost.input, cost.output, cost.cache_read, cost.cache_write]
+                .into_iter()
+                .all(|value| value.is_some_and(|value| usd_per_mtok_to_micros(value).is_ok()));
+            if !complete {
+                continue;
+            }
+            let model_id = if model.id.trim().is_empty() {
+                model_key.trim()
+            } else {
+                model.id.trim()
+            };
+            if !model_id.is_empty() {
+                entries.insert((provider_id.clone(), model_id.to_owned()));
+            }
+        }
+    }
+    Some(entries)
+}
+
+#[cfg(test)]
 fn suggest_from_json(
     body: &str,
     provider_id: Option<&str>,
@@ -331,6 +535,10 @@ fn suggest_from_json(
 ) -> Result<Option<ModelPriceSuggestionView>, String> {
     let providers: BTreeMap<String, CatalogProvider> =
         serde_json::from_str(body).map_err(|error| format!("公开价格目录格式无效：{error}"))?;
+    validate_unique_provider_namespaces(&providers)?;
+    if providers.is_empty() && !model_id.is_empty() {
+        return Err("The public price catalog contains no Provider entries".to_owned());
+    }
     suggest_from_providers(&providers, provider_id, model_id, fetched_at_ms)
 }
 
@@ -342,6 +550,10 @@ fn suggest_many_from_json(
 ) -> Result<Vec<RequestedModelPriceSuggestion>, String> {
     let providers: BTreeMap<String, CatalogProvider> =
         serde_json::from_str(body).map_err(|error| format!("公开价格目录格式无效：{error}"))?;
+    validate_unique_provider_namespaces(&providers)?;
+    if providers.is_empty() && !model_ids.is_empty() {
+        return Err("The public price catalog contains no Provider entries".to_owned());
+    }
     let mut suggestions = Vec::new();
     for model_id in model_ids {
         if let Some(suggestion) =
@@ -412,12 +624,20 @@ fn find_provider<'a>(
             provider.id.as_str()
         }
     };
+    // An exact raw key is the strongest catalog identity. Search it globally
+    // before IDs so BTree ordering cannot let an alias entry shadow it.
     providers
         .iter()
         .find_map(|(key, provider)| {
-            let id = entry_id(key, provider);
-            (key.eq_ignore_ascii_case(wanted) || id.eq_ignore_ascii_case(wanted))
+            key.eq_ignore_ascii_case(wanted)
                 .then_some((key.as_str(), provider))
+        })
+        .or_else(|| {
+            providers.iter().find_map(|(key, provider)| {
+                entry_id(key, provider)
+                    .eq_ignore_ascii_case(wanted)
+                    .then_some((key.as_str(), provider))
+            })
         })
         .or_else(|| {
             providers.iter().find_map(|(key, provider)| {
@@ -452,6 +672,12 @@ fn find_in_provider(
         let Some(output) = cost.output else {
             return Ok(None);
         };
+        let Some(cache_read) = cost.cache_read else {
+            return Ok(None);
+        };
+        let Some(cache_write) = cost.cache_write else {
+            return Ok(None);
+        };
         return Ok(Some(ModelPriceSuggestionView {
             model_id: if model.id.is_empty() {
                 model_key.clone()
@@ -478,19 +704,12 @@ fn find_in_provider(
             fetched_at_ms,
             input_per_mtok: usd_per_mtok_to_micros(input)?,
             output_per_mtok: usd_per_mtok_to_micros(output)?,
-            cache_read_per_mtok: optional_usd_to_micros(cost.cache_read)?,
-            cache_write_per_mtok: optional_usd_to_micros(cost.cache_write)?,
+            cache_read_per_mtok: usd_per_mtok_to_micros(cache_read)?,
+            cache_write_per_mtok: usd_per_mtok_to_micros(cache_write)?,
             reasoning_per_mtok: cost.reasoning.map(usd_per_mtok_to_micros).transpose()?,
         }));
     }
     Ok(None)
-}
-
-fn optional_usd_to_micros(value: Option<f64>) -> Result<u64, String> {
-    value
-        .map(usd_per_mtok_to_micros)
-        .transpose()
-        .map(Option::unwrap_or_default)
 }
 
 fn usd_per_mtok_to_micros(value: f64) -> Result<u64, String> {
@@ -501,7 +720,7 @@ fn usd_per_mtok_to_micros(value: f64) -> Result<u64, String> {
     Ok(micros.round() as u64)
 }
 
-fn normalize_provider_id(value: &str) -> String {
+pub(crate) fn normalize_provider_id(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "google-ai" | "google-generative-ai" | "gemini" => "google".to_owned(),
         "zhipu" | "zhipu-ai" | "bigmodel" | "glm-cn" | "glm_cn" => "zhipuai".to_owned(),
@@ -618,13 +837,33 @@ fn strip_date_suffix(value: &str) -> String {
     value.to_owned()
 }
 
-fn cache_path(data_dir: &Path) -> PathBuf {
+fn cache_path(data_dir: &Path, kind: CatalogCacheKind) -> PathBuf {
+    let name = match kind {
+        CatalogCacheKind::Models => "models-dev-models.json",
+        CatalogCacheKind::Prices => "models-dev-prices.json",
+    };
+    data_dir.join("catalogs").join(name)
+}
+
+fn legacy_cache_path(data_dir: &Path) -> PathBuf {
     data_dir.join("catalogs").join("models-dev-api.json")
 }
 
-fn read_cache(data_dir: &Path) -> Option<CachedCatalog> {
-    let path = cache_path(data_dir);
-    let metadata = fs::metadata(&path).ok()?;
+fn pending_cache_path(data_dir: &Path, kind: CatalogCacheKind) -> PathBuf {
+    let name = match kind {
+        CatalogCacheKind::Models => "models-dev-models.pending.json",
+        CatalogCacheKind::Prices => "models-dev-prices.pending.json",
+    };
+    data_dir.join("catalogs").join(name)
+}
+
+fn read_cache(data_dir: &Path, kind: CatalogCacheKind) -> Option<CachedCatalog> {
+    read_cache_path(&cache_path(data_dir, kind))
+        .or_else(|| read_cache_path(&legacy_cache_path(data_dir)))
+}
+
+fn read_cache_path(path: &Path) -> Option<CachedCatalog> {
+    let metadata = fs::metadata(path).ok()?;
     if metadata.len() > MAX_RESPONSE_BYTES {
         return None;
     }
@@ -646,13 +885,127 @@ fn read_cache(data_dir: &Path) -> Option<CachedCatalog> {
     })
 }
 
-fn write_cache(data_dir: &Path, body: &[u8]) -> Result<(), String> {
-    let path = cache_path(data_dir);
+fn write_cache(data_dir: &Path, kind: CatalogCacheKind, body: &[u8]) -> Result<(), String> {
+    let path = cache_path(data_dir, kind);
     crate::agent_integration::safe_fs::write_atomic_private(&path, body)
         .map_err(|error| format!("保存价格目录缓存失败：{error}"))
 }
 
+fn write_pending_cache(
+    data_dir: &Path,
+    kind: CatalogCacheKind,
+    observation: &PendingCatalogObservation,
+) -> Result<(), String> {
+    let path = pending_cache_path(data_dir, kind);
+    let body = serde_json::to_vec(observation)
+        .map_err(|error| format!("编码待确认公共目录缓存失败：{error}"))?;
+    crate::agent_integration::safe_fs::write_atomic_private(&path, &body)
+        .map_err(|error| format!("保存待确认公共目录缓存失败：{error}"))
+}
+
+fn remove_pending_cache(data_dir: &Path, kind: CatalogCacheKind) {
+    let path = pending_cache_path(data_dir, kind);
+    match fs::remove_file(&path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            eprintln!("failed to remove pending public catalog cache: {error}");
+        }
+        _ => {}
+    }
+}
+
+fn commit_cache_if_preserves(
+    data_dir: &Path,
+    kind: CatalogCacheKind,
+    body: &str,
+    observation_id: &str,
+) -> Result<bool, String> {
+    let _guard = CACHE_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Public catalog cache write lock is poisoned".to_owned())?;
+    let entries = |body: &str| match kind {
+        CatalogCacheKind::Models => semantic_model_entries(body),
+        CatalogCacheKind::Prices => semantic_price_entries(body),
+    };
+    let Some(candidate_entries) = entries(body).filter(|entries| !entries.is_empty()) else {
+        return Ok(false);
+    };
+    let current = read_cache(data_dir, kind);
+    let current_entries = current.as_ref().and_then(|value| entries(&value.body));
+    if current_entries
+        .as_ref()
+        .is_none_or(|current| current.is_subset(&candidate_entries))
+    {
+        write_cache(data_dir, kind, body.as_bytes())?;
+        remove_pending_cache(data_dir, kind);
+        return Ok(true);
+    }
+
+    // A single partial 200 response must not erase last-known-good entries,
+    // but legitimate retirements cannot be blocked forever either. Require the
+    // same semantic shrink twice within the normal cache TTL before committing
+    // it as the new authoritative snapshot.
+    let confirmed = read_cache_path(&pending_cache_path(data_dir, kind))
+        .filter(|pending| pending.fresh)
+        .and_then(|pending| serde_json::from_str::<PendingCatalogObservation>(&pending.body).ok())
+        .filter(|pending| pending.observation_id != observation_id)
+        .and_then(|pending| entries(&pending.body))
+        .is_some_and(|pending| pending == candidate_entries);
+    if confirmed {
+        write_cache(data_dir, kind, body.as_bytes())?;
+        remove_pending_cache(data_dir, kind);
+        return Ok(true);
+    }
+    write_pending_cache(
+        data_dir,
+        kind,
+        &PendingCatalogObservation {
+            observation_id: observation_id.to_owned(),
+            body: body.to_owned(),
+        },
+    )?;
+    Ok(false)
+}
+
 fn fetch_catalog(
+    egress: &token_station_cli::config::EgressConfig,
+    secrets: &token_station_cli::secrets::SecretStore,
+) -> Result<CatalogFetch, String> {
+    // Hold one short-lived shared state lock through the network request. A
+    // concurrent caller waits in its spawn_blocking worker and then reuses the
+    // same public body instead of either failing a normal UI race or launching
+    // an unbounded duplicate fetch storm.
+    let mut shared = CATALOG_FETCH_STATE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "Public catalog fetch state is poisoned".to_owned())?;
+    if let Some(previous) = shared.as_ref().filter(|previous| {
+        previous.egress == *egress && previous.completed_at.elapsed() <= FETCH_COALESCE_TTL
+    }) {
+        return previous.result.clone();
+    }
+    let result = fetch_catalog_uncached(egress, secrets).map(|body| CatalogFetch {
+        body,
+        observation_id: next_catalog_observation_id(),
+    });
+    *shared = Some(SharedCatalogFetch {
+        egress: egress.clone(),
+        completed_at: Instant::now(),
+        result: result.clone(),
+    });
+    result
+}
+
+fn next_catalog_observation_id() -> String {
+    let sequence = CATALOG_OBSERVATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}-{nanos}-{sequence}", std::process::id())
+}
+
+fn fetch_catalog_uncached(
     egress: &token_station_cli::config::EgressConfig,
     secrets: &token_station_cli::secrets::SecretStore,
 ) -> Result<String, String> {
@@ -765,17 +1118,10 @@ mod tests {
     }
 
     #[test]
-    fn finds_an_exact_provider_model_and_converts_usd_to_micros() {
-        let suggestion = suggest_from_json(CATALOG, Some("openai"), "gpt-5", 42)
+    fn does_not_convert_a_missing_token_class_price_into_free_usage() {
+        assert!(suggest_from_json(CATALOG, Some("openai"), "gpt-5", 42)
             .unwrap()
-            .unwrap();
-        assert_eq!(suggestion.provider_id, "openai");
-        assert_eq!(suggestion.model_id, "gpt-5");
-        assert_eq!(suggestion.input_per_mtok, 1_250_000);
-        assert_eq!(suggestion.output_per_mtok, 10_000_000);
-        assert_eq!(suggestion.cache_read_per_mtok, 125_000);
-        assert_eq!(suggestion.cache_write_per_mtok, 0);
-        assert_eq!(suggestion.reasoning_per_mtok, None);
+            .is_none());
     }
 
     #[test]
@@ -792,6 +1138,14 @@ mod tests {
         assert_eq!(suggestions[0].requested_model_id, "claude-sonnet-4.6@high");
         assert_eq!(suggestions[0].suggestion.model_id, "claude-sonnet-4-6");
         assert_eq!(suggestions[0].suggestion.cache_write_per_mtok, 3_750_000);
+        assert!(!price_suggestions_cover_every_request(
+            &suggestions,
+            &["claude-sonnet-4.6@high".to_owned(), "missing".to_owned()],
+        ));
+        assert!(price_suggestions_cover_every_request(
+            &suggestions,
+            &["claude-sonnet-4.6@high".to_owned()],
+        ));
     }
 
     #[test]
@@ -845,10 +1199,184 @@ mod tests {
             std::process::id(),
             now_ms()
         ));
-        write_cache(&data_dir, CATALOG.as_bytes()).unwrap();
-        let cached = read_cache(&data_dir).unwrap();
-        assert_eq!(cached.body, CATALOG);
-        assert!(cached.fresh);
+        write_cache(&data_dir, CatalogCacheKind::Models, CATALOG.as_bytes()).unwrap();
+        write_cache(&data_dir, CatalogCacheKind::Prices, CATALOG.as_bytes()).unwrap();
+        for kind in [CatalogCacheKind::Models, CatalogCacheKind::Prices] {
+            let cached = read_cache(&data_dir, kind).unwrap();
+            assert_eq!(cached.body, CATALOG);
+            assert!(cached.fresh);
+        }
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn fresh_kind_specific_caches_serve_models_and_advisory_prices_without_network() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "token-station-pricing-fresh-cache-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        write_cache(&data_dir, CatalogCacheKind::Models, CATALOG.as_bytes()).unwrap();
+        write_cache(&data_dir, CatalogCacheKind::Prices, CATALOG.as_bytes()).unwrap();
+        let egress = token_station_cli::config::EgressConfig::default();
+        let secrets = token_station_cli::secrets::SecretStore::default();
+
+        let models = list_public_provider_models_with_cache_egress(
+            &data_dir,
+            &["anthropic".to_owned()],
+            &egress,
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(models.source, "cache");
+        assert_eq!(
+            models.providers.get("anthropic").unwrap(),
+            &["claude-sonnet-4-6"]
+        );
+
+        let prices = suggest_many_with_cache_egress(
+            &data_dir,
+            Some("anthropic"),
+            &["claude-sonnet-4-6".to_owned()],
+            &egress,
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(prices.len(), 1);
+        assert_eq!(prices[0].suggestion.catalog_source, "cache");
+        assert!(suggest_with_cache_egress(
+            &data_dir,
+            Some("anthropic"),
+            "claude-sonnet-4-6",
+            &egress,
+            &secrets,
+        )
+        .unwrap()
+        .is_some());
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn rejects_semantically_empty_catalog_results() {
+        assert!(
+            public_provider_models_from_json("{}", &["openai".to_owned()], 42, "live",).is_err()
+        );
+        assert!(suggest_many_from_json("{}", Some("openai"), &["gpt-5".to_owned()], 42,).is_err());
+
+        let ambiguous = r#"{
+          "0": {"id": "openai", "models": {"gpt-x": {"id": "gpt-x"}}},
+          "openai": {"id": "openai", "models": {"gpt-5": {"id": "gpt-5"}}}
+        }"#;
+        assert!(
+            public_provider_models_from_json(ambiguous, &["openai".to_owned()], 42, "live",)
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        assert!(!cache_candidate_preserves_semantics(
+            ambiguous,
+            None,
+            CatalogCacheKind::Models,
+        ));
+    }
+
+    #[test]
+    fn cache_replacement_preserves_semantic_identity_and_complete_prices() {
+        let partial = r#"{
+          "openai": {
+            "id": "openai",
+            "models": {"gpt-5": {"id": "gpt-5"}}
+          }
+        }"#;
+        let unrelated = r#"{
+          "unrelated": {
+            "id": "unrelated",
+            "models": {"other": {"id": "other"}}
+          }
+        }"#;
+        let incomplete_price =
+            CATALOG.replace("\"cache_write\": 3.75", "\"cache_write_omitted\": 3.75");
+
+        assert!(!cache_candidate_preserves_semantics(
+            partial,
+            Some(CATALOG),
+            CatalogCacheKind::Models,
+        ));
+        assert!(!cache_candidate_preserves_semantics(
+            unrelated,
+            Some(partial),
+            CatalogCacheKind::Models,
+        ));
+        assert!(cache_candidate_preserves_semantics(
+            CATALOG,
+            Some(partial),
+            CatalogCacheKind::Models,
+        ));
+        assert!(!cache_candidate_preserves_semantics(
+            &incomplete_price,
+            Some(CATALOG),
+            CatalogCacheKind::Prices,
+        ));
+        assert!(!cache_candidate_preserves_semantics(
+            "{}",
+            Some(CATALOG),
+            CatalogCacheKind::Prices,
+        ));
+    }
+
+    #[test]
+    fn cache_requires_two_matching_observations_before_committing_a_shrink() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "token-station-pricing-shrink-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let full = r#"{
+          "openai": {"id": "openai", "models": {
+            "gpt-a": {"id": "gpt-a"},
+            "gpt-b": {"id": "gpt-b"}
+          }}
+        }"#;
+        let retired = r#"{
+          "openai": {"id": "openai", "models": {
+            "gpt-b": {"id": "gpt-b"}
+          }}
+        }"#;
+        write_cache(&data_dir, CatalogCacheKind::Models, full.as_bytes()).unwrap();
+
+        assert!(!commit_cache_if_preserves(
+            &data_dir,
+            CatalogCacheKind::Models,
+            retired,
+            "observation-1",
+        )
+        .unwrap());
+        assert_eq!(
+            read_cache(&data_dir, CatalogCacheKind::Models)
+                .unwrap()
+                .body,
+            full
+        );
+        assert!(!commit_cache_if_preserves(
+            &data_dir,
+            CatalogCacheKind::Models,
+            retired,
+            "observation-1",
+        )
+        .unwrap());
+        assert!(commit_cache_if_preserves(
+            &data_dir,
+            CatalogCacheKind::Models,
+            retired,
+            "observation-2",
+        )
+        .unwrap());
+        assert_eq!(
+            read_cache(&data_dir, CatalogCacheKind::Models)
+                .unwrap()
+                .body,
+            retired
+        );
+        assert!(!pending_cache_path(&data_dir, CatalogCacheKind::Models).exists());
         std::fs::remove_dir_all(data_dir).unwrap();
     }
 

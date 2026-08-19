@@ -134,6 +134,7 @@ pub(crate) fn discover_with_cache(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn discover_with_cache_egress(
     data_dir: &Path,
     name: &str,
@@ -141,6 +142,29 @@ pub(crate) fn discover_with_cache_egress(
     api_key: Option<&str>,
     egress: &token_station_cli::config::EgressConfig,
     secrets: &token_station_cli::secrets::SecretStore,
+) -> Result<ModelDiscoveryView, String> {
+    discover_with_cache_egress_mode(data_dir, base_url, name, api_key, egress, secrets, true)
+}
+
+pub(crate) fn discover_candidate_with_cache_egress(
+    data_dir: &Path,
+    name: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+    egress: &token_station_cli::config::EgressConfig,
+    secrets: &token_station_cli::secrets::SecretStore,
+) -> Result<ModelDiscoveryView, String> {
+    discover_with_cache_egress_mode(data_dir, base_url, name, api_key, egress, secrets, false)
+}
+
+fn discover_with_cache_egress_mode(
+    data_dir: &Path,
+    base_url: &str,
+    name: &str,
+    api_key: Option<&str>,
+    egress: &token_station_cli::config::EgressConfig,
+    secrets: &token_station_cli::secrets::SecretStore,
+    commit_live_cache: bool,
 ) -> Result<ModelDiscoveryView, String> {
     let name = name.trim();
     let base_url = base_url.trim().trim_end_matches('/');
@@ -150,6 +174,15 @@ pub(crate) fn discover_with_cache_egress(
     if base_url.is_empty() {
         return Err("请先填写 Base URL".to_owned());
     }
+    let endpoint = ProviderEndpoint::try_new(base_url).map_err(|error| error.to_string())?;
+    if !endpoint.uses_https() && !endpoint.is_loopback() {
+        return Err("Remote Provider endpoints require HTTPS".to_owned());
+    }
+    if !endpoint.uses_https() && !egress.bypasses_proxy(&endpoint.as_str())? {
+        return Err(
+            "Plaintext loopback Provider endpoints must bypass the configured proxy".to_owned(),
+        );
+    }
 
     match fetch_models_with_egress(base_url, api_key, egress, secrets) {
         Ok(live_catalog) => {
@@ -158,7 +191,9 @@ pub(crate) fn discover_with_cache_egress(
             let (entry, added, removed) =
                 merge_live_catalog(base_url, previous.as_ref(), &live_catalog, fetched_at_ms);
             let models = visible_models(&entry.models);
-            let warning = write_cache(data_dir, name, entry.clone()).err();
+            let warning = commit_live_cache
+                .then(|| write_cache(data_dir, name, entry.clone()).err())
+                .flatten();
             Ok(ModelDiscoveryView {
                 models,
                 source: "live".to_owned(),
@@ -279,10 +314,18 @@ fn merge_live_catalog(
     for old in previous.into_iter().flat_map(|entry| &entry.models) {
         if !live.contains(old.model.as_str()) {
             let mut record = old.clone();
-            if record.catalog_state != CatalogState::Removed {
-                removed.push(record.model.clone());
+            match record.catalog_state {
+                CatalogState::Active => {
+                    // One partial/empty 200 response is not enough evidence to
+                    // erase last-known-good availability.
+                    record.catalog_state = CatalogState::Stale;
+                }
+                CatalogState::Stale => {
+                    record.catalog_state = CatalogState::Removed;
+                    removed.push(record.model.clone());
+                }
+                CatalogState::Removed => {}
             }
-            record.catalog_state = CatalogState::Removed;
             catalog.push(record);
         }
     }
@@ -767,6 +810,30 @@ fn write_cache(data_dir: &Path, name: &str, entry: CacheEntry) -> Result<(), Str
     persist_cache(data_dir, &bounded_cache(cache, now_ms()))
 }
 
+pub(crate) fn commit_live_discovery_cache(
+    data_dir: &Path,
+    name: &str,
+    base_url: &str,
+    result: &ModelDiscoveryView,
+) -> Result<(), String> {
+    if result.source != "live" {
+        return Ok(());
+    }
+    let fetched_at_ms = result
+        .fetched_at_ms
+        .ok_or_else(|| "Live model discovery has no fetch timestamp".to_owned())?;
+    write_cache(
+        data_dir,
+        name,
+        CacheEntry {
+            base_url: base_url.trim().trim_end_matches('/').to_owned(),
+            revision: result.revision,
+            models: result.catalog.clone(),
+            fetched_at_ms,
+        },
+    )
+}
+
 /// Invalidates every catalog fact tied to one Provider identity.
 ///
 /// A deleted/re-added Provider may point at the same URL with a different
@@ -817,9 +884,10 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        catalog_for_provider, discover_with_cache, fetch_models, parse_models, read_cached_entry,
-        remove_provider, status_message, unknown_catalog_model, write_cache, CacheEntry,
-        CatalogSource, CatalogState, MAX_MODELS_PER_PROVIDER, MAX_MODEL_ID_BYTES,
+        catalog_for_provider, discover_with_cache, discover_with_cache_egress, fetch_models,
+        parse_models, read_cached_entry, remove_provider, status_message, unknown_catalog_model,
+        write_cache, CacheEntry, CatalogSource, CatalogState, MAX_MODELS_PER_PROVIDER,
+        MAX_MODEL_ID_BYTES,
     };
     use serde_json::json;
     use std::io::{Read, Write};
@@ -834,6 +902,39 @@ mod tests {
             "token-station-model-cache-{}-{name}-{nonce}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn discovery_transport_rejects_remote_http_and_proxied_loopback_credentials() {
+        let dir = scratch("transport-boundary");
+        let direct = token_station_cli::config::EgressConfig::default();
+        let secrets = token_station_cli::secrets::SecretStore::default();
+        let remote = discover_with_cache_egress(
+            &dir,
+            "remote",
+            "http://192.0.2.1/v1",
+            None,
+            &direct,
+            &secrets,
+        )
+        .expect_err("anonymous Provider payloads also require protected remote transport");
+        assert!(remote.contains("require HTTPS"), "{remote}");
+
+        let proxied = serde_json::from_value(json!({
+            "mode": "http",
+            "proxy_url": "http://proxy.example.test:8080"
+        }))
+        .unwrap();
+        let loopback = discover_with_cache_egress(
+            &dir,
+            "loopback",
+            "http://127.0.0.1:11434/v1",
+            None,
+            &proxied,
+            &secrets,
+        )
+        .expect_err("loopback plaintext payloads must never traverse a proxy");
+        assert!(loopback.contains("must bypass"), "{loopback}");
     }
 
     fn serve_once(status: u16, body: &'static str) -> String {
@@ -1198,6 +1299,7 @@ mod tests {
         let base = serve_sequence(vec![
             r#"{"data":[{"id":"model-a"},{"id":"model-b"}]}"#,
             r#"{"data":[{"id":"model-b"},{"id":"model-c"}]}"#,
+            r#"{"data":[{"id":"model-b"},{"id":"model-c"}]}"#,
         ]);
 
         let first = discover_with_cache(&dir, "fixture", &base, None).unwrap();
@@ -1208,8 +1310,8 @@ mod tests {
         let second = discover_with_cache(&dir, "fixture", &base, None).unwrap();
         assert_eq!(second.revision, 2);
         assert_eq!(second.added, ["model-c"]);
-        assert_eq!(second.removed, ["model-a"]);
-        assert_eq!(second.models, ["model-b", "model-c"]);
+        assert!(second.removed.is_empty());
+        assert_eq!(second.models, ["model-a", "model-b", "model-c"]);
         assert_eq!(
             second
                 .catalog
@@ -1217,8 +1319,13 @@ mod tests {
                 .find(|model| model.model == "model-a")
                 .unwrap()
                 .catalog_state,
-            CatalogState::Removed
+            CatalogState::Stale
         );
+
+        let confirmed = discover_with_cache(&dir, "fixture", &base, None).unwrap();
+        assert_eq!(confirmed.revision, 3);
+        assert_eq!(confirmed.removed, ["model-a"]);
+        assert_eq!(confirmed.models, ["model-b", "model-c"]);
 
         let stale = discover_with_cache(&dir, "fixture", &base, None).unwrap();
         assert_eq!(stale.source, "cache");

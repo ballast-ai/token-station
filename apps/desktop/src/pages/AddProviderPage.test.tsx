@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -40,6 +40,7 @@ beforeEach(() => {
       };
     }
     if (command === "add_provider_with_credential") return {};
+    if (command === "get_state") return { source: "fresh-state" };
     if (command === "import_model_prices_for_provider") {
       return {
         state: { source: "price-import" },
@@ -139,6 +140,7 @@ function renderPage(overrides: {
   catalogMode?: ProviderCatalogMode;
   entryMode?: "provider-first" | "model-first";
   onAdded?: (state: StateView, message: string) => void;
+  onStateChanged?: (state: StateView) => void;
 } = {}) {
   return render(
     <ErrorToastProvider>
@@ -146,6 +148,7 @@ function renderPage(overrides: {
         existingNames={overrides.existingNames ?? []}
         onCancel={vi.fn()}
         onAdded={overrides.onAdded ?? vi.fn()}
+        onStateChanged={overrides.onStateChanged}
         catalogMode={overrides.catalogMode ?? "regular"}
         onCatalogModeChange={vi.fn()}
         regularFilters={regularFilters}
@@ -212,7 +215,8 @@ describe("AddProviderPage", () => {
     window.localStorage.setItem("token-station-language", "zh-CN");
     const user = userEvent.setup();
     const onAdded = vi.fn();
-    renderPage({ onAdded });
+    const onStateChanged = vi.fn();
+    renderPage({ onAdded, onStateChanged });
 
     await pickPreset(user, "DeepSeek");
     expect(screen.getByRole("checkbox", { name: "批量填充匹配的公开价格" })).toBeChecked();
@@ -221,13 +225,51 @@ describe("AddProviderPage", () => {
 
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("import_model_prices_for_provider", {
       upstreamName: "deepseek",
-      catalogProviderId: "deepseek",
       modelIds: ["deepseek-v4-flash", "deepseek-v4-pro"],
     });
     expect(onAdded).toHaveBeenCalledWith(
-      expect.objectContaining({ source: "price-import" }),
+      {},
       expect.any(String),
     );
+    expect(onStateChanged).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "price-import" }),
+    );
+  });
+
+  it("publishes the added Provider before a slow public price import finishes", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    const onAdded = vi.fn();
+    const onStateChanged = vi.fn();
+    let resolveImport: ((value: unknown) => void) | undefined;
+    const baseImplementation = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((command, args) => {
+      if (command === "import_model_prices_for_provider") {
+        return new Promise((resolve) => {
+          resolveImport = resolve;
+        });
+      }
+      return baseImplementation?.(command, args) as Promise<unknown>;
+    });
+    renderPage({ onAdded, onStateChanged });
+
+    await pickPreset(user, "DeepSeek");
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    await waitFor(() => expect(onAdded).toHaveBeenCalledOnce());
+    expect(onStateChanged).not.toHaveBeenCalled();
+
+    resolveImport?.({
+      state: { source: "price-import" },
+      imported: 2,
+      existing: 0,
+      missing_model_ids: [],
+      price_version: 1,
+    });
+    await waitFor(() => expect(onStateChanged).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "price-import" }),
+    ));
   });
 
   it("keeps automatic public pricing off for custom providers", async () => {
@@ -267,7 +309,6 @@ describe("AddProviderPage", () => {
 
     expect(vi.mocked(invoke)).toHaveBeenCalledWith("import_model_prices_for_provider", {
       upstreamName: "glm_cn",
-      catalogProviderId: "zhipuai",
       modelIds: ["glm-5.2", "glm-5.1", "glm-5"],
     });
   });
@@ -276,6 +317,7 @@ describe("AddProviderPage", () => {
     window.localStorage.setItem("token-station-language", "zh-CN");
     const user = userEvent.setup();
     const onAdded = vi.fn();
+    const onStateChanged = vi.fn();
     const baseImplementation = vi.mocked(invoke).getMockImplementation();
     vi.mocked(invoke).mockImplementation(async (command, args) => {
       if (command === "import_model_prices_for_provider") {
@@ -283,13 +325,16 @@ describe("AddProviderPage", () => {
       }
       return baseImplementation?.(command, args);
     });
-    renderPage({ onAdded });
+    renderPage({ onAdded, onStateChanged });
 
     await pickPreset(user, "DeepSeek");
     await user.type(screen.getByLabelText("API Key"), "test-key");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
 
     expect(onAdded).toHaveBeenCalledWith({}, expect.any(String));
+    expect(onStateChanged).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "fresh-state" }),
+    );
     expect(screen.getByRole("alert")).toHaveTextContent(
       "供应商已添加，但公开价格导入失败",
     );
@@ -379,6 +424,76 @@ describe("AddProviderPage", () => {
       .toBeInTheDocument();
     expect(within(results).queryByRole("button", { name: /gpt-5\.6-sol.*OpenAI/ }))
       .not.toBeInTheDocument();
+  });
+
+  it("uses the refreshed public catalog when the model-first query is empty", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "list_public_provider_models") {
+        return {
+          providers: { openai: ["gpt-current"] },
+          source: "live",
+          fetched_at_ms: 42,
+          unavailable_provider_ids: [],
+        };
+      }
+      if (command === "preview_provider_endpoints") {
+        const baseUrl = (args as { baseUrl?: string } | undefined)?.baseUrl;
+        return {
+          chat: `${baseUrl}/chat/completions`,
+          responses: `${baseUrl}/responses`,
+          messages: `${baseUrl}/messages`,
+          loopback: false,
+        };
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    renderPage({ entryMode: "model-first" });
+
+    expect(await screen.findByText(
+      `公共目录已同步 · 1/${PROVIDER_CATALOG.length} 个渠道`,
+    )).toBeInTheDocument();
+    const results = screen.getByRole("list", { name: "模型与供应商" });
+    expect(within(results).getByRole("button", { name: /gpt-current.*OpenAI/ }))
+      .toBeInTheDocument();
+    expect(within(results).queryByRole("button", { name: /gpt-5\.6-sol.*OpenAI/ }))
+      .not.toBeInTheDocument();
+  });
+
+  it("clears a hidden stale selection after a late public catalog refresh", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    let resolveCatalog!: (value: unknown) => void;
+    const catalog = new Promise((resolve) => {
+      resolveCatalog = resolve;
+    });
+    const baseImplementation = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "list_public_provider_models") return catalog;
+      return baseImplementation?.(command, args);
+    });
+
+    const user = userEvent.setup();
+    renderPage({ entryMode: "model-first" });
+    const results = screen.getByRole("list", { name: "模型与供应商" });
+    await user.click(within(results).getByRole("button", { name: /gpt-5\.6-sol.*OpenAI/ }));
+
+    resolveCatalog({
+      providers: { openai: ["gpt-current"] },
+      source: "live",
+      fetched_at_ms: 42,
+      unavailable_provider_ids: [],
+    });
+    expect(await screen.findByRole("button", { name: /gpt-current/ }))
+      .toHaveAttribute("aria-pressed", "false");
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    expect(await screen.findByText("请至少选择一个模型。")).toBeInTheDocument();
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith(
+      "add_provider_with_credential",
+      expect.anything(),
+    );
   });
 
   it("filters standard providers by a model name across punctuation boundaries", async () => {

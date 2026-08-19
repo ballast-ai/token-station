@@ -1153,6 +1153,7 @@ function StationApp() {
           }}
           onSelectFree={(preset) => setView(`free-provider:${preset.id}`)}
           onAdded={handleProviderAdded}
+          onStateChanged={showState}
           entryMode={view === "add-model" ? "model-first" : "provider-first"}
         />
       )}

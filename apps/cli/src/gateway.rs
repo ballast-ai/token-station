@@ -1690,6 +1690,23 @@ pub struct PrevalidatedAgentRouter {
     router: Option<Arc<Router>>,
 }
 
+fn settle_estimated_cost(
+    pricing: &crate::pricing::PriceTable,
+    record: &mut RequestRecord,
+    served: &UpstreamModel,
+) {
+    let Some(usage) = record.usage else {
+        return;
+    };
+    if let Some((cost, version)) =
+        pricing.price_for_upstream(served.upstream.as_str(), &served.model, &usage)
+    {
+        record.cost_kind = CostKind::Estimated;
+        record.cost_micros = Some(cost);
+        record.price_version = Some(version);
+    }
+}
+
 /// A finished non-streaming exchange, ready to be an HTTP response.
 pub struct JsonReply {
     pub status: u16,
@@ -3971,13 +3988,7 @@ impl Gateway {
         // Price the exchange once, here, and pin the table version onto the
         // record so a later price change never re-values it. An unpriced model
         // leaves cost unknown (None), never a claimed-free zero.
-        if let Some(usage) = record.usage
-            && let Some((cost, version)) = self.pricing.price(model, &usage)
-        {
-            record.cost_kind = CostKind::Estimated;
-            record.cost_micros = Some(cost);
-            record.price_version = Some(version);
-        }
+        settle_estimated_cost(&self.pricing, record, served);
         match outcome {
             StreamOutcome::Complete => {
                 record.status = 200;
@@ -5978,17 +5989,52 @@ mod request_receipt_tests {
     use super::{
         annotate_conversion_failure, begin_record, catalog_model_document, model_cost_document,
         record_actual_attempt_target, record_conversion, record_conversion_cancelled,
-        record_route_decision, tag_transport,
+        record_route_decision, settle_estimated_cost, tag_transport,
     };
     use crate::pricing::{ModelPrice, PriceTable};
     use token_station_metrics::{
-        ConversionOutcome, ConversionReasonCode, ConversionReasonDetail, ConversionStage,
-        RequestPathKind,
+        ConversionOutcome, ConversionReasonCode, ConversionReasonDetail, ConversionStage, CostKind,
+        RequestPathKind, RequestRecord,
     };
-    use token_station_protocol::{ErrorCode, ErrorEnvelope, ModelCapability};
+    use token_station_protocol::{ErrorCode, ErrorEnvelope, ModelCapability, Usage};
     use token_station_router_core::{
         DecidedBy, Decision, RequestFeatures, UpstreamModel, UpstreamRef,
     };
+
+    #[test]
+    fn settlement_prefers_scoped_prices_and_preserves_unscoped_fallback() {
+        let price = |input_per_mtok| ModelPrice {
+            input_per_mtok,
+            ..ModelPrice::default()
+        };
+        let pricing = PriceTable {
+            version: 9,
+            models: BTreeMap::from([
+                ("provider_a/shared".to_owned(), price(200_000)),
+                ("provider_b/shared".to_owned(), price(700_000)),
+                ("shared".to_owned(), price(50_000)),
+            ]),
+        };
+
+        for (upstream, expected) in [
+            ("provider_a", 200_000),
+            ("provider_b", 700_000),
+            ("legacy_provider", 50_000),
+        ] {
+            let served = UpstreamModel::new(UpstreamRef::new(upstream).unwrap(), "shared");
+            let mut record = RequestRecord::begin(1, "openai-chat-completions");
+            record.usage = Some(Usage {
+                input_tokens: 1_000_000,
+                ..Usage::default()
+            });
+
+            settle_estimated_cost(&pricing, &mut record, &served);
+
+            assert_eq!(record.cost_kind, CostKind::Estimated);
+            assert_eq!(record.cost_micros, Some(expected));
+            assert_eq!(record.price_version, Some(9));
+        }
+    }
 
     #[test]
     fn models_document_preserves_discovered_limits_and_cost() {

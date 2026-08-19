@@ -195,8 +195,16 @@ struct AppInner {
     pending_free_providers: BTreeSet<String>,
     /// Verified but unsaved provider keys. Clear them on exit to avoid orphaned keys without config references.
     pending_provider_keys: BTreeMap<String, Zeroizing<String>>,
+    /// In-flight model discovery is bounded and single-flight per Provider name.
+    pending_provider_discoveries: BTreeSet<String>,
     /// Official provider dialects approved for South at startup or explicit plugin refresh.
     south_approved_dialects: BTreeSet<String>,
+    /// Monotonic in-process identities for Provider definitions. Value snapshots
+    /// alone cannot detect an A -> B -> A edit while an async operation is in flight.
+    upstream_epochs: BTreeMap<String, u64>,
+    /// Latest model-discovery operation for each Provider name. Provider
+    /// identity can stay unchanged while two network responses finish out of order.
+    discovery_generations: BTreeMap<String, u64>,
 }
 
 pub struct AppStateManaged(Mutex<AppInner>);
@@ -206,10 +214,25 @@ struct FreeProviderValidationGuard<'a> {
     upstream: String,
 }
 
+struct ProviderDiscoveryGuard<'a> {
+    inner: &'a Mutex<AppInner>,
+    provider: String,
+}
+
 impl Drop for FreeProviderValidationGuard<'_> {
     fn drop(&mut self) {
         let mut inner = self.inner.lock().unwrap();
         inner.pending_free_providers.remove(&self.upstream);
+    }
+}
+
+impl Drop for ProviderDiscoveryGuard<'_> {
+    fn drop(&mut self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.pending_provider_discoveries.remove(&self.provider);
+        if inner.draft["upstreams"].get(&self.provider).is_none() {
+            inner.discovery_generations.remove(&self.provider);
+        }
     }
 }
 
@@ -1429,6 +1452,29 @@ fn south_approved_dialects_for_draft(draft: &Value) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
+fn record_changed_upstream_epochs(
+    before: &Value,
+    after: &Value,
+    epochs: &mut BTreeMap<String, u64>,
+) {
+    let before = before.get("upstreams").and_then(Value::as_object);
+    let after = after.get("upstreams").and_then(Value::as_object);
+    let names = before
+        .into_iter()
+        .flat_map(|values| values.keys())
+        .chain(after.into_iter().flat_map(|values| values.keys()))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for name in names {
+        let previous = before.and_then(|values| values.get(&name));
+        let current = after.and_then(|values| values.get(&name));
+        if previous != current {
+            let epoch = epochs.entry(name).or_default();
+            *epoch = epoch.saturating_add(1).max(1);
+        }
+    }
+}
+
 // ---- helpers ------------------------------------------------------------------
 
 impl AppInner {
@@ -1464,17 +1510,27 @@ impl AppInner {
             server: ServerLifecycle::stopped(),
             pending_free_providers: BTreeSet::new(),
             pending_provider_keys: BTreeMap::new(),
+            pending_provider_discoveries: BTreeSet::new(),
             south_approved_dialects,
+            upstream_epochs: BTreeMap::new(),
+            discovery_generations: BTreeMap::new(),
         }
     }
 
     fn observe_draft(&mut self) -> Result<(), String> {
+        let previous = self.config_state.draft().clone();
         let draft = self.draft.clone();
         if let Err(error) = self.config_state.observe_draft(&draft) {
             self.draft = self.config_state.draft().clone();
             return Err(error);
         }
+        record_changed_upstream_epochs(&previous, &draft, &mut self.upstream_epochs);
         Ok(())
+    }
+
+    fn bump_upstream_epoch(&mut self, name: &str) {
+        let epoch = self.upstream_epochs.entry(name.to_owned()).or_default();
+        *epoch = epoch.saturating_add(1).max(1);
     }
 
     /// Build a candidate config under the lock and replace the authoritative draft
@@ -1489,20 +1545,21 @@ impl AppInner {
         let result = match edit(self) {
             Ok(result) => result,
             Err(error) => {
-                self.draft = previous;
+                self.draft = previous.clone();
                 return Err(error);
             }
         };
         if let Err(error) = self.materialize() {
-            self.draft = previous;
+            self.draft = previous.clone();
             return Err(error);
         }
         let candidate = self.draft.clone();
-        self.draft = previous;
+        self.draft = previous.clone();
         let mut candidate_state = self.config_state.clone();
         candidate_state.observe_draft(&candidate)?;
         self.draft = candidate;
         self.config_state = candidate_state;
+        record_changed_upstream_epochs(&previous, &self.draft, &mut self.upstream_epochs);
         Ok(result)
     }
 
@@ -1555,6 +1612,14 @@ impl AppInner {
             // promoted on next startup, so do not misreport a trailing state-write
             // failure as a failed config save.
             eprintln!("configuration saved but revision finalization failed: {error}");
+        }
+        if let Err(error) =
+            SqliteStore::backfill_unknown_costs(&data_dir.join("metrics.sqlite"), &config.pricing)
+        {
+            // The configuration is already atomically committed. Keep save
+            // semantics truthful and retry this idempotent backfill on the next
+            // save or startup instead of reporting a rollback that did not occur.
+            eprintln!("configuration saved but historical cost backfill failed: {error}");
         }
         for upstream in self.pending_provider_keys.keys() {
             if let Err(error) = provider_tombstones::discard(&self.data_dir(), upstream) {
@@ -2643,6 +2708,29 @@ fn preview_provider_endpoints(base_url: String) -> Result<ProviderEndpointPrevie
     })
 }
 
+fn ensure_credential_transport(
+    endpoint: &ProviderEndpoint,
+    egress: &EgressConfig,
+) -> Result<(), String> {
+    if !endpoint.uses_https() && !endpoint.is_loopback() {
+        return Err("Remote Provider endpoints must use HTTPS".to_owned());
+    }
+    if !endpoint.uses_https() && !egress.bypasses_proxy(&endpoint.as_str())? {
+        return Err(
+            "Plaintext loopback Provider endpoints must bypass the configured proxy".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn draft_egress_config(draft: &Value) -> Result<EgressConfig, String> {
+    match draft.get("egress").filter(|value| !value.is_null()) {
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|error| format!("出站配置不合法：{error}")),
+        None => Ok(EgressConfig::default()),
+    }
+}
+
 fn ensure_generic_provider_mutation_allowed(inner: &AppInner, name: &str) -> Result<(), String> {
     if inner.draft["upstreams"]
         .get(name)
@@ -2655,6 +2743,36 @@ fn ensure_generic_provider_mutation_allowed(inner: &AppInner, name: &str) -> Res
         ));
     }
     Ok(())
+}
+
+fn normalize_provider_model_ids(models: Vec<String>) -> Result<Vec<String>, String> {
+    if models.len() > model_catalog::MAX_MODELS_PER_PROVIDER {
+        return Err(format!(
+            "A Provider may configure at most {} models",
+            model_catalog::MAX_MODELS_PER_PROVIDER
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for model in models {
+        let model = model.trim();
+        if model.is_empty() {
+            continue;
+        }
+        if model.len() > model_catalog::MAX_MODEL_ID_BYTES || model.chars().any(char::is_control) {
+            return Err(format!(
+                "Model IDs must be 1-{} bytes and contain no control characters",
+                model_catalog::MAX_MODEL_ID_BYTES
+            ));
+        }
+        if seen.insert(model.to_owned()) {
+            normalized.push(model.to_owned());
+        }
+    }
+    if normalized.is_empty() {
+        return Err("请至少填一个模型".to_owned());
+    }
+    Ok(normalized)
 }
 
 fn provider_auth_value(source: &str, reference: Option<&str>) -> Result<Option<Value>, String> {
@@ -2768,8 +2886,7 @@ async fn add_free_provider(
                 preset.upstream_name
             ));
         }
-        let egress: EgressConfig = serde_json::from_value(inner.draft["egress"].clone())
-            .map_err(|error| format!("出站配置不合法：{error}"))?;
+        let egress = draft_egress_config(&inner.draft)?;
         if inner.pending_free_providers.contains(preset.upstream_name) {
             return Err(format!(
                 "免费供应商 `{}` 正在验证，请等待当前请求完成",
@@ -3119,14 +3236,16 @@ fn add_provider_impl(
     }
     let name = name.trim().to_string();
     UpstreamRef::new(name.clone()).map_err(|error| format!("供应商名不合法: {error}"))?;
-    let base_url = ProviderEndpoint::try_new(base_url.trim())
-        .map_err(|error| format!("Base URL 不合法：{error}"))?
-        .as_str();
+    let endpoint = ProviderEndpoint::try_new(base_url.trim())
+        .map_err(|error| format!("Base URL 不合法：{error}"))?;
+    let base_url = endpoint.as_str();
     if provider_dialect == "azure-openai-v1" && !azure_openai_v1_base_url_is_exact(&base_url) {
         return Err("Azure OpenAI v1 的 Base URL 路径必须精确为 `/openai/v1`".to_owned());
     }
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
+    let egress = draft_egress_config(&inner.draft)?;
+    ensure_credential_transport(&endpoint, &egress)?;
     if inner.draft["upstreams"].get(&name).is_some() {
         return Err(format!("供应商 `{name}` 已存在，请在 Provider 详情中编辑"));
     }
@@ -3137,9 +3256,9 @@ fn add_provider_impl(
         ));
     }
 
+    let models = normalize_provider_model_ids(models)?;
     let model_objs: Vec<Value> = models
         .iter()
-        .filter(|m| !m.trim().is_empty())
         .map(|m| {
             let mut capability = json!({
                 // OpenAI Chat Completions includes tools and structured output,
@@ -3166,9 +3285,6 @@ fn add_provider_impl(
             capability
         })
         .collect();
-    if model_objs.is_empty() {
-        return Err("至少填一个模型名".into());
-    }
     // A previous interrupted removal may have left only derived catalog data.
     // New Provider identity must never inherit it, even with the same name/URL.
     model_catalog::remove_provider(&data_dir, &name)?;
@@ -3534,9 +3650,9 @@ fn edit_provider_impl(
     provider_call: Option<&str>,
 ) -> Result<StateView, String> {
     let name = name.trim().to_owned();
-    let base_url = ProviderEndpoint::try_new(base_url.trim())
-        .map_err(|error| format!("Base URL 不合法：{error}"))?
-        .as_str();
+    let endpoint = ProviderEndpoint::try_new(base_url.trim())
+        .map_err(|error| format!("Base URL 不合法：{error}"))?;
+    let base_url = endpoint.as_str();
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
     ensure_generic_provider_mutation_allowed(&inner, &name)?;
@@ -3571,6 +3687,8 @@ fn edit_provider_impl(
         Some(_) => return Err("Provider call engine 不受支持".to_owned()),
     };
     let previous_auth = previous.get("auth").filter(|value| !value.is_null());
+    let egress = draft_egress_config(&inner.draft)?;
+    ensure_credential_transport(&endpoint, &egress)?;
     let auth_changed = auth
         .as_ref()
         .is_some_and(|next| next.as_ref() != previous_auth);
@@ -3634,6 +3752,9 @@ fn edit_provider_impl(
                 )),
             };
         }
+        // Secret-store contents are intentionally absent from the serialized
+        // Provider definition, so a successful key rotation needs its own epoch.
+        inner.bump_upstream_epoch(&name);
     }
     Ok(inner.snapshot())
 }
@@ -3642,6 +3763,69 @@ fn edit_provider_impl(
 enum DiscoveryCredential {
     Explicit(Option<String>),
     Stored { provider: String, slot: String },
+}
+
+impl DiscoveryCredential {
+    fn is_explicit_secret(&self) -> bool {
+        matches!(self, Self::Explicit(Some(_)))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ProviderDiscoveryTarget {
+    upstream: Option<Value>,
+    upstream_epoch: u64,
+    discovery_generation: u64,
+}
+
+fn capture_provider_discovery_target(inner: &AppInner, name: &str) -> ProviderDiscoveryTarget {
+    ProviderDiscoveryTarget {
+        upstream: inner.draft["upstreams"].get(name).cloned(),
+        upstream_epoch: inner.upstream_epochs.get(name).copied().unwrap_or_default(),
+        discovery_generation: inner
+            .discovery_generations
+            .get(name)
+            .copied()
+            .unwrap_or_default(),
+    }
+}
+
+fn begin_provider_discovery_target(inner: &mut AppInner, name: &str) -> ProviderDiscoveryTarget {
+    let generation = inner
+        .discovery_generations
+        .entry(name.to_owned())
+        .or_default();
+    *generation = generation.saturating_add(1).max(1);
+    capture_provider_discovery_target(inner, name)
+}
+
+fn ensure_provider_discovery_target_unchanged(
+    inner: &AppInner,
+    name: &str,
+    expected: &ProviderDiscoveryTarget,
+) -> Result<(), String> {
+    let current = capture_provider_discovery_target(inner, name);
+    if current.upstream != expected.upstream
+        || current.upstream_epoch != expected.upstream_epoch
+        || current.discovery_generation != expected.discovery_generation
+    {
+        return Err(format!(
+            "Provider `{name}` changed while its model catalog was loading. Retry discovery"
+        ));
+    }
+    Ok(())
+}
+
+fn provider_health_uses_south(draft: &Value, upstream: &Value, package_verified: bool) -> bool {
+    match upstream["provider_call"].as_str().unwrap_or("legacy") {
+        "south_v1_buffered" | "south_v1_buffered_streaming" => {
+            south_v1_unavailable_reason(draft, upstream, package_verified).is_none()
+        }
+        "south_v1_buffered_streaming_header_auth" => {
+            south_header_auth_v1_unavailable_reason(draft, upstream, package_verified).is_none()
+        }
+        _ => false,
+    }
 }
 
 fn prepare_discovery_credential(
@@ -3700,8 +3884,8 @@ fn catalog_cost_to_model_price(cost: &model_catalog::CatalogCostView) -> Option<
     Some(ModelPrice {
         input_per_mtok: micros(cost.input?)?,
         output_per_mtok: micros(cost.output?)?,
-        cache_read_per_mtok: cost.cache_read.and_then(micros).unwrap_or(0),
-        cache_write_per_mtok: cost.cache_write.and_then(micros).unwrap_or(0),
+        cache_read_per_mtok: micros(cost.cache_read?)?,
+        cache_write_per_mtok: micros(cost.cache_write?)?,
         reasoning_per_mtok: None,
     })
 }
@@ -3871,25 +4055,47 @@ async fn discover_provider_models(
     if name.is_empty() {
         return Err("请先填写供应商名称".to_owned());
     }
-    let base_url = ProviderEndpoint::try_new(&base_url)
-        .map_err(|error| format!("Base URL 不合法：{error}"))?
-        .as_str();
+    UpstreamRef::new(name.clone()).map_err(|error| format!("供应商名不合法: {error}"))?;
+    let endpoint = ProviderEndpoint::try_new(&base_url)
+        .map_err(|error| format!("Base URL 不合法：{error}"))?;
+    let base_url = endpoint.as_str();
 
-    let (data_dir, credential, egress, egress_secrets) = {
-        let inner = state.0.lock().unwrap();
+    let (data_dir, credential, egress, egress_secrets, expected_target, mutate_derived_state) = {
+        let mut inner = state.0.lock().unwrap();
+        if inner.pending_provider_discoveries.contains(&name) {
+            return Err(format!(
+                "Provider `{name}` model discovery is already in progress"
+            ));
+        }
+        const MAX_CONCURRENT_PROVIDER_DISCOVERIES: usize = 8;
+        if inner.pending_provider_discoveries.len() >= MAX_CONCURRENT_PROVIDER_DISCOVERIES {
+            return Err("Provider model discovery concurrency limit reached".to_owned());
+        }
         let credential =
             prepare_discovery_credential(&inner, &name, &base_url, api_key.as_deref())?;
         let config = inner.materialize()?;
+        ensure_credential_transport(&endpoint, &config.egress)?;
+        let expected_target = begin_provider_discovery_target(&mut inner, &name);
+        let mutate_derived_state =
+            expected_target.upstream.is_none() || !credential.is_explicit_secret();
+        inner.pending_provider_discoveries.insert(name.clone());
         (
             inner.data_dir(),
             credential,
             config.egress.clone(),
             secrets::SecretStore::from_config(&config, &inner.data_dir()),
+            expected_target,
+            mutate_derived_state,
         )
+    };
+    let _discovery_guard = ProviderDiscoveryGuard {
+        inner: &state.0,
+        provider: name.clone(),
     };
 
     let task_name = name.clone();
     let task_base_url = base_url.clone();
+    let task_data_dir = data_dir.clone();
     let mut result = tauri::async_runtime::spawn_blocking(move || {
         let resolved_key = match credential {
             DiscoveryCredential::Explicit(key) => key,
@@ -3897,8 +4103,8 @@ async fn discover_provider_models(
                 Some(egress_secrets.resolve(&provider, &slot)?)
             }
         };
-        model_catalog::discover_with_cache_egress(
-            &data_dir,
+        model_catalog::discover_candidate_with_cache_egress(
+            &task_data_dir,
             &task_name,
             &task_base_url,
             resolved_key.as_deref(),
@@ -3909,8 +4115,16 @@ async fn discover_provider_models(
     .await
     .map_err(|error| format!("模型目录任务异常结束：{error}"))??;
     let mut inner = state.0.lock().unwrap();
-    result.capabilities_updated =
-        apply_discovered_model_capabilities(&mut inner, &name, &result.catalog)?;
+    ensure_provider_discovery_target_unchanged(&inner, &name, &expected_target)?;
+    if mutate_derived_state {
+        if let Err(error) =
+            model_catalog::commit_live_discovery_cache(&data_dir, &name, &base_url, &result)
+        {
+            result.warning = Some(error);
+        }
+        result.capabilities_updated =
+            apply_discovered_model_capabilities(&mut inner, &name, &result.catalog)?;
+    }
     if result.source == "none"
         && inner.draft["upstreams"]
             .get(&name)
@@ -3926,18 +4140,57 @@ async fn test_provider(
     state: State<'_, AppStateManaged>,
     name: String,
 ) -> Result<Vec<ProviderTestResult>, String> {
-    let (config, name) = {
+    let (config, name, tests_south) = {
         let inner = state.0.lock().unwrap();
         let name = name.trim().to_owned();
-        if inner.draft["upstreams"].get(&name).is_none() {
-            return Err(format!("供应商 `{name}` 不存在"));
-        }
-        (inner.materialize()?, name)
+        let upstream = inner.draft["upstreams"]
+            .get(&name)
+            .ok_or_else(|| format!("供应商 `{name}` 不存在"))?;
+        let provider = upstream["provider"].as_str().unwrap_or_default();
+        let package_verified = inner.south_approved_dialects.contains(provider);
+        let tests_south = provider_health_uses_south(&inner.draft, upstream, package_verified);
+        (inner.materialize()?, name, tests_south)
     };
     let provider_runtime = tokio::runtime::Handle::current();
     tauri::async_runtime::spawn_blocking(move || {
         let recorder = Arc::new(token_station_cli::filelog::Recorders(Vec::new()));
-        let gateway = Gateway::new_with_provider_runtime(&config, recorder, provider_runtime)?;
+        let gateway =
+            Gateway::new_with_provider_runtime(&config, recorder, provider_runtime.clone())?;
+        if tests_south {
+            let outcomes = provider_runtime.block_on(gateway.probe_south_v1(&name, None))?;
+            return Ok(outcomes
+                .into_iter()
+                .map(|outcome| {
+                    let (status, detail, latency_ms) = match outcome.latency_ms {
+                        Ok(latency) => (
+                            StageStatus::Pass,
+                            Some("Configured South engine probe passed".to_owned()),
+                            Some(latency),
+                        ),
+                        Err(error) => (StageStatus::Fail, Some(error), None),
+                    };
+                    let stages = ["network", "http", "auth", "model", "generation"]
+                        .into_iter()
+                        .map(|layer| ProviderTestStage {
+                            layer: layer.to_owned(),
+                            status: if status == StageStatus::Pass || layer == "generation" {
+                                status
+                            } else {
+                                StageStatus::Skipped
+                            },
+                            detail: detail.clone(),
+                            duration_ms: latency_ms,
+                            timing_kind: latency_ms.map(|_| "cumulative"),
+                        })
+                        .collect();
+                    ProviderTestResult {
+                        model: outcome.model,
+                        stages,
+                        latency_ms,
+                    }
+                })
+                .collect());
+        }
         let probes = gateway.probe_layered(&name, None)?;
         Ok(probes
             .into_iter()
@@ -4021,16 +4274,7 @@ fn replace_provider_models(
 ) -> Result<(), String> {
     inner.ensure_editable()?;
     ensure_generic_provider_mutation_allowed(inner, name)?;
-    let mut normalized: Vec<String> = models
-        .into_iter()
-        .map(|model| model.trim().to_owned())
-        .filter(|model| !model.is_empty())
-        .collect();
-    normalized.sort();
-    normalized.dedup();
-    if normalized.is_empty() {
-        return Err("至少保留一个模型".to_owned());
-    }
+    let normalized = normalize_provider_model_ids(models)?;
 
     let upstream = inner.draft["upstreams"]
         .get(name)
@@ -4941,6 +5185,8 @@ fn complete_serve_start<R: Runtime>(
     app: &AppHandle<R>,
     generation: u64,
     result: Result<PreparedServer, StartFailure>,
+    applied_pricing: PriceTable,
+    metrics_db: PathBuf,
 ) {
     // Same-port handoff must first release the old accept socket. This state
     // mutation is instant; the candidate bind/retry itself happens below,
@@ -5160,7 +5406,12 @@ fn complete_serve_start<R: Runtime>(
         prepared.discard();
     }
     if let Some(old) = retire {
-        tauri::async_runtime::spawn_blocking(move || old.drain_and_shutdown());
+        tauri::async_runtime::spawn_blocking(move || {
+            old.drain_and_shutdown();
+            if let Err(error) = SqliteStore::backfill_unknown_costs(&metrics_db, &applied_pricing) {
+                eprintln!("post-apply historical cost backfill failed: {error}");
+            }
+        });
     }
     if let Some(view) = view {
         emit_serve_state(app, &view);
@@ -5177,7 +5428,7 @@ where
     R: Runtime,
     F: FnOnce(ClientConfig) -> Result<PreparedServer, StartFailure> + Send + 'static,
 {
-    let (config, generation, snapshot, serve_view) = {
+    let (config, generation, snapshot, serve_view, metrics_db) = {
         let mut inner = state.0.lock().unwrap();
         if let Some(expected) = expected_stopped_generation {
             if !menu_action_expectation_matches(
@@ -5205,6 +5456,7 @@ where
         }
         let config = inner.materialize()?;
         let revision = inner.save_draft()?;
+        let metrics_db = inner.data_dir().join("metrics.sqlite");
         let generation = inner
             .server
             .generation()
@@ -5226,18 +5478,25 @@ where
         };
         let snapshot = inner.snapshot();
         let serve_view = snapshot.serve.clone();
-        (config, generation, snapshot, serve_view)
+        (config, generation, snapshot, serve_view, metrics_db)
     };
 
     emit_serve_state(&app, &serve_view);
     let completion_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let applied_pricing = config.pricing.clone();
         let result =
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prepare(config))) {
                 Ok(result) => result,
                 Err(_) => Err(StartFailure::new("startup_task", "后台启动任务异常退出")),
             };
-        complete_serve_start(&completion_app, generation, result);
+        complete_serve_start(
+            &completion_app,
+            generation,
+            result,
+            applied_pricing,
+            metrics_db,
+        );
     });
     Ok(Some(snapshot))
 }
@@ -5855,7 +6114,7 @@ async fn list_public_provider_models(
     let requested: Vec<String> = requested.into_iter().collect();
     let (data_dir, egress, egress_secrets) = {
         let inner = state.0.lock().unwrap();
-        let egress: EgressConfig = serde_json::from_value(inner.draft["egress"].clone())
+        let egress = draft_egress_config(&inner.draft)
             .map_err(|error| format!("The egress configuration is invalid: {error}"))?;
         (
             inner.data_dir(),
@@ -5890,8 +6149,7 @@ async fn suggest_model_price(
         .filter(|value| !value.is_empty());
     let (data_dir, egress, egress_secrets) = {
         let inner = state.0.lock().unwrap();
-        let egress: EgressConfig = serde_json::from_value(inner.draft["egress"].clone())
-            .map_err(|error| format!("出站配置不合法：{error}"))?;
+        let egress = draft_egress_config(&inner.draft)?;
         (
             inner.data_dir(),
             egress.clone(),
@@ -5926,6 +6184,87 @@ fn configured_upstream_models(inner: &AppInner, name: &str) -> Result<BTreeSet<S
                 .ok_or_else(|| format!("Provider `{name}` has an invalid model entry"))
         })
         .collect()
+}
+
+fn configured_public_price_provider_id(inner: &AppInner, name: &str) -> Result<String, String> {
+    let upstream = inner.draft["upstreams"]
+        .get(name)
+        .ok_or_else(|| format!("Provider `{name}` is not configured"))?;
+    if upstream["provider"].as_str() != Some("openai-compatible") {
+        return Err(format!(
+            "Provider `{name}` does not support automatic public price import"
+        ));
+    }
+    let base_url = upstream["base_url"]
+        .as_str()
+        .ok_or_else(|| format!("Provider `{name}` has no valid Base URL"))?;
+    let endpoint = ProviderEndpoint::try_new(base_url).map_err(|error| error.to_string())?;
+    if endpoint.is_loopback() {
+        return Err("Local Provider prices must be configured explicitly".to_owned());
+    }
+    let access_tier = upstream["access_tier"].as_str().unwrap_or_default();
+    let brand_id = provider_brand_id(name, &endpoint.as_str(), access_tier).ok_or_else(|| {
+        format!("Provider `{name}` has no authoritative public price catalog mapping")
+    })?;
+    Ok(pricing_catalog::normalize_provider_id(brand_id))
+}
+
+#[derive(Clone, Debug)]
+struct PriceImportTarget {
+    upstream: Value,
+    upstream_epoch: u64,
+    price_version: u32,
+}
+
+fn capture_price_import_target(
+    inner: &AppInner,
+    upstream_name: &str,
+) -> Result<PriceImportTarget, String> {
+    let upstream = inner.draft["upstreams"]
+        .get(upstream_name)
+        .cloned()
+        .ok_or_else(|| format!("Provider `{upstream_name}` is not configured"))?;
+    Ok(PriceImportTarget {
+        upstream,
+        upstream_epoch: inner
+            .upstream_epochs
+            .get(upstream_name)
+            .copied()
+            .unwrap_or_default(),
+        price_version: draft_price_table(inner)?.version,
+    })
+}
+
+fn ensure_price_import_target_unchanged(
+    inner: &AppInner,
+    upstream_name: &str,
+    expected: &PriceImportTarget,
+) -> Result<(), String> {
+    let current = capture_price_import_target(inner, upstream_name)?;
+    if current.upstream != expected.upstream
+        || current.upstream_epoch != expected.upstream_epoch
+        || current.price_version != expected.price_version
+    {
+        return Err(format!(
+            "Provider `{upstream_name}` or its price table changed while public prices were loading. Retry the import"
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_automatic_price_suggestions_fresh(
+    suggestions: &[RequestedModelPriceSuggestion],
+) -> Result<(), String> {
+    if suggestions
+        .iter()
+        .any(|value| value.suggestion.catalog_source != "live")
+    {
+        return Err(
+            "Automatic price import requires a live public catalog; cached prices are advisory only"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 fn apply_public_model_prices(
@@ -5995,21 +6334,11 @@ fn apply_public_model_prices(
 async fn import_model_prices_for_provider(
     state: State<'_, AppStateManaged>,
     upstream_name: String,
-    catalog_provider_id: Option<String>,
     model_ids: Vec<String>,
 ) -> Result<ModelPriceImportResultView, String> {
     let upstream_name = upstream_name.trim().to_owned();
     if upstream_name.is_empty() {
         return Err("Provider name is required for a price import".to_owned());
-    }
-    let catalog_provider_id = catalog_provider_id
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    if catalog_provider_id
-        .as_ref()
-        .is_some_and(|value| value.len() > 128)
-    {
-        return Err("Catalog Provider ID must not exceed 128 bytes".to_owned());
     }
     let mut requested_models = BTreeSet::new();
     for model in model_ids {
@@ -6025,10 +6354,11 @@ async fn import_model_prices_for_provider(
         return Err("A price import must contain 1-512 unique models".to_owned());
     }
 
-    let (data_dir, egress, egress_secrets) = {
+    let (data_dir, egress, egress_secrets, expected_target, catalog_provider_id) = {
         let inner = state.0.lock().unwrap();
         inner.ensure_editable()?;
         let configured = configured_upstream_models(&inner, &upstream_name)?;
+        let catalog_provider_id = configured_public_price_provider_id(&inner, &upstream_name)?;
         if let Some(model) = requested_models
             .iter()
             .find(|model| !configured.contains(*model))
@@ -6037,19 +6367,21 @@ async fn import_model_prices_for_provider(
                 "Model `{model}` is not configured for Provider `{upstream_name}`"
             ));
         }
-        let egress: EgressConfig = serde_json::from_value(inner.draft["egress"].clone())
-            .map_err(|error| format!("出站配置不合法：{error}"))?;
+        let egress = draft_egress_config(&inner.draft)?;
+        let expected_target = capture_price_import_target(&inner, &upstream_name)?;
         (
             inner.data_dir(),
             egress.clone(),
             secrets::SecretStore::from_egress_config(&egress, &inner.data_dir()),
+            expected_target,
+            catalog_provider_id,
         )
     };
     let requested_for_catalog: Vec<String> = requested_models.iter().cloned().collect();
     let suggestions = tauri::async_runtime::spawn_blocking(move || {
-        pricing_catalog::suggest_many_with_cache_egress(
+        pricing_catalog::suggest_many_live_with_egress(
             &data_dir,
-            catalog_provider_id.as_deref(),
+            Some(&catalog_provider_id),
             &requested_for_catalog,
             &egress,
             &egress_secrets,
@@ -6057,8 +6389,10 @@ async fn import_model_prices_for_provider(
     })
     .await
     .map_err(|error| format!("Public price catalog task ended unexpectedly: {error}"))??;
+    ensure_automatic_price_suggestions_fresh(&suggestions)?;
 
     let mut inner = state.0.lock().unwrap();
+    ensure_price_import_target_unchanged(&inner, &upstream_name, &expected_target)?;
     let (imported, existing, missing_model_ids, price_version) =
         apply_public_model_prices(&mut inner, &upstream_name, &requested_models, suggestions)?;
     Ok(ModelPriceImportResultView {
@@ -6107,8 +6441,6 @@ fn set_model_price(
     inner.draft["pricing"] = serde_json::to_value(&next).map_err(|error| error.to_string())?;
     inner.observe_draft()?;
     inner.save_draft()?;
-    let db = inner.data_dir().join("metrics.sqlite");
-    SqliteStore::backfill_unknown_costs(&db, &next)?;
     Ok(next)
 }
 
@@ -8163,6 +8495,28 @@ mod tests {
     }
 
     #[test]
+    fn remote_http_discovery_fails_before_network_access_even_without_credentials() {
+        let root = scratch_home("credentialed-http-discovery");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        )))));
+
+        let error = tauri::async_runtime::block_on(discover_provider_models(
+            app.state(),
+            "remote_http".to_owned(),
+            "http://192.0.2.1/v1".to_owned(),
+            None,
+        ))
+        .expect_err("a remote plaintext endpoint must fail before the request starts");
+
+        assert!(error.contains("must use HTTPS"), "{error}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn a_legacy_chat_only_config_is_migrated_in_memory_with_absolute_runtime_paths() {
         let root = scratch_home("legacy");
         let mut draft = template_for_test(&root);
@@ -8751,8 +9105,8 @@ mod tests {
         let catalog_cost = model_catalog::CatalogCostView {
             input: Some(0.2),
             output: Some(0.6),
-            cache_read: None,
-            cache_write: None,
+            cache_read: Some(0.02),
+            cache_write: Some(0.2),
         };
         let catalog_price = catalog_cost_to_model_price(&catalog_cost).unwrap();
         let catalog = ["operator-owned", "unknown"]
@@ -8791,6 +9145,17 @@ mod tests {
         );
         assert_eq!(pricing.models["provider/unknown"], catalog_price);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn catalog_cost_requires_every_billed_token_class() {
+        let partial = model_catalog::CatalogCostView {
+            input: Some(0.2),
+            output: Some(0.6),
+            cache_read: Some(0.02),
+            cache_write: None,
+        };
+        assert!(catalog_cost_to_model_price(&partial).is_none());
     }
 
     #[test]
@@ -11119,6 +11484,28 @@ mod tests {
             .iter()
             .all(|provider| provider.name != "unknown"));
 
+        let error = match add_provider_with_credential(
+            app.state(),
+            "remote_http".to_owned(),
+            "http://192.0.2.1/v1".to_owned(),
+            vec!["model".to_owned()],
+            None,
+            false,
+            "env".to_owned(),
+            Some("REMOTE_HTTP_API_KEY".to_owned()),
+            None,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("desktop creation must reject credentialed remote HTTP"),
+        };
+        assert!(error.contains("must use HTTPS"), "{error}");
+        let after_http = get_state(app.state());
+        assert_eq!(after_http.draft_revision, before);
+        assert!(after_http
+            .providers
+            .iter()
+            .all(|provider| provider.name != "remote_http"));
+
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -11706,6 +12093,12 @@ mod tests {
 
     #[test]
     fn public_price_batch_scopes_models_preserves_manual_values_and_bumps_once() {
+        use token_station_metrics::{
+            CostKind, RecordedDecidedBy, Recorder, RequestRecord, RoutingRecord,
+        };
+        use token_station_protocol::Usage;
+        use token_station_router_core::RequestFeatures;
+
         let root = scratch_home("public-price-batch");
         let mut draft = template_for_test(&root);
         draft["upstreams"]["fixture"] = json!({
@@ -11746,6 +12139,12 @@ mod tests {
             "model-b".to_owned(),
         ]);
 
+        let mut stale = vec![suggestion("model-b", 2)];
+        stale[0].suggestion.catalog_source = "stale_cache".to_owned();
+        assert!(ensure_automatic_price_suggestions_fresh(&stale)
+            .unwrap_err()
+            .contains("cached prices are advisory only"));
+
         let result = apply_public_model_prices(
             &mut inner,
             "fixture",
@@ -11760,6 +12159,39 @@ mod tests {
         assert_eq!(pricing.models["fixture/model-a"].input_per_mtok, 99);
         assert_eq!(pricing.models["fixture/model-b"].input_per_mtok, 2);
         assert!(!pricing.models.contains_key("model-b"));
+
+        let data_dir = inner.data_dir();
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let db = data_dir.join("metrics.sqlite");
+        let store = SqliteStore::open(&db).unwrap();
+        let mut unknown = RequestRecord::begin(1, "openai-responses");
+        unknown.request_id = "auto-price-backfill".to_owned();
+        unknown.requested_model = "model-b".to_owned();
+        unknown.status = 200;
+        unknown.routing = Some(RoutingRecord {
+            upstream: "fixture".to_owned(),
+            model: "model-b".to_owned(),
+            pool: "main".to_owned(),
+            decided_by: RecordedDecidedBy::Default,
+            fallbacks: 0,
+            features: RequestFeatures::default(),
+        });
+        unknown.usage = Some(Usage {
+            input_tokens: 1_000_000,
+            ..Usage::default()
+        });
+        unknown.cost_kind = CostKind::Unknown;
+        store.record(&unknown);
+        drop(store);
+
+        inner
+            .save_draft()
+            .expect("saving an automatically imported price also backfills receipts");
+        let receipts = SqliteStore::recent_receipts(&db, 5).unwrap();
+        assert_eq!(receipts[0].cost_kind, CostKind::Estimated);
+        assert_eq!(receipts[0].cost_micros, Some(2));
+        assert_eq!(receipts[0].price_version, Some(5));
+
         let unconfigured = BTreeSet::from(["model-outside-provider".to_owned()]);
         let error = apply_public_model_prices(
             &mut inner,
@@ -11770,6 +12202,243 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("is not configured for Provider"), "{error}");
         assert_eq!(draft_price_table(&inner).unwrap().version, 5);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn public_price_import_rejects_a_changed_target_snapshot() {
+        let root = scratch_home("public-price-stale-target");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://old.example/v1",
+            "models": [{"model": "model-a"}]
+        });
+        let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+        let target = capture_price_import_target(&inner, "fixture").unwrap();
+        let original = inner.draft["upstreams"]["fixture"].clone();
+
+        inner.draft["upstreams"]["fixture"]["base_url"] = json!("https://new.example/v1");
+        inner.observe_draft().unwrap();
+        inner.draft["upstreams"]["fixture"] = original;
+        inner.observe_draft().unwrap();
+
+        let restored = capture_price_import_target(&inner, "fixture").unwrap();
+        assert_eq!(restored.upstream, target.upstream);
+        assert_eq!(restored.price_version, target.price_version);
+        assert!(restored.upstream_epoch > target.upstream_epoch);
+
+        let error = ensure_price_import_target_unchanged(&inner, "fixture", &target)
+            .expect_err("an ABA edit must still invalidate the old Provider identity");
+        assert!(
+            error.contains("changed while public prices were loading"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn public_price_import_rejects_a_secret_only_identity_rotation() {
+        let root = scratch_home("public-price-secret-rotation");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://same.example/v1",
+            "auth": {"slot": "provider_api_key", "store": true},
+            "models": [{"model": "model-a"}]
+        });
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            draft,
+            None,
+        )))));
+        let target = {
+            let state = app.state::<AppStateManaged>();
+            let inner = state.0.lock().unwrap();
+            capture_price_import_target(&inner, "fixture").unwrap()
+        };
+
+        edit_provider(
+            app.state(),
+            "fixture".to_owned(),
+            "https://same.example/v1".to_owned(),
+            Some("rotated-secret".to_owned()),
+        )
+        .expect("a stored credential may be rotated without changing its descriptor");
+
+        let state = app.state::<AppStateManaged>();
+        let inner = state.0.lock().unwrap();
+        let rotated = capture_price_import_target(&inner, "fixture").unwrap();
+        assert_eq!(rotated.upstream, target.upstream);
+        assert_eq!(rotated.price_version, target.price_version);
+        assert!(rotated.upstream_epoch > target.upstream_epoch);
+        ensure_price_import_target_unchanged(&inner, "fixture", &target)
+            .expect_err("a key rotation must invalidate an in-flight price import");
+        drop(inner);
+        secrets::store_remove(&root, "fixture", "provider_api_key").ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn provider_discovery_targets_reject_identity_aba_absent_add_and_older_generations() {
+        let root = scratch_home("provider-discovery-targets");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://a.example/v1",
+            "models": [{"model": "model-a"}]
+        });
+        let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+
+        let original = inner.draft["upstreams"]["fixture"].clone();
+        let aba_target = begin_provider_discovery_target(&mut inner, "fixture");
+        inner.draft["upstreams"]["fixture"]["base_url"] = json!("https://b.example/v1");
+        inner.observe_draft().unwrap();
+        inner.draft["upstreams"]["fixture"] = original;
+        inner.observe_draft().unwrap();
+        ensure_provider_discovery_target_unchanged(&inner, "fixture", &aba_target)
+            .expect_err("an A-B-A edit must invalidate discovery");
+
+        let older = begin_provider_discovery_target(&mut inner, "fixture");
+        let latest = begin_provider_discovery_target(&mut inner, "fixture");
+        ensure_provider_discovery_target_unchanged(&inner, "fixture", &older)
+            .expect_err("only the latest same-identity discovery may commit");
+        ensure_provider_discovery_target_unchanged(&inner, "fixture", &latest)
+            .expect("the latest same-identity discovery remains current");
+
+        let absent = begin_provider_discovery_target(&mut inner, "new-provider");
+        inner.draft["upstreams"]["new-provider"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://new.example/v1",
+            "models": [{"model": "model-a"}]
+        });
+        inner.observe_draft().unwrap();
+        ensure_provider_discovery_target_unchanged(&inner, "new-provider", &absent)
+            .expect_err("adding a same-name Provider must invalidate prior discovery");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn provider_model_ids_are_bounded_normalized_and_unique() {
+        assert_eq!(
+            normalize_provider_model_ids(vec![
+                " model-b ".to_owned(),
+                "model-a".to_owned(),
+                "model-b".to_owned(),
+            ])
+            .unwrap(),
+            vec!["model-b".to_owned(), "model-a".to_owned()]
+        );
+        assert!(normalize_provider_model_ids(vec!["bad\nmodel".to_owned()]).is_err());
+        assert!(normalize_provider_model_ids(vec![
+            "x".repeat(model_catalog::MAX_MODEL_ID_BYTES + 1)
+        ])
+        .is_err());
+        assert!(normalize_provider_model_ids(vec![
+            "same".to_owned();
+            model_catalog::MAX_MODELS_PER_PROVIDER + 1
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn provider_transport_rejects_remote_http_and_proxied_loopback_credentials() {
+        let direct = EgressConfig::default();
+        let loopback = ProviderEndpoint::try_new("http://127.0.0.1:11434/v1").unwrap();
+        ensure_credential_transport(&loopback, &direct)
+            .expect("direct loopback credentials stay on the device");
+
+        let proxied: EgressConfig = serde_json::from_value(json!({
+            "mode": "http",
+            "proxy_url": "http://proxy.example.test:8080"
+        }))
+        .unwrap();
+        assert!(ensure_credential_transport(&loopback, &proxied)
+            .unwrap_err()
+            .contains("must bypass"));
+
+        let bypassed: EgressConfig = serde_json::from_value(json!({
+            "mode": "http",
+            "proxy_url": "http://proxy.example.test:8080",
+            "no_proxy": ["127.0.0.1"]
+        }))
+        .unwrap();
+        ensure_credential_transport(&loopback, &bypassed)
+            .expect("an exact proxy bypass keeps loopback credentials local");
+
+        let remote = ProviderEndpoint::try_new("http://192.0.2.1/v1").unwrap();
+        assert!(ensure_credential_transport(&remote, &direct)
+            .unwrap_err()
+            .contains("must use HTTPS"));
+    }
+
+    #[test]
+    fn provider_health_uses_the_configured_production_engine() {
+        let draft = json!({
+            "plugins": {"providers": {
+                "openai-compatible": "provider-openai-compatible",
+                "azure-openai-v1": "provider-openai-compatible"
+            }},
+            "egress": {"mode": "direct"}
+        });
+        let eligible = json!({
+            "provider": "openai-compatible",
+            "provider_call": "south_v1_buffered_streaming",
+            "auth": {"env": "PROVIDER_API_KEY"}
+        });
+        assert!(provider_health_uses_south(&draft, &eligible, true));
+
+        let mut proxied = draft.clone();
+        proxied["egress"] = json!({
+            "mode": "http",
+            "proxy_url": "http://proxy.example.test:8080"
+        });
+        assert!(!provider_health_uses_south(&proxied, &eligible, true));
+
+        let mut native = eligible.clone();
+        native["api_dialect"] = json!("anthropic_native");
+        assert!(!provider_health_uses_south(&draft, &native, true));
+        assert!(!provider_health_uses_south(&draft, &eligible, false));
+
+        let azure_header = json!({
+            "provider": "azure-openai-v1",
+            "provider_call": "south_v1_buffered_streaming_header_auth",
+            "auth": {"store": true}
+        });
+        assert!(provider_health_uses_south(&draft, &azure_header, true));
+        let mut azure_legacy_south = azure_header;
+        azure_legacy_south["provider_call"] = json!("south_v1_buffered_streaming");
+        assert!(!provider_health_uses_south(
+            &draft,
+            &azure_legacy_south,
+            true
+        ));
+    }
+
+    #[test]
+    fn public_price_import_derives_its_catalog_namespace_from_provider_identity() {
+        let root = scratch_home("public-price-provider-mapping");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["glm_cn"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://open.bigmodel.cn/api/paas/v4",
+            "models": [{"model": "glm-5.2"}]
+        });
+        draft["upstreams"]["custom"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://custom.example/v1",
+            "models": [{"model": "custom-model"}]
+        });
+        let inner = AppInner::new(root.join("token-station.json"), draft, None);
+
+        assert_eq!(
+            configured_public_price_provider_id(&inner, "glm_cn").unwrap(),
+            "zhipuai"
+        );
+        assert!(configured_public_price_provider_id(&inner, "custom")
+            .unwrap_err()
+            .contains("no authoritative"));
         std::fs::remove_dir_all(root).ok();
     }
 

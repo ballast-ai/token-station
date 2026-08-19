@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   addProvider,
   discoverProviderModels,
+  getState,
   importModelPricesForProvider,
   listPublicProviderModels,
   previewProviderEndpoints,
@@ -64,6 +65,7 @@ interface AddProviderPageProps {
   existingNames: string[];
   onCancel: () => void;
   onAdded: (state: StateView, message: string) => void;
+  onStateChanged?: (state: StateView) => void;
   catalogMode: ProviderCatalogMode;
   onCatalogModeChange: (mode: ProviderCatalogMode) => void;
   regularFilters: RegularCatalogFilters;
@@ -119,20 +121,6 @@ function matchesCatalogSearch(searchableText: string, query: string): boolean {
   return terms.every((term) => normalizedText.includes(term));
 }
 
-const PUBLIC_PRICE_PROVIDER_IDS: Record<string, string> = {
-  gemini: "google",
-  glm_cn: "zhipuai",
-  glm: "zai",
-  glm_coding: "zai-coding-plan",
-  kimi: "moonshotai-cn",
-  kimi_global: "moonshotai",
-  qwen: "alibaba-cn",
-  qwen_singapore: "alibaba",
-  qwen_us: "alibaba",
-  minimax_cn: "minimax-cn",
-  minimax_global: "minimax",
-};
-
 function shouldDefaultPublicPriceImport(preset: ProviderPreset | undefined): boolean {
   return Boolean(preset && !preset.local && preset.subscription !== "Coding Plan");
 }
@@ -141,6 +129,7 @@ export default function AddProviderPage({
   existingNames,
   onCancel,
   onAdded,
+  onStateChanged,
   catalogMode,
   onCatalogModeChange,
   regularFilters,
@@ -204,10 +193,9 @@ export default function AddProviderPage({
   const catalogModels = preset?.models ?? [];
   const allModels = [...new Set([...catalogModels, ...discoveredModels, ...extraModels])];
   const configuringRegular = Boolean(presetId);
-  const publicPriceImportAvailable = !local && providerDialect !== "azure-openai-v1";
-  const publicPriceProviderId = isCustom
-    ? null
-    : PUBLIC_PRICE_PROVIDER_IDS[presetId] ?? presetId;
+  const publicPriceImportAvailable = !isCustom
+    && !local
+    && providerDialect !== "azure-openai-v1";
 
   const visibleRegular = useMemo(() => {
     const query = regularFilters.query.trim().toLocaleLowerCase();
@@ -253,8 +241,17 @@ export default function AddProviderPage({
     const query = modelFirstQuery.trim();
     return query
       ? searchModelOfferings(query, catalogProviders)
-      : listModelOfferings(PROVIDER_CATALOG);
+      : listModelOfferings(catalogProviders);
   }, [catalogProviders, modelFirstQuery]);
+
+  useEffect(() => {
+    if (!preset || isCustom) return;
+    const available = new Set([...catalogModels, ...discoveredModels, ...extraModels]);
+    setPicked((current) => {
+      const next = current.filter((model) => available.has(model));
+      return next.length === current.length ? current : next;
+    });
+  }, [catalogModels, discoveredModels, extraModels, isCustom, preset]);
 
   useEffect(() => {
     if (catalogMode !== "regular" && entryMode !== "model-first") return;
@@ -472,7 +469,7 @@ export default function AddProviderPage({
     setSaving(true);
     setError("");
     try {
-      let next = await addProvider(
+      const next = await addProvider(
         name.trim(),
         url.trim(),
         picked,
@@ -482,14 +479,19 @@ export default function AddProviderPage({
         needsKey && credentialSource !== "store" ? credentialReference.trim() : null,
         providerDialect,
       );
+      onAdded(
+        next,
+        isExisting
+          ? copy(`Provider "${name.trim()}" updated`, `供应商“${name.trim()}”已更新`)
+          : copy("Provider added", "供应商已添加"),
+      );
       if (importPublicPrices && publicPriceImportAvailable) {
         try {
           const imported = await importModelPricesForProvider(
             name.trim(),
-            publicPriceProviderId,
             picked,
           );
-          next = imported.state;
+          onStateChanged?.(imported.state);
           if (imported.missing_model_ids.length > 0) {
             showInfo(copy(
               `${imported.imported} public prices imported; ${imported.missing_model_ids.length} models remain unknown.`,
@@ -501,14 +503,13 @@ export default function AddProviderPage({
             `Provider added, but public prices could not be imported: ${humanizeAppError(priceError, language)}`,
             `供应商已添加，但公开价格导入失败：${humanizeAppError(priceError, language)}`,
           ), `provider-price-import:${name.trim()}`);
+          try {
+            onStateChanged?.(await getState());
+          } catch (refreshError) {
+            showError(humanizeAppError(refreshError), `provider-price-refresh:${name.trim()}`);
+          }
         }
       }
-      onAdded(
-        next,
-        isExisting
-          ? copy(`Provider "${name.trim()}" updated`, `供应商“${name.trim()}”已更新`)
-          : copy("Provider added", "供应商已添加"),
-      );
     } catch (caught) {
       showError(humanizeAppError(caught), `provider-save:${name.trim()}`);
     } finally {

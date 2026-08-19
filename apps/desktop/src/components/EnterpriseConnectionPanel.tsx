@@ -16,6 +16,12 @@ interface EnterpriseConnectionPanelProps {
   onConnected: (state: StateView, providerName: string, models: string[]) => void;
 }
 
+interface VerifiedConnection {
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+}
+
 function endpointProviderName(baseUrl: string, providers: ProviderView[]): string {
   let host = "endpoint";
   try {
@@ -45,6 +51,7 @@ export default function EnterpriseConnectionPanel({
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState("");
   const [completedName, setCompletedName] = useState("");
+  const [verifiedConnection, setVerifiedConnection] = useState<VerifiedConnection | null>(null);
   const suggestedName = useMemo(
     () => endpointProviderName(baseUrl.trim(), providers),
     [baseUrl, providers],
@@ -53,6 +60,14 @@ export default function EnterpriseConnectionPanel({
   const explicitNameExists = Boolean(
     accountName.trim() && providers.some((provider) => provider.name === accountName.trim()),
   );
+
+  const invalidateVerification = () => {
+    setModels([]);
+    setSelectedModels([]);
+    setVerifiedConnection(null);
+    setCompletedName("");
+    setMessage("");
+  };
 
   const verify = async () => {
     if (!baseUrl.trim() || !apiKey.trim()) {
@@ -68,9 +83,29 @@ export default function EnterpriseConnectionPanel({
     setCompletedName("");
     setModels([]);
     setSelectedModels([]);
+    setVerifiedConnection(null);
     try {
-      const discovery = await discoverProviderModels(resolvedName, baseUrl.trim(), apiKey.trim());
+      const connection = {
+        name: resolvedName,
+        baseUrl: baseUrl.trim(),
+        apiKey: apiKey.trim(),
+      };
+      const discovery = await discoverProviderModels(
+        connection.name,
+        connection.baseUrl,
+        connection.apiKey,
+      );
+      if (discovery.source !== "live") {
+        setMessage(discovery.warning
+          ? humanizeAppError(discovery.warning, language)
+          : copy(
+              "Live credential verification failed. Retry the connection.",
+              "实时凭据验证失败，请重试连接。",
+            ));
+        return;
+      }
       setModels(discovery.models);
+      setVerifiedConnection(discovery.models.length > 0 ? connection : null);
       setMessage(discovery.models.length > 0
         ? copy(
             `Connection verified. Choose the models to connect.`,
@@ -85,6 +120,24 @@ export default function EnterpriseConnectionPanel({
   };
 
   const connect = async () => {
+    const currentConnection = {
+      name: resolvedName,
+      baseUrl: baseUrl.trim(),
+      apiKey: apiKey.trim(),
+    };
+    if (
+      !verifiedConnection
+      || verifiedConnection.name !== currentConnection.name
+      || verifiedConnection.baseUrl !== currentConnection.baseUrl
+      || verifiedConnection.apiKey !== currentConnection.apiKey
+    ) {
+      invalidateVerification();
+      setMessage(copy(
+        "Connection details changed. Verify the endpoint again.",
+        "连接信息已变更，请重新验证端点。",
+      ));
+      return;
+    }
     if (selectedModels.length === 0) {
       setMessage(copy("Select at least one model.", "请至少选择一个模型。"));
       return;
@@ -110,6 +163,7 @@ export default function EnterpriseConnectionPanel({
       setAccountName("");
       setModels([]);
       setSelectedModels([]);
+      setVerifiedConnection(null);
       setMessage(copy(
         `${resolvedName} connected. Add its models to the enterprise route below.`,
         `${resolvedName} 已接入，请在下方选择参与企业路由的模型。`,
@@ -161,7 +215,10 @@ export default function EnterpriseConnectionPanel({
             placeholder="https://api.example.com/v1"
             value={baseUrl}
             disabled={disabled}
-            onChange={(event) => setBaseUrl(event.target.value)}
+            onChange={(event) => {
+              setBaseUrl(event.target.value);
+              invalidateVerification();
+            }}
           />
         </label>
         <label>
@@ -173,7 +230,10 @@ export default function EnterpriseConnectionPanel({
             placeholder="sk-…"
             value={apiKey}
             disabled={disabled}
-            onChange={(event) => setApiKey(event.target.value)}
+            onChange={(event) => {
+              setApiKey(event.target.value);
+              invalidateVerification();
+            }}
           />
         </label>
         <label>
@@ -183,7 +243,10 @@ export default function EnterpriseConnectionPanel({
             placeholder={suggestedName}
             value={accountName}
             disabled={disabled}
-            onChange={(event) => setAccountName(event.target.value)}
+            onChange={(event) => {
+              setAccountName(event.target.value);
+              invalidateVerification();
+            }}
           />
         </label>
       </div>

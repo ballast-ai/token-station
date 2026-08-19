@@ -107,4 +107,67 @@ describe("EnterpriseConnectionPanel", () => {
     );
     expect(screen.getByLabelText("API Key")).toHaveValue("");
   });
+
+  it.each(["Base URL", "API Key", "账户名称"])(
+    "invalidates verified models when %s changes",
+    async (field) => {
+      const user = userEvent.setup();
+      discoverProviderModels.mockResolvedValue({
+        models: ["enterprise-chat"],
+        source: "live",
+        fetched_at_ms: 1,
+        warning: null,
+      });
+
+      render(
+        <EnterpriseConnectionPanel
+          providers={[]}
+          busy={false}
+          onConnected={vi.fn()}
+        />,
+      );
+
+      await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://api.example.com/v1");
+      await user.type(screen.getByLabelText("API Key"), "secret-key");
+      await user.click(screen.getByRole("button", { name: "验证连接" }));
+      expect(await screen.findByRole("checkbox", { name: "enterprise-chat" })).toBeInTheDocument();
+
+      const input = screen.getByLabelText(field);
+      if (field === "账户名称") {
+        await user.type(input, "changed-account");
+      } else {
+        await user.clear(input);
+        await user.type(input, field === "Base URL" ? "https://other.example.com/v1" : "other-key");
+      }
+
+      expect(screen.queryByRole("checkbox", { name: "enterprise-chat" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "接入所选模型" })).not.toBeInTheDocument();
+    },
+  );
+
+  it("does not treat a cached discovery fallback as live credential verification", async () => {
+    const user = userEvent.setup();
+    discoverProviderModels.mockResolvedValue({
+      models: ["enterprise-chat"],
+      source: "cache",
+      fetched_at_ms: 1,
+      warning: "Provider rejected the API key",
+    });
+
+    render(
+      <EnterpriseConnectionPanel
+        providers={[]}
+        busy={false}
+        onConnected={vi.fn()}
+      />,
+    );
+
+    await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://api.example.com/v1");
+    await user.type(screen.getByLabelText("API Key"), "invalid-key");
+    await user.click(screen.getByRole("button", { name: "验证连接" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("凭据无法使用");
+    expect(screen.queryByRole("checkbox", { name: "enterprise-chat" })).not.toBeInTheDocument();
+    expect(addProvider).not.toHaveBeenCalled();
+  });
 });

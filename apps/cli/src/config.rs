@@ -995,6 +995,18 @@ impl ClientConfig {
             token_station_router_core::UpstreamRef::new(name.clone())
                 .map_err(|error| error.to_string())?;
             validate_local_identity(name, upstream)?;
+            if !upstream.base_url.uses_https() && !upstream.base_url.is_loopback() {
+                return Err(format!(
+                    "upstream `{name}` must use HTTPS unless its endpoint is loopback"
+                ));
+            }
+            if !upstream.base_url.uses_https()
+                && !self.egress.bypasses_proxy(&upstream.base_url.as_str())?
+            {
+                return Err(format!(
+                    "upstream `{name}` uses plaintext loopback traffic and must bypass the configured proxy"
+                ));
+            }
             if let Some(auth) = &upstream.auth {
                 let sources = auth.source_count();
                 if sources != 1 {
@@ -1269,6 +1281,70 @@ mod tests {
             .expect_err("strict local routing must be grounded in a loopback endpoint");
         assert!(error.to_string().contains("loopback"), "{error}");
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn credentialed_remote_upstreams_require_https() {
+        let mut remote = example();
+        remote["upstreams"]["openai_personal"]["base_url"] =
+            serde_json::json!("http://api.example.test/v1");
+        let remote: ClientConfig = serde_json::from_value(remote).unwrap();
+        assert!(remote.validate().unwrap_err().contains("HTTPS"));
+
+        let mut loopback = example();
+        loopback["upstreams"]["openai_personal"]["base_url"] =
+            serde_json::json!("http://127.0.0.1:11434/v1");
+        let loopback: ClientConfig = serde_json::from_value(loopback).unwrap();
+        loopback
+            .validate()
+            .expect("loopback HTTP can carry a local credential");
+
+        let mut proxied_loopback = example();
+        proxied_loopback["upstreams"]["openai_personal"]["base_url"] =
+            serde_json::json!("http://127.0.0.1:11434/v1");
+        proxied_loopback["egress"] = serde_json::json!({
+            "mode": "http",
+            "proxy_url": "http://proxy.example.test:8080"
+        });
+        let proxied_loopback: ClientConfig = serde_json::from_value(proxied_loopback).unwrap();
+        assert!(
+            proxied_loopback
+                .validate()
+                .unwrap_err()
+                .contains("must bypass")
+        );
+
+        let mut anonymous_proxied: serde_json::Value =
+            serde_json::to_value(&proxied_loopback).unwrap();
+        anonymous_proxied["upstreams"]["openai_personal"]
+            .as_object_mut()
+            .unwrap()
+            .remove("auth");
+        let anonymous_proxied: ClientConfig = serde_json::from_value(anonymous_proxied).unwrap();
+        assert!(
+            anonymous_proxied
+                .validate()
+                .unwrap_err()
+                .contains("must bypass")
+        );
+
+        let mut bypassed_loopback: serde_json::Value =
+            serde_json::to_value(&proxied_loopback).unwrap();
+        bypassed_loopback["egress"]["no_proxy"] = serde_json::json!(["127.0.0.1"]);
+        let bypassed_loopback: ClientConfig = serde_json::from_value(bypassed_loopback).unwrap();
+        bypassed_loopback
+            .validate()
+            .expect("an exact no_proxy rule keeps plaintext loopback credentials local");
+
+        let mut anonymous = example();
+        anonymous["upstreams"]["openai_personal"]["base_url"] =
+            serde_json::json!("http://api.example.test/v1");
+        anonymous["upstreams"]["openai_personal"]
+            .as_object_mut()
+            .unwrap()
+            .remove("auth");
+        let anonymous: ClientConfig = serde_json::from_value(anonymous).unwrap();
+        assert!(anonymous.validate().unwrap_err().contains("must use HTTPS"));
     }
 
     #[test]
