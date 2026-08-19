@@ -8,3 +8,9 @@
 - [OpenClaw](guides/openclaw.md)
 - [OpenCode with DeepSeek](guides/opencode-deepseek.md)
 - [Azure OpenAI v1 with South Header Auth](guides/azure-openai-v1-south-header-auth.md)
+
+## Design records
+
+South adoption design records (PR #91–#99 history) live in the private
+`token-station-doc` repository under `docs/design/` — this public repo
+intentionally ignores `/docs/design/` (see `.gitignore`).
