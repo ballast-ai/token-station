@@ -6318,6 +6318,152 @@ pre.block {
   }
 }
 
+/* 2026-08 Agent route summaries and enterprise endpoint connection */
+.overview-agent-route-list li {
+  grid-template-columns: 28px minmax(72px, .72fr) minmax(104px, 1.28fr);
+}
+
+.overview-agent-route-target {
+  min-width: 0;
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.overview-agent-route-target small,
+.overview-agent-route-target code {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overview-agent-route-target code {
+  color: var(--ink);
+  font: 500 9px/1.25 "IBM Plex Mono", monospace;
+}
+
+.direct-route-heading-actions,
+.quota-heading-actions,
+.agent-tier-heading-actions,
+.agent-tier-apply-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.direct-route-heading-actions {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.direct-route-heading-actions .btn,
+.quota-heading-actions .btn {
+  flex: 0 0 auto;
+}
+
+.quota-heading-actions { flex: 0 0 auto; }
+
+.agent-tier-heading-actions {
+  min-width: min(440px, 56%);
+  align-items: flex-end;
+  flex-direction: column;
+}
+
+.agent-tier-apply-actions { flex-wrap: wrap; }
+
+.enterprise-connection-panel {
+  display: grid;
+  gap: 18px;
+}
+
+.enterprise-credential-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, .8fr);
+  gap: 12px;
+}
+
+.enterprise-credential-grid label {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.enterprise-credential-grid label > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.enterprise-model-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px 18px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.enterprise-model-picker-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.enterprise-model-picker-head strong { font-size: 12px; }
+.enterprise-model-picker-head span { color: var(--muted); font-size: 10px; }
+
+.enterprise-model-options {
+  max-height: 176px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  overflow-y: auto;
+}
+
+.enterprise-model-options label {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.enterprise-model-options input { accent-color: var(--signal); }
+
+.enterprise-model-options span {
+  overflow: hidden;
+  font: 500 10px/1.25 "IBM Plex Mono", monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.enterprise-connection-status,
+.enterprise-secret-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.enterprise-connection-status { color: var(--ink); }
+
+@media (max-width: 820px) {
+  .enterprise-credential-grid { grid-template-columns: minmax(0, 1fr); }
+  .enterprise-model-options { grid-template-columns: minmax(0, 1fr); }
+  .agent-tier-heading-actions { width: 100%; min-width: 0; align-items: flex-start; }
+}
+
 /* Final product contracts: merged Home, Direct routing, and centered Overview. */
 .overview-main-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));

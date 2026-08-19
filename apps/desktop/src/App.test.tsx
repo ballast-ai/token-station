@@ -1338,14 +1338,10 @@ describe("desktop station navigation", () => {
     expect(nav.queryByRole("button", { name: "日志" })).toBeNull();
 
     expect(nav.getByRole("button", { name: "主页" })).toHaveAttribute("aria-current", "page");
-    const revisionChain = screen.getByTestId("revision-chain");
-    expect(revisionChain).toHaveAccessibleName("已保存 revision 0；待应用；未运行");
-    expect(screen.getByLabelText("系统摘要")).not.toContainElement(revisionChain);
     const snapshot = screen.getByRole("region", { name: "路由概览" });
-    expect(snapshot).toContainElement(revisionChain);
-    for (const tier of ["上档", "中档", "下档"]) {
-      expect(within(snapshot).getByText(tier)).toBeInTheDocument();
-    }
+    expect(within(snapshot).queryByTestId("revision-chain")).toBeNull();
+    expect(within(snapshot).getAllByRole("listitem")).toHaveLength(5);
+    expect(within(snapshot).getAllByText("全局 · 智能路由")).toHaveLength(5);
     expect(within(snapshot).queryByText("简单路由")).toBeNull();
     expect(within(snapshot).queryByText("额度优先")).toBeNull();
     expect(await screen.findByText(/成功率 91\.7% · P95 320ms/)).toBeInTheDocument();
@@ -1382,7 +1378,7 @@ describe("desktop station navigation", () => {
         direct_target: { upstream: "team-openai", model: "gpt-5.6" },
       });
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return [scannedClaude];
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
@@ -1390,9 +1386,8 @@ describe("desktop station navigation", () => {
     await user.click(await screen.findByRole("button", { name: "Token Station 主页" }));
     const snapshot = screen.getByRole("region", { name: "路由概览" });
 
-    expect(within(snapshot).getByText("简单路由")).toBeInTheDocument();
-    expect(within(snapshot).getByText("gpt-5.6")).toBeInTheDocument();
-    expect(within(snapshot).getByText("team-openai")).toBeInTheDocument();
+    expect(within(snapshot).getByText("全局 · 简单路由")).toBeInTheDocument();
+    expect(within(snapshot).getByText("team-openai / gpt-5.6")).toBeInTheDocument();
     expect(within(snapshot).queryByText("上档")).toBeNull();
     expect(within(snapshot).queryByText("未配置")).toBeNull();
   });
@@ -1405,15 +1400,14 @@ describe("desktop station navigation", () => {
         direct_target: null,
       });
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return [scannedClaude];
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Token Station 主页" }));
     const snapshot = screen.getByRole("region", { name: "路由概览" });
-    expect(within(snapshot).getByText("待选择供应商")).toBeInTheDocument();
-    expect(within(snapshot).getByText("待选择模型")).toBeInTheDocument();
+    expect(within(snapshot).getByText("待选择供应商 / 待选择模型")).toBeInTheDocument();
   });
 
   it("概览的额度优先快照展示账户数与实际目标", async () => {
@@ -1427,15 +1421,14 @@ describe("desktop station navigation", () => {
         ],
       });
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return [scannedClaude];
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Token Station 主页" }));
     const snapshot = screen.getByRole("region", { name: "路由概览" });
-    expect(within(snapshot).getByText("额度优先")).toBeInTheDocument();
-    expect(within(snapshot).getByText("2 个账户")).toBeInTheDocument();
+    expect(within(snapshot).getByText("全局 · 额度优先")).toBeInTheDocument();
     expect(within(snapshot).getByText("deepseek/deepseek-chat · team-openai/gpt-5.6"))
       .toBeInTheDocument();
     expect(within(snapshot).queryByText("上档")).toBeNull();
@@ -1635,7 +1628,9 @@ describe("desktop station navigation", () => {
     expect(screen.queryByRole("tablist", { name: "路由模式" })).toBeNull();
     expect(invokeMock).not.toHaveBeenCalledWith("set_routing_mode", expect.anything());
 
-    await user.click(screen.getByRole("button", { name: "保存并应用" }));
+    const enterpriseApply = screen.getByRole("button", { name: "保存并应用" });
+    expect(enterpriseApply.closest(".panel-head")).toBeInTheDocument();
+    await user.click(enterpriseApply);
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("set_routing_mode", { mode: "quota_first", agentId: null });
       expect(invokeMock).toHaveBeenCalledWith("set_quota_accounts", { accounts: [account] });

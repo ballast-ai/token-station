@@ -1022,6 +1022,12 @@ function StationApp() {
                     )
                   : copy("All Agents now follow global routing", "全部 Agent 已恢复跟随全局路由"),
               )}
+              onEnterpriseProviderConnected={(next, providerName, models) => {
+                showState(next, copy(
+                  `${providerName} connected with ${models.length} models.`,
+                  `${providerName} 已接入 ${models.length} 个模型。`,
+                ));
+              }}
               embedded
               scope={view === "enterprise-routing" ? "enterprise" : "global"}
             />

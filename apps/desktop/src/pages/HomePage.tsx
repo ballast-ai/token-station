@@ -4,6 +4,7 @@ import {
   type ProviderView,
   type QuotaAccount,
   type RoutingMode,
+  type StateView,
   type TierSlot,
   type TierView,
 } from "../api";
@@ -13,6 +14,7 @@ import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import RoutingModeSelector from "../components/RoutingModeSelector";
 import DirectRoutePanel from "../components/DirectRoutePanel";
+import EnterpriseConnectionPanel from "../components/EnterpriseConnectionPanel";
 
 interface HomePageProps {
   providers: ProviderView[];
@@ -46,6 +48,7 @@ interface HomePageProps {
   onRemoveKeyword: (slot: TierSlot, keyword: string) => void;
   onSave: () => void;
   onApplyAll: () => void;
+  onEnterpriseProviderConnected?: (state: StateView, providerName: string, models: string[]) => void;
   embedded?: boolean;
   scope?: "global" | "enterprise";
 }
@@ -77,6 +80,7 @@ export default function HomePage({
   onRemoveKeyword,
   onSave,
   onApplyAll,
+  onEnterpriseProviderConnected = () => {},
   embedded = false,
   scope = "global",
 }: HomePageProps) {
@@ -136,15 +140,22 @@ export default function HomePage({
       )}
 
       {enterprise ? (
-        <QuotaPriorityPanel
-          providers={providers}
-          accounts={quotaAccounts}
-          busy={busy}
-          applying={applying}
-          onSave={onSaveQuota}
-          onViewUsage={onViewQuotaUsage}
-          onSavePlan={onSaveQuotaPlan}
-        />
+        <>
+          <EnterpriseConnectionPanel
+            providers={providers}
+            busy={busy}
+            onConnected={onEnterpriseProviderConnected}
+          />
+          <QuotaPriorityPanel
+            providers={providers}
+            accounts={quotaAccounts}
+            busy={busy}
+            applying={applying}
+            onSave={onSaveQuota}
+            onViewUsage={onViewQuotaUsage}
+            onSavePlan={onSaveQuotaPlan}
+          />
+        </>
       ) : routingMode === "direct" ? (
         <DirectRoutePanel
           providers={providers}
@@ -191,6 +202,18 @@ export default function HomePage({
               onClick={() => setProfileOpen((current) => !current)}
             >
               {profileOpen ? copy("Close", "收起") : copy("Save as profile", "存为策略")}
+            </button>
+            <button className="btn" type="button" disabled={busy || applying} onClick={onApplyAll}>
+              {copy("Apply to all Agents", "应用到全部 Agent")}
+            </button>
+            <button
+              className="btn primary"
+              type="button"
+              data-onboarding-target="route-apply"
+              disabled={busy || applying}
+              onClick={onSave}
+            >
+              {applying ? copy("Applying…", "应用中…") : copy("Save and apply", "保存并应用")}
             </button>
           </div>
         </div>
@@ -265,20 +288,6 @@ export default function HomePage({
                 )}
               </span>
             )}
-          </div>
-          <div className="route-action-buttons">
-            <button className="btn" type="button" disabled={busy || applying} onClick={onApplyAll}>
-              {copy("Apply to all Agents", "应用到全部 Agent")}
-            </button>
-            <button
-              className="btn primary"
-              type="button"
-              data-onboarding-target="route-apply"
-              disabled={busy || applying}
-              onClick={onSave}
-            >
-              {applying ? copy("Applying…", "应用中…") : copy("Save and apply", "保存并应用")}
-            </button>
           </div>
         </footer>
       </section>

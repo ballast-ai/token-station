@@ -723,6 +723,8 @@ describe("AgentRoutePage multi-install admission", () => {
       </ErrorToastProvider>,
     );
 
+    expect(screen.getByRole("button", { name: "应用" }).closest(".panel-head"))
+      .toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "应用" }));
     let toastViewport = screen.getByTestId("error-toast-viewport");
     expect(await within(toastViewport).findByRole("status")).toHaveTextContent("已将主页路由应用到此 Agent");

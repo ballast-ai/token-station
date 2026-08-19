@@ -49,6 +49,19 @@ const agents: AgentView[] = registry.map((metadata, index) => ({
   catalog_warning: null,
 }));
 
+const routeOverride = {
+  mode: "custom" as const,
+  tiers: {
+    high: { upstream: "deepseek-main", model: "deepseek-v4" },
+    mid: { upstream: "deepseek-main", model: "deepseek-v4-flash" },
+    low: { upstream: "deepseek-main", model: "deepseek-v4-lite" },
+  },
+  config_error: null,
+  profile: null,
+  routing_mode: "direct" as const,
+  direct_target: { upstream: "deepseek-main", model: "deepseek-v4-flash" },
+};
+
 const state = {
   providers: [
     {
@@ -74,7 +87,7 @@ const state = {
     low: { upstream: null, model: null },
   },
   keywords: { high: [], mid: [], low: [] },
-  agent_routes: {},
+  agent_routes: { "agent-1": routeOverride },
   profiles: [],
   local_only: false,
   allow_cloud_fallback: false,
@@ -121,13 +134,19 @@ describe("OverviewPage summaries", () => {
     );
 
     const agentSummary = screen.getByRole("region", { name: "Agent 概览" });
-    expect(within(agentSummary).getByText("6 个 Agent")).toBeInTheDocument();
-    expect(within(agentSummary).getByText("2 个已接管")).toBeInTheDocument();
+    expect(within(agentSummary).getByText("已接入 2 个 Agent")).toBeInTheDocument();
+    expect(within(agentSummary).queryByText("2 个已接管")).toBeNull();
     expect(within(agentSummary).getAllByRole("listitem")).toHaveLength(5);
 
     const routeSummary = screen.getByRole("region", { name: "路由概览" });
-    expect(within(routeSummary).getByText("简单路由")).toBeInTheDocument();
-    expect(within(routeSummary).getByText("gpt-5.6-sol")).toBeInTheDocument();
+    expect(within(routeSummary).queryByTestId("revision-chain")).toBeNull();
+    expect(within(routeSummary).getAllByRole("listitem")).toHaveLength(5);
+    const globalRoute = within(routeSummary).getByText("Claude Code", { selector: "strong" }).closest("li");
+    const customRoute = within(routeSummary).getByText("Agent 1", { selector: "strong" }).closest("li");
+    expect(globalRoute).toHaveTextContent("全局 · 简单路由");
+    expect(globalRoute).toHaveTextContent("gpt-5.6-sol");
+    expect(customRoute).toHaveTextContent("独立 · 简单路由");
+    expect(customRoute).toHaveTextContent("deepseek-v4-flash");
 
     const modelSummary = screen.getByRole("region", { name: "模型概览" });
     expect(within(modelSummary).getByText("6 个模型")).toBeInTheDocument();

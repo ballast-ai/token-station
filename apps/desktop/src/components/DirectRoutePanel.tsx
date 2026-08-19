@@ -357,13 +357,24 @@ export default function DirectRoutePanel({
               : "将请求固定发送给你明确选择的一个供应商及其已管理模型。",
           )}</p>
         </div>
-        {target && (
-          <span className="direct-applied-target">
-            {target.model
-              ? <>{copy("Applied", "已应用")} · {target.upstream} / {target.model}</>
-              : <>{copy("Incomplete", "配置未完成")} · {target.upstream} / {copy("Select a model", "待选择模型")}</>}
-          </span>
-        )}
+        <div className="direct-route-heading-actions">
+          {target && (
+            <span className="direct-applied-target">
+              {target.model
+                ? <>{copy("Applied", "已应用")} · {target.upstream} / {target.model}</>
+                : <>{copy("Incomplete", "配置未完成")} · {target.upstream} / {copy("Select a model", "待选择模型")}</>}
+            </span>
+          )}
+          <button
+            className="btn primary"
+            type="button"
+            data-onboarding-target="route-apply"
+            disabled={busy || applying || !selectedTargetValid}
+            onClick={() => void onApply(selectedProvider, selectedModel)}
+          >
+            {applying ? copy("Applying…", "应用中…") : copy("Apply", "应用")}
+          </button>
+        </div>
       </div>
 
       {providers.length === 0 ? (
@@ -409,8 +420,8 @@ export default function DirectRoutePanel({
         {sortAnnouncement}
       </span>
 
-      <footer className="panel-foot direct-route-actions">
-        {!selectedTargetValid && (
+      {!selectedTargetValid && (
+        <footer className="panel-foot direct-route-actions">
           <span className="foot-hint">{copy(
             target?.upstream === selectedProvider && !target.model
               ? `Provider ${target.upstream} was preserved; select a model, then apply.`
@@ -419,17 +430,8 @@ export default function DirectRoutePanel({
               ? `已保留供应商 ${target.upstream}；请选择模型后再应用。`
               : "请选择一个有可用模型的供应商，再点击应用。",
           )}</span>
-        )}
-        <button
-          className="btn primary"
-          type="button"
-          data-onboarding-target="route-apply"
-          disabled={busy || applying || !selectedTargetValid}
-          onClick={() => void onApply(selectedProvider, selectedModel)}
-        >
-          {applying ? copy("Applying…", "应用中…") : copy("Apply", "应用")}
-        </button>
-      </footer>
+        </footer>
+      )}
     </section>
   );
 }

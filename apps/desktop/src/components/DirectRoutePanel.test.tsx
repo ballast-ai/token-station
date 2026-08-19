@@ -37,6 +37,21 @@ beforeEach(() => {
 });
 
 describe("DirectRoutePanel", () => {
+  it("places the primary apply action in the card header", () => {
+    render(
+      <DirectRoutePanel
+        providers={providers}
+        target={{ upstream: "deepseek-account", model: "deepseek-chat" }}
+        busy={false}
+        applying={false}
+        onApply={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "应用" }).closest(".panel-head"))
+      .toBeInTheDocument();
+  });
+
   it("lists every provider once with its brand and only its managed models", async () => {
     const user = userEvent.setup();
     render(
