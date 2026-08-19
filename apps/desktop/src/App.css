@@ -10274,9 +10274,9 @@ samp {
 .station-content-overview > .overview-page {
   height: 100%;
   min-height: 0;
-  grid-template-rows: auto 118px 284px;
+  grid-template-rows: auto clamp(128px, 18vh, 140px) clamp(300px, 45vh, 330px);
   align-content: start;
-  gap: 14px;
+  gap: 16px;
   overflow: hidden;
   padding-block: 16px 20px;
 }
@@ -10299,8 +10299,8 @@ samp {
 .station-content-overview .overview-runtime-metrics [data-slot="card-header"] {
   height: 100%;
   align-content: start;
-  gap: 3px;
-  padding: 11px 13px;
+  gap: 5px;
+  padding: 14px 16px;
 }
 
 .station-content-overview .overview-status-card [data-slot="card-header"] {
@@ -10350,26 +10350,35 @@ samp {
 
 .station-content-overview .overview-summary-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: 14px;
 }
 
 .station-content-overview .overview-summary-card[data-slot="card"] {
   min-height: 0;
-  height: 284px;
+  height: 100%;
   overflow: hidden;
 }
 
 .station-content-overview .overview-summary-card > [data-slot="card-header"] {
-  padding: 12px 13px 6px;
+  padding: 16px 52px 8px 16px;
 }
 
 .station-content-overview .overview-summary-card > [data-slot="card-content"] {
-  padding: 4px 13px 40px;
+  padding: 6px 16px 14px;
 }
 
 .station-content-overview .overview-summary-list {
   min-height: 0;
-  grid-template-rows: repeat(5, minmax(32px, 1fr));
+  grid-template-rows: repeat(5, minmax(38px, 1fr));
+}
+
+.station-content-overview .overview-summary-link {
+  top: 14px;
+  right: 14px;
+  bottom: auto;
+  width: 28px;
+  height: 28px;
+  background: transparent;
 }
 
 .station-content-overview .overview-route-summary .overview-route-list > div {
