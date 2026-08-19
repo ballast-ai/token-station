@@ -117,13 +117,15 @@ export default function HomePage({
   };
   return (
     <div className="page-stack home-page">
-      <header className="page-title-row">
-        <div>
-          {embedded
-            ? <h2>{enterprise ? copy("Enterprise routing", "企业路由") : copy("Global routing", "全局路由")}</h2>
-            : <h1>{enterprise ? copy("Enterprise routing", "企业路由") : copy("Global routing", "全局路由")}</h1>}
-        </div>
-      </header>
+      {(!embedded || enterprise) && (
+        <header className="page-title-row">
+          <div>
+            {embedded
+              ? <h2>{copy("Enterprise routing", "企业路由")}</h2>
+              : <h1>{enterprise ? copy("Enterprise routing", "企业路由") : copy("Global routing", "全局路由")}</h1>}
+          </div>
+        </header>
+      )}
 
       {!enterprise && (
         <RoutingModeSelector

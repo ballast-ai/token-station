@@ -59,6 +59,15 @@ describe("AppShell Agent and routing navigation", () => {
 
     expect(navigation.getByRole("button", { name: "主页" })).toHaveAttribute("aria-current", "page");
     expect(navigation.getByRole("button", { name: "Agent" })).not.toHaveAttribute("aria-current");
+    expect(document.querySelector(".station-content"))
+      .toHaveClass("station-content-overview");
+  });
+
+  it("does not lock scrolling for non-overview workspaces", () => {
+    renderShell("providers");
+
+    expect(document.querySelector(".station-content"))
+      .not.toHaveClass("station-content-overview");
   });
 
   it("maps connection details to Agent and route details to routing", () => {

@@ -149,7 +149,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             <div className="overview-route-list">
             {state.routing_mode === "direct" ? (
               <div data-routing-snapshot-mode="direct">
-                <Badge variant="outline">{copy("Direct", "单独路由")}</Badge>
+                <Badge variant="outline">{copy("Direct", "简单路由")}</Badge>
                 <strong>{state.direct_target?.model ?? copy("Select a model", "待选择模型")}</strong>
                 <code>{state.direct_target?.upstream ?? copy("Select a provider", "待选择供应商")}</code>
               </div>

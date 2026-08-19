@@ -342,12 +342,12 @@ export default function DirectRoutePanel({
   return (
     <section
       className="panel direct-route-panel"
-      aria-label={copy("Direct routing configuration", "单独路由配置")}
+      aria-label={copy("Direct routing configuration", "简单路由配置")}
       data-onboarding-target="route-config"
     >
       <div className="panel-head split-heading direct-route-heading">
         <div>
-          <h2>{copy("Direct routing", "单独路由")}</h2>
+          <h2>{copy("Direct routing", "简单路由")}</h2>
           <p className="sub">{copy(
             agent
               ? "Send this Agent to exactly one provider and managed model."
@@ -383,7 +383,7 @@ export default function DirectRoutePanel({
             items={orderedProviders.map((provider) => provider.name)}
             strategy={verticalListSortingStrategy}
           >
-            <div className="direct-provider-list" role="radiogroup" aria-label={copy("Direct provider", "单独路由供应商")}>
+            <div className="direct-provider-list" role="radiogroup" aria-label={copy("Direct provider", "简单路由供应商")}>
               {orderedProviders.map((provider, index) => (
                 <SortableDirectProviderRow
                   key={provider.name}

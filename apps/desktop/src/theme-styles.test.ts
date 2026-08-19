@@ -5,6 +5,26 @@ import { describe, expect, it } from "vitest";
 const appCss = readFileSync(resolve(process.cwd(), "src/App.css"), "utf8");
 
 describe("retained page theme styles", () => {
+  it("contains fixed overview runtime cards inside their grid track", () => {
+    const overviewGridRule = appCss.match(
+      /\.station-content-overview > \.overview-page\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    const runtimeCardRule = appCss.match(
+      /\.station-content-overview \.overview-runtime-metrics > \[data-slot="card"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+
+    expect(overviewGridRule).toMatch(/grid-template-rows:\s*auto 118px 284px/);
+    expect(overviewGridRule).toMatch(/align-content:\s*start/);
+    expect(runtimeCardRule).toMatch(/min-height:\s*0/);
+    expect(runtimeCardRule).toMatch(/height:\s*100%/);
+    expect(runtimeCardRule).toMatch(/overflow:\s*hidden/);
+
+    const statusHeaderRule = appCss.match(
+      /\.station-content-overview \.overview-status-card \[data-slot="card-header"\]\s*\{([^}]*)\}/s,
+    )?.[1] ?? "";
+    expect(statusHeaderRule).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\) auto/);
+  });
+
   it("uses theme tokens for router JSON code blocks", () => {
     const codeBlockRule = appCss.match(/pre\.block\s*\{([^}]*)\}/s)?.[1] ?? "";
 

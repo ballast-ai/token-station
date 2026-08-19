@@ -209,10 +209,7 @@ export default function AgentsPage({
                               aria-label={metadata.display_name}
                               title={`${metadata.display_name} · ${statusCopy(agent?.status, copy)}`}
                               aria-current={selected ? "page" : undefined}
-                              onClick={() => {
-                                setRouteListOpen(false);
-                                onOpenAgent(metadata.agent_id);
-                              }}
+                              onClick={() => onOpenAgent(metadata.agent_id)}
                             >
                               <span className="agent-master-icon" aria-hidden="true">
                                 <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={40} />

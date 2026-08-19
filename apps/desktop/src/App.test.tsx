@@ -284,7 +284,8 @@ function navigation() {
 async function openRouting(user: ReturnType<typeof userEvent.setup>) {
   await user.click((await screen.findByRole("navigation", { name: /主导航|Main navigation/ })).querySelector<HTMLButtonElement>('button[aria-label="路由"], button[aria-label="Routing"]')!);
   await user.click(await screen.findByRole("button", { name: /全局路由|Global routing/ }));
-  await screen.findByRole("heading", { name: /全局路由|Global routing/ });
+  await screen.findByRole("region", { name: /路由模式|Routing mode/ });
+  expect(screen.queryByRole("heading", { name: /全局路由|Global routing/ })).toBeNull();
 }
 
 async function openAgents(user: ReturnType<typeof userEvent.setup>) {
@@ -301,7 +302,10 @@ async function openAgent(user: ReturnType<typeof userEvent.setup>, name: string)
 async function openAgentRoute(user: ReturnType<typeof userEvent.setup>, name: string) {
   await openRouting(user);
   const scopes = screen.getByRole("region", { name: /路由范围|Routing scopes/ });
-  await user.click(within(scopes).getByRole("button", { name: /Agent 路由|Agent routes/ }));
+  const disclosure = within(scopes).getByRole("button", { name: /Agent 路由|Agent routes/ });
+  if (disclosure.getAttribute("aria-expanded") !== "true") {
+    await user.click(disclosure);
+  }
   await user.click(within(scopes).getByRole("button", { name }));
   await screen.findByRole("heading", { name });
 }
@@ -592,7 +596,8 @@ it("spotlights routing controls and advances only when the requested revision is
     listener_reachable: true,
     running_revision: 1,
   })));
-  expect(screen.getByRole("heading", { name: "全局路由" })).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "路由模式" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "全局路由" })).toBeNull();
 
   act(() => emitServe?.(serveFixture({
     phase: "running",
@@ -600,7 +605,8 @@ it("spotlights routing controls and advances only when the requested revision is
     listener_reachable: false,
     running_revision: 2,
   })));
-  expect(screen.getByRole("heading", { name: "全局路由" })).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "路由模式" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "全局路由" })).toBeNull();
 
   act(() => emitServe?.(serveFixture({
     phase: "running",
@@ -1340,7 +1346,7 @@ describe("desktop station navigation", () => {
     for (const tier of ["上档", "中档", "下档"]) {
       expect(within(snapshot).getByText(tier)).toBeInTheDocument();
     }
-    expect(within(snapshot).queryByText("单独路由")).toBeNull();
+    expect(within(snapshot).queryByText("简单路由")).toBeNull();
     expect(within(snapshot).queryByText("额度优先")).toBeNull();
     expect(await screen.findByText(/成功率 91\.7% · P95 320ms/)).toBeInTheDocument();
     expect(getStatsMock).toHaveBeenCalledWith("24h", null);
@@ -1384,7 +1390,7 @@ describe("desktop station navigation", () => {
     await user.click(await screen.findByRole("button", { name: "Token Station 主页" }));
     const snapshot = screen.getByRole("region", { name: "路由概览" });
 
-    expect(within(snapshot).getByText("单独路由")).toBeInTheDocument();
+    expect(within(snapshot).getByText("简单路由")).toBeInTheDocument();
     expect(within(snapshot).getByText("gpt-5.6")).toBeInTheDocument();
     expect(within(snapshot).getByText("team-openai")).toBeInTheDocument();
     expect(within(snapshot).queryByText("上档")).toBeNull();
@@ -2640,7 +2646,8 @@ describe("desktop station navigation", () => {
 
     await user.click(navigation().getByRole("button", { name: "路由" }));
 
-    expect(await screen.findByRole("heading", { name: "全局路由" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "路由模式" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "全局路由" })).toBeNull();
     expect(screen.queryByText(/配置结构不合法/)).toBeNull();
     expect(invokeMock).not.toHaveBeenCalledWith("save_agent_routes");
 

@@ -126,7 +126,7 @@ describe("OverviewPage summaries", () => {
     expect(within(agentSummary).getAllByRole("listitem")).toHaveLength(5);
 
     const routeSummary = screen.getByRole("region", { name: "路由概览" });
-    expect(within(routeSummary).getByText("单独路由")).toBeInTheDocument();
+    expect(within(routeSummary).getByText("简单路由")).toBeInTheDocument();
     expect(within(routeSummary).getByText("gpt-5.6-sol")).toBeInTheDocument();
 
     const modelSummary = screen.getByRole("region", { name: "模型概览" });

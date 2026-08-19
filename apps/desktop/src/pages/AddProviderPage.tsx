@@ -455,7 +455,7 @@ export default function AddProviderPage({
           </label>
 
           {visibleModelChoices.length > 0 ? (
-            <div className="model-first-results" role="list" aria-label={copy("Models and providers", "模型与供应商")}>
+            <div className="model-first-results" role="list" aria-label={copy("Models and providers", "模型与供应商")} data-layout="compact-three-column">
               {visibleModelChoices.map(({ provider, model }) => {
                 const displayName = providerName(provider.id, provider.label);
                 return (
@@ -463,11 +463,12 @@ export default function AddProviderPage({
                     <button
                       type="button"
                       aria-label={`${model} · ${displayName}`}
+                      title={`${model} · ${displayName}`}
                       onClick={() => selectPreset(provider.id, model)}
                     >
                       <span className="model-first-name">{model}</span>
                       <span className="model-first-provider">
-                        <ProviderIcon id={provider.id} label={displayName} size={26} />
+                        <ProviderIcon id={provider.id} label={displayName} size={22} />
                         <span><small>{copy("Provider", "供应商")}</small><strong>{displayName}</strong></span>
                       </span>
                     </button>

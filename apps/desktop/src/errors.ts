@@ -138,7 +138,7 @@ function modelContractGuidance(error: unknown): LocalizedAppMessage | null {
     },
     model_contract_exact_routing_unsupported: {
       en: "OpenCode's fixed model is incompatible with exact-model routing. Switch this Agent to tiered, quota-first, or direct routing.",
-      zh: "OpenCode 固定模型与精确模型路由不兼容。请将该 Agent 切换为分层、额度优先或单独路由。",
+      zh: "OpenCode 固定模型与精确模型路由不兼容。请将该 Agent 切换为分层、额度优先或简单路由。",
     },
     model_contract_invalid_route: {
       en: "The OpenCode route is invalid. Repair and save the route configuration before connecting.",

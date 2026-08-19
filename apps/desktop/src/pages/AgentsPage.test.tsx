@@ -80,5 +80,7 @@ describe("AgentsPage split workspaces", () => {
 
     await user.click(within(selector).getByRole("button", { name: "Kimi Code" }));
     expect(onOpenAgent).toHaveBeenCalledWith("kimi-code");
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
+    expect(within(selector).getByRole("button", { name: "Claude Code" })).toBeVisible();
   });
 });

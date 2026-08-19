@@ -32,18 +32,18 @@ export default function RoutingModeSelector({
         value={value}
         onValueChange={(next) => onValueChange(next as RoutingMode)}
       >
-        <TabsList aria-label={label}>
-          <TabsTrigger value="direct" aria-label={copy("Direct routing", "单独路由")} disabled={disabled}>
+        <TabsList className="routing-mode-tabs-list" variant="line" aria-label={label}>
+          <TabsTrigger className="routing-mode-tab" value="direct" aria-label={copy("Direct routing", "简单路由")} title={copy("One exact provider and model", "固定一个供应商和模型")} disabled={disabled}>
             <Target />
-            <span><strong>{copy("Direct routing", "单独路由")}</strong><small>{copy("One exact provider and model", "固定一个供应商和模型")}</small></span>
+            <span>{copy("Direct routing", "简单路由")}</span>
           </TabsTrigger>
-          <TabsTrigger value="tiered" aria-label={copy("Smart tiers", "智能分档")} disabled={disabled}>
+          <TabsTrigger className="routing-mode-tab" value="tiered" aria-label={copy("Smart tiers", "智能分档")} title={copy("Match model to task", "按任务复杂度选模型")} disabled={disabled}>
             <Layers3 />
-            <span><strong>{copy("Smart tiers", "智能分档")}</strong><small>{copy("Match model to task", "按任务复杂度选模型")}</small></span>
+            <span>{copy("Smart tiers", "智能分档")}</span>
           </TabsTrigger>
-          <TabsTrigger value="quota_first" aria-label={copy("Quota first", "额度优先")} disabled={disabled}>
+          <TabsTrigger className="routing-mode-tab" value="quota_first" aria-label={copy("Quota first", "额度优先")} title={copy("Prefer available capacity", "优先使用可用额度")} disabled={disabled}>
             <Gauge />
-            <span><strong>{copy("Quota first", "额度优先")}</strong><small>{copy("Prefer available capacity", "优先使用可用额度")}</small></span>
+            <span>{copy("Quota first", "额度优先")}</span>
           </TabsTrigger>
         </TabsList>
       </Tabs>

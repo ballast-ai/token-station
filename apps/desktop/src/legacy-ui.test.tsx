@@ -1167,7 +1167,12 @@ describe("provider deletion lifecycle", () => {
 
     expect(document.querySelector('[data-provider-brand="openai"]')).toBeInTheDocument();
     expect(document.querySelector(".provider-monogram")?.getAttribute("aria-hidden")).toBe("true");
+    const providerGroup = screen.getByRole("group", { name: "team-openai 供应商" });
+    expect(within(providerGroup).getByText("team-openai", { selector: ".provider-identity-name" }))
+      .toBeInTheDocument();
+    expect(within(providerGroup).getByText("1 个模型")).toBeInTheDocument();
     const modelList = screen.getByRole("list", { name: "team-openai 模型" });
+    expect(modelList).toHaveAttribute("data-layout", "compact-three-column");
     expect(within(modelList).getByRole("listitem"))
       .toHaveTextContent("gpt-5.6供应商 · team-openai");
   });

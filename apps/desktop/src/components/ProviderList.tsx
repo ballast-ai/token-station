@@ -77,30 +77,24 @@ export default function ProviderList({
           </div>
         )}
         {providers.map((provider) => (
-          <article className={`provider-card ${managedProvider === provider.name ? "expanded" : ""}`} key={provider.name}>
-            <div className="provider-card-head">
+          <article
+            className={`provider-card ${managedProvider === provider.name ? "expanded" : ""}`}
+            key={provider.name}
+            role="group"
+            aria-label={copy(`${provider.name} provider`, `${provider.name} 供应商`)}
+          >
+            <div className="provider-card-head provider-identity-bar">
               <div className="provider-monogram" aria-hidden="true">
                 <ProviderIcon id={provider.brand_id} label={provider.name} size={34} />
               </div>
-              <div className="provider-main">
-                <div className="provider-primary-models" role="list" aria-label={copy(`${provider.name} models`, `${provider.name} 模型`)}>
-                  {provider.models.length > 0 ? provider.models.slice(0, 5).map((model) => (
-                    <div role="listitem" key={model}>
-                      <strong>{model}</strong>
-                      <small>{copy("Provider", "供应商")} · {provider.name}</small>
-                    </div>
-                  )) : (
-                    <div role="listitem">
-                      <strong>{copy("No managed models", "暂无已管理模型")}</strong>
-                      <small>{copy("Provider", "供应商")} · {provider.name}</small>
-                    </div>
-                  )}
-                  {provider.models.length > 5 && (
-                    <span className="chip quiet-chip">+{provider.models.length - 5}</span>
-                  )}
-                </div>
+              <div className="provider-main provider-identity">
+                <small>{copy("Provider", "供应商")}</small>
+                <strong className="provider-identity-name">{provider.name}</strong>
                 <div className="provider-url">{provider.base_url}</div>
               </div>
+              <span className="provider-model-count">
+                {copy(`${provider.models.length} models`, `${provider.models.length} 个模型`)}
+              </span>
               <div className="provider-side">
                 {provider.access_tier === "free" && (
                   <span className="provider-access-badge">{copy("Free", "免费")}</span>
@@ -127,6 +121,24 @@ export default function ProviderList({
                   {copy("Delete", "删除")}
                 </button>
               </div>
+            </div>
+            <div
+              className="provider-primary-models"
+              role="list"
+              aria-label={copy(`${provider.name} models`, `${provider.name} 模型`)}
+              data-layout="compact-three-column"
+            >
+              {provider.models.length > 0 ? provider.models.map((model) => (
+                <div role="listitem" key={model} title={`${model} · ${provider.name}`}>
+                  <strong>{model}</strong>
+                  <small>{copy("Provider", "供应商")} · {provider.name}</small>
+                </div>
+              )) : (
+                <div role="listitem">
+                  <strong>{copy("No managed models", "暂无已管理模型")}</strong>
+                  <small>{copy("Provider", "供应商")} · {provider.name}</small>
+                </div>
+              )}
             </div>
             {managedProvider === provider.name && (
               provider.access_tier === "free" ? (

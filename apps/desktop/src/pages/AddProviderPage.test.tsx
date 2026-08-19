@@ -187,7 +187,10 @@ describe("AddProviderPage", () => {
 
     await user.type(screen.getByRole("searchbox", { name: "搜索模型" }), "gpt-5.6-sol");
     const results = screen.getByRole("list", { name: "模型与供应商" });
+    expect(results).toHaveAttribute("data-layout", "compact-three-column");
     const result = within(results).getByRole("button", { name: /gpt-5.6-sol.*OpenAI/ });
+    expect(result.querySelector('[data-provider-brand="openai"]'))
+      .toHaveStyle({ width: "22px", height: "22px" });
     expect(result.textContent?.indexOf("gpt-5.6-sol"))
       .toBeLessThan(result.textContent?.indexOf("OpenAI") ?? -1);
 
