@@ -84,18 +84,18 @@ const OFFICIAL_AND_MANAGED_PRESETS: ProviderPreset[] = [
     officialDocs: "https://platform.moonshot.ai/docs/guide/start-using-kimi-api", note: "仅适用于 Moonshot 国际开放平台账号。",
   }),
   verified({
-    id: "qwen", label: "阿里云百炼 Qwen（中国）", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    models: ["qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash", "qwen3-coder-plus"], needsKey: true, region: "中国", subscription: "按量 API", serviceClass: "first_party",
+    id: "qwen", label: "阿里云百炼（中国）", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    models: ["qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash", "qwen3-coder-plus", "ZHIPU/GLM-5.2"], needsKey: true, region: "中国", subscription: "按量 API", serviceClass: "first_party",
     officialDocs: "https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope",
   }),
   verified({
-    id: "qwen_singapore", label: "阿里云百炼 Qwen（新加坡）", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    id: "qwen_singapore", label: "阿里云百炼（新加坡）", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
     models: ["qwen-plus"], needsKey: true, region: "新加坡", subscription: "按量 API", serviceClass: "first_party",
     officialDocs: "https://www.alibabacloud.com/help/en/model-studio/compatibility-of-openai-with-dashscope",
     note: "仅适用于新加坡地域的 API Key。",
   }),
   verified({
-    id: "qwen_us", label: "阿里云百炼 Qwen（美国）", baseUrl: "https://dashscope-us.aliyuncs.com/compatible-mode/v1",
+    id: "qwen_us", label: "阿里云百炼（美国）", baseUrl: "https://dashscope-us.aliyuncs.com/compatible-mode/v1",
     models: ["qwen-plus"], needsKey: true, region: "美国", subscription: "按量 API", serviceClass: "first_party",
     officialDocs: "https://www.alibabacloud.com/help/en/model-studio/compatibility-of-openai-with-dashscope",
     note: "仅适用于美国（弗吉尼亚）地域的 API Key；其他国际地域需要 Workspace ID，请使用自定义供应商。",
@@ -147,11 +147,11 @@ const OFFICIAL_AND_MANAGED_PRESETS: ProviderPreset[] = [
     needsKey: true, region: "新加坡", subscription: "Coding Plan", serviceClass: "first_party", officialDocs: "https://docs.byteplus.com/en/docs/ModelArk/2164861", note: "仅限 BytePlus Coding Plan。",
   }),
   verified({
-    id: "siliconflow", label: "硅基流动 SiliconFlow（中国）", baseUrl: "https://api.siliconflow.cn/v1", models: ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct"],
+    id: "siliconflow", label: "硅基流动 SiliconFlow（中国）", baseUrl: "https://api.siliconflow.cn/v1", models: ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct", "zai-org/GLM-5.2"],
     needsKey: true, region: "中国", subscription: "托管推理", serviceClass: "managed_inference", officialDocs: "https://docs.siliconflow.cn/cn/api-reference/chat-completions/chat-completions",
   }),
   verified({
-    id: "siliconflow_global", label: "SiliconFlow（国际）", baseUrl: "https://api.siliconflow.com/v1", models: ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct"],
+    id: "siliconflow_global", label: "SiliconFlow（国际）", baseUrl: "https://api.siliconflow.com/v1", models: ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct", "zai-org/GLM-5.2"],
     needsKey: true, region: "全球", subscription: "托管推理", serviceClass: "managed_inference", officialDocs: "https://docs.siliconflow.com/en/api-reference/chat-completions/chat-completions",
   }),
   verified({

@@ -17,16 +17,25 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 beforeEach(() => {
   vi.mocked(invoke).mockReset();
-  vi.mocked(invoke).mockImplementation(async (command: string, args?: { baseUrl?: string }) => {
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
     if (command === "preview_provider_endpoints") {
-      const loopback = args?.baseUrl?.startsWith("http://127.0.0.1")
-        || args?.baseUrl?.startsWith("http://localhost")
+      const baseUrl = (args as { baseUrl?: string } | undefined)?.baseUrl;
+      const loopback = baseUrl?.startsWith("http://127.0.0.1")
+        || baseUrl?.startsWith("http://localhost")
         || false;
       return {
         chat: "https://api.minimaxi.com/v1/chat/completions",
         responses: "https://api.minimaxi.com/v1/responses",
         messages: "https://api.minimaxi.com/v1/messages",
         loopback,
+      };
+    }
+    if (command === "list_public_provider_models") {
+      return {
+        providers: {},
+        source: "cache",
+        fetched_at_ms: 42,
+        unavailable_provider_ids: [],
       };
     }
     if (command === "add_provider_with_credential") return {};
@@ -303,6 +312,70 @@ describe("AddProviderPage", () => {
     expect(screen.getByRole("heading", { name: "OpenAI" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /gpt-5.6-sol/ })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: /gpt-5.6-terra/ })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("searches one canonical GLM model across official and managed provider channels", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage({ entryMode: "model-first" });
+
+    await user.type(screen.getByRole("searchbox", { name: "搜索模型" }), "glm-5.2");
+    const results = screen.getByRole("list", { name: "模型与供应商" });
+    const alibaba = within(results).getByRole("button", {
+      name: /glm-5\.2.*阿里云百炼（中国）/,
+    });
+
+    expect(alibaba).toHaveTextContent("glm-5.2");
+    expect(alibaba).toHaveTextContent("ZHIPU/GLM-5.2");
+    expect(alibaba).toHaveTextContent("托管推理");
+    expect(within(results).getByRole("button", {
+      name: /glm-5\.2.*硅基流动 SiliconFlow（中国）/,
+    })).toBeInTheDocument();
+
+    await user.click(alibaba);
+    expect(screen.getByRole("heading", { name: "阿里云百炼（中国）" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /ZHIPU\/GLM-5\.2/ }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /qwen3\.7-max/ }))
+      .toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("uses the refreshed public catalog for model-first search", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "list_public_provider_models") {
+        return {
+          providers: {
+            openai: ["gpt-current"],
+            qwen: ["glm-5.2", "qwen-current"],
+          },
+          source: "live",
+          fetched_at_ms: 42,
+          unavailable_provider_ids: ["volcengine_ark"],
+        };
+      }
+      if (command === "preview_provider_endpoints") {
+        const baseUrl = (args as { baseUrl?: string } | undefined)?.baseUrl;
+        return {
+          chat: `${baseUrl}/chat/completions`,
+          responses: `${baseUrl}/responses`,
+          messages: `${baseUrl}/messages`,
+          loopback: false,
+        };
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    const user = userEvent.setup();
+    renderPage({ entryMode: "model-first" });
+
+    expect(await screen.findByText("公共目录已同步 · 2/41 个渠道")).toBeInTheDocument();
+    await user.type(screen.getByRole("searchbox", { name: "搜索模型" }), "gpt");
+    const results = screen.getByRole("list", { name: "模型与供应商" });
+    expect(within(results).getByRole("button", { name: /gpt-current.*OpenAI/ }))
+      .toBeInTheDocument();
+    expect(within(results).queryByRole("button", { name: /gpt-5\.6-sol.*OpenAI/ }))
+      .not.toBeInTheDocument();
   });
 
   it("filters standard providers by a model name across punctuation boundaries", async () => {

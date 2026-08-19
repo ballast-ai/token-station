@@ -5092,6 +5092,18 @@ pre.block {
   font: 700 9px/1 "SF Mono", Menlo, monospace;
   white-space: nowrap;
 }
+.provider-catalog-summary {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+}
+.public-catalog-status {
+  max-width: 280px;
+  color: var(--muted);
+  font: 600 9px/1.35 "SF Mono", Menlo, monospace;
+  text-align: right;
+}
+.public-catalog-status.error { color: var(--warning); }
 .unified-provider-catalog {
   display: grid;
   gap: 12px;
@@ -5528,7 +5540,9 @@ pre.block {
 @media (max-width: 820px) {
   .provider-catalog-title-row,
   .provider-catalog-toolbar { grid-template-columns: 1fr; }
+  .provider-catalog-summary { justify-items: start; }
   .provider-catalog-total { justify-self: start; }
+  .public-catalog-status { text-align: left; }
   .provider-catalog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .provider-mode-switch { width: 100%; }
   .provider-mode-switch button { flex: 1; justify-content: center; }
@@ -9950,6 +9964,15 @@ samp {
   font: 600 12px/1.35 "IBM Plex Mono", monospace;
   text-overflow: ellipsis;
 }
+.model-first-identity { min-width: 0; display: grid; gap: 2px; }
+.model-first-upstream {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font: 500 8.5px/1.3 "IBM Plex Mono", monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .model-first-provider { display: flex; align-items: center; gap: 8px; }
 .model-first-provider > span { display: grid; gap: 1px; }
 .model-first-provider small { color: var(--muted); font-size: 8.5px; }
@@ -10466,8 +10489,7 @@ samp {
 }
 
 .model-first-results[data-layout="compact-three-column"] button {
-  height: 68px;
-  min-height: 68px;
+  min-height: 76px;
   grid-template-columns: minmax(0, 1fr);
   align-content: center;
   gap: 7px;

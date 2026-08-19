@@ -3,15 +3,23 @@ import {
   addProvider,
   discoverProviderModels,
   importModelPricesForProvider,
+  listPublicProviderModels,
   previewProviderEndpoints,
   type FreeOfferKind,
   type FreeProviderPresetView,
   type FreeProviderRegion,
   type ModelDiscoveryView,
   type ProviderEndpointPreview,
+  type PublicProviderModelsView,
   type StateView,
 } from "../api";
 import { CUSTOM_ID, PROVIDER_CATALOG, type ProviderPreset } from "../catalog";
+import {
+  applyPublicProviderModels,
+  listModelOfferings,
+  searchModelOfferings,
+  type ModelDeliveryClass,
+} from "../modelCatalog";
 import { ProviderIcon } from "../brandIcons";
 import ModelPicker, { type CatalogStatus } from "../components/ModelPicker";
 import PageBackButton from "../components/PageBackButton";
@@ -41,6 +49,17 @@ export interface FreeCatalogFilters {
   region: "all" | FreeProviderRegion;
 }
 
+function deliveryClassLabel(
+  deliveryClass: ModelDeliveryClass,
+  copy: (english: string, chinese: string) => string,
+): string {
+  if (deliveryClass === "official") return copy("Official channel", "官方渠道");
+  if (deliveryClass === "managed") return copy("Managed inference", "托管推理");
+  if (deliveryClass === "self_hosted") return copy("Self-hosted", "自托管");
+  if (deliveryClass === "aggregated") return copy("Aggregator", "聚合渠道");
+  return copy("Provider", "供应商");
+}
+
 interface AddProviderPageProps {
   existingNames: string[];
   onCancel: () => void;
@@ -67,6 +86,7 @@ function searchableRegular(preset: ProviderPreset): string {
   return [
     preset.id,
     preset.label,
+    englishProviderName(preset.id, preset.label),
     preset.note ?? "",
     preset.region,
     preset.subscription,
@@ -165,10 +185,18 @@ export default function AddProviderPage({
   const [endpointError, setEndpointError] = useState("");
   const [modelFirstQuery, setModelFirstQuery] = useState("");
   const [importPublicPrices, setImportPublicPrices] = useState(false);
+  const [publicModels, setPublicModels] = useState<PublicProviderModelsView | null>(null);
+  const [publicModelsLoading, setPublicModelsLoading] = useState(false);
+  const [publicModelsError, setPublicModelsError] = useState("");
+
+  const catalogProviders = useMemo(
+    () => applyPublicProviderModels(PROVIDER_CATALOG, publicModels),
+    [publicModels],
+  );
 
   const preset: ProviderPreset | null = useMemo(
-    () => PROVIDER_CATALOG.find((item) => item.id === presetId) ?? null,
-    [presetId],
+    () => catalogProviders.find((item) => item.id === presetId) ?? null,
+    [catalogProviders, presetId],
   );
   const isCustom = presetId === CUSTOM_ID;
   const isExisting = name.trim().length > 0 && existingNames.includes(name.trim());
@@ -201,7 +229,7 @@ export default function AddProviderPage({
         "手动填写 OpenAI-compatible 地址与模型。",
       ),
     };
-    return [custom, ...PROVIDER_CATALOG].filter((item) => {
+    return [custom, ...catalogProviders].filter((item) => {
       if (
         item.id !== CUSTOM_ID
         && regularFilters.region !== "all"
@@ -210,7 +238,7 @@ export default function AddProviderPage({
       if (!query) return true;
       return matchesCatalogSearch(searchableRegular(item), query);
     });
-  }, [copy, regularFilters]);
+  }, [catalogProviders, copy, regularFilters]);
 
   const visibleFree = useMemo(() => {
     const query = freeFilters.query.trim().toLocaleLowerCase();
@@ -223,14 +251,32 @@ export default function AddProviderPage({
 
   const visibleModelChoices = useMemo(() => {
     const query = modelFirstQuery.trim();
-    return PROVIDER_CATALOG.flatMap((provider) => provider.models.map((model) => ({
-      provider,
-      model,
-    }))).filter(({ provider, model }) => matchesCatalogSearch(
-      `${model} ${provider.id} ${provider.label}`,
-      query,
-    ));
-  }, [modelFirstQuery]);
+    return query
+      ? searchModelOfferings(query, catalogProviders)
+      : listModelOfferings(PROVIDER_CATALOG);
+  }, [catalogProviders, modelFirstQuery]);
+
+  useEffect(() => {
+    if (catalogMode !== "regular" && entryMode !== "model-first") return;
+    let active = true;
+    setPublicModelsLoading(true);
+    setPublicModelsError("");
+    void listPublicProviderModels(PROVIDER_CATALOG.map((provider) => provider.id))
+      .then((snapshot) => {
+        if (!active) return;
+        setPublicModels(snapshot);
+      })
+      .catch((caught) => {
+        if (!active) return;
+        setPublicModelsError(humanizeAppError(caught, language));
+      })
+      .finally(() => {
+        if (active) setPublicModelsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [catalogMode, entryMode, language]);
 
   useEffect(() => {
     const baseUrl = url.trim();
@@ -297,7 +343,7 @@ export default function AddProviderPage({
 
   const selectPreset = (id: string, preferredModel?: string) => {
     setPresetId(id);
-    const selected = PROVIDER_CATALOG.find((item) => item.id === id);
+    const selected = catalogProviders.find((item) => item.id === id);
     setName(selected?.id ?? "");
     setUrl(selected?.baseUrl ?? "");
     setLocal(selected?.local ?? false);
@@ -471,6 +517,27 @@ export default function AddProviderPage({
   };
 
   const disabled = saving || discovering;
+  const publicCatalogCoverage = Object.keys(publicModels?.providers ?? {}).length;
+  const publicCatalogStatus = publicModelsLoading
+    ? copy("Syncing public catalog…", "正在同步公共目录…")
+    : publicModelsError
+      ? copy("Bundled snapshot · sync failed", "内置快照 · 同步失败")
+      : publicModels?.source === "live"
+        ? copy(
+            `Public catalog synced · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} channels`,
+            `公共目录已同步 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 个渠道`,
+          )
+        : publicModels?.source === "stale_cache"
+          ? copy(
+              `Stale public cache · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} channels`,
+              `公共目录旧缓存 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 个渠道`,
+            )
+          : publicModels
+            ? copy(
+                `Public catalog cache · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} channels`,
+                `公共目录缓存 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 个渠道`,
+              )
+            : copy("Bundled model snapshot", "内置模型快照");
 
   if (!configuringRegular && entryMode === "model-first") {
     return (
@@ -484,9 +551,18 @@ export default function AddProviderPage({
               "先搜索模型，再选择提供该模型的供应商。",
             )}</p>
           </div>
-          <span className="provider-catalog-total">
-            {copy(`${visibleModelChoices.length} choices`, `${visibleModelChoices.length} 个可选组合`)}
-          </span>
+          <div className="provider-catalog-summary">
+            <span className="provider-catalog-total">
+              {copy(`${visibleModelChoices.length} choices`, `${visibleModelChoices.length} 个可选组合`)}
+            </span>
+            <small
+              className={`public-catalog-status ${publicModelsError ? "error" : ""}`}
+              role="status"
+              title={publicModelsError || undefined}
+            >
+              {publicCatalogStatus}
+            </small>
+          </div>
         </header>
 
         <section className="panel model-first-catalog" aria-label={copy("Model search", "模型搜索")}>
@@ -504,20 +580,32 @@ export default function AddProviderPage({
 
           {visibleModelChoices.length > 0 ? (
             <div className="model-first-results" role="list" aria-label={copy("Models and providers", "模型与供应商")} data-layout="compact-three-column">
-              {visibleModelChoices.map(({ provider, model }) => {
+              {visibleModelChoices.map((offering) => {
+                const { provider, model, upstreamModelId } = offering;
                 const displayName = providerName(provider.id, provider.label);
+                const invocationDiffers = model.label !== upstreamModelId;
                 return (
-                  <article role="listitem" key={`${provider.id}:${model}`}>
+                  <article role="listitem" key={offering.id}>
                     <button
                       type="button"
-                      aria-label={`${model} · ${displayName}`}
-                      title={`${model} · ${displayName}`}
-                      onClick={() => selectPreset(provider.id, model)}
+                      aria-label={`${model.label} · ${displayName}${invocationDiffers ? ` · ${upstreamModelId}` : ""}`}
+                      title={`${model.label} · ${displayName}`}
+                      onClick={() => selectPreset(provider.id, upstreamModelId)}
                     >
-                      <span className="model-first-name">{model}</span>
+                      <span className="model-first-identity">
+                        <span className="model-first-name">{model.label}</span>
+                        {invocationDiffers ? (
+                          <small className="model-first-upstream">
+                            {copy(`Calls ${upstreamModelId}`, `调用 ID · ${upstreamModelId}`)}
+                          </small>
+                        ) : null}
+                      </span>
                       <span className="model-first-provider">
                         <ProviderIcon id={provider.id} label={displayName} size={22} />
-                        <span><small>{copy("Provider", "供应商")}</small><strong>{displayName}</strong></span>
+                        <span>
+                          <small>{deliveryClassLabel(offering.deliveryClass, copy)}</small>
+                          <strong>{displayName}</strong>
+                        </span>
                       </span>
                     </button>
                   </article>
@@ -550,12 +638,23 @@ export default function AddProviderPage({
               "从同一个目录选择常规 API 或免费 API，配置入口和返回逻辑保持一致。",
             )}</p>
           </div>
-          <span className="provider-catalog-total">
-            {copy(
-              `${catalogMode === "regular" ? PROVIDER_CATALOG.length + 1 : freePresets.length} providers`,
-              `${catalogMode === "regular" ? PROVIDER_CATALOG.length + 1 : freePresets.length} 家可选供应商`,
-            )}
-          </span>
+          <div className="provider-catalog-summary">
+            <span className="provider-catalog-total">
+              {copy(
+                `${catalogMode === "regular" ? catalogProviders.length + 1 : freePresets.length} providers`,
+                `${catalogMode === "regular" ? catalogProviders.length + 1 : freePresets.length} 家可选供应商`,
+              )}
+            </span>
+            {catalogMode === "regular" ? (
+              <small
+                className={`public-catalog-status ${publicModelsError ? "error" : ""}`}
+                role="status"
+                title={publicModelsError || undefined}
+              >
+                {publicCatalogStatus}
+              </small>
+            ) : null}
+          </div>
         </header>
 
         <section
@@ -570,7 +669,7 @@ export default function AddProviderPage({
                 aria-pressed={catalogMode === "regular"}
                 onClick={() => switchCatalogMode("regular")}
               >
-                {copy("Standard API", "常规 API")} <small>{PROVIDER_CATALOG.length + 1}</small>
+                {copy("Standard API", "常规 API")} <small>{catalogProviders.length + 1}</small>
               </button>
               <button
                 className={catalogMode === "free" ? "active free" : ""}

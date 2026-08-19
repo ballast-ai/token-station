@@ -720,6 +720,13 @@ export interface ModelPriceSuggestionView extends ModelPriceView {
   fetched_at_ms: number;
 }
 
+export interface PublicProviderModelsView {
+  providers: Record<string, string[]>;
+  source: "live" | "cache" | "stale_cache";
+  fetched_at_ms: number;
+  unavailable_provider_ids: string[];
+}
+
 export interface ModelPriceImportResultView {
   state: StateView;
   imported: number;
@@ -1048,6 +1055,9 @@ export const removeAgentBudget = (agentId: AgentId) =>
   invoke<BudgetStatus[]>("remove_agent_budget", { agentId });
 
 export const getPriceTable = () => invoke<PriceTableView>("get_price_table");
+
+export const listPublicProviderModels = (providerIds: string[]) =>
+  invoke<PublicProviderModelsView>("list_public_provider_models", { providerIds });
 
 export const suggestModelPrice = (providerId: string | null, modelId: string) =>
   invoke<ModelPriceSuggestionView | null>("suggest_model_price", {

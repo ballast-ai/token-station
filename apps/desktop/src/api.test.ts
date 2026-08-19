@@ -25,6 +25,7 @@ import {
   getStats,
   listAgentRegistry,
   listFreeProviderPresets,
+  listPublicProviderModels,
   listAgentSnapshots,
   listenServeState,
   listenDesktopUpdateProgress,
@@ -296,6 +297,7 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
       providerDialect: "openai-compatible",
     }],
     ["list free provider presets", () => listFreeProviderPresets(), "list_free_provider_presets", undefined],
+    ["list public provider models", () => listPublicProviderModels(["openai", "qwen"]), "list_public_provider_models", { providerIds: ["openai", "qwen"] }],
     ["validate and add free provider", () => addFreeProvider("nvidia", ["openai/gpt-oss-120b"], "nvapi", true), "add_free_provider", { presetId: "nvidia", selectedModels: ["openai/gpt-oss-120b"], apiKey: "nvapi", guardConfirmed: true }],
     ["add local provider", () => addProvider("ollama", "http://127.0.0.1:11434/v1", ["m"], null, true), "add_provider_with_credential", {
       name: "ollama",

@@ -1,10 +1,10 @@
-//! Public model-price suggestions for the Desktop control plane.
+//! Public model metadata and price suggestions for the Desktop control plane.
 //!
 //! This module is deliberately outside the gateway and pricing kernel. It reads
-//! a public catalog on demand and returns a suggestion; the existing
-//! `set_model_price` command remains the only write path.
+//! a public catalog on demand. Remote model IDs remain advisory. The existing
+//! `set_model_price` command remains the only price-table write path.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -33,6 +33,14 @@ pub(crate) struct ModelPriceSuggestionView {
     pub reasoning_per_mtok: Option<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct PublicProviderModelsView {
+    pub providers: BTreeMap<String, Vec<String>>,
+    pub source: String,
+    pub fetched_at_ms: u64,
+    pub unavailable_provider_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RequestedModelPriceSuggestion {
     pub requested_model_id: String,
@@ -55,7 +63,21 @@ struct CatalogModel {
     id: String,
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    family: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    modalities: Option<CatalogModalities>,
     cost: Option<CatalogCost>,
+}
+
+#[derive(Deserialize)]
+struct CatalogModalities {
+    #[serde(default)]
+    input: Vec<String>,
+    #[serde(default)]
+    output: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +93,156 @@ struct CachedCatalog {
     body: String,
     fetched_at_ms: u64,
     fresh: bool,
+}
+
+pub(crate) fn list_public_provider_models_with_cache_egress(
+    data_dir: &Path,
+    provider_ids: &[String],
+    egress: &token_station_cli::config::EgressConfig,
+    secrets: &token_station_cli::secrets::SecretStore,
+) -> Result<PublicProviderModelsView, String> {
+    let cache = read_cache(data_dir);
+    if let Some(cached) = cache.as_ref().filter(|cache| cache.fresh) {
+        if let Ok(result) = public_provider_models_from_json(
+            &cached.body,
+            provider_ids,
+            cached.fetched_at_ms,
+            "cache",
+        ) {
+            return Ok(result);
+        }
+    }
+
+    let live = fetch_catalog(egress, secrets).and_then(|body| {
+        let fetched_at_ms = now_ms();
+        let result = public_provider_models_from_json(&body, provider_ids, fetched_at_ms, "live")?;
+        let _ = write_cache(data_dir, body.as_bytes());
+        Ok(result)
+    });
+    match live {
+        Ok(result) => Ok(result),
+        Err(live_error) => {
+            let Some(cached) = cache else {
+                return Err(live_error);
+            };
+            public_provider_models_from_json(
+                &cached.body,
+                provider_ids,
+                cached.fetched_at_ms,
+                "stale_cache",
+            )
+            .map_err(|cache_error| {
+                format!("{live_error}；本地公共模型目录也无法读取：{cache_error}")
+            })
+        }
+    }
+}
+
+fn public_provider_models_from_json(
+    body: &str,
+    provider_ids: &[String],
+    fetched_at_ms: u64,
+    source: &str,
+) -> Result<PublicProviderModelsView, String> {
+    let providers: BTreeMap<String, CatalogProvider> =
+        serde_json::from_str(body).map_err(|error| format!("公共模型目录格式无效：{error}"))?;
+    let mut resolved = BTreeMap::new();
+    let mut unavailable = Vec::new();
+
+    for requested_id in provider_ids {
+        let Some(wanted) = normalize_public_model_provider_id(requested_id) else {
+            unavailable.push(requested_id.clone());
+            continue;
+        };
+        let Some((_, provider)) = find_provider(&providers, &wanted) else {
+            unavailable.push(requested_id.clone());
+            continue;
+        };
+        let mut models = BTreeSet::new();
+        let mut invalid_provider = false;
+        for (model_key, model) in &provider.models {
+            if model.status.as_deref().is_some_and(|status| {
+                status.eq_ignore_ascii_case("deprecated") || status.eq_ignore_ascii_case("retired")
+            }) {
+                continue;
+            }
+            if !is_chat_compatible_model(model_key, model) {
+                continue;
+            }
+            let model_id = if model.id.trim().is_empty() {
+                model_key.trim()
+            } else {
+                model.id.trim()
+            };
+            if model_id.is_empty()
+                || model_id.len() > 512
+                || !model_id
+                    .chars()
+                    .all(|character| character.is_ascii_graphic())
+            {
+                continue;
+            }
+            models.insert(model_id.to_owned());
+            if models.len() > 512 {
+                invalid_provider = true;
+                break;
+            }
+        }
+        if invalid_provider || models.is_empty() {
+            unavailable.push(requested_id.clone());
+            continue;
+        }
+        resolved.insert(requested_id.clone(), models.into_iter().collect());
+    }
+
+    Ok(PublicProviderModelsView {
+        providers: resolved,
+        source: source.to_owned(),
+        fetched_at_ms,
+        unavailable_provider_ids: unavailable,
+    })
+}
+
+fn normalize_public_model_provider_id(value: &str) -> Option<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        // The public catalog has one generic Alibaba namespace. Token Station
+        // uses region-specific endpoints whose model availability can differ.
+        "qwen-singapore" | "qwen_singapore" | "qwen-us" | "qwen_us" => None,
+        _ => Some(normalize_provider_id(value)),
+    }
+}
+
+fn is_chat_compatible_model(model_key: &str, model: &CatalogModel) -> bool {
+    if model.modalities.as_ref().is_some_and(|modalities| {
+        !modalities
+            .input
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("text"))
+            || modalities.output.is_empty()
+            || !modalities
+                .output
+                .iter()
+                .all(|value| value.eq_ignore_ascii_case("text"))
+    }) {
+        return false;
+    }
+
+    let searchable = format!("{} {} {}", model_key, model.id, model.family).to_ascii_lowercase();
+    ![
+        "embed",
+        "rerank",
+        "retriever",
+        "retrieval",
+        "whisper",
+        "transcri",
+        "text-to-speech",
+        "speech-to-text",
+        "moderation",
+        "-tts",
+        "_tts",
+    ]
+    .iter()
+    .any(|marker| searchable.contains(marker))
 }
 
 pub(crate) fn suggest_with_cache_egress(
@@ -233,15 +405,27 @@ fn find_provider<'a>(
     providers: &'a BTreeMap<String, CatalogProvider>,
     wanted: &str,
 ) -> Option<(&'a str, &'a CatalogProvider)> {
-    providers.iter().find_map(|(key, provider)| {
-        let entry_id = if provider.id.is_empty() {
-            key.as_str()
+    let entry_id = |key: &'a str, provider: &'a CatalogProvider| {
+        if provider.id.is_empty() {
+            key
         } else {
             provider.id.as_str()
-        };
-        (normalize_provider_id(key) == wanted || normalize_provider_id(entry_id) == wanted)
-            .then_some((key.as_str(), provider))
-    })
+        }
+    };
+    providers
+        .iter()
+        .find_map(|(key, provider)| {
+            let id = entry_id(key, provider);
+            (key.eq_ignore_ascii_case(wanted) || id.eq_ignore_ascii_case(wanted))
+                .then_some((key.as_str(), provider))
+        })
+        .or_else(|| {
+            providers.iter().find_map(|(key, provider)| {
+                let id = entry_id(key, provider);
+                (normalize_provider_id(key) == wanted || normalize_provider_id(id) == wanted)
+                    .then_some((key.as_str(), provider))
+            })
+        })
 }
 
 fn find_in_provider(
@@ -327,6 +511,16 @@ fn normalize_provider_id(value: &str) -> String {
         "kimi" => "moonshotai-cn".to_owned(),
         "qwen" => "alibaba-cn".to_owned(),
         "qwen-singapore" | "qwen_singapore" | "qwen-us" | "qwen_us" => "alibaba".to_owned(),
+        "minimax-cn" | "minimax_cn" => "minimax-cn".to_owned(),
+        "minimax-global" | "minimax_global" => "minimax".to_owned(),
+        "nvidia-nim" | "nvidia_nim" => "nvidia".to_owned(),
+        "siliconflow" => "siliconflow-cn".to_owned(),
+        "siliconflow-global" | "siliconflow_global" => "siliconflow".to_owned(),
+        "together" => "togetherai".to_owned(),
+        "fireworks" => "fireworks-ai".to_owned(),
+        "stepfun-plan" | "stepfun_plan" => "stepfun-step-plan".to_owned(),
+        "xiaomi-mimo" | "xiaomi_mimo" => "xiaomi".to_owned(),
+        "novita" => "novita-ai".to_owned(),
         other => other.to_owned(),
     }
 }
@@ -656,5 +850,132 @@ mod tests {
         assert_eq!(cached.body, CATALOG);
         assert!(cached.fresh);
         std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn lists_only_current_text_models_for_requested_provider_channels() {
+        let catalog = r#"{
+          "alibaba-cn": {
+            "id": "alibaba-cn",
+            "name": "Alibaba (China)",
+            "models": {
+              "glm-5.2": {
+                "id": "glm-5.2",
+                "name": "GLM-5.2",
+                "modalities": {"input": ["text"], "output": ["text"]}
+              },
+              "old-model": {
+                "id": "old-model",
+                "name": "Old",
+                "status": "deprecated",
+                "modalities": {"input": ["text"], "output": ["text"]}
+              },
+              "image-only": {
+                "id": "image-only",
+                "name": "Image",
+                "modalities": {"input": ["text"], "output": ["image"]}
+              },
+              "text-embedding-3-small": {
+                "id": "text-embedding-3-small",
+                "name": "Embedding",
+                "family": "text-embedding",
+                "modalities": {"input": ["text"], "output": ["text"]}
+              },
+              "whisper-large-v3": {
+                "id": "whisper-large-v3",
+                "name": "Whisper",
+                "family": "whisper",
+                "modalities": {"input": ["audio"], "output": ["text"]}
+              },
+              "bad-id": {
+                "id": "bad\u0000id",
+                "name": "Bad",
+                "modalities": {"input": ["text"], "output": ["text"]}
+              }
+            }
+          },
+          "empty": {
+            "id": "empty",
+            "name": "Empty after filtering",
+            "models": {
+              "image-only": {
+                "id": "image-only",
+                "name": "Image",
+                "modalities": {"input": ["text"], "output": ["image"]}
+              }
+            }
+          }
+        }"#;
+
+        let result = public_provider_models_from_json(
+            catalog,
+            &[
+                "qwen".to_owned(),
+                "empty".to_owned(),
+                "volcengine_ark".to_owned(),
+            ],
+            42,
+            "live",
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.providers.get("qwen"),
+            Some(&vec!["glm-5.2".to_owned()])
+        );
+        assert_eq!(
+            result.unavailable_provider_ids,
+            vec!["empty", "volcengine_ark"]
+        );
+        assert_eq!(result.source, "live");
+        assert_eq!(result.fetched_at_ms, 42);
+    }
+
+    #[test]
+    fn maps_all_supported_desktop_channel_aliases() {
+        let expected = [
+            ("gemini", "google"),
+            ("nvidia_nim", "nvidia"),
+            ("siliconflow", "siliconflow-cn"),
+            ("siliconflow_global", "siliconflow"),
+            ("together", "togetherai"),
+            ("fireworks", "fireworks-ai"),
+            ("stepfun", "stepfun"),
+            ("stepfun_plan", "stepfun-step-plan"),
+            ("xiaomi_mimo", "xiaomi"),
+            ("novita", "novita-ai"),
+        ];
+
+        for (desktop, public) in expected {
+            assert_eq!(normalize_provider_id(desktop), public);
+        }
+
+        assert_eq!(normalize_public_model_provider_id("qwen_singapore"), None);
+        assert_eq!(normalize_public_model_provider_id("qwen_us"), None);
+    }
+
+    #[test]
+    fn exact_provider_ids_win_before_regional_alias_normalization() {
+        let catalog = r#"{
+          "siliconflow": {
+            "id": "siliconflow",
+            "models": {"global-model": {"id": "global-model"}}
+          },
+          "siliconflow-cn": {
+            "id": "siliconflow-cn",
+            "models": {"china-model": {"id": "china-model"}}
+          }
+        }"#;
+
+        let result = public_provider_models_from_json(
+            catalog,
+            &["siliconflow".to_owned(), "siliconflow_global".to_owned()],
+            42,
+            "live",
+        )
+        .unwrap();
+
+        assert_eq!(result.providers["siliconflow"], vec!["china-model"]);
+        assert_eq!(result.providers["siliconflow_global"], vec!["global-model"]);
     }
 }

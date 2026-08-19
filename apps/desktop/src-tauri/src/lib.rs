@@ -67,7 +67,9 @@ use desktop_update::{
     LATEST_JSON_URL, OFFICIAL_PUBLIC_KEY, PROGRESS_EVENT,
 };
 use model_catalog::ModelDiscoveryView;
-use pricing_catalog::{ModelPriceSuggestionView, RequestedModelPriceSuggestion};
+use pricing_catalog::{
+    ModelPriceSuggestionView, PublicProviderModelsView, RequestedModelPriceSuggestion,
+};
 use recovery::{
     DiagnosticPreview, FrontendDiagnosticInput, FrontendDiagnosticRecord, RecoveryMode,
     RecoveryState,
@@ -5829,6 +5831,51 @@ fn get_price_table(state: State<'_, AppStateManaged>) -> Result<PriceTable, Stri
 }
 
 #[tauri::command]
+async fn list_public_provider_models(
+    state: State<'_, AppStateManaged>,
+    provider_ids: Vec<String>,
+) -> Result<PublicProviderModelsView, String> {
+    if provider_ids.is_empty() || provider_ids.len() > 128 {
+        return Err("Request 1 to 128 Provider IDs.".to_owned());
+    }
+    let mut requested = BTreeSet::new();
+    for provider_id in provider_ids {
+        let provider_id = provider_id.trim().to_owned();
+        if provider_id.is_empty()
+            || provider_id.len() > 128
+            || provider_id.chars().any(char::is_control)
+        {
+            return Err(
+                "Each Provider ID must be 1 to 128 bytes and contain no control characters."
+                    .to_owned(),
+            );
+        }
+        requested.insert(provider_id);
+    }
+    let requested: Vec<String> = requested.into_iter().collect();
+    let (data_dir, egress, egress_secrets) = {
+        let inner = state.0.lock().unwrap();
+        let egress: EgressConfig = serde_json::from_value(inner.draft["egress"].clone())
+            .map_err(|error| format!("The egress configuration is invalid: {error}"))?;
+        (
+            inner.data_dir(),
+            egress.clone(),
+            secrets::SecretStore::from_egress_config(&egress, &inner.data_dir()),
+        )
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        pricing_catalog::list_public_provider_models_with_cache_egress(
+            &data_dir,
+            &requested,
+            &egress,
+            &egress_secrets,
+        )
+    })
+    .await
+    .map_err(|error| format!("The public model catalog task ended unexpectedly: {error}"))?
+}
+
+#[tauri::command]
 async fn suggest_model_price(
     state: State<'_, AppStateManaged>,
     provider_id: Option<String>,
@@ -6892,6 +6939,7 @@ pub fn run() {
             set_agent_budget,
             remove_agent_budget,
             get_price_table,
+            list_public_provider_models,
             suggest_model_price,
             import_model_prices_for_provider,
             set_model_price,
