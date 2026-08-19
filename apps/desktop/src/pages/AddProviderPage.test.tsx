@@ -1,9 +1,10 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import type { FreeProviderPresetView } from "../api";
+import type { FreeProviderPresetView, StateView } from "../api";
+import { ErrorToastProvider } from "../components/ErrorToast";
 import AddProviderPage, {
   type FreeCatalogFilters,
   type ProviderCatalogMode,
@@ -11,7 +12,12 @@ import AddProviderPage, {
 } from "./AddProviderPage";
 
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async (command: string, args?: { baseUrl?: string }) => {
+  invoke: vi.fn(),
+}));
+
+beforeEach(() => {
+  vi.mocked(invoke).mockReset();
+  vi.mocked(invoke).mockImplementation(async (command: string, args?: { baseUrl?: string }) => {
     if (command === "preview_provider_endpoints") {
       const loopback = args?.baseUrl?.startsWith("http://127.0.0.1")
         || args?.baseUrl?.startsWith("http://localhost")
@@ -24,9 +30,18 @@ vi.mock("@tauri-apps/api/core", () => ({
       };
     }
     if (command === "add_provider_with_credential") return {};
+    if (command === "import_model_prices_for_provider") {
+      return {
+        state: { source: "price-import" },
+        imported: 2,
+        existing: 0,
+        missing_model_ids: [],
+        price_version: 3,
+      };
+    }
     throw new Error(`unexpected IPC command: ${command}`);
-  }),
-}));
+  });
+});
 
 // The provider picker is a clickable brand-card catalog, not a <select>; click cards by visible label.
 const pickPreset = (user: ReturnType<typeof userEvent.setup>, label: string) =>
@@ -113,25 +128,28 @@ function renderPage(overrides: {
   existingNames?: string[];
   catalogMode?: ProviderCatalogMode;
   entryMode?: "provider-first" | "model-first";
+  onAdded?: (state: StateView, message: string) => void;
 } = {}) {
   return render(
-    <AddProviderPage
-      existingNames={overrides.existingNames ?? []}
-      onCancel={vi.fn()}
-      onAdded={vi.fn()}
-      catalogMode={overrides.catalogMode ?? "regular"}
-      onCatalogModeChange={vi.fn()}
-      regularFilters={regularFilters}
-      onRegularFiltersChange={vi.fn()}
-      freePresets={[]}
-      freeLoading={false}
-      freeError=""
-      freeFilters={freeFilters}
-      onFreeFiltersChange={vi.fn()}
-      onLoadFree={vi.fn()}
-      onSelectFree={vi.fn()}
-      entryMode={overrides.entryMode}
-    />,
+    <ErrorToastProvider>
+      <AddProviderPage
+        existingNames={overrides.existingNames ?? []}
+        onCancel={vi.fn()}
+        onAdded={overrides.onAdded ?? vi.fn()}
+        catalogMode={overrides.catalogMode ?? "regular"}
+        onCatalogModeChange={vi.fn()}
+        regularFilters={regularFilters}
+        onRegularFiltersChange={vi.fn()}
+        freePresets={[]}
+        freeLoading={false}
+        freeError=""
+        freeFilters={freeFilters}
+        onFreeFiltersChange={vi.fn()}
+        onLoadFree={vi.fn()}
+        onSelectFree={vi.fn()}
+        entryMode={overrides.entryMode}
+      />
+    </ErrorToastProvider>,
   );
 }
 
@@ -180,6 +198,93 @@ function RegularCatalogHarness() {
 }
 
 describe("AddProviderPage", () => {
+  it("imports all selected public prices in one batch when adding a cloud preset", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    const onAdded = vi.fn();
+    renderPage({ onAdded });
+
+    await pickPreset(user, "DeepSeek");
+    expect(screen.getByRole("checkbox", { name: "批量填充匹配的公开价格" })).toBeChecked();
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("import_model_prices_for_provider", {
+      upstreamName: "deepseek",
+      catalogProviderId: "deepseek",
+      modelIds: ["deepseek-v4-flash", "deepseek-v4-pro"],
+    });
+    expect(onAdded).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "price-import" }),
+      expect.any(String),
+    );
+  });
+
+  it("keeps automatic public pricing off for custom providers", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage();
+
+    await pickPreset(user, "自定义配置");
+
+    expect(screen.getByRole("checkbox", { name: "批量填充匹配的公开价格" }))
+      .not.toBeChecked();
+  });
+
+  it("does not apply usage-list pricing to subscription or local presets", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage();
+
+    await pickPreset(user, "智谱 GLM（Coding Plan）");
+    expect(screen.getByRole("checkbox", { name: "批量填充匹配的公开价格" }))
+      .not.toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "返回目录" }));
+    await pickPreset(user, "本地 Ollama");
+    expect(screen.getByRole("checkbox", { name: "批量填充匹配的公开价格" }))
+      .toBeDisabled();
+  });
+
+  it("uses the regional public-catalog namespace for a preset", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage();
+
+    await pickPreset(user, "智谱 GLM（中国）");
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("import_model_prices_for_provider", {
+      upstreamName: "glm_cn",
+      catalogProviderId: "zhipuai",
+      modelIds: ["glm-5.2", "glm-5.1", "glm-5"],
+    });
+  });
+
+  it("keeps the added provider and reports a batch price import failure", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    const onAdded = vi.fn();
+    const baseImplementation = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "import_model_prices_for_provider") {
+        throw new Error("catalog unavailable");
+      }
+      return baseImplementation?.(command, args);
+    });
+    renderPage({ onAdded });
+
+    await pickPreset(user, "DeepSeek");
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    expect(onAdded).toHaveBeenCalledWith({}, expect.any(String));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "供应商已添加，但公开价格导入失败",
+    );
+  });
+
   it("searches models first and then opens the selected provider with only that model selected", async () => {
     window.localStorage.setItem("token-station-language", "zh-CN");
     const user = userEvent.setup();

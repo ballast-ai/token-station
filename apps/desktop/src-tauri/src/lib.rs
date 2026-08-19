@@ -67,7 +67,7 @@ use desktop_update::{
     LATEST_JSON_URL, OFFICIAL_PUBLIC_KEY, PROGRESS_EVENT,
 };
 use model_catalog::ModelDiscoveryView;
-use pricing_catalog::ModelPriceSuggestionView;
+use pricing_catalog::{ModelPriceSuggestionView, RequestedModelPriceSuggestion};
 use recovery::{
     DiagnosticPreview, FrontendDiagnosticInput, FrontendDiagnosticRecord, RecoveryMode,
     RecoveryState,
@@ -1239,6 +1239,15 @@ struct StateView {
     config_error: Option<String>,
     /// Settings read model: switches, egress policy, and read-only environment information.
     settings: SettingsView,
+}
+
+#[derive(Serialize)]
+struct ModelPriceImportResultView {
+    state: StateView,
+    imported: usize,
+    existing: usize,
+    missing_model_ids: Vec<String>,
+    price_version: u32,
 }
 
 /// Settings view for proxy switches, egress policy, and read-only environment information.
@@ -5834,11 +5843,12 @@ async fn suggest_model_price(
         .filter(|value| !value.is_empty());
     let (data_dir, egress, egress_secrets) = {
         let inner = state.0.lock().unwrap();
-        let config = inner.materialize()?;
+        let egress: EgressConfig = serde_json::from_value(inner.draft["egress"].clone())
+            .map_err(|error| format!("出站配置不合法：{error}"))?;
         (
             inner.data_dir(),
-            config.egress.clone(),
-            secrets::SecretStore::from_config(&config, &inner.data_dir()),
+            egress.clone(),
+            secrets::SecretStore::from_egress_config(&egress, &inner.data_dir()),
         )
     };
     tauri::async_runtime::spawn_blocking(move || {
@@ -5852,6 +5862,165 @@ async fn suggest_model_price(
     })
     .await
     .map_err(|error| format!("公开价格目录任务异常结束：{error}"))?
+}
+
+fn configured_upstream_models(inner: &AppInner, name: &str) -> Result<BTreeSet<String>, String> {
+    let upstream = inner.draft["upstreams"]
+        .get(name)
+        .ok_or_else(|| format!("Provider `{name}` is not configured"))?;
+    upstream["models"]
+        .as_array()
+        .ok_or_else(|| format!("Provider `{name}` has invalid model configuration"))?
+        .iter()
+        .map(|capability| {
+            capability["model"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("Provider `{name}` has an invalid model entry"))
+        })
+        .collect()
+}
+
+fn apply_public_model_prices(
+    inner: &mut AppInner,
+    upstream_name: &str,
+    requested_models: &BTreeSet<String>,
+    suggestions: Vec<RequestedModelPriceSuggestion>,
+) -> Result<(usize, usize, Vec<String>, u32), String> {
+    let configured = configured_upstream_models(inner, upstream_name)?;
+    if let Some(model) = requested_models
+        .iter()
+        .find(|model| !configured.contains(*model))
+    {
+        return Err(format!(
+            "Model `{model}` is not configured for Provider `{upstream_name}`"
+        ));
+    }
+
+    let current = draft_price_table(inner)?;
+    let suggestions: BTreeMap<String, ModelPriceSuggestionView> = suggestions
+        .into_iter()
+        .map(|value| (value.requested_model_id, value.suggestion))
+        .collect();
+    let mut additions = BTreeMap::new();
+    let mut existing = 0;
+    let mut missing_model_ids = Vec::new();
+    for model in requested_models {
+        let scoped_model = format!("{upstream_name}/{model}");
+        if current.models.contains_key(&scoped_model) {
+            existing += 1;
+            continue;
+        }
+        let Some(suggestion) = suggestions.get(model) else {
+            missing_model_ids.push(model.clone());
+            continue;
+        };
+        additions.insert(
+            scoped_model,
+            ModelPrice {
+                input_per_mtok: suggestion.input_per_mtok,
+                output_per_mtok: suggestion.output_per_mtok,
+                cache_read_per_mtok: suggestion.cache_read_per_mtok,
+                cache_write_per_mtok: suggestion.cache_write_per_mtok,
+                reasoning_per_mtok: suggestion.reasoning_per_mtok,
+            },
+        );
+    }
+
+    let imported = additions.len();
+    if additions.is_empty() {
+        return Ok((0, existing, missing_model_ids, current.version));
+    }
+    let next = current.next_with_models(additions)?;
+    let next_version = next.version;
+    let previous_pricing = inner.draft["pricing"].clone();
+    let previous_state = inner.config_state.clone();
+    inner.draft["pricing"] = serde_json::to_value(next).map_err(|error| error.to_string())?;
+    if let Err(error) = inner.observe_draft() {
+        inner.draft["pricing"] = previous_pricing;
+        inner.config_state = previous_state;
+        return Err(error);
+    }
+    Ok((imported, existing, missing_model_ids, next_version))
+}
+
+#[tauri::command]
+async fn import_model_prices_for_provider(
+    state: State<'_, AppStateManaged>,
+    upstream_name: String,
+    catalog_provider_id: Option<String>,
+    model_ids: Vec<String>,
+) -> Result<ModelPriceImportResultView, String> {
+    let upstream_name = upstream_name.trim().to_owned();
+    if upstream_name.is_empty() {
+        return Err("Provider name is required for a price import".to_owned());
+    }
+    let catalog_provider_id = catalog_provider_id
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if catalog_provider_id
+        .as_ref()
+        .is_some_and(|value| value.len() > 128)
+    {
+        return Err("Catalog Provider ID must not exceed 128 bytes".to_owned());
+    }
+    let mut requested_models = BTreeSet::new();
+    for model in model_ids {
+        let model = model.trim().to_owned();
+        if model.is_empty() || model.len() > 512 || model.chars().any(char::is_control) {
+            return Err(
+                "Model IDs must be 1-512 bytes and contain no control characters".to_owned(),
+            );
+        }
+        requested_models.insert(model);
+    }
+    if requested_models.is_empty() || requested_models.len() > 512 {
+        return Err("A price import must contain 1-512 unique models".to_owned());
+    }
+
+    let (data_dir, egress, egress_secrets) = {
+        let inner = state.0.lock().unwrap();
+        inner.ensure_editable()?;
+        let configured = configured_upstream_models(&inner, &upstream_name)?;
+        if let Some(model) = requested_models
+            .iter()
+            .find(|model| !configured.contains(*model))
+        {
+            return Err(format!(
+                "Model `{model}` is not configured for Provider `{upstream_name}`"
+            ));
+        }
+        let egress: EgressConfig = serde_json::from_value(inner.draft["egress"].clone())
+            .map_err(|error| format!("出站配置不合法：{error}"))?;
+        (
+            inner.data_dir(),
+            egress.clone(),
+            secrets::SecretStore::from_egress_config(&egress, &inner.data_dir()),
+        )
+    };
+    let requested_for_catalog: Vec<String> = requested_models.iter().cloned().collect();
+    let suggestions = tauri::async_runtime::spawn_blocking(move || {
+        pricing_catalog::suggest_many_with_cache_egress(
+            &data_dir,
+            catalog_provider_id.as_deref(),
+            &requested_for_catalog,
+            &egress,
+            &egress_secrets,
+        )
+    })
+    .await
+    .map_err(|error| format!("Public price catalog task ended unexpectedly: {error}"))??;
+
+    let mut inner = state.0.lock().unwrap();
+    let (imported, existing, missing_model_ids, price_version) =
+        apply_public_model_prices(&mut inner, &upstream_name, &requested_models, suggestions)?;
+    Ok(ModelPriceImportResultView {
+        state: inner.snapshot(),
+        imported,
+        existing,
+        missing_model_ids,
+        price_version,
+    })
 }
 
 #[tauri::command]
@@ -6724,6 +6893,7 @@ pub fn run() {
             remove_agent_budget,
             get_price_table,
             suggest_model_price,
+            import_model_prices_for_provider,
             set_model_price,
             remove_model_price,
             get_recent_receipts,
@@ -11483,6 +11653,75 @@ mod tests {
         )
         .unwrap();
         assert_eq!(agent_filtered.total.requests, 0);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn public_price_batch_scopes_models_preserves_manual_values_and_bumps_once() {
+        let root = scratch_home("public-price-batch");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["fixture"] = json!({
+            "provider": "openai-compatible",
+            "base_url": "https://api.example.test/v1",
+            "models": [{"model": "model-a"}, {"model": "model-b"}, {"model": "missing"}]
+        });
+        draft["pricing"] = json!({
+            "version": 4,
+            "models": {
+                "fixture/model-a": {
+                    "input_per_mtok": 99,
+                    "output_per_mtok": 199
+                }
+            }
+        });
+        let mut inner = AppInner::new(root.join("token-station.json"), draft, None);
+        let suggestion = |requested_model_id: &str, input_per_mtok| RequestedModelPriceSuggestion {
+            requested_model_id: requested_model_id.to_owned(),
+            suggestion: ModelPriceSuggestionView {
+                model_id: requested_model_id.to_owned(),
+                display_name: requested_model_id.to_owned(),
+                provider_id: "fixture-catalog".to_owned(),
+                provider_name: "Fixture".to_owned(),
+                source: "models.dev".to_owned(),
+                catalog_source: "cache".to_owned(),
+                fetched_at_ms: 1,
+                input_per_mtok,
+                output_per_mtok: input_per_mtok * 2,
+                cache_read_per_mtok: 0,
+                cache_write_per_mtok: 0,
+                reasoning_per_mtok: None,
+            },
+        };
+        let requested = BTreeSet::from([
+            "missing".to_owned(),
+            "model-a".to_owned(),
+            "model-b".to_owned(),
+        ]);
+
+        let result = apply_public_model_prices(
+            &mut inner,
+            "fixture",
+            &requested,
+            vec![suggestion("model-a", 1), suggestion("model-b", 2)],
+        )
+        .unwrap();
+
+        assert_eq!(result, (1, 1, vec!["missing".to_owned()], 5));
+        let pricing = draft_price_table(&inner).unwrap();
+        assert_eq!(pricing.version, 5);
+        assert_eq!(pricing.models["fixture/model-a"].input_per_mtok, 99);
+        assert_eq!(pricing.models["fixture/model-b"].input_per_mtok, 2);
+        assert!(!pricing.models.contains_key("model-b"));
+        let unconfigured = BTreeSet::from(["model-outside-provider".to_owned()]);
+        let error = apply_public_model_prices(
+            &mut inner,
+            "fixture",
+            &unconfigured,
+            vec![suggestion("model-outside-provider", 3)],
+        )
+        .unwrap_err();
+        assert!(error.contains("is not configured for Provider"), "{error}");
+        assert_eq!(draft_price_table(&inner).unwrap().version, 5);
         std::fs::remove_dir_all(root).ok();
     }
 

@@ -250,6 +250,42 @@ impl PriceTable {
         Ok(Self { version, models })
     }
 
+    /// Returns the next immutable price-table version with several models
+    /// added or changed as one atomic catalog import.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty batch, invalid ids/rates, a batch that changes
+    /// nothing, an invalid current table, and version exhaustion.
+    pub fn next_with_models(
+        &self,
+        additions: BTreeMap<String, ModelPrice>,
+    ) -> Result<Self, String> {
+        self.validate()?;
+        if additions.is_empty() {
+            return Err("price batch must contain at least one model".to_owned());
+        }
+        for (model, price) in &additions {
+            validate_model_id(model)?;
+            price
+                .validate()
+                .map_err(|error| format!("model `{model}` price: {error}"))?;
+        }
+        if additions
+            .iter()
+            .all(|(model, price)| self.models.get(model) == Some(price))
+        {
+            return Err("model prices are unchanged".to_owned());
+        }
+        let version = self
+            .version
+            .checked_add(1)
+            .ok_or_else(|| "pricing version exhausted; start a new configuration".to_owned())?;
+        let mut models = self.models.clone();
+        models.extend(additions);
+        Ok(Self { version, models })
+    }
+
     /// Returns the next immutable price-table version without one model.
     ///
     /// # Errors
@@ -532,6 +568,47 @@ mod tests {
                 .next_with_model("model-a", original.models["model-a"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn adding_several_models_creates_one_price_table_version() {
+        let original = PriceTable {
+            version: 7,
+            models: BTreeMap::from([(
+                "existing/model".to_owned(),
+                ModelPrice {
+                    input_per_mtok: 900_000,
+                    ..ModelPrice::default()
+                },
+            )]),
+        };
+        let additions = BTreeMap::from([
+            (
+                "deepseek/deepseek-v4-flash".to_owned(),
+                ModelPrice {
+                    input_per_mtok: 140_000,
+                    output_per_mtok: 280_000,
+                    ..ModelPrice::default()
+                },
+            ),
+            (
+                "deepseek/deepseek-v4-pro".to_owned(),
+                ModelPrice {
+                    input_per_mtok: 435_000,
+                    output_per_mtok: 870_000,
+                    ..ModelPrice::default()
+                },
+            ),
+        ]);
+
+        let next = original
+            .next_with_models(additions)
+            .expect("one batch creates one immutable version");
+
+        assert_eq!(next.version, 8);
+        assert_eq!(next.models.len(), 3);
+        assert_eq!(original.version, 7);
+        assert_eq!(original.models.len(), 1);
     }
 
     #[test]

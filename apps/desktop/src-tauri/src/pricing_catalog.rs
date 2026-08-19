@@ -33,6 +33,12 @@ pub(crate) struct ModelPriceSuggestionView {
     pub reasoning_per_mtok: Option<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RequestedModelPriceSuggestion {
+    pub requested_model_id: String,
+    pub suggestion: ModelPriceSuggestionView,
+}
+
 #[derive(Deserialize)]
 struct CatalogProvider {
     #[serde(default)]
@@ -74,37 +80,66 @@ pub(crate) fn suggest_with_cache_egress(
     egress: &token_station_cli::config::EgressConfig,
     secrets: &token_station_cli::secrets::SecretStore,
 ) -> Result<Option<ModelPriceSuggestionView>, String> {
+    let mut suggestions = suggest_many_with_cache_egress(
+        data_dir,
+        provider_id,
+        &[model_id.to_owned()],
+        egress,
+        secrets,
+    )?;
+    Ok(suggestions.pop().map(|value| value.suggestion))
+}
+
+pub(crate) fn suggest_many_with_cache_egress(
+    data_dir: &Path,
+    provider_id: Option<&str>,
+    model_ids: &[String],
+    egress: &token_station_cli::config::EgressConfig,
+    secrets: &token_station_cli::secrets::SecretStore,
+) -> Result<Vec<RequestedModelPriceSuggestion>, String> {
     let cache = read_cache(data_dir);
     if let Some(cached) = cache.as_ref().filter(|cache| cache.fresh) {
-        if let Ok(suggestion) =
-            suggest_from_json(&cached.body, provider_id, model_id, cached.fetched_at_ms)
+        if let Ok(suggestions) =
+            suggest_many_from_json(&cached.body, provider_id, model_ids, cached.fetched_at_ms)
         {
-            return Ok(suggestion.map(|value| with_catalog_source(value, "cache")));
+            return Ok(with_catalog_sources(suggestions, "cache"));
         }
     }
 
     let live = fetch_catalog(egress, secrets).and_then(|body| {
         let fetched_at_ms = now_ms();
-        let suggestion = suggest_from_json(&body, provider_id, model_id, fetched_at_ms)?
-            .map(|value| with_catalog_source(value, "live"));
+        let suggestions = suggest_many_from_json(&body, provider_id, model_ids, fetched_at_ms)?;
         // Never replace a known-good cache with an invalid catalog. Parsing and
         // price validation above are part of a successful refresh.
         let _ = write_cache(data_dir, body.as_bytes());
-        Ok(suggestion)
+        Ok(with_catalog_sources(suggestions, "live"))
     });
     match live {
-        Ok(suggestion) => Ok(suggestion),
+        Ok(suggestions) => Ok(suggestions),
         Err(live_error) => {
             let Some(cached) = cache else {
                 return Err(live_error);
             };
-            suggest_from_json(&cached.body, provider_id, model_id, cached.fetched_at_ms)
-                .map(|suggestion| suggestion.map(|value| with_catalog_source(value, "stale_cache")))
+            suggest_many_from_json(&cached.body, provider_id, model_ids, cached.fetched_at_ms)
+                .map(|suggestions| with_catalog_sources(suggestions, "stale_cache"))
                 .map_err(|cache_error| {
                     format!("{live_error}；本地价格目录也无法读取：{cache_error}")
                 })
         }
     }
+}
+
+fn with_catalog_sources(
+    suggestions: Vec<RequestedModelPriceSuggestion>,
+    catalog_source: &str,
+) -> Vec<RequestedModelPriceSuggestion> {
+    suggestions
+        .into_iter()
+        .map(|value| RequestedModelPriceSuggestion {
+            requested_model_id: value.requested_model_id,
+            suggestion: with_catalog_source(value.suggestion, catalog_source),
+        })
+        .collect()
 }
 
 fn with_catalog_source(
@@ -115,6 +150,7 @@ fn with_catalog_source(
     suggestion
 }
 
+#[cfg(test)]
 fn suggest_from_json(
     body: &str,
     provider_id: Option<&str>,
@@ -123,6 +159,37 @@ fn suggest_from_json(
 ) -> Result<Option<ModelPriceSuggestionView>, String> {
     let providers: BTreeMap<String, CatalogProvider> =
         serde_json::from_str(body).map_err(|error| format!("公开价格目录格式无效：{error}"))?;
+    suggest_from_providers(&providers, provider_id, model_id, fetched_at_ms)
+}
+
+fn suggest_many_from_json(
+    body: &str,
+    provider_id: Option<&str>,
+    model_ids: &[String],
+    fetched_at_ms: u64,
+) -> Result<Vec<RequestedModelPriceSuggestion>, String> {
+    let providers: BTreeMap<String, CatalogProvider> =
+        serde_json::from_str(body).map_err(|error| format!("公开价格目录格式无效：{error}"))?;
+    let mut suggestions = Vec::new();
+    for model_id in model_ids {
+        if let Some(suggestion) =
+            suggest_from_providers(&providers, provider_id, model_id, fetched_at_ms)?
+        {
+            suggestions.push(RequestedModelPriceSuggestion {
+                requested_model_id: model_id.clone(),
+                suggestion,
+            });
+        }
+    }
+    Ok(suggestions)
+}
+
+fn suggest_from_providers(
+    providers: &BTreeMap<String, CatalogProvider>,
+    provider_id: Option<&str>,
+    model_id: &str,
+    fetched_at_ms: u64,
+) -> Result<Option<ModelPriceSuggestionView>, String> {
     let raw_model = model_id.trim();
     if raw_model.is_empty() {
         return Ok(None);
@@ -140,7 +207,7 @@ fn suggest_from_json(
         .or_else(|| infer_official_provider(raw_model).map(str::to_owned));
 
     if let Some(provider) = selected_provider {
-        let Some((provider_key, entry)) = find_provider(&providers, &provider) else {
+        let Some((provider_key, entry)) = find_provider(providers, &provider) else {
             // A caller-supplied namespace is an explicit boundary. Do not
             // silently price it as another provider's model.
             return Ok(None);
@@ -149,7 +216,7 @@ fn suggest_from_json(
     }
 
     let mut matches = Vec::new();
-    for (provider_key, provider) in &providers {
+    for (provider_key, provider) in providers {
         if let Some(suggestion) =
             find_in_provider(provider_key, provider, raw_model, fetched_at_ms)?
         {
@@ -253,8 +320,13 @@ fn usd_per_mtok_to_micros(value: f64) -> Result<u64, String> {
 fn normalize_provider_id(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "google-ai" | "google-generative-ai" | "gemini" => "google".to_owned(),
-        "zhipu" | "zhipu-ai" | "bigmodel" => "zhipuai".to_owned(),
-        "moonshot" => "moonshotai".to_owned(),
+        "zhipu" | "zhipu-ai" | "bigmodel" | "glm-cn" | "glm_cn" => "zhipuai".to_owned(),
+        "glm" => "zai".to_owned(),
+        "glm-coding" | "glm_coding" => "zai-coding-plan".to_owned(),
+        "moonshot" | "kimi-global" | "kimi_global" => "moonshotai".to_owned(),
+        "kimi" => "moonshotai-cn".to_owned(),
+        "qwen" => "alibaba-cn".to_owned(),
+        "qwen-singapore" | "qwen_singapore" | "qwen-us" | "qwen_us" => "alibaba".to_owned(),
         other => other.to_owned(),
     }
 }
@@ -489,6 +561,16 @@ mod tests {
     }"#;
 
     #[test]
+    fn maps_desktop_regional_presets_to_current_catalog_namespaces() {
+        assert_eq!(normalize_provider_id("glm_cn"), "zhipuai");
+        assert_eq!(normalize_provider_id("glm"), "zai");
+        assert_eq!(normalize_provider_id("glm_coding"), "zai-coding-plan");
+        assert_eq!(normalize_provider_id("kimi"), "moonshotai-cn");
+        assert_eq!(normalize_provider_id("qwen"), "alibaba-cn");
+        assert_eq!(normalize_provider_id("qwen_singapore"), "alibaba");
+    }
+
+    #[test]
     fn finds_an_exact_provider_model_and_converts_usd_to_micros() {
         let suggestion = suggest_from_json(CATALOG, Some("openai"), "gpt-5", 42)
             .unwrap()
@@ -500,6 +582,22 @@ mod tests {
         assert_eq!(suggestion.cache_read_per_mtok, 125_000);
         assert_eq!(suggestion.cache_write_per_mtok, 0);
         assert_eq!(suggestion.reasoning_per_mtok, None);
+    }
+
+    #[test]
+    fn resolves_several_requested_models_from_one_catalog_parse() {
+        let suggestions = suggest_many_from_json(
+            CATALOG,
+            Some("anthropic"),
+            &["claude-sonnet-4.6@high".to_owned(), "missing".to_owned()],
+            42,
+        )
+        .unwrap();
+
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].requested_model_id, "claude-sonnet-4.6@high");
+        assert_eq!(suggestions[0].suggestion.model_id, "claude-sonnet-4-6");
+        assert_eq!(suggestions[0].suggestion.cache_write_per_mtok, 3_750_000);
     }
 
     #[test]

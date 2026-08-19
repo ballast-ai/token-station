@@ -720,6 +720,14 @@ export interface ModelPriceSuggestionView extends ModelPriceView {
   fetched_at_ms: number;
 }
 
+export interface ModelPriceImportResultView {
+  state: StateView;
+  imported: number;
+  existing: number;
+  missing_model_ids: string[];
+  price_version: number;
+}
+
 export interface BandView {
   at_least: number;
   pool: string;
@@ -1046,6 +1054,16 @@ export const suggestModelPrice = (providerId: string | null, modelId: string) =>
     providerId,
     modelId,
   });
+
+export const importModelPricesForProvider = (
+  upstreamName: string,
+  catalogProviderId: string | null,
+  modelIds: string[],
+) => invoke<ModelPriceImportResultView>("import_model_prices_for_provider", {
+  upstreamName,
+  catalogProviderId,
+  modelIds,
+});
 
 export const setModelPrice = (
   model: string,

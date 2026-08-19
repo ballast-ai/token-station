@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   addProvider,
   discoverProviderModels,
+  importModelPricesForProvider,
   previewProviderEndpoints,
   type FreeOfferKind,
   type FreeProviderPresetView,
@@ -98,6 +99,24 @@ function matchesCatalogSearch(searchableText: string, query: string): boolean {
   return terms.every((term) => normalizedText.includes(term));
 }
 
+const PUBLIC_PRICE_PROVIDER_IDS: Record<string, string> = {
+  gemini: "google",
+  glm_cn: "zhipuai",
+  glm: "zai",
+  glm_coding: "zai-coding-plan",
+  kimi: "moonshotai-cn",
+  kimi_global: "moonshotai",
+  qwen: "alibaba-cn",
+  qwen_singapore: "alibaba",
+  qwen_us: "alibaba",
+  minimax_cn: "minimax-cn",
+  minimax_global: "minimax",
+};
+
+function shouldDefaultPublicPriceImport(preset: ProviderPreset | undefined): boolean {
+  return Boolean(preset && !preset.local && preset.subscription !== "Coding Plan");
+}
+
 export default function AddProviderPage({
   existingNames,
   onCancel,
@@ -116,7 +135,7 @@ export default function AddProviderPage({
   onProviderSelected,
   entryMode = "provider-first",
 }: AddProviderPageProps) {
-  const { showError } = useErrorToast();
+  const { showError, showInfo } = useErrorToast();
   const { copy, language } = useLocalizedCopy();
   const offerLabel = (kind: FreeOfferKind) => (
     kind === "recurring" ? copy("Always free", "长期免费") : copy("Trial credit", "试用额度")
@@ -145,6 +164,7 @@ export default function AddProviderPage({
   const [endpointPreview, setEndpointPreview] = useState<ProviderEndpointPreview | null>(null);
   const [endpointError, setEndpointError] = useState("");
   const [modelFirstQuery, setModelFirstQuery] = useState("");
+  const [importPublicPrices, setImportPublicPrices] = useState(false);
 
   const preset: ProviderPreset | null = useMemo(
     () => PROVIDER_CATALOG.find((item) => item.id === presetId) ?? null,
@@ -156,6 +176,10 @@ export default function AddProviderPage({
   const catalogModels = preset?.models ?? [];
   const allModels = [...new Set([...catalogModels, ...discoveredModels, ...extraModels])];
   const configuringRegular = Boolean(presetId);
+  const publicPriceImportAvailable = !local && providerDialect !== "azure-openai-v1";
+  const publicPriceProviderId = isCustom
+    ? null
+    : PUBLIC_PRICE_PROVIDER_IDS[presetId] ?? presetId;
 
   const visibleRegular = useMemo(() => {
     const query = regularFilters.query.trim().toLocaleLowerCase();
@@ -279,6 +303,7 @@ export default function AddProviderPage({
     setLocal(selected?.local ?? false);
     setCredentialSource("store");
     setProviderDialect("openai-compatible");
+    setImportPublicPrices(shouldDefaultPublicPriceImport(selected));
     setCredentialReference("");
     setPicked(selected
       ? preferredModel && selected.models.includes(preferredModel)
@@ -300,6 +325,7 @@ export default function AddProviderPage({
     setKey("");
     setCredentialSource("store");
     setProviderDialect("openai-compatible");
+    setImportPublicPrices(false);
     setCredentialReference("");
     setPicked([]);
     setEndpointPreview(null);
@@ -317,6 +343,7 @@ export default function AddProviderPage({
     setDiscoveredModels([]);
     setDiscovery(null);
     setProviderDialect(next);
+    if (next === "azure-openai-v1") setImportPublicPrices(false);
   };
 
   const refreshModels = async () => {
@@ -399,7 +426,7 @@ export default function AddProviderPage({
     setSaving(true);
     setError("");
     try {
-      const next = await addProvider(
+      let next = await addProvider(
         name.trim(),
         url.trim(),
         picked,
@@ -409,6 +436,27 @@ export default function AddProviderPage({
         needsKey && credentialSource !== "store" ? credentialReference.trim() : null,
         providerDialect,
       );
+      if (importPublicPrices && publicPriceImportAvailable) {
+        try {
+          const imported = await importModelPricesForProvider(
+            name.trim(),
+            publicPriceProviderId,
+            picked,
+          );
+          next = imported.state;
+          if (imported.missing_model_ids.length > 0) {
+            showInfo(copy(
+              `${imported.imported} public prices imported; ${imported.missing_model_ids.length} models remain unknown.`,
+              `已导入 ${imported.imported} 个公开价格；${imported.missing_model_ids.length} 个模型仍为未知价格。`,
+            ), `provider-price-import:${name.trim()}`);
+          }
+        } catch (priceError) {
+          showError(copy(
+            `Provider added, but public prices could not be imported: ${humanizeAppError(priceError, language)}`,
+            `供应商已添加，但公开价格导入失败：${humanizeAppError(priceError, language)}`,
+          ), `provider-price-import:${name.trim()}`);
+        }
+      }
       onAdded(
         next,
         isExisting
@@ -971,6 +1019,29 @@ export default function AddProviderPage({
                 if (!picked.includes(model)) setPicked((current) => [...current, model]);
               }}
             />
+            <label className="field-label checkbox-label">
+              <input
+                type="checkbox"
+                checked={importPublicPrices}
+                disabled={disabled || !publicPriceImportAvailable}
+                onChange={(event) => setImportPublicPrices(event.target.checked)}
+              />
+              <span>{copy(
+                "Fill matching public prices",
+                "批量填充匹配的公开价格",
+              )}</span>
+            </label>
+            <p className="inline-note">
+              {publicPriceImportAvailable
+                ? copy(
+                    "Uses models.dev public USD list prices as estimates. Existing manual prices are never overwritten; unmatched models remain unknown.",
+                    "使用 models.dev 的公开美元标价作为估算。不会覆盖已有人工价格；未匹配模型保持未知价格。",
+                  )
+                : copy(
+                    "Public price import is unavailable for local and Azure deployment entries.",
+                    "本地模型和 Azure 部署条目不使用公开价格导入。",
+                  )}
+            </p>
           </div>
         </div>
 
