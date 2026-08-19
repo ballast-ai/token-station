@@ -47,7 +47,7 @@ fn official_provider_adapter_passes_the_manifest_gate() {
 
     assert_eq!(accepts_manifest(&manifest), Ok(()));
     assert_eq!(manifest.kind, AdapterKind::Provider);
-    assert_eq!(manifest.providers, ["openai-compatible"]);
+    assert_eq!(manifest.providers, ["openai-compatible", "azure-openai-v1"]);
     assert_eq!(manifest.permissions.secrets, ["provider_api_key"]);
     assert!(
         !manifest.capabilities.contains(&Capability::AgentHint),

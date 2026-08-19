@@ -1288,6 +1288,7 @@ fn south_runtime_for(
             entry.provider_call,
             ConfiguredProviderCallEngine::SouthV1Buffered
                 | ConfiguredProviderCallEngine::SouthV1BufferedStreaming
+                | ConfiguredProviderCallEngine::SouthV1BufferedStreamingHeaderAuth
         )
     });
     if !uses_south {
@@ -2624,23 +2625,10 @@ impl Gateway {
             .plugin
             .build_http_request(&request, &upstream.config)
             .map_err(describe)?;
-        let approved = if upstream.south_package_approved {
-            ProviderPackageEligibilityV1::Approved
-        } else {
-            ProviderPackageEligibilityV1::Unapproved
-        };
-        let metadata = if upstream.south_package_approved {
-            ResponseMetadataEligibilityV1::Compatible
-        } else {
-            ResponseMetadataEligibilityV1::Incompatible
-        };
-        let policy = CommunityCallPolicyV1::new(
-            RolloutEligibilityV1::Enabled,
-            approved,
-            upstream.dialect,
-            self.egress.policy.mode,
+        let policy = self.community_call_policy(
+            upstream,
             RequestBodyModeV1::Buffered,
-            metadata,
+            upstream.config.provider == "azure-openai-v1",
         );
         let prepared = prepare_provider_call_v1(policy, &upstream.config, auth_config, &descriptor)
             .map_err(describe_prepare_failure)?;
@@ -4834,6 +4822,37 @@ impl Gateway {
         })
     }
 
+    fn community_call_policy(
+        &self,
+        upstream: &Upstream,
+        body_mode: RequestBodyModeV1,
+        allow_header_auth: bool,
+    ) -> CommunityCallPolicyV1 {
+        let approved = if upstream.south_package_approved {
+            ProviderPackageEligibilityV1::Approved
+        } else {
+            ProviderPackageEligibilityV1::Unapproved
+        };
+        let metadata = if upstream.south_package_approved {
+            ResponseMetadataEligibilityV1::Compatible
+        } else {
+            ResponseMetadataEligibilityV1::Incompatible
+        };
+        let policy = CommunityCallPolicyV1::new(
+            RolloutEligibilityV1::Enabled,
+            approved,
+            upstream.dialect,
+            self.egress.policy.mode,
+            body_mode,
+            metadata,
+        );
+        if allow_header_auth {
+            policy.with_azure_openai_header_auth()
+        } else {
+            policy
+        }
+    }
+
     /// Resolves the descriptor into a real HTTP exchange.
     ///
     /// The credential is read here, written into one header, and goes out of
@@ -4863,28 +4882,16 @@ impl Gateway {
             *actual_engine = RecordedProviderCallEngine::Legacy;
             return self.send(ctx, attempt_timeout, descriptor, upstream_name);
         };
-        let approved = if upstream.south_package_approved {
-            ProviderPackageEligibilityV1::Approved
-        } else {
-            ProviderPackageEligibilityV1::Unapproved
-        };
-        let metadata = if upstream.south_package_approved {
-            ResponseMetadataEligibilityV1::Compatible
-        } else {
-            ResponseMetadataEligibilityV1::Incompatible
-        };
         let body_mode = if streaming {
             RequestBodyModeV1::Streaming
         } else {
             RequestBodyModeV1::Buffered
         };
-        let policy = CommunityCallPolicyV1::new(
-            RolloutEligibilityV1::Enabled,
-            approved,
-            upstream.dialect,
-            self.egress.policy.mode,
+        let policy = self.community_call_policy(
+            upstream,
             body_mode,
-            metadata,
+            upstream.provider_call
+                == ConfiguredProviderCallEngine::SouthV1BufferedStreamingHeaderAuth,
         );
         let prepared = match if streaming {
             prepare_provider_stream_v1(policy, &upstream.config, auth_config, descriptor)

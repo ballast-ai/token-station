@@ -597,6 +597,23 @@ describe("model selection and provider model management", () => {
     expect(screen.getByRole("option", { name: "无鉴权" })).toBeInTheDocument();
   });
 
+  it("keeps Azure deployment configuration manual without invoking model discovery", async () => {
+    const provider: ProviderView = {
+      name: "azure",
+      provider: "azure-openai-v1",
+      base_url: "https://fixture.openai.azure.com/openai/v1",
+      models: ["deployment-fixture"],
+      has_auth: true,
+    };
+    const user = userEvent.setup();
+    render(<ProviderModelManager provider={provider} serveRunning={false} onSaved={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "刷新模型" }));
+
+    expect(discoverProviderModels).not.toHaveBeenCalled();
+    expect(screen.getByText(/Azure deployment name 需要手工填写/)).toBeInTheDocument();
+  });
+
   it("keeps Legacy selected while placing South behind an experimental disclosure", async () => {
     window.localStorage.setItem("token-station-language", "en");
     const provider: ProviderView = {
@@ -623,9 +640,12 @@ describe("model selection and provider model management", () => {
     await user.click(screen.getByText("Advanced runtime"));
     const legacy = screen.getByRole("radio", { name: /^Legacy/ });
     const southBuffered = screen.getByRole("radio", { name: /South buffered only/ });
-    const southStreaming = screen.getByRole("radio", { name: /South buffered \+ streaming/ });
+    const southStreaming = screen.getByRole("radio", {
+      name: /^South buffered \+ streaming(?! \+ Header Auth)/,
+    });
+    const southHeader = screen.getByRole("radio", { name: /South buffered \+ streaming \+ Header Auth/ });
     expect(legacy).toBeChecked();
-    expect(screen.getAllByText("Experimental")).toHaveLength(2);
+    expect(screen.getAllByText("Experimental")).toHaveLength(3);
 
     legacy.focus();
     await user.keyboard("{ArrowDown}");
@@ -636,6 +656,7 @@ describe("model selection and provider model management", () => {
     expect(legacy).toBeChecked();
     await user.keyboard("{ArrowUp}");
     expect(southStreaming).toBeChecked();
+    expect(southHeader).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Save details" }));
     await waitFor(() => expect(editProvider).toHaveBeenCalledWith(
       "openai",
@@ -647,6 +668,55 @@ describe("model selection and provider model management", () => {
     ));
     expect(screen.getByText(/South never replays an attempt through Legacy/)).toBeInTheDocument();
     expect(screen.getByText(/Restart after saving to apply/)).toBeInTheDocument();
+  });
+
+  it("keeps Azure off old South modes and enables only the cumulative Header Auth option", async () => {
+    window.localStorage.setItem("token-station-language", "en");
+    const provider: ProviderView = {
+      name: "azure",
+      provider: "azure-openai-v1",
+      base_url: "https://fixture.openai.azure.com/openai/v1",
+      models: ["deployment-fixture"],
+      has_auth: true,
+      credential_source: "store",
+      provider_call: "legacy",
+      south_v1_available: false,
+      south_v1_unavailable_reason: "provider_package",
+      south_header_auth_v1_available: true,
+      south_header_auth_v1_unavailable_reason: null,
+    };
+    vi.mocked(editProvider).mockResolvedValue(state);
+    const user = userEvent.setup();
+    render(
+      <ErrorToastProvider>
+        <ProviderModelManager provider={provider} serveRunning onSaved={vi.fn()} />
+      </ErrorToastProvider>,
+    );
+
+    await user.click(screen.getByText("Advanced runtime"));
+    const buffered = screen.getByRole("radio", { name: /South buffered only/ });
+    const streaming = screen.getByRole("radio", {
+      name: /^South buffered \+ streaming(?! \+ Header Auth)/,
+    });
+    const header = screen.getByRole("radio", {
+      name: /South buffered \+ streaming \+ Header Auth/,
+    });
+    expect(buffered).toBeDisabled();
+    expect(streaming).toBeDisabled();
+    expect(header).toBeEnabled();
+    expect(screen.getByText(/real Provider requests and may incur charges/)).toBeInTheDocument();
+
+    await user.click(header);
+    expect(screen.getByText(/Azure OpenAI v1 uses the fixed api-key header/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save details" }));
+    await waitFor(() => expect(editProvider).toHaveBeenCalledWith(
+      "azure",
+      "https://fixture.openai.azure.com/openai/v1",
+      null,
+      "store",
+      null,
+      "south_v1_buffered_streaming_header_auth",
+    ));
   });
 
   it("opens the advanced runtime disclosure for an active South setting", () => {
@@ -688,10 +758,12 @@ describe("model selection and provider model management", () => {
 
     expect(screen.getByText("Experimental configured but unavailable")).toBeInTheDocument();
     expect(screen.queryByText("Experimental active")).not.toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /South buffered \+ streaming/ })).toBeDisabled();
+    expect(screen.getByRole("radio", {
+      name: /^South buffered \+ streaming(?! \+ Header Auth)/,
+    })).toBeDisabled();
   });
 
-  it("disables both experimental runtimes when host eligibility fails", async () => {
+  it("disables all experimental runtimes when host eligibility fails", async () => {
     window.localStorage.setItem("token-station-language", "en");
     const provider: ProviderView = {
       name: "local",
@@ -710,7 +782,11 @@ describe("model selection and provider model management", () => {
     await user.click(screen.getByText("Advanced runtime"));
 
     expect(screen.getByRole("radio", { name: /South buffered only/ })).toBeDisabled();
-    expect(screen.getByRole("radio", { name: /South buffered \+ streaming/ })).toBeDisabled();
+    expect(screen.getByRole("radio", {
+      name: /^South buffered \+ streaming(?! \+ Header Auth)/,
+    })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: /South buffered \+ streaming \+ Header Auth/ }))
+      .toBeDisabled();
     expect(screen.getByText(/requires Bearer credentials from the local store or an environment variable/))
       .toBeInTheDocument();
   });

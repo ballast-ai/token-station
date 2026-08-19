@@ -357,6 +357,11 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     zh: "请先填写 API Key，再读取该供应商的模型目录。",
   },
   {
+    matches: /model_catalog_azure_deployment_manual/i,
+    en: "Enter the Azure deployment name manually; this dialect does not use the generic model-catalog request.",
+    zh: "Azure deployment name 需要手工填写；该方言不使用通用模型目录请求。",
+  },
+  {
     matches: /quota|usage|pricing|catalog|额度|用量|价格目录|模型目录/i,
     en: "The latest provider data is unavailable. Keep the current settings and try refreshing again later.",
     zh: "暂时无法获取最新的供应商数据。请保留当前设置，稍后再次刷新。",

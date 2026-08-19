@@ -495,6 +495,7 @@ pub enum ProviderCallEngine {
     Legacy,
     SouthV1Buffered,
     SouthV1BufferedStreaming,
+    SouthV1BufferedStreamingHeaderAuth,
 }
 
 impl ProviderCallEngine {
@@ -1198,6 +1199,26 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&opted_in).expect("serializes")["provider_call"],
             serde_json::json!("south_v1_buffered_streaming")
+        );
+    }
+
+    #[test]
+    fn provider_call_engine_requires_an_explicit_header_auth_opt_in() {
+        let opted_in: UpstreamConfig = serde_json::from_value(serde_json::json!({
+            "provider": "azure-openai-v1",
+            "provider_call": "south_v1_buffered_streaming_header_auth",
+            "base_url": "https://fixture.openai.azure.com/openai/v1",
+            "models": [{ "model": "deployment-fixture" }]
+        }))
+        .expect("the cumulative South Header Auth opt-in parses");
+
+        assert_eq!(
+            opted_in.provider_call,
+            ProviderCallEngine::SouthV1BufferedStreamingHeaderAuth
+        );
+        assert_eq!(
+            serde_json::to_value(&opted_in).expect("serializes")["provider_call"],
+            serde_json::json!("south_v1_buffered_streaming_header_auth")
         );
     }
 

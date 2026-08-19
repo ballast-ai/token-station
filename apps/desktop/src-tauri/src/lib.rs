@@ -428,8 +428,10 @@ fn collect_installed_self_test() -> Result<Value, String> {
                 loadable: true,
             });
         }
-        if registry.provider_binding("openai-compatible").is_none() {
-            return Err("builtin provider dialect `openai-compatible` is not bound".to_owned());
+        for dialect in ["openai-compatible", "azure-openai-v1"] {
+            if registry.provider_binding(dialect).is_none() {
+                return Err(format!("builtin provider dialect `{dialect}` is not bound"));
+            }
         }
 
         let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder))
@@ -923,6 +925,8 @@ struct ProviderView {
     provider_call: String,
     south_v1_available: bool,
     south_v1_unavailable_reason: Option<&'static str>,
+    south_header_auth_v1_available: bool,
+    south_header_auth_v1_unavailable_reason: Option<&'static str>,
     /// This upstream runs on the local machine; `local_only` routing keeps to it.
     local: bool,
     access_tier: String,
@@ -1022,6 +1026,39 @@ fn south_v1_unavailable_reason(
     if !package_verified
         || upstream["provider"].as_str() != Some("openai-compatible")
         || draft["plugins"]["providers"]["openai-compatible"]
+            .as_str()
+            .is_some_and(|package| package != "provider-openai-compatible")
+    {
+        return Some("provider_package");
+    }
+    if upstream
+        .get("api_dialect")
+        .and_then(Value::as_str)
+        .is_some_and(|dialect| dialect != "translated")
+    {
+        return Some("api_dialect");
+    }
+    if draft["egress"]["mode"]
+        .as_str()
+        .is_some_and(|mode| mode != "direct")
+    {
+        return Some("egress");
+    }
+    if upstream["auth"]["store"].as_bool() != Some(true) && !upstream["auth"]["env"].is_string() {
+        return Some("auth");
+    }
+    None
+}
+
+fn south_header_auth_v1_unavailable_reason(
+    draft: &Value,
+    upstream: &Value,
+    package_verified: bool,
+) -> Option<&'static str> {
+    let provider = upstream["provider"].as_str().unwrap_or_default();
+    if !package_verified
+        || !matches!(provider, "openai-compatible" | "azure-openai-v1")
+        || draft["plugins"]["providers"][provider]
             .as_str()
             .is_some_and(|package| package != "provider-openai-compatible")
     {
@@ -1581,6 +1618,8 @@ impl AppInner {
                     .contains(up["provider"].as_str().unwrap_or_default());
                 let south_v1_unavailable_reason =
                     south_v1_unavailable_reason(&self.draft, up, package_verified);
+                let south_header_auth_v1_unavailable_reason =
+                    south_header_auth_v1_unavailable_reason(&self.draft, up, package_verified);
                 ProviderView {
                     name: name.clone(),
                     brand_id: provider_brand_id(name, &base_url, access_tier),
@@ -1613,6 +1652,9 @@ impl AppInner {
                         .to_owned(),
                     south_v1_available: south_v1_unavailable_reason.is_none(),
                     south_v1_unavailable_reason,
+                    south_header_auth_v1_available: south_header_auth_v1_unavailable_reason
+                        .is_none(),
+                    south_header_auth_v1_unavailable_reason,
                     local: up.get("local").and_then(Value::as_bool).unwrap_or(false),
                     access_tier: access_tier.to_owned(),
                     quota_plan: up["quota_plan"]["windows"][0].as_object().map(|window| {
@@ -3006,7 +3048,17 @@ fn add_provider(
     } else {
         "none"
     };
-    add_provider_impl(state, name, base_url, models, api_key, local, source, None)
+    add_provider_impl(
+        state,
+        name,
+        base_url,
+        models,
+        api_key,
+        local,
+        source,
+        None,
+        "openai-compatible",
+    )
 }
 
 #[tauri::command]
@@ -3020,7 +3072,9 @@ fn add_provider_with_credential(
     local: bool,
     credential_source: String,
     credential_reference: Option<String>,
+    provider_dialect: Option<String>,
 ) -> Result<StateView, String> {
+    let provider_dialect = provider_dialect.as_deref().unwrap_or("openai-compatible");
     add_provider_impl(
         state,
         name,
@@ -3030,6 +3084,7 @@ fn add_provider_with_credential(
         local,
         credential_source.trim(),
         credential_reference.as_deref(),
+        provider_dialect,
     )
 }
 
@@ -3043,7 +3098,11 @@ fn add_provider_impl(
     local: bool,
     credential_source: &str,
     credential_reference: Option<&str>,
+    provider_dialect: &str,
 ) -> Result<StateView, String> {
+    if !matches!(provider_dialect, "openai-compatible" | "azure-openai-v1") {
+        return Err("Provider dialect 不受支持".to_owned());
+    }
     if name.trim().is_empty() {
         return Err("供应商名不能为空".into());
     }
@@ -3052,6 +3111,9 @@ fn add_provider_impl(
     let base_url = ProviderEndpoint::try_new(base_url.trim())
         .map_err(|error| format!("Base URL 不合法：{error}"))?
         .as_str();
+    if provider_dialect == "azure-openai-v1" && !azure_openai_v1_base_url_is_exact(&base_url) {
+        return Err("Azure OpenAI v1 的 Base URL 路径必须精确为 `/openai/v1`".to_owned());
+    }
     let mut inner = state.0.lock().unwrap();
     inner.ensure_editable()?;
     if inner.draft["upstreams"].get(&name).is_some() {
@@ -3101,7 +3163,7 @@ fn add_provider_impl(
     model_catalog::remove_provider(&data_dir, &name)?;
 
     let mut up = json!({
-        "provider": "openai-compatible",
+        "provider": provider_dialect,
         "base_url": base_url,
         "models": model_objs,
     });
@@ -3156,6 +3218,17 @@ fn add_provider_impl(
         }
     }
     Ok(inner.snapshot())
+}
+
+fn azure_openai_v1_base_url_is_exact(base_url: &str) -> bool {
+    base_url
+        .split_once("://")
+        .and_then(|(_, authority_and_path)| {
+            authority_and_path
+                .find('/')
+                .map(|path_start| &authority_and_path[path_start..])
+        })
+        == Some("/openai/v1")
 }
 
 /// Set local-only routing and cloud fallback in the home router so inherited
@@ -3460,6 +3533,11 @@ fn edit_provider_impl(
         .get(&name)
         .cloned()
         .ok_or_else(|| format!("供应商 `{name}` 不存在"))?;
+    if previous["provider"].as_str() == Some("azure-openai-v1")
+        && !azure_openai_v1_base_url_is_exact(&base_url)
+    {
+        return Err("Azure OpenAI v1 的 Base URL 路径必须精确为 `/openai/v1`".to_owned());
+    }
     let api_key = api_key
         .as_deref()
         .map(str::trim)
@@ -3476,6 +3554,9 @@ fn edit_provider_impl(
         Some("legacy") => Some(None),
         Some("south_v1_buffered") => Some(Some("south_v1_buffered")),
         Some("south_v1_buffered_streaming") => Some(Some("south_v1_buffered_streaming")),
+        Some("south_v1_buffered_streaming_header_auth") => {
+            Some(Some("south_v1_buffered_streaming_header_auth"))
+        }
         Some(_) => return Err("Provider call engine 不受支持".to_owned()),
     };
     let previous_auth = previous.get("auth").filter(|value| !value.is_null());
@@ -3560,6 +3641,13 @@ fn prepare_discovery_credential(
 ) -> Result<DiscoveryCredential, String> {
     inner.ensure_editable()?;
     ensure_generic_provider_mutation_allowed(inner, name)?;
+    if inner.draft["upstreams"]
+        .get(name)
+        .and_then(|upstream| upstream["provider"].as_str())
+        == Some("azure-openai-v1")
+    {
+        return Err("model_catalog_azure_deployment_manual".to_owned());
+    }
     let explicit = api_key
         .map(str::trim)
         .filter(|key| !key.is_empty())
@@ -6755,6 +6843,39 @@ mod tests {
     }
 
     #[test]
+    fn header_auth_selector_is_independent_from_the_legacy_south_modes() {
+        let draft = json!({
+            "plugins": {"providers": {"openai-compatible": "provider-openai-compatible"}},
+            "egress": {"mode": "direct"}
+        });
+        let azure = json!({
+            "provider": "azure-openai-v1",
+            "base_url": "https://fixture.openai.azure.com/openai/v1",
+            "auth": {"slot": "provider_api_key", "store": true}
+        });
+
+        assert_eq!(
+            south_v1_unavailable_reason(&draft, &azure, true),
+            Some("provider_package"),
+            "the old South selector must remain Bearer-only"
+        );
+        assert_eq!(
+            south_header_auth_v1_unavailable_reason(&draft, &azure, true),
+            None,
+            "the new cumulative selector accepts the exact Azure dialect"
+        );
+
+        let unknown = json!({
+            "provider": "future-header-provider",
+            "auth": {"slot": "provider_api_key", "store": true}
+        });
+        assert_eq!(
+            south_header_auth_v1_unavailable_reason(&draft, &unknown, true),
+            Some("provider_package")
+        );
+    }
+
+    #[test]
     fn prepare_desktop_draft_preserves_omitted_optional_maps() {
         let source = template(
             std::path::Path::new("/tmp/token-station-data"),
@@ -7633,6 +7754,9 @@ mod tests {
         assert_eq!(report["plugins"].as_array().map(Vec::len), Some(5));
         assert_eq!(report["storage"]["credential_read"], json!(false));
         assert_eq!(report["gateway"]["loadable"], json!(true));
+        assert!(report["gateway"]["provider_dialects"]
+            .as_array()
+            .is_some_and(|dialects| dialects.iter().any(|dialect| dialect == "azure-openai-v1")));
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -8874,6 +8998,32 @@ mod tests {
         )
         .expect("OpenRouter's public catalog needs no stored credential");
         assert_eq!(openrouter, DiscoveryCredential::Explicit(None));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn azure_model_discovery_fails_before_resolving_any_credential() {
+        let root = scratch_home("azure-model-discovery");
+        let mut draft = template_for_test(&root);
+        draft["upstreams"]["azure"] = json!({
+            "provider": "azure-openai-v1",
+            "base_url": "https://fixture.openai.azure.com/openai/v1",
+            "auth": {"slot": "provider_api_key", "store": true},
+            "models": [{"model": "deployment-fixture"}]
+        });
+        let inner = AppInner::new(root.join("token-station.json"), draft, None);
+
+        for api_key in [None, Some("one-time-secret")] {
+            let error = prepare_discovery_credential(
+                &inner,
+                "azure",
+                "https://fixture.openai.azure.com/openai/v1",
+                api_key,
+            )
+            .expect_err("Azure deployments are configured manually, never fetched with Bearer");
+            assert_eq!(error, "model_catalog_azure_deployment_manual");
+        }
+
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -10552,6 +10702,7 @@ mod tests {
             false,
             "env".to_owned(),
             Some("DEEPSEEK_API_KEY".to_owned()),
+            None,
         )
         .expect("an environment credential reference is accepted");
         let env_provider = env_view
@@ -10572,6 +10723,7 @@ mod tests {
             false,
             "file".to_owned(),
             Some(credential_file.to_string_lossy().into_owned()),
+            None,
         )
         .expect("an absolute credential file reference is accepted");
         let file_provider = file_view
@@ -10594,6 +10746,7 @@ mod tests {
             false,
             "env".to_owned(),
             Some("EXAMPLE_API_KEY".to_owned()),
+            None,
         ) {
             Err(error) => error,
             Ok(_) => panic!("env/file sources cannot accept plaintext API keys"),
@@ -10608,6 +10761,7 @@ mod tests {
             false,
             "env".to_owned(),
             Some("1INVALID".to_owned()),
+            None,
         ) {
             Err(error) => error,
             Ok(_) => panic!("invalid environment names are rejected"),
@@ -10622,6 +10776,7 @@ mod tests {
             false,
             "file".to_owned(),
             Some("relative.key".to_owned()),
+            None,
         ) {
             Err(error) => error,
             Ok(_) => panic!("relative credential files are rejected"),
@@ -10644,6 +10799,107 @@ mod tests {
             .join("token-station-data")
             .join(secrets::SECRETS_FILE)
             .exists());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn provider_creation_persists_only_the_closed_dialect_catalog() {
+        let root = scratch_home("provider-dialect");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        )))));
+
+        let view = add_provider_with_credential(
+            app.state(),
+            "azure".to_owned(),
+            "https://fixture.openai.azure.com/openai/v1".to_owned(),
+            vec!["deployment-fixture".to_owned()],
+            None,
+            false,
+            "env".to_owned(),
+            Some("AZURE_OPENAI_API_KEY".to_owned()),
+            Some("azure-openai-v1".to_owned()),
+        )
+        .expect("the Azure OpenAI v1 dialect is accepted");
+        let provider = view
+            .providers
+            .iter()
+            .find(|provider| provider.name == "azure")
+            .expect("the Azure provider is visible");
+        assert_eq!(provider.provider, "azure-openai-v1");
+
+        let before = get_state(app.state()).draft_revision;
+        let error = match add_provider_with_credential(
+            app.state(),
+            "azure_wrong_base".to_owned(),
+            "https://fixture.openai.azure.com/v1".to_owned(),
+            vec!["deployment-fixture".to_owned()],
+            None,
+            false,
+            "env".to_owned(),
+            Some("AZURE_OPENAI_API_KEY".to_owned()),
+            Some("azure-openai-v1".to_owned()),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("Azure OpenAI v1 requires the exact /openai/v1 API root"),
+        };
+        assert!(error.contains("/openai/v1"), "{error}");
+        let after_wrong_base = get_state(app.state());
+        assert_eq!(after_wrong_base.draft_revision, before);
+        assert!(after_wrong_base
+            .providers
+            .iter()
+            .all(|provider| provider.name != "azure_wrong_base"));
+
+        let error = match edit_provider_with_credential(
+            app.state(),
+            "azure".to_owned(),
+            "https://fixture.openai.azure.com/v1".to_owned(),
+            None,
+            "env".to_owned(),
+            Some("AZURE_OPENAI_API_KEY".to_owned()),
+            "legacy".to_owned(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("editing Azure must preserve the exact /openai/v1 API root"),
+        };
+        assert!(error.contains("/openai/v1"), "{error}");
+        let after_wrong_edit = get_state(app.state());
+        assert_eq!(after_wrong_edit.draft_revision, before);
+        assert_eq!(
+            after_wrong_edit
+                .providers
+                .iter()
+                .find(|provider| provider.name == "azure")
+                .map(|provider| provider.base_url.as_str()),
+            Some("https://fixture.openai.azure.com/openai/v1")
+        );
+
+        let error = match add_provider_with_credential(
+            app.state(),
+            "unknown".to_owned(),
+            "https://provider.example/v1".to_owned(),
+            vec!["model".to_owned()],
+            None,
+            false,
+            "env".to_owned(),
+            Some("UNKNOWN_API_KEY".to_owned()),
+            Some("future-header-provider".to_owned()),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("unknown provider dialects must fail closed"),
+        };
+        assert!(error.contains("Provider dialect"), "{error}");
+        let after = get_state(app.state());
+        assert_eq!(after.draft_revision, before);
+        assert!(after
+            .providers
+            .iter()
+            .all(|provider| provider.name != "unknown"));
 
         std::fs::remove_dir_all(root).ok();
     }

@@ -14,7 +14,9 @@
 //! 3. **Explicit `plugins.providers` entries** — operator intent from the
 //!    config file, honored even when the package directory does not exist
 //!    yet; the gateway reports the missing package at load, exactly as it
-//!    did before discovery existed.
+//!    did before discovery existed. A newly reserved official dialect refuses
+//!    a conflicting pre-existing local or explicit binding instead of
+//!    silently changing that operator's traffic on upgrade.
 //!
 //! Conflicts within a tier are refused, not resolved: two local packages
 //! claiming the same dialect, or an explicit entry disagreeing with a
@@ -52,6 +54,11 @@ const MAX_PACKAGE_FILES: usize = 10_000;
 const MAX_PACKAGE_DEPTH: usize = 16;
 const MAX_PACKAGE_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PACKAGE_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+const NEWLY_RESERVED_OFFICIAL_DIALECTS: &[&str] = &["azure-openai-v1"];
+
+fn newly_reserved_official_dialect(dialect: &str) -> bool {
+    NEWLY_RESERVED_OFFICIAL_DIALECTS.contains(&dialect)
+}
 
 /// The builtin tier's raw material. With the feature off the slice is empty
 /// and everything below degrades to pure directory discovery.
@@ -487,6 +494,14 @@ fn bind_declared_dialects(
                 // The builtin tier is not overridable; the shipped layout
                 // (embedded copy + plugins-dist copy) must start.
                 Some(existing) if existing.origin == Origin::Builtin => {
+                    if newly_reserved_official_dialect(dialect) && existing.package != name {
+                        return Err(format!(
+                            "provider dialect `{dialect}` is now reserved by the builtin `{}`, but \
+                             package `{name}` also claims it; rename that third-party dialect or \
+                             remove the package before upgrading",
+                            existing.package,
+                        ));
+                    }
                     shadowed.push(format!(
                         "`{dialect}` from package `{name}` is shadowed by the builtin `{}`",
                         existing.package,
@@ -517,6 +532,14 @@ fn merge_explicit_entries(
         match providers.get(dialect) {
             Some(existing) if existing.origin == Origin::Builtin => {
                 if existing.package != *package {
+                    if newly_reserved_official_dialect(dialect) {
+                        return Err(format!(
+                            "plugins.providers maps newly reserved dialect `{dialect}` to \
+                             `{package}`, but the official builtin is `{}`; rename the third-party \
+                             dialect or remove the explicit mapping before upgrading",
+                            existing.package,
+                        ));
+                    }
                     shadowed.push(format!(
                         "plugins.providers entry `{dialect}` -> `{package}` is shadowed by the \
                          builtin `{}`",
@@ -1173,7 +1196,10 @@ mod tests {
 
     use crate::config::PluginsConfig;
 
-    use super::{PackageSource, PluginRegistry, ProviderPackageVerificationV1};
+    use super::{
+        DiscoveredPackage, PackageSource, PluginRegistry, ProviderPackageVerificationV1,
+        bind_declared_dialects, merge_explicit_entries,
+    };
 
     fn provider_manifest(name: &str, dialects: &[&str]) -> String {
         serde_json::json!({
@@ -1207,6 +1233,16 @@ mod tests {
         let package_dir = dir.join(package);
         fs::create_dir_all(&package_dir).expect("temp dir is writable");
         fs::write(package_dir.join("manifest.json"), manifest).expect("temp dir is writable");
+    }
+
+    fn package(name: &str, dialects: &[&str], source: PackageSource) -> DiscoveredPackage {
+        DiscoveredPackage {
+            manifest: serde_json::from_str(&provider_manifest(name, dialects))
+                .expect("the test manifest is valid"),
+            source,
+            conformance_passed: true,
+            publisher_signature_verified: true,
+        }
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -1293,6 +1329,90 @@ mod tests {
         assert!(
             error.contains("provider-a") && error.contains("provider-b"),
             "{error}"
+        );
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn newly_reserved_azure_dialect_refuses_a_silent_builtin_takeover() {
+        let dir = scratch("azure-reservation");
+        let packages = vec![
+            package(
+                "provider-openai-compatible",
+                &["azure-openai-v1"],
+                PackageSource::Builtin {
+                    manifest_source: "{}",
+                    wasm: b"",
+                },
+            ),
+            package(
+                "provider-legacy-azure",
+                &["azure-openai-v1"],
+                PackageSource::Dir(dir.join("provider-legacy-azure")),
+            ),
+        ];
+
+        let error = bind_declared_dialects(&packages, false)
+            .expect_err("an existing third-party Azure binding requires an explicit migration");
+        assert!(error.contains("azure-openai-v1"), "{error}");
+        assert!(error.contains("provider-legacy-azure"), "{error}");
+        assert!(error.contains("provider-openai-compatible"), "{error}");
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn newly_reserved_azure_dialect_refuses_a_conflicting_explicit_mapping() {
+        let dir = scratch("azure-explicit-reservation");
+        let packages = vec![package(
+            "provider-openai-compatible",
+            &["azure-openai-v1"],
+            PackageSource::Builtin {
+                manifest_source: "{}",
+                wasm: b"",
+            },
+        )];
+        let (mut providers, mut notes) =
+            bind_declared_dialects(&packages, false).expect("the builtin alone binds");
+        let config = plugins(dir.clone(), &[("azure-openai-v1", "provider-legacy-azure")]);
+
+        let error = merge_explicit_entries(&config, &packages, &mut providers, &mut notes)
+            .expect_err("operator intent cannot be silently replaced by the new builtin claim");
+        assert!(error.contains("azure-openai-v1"), "{error}");
+        assert!(error.contains("provider-legacy-azure"), "{error}");
+        assert!(error.contains("provider-openai-compatible"), "{error}");
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn newly_reserved_azure_dialect_allows_the_official_staged_copy() {
+        let dir = scratch("azure-official-staged-copy");
+        let packages = vec![
+            package(
+                "provider-openai-compatible",
+                &["azure-openai-v1"],
+                PackageSource::Builtin {
+                    manifest_source: "{}",
+                    wasm: b"",
+                },
+            ),
+            package(
+                "provider-openai-compatible",
+                &["azure-openai-v1"],
+                PackageSource::Dir(dir.join("provider-openai-compatible")),
+            ),
+        ];
+
+        let (providers, notes) = bind_declared_dialects(&packages, false)
+            .expect("the signed builtin and its staged package copy may coexist");
+        assert_eq!(
+            providers
+                .get("azure-openai-v1")
+                .map(|binding| binding.package.as_str()),
+            Some("provider-openai-compatible")
+        );
+        assert!(
+            notes.iter().any(|note| note.contains("shadowed")),
+            "{notes:?}"
         );
         fs::remove_dir_all(dir).ok();
     }

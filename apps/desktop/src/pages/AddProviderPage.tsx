@@ -127,6 +127,9 @@ export default function AddProviderPage({
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [key, setKey] = useState("");
+  const [providerDialect, setProviderDialect] = useState<
+    "openai-compatible" | "azure-openai-v1"
+  >("openai-compatible");
   const [credentialSource, setCredentialSource] = useState<"store" | "env" | "file">("store");
   const [credentialReference, setCredentialReference] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
@@ -261,6 +264,7 @@ export default function AddProviderPage({
     setUrl(selected?.baseUrl ?? "");
     setLocal(selected?.local ?? false);
     setCredentialSource("store");
+    setProviderDialect("openai-compatible");
     setCredentialReference("");
     setPicked(selected ? [...selected.models] : []);
     setExtraModels([]);
@@ -277,6 +281,7 @@ export default function AddProviderPage({
     setUrl("");
     setKey("");
     setCredentialSource("store");
+    setProviderDialect("openai-compatible");
     setCredentialReference("");
     setPicked([]);
     setEndpointPreview(null);
@@ -289,7 +294,23 @@ export default function AddProviderPage({
     if (mode === "free" && freePresets.length === 0 && !freeLoading) onLoadFree();
   };
 
+  const changeProviderDialect = (next: typeof providerDialect) => {
+    setPicked((current) => current.filter((model) => !discoveredModels.includes(model)));
+    setDiscoveredModels([]);
+    setDiscovery(null);
+    setProviderDialect(next);
+  };
+
   const refreshModels = async () => {
+    if (providerDialect === "azure-openai-v1") {
+      setDiscovery({
+        models: [],
+        source: "none",
+        fetched_at_ms: null,
+        warning: "model_catalog_azure_deployment_manual",
+      });
+      return;
+    }
     if (!name.trim() || !url.trim()) {
       setDiscovery({
         models: [],
@@ -368,6 +389,7 @@ export default function AddProviderPage({
         local && endpointPreview.loopback,
         needsKey ? credentialSource : "none",
         needsKey && credentialSource !== "store" ? credentialReference.trim() : null,
+        providerDialect,
       );
       onAdded(
         next,
@@ -684,10 +706,38 @@ export default function AddProviderPage({
               {copy("Name", "名称")}
               <input className="input" value={name} disabled={disabled || !isCustom} onChange={(event) => setName(event.target.value)} />
             </label>
+            {isCustom && (
+              <div className="field-label">
+                <span>{copy("API dialect", "API 方言")}</span>
+                <Select
+                  value={providerDialect}
+                  disabled={disabled}
+                  onValueChange={(value) => changeProviderDialect(value as typeof providerDialect)}
+                >
+                  <SelectTrigger className="w-full" aria-label={copy("API dialect", "API 方言")}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent position="popper" align="start">
+                    <SelectGroup>
+                      <SelectItem value="openai-compatible">OpenAI-compatible</SelectItem>
+                      <SelectItem value="azure-openai-v1">Azure OpenAI v1</SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             <label className="field-label">
               Base URL
               <input className="input mono" value={url} disabled={disabled || !isCustom} onChange={(event) => setUrl(event.target.value)} />
             </label>
+            {isCustom && providerDialect === "azure-openai-v1" && (
+              <p className="inline-note form-span">
+                {copy(
+                  "The Base URL must point to the resource /openai/v1 root. Use the Azure deployment name as the model; the credential is sent only in api-key.",
+                  "Base URL 必须指向资源的 /openai/v1 根路径；模型名填写 Azure deployment name，凭据只通过 api-key 发送。",
+                )}
+              </p>
+            )}
             <div className={`endpoint-preview form-span ${endpointError ? "invalid" : ""}`} aria-live="polite">
               {endpointError ? (
                 <span>{endpointError}</span>

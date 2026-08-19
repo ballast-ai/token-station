@@ -22,6 +22,8 @@ export interface ProviderView {
   provider_call?: ProviderCallEngine;
   south_v1_available?: boolean;
   south_v1_unavailable_reason?: SouthUnavailableReason | null;
+  south_header_auth_v1_available?: boolean;
+  south_header_auth_v1_unavailable_reason?: SouthUnavailableReason | null;
   /** Locally hosted provider, such as Ollama. Local-only routing uses this to keep traffic on the machine. */
   local?: boolean;
   access_tier?: "free" | "paid";
@@ -32,7 +34,8 @@ export interface ProviderView {
 export type ProviderCallEngine =
   | "legacy"
   | "south_v1_buffered"
-  | "south_v1_buffered_streaming";
+  | "south_v1_buffered_streaming"
+  | "south_v1_buffered_streaming_header_auth";
 
 export type SouthUnavailableReason = "provider_package" | "api_dialect" | "egress" | "auth";
 
@@ -823,6 +826,7 @@ export const addProvider = (
   local = false,
   credential_source: "store" | "env" | "file" | "none" = api_key ? "store" : "none",
   credential_reference: string | null = null,
+  provider_dialect: "openai-compatible" | "azure-openai-v1" = "openai-compatible",
 ) =>
   invoke<StateView>("add_provider_with_credential", {
     name,
@@ -832,6 +836,7 @@ export const addProvider = (
     local,
     credentialSource: credential_source,
     credentialReference: credential_reference,
+    providerDialect: provider_dialect,
   });
 
 export const listFreeProviderPresets = () =>

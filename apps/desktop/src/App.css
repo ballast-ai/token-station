@@ -898,7 +898,8 @@ body {
 .provider-test-results span.pass { color: var(--success); }
 .provider-test-results span.fail { color: var(--danger); }
 .provider-test-results span.skipped, .provider-test-results span.not-run { opacity: 0.72; }
-.provider-health-actions { display: flex; align-items: center; gap: 8px; }
+.provider-health-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.provider-test-charge-warning { flex-basis: 100%; color: var(--muted); font-size: 9px; text-align: right; }
 .provider-health-badge { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 9px; }
 .provider-health-badge i { width: 7px; height: 7px; border-radius: 999px; background: var(--muted); }
 .provider-health-badge small { color: var(--muted); font-size: 8.5px; }

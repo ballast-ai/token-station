@@ -95,6 +95,7 @@ fn plugins_dir() -> &'static Path {
 struct Seen {
     path: String,
     authorization: Option<String>,
+    api_key: Option<String>,
     content_type: Option<String>,
     body: Value,
 }
@@ -511,6 +512,11 @@ fn read_http_request(stream: &mut TcpStream) -> Seen {
             .starts_with("authorization:")
             .then(|| line.split_once(':').expect("header").1.trim().to_owned())
     });
+    let api_key = head.lines().find_map(|line| {
+        line.to_ascii_lowercase()
+            .starts_with("api-key:")
+            .then(|| line.split_once(':').expect("header").1.trim().to_owned())
+    });
     let content_type = head.lines().find_map(|line| {
         line.to_ascii_lowercase()
             .starts_with("content-type:")
@@ -521,6 +527,7 @@ fn read_http_request(stream: &mut TcpStream) -> Seen {
     Seen {
         path,
         authorization,
+        api_key,
         content_type,
         body,
     }
@@ -5084,6 +5091,16 @@ fn south_probe_gateway(upstream: &MockUpstream, secret: &str) -> (Gateway, PathB
 }
 
 #[cfg(feature = "builtin-plugins")]
+fn south_header_probe_gateway(upstream: &MockUpstream, secret: &str) -> (Gateway, PathBuf) {
+    let (config_path, data_dir) =
+        write_south_probe_config_for_dialect(upstream, secret, true, "azure-openai-v1");
+    let config = ClientConfig::load(&config_path).expect("approved South Header Auth config loads");
+    let gateway = Gateway::new(&config, Arc::new(token_station_metrics::NoopRecorder))
+        .expect("South Header Auth probe gateway assembles");
+    (gateway, data_dir)
+}
+
+#[cfg(feature = "builtin-plugins")]
 fn start_south_production_proxy(upstream: &MockUpstream, secret: &str) -> Proxy {
     let (config_path, _) = write_south_probe_config(upstream, secret, true);
     let mut config: Value = serde_json::from_slice(
@@ -5109,6 +5126,228 @@ fn start_south_streaming_production_proxy(upstream: &MockUpstream, secret: &str)
     let config: ClientConfig =
         serde_json::from_value(config).expect("South streaming production config parses");
     spawn_proxy(&config)
+}
+
+#[cfg(feature = "builtin-plugins")]
+fn start_south_header_auth_production_proxy(upstream: &MockUpstream, secret: &str) -> Proxy {
+    start_azure_production_proxy(upstream, secret, "south_v1_buffered_streaming_header_auth")
+}
+
+#[cfg(feature = "builtin-plugins")]
+fn start_azure_production_proxy(
+    upstream: &MockUpstream,
+    secret: &str,
+    provider_call: &str,
+) -> Proxy {
+    let (config_path, _) =
+        write_south_probe_config_for_dialect(upstream, secret, true, "azure-openai-v1");
+    let mut config: Value = serde_json::from_slice(
+        &std::fs::read(&config_path).expect("South Header Auth production config reads"),
+    )
+    .expect("South Header Auth production config is JSON");
+    config["data"]["metrics"] = json!(true);
+    config["upstreams"]["mock_primary"]["provider_call"] = json!(provider_call);
+    let config: ClientConfig =
+        serde_json::from_value(config).expect("South Header Auth production config parses");
+    spawn_proxy(&config)
+}
+
+#[test]
+#[cfg(feature = "builtin-plugins")]
+fn old_south_modes_keep_azure_header_auth_on_legacy() {
+    let answer = json!({
+        "id": "chatcmpl-azure-legacy", "model": "gpt-5.5",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "legacy" }, "finish_reason": "stop" }],
+        "usage": { "prompt_tokens": 2, "completion_tokens": 1 }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let proxy = start_azure_production_proxy(
+        &mock,
+        "synthetic-azure-legacy-secret",
+        "south_v1_buffered_streaming",
+    );
+
+    let (status, body) = post_chat(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "messages": [{ "role": "user", "content": "legacy invariant" }]
+        }),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        mock.hits(),
+        1,
+        "legacy fallback must not duplicate the request"
+    );
+    let seen = mock.seen();
+    assert_eq!(
+        seen[0].api_key.as_deref(),
+        Some("synthetic-azure-legacy-secret")
+    );
+    assert_eq!(seen[0].authorization, None);
+
+    settle();
+    let (_, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["provider_call_engine"],
+        json!("legacy")
+    );
+}
+
+#[test]
+#[cfg(feature = "builtin-plugins")]
+fn production_header_auth_opt_in_executes_buffered_south_once() {
+    let answer = json!({
+        "id": "chatcmpl-azure-buffered", "model": "gpt-5.5",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "azure" }, "finish_reason": "stop" }],
+        "usage": { "prompt_tokens": 2, "completion_tokens": 1 }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(200, &answer.to_string())]]);
+    let proxy = start_south_header_auth_production_proxy(&mock, "synthetic-azure-secret");
+
+    let (status, body) = post_chat(
+        &proxy,
+        &json!({
+            "model": "auto",
+            "messages": [{ "role": "user", "content": "header canary" }]
+        }),
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(mock.hits(), 1, "one South attempt must issue one request");
+    let seen = mock.seen();
+    assert_eq!(seen[0].path, "/openai/v1/chat/completions");
+    assert_eq!(seen[0].api_key.as_deref(), Some("synthetic-azure-secret"));
+    assert_eq!(seen[0].authorization, None);
+
+    settle();
+    let (admin_status, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    assert_eq!(admin_status, 200, "{receipts_body}");
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["provider_call_engine"],
+        json!("south_v1_buffered")
+    );
+    assert!(!receipts_body.contains("synthetic-azure-secret"));
+}
+
+#[test]
+#[cfg(feature = "builtin-plugins")]
+fn production_header_auth_opt_in_executes_streaming_south_once() {
+    let sse = concat!(
+        "data: {\"id\":\"chatcmpl-azure-stream\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"azure\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let proxy = start_south_header_auth_production_proxy(&mock, "synthetic-azure-stream-secret");
+
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("azure"), "{body}");
+    assert_eq!(mock.hits(), 1, "one South stream must issue one request");
+    let seen = mock.seen();
+    assert_eq!(seen[0].path, "/openai/v1/chat/completions");
+    assert_eq!(
+        seen[0].api_key.as_deref(),
+        Some("synthetic-azure-stream-secret")
+    );
+    assert_eq!(seen[0].authorization, None);
+
+    settle();
+    let (_, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["provider_call_engine"],
+        json!("south_v1_streaming")
+    );
+    assert!(!receipts_body.contains("synthetic-azure-stream-secret"));
+}
+
+#[test]
+#[cfg(feature = "builtin-plugins")]
+fn production_header_auth_drain_cancels_io_without_legacy_replay() {
+    let mock = MockUpstream::start_hanging_buffered();
+    let peer_closed = Arc::clone(&mock.peer_closed);
+    let proxy = start_south_header_auth_production_proxy(&mock, "synthetic-azure-drain-secret");
+    let url = proxy.url.clone();
+    let virtual_key = proxy.virtual_key.clone();
+    let client = std::thread::spawn(move || {
+        let agent = ureq::Agent::new_with_config(
+            ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(15)))
+                .http_status_as_error(false)
+                .build(),
+        );
+        agent
+            .post(format!("{url}/v1/chat/completions"))
+            .header("authorization", &format!("Bearer {virtual_key}"))
+            .send(
+                &json!({
+                    "model": "auto",
+                    "messages": [{ "role": "user", "content": "drain header auth" }]
+                })
+                .to_string(),
+            )
+            .expect("proxy answers the drained Header Auth request")
+            .status()
+            .as_u16()
+    });
+
+    let arrival_deadline = Instant::now() + Duration::from_secs(3);
+    while (mock.hits() == 0 || proxy.control.in_flight() == 0) && Instant::now() < arrival_deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        mock.hits(),
+        1,
+        "the Header Auth request reached upstream once"
+    );
+    let seen = mock.seen();
+    assert_eq!(
+        seen[0].api_key.as_deref(),
+        Some("synthetic-azure-drain-secret")
+    );
+    assert_eq!(seen[0].authorization, None);
+
+    proxy.control.cancel_in_flight();
+    assert_eq!(client.join().expect("client joins"), 503);
+
+    let cleanup_deadline = Instant::now() + Duration::from_secs(3);
+    while (proxy.control.in_flight() != 0 || !peer_closed.load(Ordering::SeqCst))
+        && Instant::now() < cleanup_deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(proxy.control.in_flight(), 0, "the worker is accounted");
+    assert!(
+        peer_closed.load(Ordering::SeqCst),
+        "cancellation drops reqwest I/O"
+    );
+    assert_eq!(mock.hits(), 1, "cancellation cannot replay through legacy");
+    mock.finish_hanging();
+
+    settle();
+    let (_, _, receipts_body) =
+        admin_get(&proxy, "/admin/receipts", Some(&proxy.virtual_key), None);
+    let receipts: Value = serde_json::from_str(&receipts_body).expect("receipts are JSON");
+    assert_eq!(receipts[0]["status"], json!(503));
+    assert_eq!(
+        receipts[0]["attempt_records"][0]["provider_call_engine"],
+        json!("south_v1_buffered")
+    );
+    assert!(!receipts_body.contains("synthetic-azure-drain-secret"));
 }
 
 #[test]
@@ -5953,6 +6192,20 @@ fn write_south_probe_config(
     secret: &str,
     conformance_approved: bool,
 ) -> (PathBuf, PathBuf) {
+    write_south_probe_config_for_dialect(
+        upstream,
+        secret,
+        conformance_approved,
+        "openai-compatible",
+    )
+}
+
+fn write_south_probe_config_for_dialect(
+    upstream: &MockUpstream,
+    secret: &str,
+    conformance_approved: bool,
+    provider: &str,
+) -> (PathBuf, PathBuf) {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
     let data_dir = std::env::temp_dir().join(format!(
         "ts-south-cli-data-{}-{}",
@@ -5979,6 +6232,11 @@ fn write_south_probe_config(
     }
     token_station_cli::secrets::store_set(&data_dir, "mock_primary", "provider_api_key", secret)
         .expect("test secret is stored");
+    let base_url = if provider == "azure-openai-v1" {
+        format!("http://127.0.0.1:{}/openai/v1", upstream.port)
+    } else {
+        upstream.base_url()
+    };
     let config = json!({
         "version": 1,
         "server": { "listen": "127.0.0.1:0" },
@@ -5990,8 +6248,8 @@ fn write_south_probe_config(
         },
         "upstreams": {
             "mock_primary": {
-                "provider": "openai-compatible",
-                "base_url": upstream.base_url(),
+                "provider": provider,
+                "base_url": base_url,
                 "auth": { "slot": "provider_api_key", "store": true },
                 "models": [ { "model": "gpt-5.5", "tool": true, "context_window": 400_000 } ]
             }
@@ -6106,6 +6364,41 @@ fn south_v1_probe_runs_the_official_plugin_and_real_reqwest_transport_once() {
         Some("Bearer sk-south-loopback")
     );
     assert_eq!(seen[0].content_type.as_deref(), Some("application/json"));
+    assert_eq!(seen[0].body["model"], json!("gpt-5.5"));
+    assert_eq!(seen[0].body["max_tokens"], json!(1));
+
+    std::fs::remove_dir_all(data_dir).ok();
+}
+
+#[test]
+#[cfg(feature = "builtin-plugins")]
+fn south_v1_probe_uses_the_exact_azure_header_auth_dialect() {
+    let answer = json!({
+        "id": "chatcmpl-azure-probe", "model": "gpt-5.5",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "p" }, "finish_reason": "length" }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    });
+    let mock = MockUpstream::start(vec![vec![http_json(201, &answer.to_string())]]);
+    let (gateway, data_dir) = south_header_probe_gateway(&mock, "synthetic-azure-probe-secret");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread diagnostic runtime builds");
+
+    let outcomes = runtime
+        .block_on(gateway.probe_south_v1("mock_primary", Some("gpt-5.5")))
+        .expect("South Header Auth diagnostic probe runs");
+
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].latency_ms.is_ok(), "{outcomes:?}");
+    let seen = mock.seen();
+    assert_eq!(seen.len(), 1, "the diagnostic cannot replay through legacy");
+    assert_eq!(seen[0].path, "/openai/v1/chat/completions");
+    assert_eq!(
+        seen[0].api_key.as_deref(),
+        Some("synthetic-azure-probe-secret")
+    );
+    assert_eq!(seen[0].authorization, None);
     assert_eq!(seen[0].body["model"], json!("gpt-5.5"));
     assert_eq!(seen[0].body["max_tokens"], json!(1));
 

@@ -318,6 +318,64 @@ describe("AddProviderPage", () => {
     }));
   });
 
+  it("offers a closed Azure OpenAI v1 dialect for custom providers", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage();
+
+    await pickPreset(user, "自定义配置");
+    await user.click(screen.getByRole("combobox", { name: "API 方言" }));
+    await user.click(await screen.findByRole("option", { name: "Azure OpenAI v1" }));
+
+    expect(screen.getByText(/Base URL 必须指向资源的 \/openai\/v1 根路径/)).toBeInTheDocument();
+    expect(screen.getByText(/模型名填写 Azure deployment name/)).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("名称"), "azure");
+    await user.type(
+      screen.getByLabelText("Base URL"),
+      "https://fixture.openai.azure.com/openai/v1",
+    );
+    await user.type(screen.getByLabelText("API Key"), "synthetic-key");
+    await screen.findByText("https://api.minimaxi.com/v1/chat/completions");
+    vi.mocked(invoke).mockClear();
+
+    await user.click(screen.getByRole("button", { name: "刷新模型" }));
+
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith(
+      "discover_provider_models",
+      expect.anything(),
+    );
+    expect(screen.getByText(/Azure deployment name 需要手工填写/)).toBeInTheDocument();
+  });
+
+  it("drops discovered OpenAI models when a custom provider switches to Azure", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage();
+
+    await pickPreset(user, "自定义配置");
+    await user.type(screen.getByLabelText("名称"), "azure");
+    await user.type(screen.getByLabelText("Base URL"), "https://api.example/v1");
+    await user.type(screen.getByLabelText("API Key"), "synthetic-key");
+    await screen.findByText("https://api.minimaxi.com/v1/chat/completions");
+    vi.mocked(invoke).mockResolvedValueOnce({
+      models: ["openai-discovered-model"],
+      source: "live",
+      fetched_at_ms: 1,
+      warning: null,
+    });
+
+    await user.click(screen.getByRole("button", { name: "刷新模型" }));
+    const discovered = await screen.findByRole("button", { name: /openai-discovered-model/ });
+    await user.click(discovered);
+    expect(discovered).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("combobox", { name: "API 方言" }));
+    await user.click(await screen.findByRole("option", { name: "Azure OpenAI v1" }));
+
+    expect(screen.queryByRole("button", { name: /openai-discovered-model/ })).not.toBeInTheDocument();
+  });
+
   it("凭据来源使用组件库下拉而非原生 select", async () => {
     window.localStorage.setItem("token-station-language", "zh-CN");
     const user = userEvent.setup();
