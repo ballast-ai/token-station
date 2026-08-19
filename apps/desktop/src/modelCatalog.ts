@@ -54,6 +54,7 @@ const GLM_5_2: ModelIdentity = {
 
 const GLM_OFFICIAL_SOURCE = "https://docs.bigmodel.cn/cn/guide/develop/openai/introduction";
 const GLM_GLOBAL_SOURCE = "https://docs.z.ai/devpack/tool/others";
+const WECODING_GLM_SOURCE = "https://wecoding.ai";
 const ALIBABA_GLM_SOURCE = "https://help.aliyun.com/zh/model-studio/glm-zhipu";
 const SILICONFLOW_CN_SOURCE = "https://www.siliconflow.cn/models";
 const SILICONFLOW_GLOBAL_SOURCE = "https://www.siliconflow.com/models";
@@ -75,6 +76,12 @@ const OFFERING_METADATA: Record<string, OfferingMetadata> = {
     model: GLM_5_2,
     deliveryClass: "official",
     sourceUrl: GLM_GLOBAL_SOURCE,
+    verifiedAt: "2026-08-19",
+  },
+  "wecoding:glm-5.2": {
+    model: GLM_5_2,
+    deliveryClass: "managed",
+    sourceUrl: WECODING_GLM_SOURCE,
     verifiedAt: "2026-08-19",
   },
   "qwen:ZHIPU/GLM-5.2": {

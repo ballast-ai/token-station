@@ -70,4 +70,21 @@ describe("provider catalog", () => {
     expect(byId.get("volcengine_ark")?.baseUrl).not.toBe(byId.get("volcengine_ark_coding")?.baseUrl);
     expect(byId.get("byteplus_ark")?.baseUrl).not.toBe(byId.get("byteplus_ark_coding")?.baseUrl);
   });
+
+  it("places WeCoding after the Zhipu channels with its private-beta endpoint", () => {
+    const zhipuCodingIndex = PROVIDER_CATALOG.findIndex((preset) => preset.id === "glm_coding");
+    const wecodingIndex = PROVIDER_CATALOG.findIndex((preset) => preset.id === "wecoding");
+
+    expect(wecodingIndex).toBe(zhipuCodingIndex + 1);
+    expect(byId.get("wecoding")).toMatchObject({
+      label: "WeCoding",
+      baseUrl: "https://open.wecoding.ai/v1",
+      models: ["glm-5.2"],
+      needsKey: true,
+      region: "马来西亚",
+      serviceClass: "managed_inference",
+      officialDocs: "https://wecoding.ai",
+    });
+    expect(byId.get("wecoding")?.note).toContain("私测");
+  });
 });

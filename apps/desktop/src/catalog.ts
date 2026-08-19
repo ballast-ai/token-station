@@ -74,6 +74,11 @@ const OFFICIAL_AND_MANAGED_PRESETS: ProviderPreset[] = [
     officialDocs: "https://docs.z.ai/devpack/tool/others", note: "仅限 Z.AI Coding Plan 的 Key，不能替代通用按量 API。",
   }),
   verified({
+    id: "wecoding", label: "WeCoding", baseUrl: "https://open.wecoding.ai/v1",
+    models: ["glm-5.2"], needsKey: true, region: "马来西亚", subscription: "按量 API / Coding Plan", serviceClass: "managed_inference",
+    officialDocs: "https://wecoding.ai", note: "当前仅限获得邀请的私测用户；提供 OpenAI 兼容的 GLM-5.2 托管推理。",
+  }),
+  verified({
     id: "kimi", label: "Moonshot Kimi（中国）", baseUrl: "https://api.moonshot.cn/v1",
     models: ["kimi-k3", "kimi-k2.6", "moonshot-v1-128k", "moonshot-v1-32k"], needsKey: true, region: "中国", subscription: "按量 API", serviceClass: "first_party",
     officialDocs: "https://platform.moonshot.cn/docs/guide/start-using-kimi-api",

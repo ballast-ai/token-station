@@ -34,6 +34,7 @@ describe("model offering catalog", () => {
       "glm_cn",
       "glm",
       "glm_coding",
+      "wecoding",
       "qwen",
       "siliconflow",
       "siliconflow_global",
@@ -43,6 +44,8 @@ describe("model offering catalog", () => {
       .toMatchObject({ upstreamModelId: "ZHIPU/GLM-5.2", deliveryClass: "managed" });
     expect(offerings.find((offering) => offering.provider.id === "siliconflow"))
       .toMatchObject({ upstreamModelId: "zai-org/GLM-5.2", deliveryClass: "managed" });
+    expect(offerings.find((offering) => offering.provider.id === "wecoding"))
+      .toMatchObject({ upstreamModelId: "glm-5.2", deliveryClass: "managed" });
     expect(offerings.find((offering) => offering.provider.id === "glm_cn"))
       .toMatchObject({ upstreamModelId: "glm-5.2", deliveryClass: "official" });
   });

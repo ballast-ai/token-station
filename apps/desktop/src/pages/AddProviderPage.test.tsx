@@ -4,6 +4,7 @@ import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import type { FreeProviderPresetView, StateView } from "../api";
+import { PROVIDER_CATALOG } from "../catalog";
 import { ErrorToastProvider } from "../components/ErrorToast";
 import AddProviderPage, {
   type FreeCatalogFilters,
@@ -369,7 +370,9 @@ describe("AddProviderPage", () => {
     const user = userEvent.setup();
     renderPage({ entryMode: "model-first" });
 
-    expect(await screen.findByText("公共目录已同步 · 2/41 个渠道")).toBeInTheDocument();
+    expect(await screen.findByText(
+      `公共目录已同步 · 2/${PROVIDER_CATALOG.length} 个渠道`,
+    )).toBeInTheDocument();
     await user.type(screen.getByRole("searchbox", { name: "搜索模型" }), "gpt");
     const results = screen.getByRole("list", { name: "模型与供应商" });
     expect(within(results).getByRole("button", { name: /gpt-current.*OpenAI/ }))
