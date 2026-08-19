@@ -138,9 +138,20 @@ export default function QuotaPriorityPanel({
             )}
           </p>
         </div>
-        <button type="button" className="btn quiet" onClick={onViewUsage}>
-          {copy("Live quota", "实时额度")}
-        </button>
+        <div className="quota-heading-actions">
+          <button type="button" className="btn quiet" onClick={onViewUsage}>
+            {copy("Live quota", "实时额度")}
+          </button>
+          <button
+            className="btn primary"
+            type="button"
+            data-onboarding-target="route-apply"
+            disabled={busy || applying || !canApply}
+            onClick={() => onSave(entries)}
+          >
+            {applying ? copy("Applying…", "应用中…") : copy("Save & apply", "保存并应用")}
+          </button>
+        </div>
       </div>
 
       <p className="quota-hint">
@@ -260,18 +271,11 @@ export default function QuotaPriorityPanel({
         </div>
       )}
 
-      <footer className="panel-foot route-actions">
-        {applyHint && <p className="foot-hint" role="status" aria-live="polite">{applyHint}</p>}
-        <button
-          className="btn primary"
-          type="button"
-          data-onboarding-target="route-apply"
-          disabled={busy || applying || !canApply}
-          onClick={() => onSave(entries)}
-        >
-          {applying ? copy("Applying…", "应用中…") : copy("Save & apply", "保存并应用")}
-        </button>
-      </footer>
+      {applyHint && (
+        <footer className="panel-foot route-actions">
+          <p className="foot-hint" role="status" aria-live="polite">{applyHint}</p>
+        </footer>
+      )}
     </section>
   );
 }

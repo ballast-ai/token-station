@@ -229,6 +229,11 @@ export default function ProviderModelManager({
   const fixedSouthReason = reportedSouthReason === "auth" ? null : reportedSouthReason;
   const southUnavailableReason = fixedSouthReason
     ?? ((credentialSource === "store" || credentialSource === "env") ? null : "auth");
+  const reportedHeaderAuthReason = provider.south_header_auth_v1_unavailable_reason
+    ?? (provider.south_header_auth_v1_available === true ? null : "provider_package");
+  const fixedHeaderAuthReason = reportedHeaderAuthReason === "auth" ? null : reportedHeaderAuthReason;
+  const headerAuthUnavailableReason = fixedHeaderAuthReason
+    ?? ((credentialSource === "store" || credentialSource === "env") ? null : "auth");
   const southUnavailableCopy = {
     provider_package: copy(
       "South requires the verified official OpenAI-compatible provider package.",
@@ -247,6 +252,31 @@ export default function ProviderModelManager({
       "South 需要来自本地存储或环境变量的 Bearer 凭据。",
     ),
   } as const;
+  const headerAuthUnavailableCopy = {
+    provider_package: copy(
+      "South Header Auth requires the verified official package for this Provider dialect.",
+      "South Header Auth 需要该 Provider dialect 对应的已验证官方包。",
+    ),
+    api_dialect: copy(
+      "South Header Auth is available only for the translated API dialect.",
+      "South Header Auth 仅支持 translated API dialect。",
+    ),
+    egress: copy(
+      "South Header Auth currently requires direct egress.",
+      "South Header Auth 当前仅支持 direct egress。",
+    ),
+    auth: copy(
+      "South Header Auth requires credentials from the local store or an environment variable.",
+      "South Header Auth 需要来自本地存储或环境变量的凭据。",
+    ),
+  } as const;
+  const usesHeaderAuthEngine = providerCall === "south_v1_buffered_streaming_header_auth";
+  const activeUnavailableReason = usesHeaderAuthEngine
+    ? headerAuthUnavailableReason
+    : southUnavailableReason;
+  const activeUnavailableCopy = usesHeaderAuthEngine
+    ? headerAuthUnavailableCopy
+    : southUnavailableCopy;
 
   useEffect(() => {
     let active = true;
@@ -398,6 +428,14 @@ export default function ProviderModelManager({
 
   const refresh = async () => {
     if (operationDisabled) return;
+    if (provider.provider === "azure-openai-v1") {
+      setStatus({
+        label: copy("Manual deployment", "手工填写 deployment"),
+        tone: "idle",
+        warning: humanizeAppError("model_catalog_azure_deployment_manual", language),
+      });
+      return;
+    }
     setRefreshing(true);
     setStatus({ label: copy("Fetching…", "正在获取…"), tone: "loading" });
     try {
@@ -467,6 +505,10 @@ export default function ProviderModelManager({
           <button className="btn tiny" type="button" disabled={operationDisabled} onClick={() => void runProviderTest()}>
             {testing ? copy("Testing…", "测试中…") : copy("Run layered test", "运行分层测试")}
           </button>
+          <small className="provider-test-charge-warning">{copy(
+            "This sends real Provider requests and may incur charges.",
+            "该测试会向真实 Provider 发出请求，可能产生费用。",
+          )}</small>
         </div>
       </div>
       <div className="provider-edit-fields">
@@ -534,7 +576,7 @@ export default function ProviderModelManager({
           <small>
             {providerCall === "legacy"
               ? copy("Legacy active", "Legacy 已启用")
-              : southUnavailableReason
+              : activeUnavailableReason
                 ? copy(
                   "Experimental configured but unavailable",
                   "实验运行时已配置但不可用",
@@ -600,15 +642,41 @@ export default function ProviderModelManager({
               </span>
               <i>{copy("Experimental", "实验")}</i>
             </label>
+            <label className={usesHeaderAuthEngine ? "selected" : ""}>
+              <input
+                type="radio"
+                name={providerCallName}
+                value="south_v1_buffered_streaming_header_auth"
+                checked={usesHeaderAuthEngine}
+                disabled={operationDisabled || headerAuthUnavailableReason !== null}
+                onChange={() => setProviderCall("south_v1_buffered_streaming_header_auth")}
+              />
+              <span>
+                <strong>{copy(
+                  "South buffered + streaming + Header Auth",
+                  "South 非流式 + 流式 + Header Auth",
+                )}</strong>
+                <small>{copy(
+                  "Adds fixed api-key Header Auth for eligible Azure OpenAI v1 calls.",
+                  "为符合条件的 Azure OpenAI v1 调用启用固定 api-key Header Auth。",
+                )}</small>
+              </span>
+              <i>{copy("Experimental", "实验")}</i>
+            </label>
           </fieldset>
           <p className={`provider-runtime-note ${providerCall === "legacy" ? "" : "warning"}`}>
-            {southUnavailableReason
-              ? southUnavailableCopy[southUnavailableReason]
+            {activeUnavailableReason
+              ? activeUnavailableCopy[activeUnavailableReason]
               : providerCall === "legacy"
                 ? copy(
                   "South is eligible for this provider. Enable it only for a controlled canary.",
                   "此 Provider 符合 South 条件。仅在受控 canary 中启用。",
                 )
+                : usesHeaderAuthEngine
+                  ? copy(
+                    "Eligible calls use South. Azure OpenAI v1 uses the fixed api-key header. South attempts never replay through Legacy.",
+                    "符合条件的调用使用 South。Azure OpenAI v1 使用固定 api-key header。South 尝试不会通过 Legacy 重放。",
+                  )
                 : copy(
                   "South never replays an attempt through Legacy once South execution begins.",
                   "South 一旦开始执行，就不会再通过 Legacy 重放该次尝试。",

@@ -101,6 +101,45 @@ describe("AgentRoutePage multi-install admission", () => {
     vi.mocked(setAgentRouteMode).mockReset().mockResolvedValue({} as never);
   });
 
+  it("shows the Agent icon beside the routing page name", () => {
+    render(
+      <AgentRoutePage
+        metadata={{
+          agent_id: "claude-code",
+          legacy_kind: "cc",
+          display_name: "Claude Code",
+          icon_key: "claude",
+          admission: "supported",
+        }}
+        route={{
+          mode: "inherit",
+          tiers: {
+            high: { upstream: null, model: null },
+            mid: { upstream: null, model: null },
+            low: { upstream: null, model: null },
+          },
+          config_error: null,
+          profile: null,
+          routing_mode: "direct",
+        }}
+        providers={[]}
+        profiles={[]}
+        quotaAccounts={[]}
+        serveRunning={false}
+        applying={false}
+        onStateChange={vi.fn()}
+        onRefreshAgents={vi.fn()}
+        onSaveQuota={vi.fn()}
+        onSaveQuotaPlan={vi.fn()}
+        onViewQuotaUsage={vi.fn()}
+        pageMode="routing"
+      />,
+    );
+
+    const heading = screen.getByRole("heading", { name: "Claude Code" }).closest("header");
+    expect(heading?.querySelector('[data-agent-brand="claude-code"]')).toBeInTheDocument();
+  });
+
   it("代理未启动时仍按 ensure → plan → apply → cached 顺序一键接入", async () => {
     const user = userEvent.setup();
     const found = installation("/opt/homebrew/bin/claude", "2.1.211");
@@ -684,6 +723,8 @@ describe("AgentRoutePage multi-install admission", () => {
       </ErrorToastProvider>,
     );
 
+    expect(screen.getByRole("button", { name: "应用" }).closest(".panel-head"))
+      .toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "应用" }));
     let toastViewport = screen.getByTestId("error-toast-viewport");
     expect(await within(toastViewport).findByRole("status")).toHaveTextContent("已将主页路由应用到此 Agent");
@@ -1404,7 +1445,8 @@ describe("AgentRoutePage split page modes", () => {
   it("shows routing controls without connection or recovery controls", () => {
     render(<ErrorToastProvider><AgentRoutePage {...props} pageMode="routing" embedded /></ErrorToastProvider>);
 
-    expect(screen.getByText("选择请求如何分配")).toBeInTheDocument();
+    expect(screen.getByRole("tablist", { name: "Agent 路由策略" })).toBeInTheDocument();
+    expect(screen.queryByText("选择请求如何分配")).toBeNull();
     expect(screen.queryByRole("button", { name: "一键接入" })).toBeNull();
     expect(screen.queryByText("发现路径")).toBeNull();
   });

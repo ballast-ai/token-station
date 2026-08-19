@@ -4,6 +4,7 @@ import {
   type ProviderView,
   type QuotaAccount,
   type RoutingMode,
+  type StateView,
   type TierSlot,
   type TierView,
 } from "../api";
@@ -13,6 +14,7 @@ import QuotaPriorityPanel from "../components/QuotaPriorityPanel";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import RoutingModeSelector from "../components/RoutingModeSelector";
 import DirectRoutePanel from "../components/DirectRoutePanel";
+import EnterpriseConnectionPanel from "../components/EnterpriseConnectionPanel";
 
 interface HomePageProps {
   providers: ProviderView[];
@@ -46,7 +48,9 @@ interface HomePageProps {
   onRemoveKeyword: (slot: TierSlot, keyword: string) => void;
   onSave: () => void;
   onApplyAll: () => void;
+  onEnterpriseProviderConnected?: (state: StateView, providerName: string, models: string[]) => void;
   embedded?: boolean;
+  scope?: "global" | "enterprise";
 }
 
 export default function HomePage({
@@ -76,7 +80,9 @@ export default function HomePage({
   onRemoveKeyword,
   onSave,
   onApplyAll,
+  onEnterpriseProviderConnected = () => {},
   embedded = false,
+  scope = "global",
 }: HomePageProps) {
   const { copy } = useLocalizedCopy();
   const tierConfigured: Record<TierSlot, boolean> = {
@@ -88,6 +94,7 @@ export default function HomePage({
   const [profileName, setProfileName] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const enterprise = scope === "enterprise";
 
   const saveProfile = async () => {
     const name = profileName.trim();
@@ -114,21 +121,31 @@ export default function HomePage({
   };
   return (
     <div className="page-stack home-page">
-      <header className="page-title-row">
-        <div>
-          {embedded
-            ? <h2>{copy("Global routing", "全局路由")}</h2>
-            : <h1>{copy("Global routing", "全局路由")}</h1>}
-        </div>
-      </header>
+      {(!embedded || enterprise) && (
+        <header className="page-title-row">
+          <div>
+            {embedded
+              ? <h2>{copy("Enterprise routing", "企业路由")}</h2>
+              : <h1>{enterprise ? copy("Enterprise routing", "企业路由") : copy("Global routing", "全局路由")}</h1>}
+          </div>
+        </header>
+      )}
 
-      <RoutingModeSelector
-        value={routingMode}
-        disabled={busy}
-        onValueChange={onSetRoutingMode}
-      />
+      {!enterprise && (
+        <RoutingModeSelector
+          value={routingMode}
+          disabled={busy}
+          onValueChange={onSetRoutingMode}
+        />
+      )}
 
-      {routingMode === "direct" ? (
+      {enterprise ? (
+        <EnterpriseConnectionPanel
+          providers={providers}
+          busy={busy}
+          onConnected={onEnterpriseProviderConnected}
+        />
+      ) : routingMode === "direct" ? (
         <DirectRoutePanel
           providers={providers}
           target={directTarget}
@@ -174,6 +191,18 @@ export default function HomePage({
               onClick={() => setProfileOpen((current) => !current)}
             >
               {profileOpen ? copy("Close", "收起") : copy("Save as profile", "存为策略")}
+            </button>
+            <button className="btn" type="button" disabled={busy || applying} onClick={onApplyAll}>
+              {copy("Apply to all Agents", "应用到全部 Agent")}
+            </button>
+            <button
+              className="btn primary"
+              type="button"
+              data-onboarding-target="route-apply"
+              disabled={busy || applying}
+              onClick={onSave}
+            >
+              {applying ? copy("Applying…", "应用中…") : copy("Save and apply", "保存并应用")}
             </button>
           </div>
         </div>
@@ -248,20 +277,6 @@ export default function HomePage({
                 )}
               </span>
             )}
-          </div>
-          <div className="route-action-buttons">
-            <button className="btn" type="button" disabled={busy || applying} onClick={onApplyAll}>
-              {copy("Apply to all Agents", "应用到全部 Agent")}
-            </button>
-            <button
-              className="btn primary"
-              type="button"
-              data-onboarding-target="route-apply"
-              disabled={busy || applying}
-              onClick={onSave}
-            >
-              {applying ? copy("Applying…", "应用中…") : copy("Save and apply", "保存并应用")}
-            </button>
           </div>
         </footer>
       </section>

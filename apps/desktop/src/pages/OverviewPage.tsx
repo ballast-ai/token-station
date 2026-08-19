@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
-import { Activity, Bot, Boxes, Clock3, Route, WalletCards } from "lucide-react";
+import { Activity, ArrowUpRight, Bot, Boxes, Clock3, Route, WalletCards } from "lucide-react";
 import { getStats } from "../api";
 import type { AgentUiMetadataView, AgentView, StateView, StatsView, TierSlot } from "../api";
-import RevisionChain from "../components/RevisionChain";
 import { useLocalizedCopy } from "../components/LanguageProvider";
 import { Badge } from "../components/ui/badge";
-import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { AgentIcon, ProviderIcon } from "../brandIcons";
 
 interface OverviewPageProps {
   state: StateView;
@@ -20,10 +19,6 @@ const TIER_COPY: Record<TierSlot, { en: string; zh: string }> = {
   mid: { en: "Medium", zh: "中档" },
   low: { en: "Low", zh: "下档" },
 };
-
-function agentHasInstall(agent: AgentView) {
-  return agent.installations.length > 0;
-}
 
 function formatSuccessRate(stats: StatsView) {
   if (stats.total.requests === 0) return null;
@@ -50,8 +45,50 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
   const [statsUnavailable, setStatsUnavailable] = useState(false);
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
   const connectedAgents = agents.filter((agent) => agent.status === "CONNECTED").length;
-  const detectedAgents = agents.filter(agentHasInstall).length;
-  const pendingAgents = Math.max(0, detectedAgents - connectedAgents);
+  const agentRows = registry.slice(0, 5).map((metadata) => ({
+    metadata,
+    agent: agents.find((candidate) => candidate.metadata.agent_id === metadata.agent_id),
+  }));
+  const connectedRouteAgents = agents
+    .filter((agent) => agent.status === "CONNECTED")
+    .sort((left, right) => {
+      const leftIndex = registry.findIndex((metadata) => metadata.agent_id === left.metadata.agent_id);
+      const rightIndex = registry.findIndex((metadata) => metadata.agent_id === right.metadata.agent_id);
+      return (leftIndex < 0 ? Number.MAX_SAFE_INTEGER : leftIndex)
+        - (rightIndex < 0 ? Number.MAX_SAFE_INTEGER : rightIndex);
+    })
+    .slice(0, 5);
+  const modelRows = state.providers.flatMap((provider) => provider.models.map((model) => ({
+    model,
+    provider,
+  }))).slice(0, 5);
+  const modelCount = state.providers.reduce((total, provider) => total + provider.models.length, 0);
+
+  const routeModeName = (mode: StateView["routing_mode"]) => {
+    if (mode === "direct") return copy("Direct", "简单路由");
+    if (mode === "quota_first") return copy("Quota-first", "额度优先");
+    return copy("Smart routing", "智能路由");
+  };
+  const routeRows = connectedRouteAgents.map(({ metadata }) => {
+    const route = state.agent_routes?.[metadata.agent_id];
+    const inherited = !route || route.mode === "inherit";
+    if (inherited) {
+      return {
+        metadata,
+        label: copy(`Global · ${routeModeName(state.routing_mode)}`, `全局 · ${routeModeName(state.routing_mode)}`),
+      };
+    }
+    if (route.mode === "profile") {
+      return {
+        metadata,
+        label: copy("Profile", "策略组"),
+      };
+    }
+    return {
+      metadata,
+      label: copy(`Custom · ${routeModeName(route.routing_mode)}`, `独立 · ${routeModeName(route.routing_mode)}`),
+    };
+  });
 
   useEffect(() => {
     let active = true;
@@ -95,10 +132,7 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
         </div>
       </header>
 
-      <section
-        className="overview-metrics"
-        aria-label={copy("System summary", "系统摘要")}
-      >
+      <section className="overview-metrics overview-runtime-metrics" aria-label={copy("System summary", "系统摘要")}>
         <Card size="sm" className="overview-status-card">
           <CardHeader>
             <span><Activity />{copy("Proxy status", "代理状态")}</span>
@@ -114,52 +148,119 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
             <p>{statsSummary}</p>
           </CardHeader>
         </Card>
-        <Card size="sm"><CardHeader><span><Bot />{copy("Managed Agents", "已接管 Agent")}</span><CardTitle>{connectedAgents} <small>/ {registry.length}</small></CardTitle><p>{copy(`${pendingAgents} detected and pending`, `${pendingAgents} 个已检测待接入`)}</p></CardHeader></Card>
-        <Card size="sm" className={state.quota_accounts.length > 0 ? "attention" : ""}><CardHeader><span><Boxes />{copy("Providers", "供应商")}</span><CardTitle>{state.providers.length}</CardTitle><p>{copy(`${state.quota_accounts.length} quota accounts configured`, `${state.quota_accounts.length} 个额度账户已配置`)}</p></CardHeader></Card>
       </section>
 
-      <section className="overview-main-grid">
-        <Card role="region" aria-label={copy("Current routing snapshot", "当前路由快照")}>
-          <CardHeader><CardTitle>{copy("Current routing snapshot", "当前路由快照")}</CardTitle><RevisionChain state={state} /></CardHeader>
-          <CardContent className="overview-route-list">
-            {state.routing_mode === "direct" ? (
-              <div data-routing-snapshot-mode="direct">
-                <Badge variant="outline">{copy("Direct", "单独路由")}</Badge>
-                <strong>{state.direct_target?.model ?? copy("Select a model", "待选择模型")}</strong>
-                <code>{state.direct_target?.upstream ?? copy("Select a provider", "待选择供应商")}</code>
-              </div>
-            ) : state.routing_mode === "quota_first" ? (
-              <div data-routing-snapshot-mode="quota-first">
-                <Badge variant="outline">{copy("Quota-first", "额度优先")}</Badge>
-                <strong>{copy(
-                  `${state.quota_accounts.length} accounts`,
-                  `${state.quota_accounts.length} 个账户`,
-                )}</strong>
-                <code>{state.quota_accounts.length > 0
-                  ? state.quota_accounts
-                    .map((account) => `${account.upstream}/${account.model}`)
-                    .join(" · ")
-                  : copy("Add a quota account", "待添加额度账户")}</code>
-              </div>
-            ) : (["high", "mid", "low"] as TierSlot[]).map((slot) => {
-                const tier = state.tiers[slot];
-                return (
-                  <div key={slot}>
-                    <Badge variant="outline">{copy(TIER_COPY[slot].en, TIER_COPY[slot].zh)}</Badge>
-                    <strong>{tier.model ?? copy("Not configured", "未配置")}</strong>
-                    <code>{tier.upstream ?? "—"}</code>
-                  </div>
-                );
-              })}
-            <Button variant="ghost" size="sm" onClick={() => onNavigate("home")}><Route />{copy("Adjust global routing", "调整全局路由")}</Button>
+      <section className="overview-summary-grid" aria-label={copy("Workspace summaries", "工作区摘要")}>
+        <Card className="overview-summary-card" role="region" aria-label={copy("Agent overview", "Agent 概览")}>
+          <CardHeader>
+            <span><Bot aria-hidden="true" />Agent</span>
+            <CardTitle>{copy(
+              `${connectedAgents} ${connectedAgents === 1 ? "Agent" : "Agents"} connected`,
+              `已接入 ${connectedAgents} 个 Agent`,
+            )}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ul className="overview-summary-list" aria-label={copy("Top Agents", "Agent Top 5")}>
+              {agentRows.map(({ metadata, agent }) => (
+                <li key={metadata.agent_id}>
+                  <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={24} />
+                  <strong>{metadata.display_name}</strong>
+                  <small>{agent?.status === "CONNECTED" ? copy("Managed", "已接管") : copy("Available", "待接入")}</small>
+                </li>
+              ))}
+            </ul>
+            <button className="overview-summary-link" type="button" aria-label={copy("Open Agents", "打开 Agent")} onClick={() => onNavigate("agents")}>
+              <ArrowUpRight aria-hidden="true" />
+            </button>
           </CardContent>
         </Card>
-        <Card>
-          <CardHeader><CardTitle>{copy("Shortcuts", "快捷键")}</CardTitle></CardHeader>
-          <CardContent className="overview-actions-list">
-            <button data-onboarding-target="agent-connect" type="button" onClick={() => onNavigate("agents")}><Bot /><span><strong>{copy("Review Agent connections", "检查 Agent 接入")}</strong><small>{copy(`${pendingAgents} detected Agents are not managed`, `${pendingAgents} 个已检测 Agent 尚未接管`)}</small></span></button>
-            <button type="button" onClick={() => onNavigate("usage")}><Clock3 /><span><strong>{copy("Review local usage", "查看本地用量")}</strong><small>{copy("Requests, reliability, tokens, and cost", "请求、成功率、Token 与成本")}</small></span></button>
-            <button type="button" onClick={() => onNavigate("logs")}><Activity /><span><strong>{copy("Inspect request receipts", "检查请求回执")}</strong><small>{copy("Routing decisions without prompt or response bodies", "仅含路由决策，不含提示词与响应正文")}</small></span></button>
+
+        <Card className="overview-summary-card overview-route-summary" role="region" aria-label={copy("Routing overview", "路由概览")}>
+          <CardHeader>
+            <span><Route aria-hidden="true" />{copy("Routing", "路由")}</span>
+            <CardTitle>{routeRows.length > 0
+              ? copy("Agent routing", "Agent 路由")
+              : copy("Global routing", "全局路由")}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {routeRows.length > 0 ? (
+              <ul className="overview-summary-list overview-agent-route-list" aria-label={copy("Agent route Top 5", "Agent 路由 Top 5")}>
+                {routeRows.map(({ metadata, label }) => (
+                  <li key={metadata.agent_id}>
+                    <AgentIcon id={metadata.agent_id} fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)} size={24} />
+                    <strong>{metadata.display_name}</strong>
+                    <span className="overview-agent-route-target" title={label}>
+                      <small>{label}</small>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : state.routing_mode === "direct" ? (
+              <div className="overview-route-list overview-global-route-list" data-routing-snapshot-mode="direct">
+                <div>
+                  <Badge variant="outline">{copy("Direct", "简单路由")}</Badge>
+                  <strong>{state.direct_target?.model ?? copy("Select a model", "待选择模型")}</strong>
+                  <code>{state.direct_target?.upstream ?? copy("Select a provider", "待选择供应商")}</code>
+                </div>
+              </div>
+            ) : state.routing_mode === "quota_first" ? (
+              <div className="overview-route-list overview-global-route-list" data-routing-snapshot-mode="quota-first">
+                <div>
+                  <Badge variant="outline">{copy("Quota-first", "额度优先")}</Badge>
+                  <strong>{copy(
+                    `${state.quota_accounts.length} accounts`,
+                    `${state.quota_accounts.length} 个账户`,
+                  )}</strong>
+                  <code>{state.quota_accounts.length > 0
+                    ? state.quota_accounts
+                      .map((account) => `${account.upstream}/${account.model}`)
+                      .join(" · ")
+                    : copy("Add a quota account", "待添加额度账户")}</code>
+                </div>
+              </div>
+            ) : (
+              <div className="overview-route-list overview-global-route-list" data-routing-snapshot-mode="tiered">
+                {(["high", "mid", "low"] as TierSlot[]).map((slot) => {
+                  const tier = state.tiers[slot];
+                  return (
+                    <div key={slot}>
+                      <Badge variant="outline">{copy(TIER_COPY[slot].en, TIER_COPY[slot].zh)}</Badge>
+                      <strong>{tier.model ?? copy("Not configured", "未配置")}</strong>
+                      <code>{tier.upstream ?? "—"}</code>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <button className="overview-summary-link" type="button" aria-label={copy("Open routing", "打开路由")} onClick={() => onNavigate("home")}>
+              <ArrowUpRight aria-hidden="true" />
+            </button>
+          </CardContent>
+        </Card>
+
+        <Card className="overview-summary-card" role="region" aria-label={copy("Model overview", "模型概览")}>
+          <CardHeader>
+            <span><Boxes aria-hidden="true" />{copy("Models", "模型")}</span>
+            <CardTitle>{copy(`${modelCount} models`, `${modelCount} 个模型`)}</CardTitle>
+            <p>{copy(`${state.providers.length} providers`, `${state.providers.length} 个供应商`)}</p>
+          </CardHeader>
+          <CardContent>
+            {modelRows.length > 0 ? (
+              <ul className="overview-summary-list overview-model-list" aria-label={copy("Top models", "模型 Top 5")}>
+                {modelRows.map(({ model, provider }) => (
+                  <li key={`${provider.name}:${model}`}>
+                    <ProviderIcon id={provider.brand_id} label={provider.name} size={24} />
+                    <strong>{model}</strong>
+                    <small>{provider.name}</small>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="overview-summary-empty">{copy("No models are connected.", "尚未接入模型。")}</p>
+            )}
+            <button className="overview-summary-link" type="button" aria-label={copy("Open models", "打开模型")} onClick={() => onNavigate("providers")}>
+              <ArrowUpRight aria-hidden="true" />
+            </button>
           </CardContent>
         </Card>
       </section>

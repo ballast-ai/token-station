@@ -88,6 +88,12 @@ impl ProviderEndpoint {
         format!("{}{}", self.origin, self.path)
     }
 
+    /// Whether the endpoint uses TLS for transport confidentiality.
+    #[must_use]
+    pub fn uses_https(&self) -> bool {
+        self.origin.starts_with("https://")
+    }
+
     /// Whether the configured endpoint's host is a loopback identity. Product
     /// `local_only` policy must derive this from the endpoint, never from an
     /// operator-controlled label alone.
@@ -476,6 +482,12 @@ mod tests {
         assert!(endpoint("http://[::1]:11434/v1").is_loopback());
         assert!(endpoint("http://localhost:11434/v1").is_loopback());
         assert!(!endpoint("https://api.example.com/v1").is_loopback());
+    }
+
+    #[test]
+    fn transport_security_is_derived_from_the_normalized_scheme() {
+        assert!(endpoint("https://api.example.com/v1").uses_https());
+        assert!(!endpoint("http://api.example.com/v1").uses_https());
     }
 
     #[test]

@@ -6,12 +6,19 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const southRepository = "https://github.com/ballast-ai/token-station-south.git";
-const southRevision = "b472526a9702e17d09b7ebdca0e5c84e724d6d40";
+const southRevision = "b8562d3e52c84beed0b6655c360ef58b3a96aa99";
+const southVersion = "0.4.0";
+const southSource = `git+${southRepository}?rev=${southRevision}#${southRevision}`;
 const expectedSouthPackages = new Set([
   "south-contracts",
   "south-core",
   "south-provider-conformance",
   "south-testkit",
+  "south-transport-reqwest",
+]);
+const expectedDesktopSouthPackages = new Set([
+  "south-contracts",
+  "south-core",
   "south-transport-reqwest",
 ]);
 
@@ -30,6 +37,43 @@ const southAccessActionPaths = [
   ".github/actions/cleanup-south-access/action.yml",
 ];
 const workflowsDirectory = path.join(root, ".github/workflows");
+
+function isSouthPackage(pkg) {
+  return (
+    pkg.name.startsWith("south-") || pkg.source?.includes(southRepository) === true
+  );
+}
+
+assert.equal(isSouthPackage({ name: "south-foreign", source: null }), true);
+assert.equal(isSouthPackage({ name: "renamed-package", source: southSource }), true);
+assert.equal(isSouthPackage({ name: "unrelated", source: null }), false);
+
+function validateSouthClosure(metadata, expectedPackages, scope) {
+  const packages = metadata.packages.filter(isSouthPackage);
+  assert.equal(
+    packages.length,
+    expectedPackages.size,
+    `${scope} must resolve exactly one instance of every approved South package`,
+  );
+  assert.deepEqual(
+    new Set(packages.map((pkg) => pkg.name)),
+    expectedPackages,
+    `${scope} South closure must contain only the approved package names`,
+  );
+  for (const pkg of packages) {
+    assert.equal(
+      pkg.version,
+      southVersion,
+      `${scope} ${pkg.name} must stay on South ${southVersion}`,
+    );
+    assert.equal(
+      pkg.source,
+      southSource,
+      `${scope} ${pkg.name} must resolve from the one pinned South source and revision`,
+    );
+  }
+  return packages;
+}
 
 assert.match(
   rootManifest,
@@ -53,7 +97,7 @@ assert.match(
 );
 
 for (const packageName of expectedSouthPackages) {
-  const exactDeclaration = `${packageName} = { version = "=0.3.0", git = "${southRepository}", rev = "${southRevision}" }`;
+  const exactDeclaration = `${packageName} = { version = "=${southVersion}", git = "${southRepository}", rev = "${southRevision}" }`;
   assert.ok(
     rootManifest.split("\n").includes(exactDeclaration),
     `${packageName} must use an exact manifest version and revision`,
@@ -101,23 +145,31 @@ const metadata = JSON.parse(
     { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
   ),
 );
-const southPackages = metadata.packages.filter((pkg) =>
-  pkg.source?.includes(southRepository),
-);
-assert.deepEqual(
-  new Set(southPackages.map((pkg) => pkg.name)),
+const southPackages = validateSouthClosure(
+  metadata,
   expectedSouthPackages,
-  "the complete South source closure must contain exactly the five approved packages",
+  "the root workspace",
 );
 
-for (const pkg of southPackages) {
-  assert.equal(pkg.version, "0.3.0", `${pkg.name} must stay on South 0.3.0`);
-  assert.ok(pkg.source, `${pkg.name} must come from the external South repository`);
-  assert.ok(
-    pkg.source.includes(southRepository) && pkg.source.includes(southRevision),
-    `${pkg.name} must resolve from the one pinned South revision`,
-  );
-}
+const desktopMetadata = JSON.parse(
+  execFileSync(
+    "cargo",
+    [
+      "metadata",
+      "--locked",
+      "--format-version",
+      "1",
+      "--manifest-path",
+      "apps/desktop/src-tauri/Cargo.toml",
+    ],
+    { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+  ),
+);
+const desktopSouthPackages = validateSouthClosure(
+  desktopMetadata,
+  expectedDesktopSouthPackages,
+  "the Desktop workspace",
+);
 
 const workspaceMemberIds = new Set(metadata.workspace_members);
 const nodeById = new Map(metadata.resolve.nodes.map((node) => [node.id, node]));

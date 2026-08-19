@@ -22,8 +22,8 @@ export default function ProvidersPage(props: ProvidersPageProps) {
     <div className="page-stack providers-page">
       <header className="overview-heading page-heading-with-action">
         <div>
-          <h1>{copy("Providers", "供应商管理")}</h1>
-          <p>{copy("Credentials, endpoints, and model catalogs shared by global and Agent routes.", "集中维护凭据、端点和模型目录，供全局路由和各客户端共用。")}</p>
+          <h1>{copy("Models", "模型")}</h1>
+          <p>{copy("Manage models first, with each delivery provider shown beside it.", "以模型为主进行管理，并在模型后标明实际供应商。")}</p>
         </div>
         <Button
           className="providers-add-button"
@@ -32,7 +32,7 @@ export default function ProvidersPage(props: ProvidersPageProps) {
           onClick={props.onAddProvider}
         >
           <Plus aria-hidden="true" />
-          {copy("Add provider", "添加供应商")}
+          {copy("Add model", "添加模型")}
         </Button>
       </header>
       <ProviderList {...props} />

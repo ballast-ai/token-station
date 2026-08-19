@@ -560,8 +560,14 @@ export default function AgentRoutePage({
     <div className={`page-stack agent-route-page ${embedded ? "agent-route-embedded" : ""}`}>
       {pageMode === "routing" && (
         <header className="agent-route-routing-heading panel">
-          <div>
-            <p className="eyebrow">{copy("Agent route", "Agent 路由")}</p>
+          <div className="agent-route-heading-identity">
+            <span className="agent-large-mark" aria-hidden="true">
+              <AgentIcon
+                id={metadata.agent_id}
+                fallback={metadata.nav_mark ?? metadata.display_name.slice(0, 1)}
+                size={42}
+              />
+            </span>
             {embedded ? <h2>{metadata.display_name}</h2> : <h1>{metadata.display_name}</h1>}
           </div>
           <span className="status-chip neutral">{route.mode === "inherit" ? copy("Follows global", "跟随全局") : copy("Independent", "独立路由")}</span>
@@ -796,10 +802,31 @@ export default function AgentRoutePage({
               "供应商和模型选择与主页一致，只决定当前客户端是否使用独立配置。",
             )}</p>
           </div>
-          <div className="mode-switch" role="radiogroup" aria-label={copy("Agent routing mode", "Agent 路由模式")}>
-            <button type="button" role="radio" aria-checked={route.mode === "inherit"} className={route.mode === "inherit" ? "active" : ""} disabled={busy} onClick={() => void switchMode("inherit")}>{copy("Follow Home", "跟随主页")}</button>
-            <button type="button" role="radio" aria-checked={route.mode === "custom"} className={route.mode === "custom" ? "active" : ""} disabled={busy} onClick={() => void switchMode("custom")}>{copy("Custom tiers", "自定义三档")}</button>
-            <button type="button" role="radio" aria-checked={route.mode === "profile"} className={route.mode === "profile" ? "active" : ""} disabled={busy} onClick={() => void mountProfile()}>{copy("Use profile", "挂载策略组")}</button>
+          <div className="agent-tier-heading-actions">
+            <div className="mode-switch" role="radiogroup" aria-label={copy("Agent routing mode", "Agent 路由模式")}>
+              <button type="button" role="radio" aria-checked={route.mode === "inherit"} className={route.mode === "inherit" ? "active" : ""} disabled={busy} onClick={() => void switchMode("inherit")}>{copy("Follow Home", "跟随主页")}</button>
+              <button type="button" role="radio" aria-checked={route.mode === "custom"} className={route.mode === "custom" ? "active" : ""} disabled={busy} onClick={() => void switchMode("custom")}>{copy("Custom tiers", "自定义三档")}</button>
+              <button type="button" role="radio" aria-checked={route.mode === "profile"} className={route.mode === "profile" ? "active" : ""} disabled={busy} onClick={() => void mountProfile()}>{copy("Use profile", "挂载策略组")}</button>
+            </div>
+            {route.mode === "custom" ? (
+              <div className="agent-tier-apply-actions">
+                <button className="btn" type="button" disabled={busy} onClick={() => void restoreHome()}>{copy("Restore home routing", "恢复主页路由")}</button>
+                <button className="btn primary" type="button" disabled={busy || Boolean(route.config_error)} onClick={() => void saveRoute()}>{copy("Save & restart", "保存并重启")}</button>
+              </div>
+            ) : route.mode === "inherit" ? (
+              <button
+                className="btn primary"
+                type="button"
+                disabled={busy}
+                onClick={() => void applyHomeRoute()}
+                title={copy(
+                  "Apply the current Home three-tier routing to this Agent now.",
+                  "立即将主页当前三档路由应用到此 Agent。",
+                )}
+              >
+                {busy ? copy("Working…", "处理中…") : copy("Apply", "应用")}
+              </button>
+            ) : null}
           </div>
         </div>
 
@@ -846,35 +873,18 @@ export default function AgentRoutePage({
         />
 
         <footer className="panel-foot route-actions">
-          {route.mode === "custom" ? (
-            <>
-              <button className="btn primary" type="button" disabled={busy || Boolean(route.config_error)} onClick={() => void saveRoute()}>{copy("Save & restart", "保存并重启")}</button>
-              <button className="btn" type="button" disabled={busy} onClick={() => void restoreHome()}>{copy("Restore home routing", "恢复主页路由")}</button>
-            </>
-          ) : route.mode === "profile" ? (
+          {route.mode === "profile" ? (
             <span className="inherit-note">{copy(
               `This Agent uses routing profile “${route.profile}”. Manage profiles on Home, then save and apply.`,
               `该 Agent 使用策略组「${route.profile}」。在主页管理策略组，保存并应用后生效。`,
             )}</span>
           ) : (
-            <>
+            route.mode === "inherit" ? (
               <span className="inherit-note">{copy(
                 "This Agent automatically uses the latest three-tier configuration from Home.",
                 "主页路由更新后，此 Agent 会自动使用最新三档配置。",
               )}</span>
-              <button
-                className="btn primary"
-                type="button"
-                disabled={busy}
-                onClick={() => void applyHomeRoute()}
-                title={copy(
-                  "Apply the current Home three-tier routing to this Agent now.",
-                  "立即将主页当前三档路由应用到此 Agent。",
-                )}
-              >
-                {busy ? copy("Working…", "处理中…") : copy("Apply", "应用")}
-              </button>
-            </>
+            ) : null
           )}
           {route.config_error && <span className="foot-hint error-text">{humanizeAppError(route.config_error)}</span>}
         </footer>

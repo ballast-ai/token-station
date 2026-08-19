@@ -1,9 +1,11 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import type { FreeProviderPresetView } from "../api";
+import type { FreeProviderPresetView, StateView } from "../api";
+import { PROVIDER_CATALOG } from "../catalog";
+import { ErrorToastProvider } from "../components/ErrorToast";
 import AddProviderPage, {
   type FreeCatalogFilters,
   type ProviderCatalogMode,
@@ -11,10 +13,16 @@ import AddProviderPage, {
 } from "./AddProviderPage";
 
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(async (command: string, args?: { baseUrl?: string }) => {
+  invoke: vi.fn(),
+}));
+
+beforeEach(() => {
+  vi.mocked(invoke).mockReset();
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
     if (command === "preview_provider_endpoints") {
-      const loopback = args?.baseUrl?.startsWith("http://127.0.0.1")
-        || args?.baseUrl?.startsWith("http://localhost")
+      const baseUrl = (args as { baseUrl?: string } | undefined)?.baseUrl;
+      const loopback = baseUrl?.startsWith("http://127.0.0.1")
+        || baseUrl?.startsWith("http://localhost")
         || false;
       return {
         chat: "https://api.minimaxi.com/v1/chat/completions",
@@ -23,10 +31,28 @@ vi.mock("@tauri-apps/api/core", () => ({
         loopback,
       };
     }
+    if (command === "list_public_provider_models") {
+      return {
+        providers: {},
+        source: "cache",
+        fetched_at_ms: 42,
+        unavailable_provider_ids: [],
+      };
+    }
     if (command === "add_provider_with_credential") return {};
+    if (command === "get_state") return { source: "fresh-state" };
+    if (command === "import_model_prices_for_provider") {
+      return {
+        state: { source: "price-import" },
+        imported: 2,
+        existing: 0,
+        missing_model_ids: [],
+        price_version: 3,
+      };
+    }
     throw new Error(`unexpected IPC command: ${command}`);
-  }),
-}));
+  });
+});
 
 // The provider picker is a clickable brand-card catalog, not a <select>; click cards by visible label.
 const pickPreset = (user: ReturnType<typeof userEvent.setup>, label: string) =>
@@ -112,24 +138,31 @@ const freePresets: FreeProviderPresetView[] = [
 function renderPage(overrides: {
   existingNames?: string[];
   catalogMode?: ProviderCatalogMode;
+  entryMode?: "provider-first" | "model-first";
+  onAdded?: (state: StateView, message: string) => void;
+  onStateChanged?: (state: StateView) => void;
 } = {}) {
   return render(
-    <AddProviderPage
-      existingNames={overrides.existingNames ?? []}
-      onCancel={vi.fn()}
-      onAdded={vi.fn()}
-      catalogMode={overrides.catalogMode ?? "regular"}
-      onCatalogModeChange={vi.fn()}
-      regularFilters={regularFilters}
-      onRegularFiltersChange={vi.fn()}
-      freePresets={[]}
-      freeLoading={false}
-      freeError=""
-      freeFilters={freeFilters}
-      onFreeFiltersChange={vi.fn()}
-      onLoadFree={vi.fn()}
-      onSelectFree={vi.fn()}
-    />,
+    <ErrorToastProvider>
+      <AddProviderPage
+        existingNames={overrides.existingNames ?? []}
+        onCancel={vi.fn()}
+        onAdded={overrides.onAdded ?? vi.fn()}
+        onStateChanged={overrides.onStateChanged}
+        catalogMode={overrides.catalogMode ?? "regular"}
+        onCatalogModeChange={vi.fn()}
+        regularFilters={regularFilters}
+        onRegularFiltersChange={vi.fn()}
+        freePresets={[]}
+        freeLoading={false}
+        freeError=""
+        freeFilters={freeFilters}
+        onFreeFiltersChange={vi.fn()}
+        onLoadFree={vi.fn()}
+        onSelectFree={vi.fn()}
+        entryMode={overrides.entryMode}
+      />
+    </ErrorToastProvider>,
   );
 }
 
@@ -178,6 +211,291 @@ function RegularCatalogHarness() {
 }
 
 describe("AddProviderPage", () => {
+  it("imports all selected public prices in one batch when adding a cloud preset", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    const onAdded = vi.fn();
+    const onStateChanged = vi.fn();
+    renderPage({ onAdded, onStateChanged });
+
+    await pickPreset(user, "DeepSeek");
+    expect(screen.getByRole("checkbox", { name: "批量填充匹配的公开价格" })).toBeChecked();
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("import_model_prices_for_provider", {
+      upstreamName: "deepseek",
+      modelIds: ["deepseek-v4-flash", "deepseek-v4-pro"],
+    });
+    expect(onAdded).toHaveBeenCalledWith(
+      {},
+      expect.any(String),
+    );
+    expect(onStateChanged).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "price-import" }),
+    );
+  });
+
+  it("publishes the added Provider before a slow public price import finishes", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    const onAdded = vi.fn();
+    const onStateChanged = vi.fn();
+    let resolveImport: ((value: unknown) => void) | undefined;
+    const baseImplementation = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((command, args) => {
+      if (command === "import_model_prices_for_provider") {
+        return new Promise((resolve) => {
+          resolveImport = resolve;
+        });
+      }
+      return baseImplementation?.(command, args) as Promise<unknown>;
+    });
+    renderPage({ onAdded, onStateChanged });
+
+    await pickPreset(user, "DeepSeek");
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    await waitFor(() => expect(onAdded).toHaveBeenCalledOnce());
+    expect(onStateChanged).not.toHaveBeenCalled();
+
+    resolveImport?.({
+      state: { source: "price-import" },
+      imported: 2,
+      existing: 0,
+      missing_model_ids: [],
+      price_version: 1,
+    });
+    await waitFor(() => expect(onStateChanged).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "price-import" }),
+    ));
+  });
+
+  it("keeps automatic public pricing off for custom providers", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage();
+
+    await pickPreset(user, "自定义配置");
+
+    expect(screen.getByRole("checkbox", { name: "批量填充匹配的公开价格" }))
+      .not.toBeChecked();
+  });
+
+  it("does not apply usage-list pricing to subscription or local presets", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage();
+
+    await pickPreset(user, "智谱 GLM（Coding Plan）");
+    expect(screen.getByRole("checkbox", { name: "批量填充匹配的公开价格" }))
+      .not.toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "返回目录" }));
+    await pickPreset(user, "本地 Ollama");
+    expect(screen.getByRole("checkbox", { name: "批量填充匹配的公开价格" }))
+      .toBeDisabled();
+  });
+
+  it("uses the regional public-catalog namespace for a preset", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage();
+
+    await pickPreset(user, "智谱 GLM（中国）");
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("import_model_prices_for_provider", {
+      upstreamName: "glm_cn",
+      modelIds: ["glm-5.2", "glm-5.1", "glm-5"],
+    });
+  });
+
+  it("keeps the added provider and reports a batch price import failure", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    const onAdded = vi.fn();
+    const onStateChanged = vi.fn();
+    const baseImplementation = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "import_model_prices_for_provider") {
+        throw new Error("catalog unavailable");
+      }
+      return baseImplementation?.(command, args);
+    });
+    renderPage({ onAdded, onStateChanged });
+
+    await pickPreset(user, "DeepSeek");
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    expect(onAdded).toHaveBeenCalledWith({}, expect.any(String));
+    expect(onStateChanged).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "fresh-state" }),
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "供应商已添加，但公开价格导入失败",
+    );
+  });
+
+  it("searches models first and then opens the selected provider with only that model selected", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage({ entryMode: "model-first" });
+
+    await user.type(screen.getByRole("searchbox", { name: "搜索模型" }), "gpt-5.6-sol");
+    const results = screen.getByRole("list", { name: "模型与供应商" });
+    expect(results).toHaveAttribute("data-layout", "compact-three-column");
+    const result = within(results).getByRole("button", { name: /gpt-5.6-sol.*OpenAI/ });
+    expect(result.querySelector('[data-provider-brand="openai"]'))
+      .toHaveStyle({ width: "22px", height: "22px" });
+    expect(result.textContent?.indexOf("gpt-5.6-sol"))
+      .toBeLessThan(result.textContent?.indexOf("OpenAI") ?? -1);
+
+    await user.click(result);
+    expect(screen.getByRole("heading", { name: "OpenAI" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /gpt-5.6-sol/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /gpt-5.6-terra/ })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("searches one canonical GLM model across official and managed provider channels", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage({ entryMode: "model-first" });
+
+    await user.type(screen.getByRole("searchbox", { name: "搜索模型" }), "glm-5.2");
+    const results = screen.getByRole("list", { name: "模型与供应商" });
+    const alibaba = within(results).getByRole("button", {
+      name: /glm-5\.2.*阿里云百炼（中国）/,
+    });
+
+    expect(alibaba).toHaveTextContent("glm-5.2");
+    expect(alibaba).toHaveTextContent("ZHIPU/GLM-5.2");
+    expect(alibaba).toHaveTextContent("托管推理");
+    expect(within(results).getByRole("button", {
+      name: /glm-5\.2.*硅基流动 SiliconFlow（中国）/,
+    })).toBeInTheDocument();
+
+    await user.click(alibaba);
+    expect(screen.getByRole("heading", { name: "阿里云百炼（中国）" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /ZHIPU\/GLM-5\.2/ }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /qwen3\.7-max/ }))
+      .toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("uses the refreshed public catalog for model-first search", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "list_public_provider_models") {
+        return {
+          providers: {
+            openai: ["gpt-current"],
+            qwen: ["glm-5.2", "qwen-current"],
+          },
+          source: "live",
+          fetched_at_ms: 42,
+          unavailable_provider_ids: ["volcengine_ark"],
+        };
+      }
+      if (command === "preview_provider_endpoints") {
+        const baseUrl = (args as { baseUrl?: string } | undefined)?.baseUrl;
+        return {
+          chat: `${baseUrl}/chat/completions`,
+          responses: `${baseUrl}/responses`,
+          messages: `${baseUrl}/messages`,
+          loopback: false,
+        };
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    const user = userEvent.setup();
+    renderPage({ entryMode: "model-first" });
+
+    expect(await screen.findByText(
+      `公共目录已同步 · 2/${PROVIDER_CATALOG.length} 个渠道`,
+    )).toBeInTheDocument();
+    await user.type(screen.getByRole("searchbox", { name: "搜索模型" }), "gpt");
+    const results = screen.getByRole("list", { name: "模型与供应商" });
+    expect(within(results).getByRole("button", { name: /gpt-current.*OpenAI/ }))
+      .toBeInTheDocument();
+    expect(within(results).queryByRole("button", { name: /gpt-5\.6-sol.*OpenAI/ }))
+      .not.toBeInTheDocument();
+  });
+
+  it("uses the refreshed public catalog when the model-first query is empty", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "list_public_provider_models") {
+        return {
+          providers: { openai: ["gpt-current"] },
+          source: "live",
+          fetched_at_ms: 42,
+          unavailable_provider_ids: [],
+        };
+      }
+      if (command === "preview_provider_endpoints") {
+        const baseUrl = (args as { baseUrl?: string } | undefined)?.baseUrl;
+        return {
+          chat: `${baseUrl}/chat/completions`,
+          responses: `${baseUrl}/responses`,
+          messages: `${baseUrl}/messages`,
+          loopback: false,
+        };
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    renderPage({ entryMode: "model-first" });
+
+    expect(await screen.findByText(
+      `公共目录已同步 · 1/${PROVIDER_CATALOG.length} 个渠道`,
+    )).toBeInTheDocument();
+    const results = screen.getByRole("list", { name: "模型与供应商" });
+    expect(within(results).getByRole("button", { name: /gpt-current.*OpenAI/ }))
+      .toBeInTheDocument();
+    expect(within(results).queryByRole("button", { name: /gpt-5\.6-sol.*OpenAI/ }))
+      .not.toBeInTheDocument();
+  });
+
+  it("clears a hidden stale selection after a late public catalog refresh", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    let resolveCatalog!: (value: unknown) => void;
+    const catalog = new Promise((resolve) => {
+      resolveCatalog = resolve;
+    });
+    const baseImplementation = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "list_public_provider_models") return catalog;
+      return baseImplementation?.(command, args);
+    });
+
+    const user = userEvent.setup();
+    renderPage({ entryMode: "model-first" });
+    const results = screen.getByRole("list", { name: "模型与供应商" });
+    await user.click(within(results).getByRole("button", { name: /gpt-5\.6-sol.*OpenAI/ }));
+
+    resolveCatalog({
+      providers: { openai: ["gpt-current"] },
+      source: "live",
+      fetched_at_ms: 42,
+      unavailable_provider_ids: [],
+    });
+    expect(await screen.findByRole("button", { name: /gpt-current/ }))
+      .toHaveAttribute("aria-pressed", "false");
+    await user.type(screen.getByLabelText("API Key"), "test-key");
+    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+
+    expect(await screen.findByText("请至少选择一个模型。")).toBeInTheDocument();
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith(
+      "add_provider_with_credential",
+      expect.anything(),
+    );
+  });
+
   it("filters standard providers by a model name across punctuation boundaries", async () => {
     window.localStorage.setItem("token-station-language", "en");
     const user = userEvent.setup();
@@ -316,6 +634,64 @@ describe("AddProviderPage", () => {
       credentialSource: "env",
       credentialReference: "DEEPSEEK_API_KEY",
     }));
+  });
+
+  it("offers a closed Azure OpenAI v1 dialect for custom providers", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage();
+
+    await pickPreset(user, "自定义配置");
+    await user.click(screen.getByRole("combobox", { name: "API 方言" }));
+    await user.click(await screen.findByRole("option", { name: "Azure OpenAI v1" }));
+
+    expect(screen.getByText(/Base URL 必须指向资源的 \/openai\/v1 根路径/)).toBeInTheDocument();
+    expect(screen.getByText(/模型名填写 Azure deployment name/)).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("名称"), "azure");
+    await user.type(
+      screen.getByLabelText("Base URL"),
+      "https://fixture.openai.azure.com/openai/v1",
+    );
+    await user.type(screen.getByLabelText("API Key"), "synthetic-key");
+    await screen.findByText("https://api.minimaxi.com/v1/chat/completions");
+    vi.mocked(invoke).mockClear();
+
+    await user.click(screen.getByRole("button", { name: "刷新模型" }));
+
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith(
+      "discover_provider_models",
+      expect.anything(),
+    );
+    expect(screen.getByText(/Azure deployment name 需要手工填写/)).toBeInTheDocument();
+  });
+
+  it("drops discovered OpenAI models when a custom provider switches to Azure", async () => {
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    const user = userEvent.setup();
+    renderPage();
+
+    await pickPreset(user, "自定义配置");
+    await user.type(screen.getByLabelText("名称"), "azure");
+    await user.type(screen.getByLabelText("Base URL"), "https://api.example/v1");
+    await user.type(screen.getByLabelText("API Key"), "synthetic-key");
+    await screen.findByText("https://api.minimaxi.com/v1/chat/completions");
+    vi.mocked(invoke).mockResolvedValueOnce({
+      models: ["openai-discovered-model"],
+      source: "live",
+      fetched_at_ms: 1,
+      warning: null,
+    });
+
+    await user.click(screen.getByRole("button", { name: "刷新模型" }));
+    const discovered = await screen.findByRole("button", { name: /openai-discovered-model/ });
+    await user.click(discovered);
+    expect(discovered).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("combobox", { name: "API 方言" }));
+    await user.click(await screen.findByRole("option", { name: "Azure OpenAI v1" }));
+
+    expect(screen.queryByRole("button", { name: /openai-discovered-model/ })).not.toBeInTheDocument();
   });
 
   it("凭据来源使用组件库下拉而非原生 select", async () => {

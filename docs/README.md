@@ -7,3 +7,4 @@
 - [Hermes Agent](guides/hermes-agent.md)
 - [OpenClaw](guides/openclaw.md)
 - [OpenCode with DeepSeek](guides/opencode-deepseek.md)
+- [Azure OpenAI v1 with South Header Auth](guides/azure-openai-v1-south-header-auth.md)

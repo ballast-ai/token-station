@@ -284,7 +284,8 @@ function navigation() {
 async function openRouting(user: ReturnType<typeof userEvent.setup>) {
   await user.click((await screen.findByRole("navigation", { name: /主导航|Main navigation/ })).querySelector<HTMLButtonElement>('button[aria-label="路由"], button[aria-label="Routing"]')!);
   await user.click(await screen.findByRole("button", { name: /全局路由|Global routing/ }));
-  await screen.findByRole("heading", { name: /全局路由|Global routing/ });
+  await screen.findByRole("region", { name: /路由模式|Routing mode/ });
+  expect(screen.queryByRole("heading", { name: /全局路由|Global routing/ })).toBeNull();
 }
 
 async function openAgents(user: ReturnType<typeof userEvent.setup>) {
@@ -301,7 +302,10 @@ async function openAgent(user: ReturnType<typeof userEvent.setup>, name: string)
 async function openAgentRoute(user: ReturnType<typeof userEvent.setup>, name: string) {
   await openRouting(user);
   const scopes = screen.getByRole("region", { name: /路由范围|Routing scopes/ });
-  await user.click(within(scopes).getByRole("button", { name: /Agent 路由|Agent routes/ }));
+  const disclosure = within(scopes).getByRole("button", { name: /Agent 路由|Agent routes/ });
+  if (disclosure.getAttribute("aria-expanded") !== "true") {
+    await user.click(disclosure);
+  }
   await user.click(within(scopes).getByRole("button", { name }));
   await screen.findByRole("heading", { name });
 }
@@ -401,13 +405,13 @@ it("teaches overview first, then spotlights the real add-provider button", async
   expect(overviewCoachmark).toHaveTextContent("点击顶部“主页”都能返回主页");
   await user.click(within(overviewCoachmark).getByRole("button", { name: "知道了，开始配置" }));
 
-  const coachmark = await screen.findByRole("dialog", { name: "添加你的第一个供应商" });
+  const coachmark = await screen.findByRole("dialog", { name: "添加你的第一个模型" });
   expect(document.body).toHaveAttribute("data-first-run-guide-active", "true");
-  expect(coachmark).toHaveTextContent("添加供应商 · 1/5");
+  expect(coachmark).toHaveTextContent("添加模型 · 1/5");
   expect(screen.queryByRole("button", { name: "下一步" })).toBeNull();
-  const addProvider = screen.getByRole("button", { name: "添加供应商" });
+  const addProvider = screen.getByRole("button", { name: "添加模型" });
   expect(addProvider).toHaveAttribute("data-onboarding-active", "true");
-  expect(addProvider).toHaveAccessibleDescription("点击这里进入供应商配置，完成操作后引导会自动继续。");
+  expect(addProvider).toHaveAccessibleDescription("点击这里进入模型配置，完成操作后引导会自动继续。");
   expect(addProvider).toHaveFocus();
 
   await user.tab();
@@ -469,8 +473,8 @@ it("walks through provider configuration and advances only after a real save", a
   render(<App />);
 
   await continueFromOverview(user);
-  await screen.findByRole("dialog", { name: "添加你的第一个供应商" });
-  await user.click(screen.getByRole("button", { name: "添加供应商" }));
+  await screen.findByRole("dialog", { name: "添加你的第一个模型" });
+  await user.click(screen.getByRole("button", { name: "添加模型" }));
   expect(await screen.findByRole("dialog", { name: "选择一个模型供应商" })).toBeInTheDocument();
   expect(screen.getByRole("list", { name: "常规供应商列表" }))
     .toHaveAttribute("data-onboarding-active", "true");
@@ -479,7 +483,7 @@ it("walks through provider configuration and advances only after a real save", a
   await user.click(screen.getByText("OpenAI", { selector: ".provider-catalog-card-title strong" }));
 
   const credentialCoachmark = await screen.findByRole("dialog", { name: "填写供应商凭据" });
-  expect(credentialCoachmark).toHaveTextContent("添加供应商 · 3/5");
+  expect(credentialCoachmark).toHaveTextContent("添加模型 · 3/5");
   expect(screen.getByRole("group", { name: "供应商凭据" }))
     .toHaveAttribute("data-onboarding-active", "true");
   await user.type(screen.getByLabelText("API Key"), "secret-test");
@@ -592,7 +596,8 @@ it("spotlights routing controls and advances only when the requested revision is
     listener_reachable: true,
     running_revision: 1,
   })));
-  expect(screen.getByRole("heading", { name: "全局路由" })).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "路由模式" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "全局路由" })).toBeNull();
 
   act(() => emitServe?.(serveFixture({
     phase: "running",
@@ -600,7 +605,8 @@ it("spotlights routing controls and advances only when the requested revision is
     listener_reachable: false,
     running_revision: 2,
   })));
-  expect(screen.getByRole("heading", { name: "全局路由" })).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "路由模式" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "全局路由" })).toBeNull();
 
   act(() => emitServe?.(serveFixture({
     phase: "running",
@@ -1100,8 +1106,10 @@ describe("desktop station navigation", () => {
       await openAgents(user);
       animate.mockClear();
 
-      await user.click(screen.getByRole("button", { name: "供应商" }));
-      expect(await screen.findByRole("heading", { name: "供应商" })).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "模型" }));
+      expect(screen.getByRole("dialog", { name: "选择模型接入方式" })).toBeInTheDocument();
+      await user.keyboard("{Escape}");
+      expect(await screen.findByRole("heading", { name: "模型" })).toBeInTheDocument();
 
       expect(animate).not.toHaveBeenCalled();
       expect(document.querySelector(".station-header")).toBeInTheDocument();
@@ -1169,13 +1177,13 @@ describe("desktop station navigation", () => {
     expect(screen.getByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
     expect(screen.getByText("发现 Agents")).toBeInTheDocument();
     const startupNavigation = within(screen.getByLabelText("主导航"));
-    for (const name of ["主页", "Agent", "路由", "供应商", "用量"]) {
+    for (const name of ["主页", "Agent", "路由", "模型", "用量"]) {
       expect(startupNavigation.getByRole("button", { name })).toBeDisabled();
     }
     expect(screen.getByRole("button", { name: "设置" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "切换颜色主题" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
-    expect(screen.queryByRole("dialog", { name: "添加你的第一个供应商" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "添加你的第一个模型" })).toBeNull();
     expect(screen.queryByTestId("agent-runtime-connection")).toBeNull();
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
     await waitFor(() => expect(emitServe).toBeTypeOf("function"));
@@ -1194,7 +1202,7 @@ describe("desktop station navigation", () => {
     await act(async () => resolveScan([scannedClaude]));
 
     await continueFromOverview(user);
-    expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "模型" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "不再提示" }));
     await user.click(navigation().getByRole("button", { name: "Agent" }));
     expect(await screen.findByRole("heading", { name: "Agent 接入" })).toBeInTheDocument();
@@ -1203,7 +1211,7 @@ describe("desktop station navigation", () => {
       "主页",
       "Agent",
       "路由",
-      "供应商",
+      "模型",
       "用量",
     ]);
     expect(screen.queryByRole("button", { name: "全局路由" })).toBeNull();
@@ -1212,7 +1220,7 @@ describe("desktop station navigation", () => {
     expect(screen.getByText("代理运行中")).toBeInTheDocument();
     expect(screen.getByTestId("agent-runtime-connection")).toHaveTextContent("0 / 1 个已接管");
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
-    expect(screen.queryByRole("dialog", { name: "添加你的第一个供应商" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "添加你的第一个模型" })).toBeNull();
   });
 
   it("serve 事件早于 get_state 返回时保留最新运行代次并只扫描一次", async () => {
@@ -1292,7 +1300,7 @@ describe("desktop station navigation", () => {
     expect(screen.getByText("启动检查未完成，当前不会把失败结果当作空 Agent 列表。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新进入 Token Station" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
-    expect(screen.queryByRole("dialog", { name: "添加你的第一个供应商" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "添加你的第一个模型" })).toBeNull();
     expect(invokeMock.mock.calls.filter(([command]) => command === "scan_agents")).toHaveLength(1);
   });
 
@@ -1319,7 +1327,7 @@ describe("desktop station navigation", () => {
 
     expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
     const nav = within(screen.getByLabelText("主导航"));
-    for (const name of ["主页", "Agent", "路由", "供应商", "用量"]) {
+    for (const name of ["主页", "Agent", "路由", "模型", "用量"]) {
       expect(nav.getByRole("button", { name })).toBeInTheDocument();
     }
     expect(nav.queryByRole("button", { name: "设置" })).toBeNull();
@@ -1330,15 +1338,13 @@ describe("desktop station navigation", () => {
     expect(nav.queryByRole("button", { name: "日志" })).toBeNull();
 
     expect(nav.getByRole("button", { name: "主页" })).toHaveAttribute("aria-current", "page");
-    const revisionChain = screen.getByTestId("revision-chain");
-    expect(revisionChain).toHaveAccessibleName("已保存 revision 0；待应用；未运行");
-    expect(screen.getByLabelText("系统摘要")).not.toContainElement(revisionChain);
-    const snapshot = screen.getByRole("region", { name: "当前路由快照" });
-    expect(snapshot).toContainElement(revisionChain);
+    const snapshot = screen.getByRole("region", { name: "路由概览" });
+    expect(within(snapshot).queryByTestId("revision-chain")).toBeNull();
+    expect(within(snapshot).getByText("全局路由")).toBeInTheDocument();
     for (const tier of ["上档", "中档", "下档"]) {
       expect(within(snapshot).getByText(tier)).toBeInTheDocument();
     }
-    expect(within(snapshot).queryByText("单独路由")).toBeNull();
+    expect(within(snapshot).queryByText("简单路由")).toBeNull();
     expect(within(snapshot).queryByText("额度优先")).toBeNull();
     expect(await screen.findByText(/成功率 91\.7% · P95 320ms/)).toBeInTheDocument();
     expect(getStatsMock).toHaveBeenCalledWith("24h", null);
@@ -1374,15 +1380,15 @@ describe("desktop station navigation", () => {
         direct_target: { upstream: "team-openai", model: "gpt-5.6" },
       });
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return [scannedClaude];
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Token Station 主页" }));
-    const snapshot = screen.getByRole("region", { name: "当前路由快照" });
+    const snapshot = screen.getByRole("region", { name: "路由概览" });
 
-    expect(within(snapshot).getByText("单独路由")).toBeInTheDocument();
+    expect(within(snapshot).getByText("简单路由")).toBeInTheDocument();
     expect(within(snapshot).getByText("gpt-5.6")).toBeInTheDocument();
     expect(within(snapshot).getByText("team-openai")).toBeInTheDocument();
     expect(within(snapshot).queryByText("上档")).toBeNull();
@@ -1397,13 +1403,13 @@ describe("desktop station navigation", () => {
         direct_target: null,
       });
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return [scannedClaude];
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Token Station 主页" }));
-    const snapshot = screen.getByRole("region", { name: "当前路由快照" });
+    const snapshot = screen.getByRole("region", { name: "路由概览" });
     expect(within(snapshot).getByText("待选择供应商")).toBeInTheDocument();
     expect(within(snapshot).getByText("待选择模型")).toBeInTheDocument();
   });
@@ -1419,13 +1425,13 @@ describe("desktop station navigation", () => {
         ],
       });
       if (command === "list_agent_registry") return registryFixture;
-      if (command === "scan_agents") return [];
+      if (command === "scan_agents") return [scannedClaude];
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Token Station 主页" }));
-    const snapshot = screen.getByRole("region", { name: "当前路由快照" });
+    const snapshot = screen.getByRole("region", { name: "路由概览" });
     expect(within(snapshot).getByText("额度优先")).toBeInTheDocument();
     expect(within(snapshot).getByText("2 个账户")).toBeInTheDocument();
     expect(within(snapshot).getByText("deepseek/deepseek-chat · team-openai/gpt-5.6"))
@@ -1453,7 +1459,7 @@ describe("desktop station navigation", () => {
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
-  it("makes cost the primary Overview metric and keeps only shortcut navigation", async () => {
+  it("makes cost primary and exposes the three fixed workspace summaries", async () => {
     getStatsMock.mockResolvedValueOnce({
       ...statsFixture,
       total: {
@@ -1475,7 +1481,13 @@ describe("desktop station navigation", () => {
     expect(costCard).toHaveTextContent("成功率 91.7% · P95 320ms");
     expect(getStatsMock).toHaveBeenCalledWith("24h", null);
     expect(within(systemSummary).queryByText("今日请求")).toBeNull();
-    expect(screen.getByText("快捷键")).toBeInTheDocument();
+    expect(screen.queryByText("快捷键")).toBeNull();
+    expect(screen.getByRole("region", { name: "Agent 概览" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "路由概览" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "模型概览" })).toBeInTheDocument();
+    for (const name of ["打开 Agent", "打开路由", "打开模型"]) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument();
+    }
     expect(screen.queryByText("下一步处理")).toBeNull();
     expect(screen.queryByRole("button", { name: "管理供应商" })).toBeNull();
     expect(screen.queryByRole("button", { name: "重新扫描 Agent" })).toBeNull();
@@ -1489,8 +1501,10 @@ describe("desktop station navigation", () => {
 
     await openRouting(user);
     await openAgents(user);
-    await user.click(navigation().getByRole("button", { name: "供应商" }));
-    expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
+    await user.click(navigation().getByRole("button", { name: "模型" }));
+    expect(screen.getByRole("dialog", { name: "选择模型接入方式" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(await screen.findByRole("heading", { name: "模型" })).toBeInTheDocument();
     expect(screen.queryByText("UPSTREAM CATALOG")).toBeNull();
     await user.click(navigation().getByRole("button", { name: "用量" }));
     expect(screen.queryByText("LOCAL RECEIPT LEDGER")).toBeNull();
@@ -1580,6 +1594,41 @@ describe("desktop station navigation", () => {
 
     expect(invokeMock).toHaveBeenCalledWith("set_routing_mode", { mode: "quota_first", agentId: null });
     expect(within(modeTabs).getByRole("tab", { name: "额度优先" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("企业路由只提供端点接入，不显示或切换额度路由", async () => {
+    const user = userEvent.setup();
+    const account = { upstream: "kimi", model: "kimi-k3" };
+    const initial = stateFixture({
+      providers: [{
+        name: "kimi",
+        brand_id: "kimi",
+        provider: "openai-compatible",
+        base_url: "https://api.moonshot.cn/v1",
+        models: ["kimi-k3"],
+        has_auth: true,
+      }],
+      quota_accounts: [account],
+    });
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") return initial;
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return detectedAgentsFixture;
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await openRouting(user);
+    const scopes = screen.getByRole("region", { name: "路由范围" });
+    await user.click(within(scopes).getByRole("button", { name: "企业路由" }));
+
+    expect(await screen.findByRole("heading", { name: "企业路由" })).toBeInTheDocument();
+    expect(screen.queryByRole("tablist", { name: "路由模式" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Base URL" })).toBeInTheDocument();
+    expect(screen.getByLabelText("API Key")).toBeInTheDocument();
+    expect(screen.queryByText("额度优先")).toBeNull();
+    expect(screen.queryByRole("button", { name: "保存并应用" })).toBeNull();
+    expect(invokeMock).not.toHaveBeenCalledWith("set_routing_mode", expect.anything());
   });
 
   it("maps the four revision relationships to stable save copy", () => {
@@ -2372,10 +2421,12 @@ describe("desktop station navigation", () => {
     await openRouting(user);
     expect(screen.getByRole("heading", { name: "Smart routing" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save and apply" })).toBeInTheDocument();
-    await user.click(navigation().getByRole("button", { name: "Providers" }));
-    expect(await screen.findByRole("heading", { name: "Providers", level: 1 })).toBeInTheDocument();
-    expect(navigation().queryByRole("button", { name: "Add provider" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Add provider" })).toBeInTheDocument();
+    await user.click(navigation().getByRole("button", { name: "Models" }));
+    expect(screen.getByRole("dialog", { name: "Choose how to add a model" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(await screen.findByRole("heading", { name: "Models", level: 1 })).toBeInTheDocument();
+    expect(navigation().queryByRole("button", { name: "Add model" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Add model" })).toBeInTheDocument();
     expect(screen.queryByText("主页路由")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Usage" }));
@@ -2390,8 +2441,9 @@ describe("desktop station navigation", () => {
     expect(screen.getByRole("status")).toHaveTextContent(`${agentIds.length} / ${agentIds.length} visible`);
     expect(screen.getByRole("group", { name: "Agent visibility options" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Codex", checked: true })).toBeInTheDocument();
-    await user.click(navigation().getByRole("button", { name: "Providers" }));
-    await user.click(screen.getByRole("button", { name: "Add provider" }));
+    await user.click(navigation().getByRole("button", { name: "Models" }));
+    await user.click(within(screen.getByRole("dialog", { name: "Choose how to add a model" }))
+      .getByRole("button", { name: "Choose provider first" }));
     expect(await screen.findByRole("heading", { name: "Add provider" })).toBeInTheDocument();
     expect(screen.getByText("MiniMax (China)")).toBeInTheDocument();
     expect(screen.queryByText("MiniMax（中国）")).not.toBeInTheDocument();
@@ -2579,7 +2631,8 @@ describe("desktop station navigation", () => {
 
     await user.click(navigation().getByRole("button", { name: "路由" }));
 
-    expect(await screen.findByRole("heading", { name: "全局路由" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "路由模式" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "全局路由" })).toBeNull();
     expect(screen.queryByText(/配置结构不合法/)).toBeNull();
     expect(invokeMock).not.toHaveBeenCalledWith("save_agent_routes");
 
@@ -2714,8 +2767,9 @@ describe("desktop station navigation", () => {
     });
     render(<App />);
     await openAgents(user);
-    await user.click(navigation().getByRole("button", { name: "供应商" }));
-    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+    await user.click(navigation().getByRole("button", { name: "模型" }));
+    await user.click(within(screen.getByRole("dialog", { name: "选择模型接入方式" }))
+      .getByRole("button", { name: "先选供应商" }));
     expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "添加供应商" })).toBeNull();
     // The provider picker is a brand-card catalog; click by visible label instead of selecting an option.
@@ -2723,7 +2777,7 @@ describe("desktop station navigation", () => {
     expect(screen.getByRole("button", { name: "添加供应商" })).toBeInTheDocument();
     await user.type(screen.getByLabelText("API Key"), "secret-test");
     await user.click(screen.getByRole("button", { name: "添加供应商" }));
-    expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "模型" })).toBeInTheDocument();
     expect(within(screen.getByTestId("error-toast-viewport")).getByText("供应商已添加"))
       .toBeInTheDocument();
   }, 15_000);
@@ -2764,8 +2818,9 @@ describe("desktop station navigation", () => {
     });
 
     render(<App />);
-    await user.click((await screen.findByRole("navigation", { name: "主导航" })).querySelector<HTMLButtonElement>('button[aria-label="供应商"]')!);
-    await user.click(screen.getByRole("button", { name: "添加供应商" }));
+    await user.click((await screen.findByRole("navigation", { name: "主导航" })).querySelector<HTMLButtonElement>('button[aria-label="模型"]')!);
+    await user.click(within(screen.getByRole("dialog", { name: "选择模型接入方式" }))
+      .getByRole("button", { name: "先选供应商" }));
     expect(await screen.findByRole("heading", { name: "添加供应商" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /常规 API/ })).toHaveAttribute("aria-pressed", "true");
 

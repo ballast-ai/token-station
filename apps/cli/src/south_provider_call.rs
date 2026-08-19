@@ -91,8 +91,9 @@ pub(crate) enum ResponseMetadataEligibilityV1 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AuthenticationEligibilityV1 {
-    BearerOnly,
-    BearerAndHeaderSecret,
+    Bearer,
+    HeaderSecretCatalog,
+    AzureOpenAiHeader,
 }
 
 /// Static host facts used before any credential lookup or transport call.
@@ -124,7 +125,7 @@ impl CommunityCallPolicyV1 {
             egress_mode,
             body_mode,
             response_metadata,
-            authentication: AuthenticationEligibilityV1::BearerOnly,
+            authentication: AuthenticationEligibilityV1::Bearer,
         }
     }
 
@@ -139,7 +140,14 @@ impl CommunityCallPolicyV1 {
     )]
     #[must_use]
     pub(crate) const fn with_header_secret_auth(mut self) -> Self {
-        self.authentication = AuthenticationEligibilityV1::BearerAndHeaderSecret;
+        self.authentication = AuthenticationEligibilityV1::HeaderSecretCatalog;
+        self
+    }
+
+    /// Enables the production Header Auth path only for the trusted Azure OpenAI v1 dialect.
+    #[must_use]
+    pub(crate) const fn with_azure_openai_header_auth(mut self) -> Self {
+        self.authentication = AuthenticationEligibilityV1::AzureOpenAiHeader;
         self
     }
 }
@@ -346,7 +354,7 @@ fn prepare_provider_call_for_mode_v1(
             ProviderAuthV1::from(BearerAuthV1::new(CredentialSlotV1::parse(secret.as_str())?))
         }
         Some(Auth::Header { name, secret })
-            if policy.authentication == AuthenticationEligibilityV1::BearerAndHeaderSecret =>
+            if header_auth_allowed(policy.authentication, &provider.provider, name) =>
         {
             let header = sanctioned_secret_header(name)
                 .ok_or(PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth))?;
@@ -536,7 +544,11 @@ pub(crate) fn map_failure_v1(
             ContractErrorV1::InvalidEndpoint
             | ContractErrorV1::InvalidRelativePath
             | ContractErrorV1::InvalidCredentialSlot
-            | ContractErrorV1::InvalidJsonBody => (
+            | ContractErrorV1::InvalidJsonBody
+            | ContractErrorV1::InvalidQueryValue
+            | ContractErrorV1::DuplicateQueryParameter
+            | ContractErrorV1::EmptyQuery
+            | ContractErrorV1::QueryTooLarge => (
                 ErrorCode::Internal,
                 500,
                 "provider request contract rejected",
@@ -659,7 +671,10 @@ fn check_static_eligibility(
     if policy.rollout != RolloutEligibilityV1::Enabled {
         return ineligible(IneligibleV1::RolloutDisabled);
     }
-    if provider.provider != "openai-compatible" {
+    let supported_provider = provider.provider == "openai-compatible"
+        || (provider.provider == "azure-openai-v1"
+            && policy.authentication == AuthenticationEligibilityV1::AzureOpenAiHeader);
+    if !supported_provider {
         return ineligible(IneligibleV1::ProviderDialect);
     }
     if policy.provider_package != ProviderPackageEligibilityV1::Approved {
@@ -684,10 +699,9 @@ fn check_static_eligibility(
         return ineligible(IneligibleV1::Body);
     }
     let supported_auth = match descriptor.auth.as_ref() {
-        Some(Auth::Bearer { .. }) => true,
+        Some(Auth::Bearer { .. }) => provider.provider == "openai-compatible",
         Some(Auth::Header { name, .. }) => {
-            policy.authentication == AuthenticationEligibilityV1::BearerAndHeaderSecret
-                && sanctioned_secret_header(name).is_some()
+            header_auth_allowed(policy.authentication, &provider.provider, name)
         }
         _ => false,
     };
@@ -706,6 +720,22 @@ fn check_static_eligibility(
         return Err(PreparationErrorV1::CredentialBindingMismatch.into());
     }
     Ok(())
+}
+
+fn header_auth_allowed(
+    authentication: AuthenticationEligibilityV1,
+    provider: &str,
+    name: &str,
+) -> bool {
+    match authentication {
+        AuthenticationEligibilityV1::Bearer => false,
+        AuthenticationEligibilityV1::HeaderSecretCatalog => {
+            provider == "openai-compatible" && sanctioned_secret_header(name).is_some()
+        }
+        AuthenticationEligibilityV1::AzureOpenAiHeader => {
+            provider == "azure-openai-v1" && name.eq_ignore_ascii_case("api-key")
+        }
+    }
 }
 
 fn sanctioned_secret_header(name: &str) -> Option<SecretHeaderV1> {

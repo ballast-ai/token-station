@@ -12,11 +12,19 @@ describe("RoutingModeSelector", () => {
     );
 
     const tabs = within(screen.getByRole("tablist", { name: "路由模式" })).getAllByRole("tab");
+    expect(screen.getByRole("tablist", { name: "路由模式" }))
+      .toHaveAttribute("data-variant", "line");
     expect(tabs.map((tab) => tab.getAttribute("aria-label"))).toEqual([
-      "单独路由",
+      "简单路由",
       "智能分档",
       "额度优先",
     ]);
+    expect(screen.queryByText("路由策略")).toBeNull();
+    expect(screen.queryByText("选择请求如何分配")).toBeNull();
+    expect(screen.queryByText("可固定一个目标，也可按任务复杂度或供应商额度分配。")).toBeNull();
+    expect(screen.queryByText("固定一个供应商和模型")).toBeNull();
+    expect(screen.queryByText("按任务复杂度选模型")).toBeNull();
+    expect(screen.queryByText("优先使用可用额度")).toBeNull();
 
     await user.click(tabs[0]);
     expect(onValueChange).toHaveBeenCalledWith("direct");

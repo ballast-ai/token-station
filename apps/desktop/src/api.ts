@@ -22,6 +22,8 @@ export interface ProviderView {
   provider_call?: ProviderCallEngine;
   south_v1_available?: boolean;
   south_v1_unavailable_reason?: SouthUnavailableReason | null;
+  south_header_auth_v1_available?: boolean;
+  south_header_auth_v1_unavailable_reason?: SouthUnavailableReason | null;
   /** Locally hosted provider, such as Ollama. Local-only routing uses this to keep traffic on the machine. */
   local?: boolean;
   access_tier?: "free" | "paid";
@@ -32,7 +34,8 @@ export interface ProviderView {
 export type ProviderCallEngine =
   | "legacy"
   | "south_v1_buffered"
-  | "south_v1_buffered_streaming";
+  | "south_v1_buffered_streaming"
+  | "south_v1_buffered_streaming_header_auth";
 
 export type SouthUnavailableReason = "provider_package" | "api_dialect" | "egress" | "auth";
 
@@ -717,6 +720,21 @@ export interface ModelPriceSuggestionView extends ModelPriceView {
   fetched_at_ms: number;
 }
 
+export interface PublicProviderModelsView {
+  providers: Record<string, string[]>;
+  source: "live" | "cache" | "stale_cache";
+  fetched_at_ms: number;
+  unavailable_provider_ids: string[];
+}
+
+export interface ModelPriceImportResultView {
+  state: StateView;
+  imported: number;
+  existing: number;
+  missing_model_ids: string[];
+  price_version: number;
+}
+
 export interface BandView {
   at_least: number;
   pool: string;
@@ -823,6 +841,7 @@ export const addProvider = (
   local = false,
   credential_source: "store" | "env" | "file" | "none" = api_key ? "store" : "none",
   credential_reference: string | null = null,
+  provider_dialect: "openai-compatible" | "azure-openai-v1" = "openai-compatible",
 ) =>
   invoke<StateView>("add_provider_with_credential", {
     name,
@@ -832,6 +851,7 @@ export const addProvider = (
     local,
     credentialSource: credential_source,
     credentialReference: credential_reference,
+    providerDialect: provider_dialect,
   });
 
 export const listFreeProviderPresets = () =>
@@ -1036,11 +1056,22 @@ export const removeAgentBudget = (agentId: AgentId) =>
 
 export const getPriceTable = () => invoke<PriceTableView>("get_price_table");
 
+export const listPublicProviderModels = (providerIds: string[]) =>
+  invoke<PublicProviderModelsView>("list_public_provider_models", { providerIds });
+
 export const suggestModelPrice = (providerId: string | null, modelId: string) =>
   invoke<ModelPriceSuggestionView | null>("suggest_model_price", {
     providerId,
     modelId,
   });
+
+export const importModelPricesForProvider = (
+  upstreamName: string,
+  modelIds: string[],
+) => invoke<ModelPriceImportResultView>("import_model_prices_for_provider", {
+  upstreamName,
+  modelIds,
+});
 
 export const setModelPrice = (
   model: string,

@@ -138,7 +138,7 @@ function modelContractGuidance(error: unknown): LocalizedAppMessage | null {
     },
     model_contract_exact_routing_unsupported: {
       en: "OpenCode's fixed model is incompatible with exact-model routing. Switch this Agent to tiered, quota-first, or direct routing.",
-      zh: "OpenCode 固定模型与精确模型路由不兼容。请将该 Agent 切换为分层、额度优先或单独路由。",
+      zh: "OpenCode 固定模型与精确模型路由不兼容。请将该 Agent 切换为分层、额度优先或简单路由。",
     },
     model_contract_invalid_route: {
       en: "The OpenCode route is invalid. Repair and save the route configuration before connecting.",
@@ -355,6 +355,11 @@ const APP_ERROR_GUIDANCE: LocalizedAppError[] = [
     matches: /model_catalog_api_key_required/i,
     en: "Enter an API key before loading this provider's model catalog.",
     zh: "请先填写 API Key，再读取该供应商的模型目录。",
+  },
+  {
+    matches: /model_catalog_azure_deployment_manual/i,
+    en: "Enter the Azure deployment name manually; this dialect does not use the generic model-catalog request.",
+    zh: "Azure deployment name 需要手工填写；该方言不使用通用模型目录请求。",
   },
   {
     matches: /quota|usage|pricing|catalog|额度|用量|价格目录|模型目录/i,

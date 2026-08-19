@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "kind": "provider-adapter",
   "api_version": "provider-adapter-v1",
-  "providers": ["openai-compatible"],
+  "providers": ["openai-compatible", "azure-openai-v1"],
   "capabilities": ["chat", "stream", "tool_call", "json_schema"],
   "permissions": {
     "network": false,

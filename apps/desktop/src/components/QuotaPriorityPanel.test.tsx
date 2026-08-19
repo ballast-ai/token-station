@@ -51,6 +51,12 @@ function renderPanel(overrides: Partial<ComponentProps<typeof QuotaPriorityPanel
 }
 
 describe("QuotaPriorityPanel quota plans", () => {
+  it("places the primary apply action in the card header", () => {
+    renderPanel();
+    expect(screen.getByRole("button", { name: "保存并应用" }).closest(".panel-head"))
+      .toBeInTheDocument();
+  });
+
   it("用两句易读文案说明本地估算边界", () => {
     const { planSection } = renderPanel();
     expect(planSection).toHaveTextContent(

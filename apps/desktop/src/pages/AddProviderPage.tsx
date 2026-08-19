@@ -2,15 +2,25 @@ import { useEffect, useMemo, useState } from "react";
 import {
   addProvider,
   discoverProviderModels,
+  getState,
+  importModelPricesForProvider,
+  listPublicProviderModels,
   previewProviderEndpoints,
   type FreeOfferKind,
   type FreeProviderPresetView,
   type FreeProviderRegion,
   type ModelDiscoveryView,
   type ProviderEndpointPreview,
+  type PublicProviderModelsView,
   type StateView,
 } from "../api";
 import { CUSTOM_ID, PROVIDER_CATALOG, type ProviderPreset } from "../catalog";
+import {
+  applyPublicProviderModels,
+  listModelOfferings,
+  searchModelOfferings,
+  type ModelDeliveryClass,
+} from "../modelCatalog";
 import { ProviderIcon } from "../brandIcons";
 import ModelPicker, { type CatalogStatus } from "../components/ModelPicker";
 import PageBackButton from "../components/PageBackButton";
@@ -40,10 +50,22 @@ export interface FreeCatalogFilters {
   region: "all" | FreeProviderRegion;
 }
 
+function deliveryClassLabel(
+  deliveryClass: ModelDeliveryClass,
+  copy: (english: string, chinese: string) => string,
+): string {
+  if (deliveryClass === "official") return copy("Official channel", "官方渠道");
+  if (deliveryClass === "managed") return copy("Managed inference", "托管推理");
+  if (deliveryClass === "self_hosted") return copy("Self-hosted", "自托管");
+  if (deliveryClass === "aggregated") return copy("Aggregator", "聚合渠道");
+  return copy("Provider", "供应商");
+}
+
 interface AddProviderPageProps {
   existingNames: string[];
   onCancel: () => void;
   onAdded: (state: StateView, message: string) => void;
+  onStateChanged?: (state: StateView) => void;
   catalogMode: ProviderCatalogMode;
   onCatalogModeChange: (mode: ProviderCatalogMode) => void;
   regularFilters: RegularCatalogFilters;
@@ -56,6 +78,7 @@ interface AddProviderPageProps {
   onLoadFree: () => void;
   onSelectFree: (preset: FreeProviderPresetView) => void;
   onProviderSelected?: () => void;
+  entryMode?: "provider-first" | "model-first";
 }
 
 const regularRegion = (preset: ProviderPreset): "china" | "global" =>
@@ -65,6 +88,7 @@ function searchableRegular(preset: ProviderPreset): string {
   return [
     preset.id,
     preset.label,
+    englishProviderName(preset.id, preset.label),
     preset.note ?? "",
     preset.region,
     preset.subscription,
@@ -97,10 +121,15 @@ function matchesCatalogSearch(searchableText: string, query: string): boolean {
   return terms.every((term) => normalizedText.includes(term));
 }
 
+function shouldDefaultPublicPriceImport(preset: ProviderPreset | undefined): boolean {
+  return Boolean(preset && !preset.local && preset.subscription !== "Coding Plan");
+}
+
 export default function AddProviderPage({
   existingNames,
   onCancel,
   onAdded,
+  onStateChanged,
   catalogMode,
   onCatalogModeChange,
   regularFilters,
@@ -113,8 +142,9 @@ export default function AddProviderPage({
   onLoadFree,
   onSelectFree,
   onProviderSelected,
+  entryMode = "provider-first",
 }: AddProviderPageProps) {
-  const { showError } = useErrorToast();
+  const { showError, showInfo } = useErrorToast();
   const { copy, language } = useLocalizedCopy();
   const offerLabel = (kind: FreeOfferKind) => (
     kind === "recurring" ? copy("Always free", "长期免费") : copy("Trial credit", "试用额度")
@@ -127,6 +157,9 @@ export default function AddProviderPage({
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [key, setKey] = useState("");
+  const [providerDialect, setProviderDialect] = useState<
+    "openai-compatible" | "azure-openai-v1"
+  >("openai-compatible");
   const [credentialSource, setCredentialSource] = useState<"store" | "env" | "file">("store");
   const [credentialReference, setCredentialReference] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
@@ -139,10 +172,20 @@ export default function AddProviderPage({
   const [error, setError] = useState("");
   const [endpointPreview, setEndpointPreview] = useState<ProviderEndpointPreview | null>(null);
   const [endpointError, setEndpointError] = useState("");
+  const [modelFirstQuery, setModelFirstQuery] = useState("");
+  const [importPublicPrices, setImportPublicPrices] = useState(false);
+  const [publicModels, setPublicModels] = useState<PublicProviderModelsView | null>(null);
+  const [publicModelsLoading, setPublicModelsLoading] = useState(false);
+  const [publicModelsError, setPublicModelsError] = useState("");
+
+  const catalogProviders = useMemo(
+    () => applyPublicProviderModels(PROVIDER_CATALOG, publicModels),
+    [publicModels],
+  );
 
   const preset: ProviderPreset | null = useMemo(
-    () => PROVIDER_CATALOG.find((item) => item.id === presetId) ?? null,
-    [presetId],
+    () => catalogProviders.find((item) => item.id === presetId) ?? null,
+    [catalogProviders, presetId],
   );
   const isCustom = presetId === CUSTOM_ID;
   const isExisting = name.trim().length > 0 && existingNames.includes(name.trim());
@@ -150,6 +193,9 @@ export default function AddProviderPage({
   const catalogModels = preset?.models ?? [];
   const allModels = [...new Set([...catalogModels, ...discoveredModels, ...extraModels])];
   const configuringRegular = Boolean(presetId);
+  const publicPriceImportAvailable = !isCustom
+    && !local
+    && providerDialect !== "azure-openai-v1";
 
   const visibleRegular = useMemo(() => {
     const query = regularFilters.query.trim().toLocaleLowerCase();
@@ -171,7 +217,7 @@ export default function AddProviderPage({
         "手动填写 OpenAI-compatible 地址与模型。",
       ),
     };
-    return [custom, ...PROVIDER_CATALOG].filter((item) => {
+    return [custom, ...catalogProviders].filter((item) => {
       if (
         item.id !== CUSTOM_ID
         && regularFilters.region !== "all"
@@ -180,7 +226,7 @@ export default function AddProviderPage({
       if (!query) return true;
       return matchesCatalogSearch(searchableRegular(item), query);
     });
-  }, [copy, regularFilters]);
+  }, [catalogProviders, copy, regularFilters]);
 
   const visibleFree = useMemo(() => {
     const query = freeFilters.query.trim().toLocaleLowerCase();
@@ -190,6 +236,44 @@ export default function AddProviderPage({
       return matchesCatalogSearch(searchableFree(item), query);
     });
   }, [freeFilters, freePresets]);
+
+  const visibleModelChoices = useMemo(() => {
+    const query = modelFirstQuery.trim();
+    return query
+      ? searchModelOfferings(query, catalogProviders)
+      : listModelOfferings(catalogProviders);
+  }, [catalogProviders, modelFirstQuery]);
+
+  useEffect(() => {
+    if (!preset || isCustom) return;
+    const available = new Set([...catalogModels, ...discoveredModels, ...extraModels]);
+    setPicked((current) => {
+      const next = current.filter((model) => available.has(model));
+      return next.length === current.length ? current : next;
+    });
+  }, [catalogModels, discoveredModels, extraModels, isCustom, preset]);
+
+  useEffect(() => {
+    if (catalogMode !== "regular" && entryMode !== "model-first") return;
+    let active = true;
+    setPublicModelsLoading(true);
+    setPublicModelsError("");
+    void listPublicProviderModels(PROVIDER_CATALOG.map((provider) => provider.id))
+      .then((snapshot) => {
+        if (!active) return;
+        setPublicModels(snapshot);
+      })
+      .catch((caught) => {
+        if (!active) return;
+        setPublicModelsError(humanizeAppError(caught, language));
+      })
+      .finally(() => {
+        if (active) setPublicModelsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [catalogMode, entryMode, language]);
 
   useEffect(() => {
     const baseUrl = url.trim();
@@ -254,15 +338,21 @@ export default function AddProviderPage({
               tone: "idle",
             };
 
-  const selectPreset = (id: string) => {
+  const selectPreset = (id: string, preferredModel?: string) => {
     setPresetId(id);
-    const selected = PROVIDER_CATALOG.find((item) => item.id === id);
+    const selected = catalogProviders.find((item) => item.id === id);
     setName(selected?.id ?? "");
     setUrl(selected?.baseUrl ?? "");
     setLocal(selected?.local ?? false);
     setCredentialSource("store");
+    setProviderDialect("openai-compatible");
+    setImportPublicPrices(shouldDefaultPublicPriceImport(selected));
     setCredentialReference("");
-    setPicked(selected ? [...selected.models] : []);
+    setPicked(selected
+      ? preferredModel && selected.models.includes(preferredModel)
+        ? [preferredModel]
+        : [...selected.models]
+      : []);
     setExtraModels([]);
     setDiscoveredModels([]);
     setDiscovery(null);
@@ -277,6 +367,8 @@ export default function AddProviderPage({
     setUrl("");
     setKey("");
     setCredentialSource("store");
+    setProviderDialect("openai-compatible");
+    setImportPublicPrices(false);
     setCredentialReference("");
     setPicked([]);
     setEndpointPreview(null);
@@ -289,7 +381,24 @@ export default function AddProviderPage({
     if (mode === "free" && freePresets.length === 0 && !freeLoading) onLoadFree();
   };
 
+  const changeProviderDialect = (next: typeof providerDialect) => {
+    setPicked((current) => current.filter((model) => !discoveredModels.includes(model)));
+    setDiscoveredModels([]);
+    setDiscovery(null);
+    setProviderDialect(next);
+    if (next === "azure-openai-v1") setImportPublicPrices(false);
+  };
+
   const refreshModels = async () => {
+    if (providerDialect === "azure-openai-v1") {
+      setDiscovery({
+        models: [],
+        source: "none",
+        fetched_at_ms: null,
+        warning: "model_catalog_azure_deployment_manual",
+      });
+      return;
+    }
     if (!name.trim() || !url.trim()) {
       setDiscovery({
         models: [],
@@ -368,6 +477,7 @@ export default function AddProviderPage({
         local && endpointPreview.loopback,
         needsKey ? credentialSource : "none",
         needsKey && credentialSource !== "store" ? credentialReference.trim() : null,
+        providerDialect,
       );
       onAdded(
         next,
@@ -375,6 +485,31 @@ export default function AddProviderPage({
           ? copy(`Provider "${name.trim()}" updated`, `供应商“${name.trim()}”已更新`)
           : copy("Provider added", "供应商已添加"),
       );
+      if (importPublicPrices && publicPriceImportAvailable) {
+        try {
+          const imported = await importModelPricesForProvider(
+            name.trim(),
+            picked,
+          );
+          onStateChanged?.(imported.state);
+          if (imported.missing_model_ids.length > 0) {
+            showInfo(copy(
+              `${imported.imported} public prices imported; ${imported.missing_model_ids.length} models remain unknown.`,
+              `已导入 ${imported.imported} 个公开价格；${imported.missing_model_ids.length} 个模型仍为未知价格。`,
+            ), `provider-price-import:${name.trim()}`);
+          }
+        } catch (priceError) {
+          showError(copy(
+            `Provider added, but public prices could not be imported: ${humanizeAppError(priceError, language)}`,
+            `供应商已添加，但公开价格导入失败：${humanizeAppError(priceError, language)}`,
+          ), `provider-price-import:${name.trim()}`);
+          try {
+            onStateChanged?.(await getState());
+          } catch (refreshError) {
+            showError(humanizeAppError(refreshError), `provider-price-refresh:${name.trim()}`);
+          }
+        }
+      }
     } catch (caught) {
       showError(humanizeAppError(caught), `provider-save:${name.trim()}`);
     } finally {
@@ -383,6 +518,111 @@ export default function AddProviderPage({
   };
 
   const disabled = saving || discovering;
+  const publicCatalogCoverage = Object.keys(publicModels?.providers ?? {}).length;
+  const publicCatalogStatus = publicModelsLoading
+    ? copy("Syncing public catalog…", "正在同步公共目录…")
+    : publicModelsError
+      ? copy("Bundled snapshot · sync failed", "内置快照 · 同步失败")
+      : publicModels?.source === "live"
+        ? copy(
+            `Public catalog synced · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} channels`,
+            `公共目录已同步 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 个渠道`,
+          )
+        : publicModels?.source === "stale_cache"
+          ? copy(
+              `Stale public cache · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} channels`,
+              `公共目录旧缓存 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 个渠道`,
+            )
+          : publicModels
+            ? copy(
+                `Public catalog cache · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} channels`,
+                `公共目录缓存 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 个渠道`,
+              )
+            : copy("Bundled model snapshot", "内置模型快照");
+
+  if (!configuringRegular && entryMode === "model-first") {
+    return (
+      <div className="page-stack add-provider-page model-first-page">
+        <header className="page-title-row provider-catalog-title-row">
+          <div>
+            <PageBackButton onClick={onCancel} />
+            <h1>{copy("Search models", "搜索模型")}</h1>
+            <p>{copy(
+              "Search for a model, then choose the provider that will deliver it.",
+              "先搜索模型，再选择提供该模型的供应商。",
+            )}</p>
+          </div>
+          <div className="provider-catalog-summary">
+            <span className="provider-catalog-total">
+              {copy(`${visibleModelChoices.length} choices`, `${visibleModelChoices.length} 个可选组合`)}
+            </span>
+            <small
+              className={`public-catalog-status ${publicModelsError ? "error" : ""}`}
+              role="status"
+              title={publicModelsError || undefined}
+            >
+              {publicCatalogStatus}
+            </small>
+          </div>
+        </header>
+
+        <section className="panel model-first-catalog" aria-label={copy("Model search", "模型搜索")}>
+          <label className="provider-catalog-search model-first-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              autoFocus
+              type="search"
+              aria-label={copy("Search models", "搜索模型")}
+              placeholder={copy("Enter a model name", "输入模型名称")}
+              value={modelFirstQuery}
+              onChange={(event) => setModelFirstQuery(event.target.value)}
+            />
+          </label>
+
+          {visibleModelChoices.length > 0 ? (
+            <div className="model-first-results" role="list" aria-label={copy("Models and providers", "模型与供应商")} data-layout="compact-three-column">
+              {visibleModelChoices.map((offering) => {
+                const { provider, model, upstreamModelId } = offering;
+                const displayName = providerName(provider.id, provider.label);
+                const invocationDiffers = model.label !== upstreamModelId;
+                return (
+                  <article role="listitem" key={offering.id}>
+                    <button
+                      type="button"
+                      aria-label={`${model.label} · ${displayName}${invocationDiffers ? ` · ${upstreamModelId}` : ""}`}
+                      title={`${model.label} · ${displayName}`}
+                      onClick={() => selectPreset(provider.id, upstreamModelId)}
+                    >
+                      <span className="model-first-identity">
+                        <span className="model-first-name">{model.label}</span>
+                        {invocationDiffers ? (
+                          <small className="model-first-upstream">
+                            {copy(`Calls ${upstreamModelId}`, `调用 ID · ${upstreamModelId}`)}
+                          </small>
+                        ) : null}
+                      </span>
+                      <span className="model-first-provider">
+                        <ProviderIcon id={provider.id} label={displayName} size={22} />
+                        <span>
+                          <small>{deliveryClassLabel(offering.deliveryClass, copy)}</small>
+                          <strong>{displayName}</strong>
+                        </span>
+                      </span>
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="provider-catalog-empty">
+              <strong>{copy("No matching models", "没有匹配的模型")}</strong>
+              <p>{copy("Try another model name.", "请尝试其他模型名称。")}</p>
+            </div>
+          )}
+        </section>
+      </div>
+    );
+  }
 
   if (!configuringRegular) {
     const filtersEmpty = catalogMode === "regular"
@@ -399,12 +639,23 @@ export default function AddProviderPage({
               "从同一个目录选择常规 API 或免费 API，配置入口和返回逻辑保持一致。",
             )}</p>
           </div>
-          <span className="provider-catalog-total">
-            {copy(
-              `${catalogMode === "regular" ? PROVIDER_CATALOG.length + 1 : freePresets.length} providers`,
-              `${catalogMode === "regular" ? PROVIDER_CATALOG.length + 1 : freePresets.length} 家可选供应商`,
-            )}
-          </span>
+          <div className="provider-catalog-summary">
+            <span className="provider-catalog-total">
+              {copy(
+                `${catalogMode === "regular" ? catalogProviders.length + 1 : freePresets.length} providers`,
+                `${catalogMode === "regular" ? catalogProviders.length + 1 : freePresets.length} 家可选供应商`,
+              )}
+            </span>
+            {catalogMode === "regular" ? (
+              <small
+                className={`public-catalog-status ${publicModelsError ? "error" : ""}`}
+                role="status"
+                title={publicModelsError || undefined}
+              >
+                {publicCatalogStatus}
+              </small>
+            ) : null}
+          </div>
         </header>
 
         <section
@@ -419,7 +670,7 @@ export default function AddProviderPage({
                 aria-pressed={catalogMode === "regular"}
                 onClick={() => switchCatalogMode("regular")}
               >
-                {copy("Standard API", "常规 API")} <small>{PROVIDER_CATALOG.length + 1}</small>
+                {copy("Standard API", "常规 API")} <small>{catalogProviders.length + 1}</small>
               </button>
               <button
                 className={catalogMode === "free" ? "active free" : ""}
@@ -684,10 +935,38 @@ export default function AddProviderPage({
               {copy("Name", "名称")}
               <input className="input" value={name} disabled={disabled || !isCustom} onChange={(event) => setName(event.target.value)} />
             </label>
+            {isCustom && (
+              <div className="field-label">
+                <span>{copy("API dialect", "API 方言")}</span>
+                <Select
+                  value={providerDialect}
+                  disabled={disabled}
+                  onValueChange={(value) => changeProviderDialect(value as typeof providerDialect)}
+                >
+                  <SelectTrigger className="w-full" aria-label={copy("API dialect", "API 方言")}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent position="popper" align="start">
+                    <SelectGroup>
+                      <SelectItem value="openai-compatible">OpenAI-compatible</SelectItem>
+                      <SelectItem value="azure-openai-v1">Azure OpenAI v1</SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             <label className="field-label">
               Base URL
               <input className="input mono" value={url} disabled={disabled || !isCustom} onChange={(event) => setUrl(event.target.value)} />
             </label>
+            {isCustom && providerDialect === "azure-openai-v1" && (
+              <p className="inline-note form-span">
+                {copy(
+                  "The Base URL must point to the resource /openai/v1 root. Use the Azure deployment name as the model; the credential is sent only in api-key.",
+                  "Base URL 必须指向资源的 /openai/v1 根路径；模型名填写 Azure deployment name，凭据只通过 api-key 发送。",
+                )}
+              </p>
+            )}
             <div className={`endpoint-preview form-span ${endpointError ? "invalid" : ""}`} aria-live="polite">
               {endpointError ? (
                 <span>{endpointError}</span>
@@ -840,6 +1119,29 @@ export default function AddProviderPage({
                 if (!picked.includes(model)) setPicked((current) => [...current, model]);
               }}
             />
+            <label className="field-label checkbox-label">
+              <input
+                type="checkbox"
+                checked={importPublicPrices}
+                disabled={disabled || !publicPriceImportAvailable}
+                onChange={(event) => setImportPublicPrices(event.target.checked)}
+              />
+              <span>{copy(
+                "Fill matching public prices",
+                "批量填充匹配的公开价格",
+              )}</span>
+            </label>
+            <p className="inline-note">
+              {publicPriceImportAvailable
+                ? copy(
+                    "Uses models.dev public USD list prices as estimates. Existing manual prices are never overwritten; unmatched models remain unknown.",
+                    "使用 models.dev 的公开美元标价作为估算。不会覆盖已有人工价格；未匹配模型保持未知价格。",
+                  )
+                : copy(
+                    "Public price import is unavailable for local and Azure deployment entries.",
+                    "本地模型和 Azure 部署条目不使用公开价格导入。",
+                  )}
+            </p>
           </div>
         </div>
 

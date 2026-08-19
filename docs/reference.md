@@ -26,6 +26,8 @@ Provider presets are editable starting points, not availability guarantees. Mode
 
 Provider requests, model discovery, and health probes can use direct access, HTTP CONNECT, or SOCKS5, with validated `no_proxy` rules and separate proxy credentials. These flows do not inherit ambient proxy environment variables. The desktop updater uses its own HTTP stack and may follow system or environment proxy settings.
 
+Legacy is the default Provider execution engine. Eligible OpenAI-compatible Bearer requests can opt in to South for buffered calls or for buffered and streaming calls. Azure OpenAI v1 uses the separate cumulative `south_v1_buffered_streaming_header_auth` opt-in and a fixed `api-key` header. See [Azure OpenAI v1 with South Header Auth](guides/azure-openai-v1-south-header-auth.md).
+
 ## Desktop
 
 The app includes first-run guidance, Agent rescanning, Provider, Usage, Settings, light and dark themes, English and Simplified Chinese, request-log inspection, encrypted connector snapshots, a provider recycle bin, and safe-mode recovery export.

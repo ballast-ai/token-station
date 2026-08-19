@@ -160,18 +160,9 @@ function SortableDirectProviderRow({
           name="direct-provider"
           checked={selected}
           disabled={busy || !hasModels}
-          aria-label={`${provider.name} · ${modelLabel} · ${selectionLabel}`}
+          aria-label={`${modelLabel} · ${provider.name} · ${selectionLabel}`}
           onChange={onSelect}
         />
-        <span className="direct-provider-brand" aria-hidden="true">
-          <ProviderIcon id={provider.brand_id} label={provider.name} size={34} />
-        </span>
-        <span className="direct-provider-copy">
-          <strong>{provider.name}</strong>
-          <small>{hasModels
-            ? copy(`${provider.models.length} managed models`, `${provider.models.length} 个已管理模型`)
-            : copy("Manage a model before selecting", "请先添加已管理模型")}</small>
-        </span>
         <CompactCombobox
           ariaLabel={copy(`${provider.name} model`, `${provider.name} 模型`)}
           value={model}
@@ -179,6 +170,15 @@ function SortableDirectProviderRow({
           options={provider.models.map((providerModel) => ({ value: providerModel, label: providerModel }))}
           onChange={onModelChange}
         />
+        <span className="direct-provider-brand" aria-hidden="true">
+          <ProviderIcon id={provider.brand_id} label={provider.name} size={34} />
+        </span>
+        <span className="direct-provider-copy">
+          <strong>{provider.name}</strong>
+          <small>{hasModels
+            ? copy("Provider", "供应商")
+            : copy("Manage a model before selecting", "请先添加已管理模型")}</small>
+        </span>
         <CheckCircle2 className="direct-selected-mark" aria-hidden="true" />
       </div>
     </div>
@@ -196,6 +196,9 @@ export default function DirectRoutePanel({
   const { copy, language } = useLocalizedCopy();
   const { showError } = useErrorToast();
   const providerNamesKey = providers.map((provider) => provider.name).join("\u0000");
+  const providerModelsKey = providers
+    .map((provider) => `${provider.name}\u0001${provider.models.join("\u0002")}`)
+    .join("\u0000");
   const providerNames = useMemo(() => providers.map((provider) => provider.name), [providerNamesKey]);
   const [providerOrder, setProviderOrder] = useState(() => reconcileOrder(storedOrder(), providerNames));
   const [selectedProvider, setSelectedProvider] = useState(() => (
@@ -218,21 +221,21 @@ export default function DirectRoutePanel({
     });
     setModelByProvider((current) => Object.fromEntries(providers.map((provider) => {
       const currentModel = current[provider.name];
+      if (currentModel && provider.models.includes(currentModel)) {
+        return [provider.name, currentModel];
+      }
       if (target?.upstream === provider.name) {
         return [
           provider.name,
           target.model && provider.models.includes(target.model) ? target.model : "",
         ];
       }
-      return [
-        provider.name,
-        currentModel && provider.models.includes(currentModel) ? currentModel : (provider.models[0] ?? ""),
-      ];
+      return [provider.name, provider.models[0] ?? ""];
     })));
     setSelectedProvider((current) => providerNames.includes(current) ? current : "");
-    // providerNamesKey is a stable content key; Provider arrays may be recreated after every IPC result.
+    // providerModelsKey is a stable content key; Provider arrays may be recreated after every IPC result.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providerNamesKey]);
+  }, [providerModelsKey]);
 
   useEffect(() => {
     try {
@@ -263,7 +266,9 @@ export default function DirectRoutePanel({
         ? (target.model ?? "")
         : "",
     }));
-  }, [providerNames, providers, target, targetKey]);
+    // Equivalent provider arrays must not overwrite an un-applied model draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerModelsKey, targetKey]);
 
   const orderedProviders = providerOrder
     .map((name) => providers.find((provider) => provider.name === name))
@@ -337,12 +342,12 @@ export default function DirectRoutePanel({
   return (
     <section
       className="panel direct-route-panel"
-      aria-label={copy("Direct routing configuration", "单独路由配置")}
+      aria-label={copy("Direct routing configuration", "简单路由配置")}
       data-onboarding-target="route-config"
     >
       <div className="panel-head split-heading direct-route-heading">
         <div>
-          <h2>{copy("Direct routing", "单独路由")}</h2>
+          <h2>{copy("Direct routing", "简单路由")}</h2>
           <p className="sub">{copy(
             agent
               ? "Send this Agent to exactly one provider and managed model."
@@ -352,13 +357,24 @@ export default function DirectRoutePanel({
               : "将请求固定发送给你明确选择的一个供应商及其已管理模型。",
           )}</p>
         </div>
-        {target && (
-          <span className="direct-applied-target">
-            {target.model
-              ? <>{copy("Applied", "已应用")} · {target.upstream} / {target.model}</>
-              : <>{copy("Incomplete", "配置未完成")} · {target.upstream} / {copy("Select a model", "待选择模型")}</>}
-          </span>
-        )}
+        <div className="direct-route-heading-actions">
+          {target && (
+            <span className="direct-applied-target">
+              {target.model
+                ? <>{copy("Applied", "已应用")} · {target.upstream} / {target.model}</>
+                : <>{copy("Incomplete", "配置未完成")} · {target.upstream} / {copy("Select a model", "待选择模型")}</>}
+            </span>
+          )}
+          <button
+            className="btn primary"
+            type="button"
+            data-onboarding-target="route-apply"
+            disabled={busy || applying || !selectedTargetValid}
+            onClick={() => void onApply(selectedProvider, selectedModel)}
+          >
+            {applying ? copy("Applying…", "应用中…") : copy("Apply", "应用")}
+          </button>
+        </div>
       </div>
 
       {providers.length === 0 ? (
@@ -378,7 +394,7 @@ export default function DirectRoutePanel({
             items={orderedProviders.map((provider) => provider.name)}
             strategy={verticalListSortingStrategy}
           >
-            <div className="direct-provider-list" role="radiogroup" aria-label={copy("Direct provider", "单独路由供应商")}>
+            <div className="direct-provider-list" role="radiogroup" aria-label={copy("Direct provider", "简单路由供应商")}>
               {orderedProviders.map((provider, index) => (
                 <SortableDirectProviderRow
                   key={provider.name}
@@ -404,8 +420,8 @@ export default function DirectRoutePanel({
         {sortAnnouncement}
       </span>
 
-      <footer className="panel-foot direct-route-actions">
-        {!selectedTargetValid && (
+      {!selectedTargetValid && (
+        <footer className="panel-foot direct-route-actions">
           <span className="foot-hint">{copy(
             target?.upstream === selectedProvider && !target.model
               ? `Provider ${target.upstream} was preserved; select a model, then apply.`
@@ -414,17 +430,8 @@ export default function DirectRoutePanel({
               ? `已保留供应商 ${target.upstream}；请选择模型后再应用。`
               : "请选择一个有可用模型的供应商，再点击应用。",
           )}</span>
-        )}
-        <button
-          className="btn primary"
-          type="button"
-          data-onboarding-target="route-apply"
-          disabled={busy || applying || !selectedTargetValid}
-          onClick={() => void onApply(selectedProvider, selectedModel)}
-        >
-          {applying ? copy("Applying…", "应用中…") : copy("Apply", "应用")}
-        </button>
-      </footer>
+        </footer>
+      )}
     </section>
   );
 }

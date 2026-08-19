@@ -90,6 +90,16 @@ fn provider_config() -> ProviderConfig {
     config
 }
 
+fn azure_provider_config() -> ProviderConfig {
+    let mut config = ProviderConfig::new(
+        "azure-openai-v1",
+        ProviderEndpoint::try_new("https://fixture.openai.azure.com/openai/v1")
+            .expect("test endpoint is valid"),
+    );
+    config.auth = Some(SecretRef::new("provider_api_key"));
+    config
+}
+
 fn auth_config() -> AuthConfig {
     AuthConfig {
         slot: "provider_api_key".to_owned(),
@@ -167,6 +177,92 @@ fn header_auth_requires_an_independent_explicit_capability() {
 
     assert_eq!(
         error,
+        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
+    );
+}
+
+#[test]
+fn azure_header_auth_requires_the_new_production_capability() {
+    let mut request = header_descriptor("api-key", "provider_api_key");
+    request.url = "https://fixture.openai.azure.com/openai/v1/chat/completions".to_owned();
+
+    let old_mode = prepare_provider_call_v1(
+        eligible_policy(),
+        &azure_provider_config(),
+        &auth_config(),
+        &request,
+    )
+    .expect_err("the old South opt-ins must remain ineligible for Azure Header Auth");
+    assert_eq!(
+        old_mode,
+        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::ProviderDialect)
+    );
+
+    let prepared = prepare_provider_call_v1(
+        eligible_policy().with_azure_openai_header_auth(),
+        &azure_provider_config(),
+        &auth_config(),
+        &request,
+    )
+    .expect("the exact Azure dialect and api-key pair must be eligible");
+    assert_eq!(prepared.relative_path(), "chat/completions");
+    assert_eq!(prepared.credential_slot(), "provider_api_key");
+}
+
+#[test]
+fn azure_header_auth_capability_remains_cumulative_for_openai_bearer() {
+    let prepared = prepare_provider_call_v1(
+        eligible_policy().with_azure_openai_header_auth(),
+        &provider_config(),
+        &auth_config(),
+        &descriptor(),
+    )
+    .expect("the cumulative Header Auth mode must retain OpenAI Bearer eligibility");
+
+    assert_eq!(prepared.relative_path(), "chat/completions");
+    assert_eq!(prepared.credential_slot(), "provider_api_key");
+}
+
+#[test]
+fn production_header_auth_does_not_open_the_full_compatibility_catalog() {
+    let mut request = header_descriptor("x-api-key", "provider_api_key");
+    request.url = "https://fixture.openai.azure.com/openai/v1/chat/completions".to_owned();
+
+    let wrong_header = prepare_provider_call_v1(
+        eligible_policy().with_azure_openai_header_auth(),
+        &azure_provider_config(),
+        &auth_config(),
+        &request,
+    )
+    .expect_err("Azure production eligibility must accept only api-key");
+    assert_eq!(
+        wrong_header,
+        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
+    );
+
+    let openai_header = prepare_provider_call_v1(
+        eligible_policy().with_azure_openai_header_auth(),
+        &provider_config(),
+        &auth_config(),
+        &header_descriptor("api-key", "provider_api_key"),
+    )
+    .expect_err("the OpenAI-compatible dialect must remain Bearer-only in production");
+    assert_eq!(
+        openai_header,
+        PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
+    );
+
+    let mut azure_bearer = descriptor();
+    azure_bearer.url = "https://fixture.openai.azure.com/openai/v1/chat/completions".to_owned();
+    let azure_bearer = prepare_provider_call_v1(
+        eligible_policy().with_azure_openai_header_auth(),
+        &azure_provider_config(),
+        &auth_config(),
+        &azure_bearer,
+    )
+    .expect_err("the Azure dialect must not silently fall back to Bearer presentation");
+    assert_eq!(
+        azure_bearer,
         PrepareProviderCallErrorV1::Ineligible(IneligibleV1::Auth)
     );
 }
@@ -792,6 +888,14 @@ fn every_south_v1_contract_failure_has_a_closed_community_mapping() {
             ErrorCode::InvalidRequest,
             413,
         ),
+        (ContractErrorV1::InvalidQueryValue, ErrorCode::Internal, 500),
+        (
+            ContractErrorV1::DuplicateQueryParameter,
+            ErrorCode::Internal,
+            500,
+        ),
+        (ContractErrorV1::EmptyQuery, ErrorCode::Internal, 500),
+        (ContractErrorV1::QueryTooLarge, ErrorCode::Internal, 500),
     ];
     for (failure, code, status) in contract {
         let mapped = map_failure_v1(
@@ -2329,10 +2433,29 @@ fn map_stable_failure_code(error: &StableProviderCallFailureV1) -> ProviderCallF
 fn map_contract_failure_code(error: ContractErrorV1) -> ProviderCallFailureCodeV1 {
     match error {
         ContractErrorV1::InvalidEndpoint => ProviderCallFailureCodeV1::InvalidEndpoint,
-        ContractErrorV1::InvalidRelativePath => ProviderCallFailureCodeV1::InvalidRelativePath,
+        ContractErrorV1::InvalidRelativePath
+        | ContractErrorV1::InvalidQueryValue
+        | ContractErrorV1::DuplicateQueryParameter
+        | ContractErrorV1::EmptyQuery
+        | ContractErrorV1::QueryTooLarge => ProviderCallFailureCodeV1::InvalidRelativePath,
         ContractErrorV1::InvalidCredentialSlot => ProviderCallFailureCodeV1::InvalidCredentialSlot,
         ContractErrorV1::InvalidJsonBody => ProviderCallFailureCodeV1::InvalidJsonBody,
         ContractErrorV1::RequestBodyTooLarge => ProviderCallFailureCodeV1::RequestBodyTooLarge,
+    }
+}
+
+#[test]
+fn controlled_query_contract_failures_keep_the_frozen_conformance_code() {
+    for error in [
+        ContractErrorV1::InvalidQueryValue,
+        ContractErrorV1::DuplicateQueryParameter,
+        ContractErrorV1::EmptyQuery,
+        ContractErrorV1::QueryTooLarge,
+    ] {
+        assert_eq!(
+            map_contract_failure_code(error),
+            ProviderCallFailureCodeV1::InvalidRelativePath,
+        );
     }
 }
 

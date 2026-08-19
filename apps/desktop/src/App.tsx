@@ -762,7 +762,8 @@ function StationApp() {
       next === "quota-usage" ||
       next === "settings" ||
       next === "logs" ||
-      next === "add-provider"
+      next === "add-provider" ||
+      next === "add-model"
     ) {
       viewHistoryRef.current.push(view);
     } else {
@@ -845,8 +846,9 @@ function StationApp() {
   const selectedAgentId = connectionAgentId
     ?? routeAgentId
     ?? (view === "agents" ? visibleRegistry[0]?.agent_id : undefined);
-  const agentWorkspaceMode = view === "home" || routeAgentId ? "routing" : "connections";
+  const agentWorkspaceMode = view === "home" || view === "enterprise-routing" || routeAgentId ? "routing" : "connections";
   const showAgentWorkspace = view === "home"
+    || view === "enterprise-routing"
     || view === "agents"
     || Boolean(connectionAgentId)
     || Boolean(routeAgentId);
@@ -945,8 +947,10 @@ function StationApp() {
           revealingAgentIds={revealingAgentIds}
           selectedAgentId={selectedAgentId}
           homeSelected={view === "home"}
+          enterpriseSelected={view === "enterprise-routing"}
           scanBusy={scanBusy}
           onOpenHome={() => navigate("home")}
+          onOpenEnterprise={() => navigate("enterprise-routing")}
           onRescan={() => void rescanAgents()}
           onOpenAgent={(id) => {
             navigate(agentWorkspaceMode === "routing" ? `agent-route:${id}` : `agent:${id}`);
@@ -1011,7 +1015,14 @@ function StationApp() {
                     )
                   : copy("All Agents now follow global routing", "全部 Agent 已恢复跟随全局路由"),
               )}
+              onEnterpriseProviderConnected={(next, providerName, models) => {
+                showState(next, copy(
+                  `${providerName} connected with ${models.length} models.`,
+                  `${providerName} 已接入 ${models.length} 个模型。`,
+                ));
+              }}
               embedded
+              scope={view === "enterprise-routing" ? "enterprise" : "global"}
             />
           )}
           {metadata && route && (
@@ -1121,7 +1132,7 @@ function StationApp() {
           initialSection={view === "logs" ? "request-logs" : "general"}
         />
       )}
-      {view === "add-provider" && (
+      {(view === "add-provider" || view === "add-model") && (
         <AddProviderPage
           existingNames={state.providers.map((provider) => provider.name)}
           onCancel={navigateBack}
@@ -1142,6 +1153,8 @@ function StationApp() {
           }}
           onSelectFree={(preset) => setView(`free-provider:${preset.id}`)}
           onAdded={handleProviderAdded}
+          onStateChanged={showState}
+          entryMode={view === "add-model" ? "model-first" : "provider-first"}
         />
       )}
       {view.startsWith("free-provider:") && (() => {

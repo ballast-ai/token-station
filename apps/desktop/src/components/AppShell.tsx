@@ -1,13 +1,22 @@
-import type { ReactNode } from "react";
-import { Activity, Settings } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { Activity, Boxes, Search, Settings, X } from "lucide-react";
 import type { AgentUiMetadataView, AgentView, ServeView } from "../api";
 import { useLanguage } from "./LanguageProvider";
 import TokenStationMark from "./TokenStationMark";
 import { Button } from "./ui/button";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "./ui/dialog";
 
 export type AppView =
   | "overview"
   | "home"
+  | "enterprise-routing"
   | "agents"
   | "providers"
   | "usage"
@@ -16,6 +25,7 @@ export type AppView =
   | "quota-usage"
   | "settings"
   | "add-provider"
+  | "add-model"
   | `free-provider:${string}`
   | `agent:${string}`
   | `agent-route:${string}`;
@@ -36,7 +46,7 @@ const PRIMARY_NAV: Array<{ view: AppView; en: string; zh: string }> = [
   { view: "overview", en: "Home", zh: "主页" },
   { view: "agents", en: "Agent", zh: "Agent" },
   { view: "home", en: "Routing", zh: "路由" },
-  { view: "providers", en: "Providers", zh: "供应商" },
+  { view: "providers", en: "Models", zh: "模型" },
   { view: "usage", en: "Usage", zh: "用量" },
 ];
 
@@ -45,7 +55,8 @@ function primaryView(view: AppView): AppView {
   if (view.startsWith("agent-route:")) return "home";
   if (view === "logs" || view === "settings") return "settings";
   if (view === "quota-usage" || view === "usage-management") return "usage";
-  if (view === "add-provider" || view.startsWith("free-provider:")) return "providers";
+  if (view === "enterprise-routing") return "home";
+  if (view === "add-provider" || view === "add-model" || view.startsWith("free-provider:")) return "providers";
   return view;
 }
 
@@ -61,6 +72,7 @@ export default function AppShell({
   children,
 }: AppShellProps) {
   const { t, copy } = useLanguage();
+  const [modelEntryOpen, setModelEntryOpen] = useState(false);
   const runtimeHealthy = serve.app_runtime === "running" && serve.listener_reachable;
   const taskRunning = serve.app_runtime === "running";
   const activePrimary = primaryView(view);
@@ -114,7 +126,14 @@ export default function AppShell({
                       ? "agent-entry"
                     : undefined
                 }
-                onClick={() => onNavigate(item.view)}
+                onClick={() => {
+                  if (item.view === "providers") {
+                    onNavigate("providers");
+                    setModelEntryOpen(true);
+                    return;
+                  }
+                  onNavigate(item.view);
+                }}
               >
                 <span data-onboarding-target={item.view === "settings" ? "settings" : undefined}>
                   {label}
@@ -158,7 +177,7 @@ export default function AppShell({
         </div>
       </header>
 
-      <main className={`station-content station-content-topnav${activePrimary === "home" || activePrimary === "agents" ? " station-content-agent" : ""}`}>
+      <main className={`station-content station-content-topnav${activePrimary === "home" || activePrimary === "agents" ? " station-content-agent" : ""}${activePrimary === "overview" ? " station-content-overview" : ""}`}>
         {children}
       </main>
 
@@ -174,6 +193,64 @@ export default function AppShell({
           )}
         </span>
       )}
+
+      <Dialog open={modelEntryOpen} onOpenChange={setModelEntryOpen}>
+        <DialogContent
+          className="model-entry-dialog"
+          aria-describedby="model-entry-description"
+          showCloseButton={false}
+        >
+          <DialogClose asChild>
+            <Button
+              variant="ghost"
+              className="absolute top-2 right-2"
+              size="icon-sm"
+              aria-label={copy("Close", "关闭")}
+            >
+              <X aria-hidden="true" />
+            </Button>
+          </DialogClose>
+          <DialogHeader>
+            <DialogTitle>{copy("Choose how to add a model", "选择模型接入方式")}</DialogTitle>
+            <DialogDescription id="model-entry-description">
+              {copy(
+                "Start from a provider when you know the account, or start from a model when you want to compare providers.",
+                "已确定账号时先选供应商；想比较可用渠道时先搜索模型。",
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="model-entry-options">
+            <button
+              type="button"
+              aria-label={copy("Choose provider first", "先选供应商")}
+              onClick={() => {
+                setModelEntryOpen(false);
+                onNavigate("add-provider");
+              }}
+            >
+              <Boxes aria-hidden="true" />
+              <span>
+                <strong>{copy("Choose provider first", "先选供应商")}</strong>
+                <small>{copy("Select a provider, then choose its models.", "先选择供应商，再选择该供应商提供的模型。")}</small>
+              </span>
+            </button>
+            <button
+              type="button"
+              aria-label={copy("Search model first", "先搜模型")}
+              onClick={() => {
+                setModelEntryOpen(false);
+                onNavigate("add-model");
+              }}
+            >
+              <Search aria-hidden="true" />
+              <span>
+                <strong>{copy("Search model first", "先搜模型")}</strong>
+                <small>{copy("Search a model, then compare its providers.", "先搜索模型，再选择可用供应商。")}</small>
+              </span>
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

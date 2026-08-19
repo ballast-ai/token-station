@@ -23,6 +23,11 @@ const TEMPLATE_DIALECT: &str = "openai-compatible";
 /// The `wit_bindgen::generate!` path the template uses inside this repo;
 /// the scaffold vendors the WIT and points at it instead.
 const TEMPLATE_WIT_PATH: &str = "../../../crates/plugin-api/wit";
+const TEMPLATE_AZURE_AUTH_ARMS: &str = r#"            ("azure-openai-v1", Some(secret)) => {
+                Some(Auth::header("api-key", secret).map_err(internal)?)
+            }
+            ("azure-openai-v1", None) => None,
+"#;
 
 const TEMPLATE_LIB: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -98,11 +103,15 @@ pub fn new_package(parent: &Path, name: &str, dialect: &str) -> Result<String, S
     };
 
     write("Cargo.toml", &cargo_toml(name))?;
+    let single_dialect_lib = TEMPLATE_LIB.replace(TEMPLATE_AZURE_AUTH_ARMS, "");
+    if single_dialect_lib.len() == TEMPLATE_LIB.len() {
+        return Err("embedded provider template is missing the Azure auth arms".to_owned());
+    }
     write(
         "src/lib.rs",
-        &rename(TEMPLATE_LIB).replace(TEMPLATE_WIT_PATH, "wit"),
+        &rename(&single_dialect_lib).replace(TEMPLATE_WIT_PATH, "wit"),
     )?;
-    write("manifest.json", &rename(TEMPLATE_MANIFEST))?;
+    write("manifest.json", &scaffold_manifest(name, dialect)?)?;
     write("wit/adapter.wit", WIT)?;
     for (fixture_name, contents) in FIXTURES {
         write(&format!("fixtures/{fixture_name}"), &rename(contents))?;
@@ -119,6 +128,17 @@ pub fn new_package(parent: &Path, name: &str, dialect: &str) -> Result<String, S
          plugin install {0}  # admit it for traffic",
         dest.display(),
     ))
+}
+
+fn scaffold_manifest(name: &str, dialect: &str) -> Result<String, String> {
+    let mut manifest: serde_json::Value = serde_json::from_str(TEMPLATE_MANIFEST)
+        .map_err(|error| format!("embedded provider manifest: {error}"))?;
+    manifest["name"] = serde_json::Value::String(name.to_owned());
+    manifest["providers"] = serde_json::json!([dialect]);
+    let mut rendered = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("scaffold provider manifest: {error}"))?;
+    rendered.push('\n');
+    Ok(rendered)
 }
 
 /// `plugin build`: compiles the package and places `adapter.wasm` beside its
@@ -259,9 +279,16 @@ mod tests {
         assert!(manifest.contains("\"provider-acme\""), "{manifest}");
         assert!(manifest.contains("\"acme\""), "{manifest}");
         assert!(!manifest.contains("openai"), "{manifest}");
+        let manifest_value: serde_json::Value =
+            serde_json::from_str(&manifest).expect("manifest is valid JSON");
+        assert_eq!(manifest_value["providers"], serde_json::json!(["acme"]));
 
         let lib = std::fs::read_to_string(root.join("src/lib.rs")).expect("written");
         assert!(lib.contains("provider-acme"), "identity renamed");
+        assert!(
+            !lib.contains("azure-openai-v1"),
+            "undeclared dialect removed"
+        );
         assert!(!lib.contains(super::TEMPLATE_WIT_PATH), "WIT path vendored");
         assert!(root.join("wit/adapter.wit").is_file());
 

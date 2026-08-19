@@ -548,8 +548,20 @@ impl Guest for OpenAiCompatible {
             }
         }
         descriptor.body = Some(body);
-        // The host holds the value; this names the slot and the dialect.
-        descriptor.auth = config.auth.clone().map(Auth::bearer);
+        // The host holds the value; this names the slot and the fixed
+        // presentation selected by the trusted provider dialect.
+        descriptor.auth = match (config.provider.as_str(), config.auth.clone()) {
+            ("openai-compatible", secret) => secret.map(Auth::bearer),
+            ("azure-openai-v1", Some(secret)) => {
+                Some(Auth::header("api-key", secret).map_err(internal)?)
+            }
+            ("azure-openai-v1", None) => None,
+            (dialect, _) => {
+                return Err(capability(format!(
+                    "unsupported provider dialect `{dialect}`"
+                )))
+            }
+        };
         to_output(&descriptor)
     }
 

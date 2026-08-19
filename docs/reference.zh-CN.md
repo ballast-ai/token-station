@@ -26,6 +26,8 @@
 
 供应商请求、模型发现与健康探测可以使用直连、HTTP CONNECT 或 SOCKS5，并提供经过校验的 `no_proxy` 规则与独立代理凭证。这些流量不会继承环境中的代理变量。桌面更新器使用独立 HTTP 栈，可能遵循系统或环境代理设置。
 
+Legacy 是默认的 Provider 执行引擎。符合条件的 OpenAI-compatible Bearer 请求可以显式启用 South 非流式，或同时启用非流式与流式。Azure OpenAI v1 必须单独选择累计式 `south_v1_buffered_streaming_header_auth`，并固定使用 `api-key` Header。配置方法见 [Azure OpenAI v1 与 South Header Auth](guides/azure-openai-v1-south-header-auth.md)。
+
 ## 桌面端
 
 App 提供首次使用引导、Agent 重新扫描、供应商、用量、设置、明暗主题、中英文、请求日志查看、加密 Connector 快照、供应商回收站和安全模式只读导出。
