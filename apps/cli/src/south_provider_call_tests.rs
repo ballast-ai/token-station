@@ -28,8 +28,9 @@ use south_provider_conformance::{
     PROVIDER_CALL_CONFORMANCE_DEADLINE_OFFSET_V1, PROVIDER_STREAM_CONFORMANCE_DEADLINE_OFFSET_V1,
     PROVIDER_STREAM_CONFORMANCE_IDLE_TIMEOUT_V1, ProviderCallControlV1, ProviderCallFailureCodeV1,
     ProviderCallFixtureV1, ProviderCallInputV1, ProviderCallUpstreamV1,
-    ProviderQuotaMetadataFixtureV1, ProviderStreamControlV1, ProviderStreamFixtureV1,
-    ProviderStreamRawHeadV1, ProviderStreamTerminalV1, ProviderStreamUpstreamV1,
+    ProviderQuotaMetadataFixtureV1, ProviderQuotaMetadataUpstreamV1, ProviderStreamControlV1,
+    ProviderStreamFixtureV1, ProviderStreamRawHeadV1, ProviderStreamTerminalV1,
+    ProviderStreamUpstreamV1,
 };
 use south_testkit::{
     AssembledExecutionFutureV1, AssembledHeaderAuthExecutionFutureV1,
@@ -2437,7 +2438,8 @@ fn map_contract_failure_code(error: ContractErrorV1) -> ProviderCallFailureCodeV
         | ContractErrorV1::InvalidQueryValue
         | ContractErrorV1::DuplicateQueryParameter
         | ContractErrorV1::EmptyQuery
-        | ContractErrorV1::QueryTooLarge => ProviderCallFailureCodeV1::InvalidRelativePath,
+        | ContractErrorV1::QueryTooLarge
+        | ContractErrorV1::InvalidUserAgentValue => ProviderCallFailureCodeV1::InvalidRelativePath,
         ContractErrorV1::InvalidCredentialSlot => ProviderCallFailureCodeV1::InvalidCredentialSlot,
         ContractErrorV1::InvalidJsonBody => ProviderCallFailureCodeV1::InvalidJsonBody,
         ContractErrorV1::RequestBodyTooLarge => ProviderCallFailureCodeV1::RequestBodyTooLarge,
@@ -2470,6 +2472,10 @@ fn map_preparation_failure_code(error: PreparationErrorV1) -> ProviderCallFailur
         }
         PreparationErrorV1::Cancelled => ProviderCallFailureCodeV1::Cancelled,
         PreparationErrorV1::DeadlineExceeded => ProviderCallFailureCodeV1::DeadlineExceeded,
+        // `PreparationErrorV1` is `#[non_exhaustive]` since South 0.7.0: no frozen
+        // fixture produces a newer variant, so fold to the context-free fallback and
+        // let the runner flag the mismatch.
+        _ => ProviderCallFailureCodeV1::RequestFailed,
     }
 }
 
@@ -2529,15 +2535,20 @@ impl CommunityQuotaConformanceExecutorV1 {
         };
         let transport = QuotaConformanceTransport {
             calls: AtomicUsize::new(0),
-            metadata: ProviderQuotaMetadataV1::try_from_iter(
-                QUOTA_METADATA_FIELDS_V1.into_iter().filter_map(|field| {
-                    fixture
-                        .upstream_metadata()
-                        .value(field)
-                        .map(|value| (field, value.to_owned()))
-                }),
-            )
-            .expect("canonical quota metadata is valid"),
+            metadata: match fixture.upstream() {
+                ProviderQuotaMetadataUpstreamV1::Metadata(raw) => {
+                    ProviderQuotaMetadataV1::try_from_iter(
+                        QUOTA_METADATA_FIELDS_V1.into_iter().filter_map(|field| {
+                            raw.value(field).map(|value| (field, value.to_owned()))
+                        }),
+                    )
+                    .expect("canonical quota metadata is valid")
+                }
+                // The transport boundary must not be reached for this case; an
+                // empty metadata set keeps the transport constructible while the
+                // call-count evidence proves it was never asked.
+                ProviderQuotaMetadataUpstreamV1::NotReached => ProviderQuotaMetadataV1::default(),
+            },
         };
         let result = execute_prepared_provider_call_v1(
             &prepared,
@@ -2607,7 +2618,7 @@ impl AsyncHttpTransport for QuotaConformanceTransport {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn community_adapter_passes_both_public_quota_metadata_cases() {
+async fn community_adapter_passes_all_public_quota_metadata_cases() {
     let executor = CommunityQuotaConformanceExecutorV1::new();
     let report = tokio::time::timeout(
         Duration::from_secs(5),
@@ -2616,7 +2627,7 @@ async fn community_adapter_passes_both_public_quota_metadata_cases() {
     .await
     .expect("quota conformance watchdog expired")
     .expect("community adapter must pass the public quota metadata suite");
-    assert_eq!(report.passed_case_ids().len(), 2);
+    assert_eq!(report.passed_case_ids().len(), 3);
 }
 
 const QUOTA_LOOPBACK_RESPONSE: &[u8] = concat!(
