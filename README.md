@@ -23,6 +23,7 @@ Connect Claude Code, Codex, Gemini CLI, Cursor, and other agents to the models y
 
 - **Local by default.** The Rust gateway listens on `127.0.0.1:8787` and requires authentication. Agent request traffic leaves the device only when you route it to a cloud provider.
 - **Three routes.** Direct pins one provider and model. Smart tiers picks High, Mid, or Low in a single decision. Quota first spends buckets that reset sooner.
+- **Enterprise-managed routing.** Enter an enterprise Base URL and credential once. The enterprise service keeps control of its real models and routing policy.
 - **Your providers.** Start from 40+ editable presets, add a custom OpenAI-compatible endpoint, or keep work on a local runtime such as Ollama.
 - **Desktop and CLI.** Both share the same Rust core. Usage, latency, cost estimates, and request logs stay on this machine.
 - **Reversible connectors.** Connect writes a bounded plan and a private snapshot. Disconnect removes only Token Station fields.
@@ -123,6 +124,7 @@ The full boundary table is in the [reference](docs/reference.md#security).
 ## Documentation
 
 - [Documentation index](docs/README.md)
+- [Enterprise managed routing](docs/guides/enterprise-managed-routing.md)
 - [Agent guides](docs/guides/)
 - [Reference](docs/reference.md)
 
