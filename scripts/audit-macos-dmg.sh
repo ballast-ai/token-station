@@ -195,9 +195,9 @@ if [[ "$unsigned_test" == "true" ]]; then
     echo "测试 App 意外通过 Gatekeeper，不能声称它是已知的未公证测试包。" >&2
     exit 1
   fi
-  for phrase in 'unsigned and not notarized' 'test build' 'SHA-256' '未签名且未经 Apple 公证' '测试包'; do
+  for phrase in 'Install Token Station' 'unsigned and not notarized' 'SHA-256' 'Terminal hides password characters'; do
     /usr/bin/grep -Fq "$phrase" "$mounted_readme" || {
-      echo "双语 README 缺少风险提示：$phrase" >&2
+      echo "README 缺少必要说明：$phrase" >&2
       exit 1
     }
   done

@@ -71,7 +71,7 @@ assert.match(finderLayout, /position of item "Applications" .*\{880, 240\}/);
 assert.match(finderLayout, /position of item "README\.md" .*\{590, 455\}/);
 
 const readme = read("packaging/macos/README.md");
-for (const phrase of ["unsigned and not notarized", "未签名且未经 Apple 公证", "测试包", "SHA-256"]) {
+for (const phrase of ["Install Token Station", "unsigned and not notarized", "SHA-256"]) {
   assert.ok(readme.includes(phrase), `README.md 缺少“${phrase}”`);
 }
 assert.deepEqual(readme.split(/\r?\n/).filter((line) => line.startsWith("sudo ")), [terminalCommand]);

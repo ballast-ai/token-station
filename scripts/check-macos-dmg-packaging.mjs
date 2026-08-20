@@ -40,11 +40,8 @@ const expectedCommand =
 const readme = read("packaging/macos/README.md");
 for (const phrase of [
   "Install Token Station",
-  "安装 Token Station",
   "unsigned and not notarized",
-  "未签名且未经 Apple 公证",
-  "Terminal does not show password characters",
-  "终端不会显示密码字符",
+  "Terminal hides password characters",
   "SHA-256",
 ]) {
   if (!readme.includes(phrase)) failures.push(`README.md 缺少“${phrase}”说明`);

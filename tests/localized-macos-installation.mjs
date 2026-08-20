@@ -14,12 +14,9 @@ const terminalCommand =
 const readme = read("packaging/macos/README.md");
 for (const phrase of [
   "Install Token Station",
-  "安装 Token Station",
-  "GitHub Releases",
+  "official GitHub Release",
   "unsigned and not notarized",
-  "未签名且未经 Apple 公证",
-  "Terminal does not show password characters",
-  "终端不会显示密码字符",
+  "Terminal hides password characters",
 ]) {
   assert.ok(readme.includes(phrase), `README.md is missing: ${phrase}`);
 }
@@ -55,4 +52,4 @@ const finderLayout = read("packaging/macos/configure-dmg-layout.applescript");
 assert.match(finderLayout, /position of item "README\.md"/);
 assert.doesNotMatch(finderLayout, /README\.zh-CN|Install Token Station\.command|终端启动命令\.txt/);
 
-console.log("single bilingual macOS installation guide: PASS");
+console.log("single concise macOS installation guide: PASS");
