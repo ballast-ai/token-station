@@ -82,6 +82,10 @@ if [[ "$mode" == "preview" ]]; then
 fi
 
 enable_updater_artifacts=false
+signing_private_key="${TAURI_SIGNING_PRIVATE_KEY:-}"
+signing_private_key_path="${TAURI_SIGNING_PRIVATE_KEY_PATH:-}"
+signing_private_key_password="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PATH TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 if [[ "$mode" != "local" && "$is_windows_target" != "true" ]]; then
   enable_updater_artifacts=true
   : "${TOKEN_STATION_UPDATER_PUBKEY:?signed updater build needs TOKEN_STATION_UPDATER_PUBKEY}"
@@ -90,20 +94,15 @@ if [[ "$mode" != "local" && "$is_windows_target" != "true" ]]; then
     echo "TOKEN_STATION_UPDATER_PUBKEY appears to contain private key material" >&2
     exit 1
   fi
-  if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -z "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
+  if [[ -z "$signing_private_key" && -z "$signing_private_key_path" ]]; then
     echo "signed updater build needs TAURI_SIGNING_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY_PATH" >&2
     exit 1
   fi
-  if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
-    [[ -f "$TAURI_SIGNING_PRIVATE_KEY_PATH" && -r "$TAURI_SIGNING_PRIVATE_KEY_PATH" ]] || {
+  if [[ -z "$signing_private_key" ]]; then
+    [[ -f "$signing_private_key_path" && -r "$signing_private_key_path" ]] || {
       echo "TAURI_SIGNING_PRIVATE_KEY_PATH must name a readable private key file" >&2
       exit 1
     }
-    # The signer subcommand accepts TAURI_SIGNING_PRIVATE_KEY_PATH, but the
-    # Tauri bundler reads only TAURI_SIGNING_PRIVATE_KEY when it creates and
-    # signs updater artifacts. Load the encrypted key without printing it.
-    export TAURI_SIGNING_PRIVATE_KEY
-    TAURI_SIGNING_PRIVATE_KEY=$(<"$TAURI_SIGNING_PRIVATE_KEY_PATH")
   fi
 fi
 
@@ -151,12 +150,15 @@ cargo test --locked \
   desktop_bundled_plugins_load_without_an_external_plugin_directory
 
 tauri_args=(build --ci --features bundled-plugins)
+macos_bundle_kind=""
 if [[ "$enable_updater_artifacts" == "true" ]]; then
   updater_artifact_config="$stage/updater-artifacts.json"
   printf '%s\n' \
     "{\"plugins\":{\"updater\":{\"pubkey\":\"$TOKEN_STATION_UPDATER_PUBKEY\"}},\"bundle\":{\"createUpdaterArtifacts\":true}}" \
     >"$updater_artifact_config"
-  tauri_args+=(--config "$updater_artifact_config")
+  if [[ "$host_os" != "Darwin" ]]; then
+    tauri_args+=(--config "$updater_artifact_config")
+  fi
 fi
 if [[ -n "$test_version" ]]; then
   test_version_config="$stage/test-version.json"
@@ -181,18 +183,18 @@ case "$host_os" in
         # Local installation consumes the signed .app directly. Building a DMG
         # adds Finder/volume state to the developer loop and can fail even after
         # the application itself is valid, so reserve installers for releases.
-        tauri_args+=(--bundles app)
+        macos_bundle_kind="app"
         ;;
       preview)
         export APPLE_SIGNING_IDENTITY="-"
-        tauri_args+=(--bundles app)
+        macos_bundle_kind="app"
         ;;
       production)
         : "${APPLE_SIGNING_IDENTITY:?production macOS build needs APPLE_SIGNING_IDENTITY}"
         # The formal DMG is assembled after the signed and notarized App passes
         # the desktop artifact audit. Updater payloads are still emitted because
         # createUpdaterArtifacts is enabled above.
-        tauri_args+=(--bundles app)
+        macos_bundle_kind="app"
         : "${APPLE_API_ISSUER:?App Store Connect notarization needs APPLE_API_ISSUER}"
         : "${APPLE_API_KEY:?App Store Connect notarization needs APPLE_API_KEY}"
         : "${APPLE_API_KEY_PATH:?App Store Connect notarization needs APPLE_API_KEY_PATH}"
@@ -228,10 +230,42 @@ case "$host_os" in
     ;;
 esac
 
-(
-  cd "$root/apps/desktop"
-  npx tauri "${tauri_args[@]}"
-)
+if [[ "$host_os" == "Darwin" && "$enable_updater_artifacts" == "true" ]]; then
+  # Compile all project and dependency code before exposing updater signing
+  # material. The bundle-only phase packages the already-built binary and is
+  # the smallest process boundary that needs the private key.
+  (
+    cd "$root/apps/desktop"
+    npx tauri "${tauri_args[@]}" --no-bundle
+  )
+  if [[ -z "$signing_private_key" ]]; then
+    signing_private_key=$(<"$signing_private_key_path")
+  fi
+  export TAURI_SIGNING_PRIVATE_KEY="$signing_private_key"
+  export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$signing_private_key_password"
+  bundle_args=(bundle --ci --features bundled-plugins --config "$updater_artifact_config")
+  if [[ -n "$target" ]]; then
+    bundle_args+=(--target "$target")
+  fi
+  if [[ -n "$macos_bundle_kind" ]]; then
+    bundle_args+=(--bundles "$macos_bundle_kind")
+  fi
+  (
+    cd "$root/apps/desktop"
+    npx tauri "${bundle_args[@]}"
+  )
+  unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+  signing_private_key=""
+  signing_private_key_password=""
+else
+  if [[ -n "$macos_bundle_kind" ]]; then
+    tauri_args+=(--bundles "$macos_bundle_kind")
+  fi
+  (
+    cd "$root/apps/desktop"
+    npx tauri "${tauri_args[@]}"
+  )
+fi
 
 "$root/scripts/audit-desktop-artifact.sh" \
   --mode "$mode" \

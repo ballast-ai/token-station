@@ -854,6 +854,16 @@ export const addProvider = (
     providerDialect: provider_dialect,
   });
 
+export const addManagedEnterpriseRoute = (
+  name: string,
+  base_url: string,
+  api_key: string,
+) => invoke<StateView>("add_managed_enterprise_route", {
+  name,
+  baseUrl: base_url,
+  apiKey: api_key,
+});
+
 export const listFreeProviderPresets = () =>
   invoke<FreeProviderPresetView[]>("list_free_provider_presets");
 
@@ -948,6 +958,16 @@ export const discoverProviderModels = (
     baseUrl: base_url,
     apiKey: api_key,
   });
+
+export const verifyEnterpriseRoute = (
+  name: string,
+  base_url: string,
+  api_key: string,
+) => invoke<ModelDiscoveryView>("verify_enterprise_route", {
+  name,
+  baseUrl: base_url,
+  apiKey: api_key,
+});
 
 export const testProvider = (name: string) =>
   invoke<ProviderTestResult[]>("test_provider", { name });

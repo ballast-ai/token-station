@@ -1611,7 +1611,7 @@ describe("desktop station navigation", () => {
       quota_accounts: [account],
     });
     const enterpriseProvider = {
-      name: "enterprise-main",
+      name: "enterprise_main",
       provider: "openai-compatible",
       base_url: "https://enterprise.example.com/v1",
       models: ["auto"],
@@ -1624,7 +1624,7 @@ describe("desktop station navigation", () => {
     const routed = stateFixture({
       ...added,
       routing_mode: "direct",
-      direct_target: { upstream: "enterprise-main", model: "auto" },
+      direct_target: { upstream: "enterprise_main", model: "auto" },
     });
     const applying = stateFixture({
       ...routed,
@@ -1636,7 +1636,7 @@ describe("desktop station navigation", () => {
       if (command === "get_state") return initial;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return detectedAgentsFixture;
-      if (command === "discover_provider_models") {
+      if (command === "verify_enterprise_route") {
         return {
           models: ["enterprise-chat", "enterprise-reasoner"],
           source: "live",
@@ -1644,9 +1644,7 @@ describe("desktop station navigation", () => {
           warning: null,
         };
       }
-      if (command === "add_provider_with_credential") return added;
-      if (command === "set_routing_mode") return { ...added, routing_mode: "direct" };
-      if (command === "set_direct_route") return routed;
+      if (command === "add_managed_enterprise_route") return routed;
       if (command === "serve_start") return applying;
       throw new Error(`unexpected IPC command: ${command}`);
     });
@@ -1666,24 +1664,58 @@ describe("desktop station navigation", () => {
     await user.click(screen.getByRole("button", { name: "接入并使用" }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("serve_start"));
-    expect(invokeMock).toHaveBeenCalledWith("add_provider_with_credential", {
+    expect(invokeMock).toHaveBeenCalledWith("add_managed_enterprise_route", {
       name: enterpriseProvider.name,
       baseUrl: enterpriseProvider.base_url,
-      models: ["auto"],
       apiKey: "secret-key",
-      local: false,
-      credentialSource: "store",
-      credentialReference: null,
-      providerDialect: "openai-compatible",
     });
-    expect(invokeMock).toHaveBeenCalledWith("set_routing_mode", { mode: "direct", agentId: null });
-    expect(invokeMock).toHaveBeenCalledWith("set_direct_route", {
-      upstream: enterpriseProvider.name,
-      model: "auto",
-      agentId: null,
+    expect(invokeMock).toHaveBeenCalledWith("verify_enterprise_route", {
+      name: enterpriseProvider.name,
+      baseUrl: enterpriseProvider.base_url,
+      apiKey: "secret-key",
     });
+    expect(invokeMock).not.toHaveBeenCalledWith("set_routing_mode", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("set_direct_route", expect.anything());
+    expect(screen.getByText("企业路由已接入，正在应用配置…")).toBeInTheDocument();
     expect(screen.queryByText("额度优先")).toBeNull();
     expect(screen.queryByRole("button", { name: "保存并应用" })).toBeNull();
+  });
+
+  it("rejects cached enterprise verification and reloads authoritative state", async () => {
+    const user = userEvent.setup();
+    const initial = stateFixture();
+    let stateReads = 0;
+    mockInvokeImplementation(async (command) => {
+      if (command === "get_state") {
+        stateReads += 1;
+        return initial;
+      }
+      if (command === "list_agent_registry") return registryFixture;
+      if (command === "scan_agents") return detectedAgentsFixture;
+      if (command === "verify_enterprise_route") {
+        return {
+          models: ["private-model"],
+          source: "cache",
+          fetched_at_ms: 1,
+          warning: "Provider rejected the API key",
+        };
+      }
+      throw new Error(`unexpected IPC command: ${command}`);
+    });
+
+    render(<App />);
+    await openRouting(user);
+    const scopes = screen.getByRole("region", { name: "路由范围" });
+    await user.click(within(scopes).getByRole("button", { name: "企业路由" }));
+    await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://enterprise.example.com/v1");
+    await user.type(screen.getByLabelText("API Key"), "invalid-key");
+    await user.click(screen.getByRole("button", { name: "接入并使用" }));
+
+    await waitFor(() => expect(stateReads).toBe(2));
+    expect(invokeMock).not.toHaveBeenCalledWith("add_managed_enterprise_route", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("serve_start");
+    expect(screen.getByText("接入未完成，请查看错误后重试。")).toBeInTheDocument();
+    expect(screen.getByLabelText("API Key")).toHaveValue("invalid-key");
   });
 
   it("maps the four revision relationships to stable save copy", () => {

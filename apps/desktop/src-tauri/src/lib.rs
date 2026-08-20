@@ -3186,6 +3186,7 @@ fn add_provider(
         source,
         None,
         "openai-compatible",
+        false,
     )
 }
 
@@ -3213,7 +3214,42 @@ fn add_provider_with_credential(
         credential_source.trim(),
         credential_reference.as_deref(),
         provider_dialect,
+        false,
     )
+}
+
+#[tauri::command]
+fn add_managed_enterprise_route(
+    state: State<'_, AppStateManaged>,
+    name: String,
+    base_url: String,
+    api_key: String,
+) -> Result<StateView, String> {
+    add_provider_impl(
+        state,
+        name,
+        base_url,
+        vec!["auto".to_owned()],
+        Some(api_key),
+        false,
+        "store",
+        None,
+        "openai-compatible",
+        true,
+    )
+}
+
+fn restore_managed_route_mutation(
+    draft: &mut Value,
+    previous_routing: &Option<Value>,
+    previous_router: &Value,
+) {
+    draft["router"] = previous_router.clone();
+    if let Some(previous_routing) = previous_routing {
+        draft["routing"] = previous_routing.clone();
+    } else if let Some(root) = draft.as_object_mut() {
+        root.remove("routing");
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3227,6 +3263,7 @@ fn add_provider_impl(
     credential_source: &str,
     credential_reference: Option<&str>,
     provider_dialect: &str,
+    managed_route: bool,
 ) -> Result<StateView, String> {
     if !matches!(provider_dialect, "openai-compatible" | "azure-openai-v1") {
         return Err("Provider dialect 不受支持".to_owned());
@@ -3257,6 +3294,9 @@ fn add_provider_impl(
     }
 
     let models = normalize_provider_model_ids(models)?;
+    if managed_route && models.as_slice() != ["auto"] {
+        return Err("Enterprise managed route must use only the `auto` alias".to_owned());
+    }
     let model_objs: Vec<Value> = models
         .iter()
         .map(|m| {
@@ -3264,8 +3304,9 @@ fn add_provider_impl(
                 // OpenAI Chat Completions includes tools and structured output,
                 // and catalog entries are compatible chat providers, so declare
                 // support by default. Leaving these unknown would fail closed and
-                // reject every tool-using Agent. Keep vision unknown because it
-                // varies by model; unsupported requests can degrade at runtime.
+                // reject every tool-using Agent. Ordinary models keep vision
+                // unknown because support varies. A managed alias declares
+                // pass-through support below because the service selects the model.
                 "model": m,
                 "tool": true,
                 "vision": false,
@@ -3275,6 +3316,11 @@ fn add_provider_impl(
                 "json_schema_state": "declared",
                 "context_window": known_context_window(m)
             });
+            if managed_route {
+                capability["vision"] = json!(true);
+                capability["vision_state"] = json!("declared");
+                capability["supported_parameters"] = json!(["reasoning_effort"]);
+            }
             capability[CONTEXT_WINDOW_SOURCE_KEY] = json!(LIMIT_SOURCE_HEURISTIC);
             if let Some(preset) = builtin_model_limits(&base_url, m) {
                 capability["context_window"] = json!(preset.context_window);
@@ -3300,6 +3346,9 @@ fn add_provider_impl(
     if local {
         up["local"] = json!(true);
     }
+    if managed_route {
+        up["managed_route"] = json!(true);
+    }
     // Store a key in the keychain and point auth to its slot; omit auth when no key exists, as with local Ollama.
     let api_key = api_key
         .as_deref()
@@ -3317,12 +3366,29 @@ fn add_provider_impl(
         up["auth"] = auth;
     }
 
+    let previous_routing = if managed_route {
+        inner.draft.get("routing").cloned()
+    } else {
+        None
+    };
+    let previous_router = inner.draft["router"].clone();
     inner.draft["upstreams"][&name] = up;
+    if managed_route {
+        if !inner.draft["routing"].is_object() {
+            inner.draft["routing"] = json!({});
+        }
+        inner.draft["routing"]["mode"] = json!("direct");
+        inner.draft["routing"]["direct_target"] = json!({ "upstream": name, "model": "auto" });
+        inner.draft["router"]["routing_mode"] = json!("tiered");
+    }
     if let Err(error) = inner.observe_draft() {
         inner.draft["upstreams"]
             .as_object_mut()
             .expect("upstreams is an object")
             .remove(&name);
+        if managed_route {
+            restore_managed_route_mutation(&mut inner.draft, &previous_routing, &previous_router);
+        }
         return Err(error);
     }
     if credential_source == "store" {
@@ -3336,6 +3402,13 @@ fn add_provider_impl(
                 .as_object_mut()
                 .expect("upstreams is an object")
                 .remove(&name);
+            if managed_route {
+                restore_managed_route_mutation(
+                    &mut inner.draft,
+                    &previous_routing,
+                    &previous_router,
+                );
+            }
             return match inner.observe_draft() {
                 Ok(()) => Err(key_error),
                 Err(rollback_error) => Err(format!(
@@ -4050,6 +4123,26 @@ async fn discover_provider_models(
     base_url: String,
     api_key: Option<String>,
 ) -> Result<ModelDiscoveryView, String> {
+    discover_provider_models_impl(state, name, base_url, api_key, true).await
+}
+
+#[tauri::command]
+async fn verify_enterprise_route(
+    state: State<'_, AppStateManaged>,
+    name: String,
+    base_url: String,
+    api_key: String,
+) -> Result<ModelDiscoveryView, String> {
+    discover_provider_models_impl(state, name, base_url, Some(api_key), false).await
+}
+
+async fn discover_provider_models_impl(
+    state: State<'_, AppStateManaged>,
+    name: String,
+    base_url: String,
+    api_key: Option<String>,
+    persist_derived_state: bool,
+) -> Result<ModelDiscoveryView, String> {
     let name = name.trim().to_owned();
     let base_url = base_url.trim().trim_end_matches('/').to_owned();
     if name.is_empty() {
@@ -4076,8 +4169,8 @@ async fn discover_provider_models(
         let config = inner.materialize()?;
         ensure_credential_transport(&endpoint, &config.egress)?;
         let expected_target = begin_provider_discovery_target(&mut inner, &name);
-        let mutate_derived_state =
-            expected_target.upstream.is_none() || !credential.is_explicit_secret();
+        let mutate_derived_state = persist_derived_state
+            && (expected_target.upstream.is_none() || !credential.is_explicit_secret());
         inner.pending_provider_discoveries.insert(name.clone());
         (
             inner.data_dir(),
@@ -7219,6 +7312,7 @@ pub fn run() {
             add_free_provider,
             add_provider,
             add_provider_with_credential,
+            add_managed_enterprise_route,
             set_local_routing,
             set_routing_mode,
             set_direct_route,
@@ -7228,6 +7322,7 @@ pub fn run() {
             edit_provider,
             edit_provider_with_credential,
             discover_provider_models,
+            verify_enterprise_route,
             test_provider,
             set_provider_model_vision,
             set_provider_model_limits,
@@ -8307,6 +8402,37 @@ mod tests {
         assert!(report["gateway"]["provider_dialects"]
             .as_array()
             .is_some_and(|dialects| dialects.iter().any(|dialect| dialect == "azure-openai-v1")));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn enterprise_verification_never_persists_the_discovered_catalog() {
+        const CATALOG: &str = r#"{"data":[{"id":"private-enterprise-model"}]}"#;
+        let root = scratch_home("enterprise-verification-isolation");
+        let data_dir = root.join("token-station-data");
+        let (base_url, server) = serve_model_catalog(vec![(200, CATALOG)]);
+        let mut draft = template_for_test(&root);
+        draft["data"]["dir"] = json!(data_dir.clone());
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            draft,
+            None,
+        )))));
+
+        let result = tauri::async_runtime::block_on(verify_enterprise_route(
+            app.state(),
+            "enterprise_main".to_owned(),
+            base_url,
+            "secret-key".to_owned(),
+        ))
+        .expect("live enterprise verification succeeds");
+
+        assert_eq!(result.source, "live");
+        assert_eq!(result.models, ["private-enterprise-model"]);
+        assert!(!data_dir.join("model-catalog-cache.json").exists());
+        assert!(get_state(app.state()).providers.is_empty());
+        server.join().expect("model catalog fixture exits");
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -11263,6 +11389,84 @@ mod tests {
         );
 
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn managed_enterprise_provider_and_direct_target_are_one_draft_mutation() {
+        let root = scratch_home("managed-enterprise-route");
+        let app = tauri::test::mock_app();
+        assert!(app.manage(AppStateManaged(Mutex::new(AppInner::new(
+            root.join("token-station.json"),
+            template_for_test(&root),
+            None,
+        )))));
+
+        let view = add_provider_impl(
+            app.state(),
+            "enterprise_main".to_owned(),
+            "https://enterprise.example.com/v1".to_owned(),
+            vec!["auto".to_owned()],
+            None,
+            false,
+            "env",
+            Some("ENTERPRISE_API_KEY"),
+            "openai-compatible",
+            true,
+        )
+        .expect("the managed provider and Direct target are valid together");
+
+        assert_eq!(view.routing_mode, "direct");
+        let target = view.direct_target.expect("the Direct target is complete");
+        assert_eq!(target.upstream, "enterprise_main");
+        assert_eq!(target.model.as_deref(), Some("auto"));
+        let provider = view
+            .providers
+            .iter()
+            .find(|provider| provider.name == "enterprise_main")
+            .expect("the managed provider is visible");
+        assert_eq!(
+            provider.model_capabilities[0].vision,
+            CapabilityState::Declared
+        );
+
+        let managed = app.state::<AppStateManaged>();
+        let inner = managed.0.lock().unwrap();
+        let upstream = &inner.draft["upstreams"]["enterprise_main"];
+        assert_eq!(upstream["managed_route"], json!(true));
+        assert_eq!(
+            upstream["models"][0]["supported_parameters"],
+            json!(["reasoning_effort"])
+        );
+        drop(inner);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn managed_enterprise_route_rollback_restores_present_and_absent_routing() {
+        let previous_router = json!({ "routing_mode": "quota-first" });
+        let previous_routing = Some(json!({
+            "mode": "quota-first",
+            "direct_target": { "upstream": "original", "model": "stable" }
+        }));
+        let mut draft = json!({
+            "router": { "routing_mode": "tiered" },
+            "routing": { "mode": "direct" }
+        });
+
+        restore_managed_route_mutation(&mut draft, &previous_routing, &previous_router);
+        assert_eq!(draft["router"], previous_router);
+        assert_eq!(draft["routing"], previous_routing.unwrap());
+
+        let mut draft_without_previous_routing = json!({
+            "router": { "routing_mode": "tiered" },
+            "routing": { "mode": "direct" }
+        });
+        restore_managed_route_mutation(
+            &mut draft_without_previous_routing,
+            &None,
+            &json!({ "routing_mode": "tiered" }),
+        );
+        assert!(draft_without_previous_routing.get("routing").is_none());
     }
 
     #[test]

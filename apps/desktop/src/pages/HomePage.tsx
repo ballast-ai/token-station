@@ -4,7 +4,6 @@ import {
   type ProviderView,
   type QuotaAccount,
   type RoutingMode,
-  type StateView,
   type TierSlot,
   type TierView,
 } from "../api";
@@ -15,6 +14,7 @@ import { useLocalizedCopy } from "../components/LanguageProvider";
 import RoutingModeSelector from "../components/RoutingModeSelector";
 import DirectRoutePanel from "../components/DirectRoutePanel";
 import EnterpriseConnectionPanel from "../components/EnterpriseConnectionPanel";
+import type { EnterpriseConnectionInput } from "../components/EnterpriseConnectionPanel";
 
 interface HomePageProps {
   providers: ProviderView[];
@@ -48,7 +48,7 @@ interface HomePageProps {
   onRemoveKeyword: (slot: TierSlot, keyword: string) => void;
   onSave: () => void;
   onApplyAll: () => void;
-  onEnterpriseProviderConnected?: (state: StateView, providerName: string) => boolean | Promise<boolean>;
+  onEnterpriseConnect?: (connection: EnterpriseConnectionInput) => boolean | Promise<boolean>;
   embedded?: boolean;
   scope?: "global" | "enterprise";
 }
@@ -80,7 +80,7 @@ export default function HomePage({
   onRemoveKeyword,
   onSave,
   onApplyAll,
-  onEnterpriseProviderConnected = () => false,
+  onEnterpriseConnect = () => false,
   embedded = false,
   scope = "global",
 }: HomePageProps) {
@@ -143,7 +143,7 @@ export default function HomePage({
         <EnterpriseConnectionPanel
           providers={providers}
           busy={busy}
-          onConnected={onEnterpriseProviderConnected}
+          onConnect={onEnterpriseConnect}
         />
       ) : routingMode === "direct" ? (
         <DirectRoutePanel

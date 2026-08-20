@@ -76,6 +76,7 @@ SCRIPT
 set -euo pipefail
 printf '%s\n' "$@" >"$TEST_STATE/npm-args"
 printf '%s' "${TAURI_SIGNING_PRIVATE_KEY:-<unset>}" >"$TEST_STATE/tauri-private-key"
+printf '%s\t%s\n' "$*" "${TAURI_SIGNING_PRIVATE_KEY:-<unset>}" >>"$TEST_STATE/tauri-calls"
 previous=""
 for argument in "$@"; do
   if [[ "$previous" == "--config" && -f "$argument" ]]; then
@@ -222,6 +223,10 @@ test_preview_build_creates_signed_updater_payload_and_unsigned_test_dmg() {
     || fail "macOS preview build did not pass a DMG architecture"
   grep -Fxq -- 'aarch64' "$state/dmg-package-args" \
     || fail "macOS preview build passed the wrong DMG architecture"
+  [[ "$(sed -n '1p' "$state/tauri-calls")" == *"build"*"<unset>" ]] \
+    || fail "preview compilation exposed the updater private key"
+  [[ "$(sed -n '2p' "$state/tauri-calls")" == *"bundle"*"RWTESTPRIVATEKEY" ]] \
+    || fail "preview bundle phase did not receive the updater private key"
 }
 
 test_preview_build_loads_the_private_key_path_for_the_tauri_bundler() {

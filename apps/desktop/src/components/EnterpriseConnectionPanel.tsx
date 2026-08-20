@@ -1,20 +1,18 @@
 import { useMemo, useState } from "react";
-import {
-  addProvider,
-  discoverProviderModels,
-  type ProviderView,
-  type StateView,
-} from "../api";
-import { humanizeAppError } from "../errors";
+import { type ProviderView } from "../api";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { Input } from "./ui/input";
 
-const MANAGED_ROUTE_ALIAS = "auto";
+export interface EnterpriseConnectionInput {
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+}
 
 interface EnterpriseConnectionPanelProps {
   providers: ProviderView[];
   busy: boolean;
-  onConnected: (state: StateView, providerName: string) => boolean | Promise<boolean>;
+  onConnect: (connection: EnterpriseConnectionInput) => boolean | Promise<boolean>;
 }
 
 function endpointProviderName(baseUrl: string, providers: ProviderView[]): string {
@@ -24,20 +22,20 @@ function endpointProviderName(baseUrl: string, providers: ProviderView[]): strin
   } catch {
     // The backend returns the actionable URL validation error during verification.
   }
-  const stem = `enterprise-${host.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "endpoint"}`;
+  const stem = `enterprise_${host.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "endpoint"}`;
   const names = new Set(providers.map((provider) => provider.name));
   if (!names.has(stem)) return stem;
   let suffix = 2;
-  while (names.has(`${stem}-${suffix}`)) suffix += 1;
-  return `${stem}-${suffix}`;
+  while (names.has(`${stem}_${suffix}`)) suffix += 1;
+  return `${stem}_${suffix}`;
 }
 
 export default function EnterpriseConnectionPanel({
   providers,
   busy,
-  onConnected,
+  onConnect,
 }: EnterpriseConnectionPanelProps) {
-  const { copy, language } = useLocalizedCopy();
+  const { copy } = useLocalizedCopy();
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [accountName, setAccountName] = useState("");
@@ -71,45 +69,21 @@ export default function EnterpriseConnectionPanel({
         baseUrl: baseUrl.trim(),
         apiKey: apiKey.trim(),
       };
-      const discovery = await discoverProviderModels(
-        connection.name,
-        connection.baseUrl,
-        connection.apiKey,
-      );
-      if (discovery.source !== "live") {
-        setMessage(discovery.warning
-          ? humanizeAppError(discovery.warning, language)
-          : copy(
-              "Live credential verification failed. Retry the connection.",
-              "实时凭据验证失败，请重试连接。",
-            ));
+      const started = await onConnect(connection);
+      if (!started) {
+        setMessage(copy(
+          "Connection did not complete. Review the error and retry.",
+          "接入未完成，请查看错误后重试。",
+        ));
         return;
       }
-      const next = await addProvider(
-        connection.name,
-        connection.baseUrl,
-        [MANAGED_ROUTE_ALIAS],
-        connection.apiKey,
-        false,
-        "store",
-        null,
-        "openai-compatible",
-      );
-      const applied = await onConnected(next, connection.name);
       setApiKey("");
       setBaseUrl("");
       setAccountName("");
-      setMessage(applied
-        ? copy(
-            "Enterprise route connected and applied. Models and policy remain managed by the enterprise service.",
-            "企业路由已接入并应用，模型与策略继续由企业服务管理。",
-          )
-        : copy(
-            "The endpoint is connected, but route apply failed. Retry Save and apply in Global routing.",
-            "端点已接入，但路由应用失败。请到全局路由重试保存并应用。",
-          ));
-    } catch (caught) {
-      setMessage(humanizeAppError(caught, language));
+      setMessage(copy(
+        "Enterprise route connected. Applying configuration…",
+        "企业路由已接入，正在应用配置…",
+      ));
     } finally {
       setWorking(false);
     }

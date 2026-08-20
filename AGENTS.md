@@ -131,14 +131,16 @@ of these credentials are missing. Do not generate a replacement key during a rel
 
 1. Confirm that the branch is `main`.
 2. Confirm that the working tree has no unrelated changes.
-3. Choose a SemVer version greater than the version in `updater-preview/latest.json`.
-4. Update the version in every file checked by `scripts/check-release-readiness.mjs`.
-5. Update both Cargo lockfiles and the desktop npm lockfile.
-6. Add `docs/release/vX.Y.Z.md` with concise English release notes.
-7. Keep the notes to the changes, update behavior, installation, and the unsigned warning.
-8. Do not add another visible file to the DMG.
-9. Keep only `token-station.app`, `Applications`, and `README.md` visible in the DMG.
-10. Run the release and DMG policy checks.
+3. Download the current rolling manifest from the fixed URL in step 2 to a new temporary directory.
+   Parse its `version` with `jq`; stop if the download or parse fails. Do not rely on a repository file.
+4. Choose a SemVer version greater than both the rolling manifest version and every existing version tag.
+5. Update the version in every file checked by `scripts/check-release-readiness.mjs`.
+6. Update both Cargo lockfiles and the desktop npm lockfile.
+7. Add `docs/release/vX.Y.Z.md` with concise English release notes.
+8. Keep the notes to the changes, update behavior, installation, and the unsigned warning.
+9. Do not add another visible file to the DMG.
+10. Keep only `token-station.app`, `Applications`, and `README.md` visible in the DMG.
+11. Run the release and DMG policy checks.
 
 ```bash
 node scripts/check-release-readiness.mjs --version "$VERSION"
@@ -168,7 +170,8 @@ Load these environment variables without displaying their values:
 
 The authorized local key is under `~/.config/token-station/release/`. The Keychain service is
 `com.tokenstation.updater-signing`. Read the public-key file as one value with whitespace removed. Unset the
-private-key password after the build.
+private-key password after the build. `scripts/build-desktop.sh` must remove private signing material from
+the dependency compilation environment and expose it only to the bundle-only signing phase.
 
 ### 3. Build from the tagged commit
 

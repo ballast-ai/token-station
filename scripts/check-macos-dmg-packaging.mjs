@@ -132,7 +132,8 @@ if (/README\.zh-CN|Install Token Station\.command|终端启动命令\.txt/.test(
 
 const buildScript = read("scripts/build-desktop.sh");
 if (!/package-macos-dmg\.sh/.test(buildScript)) failures.push("build-desktop.sh 没有调用 DMG 打包器");
-if ((buildScript.match(/--bundles app/g) ?? []).length < 2) failures.push("build-desktop.sh 没有限制 Tauri 只生成 App");
+const appBundleSelections = (buildScript.match(/--bundles app|macos_bundle_kind="app"/g) ?? []).length;
+if (appBundleSelections < 2) failures.push("build-desktop.sh 没有限制 Tauri 只生成 App");
 
 for (const workflowPath of [".github/workflows/ci.yml", ".github/workflows/desktop-release.yml"]) {
   const workflow = read(workflowPath);

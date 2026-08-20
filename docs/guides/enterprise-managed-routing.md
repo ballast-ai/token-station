@@ -40,10 +40,8 @@ One **Connect and use** action runs this sequence:
 1. Validate the required fields and the optional account name.
 2. Reject an explicit account name that already exists.
 3. Perform live endpoint and credential verification.
-4. Store the endpoint with the managed route alias `auto`.
-5. Set global routing to Direct.
-6. Set the direct target to the new enterprise account and `auto`.
-7. Save and apply the configuration.
+4. In one backend draft mutation, store the endpoint with the managed route alias `auto`, set global routing to Direct, and set its direct target.
+5. Save and apply the configuration.
 
 Agents that inherit global routing use the enterprise route after the apply operation succeeds.
 Agent-specific route overrides remain unchanged.
@@ -78,7 +76,7 @@ Redirects are not followed.
 A cached model response does not count as credential verification.
 
 The returned model IDs are discarded.
-They are not shown for selection and are not saved as enterprise models.
+They are not shown for selection, saved as enterprise models, or written to the local model-catalog cache.
 
 ## Managed route alias
 
@@ -113,6 +111,8 @@ Content-Type: application/json
 ```
 
 The enterprise service must resolve `auto` to a real model and policy.
+Token Station declares the alias as a pass-through route for image input, tools, structured output, and translated `reasoning_effort` preferences.
+The enterprise service must select a real model that supports each received request.
 The service must return an OpenAI-compatible Chat Completions response.
 It must support streaming when the originating Agent requests streaming.
 
@@ -127,6 +127,7 @@ It must support streaming when the originating Agent requests streaming.
 | Managed alias | Accept `model: "auto"` and select the real model on the server. |
 | Streaming | Return OpenAI-compatible SSE when `stream: true`. |
 | Tools and structured output | Support the request fields required by the connected Agents. |
+| Images and reasoning | Select a compatible real model when a request contains image input or `reasoning_effort`. |
 | Errors | Return OpenAI-compatible status codes and error bodies. |
 
 The enterprise service can change its real models or policies without a desktop configuration change.
@@ -158,7 +159,7 @@ Token Station can also store request bodies locally when desktop request-body lo
 | `/models` returns 404 | The endpoint does not satisfy the current enterprise connection contract. |
 | `/models` returns invalid JSON | Verification fails. |
 | Only a cached result is available | Verification fails and no Provider is created. |
-| Route apply fails after Provider creation | The valid draft remains available. Retry the apply operation in global routing. |
+| Route apply fails after Provider creation | Token Station reloads authoritative state and keeps the valid draft available. Retry the apply operation in global routing. |
 
 ## Current limitations
 
@@ -212,10 +213,8 @@ Base URL 中不要包含凭据、查询参数或片段。
 1. 校验必填字段和可选账户名称。
 2. 拒绝已存在的显式账户名称。
 3. 实时验证端点和凭据。
-4. 使用托管路由别名 `auto` 保存端点。
-5. 把全局路由设置为单独路由。
-6. 把直连目标设置为新企业账户和 `auto`。
-7. 保存并应用配置。
+4. 在一次后端草稿变更中，使用托管路由别名 `auto` 保存端点，把全局路由设为单独路由，并设置直连目标。
+5. 保存并应用配置。
 
 应用成功后，继承全局路由的 Agent 会立即使用企业路由。
 已有的 Agent 独立路由不会被修改。
@@ -250,7 +249,7 @@ Token Station 不跟随重定向。
 缓存的模型响应不能作为凭据验证结果。
 
 接口返回的模型 ID 会被丢弃。
-Token Station 不显示这些模型，也不会把它们保存为企业模型。
+Token Station 不显示这些模型，也不会把它们保存为企业模型或写入本地模型目录缓存。
 
 ## 托管路由别名
 
@@ -285,6 +284,8 @@ Content-Type: application/json
 ```
 
 企业服务必须把 `auto` 解析为真实模型和策略。
+Token Station 把该别名声明为图像输入、工具、结构化输出和翻译后 `reasoning_effort` 偏好的透传路由。
+企业服务必须为每个收到的请求选择兼容的真实模型。
 企业服务必须返回 OpenAI 兼容的 Chat Completions 响应。
 当来源 Agent 请求流式输出时，企业服务必须支持流式响应。
 
@@ -299,6 +300,7 @@ Content-Type: application/json
 | 托管别名 | 必须接受 `model: "auto"`，并在服务端选择真实模型。 |
 | 流式响应 | `stream: true` 时必须返回 OpenAI 兼容 SSE。 |
 | 工具与结构化输出 | 必须支持已接入 Agent 所需的请求字段。 |
+| 图像与推理 | 请求包含图像输入或 `reasoning_effort` 时，必须选择兼容的真实模型。 |
 | 错误 | 必须返回 OpenAI 兼容的状态码和错误正文。 |
 
 企业服务可以在不修改桌面配置的情况下变更真实模型或策略。
@@ -330,7 +332,7 @@ Token Station 仅在确认配置的 Origin 和路径边界后注入 Bearer 凭�
 | `/models` 返回 404 | 端点不符合当前企业接入契约。 |
 | `/models` 返回无效 JSON | 验证失败。 |
 | 只能获取缓存结果 | 验证失败，并且不创建 Provider。 |
-| 创建 Provider 后应用路由失败 | 有效草稿会保留。请在全局路由中重试应用。 |
+| 创建 Provider 后应用路由失败 | Token Station 会重新加载权威状态并保留有效草稿。请在全局路由中重试应用。 |
 
 ## 当前限制
 

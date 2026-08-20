@@ -1,18 +1,8 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ProviderView, StateView } from "../api";
+import { describe, expect, it, vi } from "vitest";
+import type { ProviderView } from "../api";
 import EnterpriseConnectionPanel from "./EnterpriseConnectionPanel";
-
-const { discoverProviderModels, addProvider } = vi.hoisted(() => ({
-  discoverProviderModels: vi.fn(),
-  addProvider: vi.fn(),
-}));
-
-vi.mock("../api", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../api")>();
-  return { ...actual, discoverProviderModels, addProvider };
-});
 
 const connectedProvider: ProviderView = {
   name: "enterprise-api-example-com",
@@ -22,18 +12,13 @@ const connectedProvider: ProviderView = {
   has_auth: true,
 };
 
-beforeEach(() => {
-  discoverProviderModels.mockReset();
-  addProvider.mockReset();
-});
-
 describe("EnterpriseConnectionPanel", () => {
   it("shows three connection fields and one managed-route action", () => {
     render(
       <EnterpriseConnectionPanel
         providers={[connectedProvider]}
         busy={false}
-        onConnected={vi.fn()}
+        onConnect={vi.fn()}
       />,
     );
 
@@ -52,34 +37,23 @@ describe("EnterpriseConnectionPanel", () => {
       <EnterpriseConnectionPanel
         providers={[]}
         busy={false}
-        onConnected={vi.fn()}
+        onConnect={vi.fn()}
       />,
     );
 
     await user.click(screen.getByRole("button", { name: "接入并使用" }));
     expect(screen.getByRole("status")).toHaveTextContent("请填写 Base URL 和 API Key");
-    expect(discoverProviderModels).not.toHaveBeenCalled();
   });
 
-  it.each([
-    { discoveredModels: [] },
-    { discoveredModels: ["enterprise-chat", "enterprise-reasoner"] },
-  ])("uses auto without persisting the discovered model list $discoveredModels", async ({ discoveredModels }) => {
+  it("submits a backend-valid derived account name and reports apply as pending", async () => {
     const user = userEvent.setup();
-    const onConnected = vi.fn().mockResolvedValue(true);
-    discoverProviderModels.mockResolvedValue({
-      models: discoveredModels,
-      source: "live",
-      fetched_at_ms: 1,
-      warning: null,
-    });
-    addProvider.mockResolvedValue({ providers: [connectedProvider] } as StateView);
+    const onConnect = vi.fn().mockResolvedValue(true);
 
     render(
       <EnterpriseConnectionPanel
         providers={[]}
         busy={false}
-        onConnected={onConnected}
+        onConnect={onConnect}
       />,
     );
 
@@ -87,23 +61,14 @@ describe("EnterpriseConnectionPanel", () => {
     await user.type(screen.getByLabelText("API Key"), "secret-key");
     await user.click(screen.getByRole("button", { name: "接入并使用" }));
 
-    await waitFor(() => expect(addProvider).toHaveBeenCalledWith(
-      "enterprise-api-example-com",
-      "https://api.example.com/v1",
-      ["auto"],
-      "secret-key",
-      false,
-      "store",
-      null,
-      "openai-compatible",
-    ));
-    expect(onConnected).toHaveBeenCalledWith(
-      expect.objectContaining({ providers: [connectedProvider] }),
-      "enterprise-api-example-com",
-    );
+    await waitFor(() => expect(onConnect).toHaveBeenCalledWith({
+      name: "enterprise_api_example_com",
+      baseUrl: "https://api.example.com/v1",
+      apiKey: "secret-key",
+    }));
     expect(screen.queryByRole("checkbox")).toBeNull();
     expect(screen.getByLabelText("API Key")).toHaveValue("");
-    expect(screen.getByRole("status")).toHaveTextContent("企业路由已接入并应用");
+    expect(screen.getByRole("status")).toHaveTextContent("企业路由已接入，正在应用配置");
   });
 
   it("rejects an explicit duplicate account name before verification", async () => {
@@ -112,7 +77,7 @@ describe("EnterpriseConnectionPanel", () => {
       <EnterpriseConnectionPanel
         providers={[connectedProvider]}
         busy={false}
-        onConnected={vi.fn()}
+        onConnect={vi.fn()}
       />,
     );
 
@@ -122,31 +87,26 @@ describe("EnterpriseConnectionPanel", () => {
     await user.click(screen.getByRole("button", { name: "接入并使用" }));
 
     expect(screen.getByRole("status")).toHaveTextContent("该账户名称已存在");
-    expect(discoverProviderModels).not.toHaveBeenCalled();
   });
 
-  it("does not treat a cached discovery fallback as live credential verification", async () => {
+  it("keeps credentials available for retry when the parent workflow fails", async () => {
     const user = userEvent.setup();
-    discoverProviderModels.mockResolvedValue({
-      models: ["enterprise-chat"],
-      source: "cache",
-      fetched_at_ms: 1,
-      warning: "Provider rejected the API key",
-    });
+    const onConnect = vi.fn().mockResolvedValue(false);
 
     render(
       <EnterpriseConnectionPanel
         providers={[]}
         busy={false}
-        onConnected={vi.fn()}
+        onConnect={onConnect}
       />,
     );
 
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://api.example.com/v1");
-    await user.type(screen.getByLabelText("API Key"), "invalid-key");
+    await user.type(screen.getByLabelText("API Key"), "secret-key");
     await user.click(screen.getByRole("button", { name: "接入并使用" }));
 
-    expect(await screen.findByRole("status")).toHaveTextContent("凭据无法使用");
-    expect(addProvider).not.toHaveBeenCalled();
+    expect(await screen.findByRole("status")).toHaveTextContent("接入未完成");
+    expect(screen.getByRole("textbox", { name: "Base URL" })).toHaveValue("https://api.example.com/v1");
+    expect(screen.getByLabelText("API Key")).toHaveValue("secret-key");
   });
 });
