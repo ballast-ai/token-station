@@ -75,6 +75,7 @@ SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$@" >"$TEST_STATE/npm-args"
+printf '%s' "${TAURI_SIGNING_PRIVATE_KEY:-<unset>}" >"$TEST_STATE/tauri-private-key"
 previous=""
 for argument in "$@"; do
   if [[ "$previous" == "--config" && -f "$argument" ]]; then
@@ -221,6 +222,23 @@ test_preview_build_creates_signed_updater_payload_and_unsigned_test_dmg() {
     || fail "macOS preview build passed the wrong DMG architecture"
 }
 
+test_preview_build_loads_the_private_key_path_for_the_tauri_bundler() {
+  make_fixture preview-updater-key-path Darwin
+  printf '%s\n' 'encrypted-preview-key' >"$fixture/updater.key"
+  env \
+    PATH="$fake_bin:/usr/bin:/bin" \
+    CARGO_HOME="$fixture/cargo-home" \
+    RUSTFLAGS= \
+    TEST_RUST_SYSROOT="$fixture/rust-sysroot" \
+    TEST_STATE="$state" \
+    TOKEN_STATION_UPDATER_ENDPOINT="https://github.com/ballast-ai/token-station/releases/download/updater-preview/latest.json" \
+    TOKEN_STATION_UPDATER_PUBKEY="untrusted comment: minisign public key\nRWTESTPUBLICKEY" \
+    TAURI_SIGNING_PRIVATE_KEY_PATH="$fixture/updater.key" \
+    "$repo/scripts/build-desktop.sh" --preview --target aarch64-apple-darwin >/dev/null
+  [[ "$(cat "$state/tauri-private-key")" == "encrypted-preview-key" ]] \
+    || fail "preview build did not load the updater private key path for the Tauri bundler"
+}
+
 test_windows_production_build_does_not_require_updater_artifacts_for_the_first_release() {
   make_fixture windows-no-updater
   run_windows_production_build >/dev/null
@@ -260,6 +278,7 @@ test_all_rust_builds_remap_private_host_paths
 test_production_build_requires_the_official_updater_public_key
 test_production_build_creates_updater_payloads_without_publishing_the_temporary_signature
 test_preview_build_creates_signed_updater_payload_and_unsigned_test_dmg
+test_preview_build_loads_the_private_key_path_for_the_tauri_bundler
 test_windows_production_build_does_not_require_updater_artifacts_for_the_first_release
 test_production_build_rejects_private_material_in_the_public_key_variable
 

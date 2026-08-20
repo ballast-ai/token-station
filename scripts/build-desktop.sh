@@ -94,6 +94,17 @@ if [[ "$mode" != "local" && "$is_windows_target" != "true" ]]; then
     echo "signed updater build needs TAURI_SIGNING_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY_PATH" >&2
     exit 1
   fi
+  if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+    [[ -f "$TAURI_SIGNING_PRIVATE_KEY_PATH" && -r "$TAURI_SIGNING_PRIVATE_KEY_PATH" ]] || {
+      echo "TAURI_SIGNING_PRIVATE_KEY_PATH must name a readable private key file" >&2
+      exit 1
+    }
+    # The signer subcommand accepts TAURI_SIGNING_PRIVATE_KEY_PATH, but the
+    # Tauri bundler reads only TAURI_SIGNING_PRIVATE_KEY when it creates and
+    # signs updater artifacts. Load the encrypted key without printing it.
+    export TAURI_SIGNING_PRIVATE_KEY
+    TAURI_SIGNING_PRIVATE_KEY=$(<"$TAURI_SIGNING_PRIVATE_KEY_PATH")
+  fi
 fi
 
 stage="$(mktemp -d "${TMPDIR:-/tmp}/token-station-desktop.XXXXXX")"
