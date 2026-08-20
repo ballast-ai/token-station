@@ -114,9 +114,139 @@ each failed step accurately.
 A change to documentation, comments, or test data does not require App installation. Install the App if
 the user explicitly requests it.
 
-## Read the macOS DMG requirements
+## Publish each Apple Silicon preview release
 
-Before you create, change, upload, or release a macOS DMG, read and follow
-[`docs/release/macOS-DMG安装提示与打包要求.md`](docs/release/macOS-DMG安装提示与打包要求.md).
+Use this procedure for every preview release after v1.2.1. This procedure publishes an ad-hoc signed,
+Apple-unsigned, and unnotarized Apple Silicon App. Do not call this a stable or formal release.
 
-This requirement does not grant permission to create or publish a release.
+Publishing only a versioned GitHub Release does not update an installed App. The versioned release stores
+immutable files. The `updater-preview` release stores the rolling `latest.json` file that installed Apps
+check. Publish the versioned release first. Replace the rolling manifest only after every check passes.
+
+Keep the updater private key offline. Do not add it to this repository or GitHub Actions. Do not print its
+contents or password. Use the existing authorized local key, public key, and Keychain password. Stop if any
+of these credentials are missing. Do not generate a replacement key during a release.
+
+### 1. Prepare the release commit
+
+1. Confirm that the branch is `main`.
+2. Confirm that the working tree has no unrelated changes.
+3. Choose a SemVer version greater than the version in `updater-preview/latest.json`.
+4. Update the version in every file checked by `scripts/check-release-readiness.mjs`.
+5. Update both Cargo lockfiles and the desktop npm lockfile.
+6. Add `docs/release/vX.Y.Z.md` with concise English release notes.
+7. Keep the notes to the changes, update behavior, installation, and the unsigned warning.
+8. Do not add another visible file to the DMG.
+9. Keep only `token-station.app`, `Applications`, and `README.md` visible in the DMG.
+10. Run the release and DMG policy checks.
+
+```bash
+node scripts/check-release-readiness.mjs --version "$VERSION"
+node scripts/check-macos-dmg-packaging.mjs
+tests/build-desktop-verbosity.sh
+tests/desktop-updater-release.sh
+```
+
+Run the complete Rust, desktop Rust, and frontend checks from `.github/workflows/ci.yml`. Build the frontend.
+Commit the version and release-note changes directly to `main`. Create an annotated `vX.Y.Z` tag on that
+exact commit. Do not move an existing version tag.
+
+### 2. Load the preview signing configuration
+
+Use this fixed updater URL:
+
+```text
+https://github.com/ballast-ai/token-station/releases/download/updater-preview/latest.json
+```
+
+Load these environment variables without displaying their values:
+
+- `TOKEN_STATION_UPDATER_ENDPOINT`: The fixed URL above.
+- `TOKEN_STATION_UPDATER_PUBKEY`: The existing Tauri updater public key.
+- `TAURI_SIGNING_PRIVATE_KEY_PATH`: The existing offline updater private-key file.
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: The password from macOS Keychain.
+
+The authorized local key is under `~/.config/token-station/release/`. The Keychain service is
+`com.tokenstation.updater-signing`. Read the public-key file as one value with whitespace removed. Unset the
+private-key password after the build.
+
+### 3. Build from the tagged commit
+
+Confirm that `HEAD` is the new version tag. Run the preview build on an Apple Silicon Mac:
+
+```bash
+scripts/build-desktop.sh --preview --target aarch64-apple-darwin
+```
+
+The build must create and audit these source artifacts:
+
+- `bundle/dmg/token-station_X.Y.Z_aarch64_UNSIGNED-UNNOTARIZED.dmg`
+- `bundle/dmg/token-station_X.Y.Z_aarch64_UNSIGNED-UNNOTARIZED.dmg.sha256`
+- `bundle/macos/token-station.app.tar.gz`
+- `bundle/macos/token-station.app.tar.gz.sig`
+
+Copy the updater payload and signature into a new empty release directory. Rename them to
+`token-station_X.Y.Z_aarch64.app.tar.gz` and `token-station_X.Y.Z_aarch64.app.tar.gz.sig`. Do not modify either
+file after signing.
+
+### 4. Create and verify the update manifest
+
+Create `latest.json` with `scripts/create-desktop-update-manifest.mjs`. Use these inputs:
+
+- The new version without the `v` prefix.
+- The current UTC time in RFC 3339 format.
+- `https://github.com/ballast-ai/token-station/releases/download/vX.Y.Z` as the release base URL.
+- `darwin-aarch64` as the only platform.
+- The renamed `.app.tar.gz` file as the updater artifact.
+- The concise English release-note file as the notes file.
+
+Verify the renamed updater payload with `ts-release verify-updater` and the trusted updater public key.
+Verify the DMG checksum. Run `scripts/audit-macos-dmg.sh --unsigned-test` against the final DMG. Inspect the
+mounted DMG in Finder. Confirm that it shows one App, one Applications link, and one README.
+
+### 5. Push and publish the versioned release
+
+Push the release commit to `origin/main`. Push the annotated version tag. Wait for the CI and macOS platform
+checks for the exact commit. Do not publish if a required check fails or is still running.
+
+Create one GitHub pre-release named `Token Station vX.Y.Z`. Upload only these five files:
+
+1. `token-station_X.Y.Z_aarch64_UNSIGNED-UNNOTARIZED.dmg`
+2. `token-station_X.Y.Z_aarch64_UNSIGNED-UNNOTARIZED.dmg.sha256`
+3. `token-station_X.Y.Z_aarch64.app.tar.gz`
+4. `token-station_X.Y.Z_aarch64.app.tar.gz.sig`
+5. `latest.json`
+
+Use the concise English note file for the GitHub release body. Never overwrite an asset in a published
+versioned release. Publish a higher version if an uploaded file is wrong.
+
+### 6. Enable the in-App update
+
+Download and save the current `updater-preview/latest.json` before changing it. Confirm that every URL in the
+new manifest downloads from the new versioned release. Then replace only `latest.json` on the existing
+`updater-preview` pre-release. Do not delete or recreate the rolling release.
+
+Download the rolling manifest again. Confirm its version, signature, platform, and versioned asset URL.
+Download the updater payload from that URL. Verify it again with the trusted updater public key.
+
+### 7. Test the real update and report the release
+
+Keep the previous public App installed until this test. Open that App and select **Check for Updates**. Confirm
+the update. Verify that the App downloads the payload, verifies it, installs it, restarts, and reports the new
+version. This confirmation is required. The updater must not install without user confirmation.
+
+After the real update passes, report these links and facts:
+
+- The versioned GitHub pre-release URL.
+- The direct DMG URL.
+- The rolling `latest.json` URL.
+- The exact release commit and tag.
+- The CI and macOS check results.
+- The real previous-version to new-version update result.
+- The Apple Silicon, ad-hoc signed, Apple-unsigned, and unnotarized limitations.
+
+If the real update fails, stop the release. Restore the saved rolling manifest if it was already replaced.
+Do not change or delete the versioned assets. Fix the problem and publish a higher version.
+
+This procedure does not grant permission to publish a release. Publish only when the user explicitly requests
+it.
