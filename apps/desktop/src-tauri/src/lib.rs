@@ -63,8 +63,8 @@ use cursor_tunnel::{
     CursorTunnelState,
 };
 use desktop_update::{
-    DesktopUpdateCandidate, DesktopUpdateOperation, DesktopUpdateProgress, DesktopUpdateView,
-    LATEST_JSON_URL, OFFICIAL_PUBLIC_KEY, PROGRESS_EVENT,
+    official_update_manifest_endpoint, DesktopUpdateCandidate, DesktopUpdateOperation,
+    DesktopUpdateProgress, DesktopUpdateView, OFFICIAL_PUBLIC_KEY, PROGRESS_EVENT,
 };
 use model_catalog::ModelDiscoveryView;
 use pricing_catalog::{
@@ -6718,7 +6718,7 @@ fn get_plugins(state: State<'_, AppStateManaged>) -> Result<PluginsView, String>
 fn desktop_updater<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<tauri_plugin_updater::Updater, String> {
-    let endpoint = LATEST_JSON_URL
+    let endpoint = official_update_manifest_endpoint()?
         .parse()
         .map_err(|error| format!("更新地址无效：{error}"))?;
     app.updater_builder()

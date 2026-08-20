@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: scripts/audit-desktop-artifact.sh --mode <local|production> --binary <path> --bundle-root <path> --source-root <path> --rust-sysroot <path>" >&2
+  echo "usage: scripts/audit-desktop-artifact.sh --mode <local|preview|production> --binary <path> --bundle-root <path> --source-root <path> --rust-sysroot <path>" >&2
   exit 2
 }
 
@@ -21,7 +21,7 @@ while [[ $# -gt 0 ]]; do
     *) usage ;;
   esac
 done
-[[ "$mode" == "local" || "$mode" == "production" ]] || usage
+[[ "$mode" == "local" || "$mode" == "preview" || "$mode" == "production" ]] || usage
 [[ -n "$binary" && -n "$bundle_root" && -n "$source_root" && -n "$rust_sysroot" ]] || usage
 [[ -f "$binary" ]] || { echo "desktop executable missing: $binary" >&2; exit 1; }
 
@@ -118,7 +118,13 @@ case "$(uname -s)" in
       echo "macOS app is missing the Wasmtime executable-memory entitlement" >&2
       exit 1
     }
-    if [[ "$mode" == "production" ]]; then
+    if [[ "$mode" == "preview" ]]; then
+      signature="$(codesign --display --verbose=4 "$app" 2>&1)"
+      grep -Fq "Signature=adhoc" <<<"$signature" || {
+        echo "macOS preview app is not ad-hoc signed" >&2
+        exit 1
+      }
+    elif [[ "$mode" == "production" ]]; then
       signature="$(codesign --display --verbose=4 "$app" 2>&1)"
       grep -Fq "Authority=Developer ID Application" <<<"$signature" || {
         echo "macOS production app is not signed with Developer ID Application" >&2

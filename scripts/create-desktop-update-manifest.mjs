@@ -3,7 +3,7 @@
 import { basename } from "node:path";
 import { readFileSync, writeFileSync } from "node:fs";
 
-const REQUIRED_PLATFORMS = [
+const SUPPORTED_PLATFORMS = [
   "darwin-aarch64",
   "darwin-x86_64",
 ];
@@ -13,6 +13,7 @@ function usage(message) {
   console.error(
     "usage: create-desktop-update-manifest.mjs --version <semver> --pub-date <RFC3339> " +
       "--release-base-url <https-url> --output <latest.json> [--notes-file <path>] " +
+      "[--platforms <comma-separated-platforms>] " +
       "--artifact <platform=payload> (repeat for all supported platforms)",
   );
   process.exit(2);
@@ -57,15 +58,26 @@ try {
 }
 if (baseUrl.protocol !== "https:") usage("release base URL must use HTTPS");
 
-for (const platform of artifacts.keys()) {
-  if (!REQUIRED_PLATFORMS.includes(platform)) usage(`unsupported platform: ${platform}`);
+const configuredPlatforms = values.get("--platforms");
+const requiredPlatforms = configuredPlatforms
+  ? configuredPlatforms.split(",").map((platform) => platform.trim()).filter(Boolean)
+  : [...SUPPORTED_PLATFORMS];
+if (requiredPlatforms.length === 0 || new Set(requiredPlatforms).size !== requiredPlatforms.length) {
+  usage("platform selection must contain unique supported platforms");
 }
-for (const platform of REQUIRED_PLATFORMS) {
+for (const platform of requiredPlatforms) {
+  if (!SUPPORTED_PLATFORMS.includes(platform)) usage(`unsupported platform: ${platform}`);
+}
+
+for (const platform of artifacts.keys()) {
+  if (!requiredPlatforms.includes(platform)) usage(`artifact is outside the selected platforms: ${platform}`);
+}
+for (const platform of requiredPlatforms) {
   if (!artifacts.has(platform)) usage(`missing artifact: ${platform}`);
 }
 
 const platforms = {};
-for (const platform of REQUIRED_PLATFORMS) {
+for (const platform of requiredPlatforms) {
   const payloadPath = artifacts.get(platform);
   const signaturePath = `${payloadPath}.sig`;
   let signature;

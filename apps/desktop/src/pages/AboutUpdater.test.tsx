@@ -118,6 +118,7 @@ describe("desktop in-app update", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "检查更新" }));
+    await user.click(await screen.findByRole("button", { name: "取消" }));
     await user.click(await screen.findByRole("button", { name: "复制链接" }));
 
     const message = "无法复制发布链接。请检查系统剪贴板权限，然后重试。";
@@ -148,15 +149,14 @@ describe("desktop in-app update", () => {
     const user = userEvent.setup();
     render(<About desktopVersion="1.1.2" coreVersion="0.2.0" />);
     await user.click(screen.getByRole("button", { name: "检查更新" }));
-    await user.click(await screen.findByRole("button", { name: "下载并更新到 1.1.3" }));
-    await user.click(screen.getByRole("button", { name: "确认更新并重启" }));
+    await user.click(await screen.findByRole("button", { name: "确认更新并重启" }));
     onProgress?.({ downloaded: 50, total: 100 });
 
     expect(await screen.findByRole("progressbar")).toHaveAttribute("aria-valuenow", "50");
     expect(screen.getByText("已下载 50%")).toBeInTheDocument();
   });
 
-  it("requires confirmation before installing an available signed update", async () => {
+  it("opens update confirmation after one successful check without installing", async () => {
     vi.mocked(checkDesktopUpdate).mockResolvedValue({
       status: "update_available",
       current_version: "1.1.2",
@@ -176,9 +176,6 @@ describe("desktop in-app update", () => {
     expect(await screen.findByText("发现新版本 1.1.3")).toBeInTheDocument();
     expect(screen.getByText("安全更新")).toBeInTheDocument();
     expect(screen.getByText("发布日期：2026-08-06T07:00:00Z")).toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: "下载并更新到 1.1.3" }),
-    );
 
     expect(
       await screen.findByRole("alertdialog", { name: "安装应用更新？" }),
@@ -207,8 +204,7 @@ describe("desktop in-app update", () => {
     const user = userEvent.setup();
     render(<About desktopVersion="1.1.2" coreVersion="0.2.0" />);
     await user.click(screen.getByRole("button", { name: "检查更新" }));
-    await user.click(await screen.findByRole("button", { name: "下载并更新到 1.1.3" }));
-    await user.click(screen.getByRole("button", { name: "确认更新并重启" }));
+    await user.click(await screen.findByRole("button", { name: "确认更新并重启" }));
 
     expect(await screen.findByText("可用更新已经发生变化。请重新检查后再确认安装。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "检查更新" })).toBeInTheDocument();
