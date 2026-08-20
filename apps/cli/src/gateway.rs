@@ -69,6 +69,7 @@ use crate::south_provider_call::{
     map_stream_read_failure_v1, open_prepared_provider_stream_v1, prepare_provider_call_v1,
     prepare_provider_stream_v1, project_open_stream_head_v1,
 };
+use south_core::raw::BoundedResolverV1;
 
 /// Caps on what crosses the proxy, applied by the host per architecture section 6.
 pub(crate) const MAX_INBOUND_BODY: usize = 10 * 1024 * 1024;
@@ -1252,7 +1253,7 @@ impl SouthProviderRuntime {
     fn open_stream(
         &self,
         prepared: &PreparedCommunityProviderCallV1,
-        resolver: &CommunityCredentialResolverV1<'_>,
+        resolver: &BoundedResolverV1<CommunityCredentialResolverV1<'_>>,
         deadline: tokio::time::Instant,
         cancellation: &tokio_util::sync::CancellationToken,
         disposition: CancellationDispositionV1,
@@ -2624,7 +2625,7 @@ impl Gateway {
         upstream: &Upstream,
         model: &str,
         auth_config: &AuthConfig,
-        resolver: &CommunityCredentialResolverV1<'_>,
+        resolver: &BoundedResolverV1<CommunityCredentialResolverV1<'_>>,
         transport: &south_transport_reqwest::ReqwestTransportV1,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<u64, String> {

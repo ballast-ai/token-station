@@ -7,6 +7,7 @@ use south_contracts::{
     PreparationErrorV1, ProviderAuthV1, ProviderEndpointV1, ProviderQuotaMetadataFieldV1,
     RelativePathV1, SafeHeaders, SecretHeaderV1, StreamTransportConfigV1,
 };
+use south_core::raw::BoundedResolverV1;
 use south_core::{
     CredentialResolutionErrorV1, CredentialResolutionFuture, CredentialResolver, ProviderBindingV1,
     SecretValue, StreamingCallV1,
@@ -222,19 +223,28 @@ pub(crate) struct CommunityCredentialResolverV1<'host> {
 }
 
 impl<'host> CommunityCredentialResolverV1<'host> {
+    /// Builds the store-backed resolver behind South's size-bounding adapter.
+    ///
+    /// The 16 KiB cap is a host parameter; the bounding mechanism is the
+    /// prelude's `BoundedResolverV1` (South 0.7.0), which replaced this
+    /// adapter's hand-rolled length check. An oversized secret maps to the
+    /// same opaque resolution failure as before.
     pub(crate) fn try_new(
         secrets: &'host SecretStore,
         upstream: &'host str,
         auth_config: &'host AuthConfig,
-    ) -> Result<Self, IneligibleV1> {
+    ) -> Result<BoundedResolverV1<Self>, IneligibleV1> {
         if !has_supported_secret_source(auth_config) {
             return Err(IneligibleV1::SecretSource);
         }
-        Ok(Self {
-            secrets,
-            upstream,
-            declared_slot: &auth_config.slot,
-        })
+        Ok(BoundedResolverV1::new(
+            Self {
+                secrets,
+                upstream,
+                declared_slot: &auth_config.slot,
+            },
+            MAX_COMMUNITY_CREDENTIAL_BYTES_V1,
+        ))
     }
 }
 
@@ -256,9 +266,6 @@ impl CredentialResolver for CommunityCredentialResolverV1<'_> {
                 .secrets
                 .resolve(self.upstream, self.declared_slot)
                 .map_err(|_| CredentialResolutionErrorV1)?;
-            if secret.len() > MAX_COMMUNITY_CREDENTIAL_BYTES_V1 {
-                return Err(CredentialResolutionErrorV1);
-            }
             Ok(SecretValue::new(secret))
         })
     }
@@ -548,7 +555,8 @@ pub(crate) fn map_failure_v1(
             | ContractErrorV1::InvalidQueryValue
             | ContractErrorV1::DuplicateQueryParameter
             | ContractErrorV1::EmptyQuery
-            | ContractErrorV1::QueryTooLarge => (
+            | ContractErrorV1::QueryTooLarge
+            | ContractErrorV1::InvalidUserAgentValue => (
                 ErrorCode::Internal,
                 500,
                 "provider request contract rejected",
@@ -581,6 +589,16 @@ pub(crate) fn map_failure_v1(
                 PreparationErrorV1::DeadlineExceeded => {
                     (ErrorCode::Timeout, 504, "request deadline exceeded")
                 }
+                // `PreparationErrorV1` is `#[non_exhaustive]` since South 0.7.0
+                // (host-prelude D2/D4; includes `UNSUPPORTED_AUTH_SHAPE`). The
+                // community adapter only declares the two frozen auth arms, so a
+                // newer variant is structurally unreachable here; fail closed as
+                // an internal preparation rejection rather than panicking.
+                _ => (
+                    ErrorCode::Internal,
+                    500,
+                    "provider request preparation rejected",
+                ),
             },
             south_core::ProviderCallErrorV1::Transport(error) => match error {
                 south_contracts::TransportErrorV1::ClientBuildFailed => (
