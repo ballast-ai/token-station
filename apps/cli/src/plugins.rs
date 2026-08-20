@@ -63,7 +63,7 @@ fn newly_reserved_official_dialect(dialect: &str) -> bool {
 /// The builtin tier's raw material. With the feature off the slice is empty
 /// and everything below degrades to pure directory discovery.
 mod builtin {
-    pub(super) struct Package {
+    pub(crate) struct Package {
         pub manifest_source: &'static str,
         pub wasm: &'static [u8],
     }
@@ -94,6 +94,23 @@ mod builtin {
 
     #[cfg(not(feature = "builtin-plugins"))]
     pub(super) const PACKAGES: &[Package] = &[];
+
+    /// The v2 south component tier (S4). Deliberately not part of
+    /// [`PACKAGES`]: its manifest is the south v2 schema, which the v1
+    /// registry must not try to parse. The south loader runs its own gates.
+    #[cfg(feature = "builtin-plugins")]
+    pub(crate) const SOUTH_OPENAI_COMPATIBLE_V2: Option<Package> = Some(Package {
+        manifest_source: include_str!(env!("TS_BUILTIN_PROVIDER_OPENAI_V2_MANIFEST")),
+        wasm: include_bytes!(env!("TS_BUILTIN_PROVIDER_OPENAI_V2_WASM")),
+    });
+
+    #[cfg(not(feature = "builtin-plugins"))]
+    pub(crate) const SOUTH_OPENAI_COMPATIBLE_V2: Option<Package> = None;
+}
+
+/// The embedded v2 south component package, when the builtin tier carries it.
+pub(crate) fn builtin_south_openai_compatible_v2() -> Option<(&'static str, &'static [u8])> {
+    builtin::SOUTH_OPENAI_COMPATIBLE_V2.map(|package| (package.manifest_source, package.wasm))
 }
 
 /// Where a package's bytes come from. The loader runs the same gates on both.

@@ -2154,8 +2154,8 @@ dependencies = [
 
 [[package]]
 name = "south-contracts"
-version = "0.7.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=381820f95ea1874ee451fe0d48b221d5784b118b#381820f95ea1874ee451fe0d48b221d5784b118b"
+version = "0.10.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=13e4567a22bcfb43aef2bf44fd870c811210c8f1#13e4567a22bcfb43aef2bf44fd870c811210c8f1"
 dependencies = [
  "bytes",
  "http",
@@ -2167,8 +2167,8 @@ dependencies = [
 
 [[package]]
 name = "south-core"
-version = "0.7.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=381820f95ea1874ee451fe0d48b221d5784b118b#381820f95ea1874ee451fe0d48b221d5784b118b"
+version = "0.10.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=13e4567a22bcfb43aef2bf44fd870c811210c8f1#13e4567a22bcfb43aef2bf44fd870c811210c8f1"
 dependencies = [
  "http",
  "south-contracts",
@@ -2180,17 +2180,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "south-provider-api"
+version = "0.10.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=13e4567a22bcfb43aef2bf44fd870c811210c8f1#13e4567a22bcfb43aef2bf44fd870c811210c8f1"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "south-provider-conformance"
-version = "0.7.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=381820f95ea1874ee451fe0d48b221d5784b118b#381820f95ea1874ee451fe0d48b221d5784b118b"
+version = "0.10.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=13e4567a22bcfb43aef2bf44fd870c811210c8f1#13e4567a22bcfb43aef2bf44fd870c811210c8f1"
 dependencies = [
  "south-contracts",
 ]
 
 [[package]]
+name = "south-provider-runtime"
+version = "0.10.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=13e4567a22bcfb43aef2bf44fd870c811210c8f1#13e4567a22bcfb43aef2bf44fd870c811210c8f1"
+dependencies = [
+ "serde_json",
+ "south-provider-api",
+ "thiserror 2.0.18",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "south-testkit"
-version = "0.7.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=381820f95ea1874ee451fe0d48b221d5784b118b#381820f95ea1874ee451fe0d48b221d5784b118b"
+version = "0.10.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=13e4567a22bcfb43aef2bf44fd870c811210c8f1#13e4567a22bcfb43aef2bf44fd870c811210c8f1"
 dependencies = [
  "bytes",
  "http",
@@ -2203,8 +2224,8 @@ dependencies = [
 
 [[package]]
 name = "south-transport-reqwest"
-version = "0.7.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=381820f95ea1874ee451fe0d48b221d5784b118b#381820f95ea1874ee451fe0d48b221d5784b118b"
+version = "0.10.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=13e4567a22bcfb43aef2bf44fd870c811210c8f1#13e4567a22bcfb43aef2bf44fd870c811210c8f1"
 dependencies = [
  "bytes",
  "http",
@@ -2392,7 +2413,9 @@ dependencies = [
  "sha2 0.10.9",
  "south-contracts",
  "south-core",
+ "south-provider-api",
  "south-provider-conformance",
+ "south-provider-runtime",
  "south-testkit",
  "south-transport-reqwest",
  "token-station-conformance",

@@ -22,14 +22,31 @@ fn main() {
         .canonicalize()
         .expect("TOKEN_STATION_PLUGINS_DIST must name an existing directory");
 
-    for (stem, package) in [
-        ("AGENT_OPENAI", "agent-openai"),
-        ("AGENT_ANTHROPIC", "agent-anthropic"),
-        ("AGENT_OPENAI_RESPONSES", "agent-openai-responses"),
-        ("AGENT_GEMINI", "agent-gemini"),
-        ("PROVIDER_OPENAI", "provider-openai-compatible"),
+    for (stem, package, wasm_file) in [
+        ("AGENT_OPENAI", "agent-openai", "adapter.wasm"),
+        ("AGENT_ANTHROPIC", "agent-anthropic", "adapter.wasm"),
+        (
+            "AGENT_OPENAI_RESPONSES",
+            "agent-openai-responses",
+            "adapter.wasm",
+        ),
+        ("AGENT_GEMINI", "agent-gemini", "adapter.wasm"),
+        (
+            "PROVIDER_OPENAI",
+            "provider-openai-compatible",
+            "adapter.wasm",
+        ),
+        // The v2 south component: staged by the same scripts, embedded by the
+        // same mechanism, but consumed by the south loader, never the v1
+        // registry (its manifest is the v2 schema). It lives under the
+        // `south/` subtree so the v1 directory scan never reads its manifest.
+        (
+            "PROVIDER_OPENAI_V2",
+            "south/provider-openai-compatible-v2",
+            "component.wasm",
+        ),
     ] {
-        for (kind, file) in [("MANIFEST", "manifest.json"), ("WASM", "adapter.wasm")] {
+        for (kind, file) in [("MANIFEST", "manifest.json"), ("WASM", wasm_file)] {
             let path = dist.join(package).join(file);
             assert!(
                 path.is_file(),

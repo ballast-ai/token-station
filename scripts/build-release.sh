@@ -53,6 +53,11 @@ for plugin in agent-openai agent-anthropic agent-openai-responses agent-gemini p
     && cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target wasm32-wasip2)
 done
 
+# The v2 south component: same toolchain, staged under the south loader's
+# file name, never entering the v1 registry.
+(cd "plugins/official/provider-openai-compatible-v2" \
+  && cargo "+${RELEASE_TOOLCHAIN}" build --locked --release --target wasm32-wasip2)
+
 NAME="token-station-cli-${VERSION}-${TARGET}"
 STAGE="dist/${NAME}"
 rm -rf "$STAGE"
@@ -65,6 +70,12 @@ for plugin in agent-openai agent-anthropic agent-openai-responses agent-gemini p
      "$STAGE/plugins-dist/${plugin}/adapter.wasm"
   cp -R "plugins/official/${plugin}/fixtures" "$STAGE/plugins-dist/${plugin}/fixtures"
 done
+
+mkdir -p "$STAGE/plugins-dist/south/provider-openai-compatible-v2"
+cp "plugins/official/provider-openai-compatible-v2/manifest.json" \
+   "$STAGE/plugins-dist/south/provider-openai-compatible-v2/"
+cp "plugins/official/provider-openai-compatible-v2/target/wasm32-wasip2/release/provider_openai_compatible_v2.wasm" \
+   "$STAGE/plugins-dist/south/provider-openai-compatible-v2/component.wasm"
 
 echo "building token-station-cli ${VERSION} for ${TARGET} (rust ${RELEASE_TOOLCHAIN})" >&2
 TOKEN_STATION_PLUGINS_DIST="${ROOT}/${STAGE}/plugins-dist" \

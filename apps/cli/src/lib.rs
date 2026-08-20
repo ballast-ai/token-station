@@ -38,6 +38,7 @@ pub mod request_context;
 pub mod scaffold;
 pub mod secrets;
 pub mod server;
+pub mod south_component;
 pub(crate) mod south_provider_call;
 mod sse;
 pub mod stats;
