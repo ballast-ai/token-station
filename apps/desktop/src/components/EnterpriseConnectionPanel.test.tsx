@@ -28,7 +28,7 @@ beforeEach(() => {
 });
 
 describe("EnterpriseConnectionPanel", () => {
-  it("shows the endpoint connection steps and current available endpoints", () => {
+  it("shows the connection steps without repeating connected endpoints", () => {
     render(
       <EnterpriseConnectionPanel
         providers={[connectedProvider]}
@@ -41,8 +41,8 @@ describe("EnterpriseConnectionPanel", () => {
     for (const step of ["验证接口", "选择模型", "完成接入"]) {
       expect(flow).toHaveTextContent(step);
     }
-    expect(screen.getByRole("region", { name: "可用端点" })).toHaveTextContent("enterprise-api-example-com");
-    expect(screen.getByRole("region", { name: "可用端点" })).toHaveTextContent("1 个模型");
+    expect(screen.queryByRole("region", { name: "可用端点" })).toBeNull();
+    expect(screen.queryByText("enterprise-api-example-com")).toBeNull();
     expect(screen.queryByText("额度优先")).toBeNull();
     expect(screen.queryByRole("button", { name: "保存并应用" })).toBeNull();
   });

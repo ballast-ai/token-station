@@ -6,7 +6,6 @@ import {
   type StateView,
 } from "../api";
 import { humanizeAppError } from "../errors";
-import { ProviderIcon } from "../brandIcons";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { Input } from "./ui/input";
 
@@ -165,8 +164,8 @@ export default function EnterpriseConnectionPanel({
       setSelectedModels([]);
       setVerifiedConnection(null);
       setMessage(copy(
-        `${resolvedName} connected. Add its models to the enterprise route below.`,
-        `${resolvedName} 已接入，请在下方选择参与企业路由的模型。`,
+        `${resolvedName} connected. Its models are available in global and Agent routing.`,
+        `${resolvedName} 已接入，可在全局路由或 Agent 路由中使用其模型。`,
       ));
     } catch (caught) {
       setMessage(humanizeAppError(caught, language));
@@ -283,41 +282,6 @@ export default function EnterpriseConnectionPanel({
         "The API key is stored in the local credential store and is not shown again.",
         "API Key 仅保存到本机凭据存储，接入后不会再次显示。",
       )}</p>
-
-      <div className="enterprise-endpoints" role="region" aria-label={copy("Available endpoints", "可用端点")}>
-        <div className="enterprise-endpoints-head">
-          <div>
-            <strong>{copy("Available endpoints", "可用端点")}</strong>
-            <span>{copy(
-              "Connected endpoints can be selected from the normal route editors.",
-              "已接入端点可直接在全局路由或 Agent 路由中选择。",
-            )}</span>
-          </div>
-          <small>{copy(`${providers.length} connected`, `已接入 ${providers.length} 个`)}</small>
-        </div>
-        {providers.length > 0 ? (
-          <div className="enterprise-endpoint-list">
-            {providers.slice(0, 5).map((provider) => (
-              <article key={provider.name}>
-                <ProviderIcon id={provider.brand_id} label={provider.name} size={28} />
-                <div>
-                  <strong>{provider.name}</strong>
-                  <code title={provider.base_url}>{provider.base_url}</code>
-                </div>
-                <small>{copy(
-                  `${provider.models.length} ${provider.models.length === 1 ? "model" : "models"}`,
-                  `${provider.models.length} 个模型`,
-                )}</small>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <div className="enterprise-endpoints-empty">
-            <strong>{copy("No endpoint connected", "还没有可用端点")}</strong>
-            <span>{copy("Enter a URL and API key above to start.", "在上方填写 URL 和 API Key 开始接入。")}</span>
-          </div>
-        )}
-      </div>
     </section>
   );
 }
