@@ -38,10 +38,11 @@ fn main() {
         ),
         // The v2 south component: staged by the same scripts, embedded by the
         // same mechanism, but consumed by the south loader, never the v1
-        // registry (its manifest is the v2 schema).
+        // registry (its manifest is the v2 schema). It lives under the
+        // `south/` subtree so the v1 directory scan never reads its manifest.
         (
             "PROVIDER_OPENAI_V2",
-            "provider-openai-compatible-v2",
+            "south/provider-openai-compatible-v2",
             "component.wasm",
         ),
     ] {
