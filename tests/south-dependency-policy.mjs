@@ -6,19 +6,23 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const southRepository = "https://github.com/ballast-ai/token-station-south.git";
-const southRevision = "381820f95ea1874ee451fe0d48b221d5784b118b";
-const southVersion = "0.7.0";
+const southRevision = "13e4567a22bcfb43aef2bf44fd870c811210c8f1";
+const southVersion = "0.10.0";
 const southSource = `git+${southRepository}?rev=${southRevision}#${southRevision}`;
 const expectedSouthPackages = new Set([
   "south-contracts",
   "south-core",
+  "south-provider-api",
   "south-provider-conformance",
+  "south-provider-runtime",
   "south-testkit",
   "south-transport-reqwest",
 ]);
 const expectedDesktopSouthPackages = new Set([
   "south-contracts",
   "south-core",
+  "south-provider-api",
+  "south-provider-runtime",
   "south-transport-reqwest",
 ]);
 
@@ -198,11 +202,13 @@ assert.deepEqual(
   new Map([
     ["south-contracts", "normal"],
     ["south-core", "normal"],
+    ["south-provider-api", "normal"],
     ["south-provider-conformance", "dev"],
+    ["south-provider-runtime", "normal"],
     ["south-testkit", "dev"],
     ["south-transport-reqwest", "normal"],
   ]),
-  "the CLI must keep conformance/testkit test-only and only three South runtime dependencies",
+  "the CLI must keep conformance/testkit test-only and only five South runtime dependencies",
 );
 
 const policyPackageIds = new Set([

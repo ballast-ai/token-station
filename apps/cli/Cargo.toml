@@ -20,6 +20,8 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 south-contracts = { workspace = true }
 south-core = { workspace = true }
+south-provider-api = { workspace = true }
+south-provider-runtime = { workspace = true }
 south-transport-reqwest = { workspace = true }
 token-station-conformance = { path = "../../crates/conformance" }
 token-station-metrics = { path = "../../crates/metrics" }

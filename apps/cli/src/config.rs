@@ -498,6 +498,31 @@ pub enum ProviderCallEngine {
     SouthV1BufferedStreamingHeaderAuth,
 }
 
+/// How the v2 south component participates in this upstream's translation.
+///
+/// `Shadow` is the default and the migration's first stage: every eligible
+/// translation runs through both the v1 provider plugin and the v2 south
+/// component, byte-compares the outputs, logs any divergence, and always
+/// serves the v1 result. Pure translation — the shadow never sends a request.
+/// `Primary` is the explicit opt-in that serves the v2 result; `Off` restores
+/// the v1-only path. Upstreams whose dialect the official v2 component does
+/// not cover stay on v1 regardless of this setting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SouthComponentMode {
+    Off,
+    #[default]
+    Shadow,
+    Primary,
+}
+
+impl SouthComponentMode {
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Shadow)
+    }
+}
+
 impl ProviderCallEngine {
     #[must_use]
     pub const fn is_legacy(&self) -> bool {
@@ -554,6 +579,11 @@ pub struct UpstreamConfig {
     /// remain on the legacy path before credentials or network I/O begin.
     #[serde(default, skip_serializing_if = "ProviderCallEngine::is_legacy")]
     pub provider_call: ProviderCallEngine,
+    /// The v2 south component's role in this upstream's translation
+    /// (S4 migration). Defaults to shadow comparison; see
+    /// [`SouthComponentMode`].
+    #[serde(default, skip_serializing_if = "SouthComponentMode::is_default")]
+    pub south_component: SouthComponentMode,
     /// What this upstream serves. The provider adapter may refine it; with no
     /// network of its own it cannot replace it.
     pub models: Vec<ModelCapability>,

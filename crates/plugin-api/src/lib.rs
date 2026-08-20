@@ -15,6 +15,15 @@
 //! surface at run time rather than at build time; the conformance suite is what
 //! catches those.
 //!
+//! # Southbound transition (S4)
+//!
+//! The provider (southbound) half of this ABI is superseded by the
+//! South-owned `token-station:adapter@2.0.0` component ABI. Per the ruled
+//! transition policy, `provider-adapter-v1` remains supported for two minor
+//! releases of this repository from the S4 landing, receiving security fixes
+//! only, and is removed in the third. The agent (northbound) half is
+//! unaffected.
+//!
 //! # Versioning
 //!
 //! [`AdapterKind::expected_api_version`] returns the WIT `world` an adapter must

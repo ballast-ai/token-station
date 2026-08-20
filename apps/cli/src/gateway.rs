@@ -1232,7 +1232,9 @@ fn record_actual_attempt_target(
 struct Upstream {
     config: ProviderConfig,
     auth_config: Option<AuthConfig>,
-    plugin: Arc<ProviderPlugin>,
+    /// The translation engine: the v1 plugin, the v2 south component, or the
+    /// shadow decorator running both (S4). Chosen per upstream at assembly.
+    plugin: Arc<dyn ProviderAdapter + Send + Sync>,
     /// The wire dialect, carried host-side only (never enters a WASM plugin).
     /// `AnthropicNative` diverts an anthropic-messages request onto the verbatim
     /// passthrough path instead of the Canonical-IR provider render.
@@ -1278,6 +1280,157 @@ impl SouthProviderRuntime {
             }
         })
     }
+}
+
+/// Everything the v2 south component lane needs, built once per gateway.
+struct SouthComponentSupport {
+    adapter: Arc<crate::south_component::SouthComponentAdapter>,
+    report: Arc<crate::south_component::ShadowReport>,
+    dialects: std::collections::BTreeSet<String>,
+}
+
+impl SouthComponentSupport {
+    fn covers(&self, dialect: &str) -> bool {
+        self.dialects.contains(dialect)
+    }
+}
+
+/// Resolves every configured upstream: its translation engine (v1, shadow,
+/// or v2 per the S4 mode), its fenced provider config, and its refined model
+/// catalog.
+#[allow(
+    clippy::type_complexity,
+    reason = "one call site; the pair is unpacked immediately"
+)]
+fn assemble_upstreams(
+    config: &ClientConfig,
+    provider_plugins: &BTreeMap<String, Arc<ProviderPlugin>>,
+    south_component: Option<&SouthComponentSupport>,
+    registry: &crate::plugins::PluginRegistry,
+) -> Result<
+    (
+        BTreeMap<String, Upstream>,
+        Vec<(UpstreamModel, token_station_protocol::ModelCapability)>,
+    ),
+    String,
+> {
+    let mut upstreams = BTreeMap::new();
+    let mut catalog = Vec::new();
+
+    for (name, entry) in &config.upstreams {
+        // `.clone()` rather than `Arc::clone`: the unsized coercion to the
+        // trait-object parameter must not flow backward into the map's
+        // concrete value type.
+        let plugin = south_component_engine(
+            provider_plugins
+                .get(&entry.provider)
+                .expect("the caller loaded a plugin for every configured dialect")
+                .clone(),
+            south_component,
+            entry.south_component,
+            &entry.provider,
+        );
+
+        let mut provider_config =
+            ProviderConfig::new(entry.provider.clone(), entry.base_url.clone());
+        provider_config.auth = entry.auth.as_ref().map(|auth| SecretRef::new(&auth.slot));
+        provider_config.models = entry
+            .models
+            .iter()
+            .cloned()
+            .map(project_capability_evidence_for_v1)
+            .collect();
+
+        // The adapter may refine the declared catalog; it cannot invent one,
+        // having no network. This is `model_capabilities`' production call.
+        let capabilities: Vec<_> = plugin
+            .model_capabilities(&provider_config)
+            .map_err(|error| format!("upstream `{name}` capabilities: {}", error.message))?
+            .into_iter()
+            .map(|capability| restore_configured_capability_evidence(capability, &entry.models))
+            .collect();
+
+        let reference = token_station_router_core::UpstreamRef::new(name.clone())
+            .expect("config validation checked the shape");
+        for capability in &capabilities {
+            catalog.push((
+                UpstreamModel::new(reference.clone(), capability.model.clone()),
+                capability.clone(),
+            ));
+        }
+
+        upstreams.insert(
+            name.clone(),
+            Upstream {
+                config: provider_config,
+                auth_config: entry.auth.clone(),
+                plugin,
+                dialect: entry.api_dialect,
+                provider_call: entry.provider_call,
+                south_package_approved: registry
+                    .provider_package_south_approved(&entry.provider, "provider-openai-compatible"),
+            },
+        );
+    }
+
+    Ok((upstreams, catalog))
+}
+
+/// S4: routes one upstream's translation through the v2 south component per
+/// its configured mode. Uncovered dialects and hosts without the v2 package
+/// stay on v1 regardless.
+fn south_component_engine(
+    plugin: Arc<dyn ProviderAdapter + Send + Sync>,
+    support: Option<&SouthComponentSupport>,
+    mode: crate::config::SouthComponentMode,
+    dialect: &str,
+) -> Arc<dyn ProviderAdapter + Send + Sync> {
+    match (support, mode) {
+        (Some(support), crate::config::SouthComponentMode::Shadow) if support.covers(dialect) => {
+            Arc::new(crate::south_component::ShadowedProviderAdapter::new(
+                plugin,
+                Arc::clone(&support.adapter),
+                Arc::clone(&support.report),
+                dialect,
+            ))
+        }
+        (Some(support), crate::config::SouthComponentMode::Primary) if support.covers(dialect) => {
+            Arc::clone(&support.adapter) as _
+        }
+        _ => plugin,
+    }
+}
+
+/// Loads the embedded v2 component when any upstream asks for it. A host
+/// without the builtin package degrades to the v1-only path with a notice —
+/// shadow is an observation lane, never a startup failure.
+fn south_component_support(config: &ClientConfig) -> Result<Option<SouthComponentSupport>, String> {
+    let wanted = config
+        .upstreams
+        .values()
+        .any(|entry| entry.south_component != crate::config::SouthComponentMode::Off);
+    if !wanted {
+        return Ok(None);
+    }
+    let Some((manifest_source, wasm)) = crate::plugins::builtin_south_openai_compatible_v2() else {
+        eprintln!(
+            "south component package unavailable in this build; upstream translation stays on \
+             the v1 plugin path"
+        );
+        return Ok(None);
+    };
+    let runtime = crate::south_component::south_component_runtime()?;
+    let adapter = crate::south_component::SouthComponentAdapter::load_embedded(
+        &runtime,
+        manifest_source,
+        wasm,
+    )?;
+    let dialects = adapter.dialects().into_iter().collect();
+    Ok(Some(SouthComponentSupport {
+        adapter: Arc::new(adapter),
+        report: Arc::new(crate::south_component::ShadowReport::default()),
+        dialects,
+    }))
 }
 
 fn south_runtime_for(
@@ -2142,59 +2295,14 @@ impl Gateway {
 
         let south_runtime = south_runtime_for(config, provider_runtime)?;
 
-        let mut upstreams = BTreeMap::new();
-        let mut catalog = Vec::new();
+        let south_component = south_component_support(config)?;
 
-        for (name, entry) in &config.upstreams {
-            let plugin = Arc::clone(
-                provider_plugins
-                    .get(&entry.provider)
-                    .expect("the loop above loaded a plugin for every configured dialect"),
-            );
-
-            let mut provider_config =
-                ProviderConfig::new(entry.provider.clone(), entry.base_url.clone());
-            provider_config.auth = entry.auth.as_ref().map(|auth| SecretRef::new(&auth.slot));
-            provider_config.models = entry
-                .models
-                .iter()
-                .cloned()
-                .map(project_capability_evidence_for_v1)
-                .collect();
-
-            // The adapter may refine the declared catalog; it cannot invent one,
-            // having no network. This is `model_capabilities`' production call.
-            let capabilities: Vec<_> = plugin
-                .model_capabilities(&provider_config)
-                .map_err(|error| format!("upstream `{name}` capabilities: {}", error.message))?
-                .into_iter()
-                .map(|capability| restore_configured_capability_evidence(capability, &entry.models))
-                .collect();
-
-            let reference = token_station_router_core::UpstreamRef::new(name.clone())
-                .expect("config validation checked the shape");
-            for capability in &capabilities {
-                catalog.push((
-                    UpstreamModel::new(reference.clone(), capability.model.clone()),
-                    capability.clone(),
-                ));
-            }
-
-            upstreams.insert(
-                name.clone(),
-                Upstream {
-                    config: provider_config,
-                    auth_config: entry.auth.clone(),
-                    plugin,
-                    dialect: entry.api_dialect,
-                    provider_call: entry.provider_call,
-                    south_package_approved: registry.provider_package_south_approved(
-                        &entry.provider,
-                        "provider-openai-compatible",
-                    ),
-                },
-            );
-        }
+        let (upstreams, catalog) = assemble_upstreams(
+            config,
+            &provider_plugins,
+            south_component.as_ref(),
+            &registry,
+        )?;
 
         let (local_upstreams, free_upstreams) = Self::upstream_boundary_sets(config);
 
