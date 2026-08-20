@@ -5,14 +5,14 @@ name: Platform Gates
 # ci.yml runs the full clippy / test / fmt / doc / audit / MSRV / frontend set
 # on Linux at 1x billing and catches the large majority of problems. Windows is
 # 2x and macOS is 10x, and what they run here overlaps heavily with that Linux
-# layer, so putting them on every pull request buys almost no extra coverage
-# while multiplying both the bill and the wait. They run once a change reaches
-# develop / main instead.
+# layer, so running them on non-main integration branches buys almost no extra
+# coverage while multiplying both the bill and the wait. Ordinary branch
+# validation therefore runs only after a change reaches main. Published releases
+# and manual release validation keep their explicit entry points below.
 on:
   push:
     branches:
       - main
-      - develop
     paths-ignore:
       - '**.md'
       - 'LICENSE'
