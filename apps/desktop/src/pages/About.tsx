@@ -109,7 +109,11 @@ function AboutContent({
     setErr("");
     setUpdate(null);
     try {
-      setUpdate(await checkDesktopUpdate());
+      const next = await checkDesktopUpdate();
+      setUpdate(next);
+      if (next.status === "update_available" && next.version) {
+        setConfirmOpen(true);
+      }
     } catch (e) {
       showError(humanizeAppError(e, language), "desktop-update-check");
     } finally {

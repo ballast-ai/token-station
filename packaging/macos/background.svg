@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="640" viewBox="0 0 1180 640" role="img" aria-label="Token Station macOS installer background">
+  <defs>
+    <linearGradient id="outer" x1="0" y1="0" x2="1180" y2="640" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E9E4DD"/>
+      <stop offset="0.48" stop-color="#F0ECE6"/>
+      <stop offset="1" stop-color="#DED8D0"/>
+    </linearGradient>
+    <linearGradient id="surface" x1="88" y1="54" x2="1094" y2="600" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F8F5F0"/>
+      <stop offset="0.48" stop-color="#F2EEE8"/>
+      <stop offset="1" stop-color="#EAE5DE"/>
+    </linearGradient>
+    <radialGradient id="warmth" cx="0" cy="0" r="1" gradientTransform="translate(591 307) rotate(90) scale(310 560)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F6B18B" stop-opacity="0.14"/>
+      <stop offset="0.42" stop-color="#F6B18B" stop-opacity="0.045"/>
+      <stop offset="1" stop-color="#F6B18B" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="arrowLine" x1="446" y1="285" x2="734" y2="285" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E87C48" stop-opacity="0.42"/>
+      <stop offset="0.18" stop-color="#E87C48"/>
+      <stop offset="0.82" stop-color="#E87C48"/>
+      <stop offset="1" stop-color="#E87C48" stop-opacity="0.42"/>
+    </linearGradient>
+    <filter id="windowShadow" x="-12%" y="-18%" width="124%" height="142%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="26" flood-color="#6D6257" flood-opacity="0.17"/>
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#6D6257" flood-opacity="0.1"/>
+    </filter>
+    <filter id="arrowGlow" x="-20%" y="-400%" width="140%" height="900%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="5"/>
+    </filter>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.58" numOctaves="2" seed="31" stitchTiles="stitch"/>
+      <feColorMatrix values="0.45 0 0 0 0.28
+                             0 0.42 0 0 0.25
+                             0 0 0.39 0 0.22
+                             0 0 0 0.022 0"/>
+    </filter>
+  </defs>
+
+  <rect width="1180" height="640" fill="url(#outer)"/>
+  <g filter="url(#windowShadow)">
+    <rect x="14" y="12" width="1152" height="612" rx="42" fill="url(#surface)"/>
+    <rect x="14.5" y="12.5" width="1151" height="611" rx="41.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.7"/>
+  </g>
+  <rect x="15" y="13" width="1150" height="610" rx="41" fill="url(#warmth)"/>
+
+  <!-- The real Finder App icons occupy (300,285) and (880,285). -->
+  <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC', 'Helvetica Neue', sans-serif" text-anchor="middle">
+    <text x="590" y="199" fill="#5F5A54" font-size="16" font-weight="600" letter-spacing="0.15">Drag to Applications</text>
+  </g>
+
+  <!-- A precise, low-profile direction cue between the two real Finder icons. -->
+  <path d="M447 285H718" stroke="#E87845" stroke-opacity="0.14" stroke-width="9" stroke-linecap="round" filter="url(#arrowGlow)"/>
+  <path d="M447 285H720" stroke="url(#arrowLine)" stroke-width="3" stroke-linecap="round"/>
+  <path d="M707 273L723 285L707 297" fill="none" stroke="#E87845" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="447" cy="285" r="3" fill="#E87845" fill-opacity="0.62"/>
+
+  <!-- The real README icon occupies (590,500). Keep its 128 px icon area clear. -->
+  <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Helvetica Neue', sans-serif" text-anchor="middle">
+    <text x="590" y="375" fill="#6B655E" font-size="13.5" font-weight="560">Open README if macOS blocks launch</text>
+  </g>
+  <path d="M548 410H632" stroke="#B9B0A7" stroke-width="1" stroke-linecap="round"/>
+  <circle cx="590" cy="410" r="2.5" fill="#E87845"/>
+
+  <rect x="15" y="13" width="1150" height="610" rx="41" filter="url(#grain)" opacity="0.72"/>
+</svg>

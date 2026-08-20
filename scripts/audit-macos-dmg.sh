@@ -41,6 +41,7 @@ fi
   exit 1
 }
 
+readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly expected_bundle_id="com.tokenstation.desktop"
 mount_point=$(mktemp -d "${TMPDIR:-/tmp}/token-station-dmg-audit.XXXXXX")
 readonly mount_point
@@ -63,50 +64,58 @@ mounted=true
 
 readonly mounted_app="$mount_point/token-station.app"
 readonly mounted_applications="$mount_point/Applications"
-readonly mounted_readme="$mount_point/installation-guide.md"
-readonly mounted_troubleshooting_guide="$mount_point/macos-troubleshooting.md"
-readonly mounted_installer="$mount_point/安装 Token Station.command"
-readonly mounted_unsigned_test_marker="$mount_point/未签名测试版.txt"
-readonly mounted_provenance="$mount_point/构建来源.txt"
-readonly mounted_terminal_command="$mount_point/终端启动命令.txt"
+readonly mounted_readme="$mount_point/README.md"
+readonly mounted_background_dir="$mount_point/.background"
+readonly mounted_background="$mounted_background_dir/background.png"
+readonly mounted_metadata="$mount_point/.release-metadata"
+readonly mounted_provenance="$mounted_metadata/provenance.txt"
+readonly mounted_warning="$mounted_metadata/unsigned-test-warning.txt"
+readonly mounted_release_metadata="$mounted_metadata/release.txt"
 readonly mounted_ds_store="$mount_point/.DS_Store"
-readonly finder_layout_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/packaging/macos/configure-dmg-layout.applescript"
+readonly finder_layout_script="$root/packaging/macos/configure-dmg-layout.applescript"
 
-for required_path in "$mounted_app" "$mounted_applications" "$mounted_readme" "$mounted_troubleshooting_guide" "$mounted_installer"; do
+for required_path in "$mounted_app" "$mounted_applications" "$mounted_readme" "$mounted_background" "$mounted_metadata"; do
   [[ -e "$required_path" || -L "$required_path" ]] || {
-    echo "DMG 缺少根目录入口：$(basename "$required_path")" >&2
+    echo "DMG 缺少必要内容：${required_path#"$mount_point/"}" >&2
     exit 1
   }
 done
+
+actual_entries=$(/usr/bin/find "$mount_point" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort)
+expected_entries=$(printf '%s\n' token-station.app Applications README.md .background .release-metadata .DS_Store | LC_ALL=C sort)
+[[ "$actual_entries" == "$expected_entries" ]] || {
+  echo "DMG 根目录包含多余或缺失的文件。" >&2
+  printf '期望：\n%s\n实际：\n%s\n' "$expected_entries" "$actual_entries" >&2
+  exit 1
+}
+
+background_entries=$(/usr/bin/find "$mounted_background_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort)
+[[ "$background_entries" == "background.png" ]] || {
+  echo "DMG 的隐藏背景目录包含多余或缺失的文件。" >&2
+  exit 1
+}
+background_width=$(sips -g pixelWidth "$mounted_background" 2>/dev/null | awk '/pixelWidth:/ {print $2}')
+background_height=$(sips -g pixelHeight "$mounted_background" 2>/dev/null | awk '/pixelHeight:/ {print $2}')
+[[ "$background_width" == "1180" && "$background_height" == "640" ]] || {
+  echo "DMG 背景尺寸不是 1180×640。" >&2
+  exit 1
+}
+[[ "$(shasum -a 256 "$mounted_background" | awk '{print $1}')" == "$(shasum -a 256 "$root/packaging/macos/background.png" | awk '{print $1}')" ]] || {
+  echo "DMG 背景与已验收资源不一致。" >&2
+  exit 1
+}
+
 if [[ "$unsigned_test" == "true" ]]; then
-  for required_path in "$mounted_unsigned_test_marker" "$mounted_provenance" "$mounted_terminal_command"; do
-    [[ -f "$required_path" ]] || {
-      echo "测试 DMG 缺少根目录警告或构建来源：$(basename "$required_path")" >&2
-      exit 1
-    }
-  done
-  actual_entries=$(/usr/bin/find "$mount_point" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort)
-  expected_entries=$(printf '%s\n' \
-    token-station.app \
-    Applications \
-    'installation-guide.md' \
-    'macos-troubleshooting.md' \
-    '安装 Token Station.command' \
-    '未签名测试版.txt' \
-    '构建来源.txt' \
-    '终端启动命令.txt' \
-    .DS_Store | LC_ALL=C sort)
-  [[ "$actual_entries" == "$expected_entries" ]] || {
-    echo "测试 DMG 根目录包含多余或缺失的文件。" >&2
-    echo "期望文件：" >&2
-    printf '%s\n' "$expected_entries" >&2
-    echo "实际文件：" >&2
-    printf '%s\n' "$actual_entries" >&2
+  expected_metadata_entries=$(printf '%s\n' provenance.txt unsigned-test-warning.txt | LC_ALL=C sort)
+  actual_metadata_entries=$(/usr/bin/find "$mounted_metadata" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort)
+  [[ "$actual_metadata_entries" == "$expected_metadata_entries" ]] || {
+    echo "测试 DMG 的隐藏发布元数据不完整。" >&2
     exit 1
   }
 else
-  [[ ! -e "$mounted_terminal_command" ]] || {
-    echo "正式 DMG 不得包含终端 Gatekeeper 绕过入口。" >&2
+  actual_metadata_entries=$(/usr/bin/find "$mounted_metadata" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort)
+  [[ "$actual_metadata_entries" == "release.txt" ]] || {
+    echo "正式 DMG 的隐藏发布元数据不完整。" >&2
     exit 1
   }
 fi
@@ -115,53 +124,30 @@ fi
   echo "DMG 没有保存 Finder 拖拽布局，打开后会变成散乱的自动排列。" >&2
   exit 1
 }
-finder_layout_lines=( \
-  "$([[ "$unsigned_test" == "true" ]] && echo 'window=1080x600' || echo 'window=920x600')" \
+expected_finder_layout=$(printf '%s\n' \
+  'window=1180x640' \
   'view=icon view' \
   'icon_size=128' \
   'arrangement=not arranged' \
   'toolbar=false' \
   'statusbar=false' \
   'pathbar=false' \
-  'sidebar_width=0')
-if [[ "$unsigned_test" == "true" ]]; then
-  finder_layout_lines+=( \
-    'app=360,170' \
-    'applications=720,170' \
-    'installer=100,440' \
-    'readme=280,440' \
-    'troubleshooting=460,440' \
-    'terminal_command=640,440' \
-    'provenance=820,440' \
-    'warning=1000,440')
-else
-  finder_layout_lines+=( \
-    'app=310,170' \
-    'applications=610,170' \
-    'installer=100,440' \
-    'readme=280,440' \
-    'troubleshooting=460,440')
-fi
-expected_finder_layout=$(printf '%s\n' "${finder_layout_lines[@]}")
+  'sidebar_width=0' \
+  'app=300,285' \
+  'applications=880,285' \
+  'readme=590,500')
 if ! actual_finder_layout=$(osascript "$finder_layout_script" inspect "$mount_point"); then
   echo "Finder 无法读取 DMG 的拖拽布局，请确认 Finder 可以正常启动后重试。" >&2
   exit 1
 fi
 [[ "$actual_finder_layout" == "$expected_finder_layout" ]] || {
   echo "DMG 的 Finder 布局与发布模板不一致。" >&2
-  echo "期望布局：" >&2
-  printf '%s\n' "$expected_finder_layout" >&2
-  echo "实际布局：" >&2
-  printf '%s\n' "$actual_finder_layout" >&2
+  printf '期望：\n%s\n实际：\n%s\n' "$expected_finder_layout" "$actual_finder_layout" >&2
   exit 1
 }
 
 [[ -L "$mounted_applications" && "$(readlink "$mounted_applications")" == "/Applications" ]] || {
   echo "DMG 中的 Applications 不是指向 /Applications 的快捷方式。" >&2
-  exit 1
-}
-[[ -x "$mounted_installer" ]] || {
-  echo "DMG 中的安装 Token Station.command 不能双击执行。" >&2
   exit 1
 }
 
@@ -190,6 +176,7 @@ codesign --verify --deep --strict "$mounted_app" || {
   echo "DMG 中的 App 代码签名验证失败。" >&2
   exit 1
 }
+
 if [[ "$unsigned_test" == "true" ]]; then
   signature_details=$(codesign -d --verbose=4 "$mounted_app" 2>&1 || true)
   [[ "$signature_details" == *"Signature=adhoc"* ]] || {
@@ -208,16 +195,12 @@ if [[ "$unsigned_test" == "true" ]]; then
     echo "测试 App 意外通过 Gatekeeper，不能声称它是已知的未公证测试包。" >&2
     exit 1
   fi
-  for phrase in '未签名' '未经 Apple 公证' '仅供测试' 'SHA-256'; do
+  for phrase in 'Install Token Station' 'unsigned and not notarized' 'SHA-256' 'Terminal hides password characters'; do
     /usr/bin/grep -Fq "$phrase" "$mounted_readme" || {
-      echo "测试 DMG 安装说明缺少风险提示：$phrase" >&2
+      echo "README 缺少必要说明：$phrase" >&2
       exit 1
     }
   done
-  /usr/bin/grep -Fq '未签名、未经 Apple 公证' "$mounted_installer" || {
-    echo "测试 DMG 安装脚本没有显示未签名、未公证提示。" >&2
-    exit 1
-  }
   /usr/bin/grep -Eq '^App source tag: v[0-9]+\.[0-9]+\.[0-9]+$' "$mounted_provenance" || {
     echo "构建来源缺少 App 标签。" >&2
     exit 1
@@ -226,31 +209,15 @@ if [[ "$unsigned_test" == "true" ]]; then
     echo "构建来源没有记录完整提交。" >&2
     exit 1
   }
-  readonly expected_terminal_command='sudo xattr -dr com.apple.quarantine "/Applications/token-station.app" && open "/Applications/token-station.app"'
-  actual_terminal_command=$(/usr/bin/grep '^sudo ' "$mounted_terminal_command" || true)
-  [[ "$actual_terminal_command" == "$expected_terminal_command" ]] || {
-    echo "终端启动命令不是只针对 canonical Token Station 的预期命令。" >&2
-    exit 1
-  }
-  [[ "$(/usr/bin/grep -c '^sudo ' "$mounted_terminal_command")" == "1" ]] || {
-    echo "终端启动说明必须只提供一条可执行命令。" >&2
-    exit 1
-  }
-  for phrase in 'Token Station 官方 GitHub Releases' '先把 token-station.app 拖到 Applications' '管理员密码' '不会显示字符'; do
-    /usr/bin/grep -Fq "$phrase" "$mounted_terminal_command" || {
-      echo "终端启动说明缺少安全提示：$phrase" >&2
-      exit 1
-    }
-  done
-  if /usr/bin/grep -Eq 'spctl[[:space:]]+--master-disable' "$mounted_terminal_command"; then
-    echo "终端启动说明包含关闭 Gatekeeper 的命令。" >&2
-    exit 1
-  fi
-  /bin/zsh -n -c "$actual_terminal_command" || {
-    echo "终端启动命令无法通过 zsh 语法检查。" >&2
+  /usr/bin/grep -Fq '未签名、未经 Apple 公证' "$mounted_warning" || {
+    echo "测试 DMG 的隐藏风险标记不完整。" >&2
     exit 1
   }
 else
+  /usr/bin/grep -Fq "Release version: $expected_version" "$mounted_release_metadata" || {
+    echo "正式 DMG 的隐藏版本元数据不正确。" >&2
+    exit 1
+  }
   codesign --verify --strict "$dmg_path" || {
     echo "DMG 自身的代码签名验证失败。" >&2
     exit 1
@@ -273,18 +240,24 @@ else
   }
 fi
 
-gatekeeper_documents=("$mounted_readme" "$mounted_troubleshooting_guide" "$mounted_installer")
-if [[ "$unsigned_test" == "true" ]]; then
-  gatekeeper_documents+=("$mounted_terminal_command")
-fi
-if /usr/bin/grep -Eq 'spctl[[:space:]]+--master-disable' "${gatekeeper_documents[@]}"; then
-  echo "安装说明或脚本包含关闭 Gatekeeper 的命令。" >&2
-  exit 1
-fi
-/usr/bin/grep -Fq 'xattr -dr com.apple.quarantine "$DEST_APP"' "$mounted_installer" || {
-  echo "安装脚本没有把 quarantine 清理限制在 Token Station。" >&2
+readonly expected_terminal_command='sudo xattr -dr com.apple.quarantine "/Applications/token-station.app" && open "/Applications/token-station.app"'
+actual_terminal_command=$(/usr/bin/grep '^sudo ' "$mounted_readme" || true)
+[[ "$actual_terminal_command" == "$expected_terminal_command" ]] || {
+  echo "README 的终端兜底不是只针对 canonical Token Station 的预期命令。" >&2
   exit 1
 }
+[[ "$(/usr/bin/grep -c '^sudo ' "$mounted_readme")" == "1" ]] || {
+  echo "README 必须只提供一条可执行命令。" >&2
+  exit 1
+}
+/bin/zsh -n -c "$actual_terminal_command" || {
+  echo "README 的终端兜底命令无法通过 zsh 语法检查。" >&2
+  exit 1
+}
+if /usr/bin/grep -Eq 'spctl[[:space:]]+--master-disable' "$mounted_readme"; then
+  echo "README 包含关闭 Gatekeeper 的命令。" >&2
+  exit 1
+fi
 
 if [[ "$unsigned_test" == "true" ]]; then
   echo "macOS unsigned test DMG mounted artifact: PASS ($(basename "$dmg_path"))"

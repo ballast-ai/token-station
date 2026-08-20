@@ -18,8 +18,8 @@ for (const workflow of [
   assert.match(contents, /needs\.release-mode\.outputs\.enabled == 'true'/);
 }
 
-const notes = read("docs/release/v1.1.3.md");
-assert.match(notes, /源码 Release/);
+const notes = read("docs/release/v1.2.0.md");
+assert.match(notes, /源码预发布版/);
 assert.match(notes, /UNSIGNED-UNNOTARIZED\.dmg/);
 assert.match(notes, /未签名[^\u3002]*未公证[^\u3002]*仅供测试/);
 assert.match(notes, /不提供[^\u3002]*CLI 二进制/);

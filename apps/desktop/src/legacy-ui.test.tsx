@@ -412,6 +412,7 @@ describe("settings and update actions", () => {
     const first = render(<About desktopVersion="0.1.0" coreVersion="0.2.0" />);
     await user.click(screen.getByRole("button", { name: "检查更新" }));
     expect(await screen.findByText(/发现新版本/)).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "取消" }));
     await user.click(screen.getByRole("button", { name: "复制链接" }));
     expect(writeText).toHaveBeenCalledWith("https://example.invalid/release");
     first.unmount();

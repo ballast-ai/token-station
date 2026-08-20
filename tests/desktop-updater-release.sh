@@ -47,6 +47,22 @@ if ("windows-x86_64" in manifest.platforms) {
 }
 NODE
 
+node "$root/scripts/create-desktop-update-manifest.mjs" \
+  --version 1.2.3 \
+  --pub-date 2026-08-06T08:00:00Z \
+  --release-base-url https://github.com/ballast-ai/token-station/releases/download/v1.2.3 \
+  --output "$test_dir/preview-latest.json" \
+  --platforms darwin-aarch64 \
+  --artifact "darwin-aarch64=$test_dir/payloads/token-station-darwin-aarch64.tar.gz"
+
+node - "$test_dir/preview-latest.json" <<'NODE'
+const fs = require("node:fs");
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (JSON.stringify(Object.keys(manifest.platforms)) !== JSON.stringify(["darwin-aarch64"])) {
+  throw new Error("preview manifest must contain only the selected Apple Silicon platform");
+}
+NODE
+
 if node "$root/scripts/create-desktop-update-manifest.mjs" \
   --version 1.2.3 \
   --pub-date 2026-08-06T08:00:00Z \

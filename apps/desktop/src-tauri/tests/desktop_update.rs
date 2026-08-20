@@ -4,9 +4,28 @@ use std::sync::{
 };
 
 use token_station_desktop_lib::desktop_update::{
-    check_with, install_with, DesktopUpdateOperation, DesktopUpdatePrepareFailure,
-    DesktopUpdateStatus, DesktopUpdateView, WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE,
+    check_with, install_with, update_manifest_endpoint, DesktopUpdateOperation,
+    DesktopUpdatePrepareFailure, DesktopUpdateStatus, DesktopUpdateView, STABLE_LATEST_JSON_URL,
+    WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE,
 };
+
+#[test]
+fn updater_manifest_endpoint_accepts_only_an_https_override() {
+    let preview =
+        "https://github.com/ballast-ai/token-station/releases/download/updater-preview/latest.json";
+
+    assert_eq!(update_manifest_endpoint(None), Ok(STABLE_LATEST_JSON_URL));
+    assert_eq!(
+        update_manifest_endpoint(Some("  ")),
+        Ok(STABLE_LATEST_JSON_URL)
+    );
+    assert_eq!(update_manifest_endpoint(Some(preview)), Ok(preview));
+    assert!(
+        update_manifest_endpoint(Some("http://example.test/latest.json"))
+            .unwrap_err()
+            .contains("HTTPS")
+    );
+}
 
 #[test]
 fn concurrent_update_operations_are_rejected_until_the_first_finishes() {

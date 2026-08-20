@@ -7,8 +7,9 @@ use std::sync::{
 use serde::Serialize;
 
 pub const RELEASES_URL: &str = "https://github.com/ballast-ai/token-station/releases";
-pub const LATEST_JSON_URL: &str =
+pub const STABLE_LATEST_JSON_URL: &str =
     "https://github.com/ballast-ai/token-station/releases/latest/download/latest.json";
+const CONFIGURED_LATEST_JSON_URL: Option<&str> = option_env!("TOKEN_STATION_UPDATER_ENDPOINT");
 pub const PROGRESS_EVENT: &str = "desktop-update-progress";
 pub const WINDOWS_FIRST_RELEASE_UNSUPPORTED_MESSAGE: &str =
     "Windows 首版暂不支持应用内更新；请从正式发布页手动下载安装。";
@@ -21,6 +22,23 @@ pub const OFFICIAL_PUBLIC_KEY: &str = match option_env!("TOKEN_STATION_UPDATER_P
     Some(public_key) => public_key,
     None => "",
 };
+
+pub fn update_manifest_endpoint(configured: Option<&str>) -> Result<&str, String> {
+    let endpoint = configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(STABLE_LATEST_JSON_URL);
+    if !endpoint.starts_with("https://") {
+        return Err(
+            "update_manifest_endpoint_invalid: updater manifest endpoint must use HTTPS".to_owned(),
+        );
+    }
+    Ok(endpoint)
+}
+
+pub fn official_update_manifest_endpoint() -> Result<&'static str, String> {
+    update_manifest_endpoint(CONFIGURED_LATEST_JSON_URL)
+}
 
 #[derive(Clone, Default)]
 pub struct DesktopUpdateOperation {

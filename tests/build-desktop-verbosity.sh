@@ -75,6 +75,8 @@ SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$@" >"$TEST_STATE/npm-args"
+printf '%s' "${TAURI_SIGNING_PRIVATE_KEY:-<unset>}" >"$TEST_STATE/tauri-private-key"
+printf '%s\t%s\n' "$*" "${TAURI_SIGNING_PRIVATE_KEY:-<unset>}" >>"$TEST_STATE/tauri-calls"
 previous=""
 for argument in "$@"; do
   if [[ "$previous" == "--config" && -f "$argument" ]]; then
@@ -129,6 +131,19 @@ run_macos_production_build() {
     TOKEN_STATION_UPDATER_PUBKEY="untrusted comment: minisign public key\nRWTESTPUBLICKEY" \
     TAURI_SIGNING_PRIVATE_KEY="untrusted comment: temporary CI key\nRWTESTPRIVATEKEY" \
     "$repo/scripts/build-desktop.sh" --production --target aarch64-apple-darwin
+}
+
+run_macos_preview_build() {
+  env \
+    PATH="$fake_bin:/usr/bin:/bin" \
+    CARGO_HOME="$fixture/cargo-home" \
+    RUSTFLAGS= \
+    TEST_RUST_SYSROOT="$fixture/rust-sysroot" \
+    TEST_STATE="$state" \
+    TOKEN_STATION_UPDATER_ENDPOINT="https://github.com/ballast-ai/token-station/releases/download/updater-preview/latest.json" \
+    TOKEN_STATION_UPDATER_PUBKEY="untrusted comment: minisign public key\nRWTESTPUBLICKEY" \
+    TAURI_SIGNING_PRIVATE_KEY="untrusted comment: preview signing key\nRWTESTPRIVATEKEY" \
+    "$repo/scripts/build-desktop.sh" --preview --target aarch64-apple-darwin
 }
 
 test_normal_build_does_not_enable_verbose_tauri_logs() {
@@ -195,6 +210,42 @@ test_production_build_creates_updater_payloads_without_publishing_the_temporary_
     || fail "macOS production build passed the wrong DMG architecture"
 }
 
+test_preview_build_creates_signed_updater_payload_and_unsigned_test_dmg() {
+  make_fixture preview-updater-artifacts Darwin
+  run_macos_preview_build >/dev/null
+  grep -Fq '"createUpdaterArtifacts":true' "$state/tauri-configs" \
+    || fail "macOS preview build did not enable updater artifacts"
+  grep -Fq '"pubkey":"untrusted comment: minisign public key\nRWTESTPUBLICKEY"' "$state/tauri-configs" \
+    || fail "macOS preview build did not provide the updater public key to the Tauri bundler"
+  grep -Fxq -- '--unsigned-test' "$state/dmg-package-args" \
+    || fail "macOS preview build did not use the unsigned test DMG policy"
+  grep -Fxq -- '--architecture' "$state/dmg-package-args" \
+    || fail "macOS preview build did not pass a DMG architecture"
+  grep -Fxq -- 'aarch64' "$state/dmg-package-args" \
+    || fail "macOS preview build passed the wrong DMG architecture"
+  [[ "$(sed -n '1p' "$state/tauri-calls")" == *"build"*"<unset>" ]] \
+    || fail "preview compilation exposed the updater private key"
+  [[ "$(sed -n '2p' "$state/tauri-calls")" == *"bundle"*"RWTESTPRIVATEKEY" ]] \
+    || fail "preview bundle phase did not receive the updater private key"
+}
+
+test_preview_build_loads_the_private_key_path_for_the_tauri_bundler() {
+  make_fixture preview-updater-key-path Darwin
+  printf '%s\n' 'encrypted-preview-key' >"$fixture/updater.key"
+  env \
+    PATH="$fake_bin:/usr/bin:/bin" \
+    CARGO_HOME="$fixture/cargo-home" \
+    RUSTFLAGS= \
+    TEST_RUST_SYSROOT="$fixture/rust-sysroot" \
+    TEST_STATE="$state" \
+    TOKEN_STATION_UPDATER_ENDPOINT="https://github.com/ballast-ai/token-station/releases/download/updater-preview/latest.json" \
+    TOKEN_STATION_UPDATER_PUBKEY="untrusted comment: minisign public key\nRWTESTPUBLICKEY" \
+    TAURI_SIGNING_PRIVATE_KEY_PATH="$fixture/updater.key" \
+    "$repo/scripts/build-desktop.sh" --preview --target aarch64-apple-darwin >/dev/null
+  [[ "$(cat "$state/tauri-private-key")" == "encrypted-preview-key" ]] \
+    || fail "preview build did not load the updater private key path for the Tauri bundler"
+}
+
 test_windows_production_build_does_not_require_updater_artifacts_for_the_first_release() {
   make_fixture windows-no-updater
   run_windows_production_build >/dev/null
@@ -233,6 +284,8 @@ test_test_version_build_enables_two_verbose_levels
 test_all_rust_builds_remap_private_host_paths
 test_production_build_requires_the_official_updater_public_key
 test_production_build_creates_updater_payloads_without_publishing_the_temporary_signature
+test_preview_build_creates_signed_updater_payload_and_unsigned_test_dmg
+test_preview_build_loads_the_private_key_path_for_the_tauri_bundler
 test_windows_production_build_does_not_require_updater_artifacts_for_the_first_release
 test_production_build_rejects_private_material_in_the_public_key_variable
 

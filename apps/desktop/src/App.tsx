@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addKeyword,
+  addManagedEnterpriseRoute,
   applyHomeRouteToAllAgents,
   deleteProfile,
   getCachedAgentViews,
@@ -25,6 +26,7 @@ import {
   setQuotaPlan,
   setRoutingMode,
   setTier,
+  verifyEnterpriseRoute,
   type AgentRouteView,
   type AgentUiMetadataView,
   type AgentView,
@@ -699,6 +701,7 @@ function StationApp() {
     action: () => Promise<StateView>,
     ok?: string,
     recordApplyTarget = false,
+    reloadOnFailure = false,
   ): Promise<boolean> => {
     if (busyRef.current) return false;
     busyRef.current = true;
@@ -715,6 +718,13 @@ function StationApp() {
       return true;
     } catch (caught) {
       if (recordApplyTarget) pendingApplyRevisionRef.current = null;
+      if (reloadOnFailure) {
+        try {
+          showState(await getState());
+        } catch {
+          // Keep the operation error authoritative. Normal polling can retry the reload.
+        }
+      }
       showError(errorText(caught), recordApplyTarget ? "config-apply" : undefined);
       return false;
     } finally {
@@ -1015,12 +1025,22 @@ function StationApp() {
                     )
                   : copy("All Agents now follow global routing", "全部 Agent 已恢复跟随全局路由"),
               )}
-              onEnterpriseProviderConnected={(next, providerName, models) => {
-                showState(next, copy(
-                  `${providerName} connected with ${models.length} models.`,
-                  `${providerName} 已接入 ${models.length} 个模型。`,
-                ));
-              }}
+              onEnterpriseConnect={(connection) => run(async () => {
+                  const discovery = await verifyEnterpriseRoute(
+                    connection.name,
+                    connection.baseUrl,
+                    connection.apiKey,
+                  );
+                  if (discovery.source !== "live") {
+                    throw new Error(discovery.warning ?? "Live credential verification failed");
+                  }
+                  await addManagedEnterpriseRoute(
+                    connection.name,
+                    connection.baseUrl,
+                    connection.apiKey,
+                  );
+                  return serveStart();
+                }, undefined, true, true)}
               embedded
               scope={view === "enterprise-routing" ? "enterprise" : "global"}
             />

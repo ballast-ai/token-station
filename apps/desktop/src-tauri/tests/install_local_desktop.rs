@@ -35,8 +35,14 @@ fn local_desktop_build_only_requests_the_app_bundle() {
     let build_script = std::fs::read_to_string(project_root.join("scripts/build-desktop.sh"))
         .expect("desktop build script must be readable");
 
+    let local_case = build_script
+        .split("local)")
+        .nth(1)
+        .and_then(|tail| tail.split(";;").next())
+        .expect("build script must define the local mode");
     assert!(
-        build_script.contains("tauri_args+=(--bundles app)"),
+        local_case.contains("macos_bundle_kind=\"app\"")
+            && build_script.contains("tauri_args+=(--bundles \"$macos_bundle_kind\")"),
         "local desktop installation must not depend on release-only DMG packaging"
     );
 }

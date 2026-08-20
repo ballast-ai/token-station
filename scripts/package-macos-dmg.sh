@@ -46,13 +46,9 @@ done
 
 readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly expected_bundle_id="com.tokenstation.desktop"
-readonly installer="$root/packaging/macos/安装 Token Station.command"
-readonly readme="$root/packaging/macos/installation-guide.md"
-readonly troubleshooting_guide="$root/macos-troubleshooting.md"
-readonly unsigned_terminal_command="$root/packaging/macos/终端启动命令.txt"
-readonly formal_finder_layout_template="$root/packaging/macos/dmg-layout.dsstore.base64"
-readonly unsigned_finder_layout_template="$root/packaging/macos/dmg-layout-unsigned.dsstore.base64"
-finder_layout_template="$formal_finder_layout_template"
+readonly readme="$root/packaging/macos/README.md"
+readonly background="$root/packaging/macos/background.png"
+readonly finder_layout_script="$root/packaging/macos/configure-dmg-layout.applescript"
 packaging_source_commit=""
 tag_commit=""
 
@@ -84,7 +80,6 @@ if [[ "$unsigned_test" == "true" ]]; then
     echo "当前打包提交中的 App 源码已与 v${version} 标签分叉，已停止。" >&2
     exit 1
   fi
-  finder_layout_template="$unsigned_finder_layout_template"
 else
   [[ -n "$signing_identity" && "$signing_identity" != "-" ]] || {
     echo "正式 DMG 必须提供非 ad-hoc 签名身份。" >&2
@@ -135,36 +130,36 @@ temporary_checksum="$publish_stage/$(basename "$checksum_path")"
 readonly temporary_checksum
 writable_dmg="$publish_stage/token-station-layout-writable.dmg"
 readonly writable_dmg
+layout_mount=$(mktemp -d "${TMPDIR:-/tmp}/token-station-dmg-layout.XXXXXX")
+readonly layout_mount
+layout_mounted=false
 cleanup() {
+  if [[ "$layout_mounted" == "true" ]]; then
+    osascript "$finder_layout_script" close "$layout_mount" >/dev/null 2>&1 || true
+    hdiutil detach "$layout_mount" >/dev/null 2>&1 || true
+  fi
   /bin/rm -rf -- "$stage"
   /bin/rm -rf -- "$publish_stage"
+  /bin/rmdir "$layout_mount" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 /usr/bin/ditto "$app_path" "$stage/token-station.app"
 ln -s /Applications "$stage/Applications"
-/bin/cp "$readme" "$stage/installation-guide.md"
-/bin/cp "$troubleshooting_guide" "$stage/macos-troubleshooting.md"
-/bin/cp "$installer" "$stage/安装 Token Station.command"
-/bin/chmod 755 "$stage/安装 Token Station.command"
+/bin/cp "$readme" "$stage/README.md"
+/bin/mkdir "$stage/.background"
+/bin/cp "$background" "$stage/.background/background.png"
+/bin/mkdir "$stage/.release-metadata"
 if [[ "$unsigned_test" == "true" ]]; then
-  /bin/cp "$unsigned_terminal_command" "$stage/终端启动命令.txt"
   printf '%s\n' \
-    '警告：此 DMG 未签名、未经 Apple 公证，仅供测试。安装前请先阅读“installation-guide.md”并核对 SHA-256。' \
-    >"$stage/未签名测试版.txt"
+    '警告：此 DMG 未签名、未经 Apple 公证，仅供测试。安装前请阅读 README，并核对 SHA-256。' \
+    >"$stage/.release-metadata/unsigned-test-warning.txt"
   printf 'App source tag: v%s\nApp source commit: %s\nPackaging source commit: %s\n' \
     "$version" "$app_source_commit" "$packaging_source_commit" \
-    >"$stage/构建来源.txt"
+    >"$stage/.release-metadata/provenance.txt"
+else
+  printf 'Release version: %s\n' "$version" >"$stage/.release-metadata/release.txt"
 fi
-
-if ! /usr/bin/base64 -D -i "$finder_layout_template" -o "$stage/.DS_Store"; then
-  echo "DMG 拖拽布局模板无法读取，请重新检出完整源码后重试。" >&2
-  exit 1
-fi
-[[ -s "$stage/.DS_Store" ]] || {
-  echo "DMG 拖拽布局模板是空文件，已停止生成发布文件。" >&2
-  exit 1
-}
 
 hdiutil create \
   -volname "$volume_name" \
@@ -172,6 +167,25 @@ hdiutil create \
   -fs HFS+ \
   -format UDRW \
   "$writable_dmg"
+
+hdiutil attach "$writable_dmg" -readwrite -nobrowse -mountpoint "$layout_mount" >/dev/null
+layout_mounted=true
+osascript "$finder_layout_script" configure "$layout_mount" >/dev/null
+sleep 2
+[[ -s "$layout_mount/.DS_Store" ]] || {
+  echo "Finder 没有保存 DMG 拖拽布局，已停止生成发布文件。" >&2
+  exit 1
+}
+# Finder can create these only while configuring a writable image. They are not release content.
+if [[ -d "$layout_mount/.fseventsd" ]]; then
+  /usr/bin/find "$layout_mount/.fseventsd" -depth -delete
+fi
+if [[ -d "$layout_mount/.Trashes" ]]; then
+  /usr/bin/find "$layout_mount/.Trashes" -depth -delete
+fi
+osascript "$finder_layout_script" close "$layout_mount" >/dev/null
+hdiutil detach "$layout_mount" >/dev/null
+layout_mounted=false
 
 hdiutil convert \
   "$writable_dmg" \

@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   addProvider,
+  addManagedEnterpriseRoute,
   addFreeProvider,
   setLocalRouting,
   applyHomeRouteToAllAgents,
@@ -43,6 +44,7 @@ import {
   ensureServeRunning,
   serveStart,
   serveStop,
+  verifyEnterpriseRoute,
   setAdminEndpoint,
   setSettings,
   setAgentRouteMode,
@@ -296,6 +298,11 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
       credentialReference: null,
       providerDialect: "openai-compatible",
     }],
+    ["add managed enterprise route", () => addManagedEnterpriseRoute("enterprise_main", "https://enterprise.example.com/v1", "k"), "add_managed_enterprise_route", {
+      name: "enterprise_main",
+      baseUrl: "https://enterprise.example.com/v1",
+      apiKey: "k",
+    }],
     ["list free provider presets", () => listFreeProviderPresets(), "list_free_provider_presets", undefined],
     ["list public provider models", () => listPublicProviderModels(["openai", "qwen"]), "list_public_provider_models", { providerIds: ["openai", "qwen"] }],
     ["validate and add free provider", () => addFreeProvider("nvidia", ["openai/gpt-oss-120b"], "nvapi", true), "add_free_provider", { presetId: "nvidia", selectedModels: ["openai/gpt-oss-120b"], apiKey: "nvapi", guardConfirmed: true }],
@@ -358,6 +365,7 @@ describe("desktop API mapping and read-only HTTP data plane", () => {
     ["remove provider", () => removeProvider("p"), "remove_provider", { name: "p" }],
     ["restore provider", () => restoreProvider("p"), "restore_provider", { name: "p" }],
     ["discover models", () => discoverProviderModels("p", "https://p/v1", null), "discover_provider_models", { name: "p", baseUrl: "https://p/v1", apiKey: null }],
+    ["verify enterprise route", () => verifyEnterpriseRoute("enterprise", "https://p/v1", "k"), "verify_enterprise_route", { name: "enterprise", baseUrl: "https://p/v1", apiKey: "k" }],
     ["test provider", () => testProvider("p"), "test_provider", { name: "p" }],
     ["declare model vision", () => setProviderModelVision("p", "m", true), "set_provider_model_vision", { name: "p", model: "m", supported: true }],
     ["set model limits", () => setProviderModelLimits("p", "m", 128000, 32768), "set_provider_model_limits", { name: "p", model: "m", contextWindow: 128000, maxOutputTokens: 32768 }],
