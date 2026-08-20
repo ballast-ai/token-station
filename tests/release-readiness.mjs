@@ -23,18 +23,18 @@ function run(args, releaseKey) {
   });
 }
 
-const sourceBuild = run(["--version", "1.1.3"]);
+const sourceBuild = run(["--version", "1.2.0"]);
 assert.equal(sourceBuild.status, 0, sourceBuild.stderr);
 
-const missingKey = run(["--version", "1.1.3", "--formal"]);
+const missingKey = run(["--version", "1.2.0", "--formal"]);
 assert.equal(missingKey.status, 1);
 assert.match(missingKey.stderr, /CLI 发布公钥/);
 
-const invalidKey = run(["--version", "1.1.3", "--formal"], "not-a-key");
+const invalidKey = run(["--version", "1.2.0", "--formal"], "not-a-key");
 assert.equal(invalidKey.status, 1);
 assert.match(invalidKey.stderr, /64 位小写十六进制/);
 
-const validKey = run(["--version", "1.1.3", "--formal"], "ab".repeat(32));
+const validKey = run(["--version", "1.2.0", "--formal"], "ab".repeat(32));
 assert.equal(validKey.status, 0, validKey.stderr);
 
 console.log("formal release public key gate: PASS");

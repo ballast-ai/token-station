@@ -214,6 +214,7 @@ jobs:
       - run: node scripts/check-ci-msi-trigger-policy.mjs
       - run: node scripts/check-ci-scaffold-prefetch.mjs
       - run: node scripts/check-macos-dmg-packaging.mjs
+      - run: node tests/localized-macos-installation.mjs
       - run: node tests/release-assets.mjs
       - run: node tests/formal-release-finalization.mjs
       # Prime the locked Rust dependencies before the test enters its offline signing phase.
