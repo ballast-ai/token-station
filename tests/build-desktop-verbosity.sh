@@ -214,6 +214,8 @@ test_preview_build_creates_signed_updater_payload_and_unsigned_test_dmg() {
   run_macos_preview_build >/dev/null
   grep -Fq '"createUpdaterArtifacts":true' "$state/tauri-configs" \
     || fail "macOS preview build did not enable updater artifacts"
+  grep -Fq '"pubkey":"untrusted comment: minisign public key\nRWTESTPUBLICKEY"' "$state/tauri-configs" \
+    || fail "macOS preview build did not provide the updater public key to the Tauri bundler"
   grep -Fxq -- '--unsigned-test' "$state/dmg-package-args" \
     || fail "macOS preview build did not use the unsigned test DMG policy"
   grep -Fxq -- '--architecture' "$state/dmg-package-args" \

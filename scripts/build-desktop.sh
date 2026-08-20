@@ -153,7 +153,9 @@ cargo test --locked \
 tauri_args=(build --ci --features bundled-plugins)
 if [[ "$enable_updater_artifacts" == "true" ]]; then
   updater_artifact_config="$stage/updater-artifacts.json"
-  printf '%s\n' '{"bundle":{"createUpdaterArtifacts":true}}' >"$updater_artifact_config"
+  printf '%s\n' \
+    "{\"plugins\":{\"updater\":{\"pubkey\":\"$TOKEN_STATION_UPDATER_PUBKEY\"}},\"bundle\":{\"createUpdaterArtifacts\":true}}" \
+    >"$updater_artifact_config"
   tauri_args+=(--config "$updater_artifact_config")
 fi
 if [[ -n "$test_version" ]]; then
