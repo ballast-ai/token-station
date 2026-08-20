@@ -11444,10 +11444,11 @@ mod tests {
     #[test]
     fn managed_enterprise_route_rollback_restores_present_and_absent_routing() {
         let previous_router = json!({ "routing_mode": "quota-first" });
-        let previous_routing = Some(json!({
+        let expected_routing = json!({
             "mode": "quota-first",
             "direct_target": { "upstream": "original", "model": "stable" }
-        }));
+        });
+        let previous_routing = Some(expected_routing.clone());
         let mut draft = json!({
             "router": { "routing_mode": "tiered" },
             "routing": { "mode": "direct" }
@@ -11455,7 +11456,7 @@ mod tests {
 
         restore_managed_route_mutation(&mut draft, &previous_routing, &previous_router);
         assert_eq!(draft["router"], previous_router);
-        assert_eq!(draft["routing"], previous_routing.unwrap());
+        assert_eq!(draft["routing"], expected_routing);
 
         let mut draft_without_previous_routing = json!({
             "router": { "routing_mode": "tiered" },
