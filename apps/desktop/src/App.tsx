@@ -1015,11 +1015,16 @@ function StationApp() {
                     )
                   : copy("All Agents now follow global routing", "全部 Agent 已恢复跟随全局路由"),
               )}
-              onEnterpriseProviderConnected={(next, providerName, models) => {
-                showState(next, copy(
-                  `${providerName} connected with ${models.length} models.`,
-                  `${providerName} 已接入 ${models.length} 个模型。`,
-                ));
+              onEnterpriseProviderConnected={(next, providerName) => {
+                showState(next);
+                return run(async () => {
+                  await setRoutingMode("direct");
+                  await setDirectRoute(providerName, "auto");
+                  return serveStart();
+                }, copy(
+                  `${providerName} is active. Models and policy are managed by the enterprise service.`,
+                  `${providerName} 已启用，模型与策略由企业服务管理。`,
+                ), true);
               }}
               embedded
               scope={view === "enterprise-routing" ? "enterprise" : "global"}

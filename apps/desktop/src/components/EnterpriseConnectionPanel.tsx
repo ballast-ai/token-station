@@ -9,16 +9,12 @@ import { humanizeAppError } from "../errors";
 import { useLocalizedCopy } from "./LanguageProvider";
 import { Input } from "./ui/input";
 
+const MANAGED_ROUTE_ALIAS = "auto";
+
 interface EnterpriseConnectionPanelProps {
   providers: ProviderView[];
   busy: boolean;
-  onConnected: (state: StateView, providerName: string, models: string[]) => void;
-}
-
-interface VerifiedConnection {
-  name: string;
-  baseUrl: string;
-  apiKey: string;
+  onConnected: (state: StateView, providerName: string) => boolean | Promise<boolean>;
 }
 
 function endpointProviderName(baseUrl: string, providers: ProviderView[]): string {
@@ -45,12 +41,8 @@ export default function EnterpriseConnectionPanel({
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [accountName, setAccountName] = useState("");
-  const [models, setModels] = useState<string[]>([]);
-  const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState("");
-  const [completedName, setCompletedName] = useState("");
-  const [verifiedConnection, setVerifiedConnection] = useState<VerifiedConnection | null>(null);
   const suggestedName = useMemo(
     () => endpointProviderName(baseUrl.trim(), providers),
     [baseUrl, providers],
@@ -60,15 +52,9 @@ export default function EnterpriseConnectionPanel({
     accountName.trim() && providers.some((provider) => provider.name === accountName.trim()),
   );
 
-  const invalidateVerification = () => {
-    setModels([]);
-    setSelectedModels([]);
-    setVerifiedConnection(null);
-    setCompletedName("");
-    setMessage("");
-  };
+  const clearMessage = () => setMessage("");
 
-  const verify = async () => {
+  const connect = async () => {
     if (!baseUrl.trim() || !apiKey.trim()) {
       setMessage(copy("Enter the Base URL and API key.", "请填写 Base URL 和 API Key。"));
       return;
@@ -79,10 +65,6 @@ export default function EnterpriseConnectionPanel({
     }
     setWorking(true);
     setMessage("");
-    setCompletedName("");
-    setModels([]);
-    setSelectedModels([]);
-    setVerifiedConnection(null);
     try {
       const connection = {
         name: resolvedName,
@@ -103,70 +85,29 @@ export default function EnterpriseConnectionPanel({
             ));
         return;
       }
-      setModels(discovery.models);
-      setVerifiedConnection(discovery.models.length > 0 ? connection : null);
-      setMessage(discovery.models.length > 0
-        ? copy(
-            `Connection verified. Choose the models to connect.`,
-            "连接验证成功，请选择要接入的模型。",
-          )
-        : copy("Connection succeeded, but no models were returned.", "连接成功，但接口未返回可用模型。"));
-    } catch (caught) {
-      setMessage(humanizeAppError(caught, language));
-    } finally {
-      setWorking(false);
-    }
-  };
-
-  const connect = async () => {
-    const currentConnection = {
-      name: resolvedName,
-      baseUrl: baseUrl.trim(),
-      apiKey: apiKey.trim(),
-    };
-    if (
-      !verifiedConnection
-      || verifiedConnection.name !== currentConnection.name
-      || verifiedConnection.baseUrl !== currentConnection.baseUrl
-      || verifiedConnection.apiKey !== currentConnection.apiKey
-    ) {
-      invalidateVerification();
-      setMessage(copy(
-        "Connection details changed. Verify the endpoint again.",
-        "连接信息已变更，请重新验证端点。",
-      ));
-      return;
-    }
-    if (selectedModels.length === 0) {
-      setMessage(copy("Select at least one model.", "请至少选择一个模型。"));
-      return;
-    }
-    setWorking(true);
-    setMessage("");
-    try {
       const next = await addProvider(
-        resolvedName,
-        baseUrl.trim(),
-        selectedModels,
-        apiKey.trim(),
+        connection.name,
+        connection.baseUrl,
+        [MANAGED_ROUTE_ALIAS],
+        connection.apiKey,
         false,
         "store",
         null,
         "openai-compatible",
       );
-      const connectedModels = [...selectedModels];
-      onConnected(next, resolvedName, connectedModels);
-      setCompletedName(resolvedName);
+      const applied = await onConnected(next, connection.name);
       setApiKey("");
       setBaseUrl("");
       setAccountName("");
-      setModels([]);
-      setSelectedModels([]);
-      setVerifiedConnection(null);
-      setMessage(copy(
-        `${resolvedName} connected. Its models are available in global and Agent routing.`,
-        `${resolvedName} 已接入，可在全局路由或 Agent 路由中使用其模型。`,
-      ));
+      setMessage(applied
+        ? copy(
+            "Enterprise route connected and applied. Models and policy remain managed by the enterprise service.",
+            "企业路由已接入并应用，模型与策略继续由企业服务管理。",
+          )
+        : copy(
+            "The endpoint is connected, but route apply failed. Retry Save and apply in Global routing.",
+            "端点已接入，但路由应用失败。请到全局路由重试保存并应用。",
+          ));
     } catch (caught) {
       setMessage(humanizeAppError(caught, language));
     } finally {
@@ -176,34 +117,19 @@ export default function EnterpriseConnectionPanel({
 
   const disabled = busy || working;
   return (
-    <section className="panel enterprise-connection-panel" aria-label={copy("Enterprise endpoint connection", "企业端点接入")}>
+    <section className="panel enterprise-connection-panel" aria-label={copy("Enterprise route connection", "企业路由接入")}>
       <div className="panel-head split-heading">
         <div>
-          <h2>{copy("Connect enterprise account", "接入企业账户")}</h2>
+          <h2>{copy("Connect enterprise route", "接入企业路由")}</h2>
           <p className="sub">{copy(
-            "Verify an OpenAI-compatible endpoint, then choose which returned models to connect.",
-            "填写企业接口地址与密钥，验证成功后选择要接入的模型。",
+            "Enter the managed endpoint and credential. Models and routing policy stay on the enterprise service.",
+            "填写企业路由地址与凭据；模型和路由策略均由企业服务管理。",
           )}</p>
         </div>
-        <button className="btn" type="button" disabled={disabled} onClick={() => void verify()}>
-          {working && models.length === 0 ? copy("Verifying…", "验证中…") : copy("Verify connection", "验证连接")}
+        <button className="btn primary" type="button" disabled={disabled} onClick={() => void connect()}>
+          {working ? copy("Connecting…", "接入中…") : copy("Connect and use", "接入并使用")}
         </button>
       </div>
-
-      <ol className="enterprise-connection-steps" aria-label={copy("Connection flow", "接入流程")}>
-        <li data-state={models.length > 0 || completedName ? "complete" : "active"}>
-          <span>1</span>
-          <div><strong>{copy("Verify endpoint", "验证接口")}</strong><small>{copy("Check URL and credentials", "检查地址与凭据")}</small></div>
-        </li>
-        <li data-state={completedName ? "complete" : models.length > 0 ? "active" : "upcoming"}>
-          <span>2</span>
-          <div><strong>{copy("Choose models", "选择模型")}</strong><small>{copy("Connect only what you need", "只接入需要的模型")}</small></div>
-        </li>
-        <li data-state={completedName ? "complete" : "upcoming"}>
-          <span>3</span>
-          <div><strong>{copy("Finish connection", "完成接入")}</strong><small>{copy("Store the key locally", "密钥保存到本机")}</small></div>
-        </li>
-      </ol>
 
       <div className="enterprise-credential-grid">
         <label>
@@ -216,7 +142,7 @@ export default function EnterpriseConnectionPanel({
             disabled={disabled}
             onChange={(event) => {
               setBaseUrl(event.target.value);
-              invalidateVerification();
+              clearMessage();
             }}
           />
         </label>
@@ -231,7 +157,7 @@ export default function EnterpriseConnectionPanel({
             disabled={disabled}
             onChange={(event) => {
               setApiKey(event.target.value);
-              invalidateVerification();
+              clearMessage();
             }}
           />
         </label>
@@ -244,38 +170,11 @@ export default function EnterpriseConnectionPanel({
             disabled={disabled}
             onChange={(event) => {
               setAccountName(event.target.value);
-              invalidateVerification();
+              clearMessage();
             }}
           />
         </label>
       </div>
-
-      {models.length > 0 && (
-        <div className="enterprise-model-picker">
-          <div className="enterprise-model-picker-head">
-            <strong>{copy("Choose models", "选择接入模型")}</strong>
-            <span>{copy(`${selectedModels.length} selected`, `已选 ${selectedModels.length} 个`)}</span>
-          </div>
-          <div className="enterprise-model-options">
-            {models.map((model) => (
-              <label key={model}>
-                <input
-                  type="checkbox"
-                  checked={selectedModels.includes(model)}
-                  disabled={disabled}
-                  onChange={(event) => setSelectedModels((current) => event.target.checked
-                    ? [...current, model]
-                    : current.filter((candidate) => candidate !== model))}
-                />
-                <span>{model}</span>
-              </label>
-            ))}
-          </div>
-          <button className="btn primary" type="button" disabled={disabled || selectedModels.length === 0} onClick={() => void connect()}>
-            {working ? copy("Connecting…", "接入中…") : copy("Connect selected models", "接入所选模型")}
-          </button>
-        </div>
-      )}
 
       {message && <p className="enterprise-connection-status" role="status" aria-live="polite">{message}</p>}
       <p className="enterprise-secret-note">{copy(

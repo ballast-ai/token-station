@@ -1,6 +1,6 @@
 # Token Station
 
-Token Station connects AI Agents to model delivery channels and routes each request to one exact model offering.
+Token Station connects AI Agents to model delivery channels. It routes each request to one exact model offering or one server-managed enterprise route.
 
 ## Model Catalog Language
 
@@ -31,3 +31,11 @@ _Avoid_: Availability guarantee, account verification
 **Account Verification**:
 Evidence that a configured account can currently discover or call a model offering.
 _Avoid_: Catalog verification
+
+**Server-Managed Enterprise Route**:
+An enterprise endpoint that owns model selection and routing policy outside the desktop App.
+_Avoid_: Enterprise Provider, local enterprise model
+
+**Managed Route Alias**:
+The stable `auto` request value that selects a server-managed enterprise route without naming its real models.
+_Avoid_: Enterprise model, synthetic model

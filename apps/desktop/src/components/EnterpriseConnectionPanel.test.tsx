@@ -18,7 +18,7 @@ const connectedProvider: ProviderView = {
   name: "enterprise-api-example-com",
   provider: "openai-compatible",
   base_url: "https://api.example.com/v1",
-  models: ["enterprise-chat"],
+  models: ["auto"],
   has_auth: true,
 };
 
@@ -28,7 +28,7 @@ beforeEach(() => {
 });
 
 describe("EnterpriseConnectionPanel", () => {
-  it("shows the connection steps without repeating connected endpoints", () => {
+  it("shows three connection fields and one managed-route action", () => {
     render(
       <EnterpriseConnectionPanel
         providers={[connectedProvider]}
@@ -37,17 +37,16 @@ describe("EnterpriseConnectionPanel", () => {
       />,
     );
 
-    const flow = screen.getByRole("list", { name: "接入流程" });
-    for (const step of ["验证接口", "选择模型", "完成接入"]) {
-      expect(flow).toHaveTextContent(step);
-    }
-    expect(screen.queryByRole("region", { name: "可用端点" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Base URL" })).toBeInTheDocument();
+    expect(screen.getByLabelText("API Key")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "账户名称" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "接入并使用" })).toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "接入流程" })).toBeNull();
+    expect(screen.queryByRole("checkbox")).toBeNull();
     expect(screen.queryByText("enterprise-api-example-com")).toBeNull();
-    expect(screen.queryByText("额度优先")).toBeNull();
-    expect(screen.queryByRole("button", { name: "保存并应用" })).toBeNull();
   });
 
-  it("requires both an endpoint and API key before verification", async () => {
+  it("requires both an endpoint and API key before connection", async () => {
     const user = userEvent.setup();
     render(
       <EnterpriseConnectionPanel
@@ -57,16 +56,19 @@ describe("EnterpriseConnectionPanel", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "验证连接" }));
+    await user.click(screen.getByRole("button", { name: "接入并使用" }));
     expect(screen.getByRole("status")).toHaveTextContent("请填写 Base URL 和 API Key");
     expect(discoverProviderModels).not.toHaveBeenCalled();
   });
 
-  it("verifies credentials, lets the user choose models, and stores only the selection", async () => {
+  it.each([
+    { discoveredModels: [] },
+    { discoveredModels: ["enterprise-chat", "enterprise-reasoner"] },
+  ])("uses auto without persisting the discovered model list $discoveredModels", async ({ discoveredModels }) => {
     const user = userEvent.setup();
-    const onConnected = vi.fn();
+    const onConnected = vi.fn().mockResolvedValue(true);
     discoverProviderModels.mockResolvedValue({
-      models: ["enterprise-chat", "enterprise-reasoner"],
+      models: discoveredModels,
       source: "live",
       fetched_at_ms: 1,
       warning: null,
@@ -83,17 +85,12 @@ describe("EnterpriseConnectionPanel", () => {
 
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://api.example.com/v1");
     await user.type(screen.getByLabelText("API Key"), "secret-key");
-    await user.click(screen.getByRole("button", { name: "验证连接" }));
-
-    expect(await screen.findByRole("checkbox", { name: "enterprise-chat" })).not.toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "enterprise-reasoner" })).not.toBeChecked();
-    await user.click(screen.getByRole("checkbox", { name: "enterprise-chat" }));
-    await user.click(screen.getByRole("button", { name: "接入所选模型" }));
+    await user.click(screen.getByRole("button", { name: "接入并使用" }));
 
     await waitFor(() => expect(addProvider).toHaveBeenCalledWith(
       "enterprise-api-example-com",
       "https://api.example.com/v1",
-      ["enterprise-chat"],
+      ["auto"],
       "secret-key",
       false,
       "store",
@@ -103,47 +100,30 @@ describe("EnterpriseConnectionPanel", () => {
     expect(onConnected).toHaveBeenCalledWith(
       expect.objectContaining({ providers: [connectedProvider] }),
       "enterprise-api-example-com",
-      ["enterprise-chat"],
     );
+    expect(screen.queryByRole("checkbox")).toBeNull();
     expect(screen.getByLabelText("API Key")).toHaveValue("");
+    expect(screen.getByRole("status")).toHaveTextContent("企业路由已接入并应用");
   });
 
-  it.each(["Base URL", "API Key", "账户名称"])(
-    "invalidates verified models when %s changes",
-    async (field) => {
-      const user = userEvent.setup();
-      discoverProviderModels.mockResolvedValue({
-        models: ["enterprise-chat"],
-        source: "live",
-        fetched_at_ms: 1,
-        warning: null,
-      });
+  it("rejects an explicit duplicate account name before verification", async () => {
+    const user = userEvent.setup();
+    render(
+      <EnterpriseConnectionPanel
+        providers={[connectedProvider]}
+        busy={false}
+        onConnected={vi.fn()}
+      />,
+    );
 
-      render(
-        <EnterpriseConnectionPanel
-          providers={[]}
-          busy={false}
-          onConnected={vi.fn()}
-        />,
-      );
+    await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://api.example.com/v1");
+    await user.type(screen.getByLabelText("API Key"), "secret-key");
+    await user.type(screen.getByRole("textbox", { name: "账户名称" }), connectedProvider.name);
+    await user.click(screen.getByRole("button", { name: "接入并使用" }));
 
-      await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://api.example.com/v1");
-      await user.type(screen.getByLabelText("API Key"), "secret-key");
-      await user.click(screen.getByRole("button", { name: "验证连接" }));
-      expect(await screen.findByRole("checkbox", { name: "enterprise-chat" })).toBeInTheDocument();
-
-      const input = screen.getByLabelText(field);
-      if (field === "账户名称") {
-        await user.type(input, "changed-account");
-      } else {
-        await user.clear(input);
-        await user.type(input, field === "Base URL" ? "https://other.example.com/v1" : "other-key");
-      }
-
-      expect(screen.queryByRole("checkbox", { name: "enterprise-chat" })).not.toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "接入所选模型" })).not.toBeInTheDocument();
-    },
-  );
+    expect(screen.getByRole("status")).toHaveTextContent("该账户名称已存在");
+    expect(discoverProviderModels).not.toHaveBeenCalled();
+  });
 
   it("does not treat a cached discovery fallback as live credential verification", async () => {
     const user = userEvent.setup();
@@ -164,10 +144,9 @@ describe("EnterpriseConnectionPanel", () => {
 
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://api.example.com/v1");
     await user.type(screen.getByLabelText("API Key"), "invalid-key");
-    await user.click(screen.getByRole("button", { name: "验证连接" }));
+    await user.click(screen.getByRole("button", { name: "接入并使用" }));
 
     expect(await screen.findByRole("status")).toHaveTextContent("凭据无法使用");
-    expect(screen.queryByRole("checkbox", { name: "enterprise-chat" })).not.toBeInTheDocument();
     expect(addProvider).not.toHaveBeenCalled();
   });
 });

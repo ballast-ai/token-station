@@ -6374,64 +6374,6 @@ pre.block {
   gap: 16px;
 }
 
-.enterprise-connection-steps {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.enterprise-connection-steps li {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
-  align-items: center;
-  gap: 9px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--surface-2);
-}
-
-.enterprise-connection-steps li > span {
-  width: 24px;
-  height: 24px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  color: var(--muted);
-  font: 600 9px/1 "IBM Plex Mono", monospace;
-}
-
-.enterprise-connection-steps li > div {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-
-.enterprise-connection-steps strong { font-size: 10.5px; }
-.enterprise-connection-steps small {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 8.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.enterprise-connection-steps li[data-state="active"] {
-  border-color: var(--signal-selection-border);
-  background: var(--signal-soft);
-}
-
-.enterprise-connection-steps li[data-state="active"] > span,
-.enterprise-connection-steps li[data-state="complete"] > span {
-  border-color: var(--signal);
-  color: var(--signal);
-}
-
 .enterprise-credential-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, .8fr);
@@ -6450,57 +6392,6 @@ pre.block {
   font-weight: 600;
 }
 
-.enterprise-model-picker {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 12px 18px;
-  padding: 14px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface-2);
-}
-
-.enterprise-model-picker-head {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.enterprise-model-picker-head strong { font-size: 12px; }
-.enterprise-model-picker-head span { color: var(--muted); font-size: 10px; }
-
-.enterprise-model-options {
-  max-height: 176px;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
-  overflow-y: auto;
-}
-
-.enterprise-model-options label {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 9px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-  cursor: pointer;
-}
-
-.enterprise-model-options input { accent-color: var(--signal); }
-
-.enterprise-model-options span {
-  overflow: hidden;
-  font: 500 10px/1.25 "IBM Plex Mono", monospace;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .enterprise-connection-status,
 .enterprise-secret-note {
   margin: 0;
@@ -6513,8 +6404,6 @@ pre.block {
 
 @media (max-width: 820px) {
   .enterprise-credential-grid { grid-template-columns: minmax(0, 1fr); }
-  .enterprise-connection-steps { grid-template-columns: minmax(0, 1fr); }
-  .enterprise-model-options { grid-template-columns: minmax(0, 1fr); }
   .agent-tier-heading-actions { width: 100%; min-width: 0; align-items: flex-start; }
 }
 

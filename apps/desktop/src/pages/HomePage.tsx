@@ -48,7 +48,7 @@ interface HomePageProps {
   onRemoveKeyword: (slot: TierSlot, keyword: string) => void;
   onSave: () => void;
   onApplyAll: () => void;
-  onEnterpriseProviderConnected?: (state: StateView, providerName: string, models: string[]) => void;
+  onEnterpriseProviderConnected?: (state: StateView, providerName: string) => boolean | Promise<boolean>;
   embedded?: boolean;
   scope?: "global" | "enterprise";
 }
@@ -80,7 +80,7 @@ export default function HomePage({
   onRemoveKeyword,
   onSave,
   onApplyAll,
-  onEnterpriseProviderConnected = () => {},
+  onEnterpriseProviderConnected = () => false,
   embedded = false,
   scope = "global",
 }: HomePageProps) {

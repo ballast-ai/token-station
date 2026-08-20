@@ -1596,7 +1596,7 @@ describe("desktop station navigation", () => {
     expect(within(modeTabs).getByRole("tab", { name: "额度优先" })).toHaveAttribute("aria-selected", "true");
   });
 
-  it("企业路由只提供端点接入，不显示或切换额度路由", async () => {
+  it("connects and applies a server-managed enterprise route in one action", async () => {
     const user = userEvent.setup();
     const account = { upstream: "kimi", model: "kimi-k3" };
     const initial = stateFixture({
@@ -1610,10 +1610,44 @@ describe("desktop station navigation", () => {
       }],
       quota_accounts: [account],
     });
+    const enterpriseProvider = {
+      name: "enterprise-main",
+      provider: "openai-compatible",
+      base_url: "https://enterprise.example.com/v1",
+      models: ["auto"],
+      has_auth: true,
+    };
+    const added = stateFixture({
+      ...initial,
+      providers: [...initial.providers, enterpriseProvider],
+    });
+    const routed = stateFixture({
+      ...added,
+      routing_mode: "direct",
+      direct_target: { upstream: "enterprise-main", model: "auto" },
+    });
+    const applying = stateFixture({
+      ...routed,
+      config_dirty: false,
+      saved_revision: routed.draft_revision,
+      serve: serveFixture({ phase: "starting" }),
+    });
     mockInvokeImplementation(async (command) => {
       if (command === "get_state") return initial;
       if (command === "list_agent_registry") return registryFixture;
       if (command === "scan_agents") return detectedAgentsFixture;
+      if (command === "discover_provider_models") {
+        return {
+          models: ["enterprise-chat", "enterprise-reasoner"],
+          source: "live",
+          fetched_at_ms: 1,
+          warning: null,
+        };
+      }
+      if (command === "add_provider_with_credential") return added;
+      if (command === "set_routing_mode") return { ...added, routing_mode: "direct" };
+      if (command === "set_direct_route") return routed;
+      if (command === "serve_start") return applying;
       throw new Error(`unexpected IPC command: ${command}`);
     });
 
@@ -1626,9 +1660,30 @@ describe("desktop station navigation", () => {
     expect(screen.queryByRole("tablist", { name: "路由模式" })).toBeNull();
     expect(screen.getByRole("textbox", { name: "Base URL" })).toBeInTheDocument();
     expect(screen.getByLabelText("API Key")).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "Base URL" }), enterpriseProvider.base_url);
+    await user.type(screen.getByLabelText("API Key"), "secret-key");
+    await user.type(screen.getByRole("textbox", { name: "账户名称" }), enterpriseProvider.name);
+    await user.click(screen.getByRole("button", { name: "接入并使用" }));
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("serve_start"));
+    expect(invokeMock).toHaveBeenCalledWith("add_provider_with_credential", {
+      name: enterpriseProvider.name,
+      baseUrl: enterpriseProvider.base_url,
+      models: ["auto"],
+      apiKey: "secret-key",
+      local: false,
+      credentialSource: "store",
+      credentialReference: null,
+      providerDialect: "openai-compatible",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("set_routing_mode", { mode: "direct", agentId: null });
+    expect(invokeMock).toHaveBeenCalledWith("set_direct_route", {
+      upstream: enterpriseProvider.name,
+      model: "auto",
+      agentId: null,
+    });
     expect(screen.queryByText("额度优先")).toBeNull();
     expect(screen.queryByRole("button", { name: "保存并应用" })).toBeNull();
-    expect(invokeMock).not.toHaveBeenCalledWith("set_routing_mode", expect.anything());
   });
 
   it("maps the four revision relationships to stable save copy", () => {
