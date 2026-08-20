@@ -126,6 +126,36 @@ const state = {
 } satisfies StateView;
 
 describe("OverviewPage summaries", () => {
+  it("moves connected Agents to the front and restores registry order after disconnect", () => {
+    const laterAgentConnected = agents.map((agent, index) => ({
+      ...agent,
+      status: index === 4 ? "CONNECTED" as const : "DETECTED_VERIFIED" as const,
+    }));
+    const { rerender } = render(
+      <LanguageProvider>
+        <OverviewPage state={state} registry={registry} agents={laterAgentConnected} onNavigate={vi.fn()} />
+      </LanguageProvider>,
+    );
+    const agentSummary = screen.getByRole("region", { name: "Agent 概览" });
+    const rowNames = () => within(agentSummary).getAllByRole("listitem")
+      .map((row) => row.querySelector("strong")?.textContent);
+
+    expect(rowNames()).toEqual(["Agent 4", "Claude Code", "Agent 1", "Agent 2", "Agent 3"]);
+
+    rerender(
+      <LanguageProvider>
+        <OverviewPage
+          state={state}
+          registry={registry}
+          agents={laterAgentConnected.map((agent) => ({ ...agent, status: "DETECTED_VERIFIED" }))}
+          onNavigate={vi.fn()}
+        />
+      </LanguageProvider>,
+    );
+
+    expect(rowNames()).toEqual(["Claude Code", "Agent 1", "Agent 2", "Agent 3", "Agent 4"]);
+  });
+
   it("shows fixed Agent, routing, and model summaries capped at five rows", () => {
     render(
       <LanguageProvider>

@@ -44,8 +44,17 @@ export default function OverviewPage({ state, registry, agents, onNavigate }: Ov
   const [stats, setStats] = useState<StatsView | null>(null);
   const [statsUnavailable, setStatsUnavailable] = useState(false);
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
-  const connectedAgents = agents.filter((agent) => agent.status === "CONNECTED").length;
-  const agentRows = registry.slice(0, 5).map((metadata) => ({
+  const connectedAgentIds = new Set(
+    agents
+      .filter((agent) => agent.status === "CONNECTED")
+      .map((agent) => agent.metadata.agent_id),
+  );
+  const connectedAgents = connectedAgentIds.size;
+  const orderedAgentMetadata = [
+    ...registry.filter((metadata) => connectedAgentIds.has(metadata.agent_id)),
+    ...registry.filter((metadata) => !connectedAgentIds.has(metadata.agent_id)),
+  ];
+  const agentRows = orderedAgentMetadata.slice(0, 5).map((metadata) => ({
     metadata,
     agent: agents.find((candidate) => candidate.metadata.agent_id === metadata.agent_id),
   }));
