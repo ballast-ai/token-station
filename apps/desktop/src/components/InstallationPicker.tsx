@@ -74,29 +74,29 @@ export default function InstallationPicker({
   const rootRef = useRef<HTMLDivElement>(null);
   const options = useMemo(
     () => installationLabels(installations, {
-      china: copy("WorkBuddy China", "WorkBuddy 中国版"),
-      global: copy("WorkBuddy Global", "WorkBuddy 海外版"),
+      china: copy("WorkBuddy China", "WorkBuddy 中国版", "WorkBuddy 中國版", "WorkBuddy 中国版"),
+      global: copy("WorkBuddy Global", "WorkBuddy 海外版", "WorkBuddy 海外版", "WorkBuddy 海外版"),
     }),
     [copy, installations],
   );
   const sourceLabels: Record<AgentInstallationView["discovery"]["binary_source"], string> = {
     homebrew: "Homebrew",
-    npm_global: copy("npm global", "npm 全局"),
+    npm_global: copy("npm global", "npm 全局", "npm 全域", "npm グローバル"),
     microsoft_store: "Microsoft Store",
     path: "PATH",
-    known_path: copy("Known location", "已知目录"),
-    env_override: copy("Environment override", "环境变量"),
+    known_path: copy("Known location", "已知目录", "已知目錄", "既知のディレクトリ"),
+    env_override: copy("Environment override", "环境变量", "環境變數", "環境変数"),
   };
   const modifiedLabel = (modifiedAtMs: number | null) => (
     modifiedAtMs == null
-      ? copy("Modified time unknown", "修改时间未知")
+      ? copy("Modified time unknown", "修改时间未知", "修改時間未知", "変更日時が不明")
       : copy(
           `Modified ${new Date(modifiedAtMs).toLocaleString(language)}`,
-          `修改于 ${new Date(modifiedAtMs).toLocaleString(language)}`,
+          `修改于 ${new Date(modifiedAtMs).toLocaleString(language)}`, `修改於 ${new Date(modifiedAtMs).toLocaleString(language)}`, `${new Date(modifiedAtMs).toLocaleString(language)} に更新`
         )
   );
   const hashLabel = (hash: string | null) => (
-    hash ? `SHA-256 ${hash.slice(0, 12)}` : copy("SHA-256 unavailable", "SHA-256 不可读")
+    hash ? `SHA-256 ${hash.slice(0, 12)}` : copy("SHA-256 unavailable", "SHA-256 不可读", "SHA-256 不可讀", "SHA-256 が読み込めません")
   );
 
   useEffect(() => setOpen(false), [agentName]);
@@ -130,14 +130,14 @@ export default function InstallationPicker({
         disabled={disabled}
         onClick={() => setOpen((current) => !current)}
       >
-        {copy("Select version", "选择版本")} <span aria-hidden="true">⌄</span>
+        {copy("Select version", "选择版本", "選擇版本", "バージョンを選択")} <span aria-hidden="true">⌄</span>
       </button>
       {open && (
         <div
           className="installation-picker-menu"
           role="listbox"
           data-onboarding-floating="true"
-          aria-label={copy(`${agentName} installations`, `${agentName} 安装列表`)}
+          aria-label={copy(`${agentName} installations`, `${agentName} 安装列表`, `${agentName} 安裝列表`, `${agentName} のインストールリスト`)}
         >
           {options.map((option, index) => {
             const selected = option.path === selectedPath;
@@ -159,7 +159,7 @@ export default function InstallationPicker({
                 <code className="installation-option-path">{discovery.canonical_path}</code>
                 <span className="installation-option-facts">
                   {sourceLabels[discovery.binary_source]}
-                  {discovery.is_path_default ? ` · ${copy("Active", "当前生效")}` : ""}
+                  {discovery.is_path_default ? ` · ${copy("Active", "当前生效", "當前生效", "現在有効")}` : ""}
                   {` · ${modifiedLabel(discovery.modified_at_ms)} · ${hashLabel(discovery.binary_sha256)}`}
                 </span>
                 {selected && <span className="installation-check" aria-hidden="true">✓</span>}

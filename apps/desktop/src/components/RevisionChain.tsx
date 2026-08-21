@@ -7,17 +7,17 @@ export default function RevisionChain({ state }: { state: StateView }) {
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
   const runningRevision = state.serve.running_revision;
   const savedApplied = runtimeHealthy && runningRevision === state.saved_revision;
-  const draftLabel = state.config_dirty ? copy("Draft", "草稿") : copy("Saved", "已保存");
+  const draftLabel = state.config_dirty ? copy("Draft", "草稿", "草案", "下書き") : copy("Saved", "已保存", "已儲存", "保存済み");
   const draftRevision = state.config_dirty ? state.draft_revision : state.saved_revision;
   const middleLabel = state.serve.phase === "starting"
-    ? copy("Applying", "正在应用")
+    ? copy("Applying", "正在应用", "應用中", "適用中")
     : savedApplied
-      ? copy("Applied", "已应用")
-      : copy("Pending apply", "待应用");
-  const runtimeLabel = runtimeHealthy ? copy("Running", "运行中") : copy("Not running", "未运行");
+      ? copy("Applied", "已应用", "已應用", "適用済み")
+      : copy("Pending apply", "待应用", "待應用", "適用待ち");
+  const runtimeLabel = runtimeHealthy ? copy("Running", "运行中", "執行中", "実行中") : copy("Not running", "未运行", "未執行", "実行されていません");
   const accessible = copy(
     `${draftLabel} revision ${draftRevision}; ${middleLabel}; ${runtimeLabel}${runningRevision == null ? "" : ` revision ${runningRevision}`}`,
-    `${draftLabel} revision ${draftRevision}；${middleLabel}；${runtimeLabel}${runningRevision == null ? "" : ` revision ${runningRevision}`}`,
+    `${draftLabel} revision ${draftRevision}；${middleLabel}；${runtimeLabel}${runningRevision == null ? "" : ` revision ${runningRevision}`}`, `${draftLabel} 版本 ${draftRevision}；${middleLabel}；${runtimeLabel}${runningRevision == null ? "" : ` revision ${runningRevision}`}`, `${draftLabel} バージョン ${draftRevision}；${middleLabel}；${runtimeLabel}${runningRevision == null ? "" : ` revision ${runningRevision}`}`
   );
 
   return (
@@ -29,7 +29,7 @@ export default function RevisionChain({ state }: { state: StateView }) {
       <ArrowRight aria-hidden="true" />
       <span className={`revision-step ${savedApplied ? "applied" : "pending"}`}>
         <small>{middleLabel}</small>
-        <strong>{state.serve.phase === "starting" ? "…" : savedApplied ? copy("Synced", "同步") : copy("Waiting", "等待")}</strong>
+        <strong>{state.serve.phase === "starting" ? "…" : savedApplied ? copy("Synced", "同步", "已同步", "同期済み") : copy("Waiting", "等待", "等待中", "待機中")}</strong>
       </span>
       <ArrowRight aria-hidden="true" />
       <span className={`revision-step ${runtimeHealthy ? "running" : "stopped"}`}>

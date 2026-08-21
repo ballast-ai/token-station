@@ -1,7 +1,27 @@
-import { describe, expect, it } from "vitest";
-import { humanizeAppError } from "./errors";
+import { describe, expect, it, vi } from "vitest";
+import { humanizeAppError, humanizeErrorCode } from "./errors";
+import { setActiveLanguage } from "./i18n";
 
 describe("humanizeAppError", () => {
+  it.each([
+    ["zh-TW", "驗證 · Key", "上游拒絕此憑證。"],
+    ["ja", "認証 · Key", "アップストリームが認証情報を拒否しました。"],
+  ] as const)("localizes receipt errors for %s", (language, layer, message) => {
+    expect(humanizeErrorCode("auth", language)).toMatchObject({ layer, message });
+  });
+
+  it.each([
+    ["zh-TW", "操作未能完成。請重試。"],
+    ["ja", "操作を完了できませんでした。もう一度お試しください。"],
+  ] as const)("does not fall back to English App errors for %s", (language, expected) => {
+    expect(humanizeAppError("secret internal detail", language)).toContain(expected);
+  });
+
+  it("uses a persisted new locale when the caller omits the language", () => {
+    window.localStorage.setItem("token-station-language", "ja");
+    expect(humanizeAppError("secret internal detail")).toContain("操作を完了できませんでした");
+  });
+
   it("explains that Cursor must be quit before its local database can be configured", () => {
     const structured = {
       code: "cursor_running",
@@ -17,6 +37,17 @@ describe("humanizeAppError", () => {
     expect(humanizeAppError("cursor_running", "zh-CN")).toBe(
       "Cursor 仍在运行。请彻底退出 Cursor 后再点一次一键接入。Token Station 不会强制关闭它。",
     );
+    expect(humanizeAppError("cursor_running", "zh-TW")).toContain("完全退出 Cursor");
+    expect(humanizeAppError("cursor_running", "ja")).toContain("Cursor を完全に終了");
+  });
+
+  it("uses the active session language when locale storage is unavailable", () => {
+    setActiveLanguage("ja");
+    const storageSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+    expect(humanizeAppError("cursor_running")).toContain("Cursor を完全に終了");
+    storageSpy.mockRestore();
   });
 
   it("explains Cursor tunnel failures without falling back to a generic error", () => {
@@ -187,6 +218,14 @@ describe("humanizeAppError", () => {
     expect(humanizeAppError(error, "en")).toBe(
       "Model `kimi/kimi-k3` has no maximum output token limit. Complete this model's limits in Providers, then restart the proxy.",
     );
+    expect(humanizeAppError(error, "zh-TW")).toContain("`kimi/kimi-k3` 缺少最大輸出 Token 上限");
+    expect(humanizeAppError(error, "ja")).toContain("モデル `kimi/kimi-k3` に最大出力トークンの上限がありません");
+  });
+
+  it("preserves dynamic route-pool names in the new locales", () => {
+    const raw = "pool `tier_high` has no members";
+    expect(humanizeAppError(raw, "zh-TW")).toContain("路由集區 `tier_high` 是空的");
+    expect(humanizeAppError(raw, "ja")).toContain("ルートプール `tier_high` は空です");
   });
 
   it.each([

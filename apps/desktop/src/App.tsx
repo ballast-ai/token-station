@@ -57,6 +57,7 @@ import {
 } from "./components/AgentVisibilityPreferences";
 import {
   LanguageBoundary,
+  localizedCopy,
   useLanguage,
   type Language,
 } from "./components/LanguageProvider";
@@ -138,18 +139,33 @@ export function firstRunRouteApplyComplete(
 }
 
 export function configSaveStatus(state: StateView, language: Language = "en"): string {
-  const chinese = language === "zh-CN";
-  if (state.config_dirty) return chinese ? "有未保存更改" : "Unsaved changes";
+  if (state.config_dirty) return localizedCopy(
+    language,
+    "Unsaved changes",
+    "有未保存更改",
+    "有未儲存的變更",
+    "未保存の変更があります",
+  );
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
   if (runtimeHealthy && state.serve.running_revision !== state.saved_revision) {
-    return chinese ? "已保存尚未应用" : "Saved, not applied";
+    return localizedCopy(
+      language,
+      "Saved, not applied",
+      "已保存尚未应用",
+      "已儲存但尚未套用",
+      "保存済み、未適用",
+    );
   }
   if (runtimeHealthy && state.serve.running_revision === state.saved_revision) {
-    return chinese
-      ? `运行中 revision ${state.saved_revision}`
-      : `Running revision ${state.saved_revision}`;
+    return localizedCopy(
+      language,
+      `Running revision ${state.saved_revision}`,
+      `运行中 revision ${state.saved_revision}`,
+      `執行中 revision ${state.saved_revision}`,
+      `実行中の revision ${state.saved_revision}`,
+    );
   }
-  return chinese ? "无改动" : "No changes";
+  return localizedCopy(language, "No changes", "无改动", "沒有變更", "変更はありません");
 }
 
 export function firstProviderDefaultTarget(
@@ -166,17 +182,17 @@ function StartupHome({ error, onReload }: { error: string; onReload: () => void 
   const { copy } = useLanguage();
   const failed = Boolean(error);
   const statusLabel = failed
-    ? copy("Unable to check local Agents", "无法检查本机 Agent")
-    : copy("Checking local Agents", "正在检查本机 Agent");
+    ? copy("Unable to check local Agents", "无法检查本机 Agent", "無法檢查本機 Agent", "ローカルのエージェントを確認できません")
+    : copy("Checking local Agents", "正在检查本机 Agent", "正在檢查本機 Agent", "ローカルのエージェントを確認中");
 
   return (
     <div className="startup-home agent-workspace-page">
       <header className="startup-heading">
         <div>
-          <h1>{copy("Agent connection", "Agent 接入")}</h1>
+          <h1>{copy("Agent connection", "Agent 接入", "Agent 連線", "エージェント接続")}</h1>
           <p>{copy(
             "Discovering local Agents and preparing connection details.",
-            "正在发现本机 Agent 并准备接入详情。",
+            "正在发现本机 Agent 并准备接入详情。", "正在發現本機 Agent 並準備連線細節。", "ローカルのエージェントを検出中で、接続の詳細を準備しています。"
           )}</p>
         </div>
       </header>
@@ -184,18 +200,18 @@ function StartupHome({ error, onReload }: { error: string; onReload: () => void 
       <div className="startup-layout">
         <section
           className="startup-agent-card"
-          aria-label={copy("Detected Agents", "发现 Agents")}
+          aria-label={copy("Detected Agents", "发现 Agents", "檢測到的 Agent", "検出されたエージェント")}
         >
           <header className="startup-agent-card-header">
             <div>
-              <h2>{copy("Detected Agents", "发现 Agents")}</h2>
+              <h2>{copy("Detected Agents", "发现 Agents", "檢測到的 Agent", "検出されたエージェント")}</h2>
             </div>
             <span className="startup-count" aria-hidden="true">—</span>
           </header>
           <div className="startup-agent-card-body">
             <p className="startup-agent-pending-copy">{copy(
               "Detected Agents appear together when this startup check finishes.",
-              "启动检查完成后，已发现的 Agent 会一次性出现。",
+              "启动检查完成后，已发现的 Agent 会一次性出现。", "此啟動檢查完成後，檢測到的 Agent 會一次性出現。", "この起動チェックが完了すると、検出されたエージェントが一括して表示されます。"
             )}</p>
           </div>
         </section>
@@ -211,15 +227,15 @@ function StartupHome({ error, onReload }: { error: string; onReload: () => void 
           <p>{failed
             ? copy(
                 "The startup check did not complete. No empty Agent result has been applied.",
-                "启动检查未完成，当前不会把失败结果当作空 Agent 列表。",
+                "启动检查未完成，当前不会把失败结果当作空 Agent 列表。", "啟動檢查未完成，當前不會把失敗結果當作空 Agent 清單。", "起動チェックが完了していません。現在、失敗結果を空のエージェントリストとして扱いません。"
               )
             : copy(
                 "Verifying installation locations, versions, and local configuration. This runs once per launch.",
-                "正在核对安装位置、版本与本地配置；每次启动只执行一次。",
+                "正在核对安装位置、版本与本地配置；每次启动只执行一次。", "正在核對安裝位置、版本與本地配置；每次啟動只執行一次。", "インストール場所、バージョン、ローカル設定を確認しています。起動ごとに1回実行します。"
               )}</p>
           {!failed && (
             <div className="startup-discovery-track" aria-hidden="true">
-              <span>{copy("ENTRY", "入口")}</span>
+              <span>{copy("ENTRY", "入口", "入口", "エントリ")}</span>
               <i><b /></i>
               <span>AGENT</span>
             </div>
@@ -228,7 +244,7 @@ function StartupHome({ error, onReload }: { error: string; onReload: () => void 
             <div className="startup-failure-actions">
               <p className="startup-error-detail">{error}</p>
               <button className="startup-reload-button" type="button" onClick={onReload}>
-                {copy("Reload Token Station", "重新进入 Token Station")}
+                {copy("Reload Token Station", "重新进入 Token Station", "重新進入 Token Station", "Token Station に再接続")}
               </button>
             </div>
           )}
@@ -402,7 +418,7 @@ function StationApp() {
     if (!hiddenSaved || !shownSaved) {
       showError(copy(
         "Agent visibility changed for this session, but it could not be saved for the next launch.",
-        "Agent 显示已在本次会话生效，但无法保存到下次启动。",
+        "Agent 显示已在本次会话生效，但无法保存到下次启动。", "Agent 顯示已在本次會話生效，但無法儲存到下次啟動。", "エージェントの表示はこのセッションで有効ですが、次回起動には保存できません。"
       ), "agent-visibility-storage");
     }
   }, [copy, showError]);
@@ -584,14 +600,14 @@ function StationApp() {
       && state.serve.listener_reachable
     ) {
       pendingServeActionRef.current = null;
-      showSuccess(copy("Proxy started", "代理已启动"), "serve-toggle");
+      showSuccess(copy("Proxy started", "代理已启动", "代理已啟動", "プロキシが起動しました"), "serve-toggle");
     } else if (
       action === "stop"
       && state.serve.phase === "stopped"
       && state.serve.app_runtime === "stopped"
     ) {
       pendingServeActionRef.current = null;
-      showSuccess(copy("Proxy stopped", "代理已停止"), "serve-toggle");
+      showSuccess(copy("Proxy stopped", "代理已停止", "代理已停止", "プロキシが停止しました"), "serve-toggle");
     }
   }, [copy, showSuccess, state?.serve.app_runtime, state?.serve.error, state?.serve.listener_reachable, state?.serve.phase]);
 
@@ -655,12 +671,12 @@ function StationApp() {
         setView(agents[0] ? `agent:${agents[0].metadata.agent_id}` : "agents");
         showSuccess(copy(
           "Routing is running. Connect an Agent next.",
-          "路由已运行，接下来接入 Agent。",
+          "路由已运行，接下来接入 Agent。", "路由已執行，接下來接入 Agent。", "ルーティングが実行中です。次にエージェントを接続してください。"
         ), "config-apply");
       } else {
         showSuccess(copy(
           `Configuration applied · revision ${targetRevision}`,
-          `配置已应用 · revision ${targetRevision}`,
+          `配置已应用 · revision ${targetRevision}`, `配置已應用 · revision ${targetRevision}`, `設定が適用されました · revision ${targetRevision}`
         ), "config-apply");
       }
       return undefined;
@@ -707,7 +723,7 @@ function StationApp() {
     busyRef.current = true;
     setBusy(true);
     if (recordApplyTarget) {
-      showInfo(copy("Applying configuration…", "正在应用配置…"), "config-apply");
+      showInfo(copy("Applying configuration…", "正在应用配置…", "正在應用配置…", "設定を適用中…"), "config-apply");
     }
     try {
       const next = await action();
@@ -743,8 +759,8 @@ function StationApp() {
     pendingServeActionRef.current = action;
     showInfo(
       action === "start"
-        ? copy("Starting proxy…", "正在启动代理…")
-        : copy("Stopping proxy…", "正在停止代理…"),
+        ? copy("Starting proxy…", "正在启动代理…", "開始代理中…", "プロキシを開始中…")
+        : copy("Stopping proxy…", "正在停止代理…", "停止代理中…", "プロキシを停止中…"),
       "serve-toggle",
     );
     try {
@@ -815,18 +831,18 @@ function StationApp() {
         aria-live="polite"
         aria-busy={!error}
         aria-label={error
-          ? copy("Unable to load Token Station", "无法加载 Token Station")
-          : copy("Opening Token Station", "正在进入 Token Station")}
+          ? copy("Unable to load Token Station", "无法加载 Token Station", "無法載入 Token Station", "Token Station を読み込めません")
+          : copy("Opening Token Station", "正在进入 Token Station", "開啟 Token Station", "Token Station を開きます")}
       >
         <span className="loading-mark" aria-hidden="true"><i /><i /><i /></span>
         <strong>{error
-          ? copy("Unable to load Token Station", "无法加载 Token Station")
-          : copy("Opening Token Station", "正在进入 Token Station")}</strong>
+          ? copy("Unable to load Token Station", "无法加载 Token Station", "無法載入 Token Station", "Token Station を読み込めません")
+          : copy("Opening Token Station", "正在进入 Token Station", "開啟 Token Station", "Token Station を開きます")}</strong>
         {error && (
           <>
             <p>{error}</p>
             <button className="btn" type="button" onClick={() => window.location.reload()}>
-              {copy("Retry", "重试")}
+              {copy("Retry", "重试", "重試", "再試行")}
             </button>
           </>
         )}
@@ -900,7 +916,7 @@ function StationApp() {
       if (firstRunSetupStep === "provider") {
         showState(next, copy(
           "Provider added. Configure routing next.",
-          "供应商已添加，接下来配置路由。",
+          "供应商已添加，接下来配置路由。", "供應商已加入。請配置路由。", "プロバイダーが追加されました。ルーティングを設定してください。"
         ));
         viewHistoryRef.current = [];
         setFirstRunSetupStep("route");
@@ -920,7 +936,7 @@ function StationApp() {
       return serveStart();
     }, copy(
       `Provider added. Global routing now uses ${defaultTarget.upstream} / ${defaultTarget.model}.`,
-      `供应商已添加，全局路由已默认使用 ${defaultTarget.upstream} / ${defaultTarget.model}。`,
+      `供应商已添加，全局路由已默认使用 ${defaultTarget.upstream} / ${defaultTarget.model}。`, `供應商已加入。全域性路由已預設使用 ${defaultTarget.upstream} / ${defaultTarget.model}。`, `プロバイダーが追加されました。グローバルルーティングは ${defaultTarget.upstream} / ${defaultTarget.model} がデフォルトです。`
     ), true);
     viewHistoryRef.current = [];
     if (firstRunSetupStep === "provider") {
@@ -1003,14 +1019,14 @@ function StationApp() {
                 () => saveHomeRouteAsProfile(name),
                 copy(
                   `Profile "${name}" added to the draft. Save and apply to activate it.`,
-                  `策略组“${name}”已加入草稿，请保存并应用。`,
+                  `策略组“${name}”已加入草稿，请保存并应用。`, `策略組「${name}」已加入草稿。請儲存並應用。`, `プロファイル「${name}」が下書きに追加されました。保存して適用してください。`
                 ),
               )}
               onDeleteProfile={(name) => run(
                 () => deleteProfile(name),
                 copy(
                   `Profile "${name}" removed from the draft. Save and apply to activate the change.`,
-                  `策略组“${name}”已从草稿删除，请保存并应用。`,
+                  `策略组“${name}”已从草稿删除，请保存并应用。`, `策略組「${name}」已從草稿刪除。請儲存並應用。`, `プロファイル「${name}」が下書きから削除されました。保存して適用してください。`
                 ),
               )}
               onAddKeyword={(slot, keyword) => void run(() => addKeyword(slot, keyword))}
@@ -1021,9 +1037,9 @@ function StationApp() {
                 runtimeHealthy
                   ? copy(
                       "All Agents now follow global routing · pending apply",
-                      "全部 Agent 已恢复跟随全局路由 · 尚待应用",
+                      "全部 Agent 已恢复跟随全局路由 · 尚待应用", "全部 Agent 已恢復跟隨全域性路由 · 尚待應用", "すべての Agent がグローバルルーティングに従うようになりました · 適用を待機中"
                     )
-                  : copy("All Agents now follow global routing", "全部 Agent 已恢复跟随全局路由"),
+                  : copy("All Agents now follow global routing", "全部 Agent 已恢复跟随全局路由", "全部 Agent 已恢復跟隨全域性路由", "すべての Agent がグローバルルーティングに従うようになりました"),
               )}
               onEnterpriseConnect={(connection) => run(async () => {
                   const discovery = await verifyEnterpriseRoute(
@@ -1071,7 +1087,7 @@ function StationApp() {
               })}
               onDeleteProfile={(name) => run(
                 () => deleteProfile(name),
-                copy(`Profile "${name}" deleted`, `已删除策略组“${name}”`),
+                copy(`Profile "${name}" deleted`, `已删除策略组“${name}”`, `已刪除策略組「${name}」`, `プロファイル「${name}」が削除されました`),
               )}
               selectedInstallationPath={(() => {
                 const selectedPath = selectedInstallationPaths[metadata.agent_id];
@@ -1097,8 +1113,8 @@ function StationApp() {
           {!metadata && (agentWorkspaceMode === "connections" || Boolean(routeAgentId)) && (
             <section className="panel agent-master-empty">
               <div className="panel-head">
-                <h2>{copy("No Agent selected", "未选择 Agent")}</h2>
-                <p className="sub">{copy("Choose a visible Agent.", "请选择一个可见 Agent。")}</p>
+                <h2>{copy("No Agent selected", "未选择 Agent", "未選擇 Agent", "Agent を選択していません")}</h2>
+                <p className="sub">{copy("Choose a visible Agent.", "请选择一个可见 Agent。", "請選擇一個可見 Agent。", "表示されている Agent を選択してください。")}</p>
               </div>
             </section>
           )}
@@ -1114,11 +1130,11 @@ function StationApp() {
           busy={busy}
           onRemove={(name) => void run(
             () => removeProvider(name),
-            copy("Provider deleted", "供应商已删除"),
+            copy("Provider deleted", "供应商已删除", "供應商已刪除", "プロバイダーが削除されました"),
           )}
           onRestore={(name) => void run(
             () => restoreProvider(name),
-            copy("Provider restored from the recycle bin", "供应商已从回收站恢复"),
+            copy("Provider restored from the recycle bin", "供应商已从回收站恢复", "供應商已從回收站恢復", "プロバイダーがゴミ箱から復元されました"),
           )}
           onStateChange={showState}
           onAddProvider={() => navigate("add-provider")}
@@ -1192,10 +1208,10 @@ function StationApp() {
           <section className="panel free-catalog-state">
             <strong>{copy(
               "This free provider is no longer available or the catalog has changed.",
-              "免费供应商不存在或目录已更新。",
+              "免费供应商不存在或目录已更新。", "此免費供應商已無法使用或目錄已更新。", "この無料プロバイダーは利用できなくなりましたか、またはカタログが変更されました。"
             )}</strong>
             <button className="btn" type="button" onClick={() => setView("add-provider")}>
-              {copy("Back to catalog", "返回目录")}
+              {copy("Back to catalog", "返回目录", "返回目錄", "カタログに戻る")}
             </button>
           </section>
         );

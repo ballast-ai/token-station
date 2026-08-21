@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentUiMetadataView, AgentView, StateView } from "../api";
-import { LanguageProvider } from "../components/LanguageProvider";
+import { LANGUAGE_STORAGE_KEY, LanguageProvider } from "../components/LanguageProvider";
 import OverviewPage from "./OverviewPage";
 
 vi.mock("../api", async (importOriginal) => {
@@ -125,7 +125,47 @@ const state = {
   },
 } satisfies StateView;
 
+beforeEach(() => {
+  window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "zh-CN");
+});
+
 describe("OverviewPage summaries", () => {
+  it("renders the Overview title and content in Japanese", () => {
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "ja");
+
+    render(
+      <LanguageProvider>
+        <OverviewPage state={state} registry={registry} agents={agents} onNavigate={vi.fn()} />
+      </LanguageProvider>,
+    );
+
+    expect(screen.getByRole("heading", { name: "概要" })).toBeInTheDocument();
+    expect(screen.getByText("プロキシのステータス、現在のルーティング、リクエストとコストを一画面で確認できます。"))
+      .toBeInTheDocument();
+    expect(screen.getByText("プロキシステータス")).toBeInTheDocument();
+    expect(screen.getByText("リビジョン")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Agentの概要" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Overview" })).toBeNull();
+  });
+
+  it("renders the Overview title and content in Traditional Chinese", () => {
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "zh-TW");
+
+    render(
+      <LanguageProvider>
+        <OverviewPage state={state} registry={registry} agents={agents} onNavigate={vi.fn()} />
+      </LanguageProvider>,
+    );
+
+    expect(screen.getByRole("heading", { name: "概覽" })).toBeInTheDocument();
+    expect(screen.getByText("代理執行狀態、當前路由、請求與成本，一屏看清。"))
+      .toBeInTheDocument();
+    expect(screen.getByText("代理狀態")).toBeInTheDocument();
+    expect(screen.getByText("版本")).toBeInTheDocument();
+    expect(screen.getByText("已連線 2 個 Agent")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Overview" })).toBeNull();
+  });
+
   it("moves connected Agents to the front and restores registry order after disconnect", () => {
     const laterAgentConnected = agents.map((agent, index) => ({
       ...agent,

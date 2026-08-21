@@ -1729,6 +1729,10 @@ describe("desktop station navigation", () => {
       saved_revision: 2,
       serve: serveFixture({ app_runtime: "running", listener_reachable: true, running_revision: 2 }),
     }), "zh-CN")).toBe("运行中 revision 2");
+    expect(configSaveStatus(stateFixture({ config_dirty: true }), "zh-TW")).toBe("有未儲存的變更");
+    expect(configSaveStatus(stateFixture({ config_dirty: true }), "ja")).toBe("未保存の変更があります");
+    expect(configSaveStatus(stateFixture(), "zh-TW")).toBe("沒有變更");
+    expect(configSaveStatus(stateFixture(), "ja")).toBe("変更はありません");
   });
 
   it("shows the revision save state and makes 保存并应用 start a real apply", async () => {
@@ -2547,6 +2551,9 @@ describe("desktop station navigation", () => {
     expect(languageButton.querySelector(".lucide-languages")).toBeNull();
     await user.click(languageButton);
     expect(screen.getByRole("heading", { name: "Interface language" })).toBeInTheDocument();
+    expect(screen.getAllByRole("radio")).toHaveLength(4);
+    expect(screen.getByRole("radio", { name: /繁體中文/ })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /日本語/ })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /English/ })).toHaveAttribute("aria-checked", "true");
 
     await user.click(screen.getByRole("radio", { name: /简体中文/ }));

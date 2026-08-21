@@ -11,6 +11,7 @@ import {
   type ResolvedTheme,
 } from "./ThemeProvider";
 import { ErrorToastProvider } from "./ErrorToast";
+import { LanguageProvider, useLanguage } from "./LanguageProvider";
 
 const { setDockThemeIconMock, setWindowThemeMock } = vi.hoisted(() => ({
   setDockThemeIconMock: vi.fn(),
@@ -63,6 +64,11 @@ function ThemeProbe() {
       <button onClick={() => setTheme("system")}>System</button>
     </div>
   );
+}
+
+function LanguageSwitch() {
+  const { setLanguage } = useLanguage();
+  return <button onClick={() => setLanguage("ja")}>Japanese</button>;
 }
 
 beforeEach(() => {
@@ -181,6 +187,30 @@ describe("ThemeProvider", () => {
     );
   });
 
+  it("does not persist or synchronize the theme again when only language changes", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    const storageSpy = vi.spyOn(Storage.prototype, "setItem");
+    const user = userEvent.setup();
+    render(
+      <ErrorToastProvider>
+        <LanguageProvider>
+          <ThemeProvider><ThemeProbe /><LanguageSwitch /></ThemeProvider>
+        </LanguageProvider>
+      </ErrorToastProvider>,
+    );
+    await waitFor(() => expect(setDockThemeIconMock).toHaveBeenCalledTimes(1));
+    const initialThemeWrites = storageSpy.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY).length;
+
+    await user.click(screen.getByRole("button", { name: "Japanese" }));
+
+    expect(storageSpy.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY)).toHaveLength(initialThemeWrites);
+    expect(setWindowThemeMock).toHaveBeenCalledTimes(1);
+    expect(setDockThemeIconMock).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the page theme active when the native Dock update fails", async () => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       configurable: true,
@@ -210,6 +240,20 @@ describe("ThemeProvider", () => {
     expect(screen.getByText("dark:dark")).toBeInTheDocument();
     expect(within(screen.getByTestId("error-toast-viewport")).getByRole("alert"))
       .toHaveTextContent("theme changed for this session");
+  });
+
+  it("reports theme storage failure in Traditional Chinese", async () => {
+    window.localStorage.setItem("token-station-language", "zh-TW");
+    const user = userEvent.setup();
+    render(<ErrorToastProvider><ThemeProvider><ThemeProbe /></ThemeProvider></ErrorToastProvider>);
+    vi.spyOn(Storage.prototype, "setItem").mockImplementationOnce(() => {
+      throw new Error("storage denied");
+    });
+
+    await user.click(screen.getByRole("button", { name: "Dark" }));
+
+    expect(within(screen.getByTestId("error-toast-viewport")).getByRole("alert"))
+      .toHaveTextContent("主題已在本次工作階段生效");
   });
 
   it("ignores invalid persisted values", () => {

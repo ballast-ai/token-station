@@ -164,7 +164,7 @@ function AboutContent({
       showError(
         copy(
           "Could not copy the release link. Check the system clipboard permission and try again.",
-          "无法复制发布链接。请检查系统剪贴板权限，然后重试。",
+          "无法复制发布链接。请检查系统剪贴板权限，然后重试。", "無法複製釋出連結。請檢查系統剪貼簿許可權，然後重試。", "リリースリンクをコピーできませんでした。システムクリップボードの権限を確認し、再度お試しください。"
         ),
         "copy-release-url",
       );
@@ -311,7 +311,7 @@ function AboutContent({
           {onOpenFirstRunGuide && (
             <Button variant="outline" type="button" onClick={onOpenFirstRunGuide}>
               <BookOpen aria-hidden="true" />
-              {copy("Review getting started guide", "重新查看新手引导")}
+              {copy("Review getting started guide", "重新查看新手引导", "重新檢視新手引導", "ガイドを再確認")}
             </Button>
           )}
         </CardHeader>

@@ -24,7 +24,7 @@ import {
 import { ProviderIcon } from "../brandIcons";
 import ModelPicker, { type CatalogStatus } from "../components/ModelPicker";
 import PageBackButton from "../components/PageBackButton";
-import { useLocalizedCopy } from "../components/LanguageProvider";
+import { useLocalizedCopy, type LocalizedCopy } from "../components/LanguageProvider";
 import { englishProviderName } from "../providerCopy";
 import { humanizeAppError } from "../errors";
 import { useErrorToast } from "../components/ErrorToast";
@@ -52,13 +52,13 @@ export interface FreeCatalogFilters {
 
 function deliveryClassLabel(
   deliveryClass: ModelDeliveryClass,
-  copy: (english: string, chinese: string) => string,
+  copy: LocalizedCopy,
 ): string {
-  if (deliveryClass === "official") return copy("Official channel", "官方渠道");
-  if (deliveryClass === "managed") return copy("Managed inference", "托管推理");
-  if (deliveryClass === "self_hosted") return copy("Self-hosted", "自托管");
-  if (deliveryClass === "aggregated") return copy("Aggregator", "聚合渠道");
-  return copy("Provider", "供应商");
+  if (deliveryClass === "official") return copy("Official channel", "官方渠道", "官方渠道", "公式チャネル");
+  if (deliveryClass === "managed") return copy("Managed inference", "托管推理", "管理式推理", "マネージドインフェレンス");
+  if (deliveryClass === "self_hosted") return copy("Self-hosted", "自托管", "自建主機", "セルフホスティング");
+  if (deliveryClass === "aggregated") return copy("Aggregator", "聚合渠道", "聚合器", "アグレゲーター");
+  return copy("Provider", "供应商", "供應商", "プロバイダー");
 }
 
 interface AddProviderPageProps {
@@ -147,11 +147,13 @@ export default function AddProviderPage({
   const { showError, showInfo } = useErrorToast();
   const { copy, language } = useLocalizedCopy();
   const offerLabel = (kind: FreeOfferKind) => (
-    kind === "recurring" ? copy("Always free", "长期免费") : copy("Trial credit", "试用额度")
+    kind === "recurring" ? copy("Always free", "长期免费", "永久免費", "永続無料") : copy("Trial credit", "试用额度", "試用額度", "トライアルクォータ")
   );
   const providerName = (id: string, label: string) => copy(
     englishProviderName(id, label),
     label,
+    englishProviderName(id, label),
+    englishProviderName(id, label),
   );
   const [presetId, setPresetId] = useState("");
   const [name, setName] = useState("");
@@ -201,20 +203,20 @@ export default function AddProviderPage({
     const query = regularFilters.query.trim().toLocaleLowerCase();
     const custom: ProviderPreset = {
       id: CUSTOM_ID,
-      label: copy("Custom configuration", "自定义配置"),
+      label: copy("Custom configuration", "自定义配置", "自訂配置", "カスタム設定"),
       baseUrl: "",
       models: [],
       needsKey: true,
       protocol: "openai_chat_completions",
-      region: copy("Custom", "自定义"),
-      subscription: copy("Manual configuration", "手动配置"),
+      region: copy("Custom", "自定义", "自訂", "カスタム"),
+      subscription: copy("Manual configuration", "手动配置", "手動配置", "手動設定"),
       serviceClass: "self_hosted",
       officialDocs: "",
       modelDocs: "",
       verifiedAt: "2026-07-22",
       note: copy(
         "Enter an OpenAI-compatible endpoint and models manually.",
-        "手动填写 OpenAI-compatible 地址与模型。",
+        "手动填写 OpenAI-compatible 地址与模型。", "手動輸入 OpenAI 相容端點與模型。", "OpenAI 互換エンドポイントとモデルを手動で入力してください。"
       ),
     };
     return [custom, ...catalogProviders].filter((item) => {
@@ -309,12 +311,12 @@ export default function AddProviderPage({
     ? humanizeAppError(discovery.warning, language)
     : discovery?.warning;
   const catalogStatus: CatalogStatus = discovering
-    ? { label: copy("Loading…", "正在获取…"), tone: "loading" }
+    ? { label: copy("Loading…", "正在获取…", "載入中…", "読み込み中…"), tone: "loading" }
     : discovery?.source === "live"
       ? {
           label: copy(
             `${discovery.models.length} models synced`,
-            `已同步 ${discovery.models.length} 个`,
+            `已同步 ${discovery.models.length} 个`, `已同步 ${discovery.models.length} 個模型`, `${discovery.models.length} 個モデルが同期されました`
           ),
           tone: "live",
           warning: catalogWarning,
@@ -323,17 +325,17 @@ export default function AddProviderPage({
         ? {
             label: copy(
               `Cached · ${discovery.models.length} models`,
-              `使用缓存 · ${discovery.models.length} 个`,
+              `使用缓存 · ${discovery.models.length} 个`, `使用快取 · ${discovery.models.length} 個`, `キャッシュ使用 · ${discovery.models.length} 個`
             ),
             tone: "cache",
             warning: catalogWarning,
           }
         : discovery
-          ? { label: copy("Failed to load", "获取失败"), tone: "error", warning: catalogWarning }
+          ? { label: copy("Failed to load", "获取失败", "載入失敗", "読み込み失敗"), tone: "error", warning: catalogWarning }
           : {
               label: copy(
                 `Built-in suggestions · ${catalogModels.length}`,
-                `内置建议 · ${catalogModels.length} 个`,
+                `内置建议 · ${catalogModels.length} 个`, `內建建議 · ${catalogModels.length} 個`, `インバンド推奨 · ${catalogModels.length} 個`
               ),
               tone: "idle",
             };
@@ -441,29 +443,29 @@ export default function AddProviderPage({
   };
 
   const submit = async () => {
-    if (!presetId) return setError(copy("Select a provider first.", "请先选择供应商。"));
+    if (!presetId) return setError(copy("Select a provider first.", "请先选择供应商。", "請先選擇供應商。", "まずプロバイダーを選択してください。"));
     if (!name.trim() || !url.trim()) {
       return setError(copy(
         "Provider name and base URL are required.",
-        "供应商名称和 Base URL 不能为空。",
+        "供应商名称和 Base URL 不能为空。", "供應商名稱和 Base URL 為必填項。", "プロバイダー名と Base URL は必須です。"
       ));
     }
     if (!endpointPreview || endpointError) {
       return setError(endpointError || copy(
         "The base URL is still being resolved.",
-        "Base URL 尚未解析完成。",
+        "Base URL 尚未解析完成。", "Base URL 尚未解析完成。", "Base URL はまだ解決されていません。"
       ));
     }
     if (picked.length === 0) {
-      return setError(copy("Select at least one model.", "请至少选择一个模型。"));
+      return setError(copy("Select at least one model.", "请至少选择一个模型。", "請至少選擇一個模型。", "少なくとも1つのモデルを選択してください。"));
     }
     if (needsKey && credentialSource === "store" && !key.trim()) {
-      return setError(copy("Enter an API key.", "请填写 API Key。"));
+      return setError(copy("Enter an API key.", "请填写 API Key。", "輸入 API Key。", "APIキーを入力してください。"));
     }
     if (needsKey && credentialSource !== "store" && !credentialReference.trim()) {
       return setError(copy(
         "Enter the environment variable name or absolute file path.",
-        "请填写环境变量名或凭据文件绝对路径。",
+        "请填写环境变量名或凭据文件绝对路径。", "輸入環境變數名稱或絕對檔案路徑。", "環境変数名または絶対ファイルパスを入力してください。"
       ));
     }
     setSaving(true);
@@ -482,8 +484,8 @@ export default function AddProviderPage({
       onAdded(
         next,
         isExisting
-          ? copy(`Provider "${name.trim()}" updated`, `供应商“${name.trim()}”已更新`)
-          : copy("Provider added", "供应商已添加"),
+          ? copy(`Provider "${name.trim()}" updated`, `供应商“${name.trim()}”已更新`, `供應商 "${name.trim()}" 已更新`, `プロバイダー "${name.trim()}" が更新されました`)
+          : copy("Provider added", "供应商已添加", "供應商已新增", "プロバイダーが追加されました"),
       );
       if (importPublicPrices && publicPriceImportAvailable) {
         try {
@@ -495,13 +497,13 @@ export default function AddProviderPage({
           if (imported.missing_model_ids.length > 0) {
             showInfo(copy(
               `${imported.imported} public prices imported; ${imported.missing_model_ids.length} models remain unknown.`,
-              `已导入 ${imported.imported} 个公开价格；${imported.missing_model_ids.length} 个模型仍为未知价格。`,
+              `已导入 ${imported.imported} 个公开价格；${imported.missing_model_ids.length} 个模型仍为未知价格。`, `已匯入 ${imported.imported} 個公開價格；${imported.missing_model_ids.length} 個模型仍為未知價格。`, `${imported.imported} 個の公開価格がインポートされました；${imported.missing_model_ids.length} 個のモデルは価格が未確認です。`
             ), `provider-price-import:${name.trim()}`);
           }
         } catch (priceError) {
           showError(copy(
             `Provider added, but public prices could not be imported: ${humanizeAppError(priceError, language)}`,
-            `供应商已添加，但公开价格导入失败：${humanizeAppError(priceError, language)}`,
+            `供应商已添加，但公开价格导入失败：${humanizeAppError(priceError, language)}`, `供應商已新增，但公開價格匯入失敗：${humanizeAppError(priceError, language)}`, `プロバイダーが追加されました。ただし、公開価格のインポートに失敗しました：${humanizeAppError(priceError, language)}`
           ), `provider-price-import:${name.trim()}`);
           try {
             onStateChanged?.(await getState());
@@ -520,25 +522,25 @@ export default function AddProviderPage({
   const disabled = saving || discovering;
   const publicCatalogCoverage = Object.keys(publicModels?.providers ?? {}).length;
   const publicCatalogStatus = publicModelsLoading
-    ? copy("Syncing public catalog…", "正在同步公共目录…")
+    ? copy("Syncing public catalog…", "正在同步公共目录…", "正在同步公共目錄…", "パブリックカタログを同期中…")
     : publicModelsError
-      ? copy("Bundled snapshot · sync failed", "内置快照 · 同步失败")
+      ? copy("Bundled snapshot · sync failed", "内置快照 · 同步失败", "內建快照 · 同步失敗", "バンドルされたスナップショット · 同期失敗")
       : publicModels?.source === "live"
         ? copy(
             `Public catalog synced · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} channels`,
-            `公共目录已同步 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 个渠道`,
+            `公共目录已同步 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 个渠道`, `公共目錄已同步 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 個渠道`, `パブリックカタログが同期されました · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 個のチャネル`
           )
         : publicModels?.source === "stale_cache"
           ? copy(
               `Stale public cache · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} channels`,
-              `公共目录旧缓存 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 个渠道`,
+              `公共目录旧缓存 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 个渠道`, `公共目錄舊快取 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 個渠道`, `パブリックカタログの古いキャッシュ · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 個のチャネル`
             )
           : publicModels
             ? copy(
                 `Public catalog cache · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} channels`,
-                `公共目录缓存 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 个渠道`,
+                `公共目录缓存 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 个渠道`, `公共目錄快取 · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 個渠道`, `パブリックカタログのキャッシュ · ${publicCatalogCoverage}/${PROVIDER_CATALOG.length} 個のチャネル`
               )
-            : copy("Bundled model snapshot", "内置模型快照");
+            : copy("Bundled model snapshot", "内置模型快照", "內建模型快照", "バンドルされたモデルスナップショット");
 
   if (!configuringRegular && entryMode === "model-first") {
     return (
@@ -546,15 +548,15 @@ export default function AddProviderPage({
         <header className="page-title-row provider-catalog-title-row">
           <div>
             <PageBackButton onClick={onCancel} />
-            <h1>{copy("Search models", "搜索模型")}</h1>
+            <h1>{copy("Search models", "搜索模型", "搜尋模型", "モデルを検索")}</h1>
             <p>{copy(
               "Search for a model, then choose the provider that will deliver it.",
-              "先搜索模型，再选择提供该模型的供应商。",
+              "先搜索模型，再选择提供该模型的供应商。", "先搜尋模型，再選擇提供該模型的供應商。", "まずモデルを検索し、そのモデルを提供するプロバイダーを選択してください。"
             )}</p>
           </div>
           <div className="provider-catalog-summary">
             <span className="provider-catalog-total">
-              {copy(`${visibleModelChoices.length} choices`, `${visibleModelChoices.length} 个可选组合`)}
+              {copy(`${visibleModelChoices.length} choices`, `${visibleModelChoices.length} 个可选组合`, `${visibleModelChoices.length} 個可選組合`, `${visibleModelChoices.length} 個の選択肢`)}
             </span>
             <small
               className={`public-catalog-status ${publicModelsError ? "error" : ""}`}
@@ -566,21 +568,21 @@ export default function AddProviderPage({
           </div>
         </header>
 
-        <section className="panel model-first-catalog" aria-label={copy("Model search", "模型搜索")}>
+        <section className="panel model-first-catalog" aria-label={copy("Model search", "模型搜索", "模型搜尋", "モデル検索")}>
           <label className="provider-catalog-search model-first-search">
             <span aria-hidden="true">⌕</span>
             <input
               autoFocus
               type="search"
-              aria-label={copy("Search models", "搜索模型")}
-              placeholder={copy("Enter a model name", "输入模型名称")}
+              aria-label={copy("Search models", "搜索模型", "搜尋模型", "モデルを検索")}
+              placeholder={copy("Enter a model name", "输入模型名称", "輸入模型名稱", "モデル名を入力")}
               value={modelFirstQuery}
               onChange={(event) => setModelFirstQuery(event.target.value)}
             />
           </label>
 
           {visibleModelChoices.length > 0 ? (
-            <div className="model-first-results" role="list" aria-label={copy("Models and providers", "模型与供应商")} data-layout="compact-three-column">
+            <div className="model-first-results" role="list" aria-label={copy("Models and providers", "模型与供应商", "模型與供應商", "モデルとプロバイダー")} data-layout="compact-three-column">
               {visibleModelChoices.map((offering) => {
                 const { provider, model, upstreamModelId } = offering;
                 const displayName = providerName(provider.id, provider.label);
@@ -597,7 +599,7 @@ export default function AddProviderPage({
                         <span className="model-first-name">{model.label}</span>
                         {invocationDiffers ? (
                           <small className="model-first-upstream">
-                            {copy(`Calls ${upstreamModelId}`, `调用 ID · ${upstreamModelId}`)}
+                            {copy(`Calls ${upstreamModelId}`, `调用 ID · ${upstreamModelId}`, `呼叫 ${upstreamModelId}`, `呼び出し ${upstreamModelId}`)}
                           </small>
                         ) : null}
                       </span>
@@ -615,8 +617,8 @@ export default function AddProviderPage({
             </div>
           ) : (
             <div className="provider-catalog-empty">
-              <strong>{copy("No matching models", "没有匹配的模型")}</strong>
-              <p>{copy("Try another model name.", "请尝试其他模型名称。")}</p>
+              <strong>{copy("No matching models", "没有匹配的模型", "沒有匹配的模型", "一致するモデルがありません")}</strong>
+              <p>{copy("Try another model name.", "请尝试其他模型名称。", "請嘗試其他模型名稱。", "別のモデル名を試してください。")}</p>
             </div>
           )}
         </section>
@@ -633,17 +635,17 @@ export default function AddProviderPage({
         <header className="page-title-row provider-catalog-title-row">
           <div>
             <PageBackButton onClick={onCancel} />
-            <h1>{copy("Add provider", "添加供应商")}</h1>
+            <h1>{copy("Add provider", "添加供应商", "新增供應商", "プロバイダーを追加")}</h1>
             <p>{copy(
               "Choose a standard or free API from one catalog.",
-              "从同一个目录选择常规 API 或免费 API，配置入口和返回逻辑保持一致。",
+              "从同一个目录选择常规 API 或免费 API，配置入口和返回逻辑保持一致。", "從同一個目錄選擇常規 API 或免費 API，配置入口和返回邏輯保持一致。", "同じディレクトリから標準APIまたは無料APIを選択し、エントリと返却ロジックを統一してください。"
             )}</p>
           </div>
           <div className="provider-catalog-summary">
             <span className="provider-catalog-total">
               {copy(
                 `${catalogMode === "regular" ? catalogProviders.length + 1 : freePresets.length} providers`,
-                `${catalogMode === "regular" ? catalogProviders.length + 1 : freePresets.length} 家可选供应商`,
+                `${catalogMode === "regular" ? catalogProviders.length + 1 : freePresets.length} 家可选供应商`, `${catalogMode === "regular" ? catalogProviders.length + 1 : freePresets.length} 家可選供應商`, `${catalogMode === "regular" ? catalogProviders.length + 1 : freePresets.length} 個の選択可能なプロバイダー`
               )}
             </span>
             {catalogMode === "regular" ? (
@@ -660,17 +662,17 @@ export default function AddProviderPage({
 
         <section
           className="panel unified-provider-catalog"
-          aria-label={copy("Choose a provider", "选择供应商")}
+          aria-label={copy("Choose a provider", "选择供应商", "選擇供應商", "プロバイダーを選択")}
         >
           <div className="provider-catalog-toolbar">
-            <div className="provider-mode-switch" aria-label={copy("API type", "API 类型")}>
+            <div className="provider-mode-switch" aria-label={copy("API type", "API 类型", "API 型別", "API タイプ")}>
               <button
                 className={catalogMode === "regular" ? "active regular" : ""}
                 type="button"
                 aria-pressed={catalogMode === "regular"}
                 onClick={() => switchCatalogMode("regular")}
               >
-                {copy("Standard API", "常规 API")} <small>{catalogProviders.length + 1}</small>
+                {copy("Standard API", "常规 API", "常規 API", "標準API")} <small>{catalogProviders.length + 1}</small>
               </button>
               <button
                 className={catalogMode === "free" ? "active free" : ""}
@@ -679,7 +681,7 @@ export default function AddProviderPage({
                 onClick={() => switchCatalogMode("free")}
               >
                 <span className="free-entry-signal" aria-hidden="true"><i /><i /><i /></span>
-                {copy("Free API", "免费 API")} <small>{freePresets.length || "—"}</small>
+                {copy("Free API", "免费 API", "免費 API", "無料API")} <small>{freePresets.length || "—"}</small>
               </button>
             </div>
             <label className="provider-catalog-search">
@@ -687,9 +689,9 @@ export default function AddProviderPage({
               <input
                 type="search"
                 aria-label={catalogMode === "regular"
-                  ? copy("Search standard providers", "搜索常规供应商")
-                  : copy("Search free providers", "搜索免费供应商")}
-                placeholder={copy("Search providers, models, or tags…", "搜索供应商、模型或标签…")}
+                  ? copy("Search standard providers", "搜索常规供应商", "搜尋常規供應商", "標準プロバイダーを検索")
+                  : copy("Search free providers", "搜索免费供应商", "搜尋免費供應商", "無料プロバイダーを検索")}
+                placeholder={copy("Search providers, models, or tags…", "搜索供应商、模型或标签…", "搜尋供應商、模型或標籤…", "プロバイダー、モデル、またはタグを検索…")}
                 value={catalogMode === "regular" ? regularFilters.query : freeFilters.query}
                 onChange={(event) => {
                   if (catalogMode === "regular") {
@@ -704,11 +706,11 @@ export default function AddProviderPage({
 
           <div className="provider-catalog-filters">
             {catalogMode === "regular" ? (
-              <div className="free-filter-row" aria-label={copy("Standard provider region", "常规供应商地区筛选")}>
+              <div className="free-filter-row" aria-label={copy("Standard provider region", "常规供应商地区筛选", "常規供應商地區篩選", "標準プロバイダーの地域フィルタ")}>
                 {([
-                  ["all", copy("All", "全部")],
-                  ["china", copy("Available in China", "中国可用")],
-                  ["global", copy("Global", "全球平台")],
+                  ["all", copy("All", "全部", "全部", "すべて")],
+                  ["china", copy("Available in China", "中国可用", "中國可用", "中国で利用可能")],
+                  ["global", copy("Global", "全球平台", "全球", "グローバル")],
                 ] as const).map(([value, label]) => (
                   <button
                     key={value}
@@ -723,11 +725,11 @@ export default function AddProviderPage({
               </div>
             ) : (
               <>
-                <div className="free-filter-row" aria-label={copy("Free offer type", "免费类型筛选")}>
+                <div className="free-filter-row" aria-label={copy("Free offer type", "免费类型筛选", "免費型別篩選", "無料タイプフィルタ")}>
                   {([
-                    ["all", copy("All", "全部")],
-                    ["recurring", copy("Always free", "长期免费")],
-                    ["trial", copy("Trial credit", "试用额度")],
+                    ["all", copy("All", "全部", "全部", "すべて")],
+                    ["recurring", copy("Always free", "长期免费", "永久免費", "永続無料")],
+                    ["trial", copy("Trial credit", "试用额度", "試用額度", "トライアルクォータ")],
                   ] as const).map(([value, label]) => (
                     <button
                       key={value}
@@ -740,11 +742,11 @@ export default function AddProviderPage({
                     </button>
                   ))}
                 </div>
-                <div className="free-filter-row" aria-label={copy("Free provider region", "免费供应商地区筛选")}>
+                <div className="free-filter-row" aria-label={copy("Free provider region", "免费供应商地区筛选", "免費供應商地區篩選", "無料プロバイダー地域フィルタ")}>
                   {([
-                    ["all", copy("All regions", "全部地区")],
-                    ["china", copy("Available in China", "中国可用")],
-                    ["global", copy("Global", "全球平台")],
+                    ["all", copy("All regions", "全部地区", "全部地區", "すべての地域")],
+                    ["china", copy("Available in China", "中国可用", "中國可用", "中国で利用可能")],
+                    ["global", copy("Global", "全球平台", "全球", "グローバル")],
                   ] as const).map(([value, label]) => (
                     <button
                       key={value}
@@ -763,26 +765,26 @@ export default function AddProviderPage({
 
           {catalogMode === "free" && (
             <div className="provider-free-boundary">
-              <strong>{copy("Cost boundary", "费用边界")}</strong>
+              <strong>{copy("Cost boundary", "费用边界", "費用邊界", "費用境界")}</strong>
               {copy(
                 "Only verified free models are saved. Requests stop when quota is exhausted and never fall back to paid instances.",
-                "只保存已核验免费模型；额度耗尽时停止，不回退到付费实例。",
+                "只保存已核验免费模型；额度耗尽时停止，不回退到付费实例。", "只儲存已核驗免費模型；額度耗盡時停止，不回退到付費執行個體。", "認証済みの無料モデルのみ保存されます。クォータが尽きると停止し、有料インスタンスには戻りません。"
               )}
-              <small>{copy("Last verified", "最后核验")} · {freePresets[0]?.verified_at ?? "—"}</small>
+              <small>{copy("Last verified", "最后核验", "最後核驗", "最後の認証")} · {freePresets[0]?.verified_at ?? "—"}</small>
             </div>
           )}
 
           {catalogMode === "free" && freeLoading && (
             <div className="provider-catalog-status">{copy(
               "Loading free provider catalog…",
-              "正在读取免费供应商目录…",
+              "正在读取免费供应商目录…", "正在讀取免費供應商目錄…", "無料プロバイダーのカタログを読み込んでいます…"
             )}</div>
           )}
           {catalogMode === "free" && freeError && (
             <div className="provider-catalog-status error">
-              <strong>{copy("Failed to load free provider catalog", "免费供应商目录加载失败")}</strong>
+              <strong>{copy("Failed to load free provider catalog", "免费供应商目录加载失败", "免費供應商目錄讀取失敗", "無料プロバイダーのカタログ読み込み失敗")}</strong>
               <span>{freeError}</span>
-              <button className="btn" type="button" onClick={onLoadFree}>{copy("Retry", "重试")}</button>
+              <button className="btn" type="button" onClick={onLoadFree}>{copy("Retry", "重试", "重試", "再試行")}</button>
             </div>
           )}
 
@@ -790,7 +792,7 @@ export default function AddProviderPage({
             <div
               className="provider-catalog-grid"
               role="list"
-              aria-label={copy("Standard providers", "常规供应商列表")}
+              aria-label={copy("Standard providers", "常规供应商列表", "常規供應商清單", "標準プロバイダー一覧")}
               data-onboarding-target="provider-choice"
             >
               {visibleRegular.map((item) => {
@@ -816,7 +818,7 @@ export default function AddProviderPage({
             <div
               className="provider-catalog-grid"
               role="list"
-              aria-label={copy("Free providers", "免费供应商列表")}
+              aria-label={copy("Free providers", "免费供应商列表", "免費供應商清單", "無料プロバイダー一覧")}
               data-onboarding-target="provider-choice"
             >
               {visibleFree.map((item) => (
@@ -861,10 +863,10 @@ export default function AddProviderPage({
             )
           ) && (
             <div className="provider-catalog-empty">
-              <strong>{copy("No matching providers", "没有匹配的供应商")}</strong>
+              <strong>{copy("No matching providers", "没有匹配的供应商", "沒有匹配的供應商", "一致するプロバイダーがありません")}</strong>
               <p>{copy(
                 "No providers match the current search and filters.",
-                "当前搜索词或筛选组合没有结果。",
+                "当前搜索词或筛选组合没有结果。", "當前搜尋詞或篩選組合沒有結果。", "現在の検索語またはフィルタの組み合わせで結果がありません。"
               )}</p>
               {!filtersEmpty && (
                 <button
@@ -878,7 +880,7 @@ export default function AddProviderPage({
                     }
                   }}
                 >
-                  {copy("Clear filters", "清除筛选")}
+                  {copy("Clear filters", "清除筛选", "清除篩選", "フィルタをクリア")}
                 </button>
               )}
             </div>
@@ -893,10 +895,10 @@ export default function AddProviderPage({
       <header className="page-title-row">
         <div>
           <PageBackButton onClick={leaveRegularConfig} disabled={disabled} />
-          <h1>{preset?.label ?? copy("Custom configuration", "自定义配置")}</h1>
+          <h1>{preset?.label ?? copy("Custom configuration", "自定义配置", "自訂配置", "カスタム設定")}</h1>
           <p>{copy(
             "Enter credentials and choose models to create a standard API instance.",
-            "填写凭据并选择模型；保存后创建独立的常规 API 实例。",
+            "填写凭据并选择模型；保存后创建独立的常规 API 实例。", "填寫憑據並選擇模型；儲存後建立獨立的常規 API 例項。", "資格情報を入力し、モデルを選択してください。保存後、独立した標準APIインスタンスが作成されます。"
           )}</p>
         </div>
       </header>
@@ -906,7 +908,7 @@ export default function AddProviderPage({
         <div className="banner info">
           {copy(
             `Provider "${name.trim()}" already exists. Saving updates its base URL, API key, and models instead of creating a duplicate.`,
-            `供应商“${name.trim()}”已经存在。继续保存会更新它的 Base URL、API Key 和模型，不会重复创建。`,
+            `供应商“${name.trim()}”已经存在。继续保存会更新它的 Base URL、API Key 和模型，不会重复创建。`, `供應商 "${name.trim()}" 已經存在。繼續儲存會更新它的 Base URL、API Key 和模型，不會重複建立。`, `プロバイダー "${name.trim()}" はすでに存在しています。続行して保存すると、Base URL、API Key、およびモデルが更新され、重複して作成されません。`
           )}
         </div>
       )}
@@ -917,33 +919,35 @@ export default function AddProviderPage({
             <span>{copy(
               "Review the provider documentation before saving credentials and models.",
               preset.note ?? `${preset.region} · ${preset.subscription}`,
+              "儲存憑證與模型前，請先檢視供應商檔案。",
+              "資格情報とモデルを保存する前に、プロバイダーのドキュメンテーションを確認してください。",
             )}</span>
             <a href={preset.officialDocs} target="_blank" rel="noreferrer">
-              {copy("Provider documentation", "官方接入文档")}
+              {copy("Provider documentation", "官方接入文档", "官方檔案", "公式ドキュメント")}
             </a>
           </div>
         )}
         <div
           className="wizard-step"
           role="group"
-          aria-label={copy("Provider credentials", "供应商凭据")}
+          aria-label={copy("Provider credentials", "供应商凭据", "供應商憑證", "プロバイダー資格情報")}
           data-onboarding-target="provider-credential"
         >
           <div className="step-index">01</div>
           <div className="step-body form-grid">
             <label className="field-label">
-              {copy("Name", "名称")}
+              {copy("Name", "名称", "名稱", "名前")}
               <input className="input" value={name} disabled={disabled || !isCustom} onChange={(event) => setName(event.target.value)} />
             </label>
             {isCustom && (
               <div className="field-label">
-                <span>{copy("API dialect", "API 方言")}</span>
+                <span>{copy("API dialect", "API 方言", "API 方言", "API ディアレクト")}</span>
                 <Select
                   value={providerDialect}
                   disabled={disabled}
                   onValueChange={(value) => changeProviderDialect(value as typeof providerDialect)}
                 >
-                  <SelectTrigger className="w-full" aria-label={copy("API dialect", "API 方言")}>
+                  <SelectTrigger className="w-full" aria-label={copy("API dialect", "API 方言", "API 方言", "API ディアレクト")}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent position="popper" align="start">
@@ -963,7 +967,7 @@ export default function AddProviderPage({
               <p className="inline-note form-span">
                 {copy(
                   "The Base URL must point to the resource /openai/v1 root. Use the Azure deployment name as the model; the credential is sent only in api-key.",
-                  "Base URL 必须指向资源的 /openai/v1 根路径；模型名填写 Azure deployment name，凭据只通过 api-key 发送。",
+                  "Base URL 必须指向资源的 /openai/v1 根路径；模型名填写 Azure deployment name，凭据只通过 api-key 发送。", "Base URL 必須指向資源的 /openai/v1 根路徑；模型名稱請填寫 Azure 部署名稱，憑證只會透過 api-key 傳送。", "Base URL はリソースの /openai/v1 ルートを指す必要があります。モデル名には Azure のデプロイ名を入力し、認証情報は api-key でのみ送信されます。"
                 )}
               </p>
             )}
@@ -979,7 +983,7 @@ export default function AddProviderPage({
               ) : (
                 <span>{copy(
                   "Enter a base URL to preview the final request endpoints.",
-                  "填写 Base URL 后显示最终请求地址。",
+                  "填写 Base URL 后显示最终请求地址。", "填寫 Base URL 後顯示最終請求地址。", "Base URL を入力すると、最終的なリクエストエンドポイントが表示されます。"
                 )}</span>
               )}
             </div>
@@ -992,7 +996,7 @@ export default function AddProviderPage({
                       className="input mono"
                       type="password"
                       autoComplete="off"
-                      placeholder={copy("Stored in local secrets.json", "保存在本机 secrets.json")}
+                      placeholder={copy("Stored in local secrets.json", "保存在本机 secrets.json", "儲存在本機 secrets.json", "ローカルの secrets.json に保存")}
                       value={key}
                       disabled={disabled}
                       onChange={(event) => setKey(event.target.value)}
@@ -1000,9 +1004,9 @@ export default function AddProviderPage({
                   </label>
                 )}
                 <details className="credential-source-advanced">
-                  <summary>{copy("Advanced credential source", "高级凭据来源")}</summary>
+                  <summary>{copy("Advanced credential source", "高级凭据来源", "高階憑證來源", "高度な資格情報ソース")}</summary>
                   <div className="field-label">
-                    <span>{copy("Credential source", "凭据来源")}</span>
+                    <span>{copy("Credential source", "凭据来源", "憑證來源", "資格情報ソース")}</span>
                     <Select
                       value={credentialSource}
                       disabled={disabled}
@@ -1014,20 +1018,20 @@ export default function AddProviderPage({
                     >
                       <SelectTrigger
                         className="w-full"
-                        aria-label={copy("Credential source", "凭据来源")}
+                        aria-label={copy("Credential source", "凭据来源", "憑證來源", "資格情報ソース")}
                       >
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent position="popper" align="start">
                         <SelectGroup>
                           <SelectItem value="store">
-                            {copy("Local store (default)", "本地存储（默认）")}
+                            {copy("Local store (default)", "本地存储（默认）", "本地儲存（預設）", "ローカルストレージ（デフォルト）")}
                           </SelectItem>
                           <SelectItem value="env">
-                            {copy("Environment variable", "环境变量")}
+                            {copy("Environment variable", "环境变量", "環境變數", "環境変数")}
                           </SelectItem>
                           <SelectItem value="file">
-                            {copy("Credential file", "凭据文件")}
+                            {copy("Credential file", "凭据文件", "憑據檔案", "資格情報ファイル")}
                           </SelectItem>
                         </SelectGroup>
                       </SelectContent>
@@ -1036,13 +1040,13 @@ export default function AddProviderPage({
                   {credentialSource !== "store" && (
                     <label className="field-label">
                       {credentialSource === "env"
-                        ? copy("Environment variable name", "环境变量名")
-                        : copy("Absolute credential file path", "凭据文件绝对路径")}
+                        ? copy("Environment variable name", "环境变量名", "環境變數名", "環境変数名")
+                        : copy("Absolute credential file path", "凭据文件绝对路径", "憑據檔案絕對路徑", "絶対パスの認証ファイル")}
                       <input
                         className="input mono"
                         aria-label={credentialSource === "env"
-                          ? copy("Environment variable name", "环境变量名")
-                          : copy("Absolute credential file path", "凭据文件绝对路径")}
+                          ? copy("Environment variable name", "环境变量名", "環境變數名", "環境変数名")
+                          : copy("Absolute credential file path", "凭据文件绝对路径", "憑據檔案絕對路徑", "絶対パスの認証ファイル")}
                         value={credentialReference}
                         disabled={disabled}
                         placeholder={credentialSource === "env" ? "DEEPSEEK_API_KEY" : "/absolute/path/provider.key"}
@@ -1052,13 +1056,13 @@ export default function AddProviderPage({
                   )}
                   <p className="inline-note">{copy(
                     "env/file stores only the reference. Token Station reads the value at request time.",
-                    "env/file 只保存引用，Token Station 在请求时读取凭据值。",
+                    "env/file 只保存引用，Token Station 在请求时读取凭据值。", "env/file 只儲存參考，Token Station 在請求時讀取憑證值。", "env/file は参照のみを保存し、Token Station はリクエスト時に資格情報を読み込みます。"
                   )}</p>
                 </details>
               </div>
             ) : (
               <div className="local-provider-note form-span">
-                {copy("Local provider. No API key required.", "本地供应商，无需 API Key。")}
+                {copy("Local provider. No API key required.", "本地供应商，无需 API Key。", "本地供應商。無需 API Key。", "ローカルプロバイダー。API Key は必要ありません。")}
               </div>
             )}
             <label className="field-label form-span checkbox-label">
@@ -1071,7 +1075,7 @@ export default function AddProviderPage({
               />
               <span>{copy(
                 "This model runs locally (for example, Ollama or LM Studio) and can be selected by Local only routing.",
-                "这是本机运行的本地模型（Ollama / LM Studio 等），可被“只走本地”路由锁定，请求不出本机。",
+                "这是本机运行的本地模型（Ollama / LM Studio 等），可被“只走本地”路由锁定，请求不出本机。", "這是本機執行的本地模型（Ollama / LM Studio 等），可被「只走本地」路由鎖定，請求不出本機。", "これはローカルで実行されるローカルモデル（Ollama / LM Studio など）で、「ローカルのみ」ルーティングでロックされ、リクエストがローカル外に漏れません。"
               )}</span>
             </label>
             <p
@@ -1082,16 +1086,16 @@ export default function AddProviderPage({
               {!endpointPreview
                 ? copy(
                     "Resolve the base URL before marking this provider as local.",
-                    "Base URL 解析完成后才能判断是否为本地模型。",
+                    "Base URL 解析完成后才能判断是否为本地模型。", "解析 Base URL 後才能標記此供應商為本地模型。", "Base URL を解析した後で、このプロバイダーをローカルプロバイダーとしてマークできます。"
                   )
                 : endpointPreview.loopback
                   ? copy(
                       "A loopback endpoint was detected. This provider can be marked as local.",
-                      "已检测到本机回环地址，可以标记为本地模型。",
+                      "已检测到本机回环地址，可以标记为本地模型。", "已檢測到本機回環地址，可以標記為本地模型。", "ローカルホストアドレスが検出されました。このプロバイダーをローカルプロバイダーとしてマークできます。"
                     )
                   : copy(
                       "Cloud endpoints cannot be marked as local. Only localhost or 127.0.0.1 endpoints qualify.",
-                      "云端地址不能标记为本地模型；只有 localhost 或 127.0.0.1 等回环地址可以使用此选项。",
+                      "云端地址不能标记为本地模型；只有 localhost 或 127.0.0.1 等回环地址可以使用此选项。", "雲端地址不能標記為本地模型；只有 localhost 或 127.0.0.1 等回環地址可以使用此選項。", "クラウドアドレスはローカルプロバイダーとしてマークできません。ローカルホスト（localhost または 127.0.0.1）などのループバックアドレスのみがこのオプションを使用できます。"
                     )}
             </p>
           </div>
@@ -1100,12 +1104,12 @@ export default function AddProviderPage({
         <div
           className="wizard-step"
           role="group"
-          aria-label={copy("Provider models", "供应商模型")}
+          aria-label={copy("Provider models", "供应商模型", "供應商模型", "プロバイダーのモデル")}
           data-onboarding-target="provider-models"
         >
           <div className="step-index">02</div>
           <div className="step-body">
-            <label className="field-label">{copy("Select models", "选择模型")}</label>
+            <label className="field-label">{copy("Select models", "选择模型", "選擇模型", "モデルを選択")}</label>
             <ModelPicker
               models={allModels}
               selected={picked}
@@ -1128,18 +1132,18 @@ export default function AddProviderPage({
               />
               <span>{copy(
                 "Fill matching public prices",
-                "批量填充匹配的公开价格",
+                "批量填充匹配的公开价格", "填入匹配的公開價格", "一致する公開価格を一括で入力"
               )}</span>
             </label>
             <p className="inline-note">
               {publicPriceImportAvailable
                 ? copy(
                     "Uses models.dev public USD list prices as estimates. Existing manual prices are never overwritten; unmatched models remain unknown.",
-                    "使用 models.dev 的公开美元标价作为估算。不会覆盖已有人工价格；未匹配模型保持未知价格。",
+                    "使用 models.dev 的公开美元标价作为估算。不会覆盖已有人工价格；未匹配模型保持未知价格。", "使用 models.dev 公開美元標價作為估算。已有人工價格不會被覆蓋；未匹配模型保持未知價格。", "models.dev の公開ドル価格を使用して推定します。既存の人為的価格は上書きされません。一致しないモデルは未知の価格のままです。"
                   )
                 : copy(
                     "Public price import is unavailable for local and Azure deployment entries.",
-                    "本地模型和 Azure 部署条目不使用公开价格导入。",
+                    "本地模型和 Azure 部署条目不使用公开价格导入。", "本機模型和 Azure 部署項目無法匯入公開價格。", "ローカルモデルと Azure デプロイの項目では公開価格を取り込めません。"
                   )}
             </p>
           </div>
@@ -1147,7 +1151,7 @@ export default function AddProviderPage({
 
         <footer className="wizard-actions">
           <button className="btn" type="button" disabled={disabled} onClick={leaveRegularConfig}>
-            {copy("Back to catalog", "返回目录")}
+            {copy("Back to catalog", "返回目录", "返回目錄", "カタログに戻る")}
           </button>
           <button
             className="btn primary"
@@ -1157,10 +1161,10 @@ export default function AddProviderPage({
             onClick={() => void submit()}
           >
             {saving
-              ? copy("Saving…", "正在保存…")
+              ? copy("Saving…", "正在保存…", "正在儲存…", "保存中…")
               : isExisting
-                ? copy("Update provider", "更新供应商")
-                : copy("Add provider", "添加供应商")}
+                ? copy("Update provider", "更新供应商", "更新供應商", "プロバイダーを更新")
+                : copy("Add provider", "添加供应商", "新增供應商", "プロバイダーを追加")}
           </button>
         </footer>
       </section>

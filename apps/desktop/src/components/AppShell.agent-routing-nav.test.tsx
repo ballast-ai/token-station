@@ -20,6 +20,7 @@ const serve: ServeView = {
 function renderShell(
   view: Parameters<typeof AppShell>[0]["view"],
   serveOverride: Partial<ServeView> = {},
+  navigationName = "主导航",
 ) {
   const onNavigate = vi.fn();
   render(
@@ -38,12 +39,24 @@ function renderShell(
     </LanguageProvider>,
   );
   return {
-    navigation: within(screen.getByRole("navigation", { name: "主导航" })),
+    navigation: within(screen.getByRole("navigation", { name: navigationName })),
     onNavigate,
   };
 }
 
 describe("AppShell Agent and routing navigation", () => {
+  it.each([
+    ["zh-TW", true, "Agent：已連線"],
+    ["zh-TW", false, "Agent：未連線"],
+    ["ja", true, "エージェント：接続済み"],
+    ["ja", false, "エージェント：未接続"],
+  ] as const)("localizes the live connection status for %s", (language, connected, expected) => {
+    window.localStorage.setItem("token-station-language", language);
+    const navigationName = language === "ja" ? "メインナビゲーション" : "主導覽";
+    renderShell("overview", { agent_connected: connected }, navigationName);
+    expect(screen.getByTestId("agent-runtime-connection")).toHaveTextContent(expected);
+  });
+
   it("exposes Agent and routing as separate primary pages", () => {
     const { navigation } = renderShell("agents");
 

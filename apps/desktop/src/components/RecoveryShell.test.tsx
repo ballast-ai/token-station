@@ -2,6 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import RecoveryShell from "./RecoveryShell";
+import { LanguageProvider } from "./LanguageProvider";
 import {
   checkDesktopUpdate,
   exportRecoveryBundle,
@@ -178,5 +179,31 @@ describe("RecoveryShell", () => {
     render(<RecoveryShell initialState={{ ...safeState, mode: "normal", reason_code: null, message: null }} initialError={new Error("render boom")} />);
     expect(await screen.findByText("操作未能完成。请重试；如果仍然失败，请从自救模式打开本地日志。")).toBeInTheDocument();
     await waitFor(() => expect(recordFrontendDiagnostic).toHaveBeenCalledWith(expect.objectContaining({ kind: "render_error", message: "render boom" })));
+  });
+
+  it("uses the detected language for the first recovery render when storage is unavailable", async () => {
+    Object.defineProperty(window.navigator, "languages", {
+      configurable: true,
+      value: ["ja-JP"],
+    });
+    Object.defineProperty(window.navigator, "language", {
+      configurable: true,
+      value: "ja-JP",
+    });
+    const storageSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+
+    render(
+      <LanguageProvider>
+        <RecoveryShell
+          initialState={{ ...safeState, mode: "normal", reason_code: null, message: null }}
+          initialError={new Error("cursor_running")}
+        />
+      </LanguageProvider>,
+    );
+
+    expect(await screen.findByText(/Cursor を完全に終了/)).toBeInTheDocument();
+    storageSpy.mockRestore();
   });
 });
