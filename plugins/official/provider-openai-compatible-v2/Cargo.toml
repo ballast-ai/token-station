@@ -21,11 +21,11 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-south-component-conformance = { version = "=0.10.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "13e4567a22bcfb43aef2bf44fd870c811210c8f1", default-features = false }
+south-component-conformance = { version = "=0.11.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "8a0fec515f323f612ea51b0ab178885094b4f32e", default-features = false }
 wit-bindgen = "0.59"
 
 [dev-dependencies]
-south-provider-api = { version = "=0.10.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "13e4567a22bcfb43aef2bf44fd870c811210c8f1" }
+south-provider-api = { version = "=0.11.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "8a0fec515f323f612ea51b0ab178885094b4f32e" }
 
 [profile.release]
 lto = "thin"

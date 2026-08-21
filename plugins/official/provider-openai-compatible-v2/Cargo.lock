@@ -182,8 +182,8 @@ dependencies = [
 
 [[package]]
 name = "south-component-conformance"
-version = "0.10.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=13e4567a22bcfb43aef2bf44fd870c811210c8f1#13e4567a22bcfb43aef2bf44fd870c811210c8f1"
+version = "0.11.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=8a0fec515f323f612ea51b0ab178885094b4f32e#8a0fec515f323f612ea51b0ab178885094b4f32e"
 dependencies = [
  "serde",
  "serde_json",
@@ -194,8 +194,8 @@ dependencies = [
 
 [[package]]
 name = "south-provider-api"
-version = "0.10.0"
-source = "git+https://github.com/ballast-ai/token-station-south.git?rev=13e4567a22bcfb43aef2bf44fd870c811210c8f1#13e4567a22bcfb43aef2bf44fd870c811210c8f1"
+version = "0.11.0"
+source = "git+https://github.com/ballast-ai/token-station-south.git?rev=8a0fec515f323f612ea51b0ab178885094b4f32e#8a0fec515f323f612ea51b0ab178885094b4f32e"
 dependencies = [
  "serde",
  "thiserror",

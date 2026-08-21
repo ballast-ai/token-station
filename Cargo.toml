@@ -39,13 +39,13 @@ publish = false
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-south-contracts = { version = "=0.10.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "13e4567a22bcfb43aef2bf44fd870c811210c8f1" }
-south-core = { version = "=0.10.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "13e4567a22bcfb43aef2bf44fd870c811210c8f1" }
-south-provider-conformance = { version = "=0.10.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "13e4567a22bcfb43aef2bf44fd870c811210c8f1" }
-south-testkit = { version = "=0.10.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "13e4567a22bcfb43aef2bf44fd870c811210c8f1" }
-south-transport-reqwest = { version = "=0.10.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "13e4567a22bcfb43aef2bf44fd870c811210c8f1" }
-south-provider-api = { version = "=0.10.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "13e4567a22bcfb43aef2bf44fd870c811210c8f1" }
-south-provider-runtime = { version = "=0.10.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "13e4567a22bcfb43aef2bf44fd870c811210c8f1" }
+south-contracts = { version = "=0.11.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "8a0fec515f323f612ea51b0ab178885094b4f32e" }
+south-core = { version = "=0.11.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "8a0fec515f323f612ea51b0ab178885094b4f32e" }
+south-provider-conformance = { version = "=0.11.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "8a0fec515f323f612ea51b0ab178885094b4f32e" }
+south-testkit = { version = "=0.11.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "8a0fec515f323f612ea51b0ab178885094b4f32e" }
+south-transport-reqwest = { version = "=0.11.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "8a0fec515f323f612ea51b0ab178885094b4f32e" }
+south-provider-api = { version = "=0.11.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "8a0fec515f323f612ea51b0ab178885094b4f32e" }
+south-provider-runtime = { version = "=0.11.0", git = "https://github.com/ballast-ai/token-station-south.git", rev = "8a0fec515f323f612ea51b0ab178885094b4f32e" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
