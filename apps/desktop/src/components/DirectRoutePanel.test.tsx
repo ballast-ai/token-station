@@ -616,6 +616,31 @@ describe("DirectRoutePanel", () => {
     }
   });
 
+  it("reports provider-order storage failure in Japanese", () => {
+    window.localStorage.setItem("token-station-language", "ja");
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("storage unavailable", "QuotaExceededError");
+    });
+
+    try {
+      render(
+        <ErrorToastProvider>
+          <DirectRoutePanel
+            providers={providers}
+            target={null}
+            busy={false}
+            applying={false}
+            onApply={vi.fn()}
+          />
+        </ErrorToastProvider>,
+      );
+
+      expect(screen.getByRole("alert")).toHaveTextContent("表示順を保存できませんでした");
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
   it("preserves a known provider without auto-selecting a replacement model", () => {
     render(
       <DirectRoutePanel

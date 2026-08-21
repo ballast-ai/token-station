@@ -1729,6 +1729,10 @@ describe("desktop station navigation", () => {
       saved_revision: 2,
       serve: serveFixture({ app_runtime: "running", listener_reachable: true, running_revision: 2 }),
     }), "zh-CN")).toBe("运行中 revision 2");
+    expect(configSaveStatus(stateFixture({ config_dirty: true }), "zh-TW")).toBe("有未儲存的變更");
+    expect(configSaveStatus(stateFixture({ config_dirty: true }), "ja")).toBe("未保存の変更があります");
+    expect(configSaveStatus(stateFixture(), "zh-TW")).toBe("沒有變更");
+    expect(configSaveStatus(stateFixture(), "ja")).toBe("変更はありません");
   });
 
   it("shows the revision save state and makes 保存并应用 start a real apply", async () => {

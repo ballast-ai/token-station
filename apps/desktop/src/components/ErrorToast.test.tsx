@@ -17,7 +17,47 @@ function Harness() {
 
 describe("ErrorToast", () => {
   beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    document.documentElement.lang = "zh-CN";
+  });
+
+  it.each([
+    ["zh-TW", "通知", "關閉通知"],
+    ["ja", "通知", "通知を閉じる"],
+  ] as const)("localizes notification accessibility copy for %s", (language, viewportName, closeName) => {
+    document.documentElement.lang = language;
+    render(<ErrorToastProvider><Harness /></ErrorToastProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "first" }));
+
+    expect(screen.getByLabelText(viewportName)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: closeName })).toBeInTheDocument();
+  });
+
+  it("reacts when the active document language changes", async () => {
+    document.documentElement.lang = "zh-CN";
+    render(<ErrorToastProvider><Harness /></ErrorToastProvider>);
+    await act(async () => {
+      document.documentElement.lang = "ja";
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "first" }));
+
+    expect(screen.getByRole("button", { name: "通知を閉じる" })).toBeInTheDocument();
+  });
+
+  it("uses English immediately when the document switches from Chinese to English", async () => {
+    document.documentElement.lang = "zh-CN";
+    window.localStorage.setItem("token-station-language", "zh-CN");
+    render(<ErrorToastProvider><Harness /></ErrorToastProvider>);
+    await act(async () => {
+      document.documentElement.lang = "en";
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "first" }));
+
+    expect(screen.getByRole("button", { name: "Close notification" })).toBeInTheDocument();
+  });
 
   it("在左下角去重堆叠操作错误并允许手动关闭", () => {
     render(<ErrorToastProvider><Harness /></ErrorToastProvider>);

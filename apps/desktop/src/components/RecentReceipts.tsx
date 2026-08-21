@@ -108,10 +108,20 @@ function formatFeatures(
   copy: LocalizedCopy,
 ): string {
   const flags = [
-    features.tool_count ? `${features.tool_count} tools` : null,
+    features.tool_count ? copy(
+      `${features.tool_count} tools`,
+      `${features.tool_count} 个工具`,
+      `${features.tool_count} 個工具`,
+      `${features.tool_count} 個のツール`,
+    ) : null,
     features.has_images ? copy("images", "图像", "影像", "画像") : null,
     features.requires_json_schema ? "JSON Schema" : null,
-    features.code_block_count ? `${features.code_block_count} code blocks` : null,
+    features.code_block_count ? copy(
+      `${features.code_block_count} code blocks`,
+      `${features.code_block_count} 个代码块`,
+      `${features.code_block_count} 個程式碼區塊`,
+      `${features.code_block_count} 個のコードブロック`,
+    ) : null,
   ].filter(Boolean);
   return copy(
     `${features.estimated_input_tokens} estimated input tokens · ${features.message_count} messages${flags.length ? ` · ${flags.join(" · ")}` : ""}`,
@@ -153,7 +163,7 @@ export function ReceiptDetails({ receipt }: { receipt: ReceiptView }) {
     <div className="receipt-timeline receipt-timeline-compact" data-testid="receipt-trace">
       {diagnosis && (
         <section className="receipt-diagnosis" aria-label={copy("Error diagnosis", "错误诊断", "錯誤診斷", "エラー診断")}>
-          <h4>Diagnosis</h4>
+          <h4>{copy("Diagnosis", "诊断", "診斷", "診断")}</h4>
           <strong>{diagnosis.layer}</strong>
           <span>{diagnosis.message}</span>
           <small>{copy(`Next: ${diagnosis.suggestion}`, `下一步：${diagnosis.suggestion}`, `下一步：${diagnosis.suggestion}`, `次：${diagnosis.suggestion}`)}</small>

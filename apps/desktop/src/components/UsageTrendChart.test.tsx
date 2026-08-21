@@ -70,4 +70,18 @@ describe("UsageTrendChart", () => {
     expect(screen.getByText("未知")).toBeInTheDocument();
     expect(container.querySelector("[data-cost-unknown]")).toBeInTheDocument();
   });
+
+  it("localizes unknown cost in the Japanese accessible bucket label", () => {
+    window.localStorage.setItem("token-station-language", "ja");
+    const nowMs = new Date(2026, 6, 23, 13, 35).getTime();
+    const bucketMs = new Date(2026, 6, 23, 12).getTime();
+    const { container } = render(
+      <UsageTrendChart
+        groups={[[String(bucketMs), { ...aggregate, cost_micros: null }]]}
+        range="24h"
+        nowMs={nowMs}
+      />,
+    );
+    expect(container.querySelector('[aria-label*="コスト 不明"]')).toBeInTheDocument();
+  });
 });

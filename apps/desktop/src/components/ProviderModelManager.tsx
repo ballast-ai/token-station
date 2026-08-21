@@ -31,6 +31,10 @@ import {
   SelectValue,
 } from "./ui/select";
 
+export function formatTestedAt(testedAtMs: number, language: Language): string {
+  return new Date(testedAtMs).toLocaleString(language);
+}
+
 interface ProviderModelManagerProps {
   provider: ProviderView;
   serveRunning: boolean;
@@ -499,7 +503,7 @@ export default function ProviderModelManager({
             <i aria-hidden="true" />
             <span>{healthLabel[providerHealth(testResults)]}</span>
             {testedAtMs != null && (
-              <small>{copy("Last tested", "最近测试", "最近測試", "最近のテスト")} {new Date(testedAtMs).toLocaleString(language === "zh-CN" ? "zh-CN" : "en-US")}</small>
+              <small>{copy("Last tested", "最近测试", "最近測試", "最近のテスト")} {formatTestedAt(testedAtMs, language)}</small>
             )}
           </div>
           <button className="btn tiny" type="button" disabled={operationDisabled} onClick={() => void runProviderTest()}>

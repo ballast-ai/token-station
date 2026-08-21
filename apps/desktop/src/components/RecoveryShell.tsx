@@ -31,10 +31,6 @@ interface RecoveryShellProps {
   initialError?: Error;
 }
 
-function failureText(error: unknown): string {
-  return humanizeAppError(error);
-}
-
 function requiresFreshUpdateCheck(message: string): boolean {
   return message.includes("update_version_changed:")
     || message.includes("update_expected_version_missing:");
@@ -55,7 +51,9 @@ function invalidateUpdateCandidate(
 }
 
 export default function RecoveryShell({ initialState, initialError }: RecoveryShellProps) {
-  const { copy } = useLocalizedCopy();
+  const { copy, language } = useLocalizedCopy();
+  const languageRef = useRef(language);
+  languageRef.current = language;
   const [state, setState] = useState<RecoveryState | null>(initialState ?? null);
   const [preview, setPreview] = useState<DiagnosticPreview | null>(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -82,7 +80,7 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
           setPreview(nextPreview);
         }
       } catch (caught) {
-        if (!disposed) setError(failureText(caught));
+        if (!disposed) setError(humanizeAppError(caught, languageRef.current));
       }
     };
     void load();
@@ -104,7 +102,7 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
     try {
       setMessage(await action());
     } catch (caught) {
-      setError(failureText(caught));
+      setError(humanizeAppError(caught, languageRef.current));
     } finally {
       setBusy("");
     }
@@ -126,7 +124,7 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
     try {
       setUpgrade(await checkDesktopUpdate());
     } catch (caught) {
-      setError(failureText(caught));
+      setError(humanizeAppError(caught, languageRef.current));
     } finally {
       setBusy("");
     }
@@ -155,7 +153,7 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
       }
     } catch (caught) {
       const rawMessage = String(caught);
-      const message = failureText(caught);
+      const message = humanizeAppError(caught, languageRef.current);
       if (requiresFreshUpdateCheck(rawMessage)) {
         setUpgrade((current) => invalidateUpdateCandidate(current, rawMessage));
       } else {
@@ -188,7 +186,7 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
             <b>{initialError
               ? copy("Interface rendering error", "前端渲染异常", "介面渲染錯誤", "インターフェースレンダリングエラー")
               : copy("Database compatibility protection", "数据库兼容性保护", "資料庫相容性保護", "データベース互換性保護")}</b>
-            <span>{humanizeAppError(initialError ?? state?.message)}</span>
+            <span>{humanizeAppError(initialError ?? state?.message, language)}</span>
           </div>
         )}
         {state?.found_schema != null && (
@@ -210,7 +208,7 @@ export default function RecoveryShell({ initialState, initialError }: RecoverySh
               ? copy(`Version ${upgrade.version} is available`, `发现新版本 ${upgrade.version}`, `發現新版本 ${upgrade.version}`, `新バージョン ${upgrade.version} が発見されました`)
               : upgrade.status === "up_to_date"
                 ? copy(`Version ${upgrade.current_version} is up to date`, `当前已是最新版本 ${upgrade.current_version}`, `版本 ${upgrade.current_version} 已為最新`, `バージョン ${upgrade.current_version} は最新です`)
-                : humanizeAppError(upgrade.message)}
+                : humanizeAppError(upgrade.message, language)}
             {upgrade.release_url && <span className="mono"> · {upgrade.release_url}</span>}
           </div>
         )}

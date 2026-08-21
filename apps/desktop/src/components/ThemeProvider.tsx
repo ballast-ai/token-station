@@ -4,12 +4,14 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { setDockThemeIcon } from "../api";
 import { useErrorToast } from "./ErrorToast";
+import { localizedCopy, useLocalizedCopy } from "./LanguageProvider";
 
 export type Theme = "light" | "dark" | "system";
 export type ResolvedTheme = Exclude<Theme, "system">;
@@ -45,6 +47,9 @@ function systemTheme(): ResolvedTheme {
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const { showError } = useErrorToast();
+  const { language } = useLocalizedCopy();
+  const languageRef = useRef(language);
+  languageRef.current = language;
   const [theme, setTheme] = useState<Theme>(storedTheme);
   const [preferredTheme, setPreferredTheme] = useState<ResolvedTheme>(systemTheme);
 
@@ -53,9 +58,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       window.localStorage.setItem(THEME_STORAGE_KEY, theme);
     } catch {
       showError(
-        document.documentElement.lang === "zh-CN"
-          ? "主题已在本次会话生效，但无法保存到下次启动。"
-          : "The theme changed for this session, but it could not be saved for the next launch.",
+        localizedCopy(
+          languageRef.current,
+          "The theme changed for this session, but it could not be saved for the next launch.",
+          "主题已在本次会话生效，但无法保存到下次启动。",
+          "主題已在本次工作階段生效，但無法儲存供下次啟動使用。",
+          "テーマはこのセッションに反映されましたが、次回の起動用に保存できませんでした。",
+        ),
         "theme-storage",
       );
     }
@@ -80,9 +89,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     document.documentElement.classList.add(resolvedTheme);
     if ("__TAURI_INTERNALS__" in window) {
       const reportSyncFailure = () => showError(
-        document.documentElement.lang === "zh-CN"
-          ? "界面主题已切换，但 macOS 外观没有完全同步。"
-          : "The interface theme changed, but the macOS appearance did not fully synchronize.",
+        localizedCopy(
+          languageRef.current,
+          "The interface theme changed, but the macOS appearance did not fully synchronize.",
+          "界面主题已切换，但 macOS 外观没有完全同步。",
+          "介面主題已切換，但 macOS 外觀未完全同步。",
+          "インターフェースのテーマは変更されましたが、macOS の外観と完全には同期できませんでした。",
+        ),
         "theme-native-sync",
       );
       void getCurrentWindow().setTheme(resolvedTheme).catch(reportSyncFailure);

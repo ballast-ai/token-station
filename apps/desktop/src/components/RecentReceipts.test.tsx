@@ -379,6 +379,34 @@ describe("RecentReceipts", () => {
     expect(within(row).getByRole("button", { name: "已复制" })).toBeInTheDocument();
   });
 
+  it("renders Japanese diagnosis and dynamic feature counts without English fallback", async () => {
+    window.localStorage.setItem("token-station-language", "ja");
+    vi.mocked(getRecentReceipts).mockResolvedValue([receipt(1, {
+      status: 401,
+      error_code: "auth",
+      decision: {
+        upstream: "provider-final",
+        model: "model-final",
+        pool: "tier_mid",
+        decided_by: { tier: "heuristic", score: 30, matched_band_at_least: 22 },
+        fallbacks: 0,
+        features: { ...features, tool_count: 1, code_block_count: 2 },
+      },
+    })]);
+    const user = userEvent.setup();
+    render(<RecentReceipts />);
+
+    const row = (await screen.findAllByTestId("receipt-row"))[0] as HTMLDetailsElement;
+    await user.click(row.querySelector("summary")!);
+
+    expect(within(row).getByLabelText("エラー診断")).toHaveTextContent("認証 · Key");
+    expect(within(row).getByLabelText("エラー診断")).toHaveTextContent("診断");
+    expect(row).toHaveTextContent("1 個のツール");
+    expect(row).toHaveTextContent("2 個のコードブロック");
+    expect(row).not.toHaveTextContent("1 tools");
+    expect(row).not.toHaveTextContent("2 code blocks");
+  });
+
   it("本地入站转换失败时明确说明请求尚未发往上游", async () => {
     vi.mocked(getRecentReceipts).mockResolvedValue([receipt(1, {
       status: 400,

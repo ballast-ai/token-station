@@ -9,6 +9,7 @@ import {
 import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
 
 type ToastTone = "error" | "info" | "success";
+type FeedbackLanguage = "en" | "zh-CN" | "zh-TW" | "ja";
 
 interface ErrorToastValue {
   showError: (message: string, id?: string) => void;
@@ -33,20 +34,39 @@ const fallbackToastValue: ErrorToastValue = {
 
 const ErrorToastContext = createContext<ErrorToastValue | null>(null);
 
-function feedbackCopy(english: string, simplifiedChinese: string): string {
-  try {
-    const chinese = (
-      typeof document !== "undefined" && document.documentElement.lang === "zh-CN"
-    ) || (
-      typeof window !== "undefined"
-      && window.localStorage.getItem("token-station-language") === "zh-CN"
-    );
-    return chinese ? simplifiedChinese : english;
-  } catch {
-    return typeof document !== "undefined" && document.documentElement.lang === "zh-CN"
-      ? simplifiedChinese
-      : english;
+function feedbackLanguage(): FeedbackLanguage {
+  const documentLanguage = typeof document === "undefined" ? "" : document.documentElement.lang;
+  if (
+    documentLanguage === "en"
+    || documentLanguage === "zh-CN"
+    || documentLanguage === "zh-TW"
+    || documentLanguage === "ja"
+  ) {
+    return documentLanguage;
   }
+  try {
+    const stored = typeof window === "undefined"
+      ? null
+      : window.localStorage.getItem("token-station-language");
+    return stored === "zh-CN" || stored === "zh-TW" || stored === "ja" ? stored : "en";
+  } catch {
+    return "en";
+  }
+}
+
+function feedbackCopy(
+  language: FeedbackLanguage,
+  english: string,
+  simplifiedChinese: string,
+  traditionalChinese: string,
+  japanese: string,
+): string {
+  return {
+    en: english,
+    "zh-CN": simplifiedChinese,
+    "zh-TW": traditionalChinese,
+    ja: japanese,
+  }[language];
 }
 
 export function useErrorToast() {
@@ -56,9 +76,11 @@ export function useErrorToast() {
 function Toast({
   toast,
   onDismiss,
+  language,
 }: {
   toast: ErrorToastItem;
   onDismiss: (id: string) => void;
+  language: FeedbackLanguage;
 }) {
   const [fading, setFading] = useState(false);
 
@@ -90,7 +112,13 @@ function Toast({
       <button
         type="button"
         className="error-toast-close"
-        aria-label={feedbackCopy("Close notification", "关闭提示")}
+        aria-label={feedbackCopy(
+          language,
+          "Close notification",
+          "关闭提示",
+          "關閉通知",
+          "通知を閉じる",
+        )}
         onClick={() => onDismiss(toast.id)}
       >
         <X aria-hidden="true" />
@@ -101,6 +129,14 @@ function Toast({
 
 export function ErrorToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ErrorToastItem[]>([]);
+  const [language, setLanguage] = useState<FeedbackLanguage>(feedbackLanguage);
+
+  useEffect(() => {
+    if (typeof MutationObserver === "undefined") return;
+    const observer = new MutationObserver(() => setLanguage(feedbackLanguage()));
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
+    return () => observer.disconnect();
+  }, []);
 
   const dismissToast = useCallback((id: string) => {
     setToasts((current) => current.filter((toast) => toast.id !== id));
@@ -142,10 +178,10 @@ export function ErrorToastProvider({ children }: { children: ReactNode }) {
       <div
         className="error-toast-viewport"
         data-testid="error-toast-viewport"
-        aria-label={feedbackCopy("Notifications", "操作提示")}
+        aria-label={feedbackCopy(language, "Notifications", "操作提示", "通知", "通知")}
       >
         {toasts.map((toast) => (
-          <Toast key={toast.id} toast={toast} onDismiss={dismissToast} />
+          <Toast key={toast.id} toast={toast} onDismiss={dismissToast} language={language} />
         ))}
       </div>
     </ErrorToastContext.Provider>

@@ -185,7 +185,9 @@ export default function AppShell({
         <span className="station-agent-summary" data-testid="agent-runtime-connection" aria-live="polite">
           {copy(
             `Agent: ${serve.agent_connected ? "Connected" : "Disconnected"}`,
-            `Agent：${serve.agent_connected ? "已连接" : "未连接"}`, `Agent: ${serve.agent_connected ? "Connected" : "Disconnected"}`, `エージェント: ${serve.agent_connected ? "Connected" : "Disconnected"}`
+            `Agent：${serve.agent_connected ? "已连接" : "未连接"}`,
+            `Agent：${serve.agent_connected ? "已連線" : "未連線"}`,
+            `エージェント：${serve.agent_connected ? "接続済み" : "未接続"}`,
           )}
           {copy(
             ` · ${connectedAgents} of ${registry.length} managed`,

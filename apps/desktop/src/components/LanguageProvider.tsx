@@ -8,10 +8,13 @@ import {
   type ReactNode,
 } from "react";
 import { useErrorToast } from "./ErrorToast";
+import { localizedCopy, setActiveLanguage, type Language } from "../i18n";
 
-export type Language = "zh-CN" | "zh-TW" | "en" | "ja";
+export { localizedCopy, type Language } from "../i18n";
 
 export const LANGUAGE_STORAGE_KEY = "token-station-language";
+export const LANGUAGE_PREFERENCE_VERSION_KEY = "token-station-language-preference-version";
+const LANGUAGE_PREFERENCE_VERSION = "2";
 
 const messages = {
   "zh-CN": {
@@ -218,7 +221,7 @@ const messages = {
     "settings.aboutHint": "版本與更新",
     "language.eyebrow": "LANGUAGE",
     "language.title": "介面語言",
-    "language.description": "切換後會立即套用到導覽與設定介面，無需重新啟動。",
+    "language.description": "切換後會立即套用到整個介面，無需重新啟動。",
     "language.groupLabel": "介面語言",
     "language.zhCNHint": "简体中文界面",
     "language.zhTWHint": "繁體中文介面",
@@ -544,7 +547,7 @@ const messages = {
     "settings.aboutHint": "バージョンと更新",
     "language.eyebrow": "LANGUAGE",
     "language.title": "表示言語",
-    "language.description": "ナビゲーションと設定画面にすぐ反映されます。再起動は不要です。",
+    "language.description": "変更はインターフェース全体にすぐ反映されます。再起動は不要です。",
     "language.groupLabel": "表示言語",
     "language.zhCNHint": "簡体字中国語の画面",
     "language.zhTWHint": "繁体字中国語の画面",
@@ -703,15 +706,11 @@ function detectedLanguage(): Language {
       if (parts[0] === "en") return "en";
       if (parts[0] === "ja") return "ja";
       if (parts[0] === "zh") {
-        if (
-          parts.includes("hant")
-          || parts.includes("tw")
-          || parts.includes("hk")
-          || parts.includes("mo")
-        ) return "zh-TW";
+        if (parts.includes("hant")) return "zh-TW";
+        if (parts.includes("hans")) return "zh-CN";
+        if (parts.includes("tw") || parts.includes("hk") || parts.includes("mo")) return "zh-TW";
         if (
           parts.length === 1
-          || parts.includes("hans")
           || parts.includes("cn")
           || parts.includes("sg")
         ) return "zh-CN";
@@ -746,6 +745,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     try {
+      window.localStorage.setItem(LANGUAGE_PREFERENCE_VERSION_KEY, LANGUAGE_PREFERENCE_VERSION);
       window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
     } catch {
       showError(
@@ -761,6 +761,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
   }, [language, showError]);
 
   useLayoutEffect(() => {
+    setActiveLanguage(language);
     document.documentElement.lang = language;
   }, [language]);
 
@@ -769,12 +770,13 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
       language,
       setLanguage,
       t: (key, replacements) => format(messages[language][key], replacements),
-      copy: (english, simplifiedChinese, traditionalChinese, japanese) => ({
-        en: english,
-        "zh-CN": simplifiedChinese,
-        "zh-TW": traditionalChinese,
-        ja: japanese,
-      })[language],
+      copy: (english, simplifiedChinese, traditionalChinese, japanese) => localizedCopy(
+        language,
+        english,
+        simplifiedChinese,
+        traditionalChinese,
+        japanese,
+      ),
     }),
     [language],
   );
@@ -798,11 +800,12 @@ export function useLocalizedCopy(): Pick<LanguageContextValue, "language" | "cop
   const language = storedLanguage();
   return value ?? {
     language,
-    copy: (english, simplifiedChinese, traditionalChinese, japanese) => ({
-      en: english,
-      "zh-CN": simplifiedChinese,
-      "zh-TW": traditionalChinese,
-      ja: japanese,
-    })[language],
+    copy: (english, simplifiedChinese, traditionalChinese, japanese) => localizedCopy(
+      language,
+      english,
+      simplifiedChinese,
+      traditionalChinese,
+      japanese,
+    ),
   };
 }

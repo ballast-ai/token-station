@@ -167,7 +167,7 @@ describe("QuotaPriorityPanel quota plans", () => {
     ));
 
     await user.click(within(planSection).getByRole("combobox", { name: "deepseek 单位" }));
-    await user.click(await screen.findByRole("option", { name: "requests" }));
+    await user.click(await screen.findByRole("option", { name: "请求" }));
     await waitFor(() => expect(onSavePlan).toHaveBeenLastCalledWith(
       "deepseek",
       oneDayMs,

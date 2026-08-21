@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   LANGUAGE_STORAGE_KEY,
+  LANGUAGE_PREFERENCE_VERSION_KEY,
   LanguageProvider,
   useLanguage,
 } from "./LanguageProvider";
@@ -81,6 +82,34 @@ describe("LanguageProvider", () => {
     );
 
     expect(screen.getByText(expected)).toBeInTheDocument();
+  });
+
+  it.each([
+    ["zh-Hans-HK", "zh-CN:设置:主页路由"],
+    ["zh-Hant-CN", "zh-TW:設定:首頁路由"],
+  ])("gives an explicit script priority over the region in %s", (browserLanguage, expected) => {
+    setBrowserLanguages([browserLanguage]);
+    render(<LanguageProvider><LanguageProbe /></LanguageProvider>);
+    expect(screen.getByText(expected)).toBeInTheDocument();
+  });
+
+  it.each(["ja-JP", "zh-HK"])(
+    "preserves an unversioned legacy English preference on %s",
+    (browserLanguage) => {
+    setBrowserLanguages([browserLanguage]);
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "en");
+    render(<LanguageProvider><LanguageProbe /></LanguageProvider>);
+    expect(screen.getByText("en:Settings:Home routing")).toBeInTheDocument();
+    expect(window.localStorage.getItem(LANGUAGE_PREFERENCE_VERSION_KEY)).toBe("2");
+    },
+  );
+
+  it("preserves a versioned explicit English selection on a Japanese system", () => {
+    setBrowserLanguages(["ja-JP"]);
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "en");
+    window.localStorage.setItem(LANGUAGE_PREFERENCE_VERSION_KEY, "2");
+    render(<LanguageProvider><LanguageProbe /></LanguageProvider>);
+    expect(screen.getByText("en:Settings:Home routing")).toBeInTheDocument();
   });
 
   it("keeps an explicit saved language ahead of the browser language", () => {

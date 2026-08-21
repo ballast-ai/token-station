@@ -26,7 +26,7 @@ import type { DirectRouteTarget, ProviderView } from "../api";
 import { ProviderIcon } from "../brandIcons";
 import CompactCombobox from "./CompactCombobox";
 import { useErrorToast } from "./ErrorToast";
-import { useLocalizedCopy } from "./LanguageProvider";
+import { localizedCopy, useLocalizedCopy } from "./LanguageProvider";
 
 export const DIRECT_PROVIDER_ORDER_STORAGE_KEY = "token-station-direct-provider-order-v1";
 
@@ -247,9 +247,13 @@ export default function DirectRoutePanel({
       localStorage.setItem(DIRECT_PROVIDER_ORDER_STORAGE_KEY, JSON.stringify(providerOrder));
     } catch {
       showError(
-        language === "zh-CN"
-          ? "无法保存供应商显示顺序；本次排序仍可使用。"
-          : "Could not save the provider display order; reordering still works for this session.",
+        localizedCopy(
+          language,
+          "Could not save the provider display order; reordering still works for this session.",
+          "无法保存供应商显示顺序；本次排序仍可使用。",
+          "無法儲存供應商顯示順序；本次工作階段仍可重新排序。",
+          "プロバイダーの表示順を保存できませんでした。このセッションでは並べ替えを引き続き使用できます。",
+        ),
         "direct-provider-order-storage",
       );
     }
@@ -285,7 +289,9 @@ export default function DirectRoutePanel({
     if (targetIndex < 0 || targetIndex >= providerOrder.length) {
       setSortAnnouncement(copy(
         `${name} is already at the ${targetIndex < 0 ? "top" : "bottom"} of the list.`,
-        `${name} 已在列表${targetIndex < 0 ? "顶部" : "底部"}。`, `${name} 已在列表${targetIndex < 0 ? "top" : "bottom"}。`, `${name} はリストの${targetIndex < 0 ? "top" : "bottom"}にすでにあります。`
+        `${name} 已在列表${targetIndex < 0 ? "顶部" : "底部"}。`,
+        `${name} 已在列表${targetIndex < 0 ? "頂端" : "底部"}。`,
+        `${name} はリストの${targetIndex < 0 ? "先頭" : "末尾"}にあります。`,
       ));
       return;
     }

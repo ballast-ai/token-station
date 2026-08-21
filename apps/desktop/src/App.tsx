@@ -57,6 +57,7 @@ import {
 } from "./components/AgentVisibilityPreferences";
 import {
   LanguageBoundary,
+  localizedCopy,
   useLanguage,
   type Language,
 } from "./components/LanguageProvider";
@@ -138,18 +139,33 @@ export function firstRunRouteApplyComplete(
 }
 
 export function configSaveStatus(state: StateView, language: Language = "en"): string {
-  const chinese = language === "zh-CN";
-  if (state.config_dirty) return chinese ? "有未保存更改" : "Unsaved changes";
+  if (state.config_dirty) return localizedCopy(
+    language,
+    "Unsaved changes",
+    "有未保存更改",
+    "有未儲存的變更",
+    "未保存の変更があります",
+  );
   const runtimeHealthy = state.serve.app_runtime === "running" && state.serve.listener_reachable;
   if (runtimeHealthy && state.serve.running_revision !== state.saved_revision) {
-    return chinese ? "已保存尚未应用" : "Saved, not applied";
+    return localizedCopy(
+      language,
+      "Saved, not applied",
+      "已保存尚未应用",
+      "已儲存但尚未套用",
+      "保存済み、未適用",
+    );
   }
   if (runtimeHealthy && state.serve.running_revision === state.saved_revision) {
-    return chinese
-      ? `运行中 revision ${state.saved_revision}`
-      : `Running revision ${state.saved_revision}`;
+    return localizedCopy(
+      language,
+      `Running revision ${state.saved_revision}`,
+      `运行中 revision ${state.saved_revision}`,
+      `執行中 revision ${state.saved_revision}`,
+      `実行中の revision ${state.saved_revision}`,
+    );
   }
-  return chinese ? "无改动" : "No changes";
+  return localizedCopy(language, "No changes", "无改动", "沒有變更", "変更はありません");
 }
 
 export function firstProviderDefaultTarget(

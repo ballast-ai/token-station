@@ -399,8 +399,8 @@ function QuotaPlanRow({
             </SelectTrigger>
             <SelectContent align="end">
               <SelectGroup>
-                <SelectItem value="tokens">tokens</SelectItem>
-                <SelectItem value="requests">requests</SelectItem>
+                <SelectItem value="tokens">{copy("tokens", "Token", "Token", "トークン")}</SelectItem>
+                <SelectItem value="requests">{copy("requests", "请求", "請求", "リクエスト")}</SelectItem>
               </SelectGroup>
             </SelectContent>
           </Select>

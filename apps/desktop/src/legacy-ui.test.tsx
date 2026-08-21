@@ -20,7 +20,7 @@ import {
   updateProviderModels,
 } from "./api";
 import ModelPicker from "./components/ModelPicker";
-import ProviderModelManager from "./components/ProviderModelManager";
+import ProviderModelManager, { formatTestedAt } from "./components/ProviderModelManager";
 import ProviderList from "./components/ProviderList";
 import { ErrorToastProvider } from "./components/ErrorToast";
 import About from "./pages/About";
@@ -30,6 +30,18 @@ import Settings from "./pages/Settings";
 import Stats from "./pages/Stats";
 
 vi.mock("./components/PricingEditor", () => ({ default: () => null }));
+
+describe("localized provider timestamps", () => {
+  it.each(["zh-TW", "ja"] as const)("passes %s to Intl formatting", (language) => {
+    const format = vi.spyOn(Date.prototype, "toLocaleString").mockReturnValue("localized date");
+    try {
+      expect(formatTestedAt(1_752_000_000_000, language)).toBe("localized date");
+      expect(format).toHaveBeenCalledWith(language);
+    } finally {
+      format.mockRestore();
+    }
+  });
+});
 
 vi.mock("./api", async (loadOriginal) => {
   const original = await loadOriginal<typeof import("./api")>();
