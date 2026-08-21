@@ -429,7 +429,14 @@ fn events_of_frame(
         }
     };
     if choices.is_some_and(Vec::is_empty) && usage.is_none() {
-        return Err(protocol_error("the upstream SSE event contains no choices"));
+        // An event with no choices and no usage is ignored, not refused.
+        //
+        // Refusing it terminates the whole stream, and this shape is not
+        // exotic: Azure OpenAI opens a stream with a `prompt_filter_results`
+        // frame carrying an empty `choices` array, and that is a dialect this
+        // package's own manifest declares. Ordinary keepalive frames look the
+        // same. Matches the v2 component (south 0.11.0, S5).
+        return Ok(events);
     }
     for choice in choices.into_iter().flatten() {
         let index = index_of(&choice["index"]);

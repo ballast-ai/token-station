@@ -3683,6 +3683,41 @@ fn an_empty_stream_choices_frame_cannot_become_a_successful_done() {
     std::fs::remove_file(key).ok();
 }
 
+/// The other half of the guard above, and the reason it had to move.
+///
+/// Azure OpenAI opens a stream with a `prompt_filter_results` frame carrying
+/// an empty `choices` array. While the adapter refused that shape frame by
+/// frame, the stream died before a single token reached the client — on a
+/// dialect the official package's own manifest declares. The refusal now
+/// applies to the stream rather than the frame, so an opening keepalive costs
+/// nothing and the guarantee above still holds.
+#[test]
+fn an_opening_empty_choices_frame_does_not_kill_the_stream() {
+    let sse = concat!(
+        "data: {\"choices\":[],\"prompt_filter_results\":[{\"prompt_index\":0}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+        sse.len()
+    )
+    .into_bytes();
+    let mock = MockUpstream::start(vec![vec![response]]);
+    let key = key_file("sse-opening-empty-choices", "sk-test-key");
+    let proxy = start_proxy(&mock, &key);
+    let (status, body) = post_chat_stream(&proxy);
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("ok"),
+        "the content survived the frame: {body}"
+    );
+    settle();
+    assert_eq!(last_row(&proxy.data_dir)["status"], "Integer(200)");
+    std::fs::remove_file(key).ok();
+}
+
 #[test]
 fn finish_reason_then_clean_eof_is_a_complete_stream() {
     let sse = concat!(

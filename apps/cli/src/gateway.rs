@@ -5224,6 +5224,9 @@ impl Gateway {
         let mut reader = response.into_reader();
         let mut decoder = SseFrameDecoder::default();
         let mut committed = false;
+        // Whether the stream has produced any event other than its terminal
+        // one. See `terminal_without_delivery`.
+        let mut delivered = false;
         let mut buffer = [0u8; STREAM_READ];
 
         loop {
@@ -5282,6 +5285,16 @@ impl Gateway {
                             committed,
                         );
                     }
+                    if Self::terminal_without_delivery(&events, delivered) {
+                        return Self::terminate_stream(
+                            agent,
+                            render_context,
+                            emit,
+                            record,
+                            Self::empty_stream_envelope(),
+                            committed,
+                        );
+                    }
                     let mut terminal = false;
                     for event in events {
                         let chunk = match agent.plugin.render_stream_event(&event, render_context) {
@@ -5311,6 +5324,8 @@ impl Gateway {
                             return Ok(StreamOutcome::ClientCancelled);
                         }
                         committed = true;
+                        // No `delivered` update: this is the last batch the
+                        // stream can produce, and the guard above already ran.
                         match event {
                             StreamEvent::Usage { usage } => record.usage = Some(usage),
                             StreamEvent::Done { .. } => terminal = true,
@@ -5424,6 +5439,17 @@ impl Gateway {
                     );
                 }
 
+                if Self::terminal_without_delivery(&events, delivered) {
+                    return Self::terminate_stream(
+                        agent,
+                        render_context,
+                        emit,
+                        record,
+                        Self::empty_stream_envelope(),
+                        committed,
+                    );
+                }
+
                 let mut rendered = Vec::with_capacity(events.len());
                 for event in &events {
                     let chunk = match agent.plugin.render_stream_event(event, render_context) {
@@ -5463,9 +5489,12 @@ impl Gateway {
                     }
                     committed = true;
                     match event {
-                        StreamEvent::Usage { usage } => record.usage = Some(usage),
                         StreamEvent::Done { .. } => terminal = true,
-                        _ => {}
+                        StreamEvent::Usage { usage } => {
+                            record.usage = Some(usage);
+                            delivered = true;
+                        }
+                        _ => delivered = true,
                     }
                 }
                 if terminal {
@@ -5474,6 +5503,35 @@ impl Gateway {
                 }
             }
         }
+    }
+
+    /// Whether this batch closes the stream without anything having been
+    /// delivered — the terminal event, and nothing else, ever.
+    ///
+    /// Adapters no longer refuse the frames that produce this shape: an empty
+    /// `choices` array is a keepalive to some upstreams and the opening frame
+    /// to others, so refusing it frame by frame kills streams that work
+    /// (south 0.11.0's S5 ruling; the v1 package matches it). Refusing only
+    /// the *stream* that delivered nothing keeps both halves: the keepalive
+    /// passes through, an empty completion still does not become a success.
+    ///
+    /// It lives here rather than in an adapter because it is the host's
+    /// guarantee, not one dialect's — which also means it covers the v2 south
+    /// component, whose translation carries no such guard of its own.
+    fn terminal_without_delivery(events: &[StreamEvent], delivered: bool) -> bool {
+        !delivered
+            && !events.is_empty()
+            && events
+                .iter()
+                .all(|event| matches!(event, StreamEvent::Done { .. }))
+    }
+
+    fn empty_stream_envelope() -> ErrorEnvelope {
+        ErrorEnvelope::new(
+            ErrorCode::ProviderProtocolError,
+            502,
+            "the upstream stream ended without delivering any event",
+        )
     }
 
     fn terminate_stream(
