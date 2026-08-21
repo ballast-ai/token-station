@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Building2, ChevronDown, RefreshCw } from "lucide-react";
 import type { AgentUiMetadataView, AgentView } from "../api";
 import { AgentIcon } from "../brandIcons";
-import { useLocalizedCopy } from "../components/LanguageProvider";
+import { useLocalizedCopy, type LocalizedCopy } from "../components/LanguageProvider";
 import TokenStationMark from "../components/TokenStationMark";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -26,22 +26,22 @@ interface AgentsPageProps {
   children: ReactNode;
 }
 
-function statusCopy(status: AgentView["status"] | undefined, copy: (en: string, zh: string) => string) {
-  if (status === "CONNECTED") return copy("Connected", "已接入");
-  if (status === "DETECTED_VERIFIED") return copy("Ready", "可接入");
-  if (status === "DETECTED_BLOCKED" || status === "INSTALLED_BROKEN") return copy("Attention", "需处理");
-  if (status === "MULTIPLE_INSTALLATIONS") return copy("Choose", "待选择");
-  if (status === "DETECTED_UNKNOWN") return copy("Detected", "已检测");
-  return copy("Offline", "未检测");
+function statusCopy(status: AgentView["status"] | undefined, copy: LocalizedCopy) {
+  if (status === "CONNECTED") return copy("Connected", "已接入", "已接入", "接続済み");
+  if (status === "DETECTED_VERIFIED") return copy("Ready", "可接入", "可接入", "接続可能");
+  if (status === "DETECTED_BLOCKED" || status === "INSTALLED_BROKEN") return copy("Attention", "需处理", "注意", "注意");
+  if (status === "MULTIPLE_INSTALLATIONS") return copy("Choose", "待选择", "選擇", "選択");
+  if (status === "DETECTED_UNKNOWN") return copy("Detected", "已检测", "已檢測", "検出済み");
+  return copy("Offline", "未检测", "未檢測", "検出されていません");
 }
 
-function navStatusCopy(status: AgentView["status"] | undefined, copy: (en: string, zh: string) => string) {
-  if (status === "CONNECTED") return copy("Managed", "接管中");
-  if (status === "DETECTED_VERIFIED") return copy("Ready", "就绪");
-  if (status === "MULTIPLE_INSTALLATIONS") return copy("Multiple", "多实例");
-  if (status === "DETECTED_BLOCKED" || status === "INSTALLED_BROKEN") return copy("Issue", "异常");
-  if (status === "DETECTED_UNKNOWN") return copy("Found", "已发现");
-  return copy("Not found", "未检测");
+function navStatusCopy(status: AgentView["status"] | undefined, copy: LocalizedCopy) {
+  if (status === "CONNECTED") return copy("Managed", "接管中", "接管中", "管理中");
+  if (status === "DETECTED_VERIFIED") return copy("Ready", "就绪", "就緒", "準備完了");
+  if (status === "MULTIPLE_INSTALLATIONS") return copy("Multiple", "多实例", "多例項", "複数インスタンス");
+  if (status === "DETECTED_BLOCKED" || status === "INSTALLED_BROKEN") return copy("Issue", "异常", "異常", "異常");
+  if (status === "DETECTED_UNKNOWN") return copy("Found", "已发现", "已發現", "検出済み");
+  return copy("Not found", "未检测", "未檢測", "検出されていません");
 }
 
 export default function AgentsPage({
@@ -72,10 +72,10 @@ export default function AgentsPage({
     <div className="page-stack agents-page agent-workspace-page">
       <header className="overview-heading">
         <div>
-          <h1>{connections ? copy("Agent connection", "Agent 接入") : copy("Routing", "路由配置")}</h1>
+          <h1>{connections ? copy("Agent connection", "Agent 接入", "Agent 連線", "エージェント接続") : copy("Routing", "路由配置", "路由", "ルーティング")}</h1>
           <p>{connections
-            ? copy("Select a detected Agent to manage its connection.", "选择一个已发现的 Agent，查看详情并管理接入。")
-            : copy("Configure global routing or open one Agent route.", "配置全局路由，或打开一个 Agent 的独立路由。")}</p>
+            ? copy("Select a detected Agent to manage its connection.", "选择一个已发现的 Agent，查看详情并管理接入。", "選擇一個偵測到的 Agent 以管理其連線。", "検出された Agent を選択して、その接続を管理します。")
+            : copy("Configure global routing or open one Agent route.", "配置全局路由，或打开一个 Agent 的独立路由。", "配置全域路由，或開啟一個 Agent 的獨立路由。", "グローバルルーティングを設定するか、1 つの Agent の独立ルーティングを開きます。")}</p>
         </div>
       </header>
 
@@ -83,12 +83,12 @@ export default function AgentsPage({
         <Card
           className="agent-master-list-card"
           role="region"
-          aria-label={connections ? copy("Agent selector", "Agent 选择列表") : copy("Routing scopes", "路由范围")}
+          aria-label={connections ? copy("Agent selector", "Agent 选择列表", "Agent 選擇清單", "Agent 選択リスト") : copy("Routing scopes", "路由范围", "路由範圍", "ルーティングスコープ")}
           data-onboarding-target="agent-list"
         >
           <CardHeader>
             <div>
-              <CardTitle><h2>{connections ? copy("Detected Agents", "发现 Agents") : copy("Routing scopes", "路由范围")}</h2></CardTitle>
+              <CardTitle><h2>{connections ? copy("Detected Agents", "发现 Agents", "檢測到的 Agent", "検出されたエージェント") : copy("Routing scopes", "路由范围", "路由範圍", "ルーティングスコープ")}</h2></CardTitle>
             </div>
             <div className="agent-master-actions">
               <Badge variant="outline">{registry.length}</Badge>
@@ -106,7 +106,7 @@ export default function AgentsPage({
                     className={cn(scanBusy && "is-spinning")}
                     aria-hidden="true"
                   />
-                  {scanBusy ? copy("Scanning…", "扫描中…") : copy("Rescan", "重新扫描")}
+                  {scanBusy ? copy("Scanning…", "扫描中…", "掃描中…", "スキャン中…") : copy("Rescan", "重新扫描", "重新掃描", "再スキャン")}
                 </Button>
               )}
             </div>
@@ -115,7 +115,7 @@ export default function AgentsPage({
             <ScrollArea className="agent-master-scroll">
               <nav
                 className="agent-master-nav"
-                aria-label={connections ? copy("Detected Agent list", "发现 Agent 列表") : copy("Routing scope list", "路由范围列表")}
+                aria-label={connections ? copy("Detected Agent list", "发现 Agent 列表", "偵測到的 Agent 清單", "検出された Agent リスト") : copy("Routing scope list", "路由范围列表", "路由範圍清單", "ルーティングスコープリスト")}
               >
                 {!connections && (
                   <>
@@ -123,8 +123,8 @@ export default function AgentsPage({
                       className="agent-master-item agent-master-home"
                       variant="ghost"
                       type="button"
-                      aria-label={copy("Global routing", "全局路由")}
-                      title={copy("Global routing", "全局路由")}
+                      aria-label={copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}
+                      title={copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}
                       aria-current={homeSelected ? "page" : undefined}
                       data-onboarding-target="routing"
                       onClick={onOpenHome}
@@ -132,23 +132,23 @@ export default function AgentsPage({
                       <span className="agent-master-icon global-route-mark" aria-hidden="true">
                         <TokenStationMark size={36} />
                       </span>
-                      <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由")}</strong></span>
-                      <Badge variant={homeSelected ? "default" : "outline"}>{copy("Default", "默认")}</Badge>
+                      <span className="agent-master-copy"><strong>{copy("Global routing", "全局路由", "全域路由", "グローバルルーティング")}</strong></span>
+                      <Badge variant={homeSelected ? "default" : "outline"}>{copy("Default", "默认", "預設", "デフォルト")}</Badge>
                     </Button>
                     <Button
                       className="agent-master-item agent-master-enterprise"
                       variant="ghost"
                       type="button"
-                      aria-label={copy("Enterprise routing", "企业路由")}
-                      title={copy("Enterprise endpoint connection", "企业端点接入")}
+                      aria-label={copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}
+                      title={copy("Enterprise endpoint connection", "企业端点接入", "企業端點接入", "企業エンドポイント接続")}
                       aria-current={enterpriseSelected ? "page" : undefined}
                       onClick={onOpenEnterprise}
                     >
                       <span className="agent-master-icon enterprise-route-mark" aria-hidden="true">
                         <Building2 />
                       </span>
-                      <span className="agent-master-copy"><strong>{copy("Enterprise routing", "企业路由")}</strong></span>
-                      <Badge variant={enterpriseSelected ? "default" : "outline"}>{copy("Endpoint", "端点")}</Badge>
+                      <span className="agent-master-copy"><strong>{copy("Enterprise routing", "企业路由", "企業路由", "企業ルーティング")}</strong></span>
+                      <Badge variant={enterpriseSelected ? "default" : "outline"}>{copy("Endpoint", "端点", "端點", "エンドポイント")}</Badge>
                     </Button>
                   </>
                 )}
@@ -187,12 +187,12 @@ export default function AgentsPage({
                       className="agent-route-disclosure-trigger"
                       variant="outline"
                       type="button"
-                      aria-label={copy("Agent routes", "Agent 路由")}
+                      aria-label={copy("Agent routes", "Agent 路由", "Agent 路由", "Agent ルーティング")}
                       aria-expanded={routeListOpen}
                       aria-controls="agent-route-list"
                       onClick={() => setRouteListOpen((open) => !open)}
                     >
-                      <span>{copy("Agent routes", "Agent 路由")}</span>
+                      <span>{copy("Agent routes", "Agent 路由", "Agent 路由", "Agent ルーティング")}</span>
                       <ChevronDown aria-hidden="true" />
                     </Button>
                     {routeListOpen && (
@@ -228,7 +228,7 @@ export default function AgentsPage({
           </CardContent>
         </Card>
 
-        <section className="agent-master-content" aria-label={connections ? copy("Selected Agent details", "当前 Agent 详情") : copy("Selected routing configuration", "当前路由配置")}>
+        <section className="agent-master-content" aria-label={connections ? copy("Selected Agent details", "当前 Agent 详情", "當前 Agent 詳細", "現在の Agent の詳細") : copy("Selected routing configuration", "当前路由配置", "當前路由配置", "現在のルーティング設定")}>
           {children}
         </section>
       </div>

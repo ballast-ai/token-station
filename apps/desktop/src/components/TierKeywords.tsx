@@ -31,21 +31,21 @@ export default function TierKeywords({
   }[] = [
     {
       slot: "high",
-      label: copy("High model", "强模型"),
-      hint: copy("Matches go directly to the high tier", "命中这些词 → 直接上最强档"),
-      placeholder: copy("Enter a keyword and press Return", "输入关键词，回车加入"),
+      label: copy("High model", "强模型", "強模型", "強モデル"),
+      hint: copy("Matches go directly to the high tier", "命中这些词 → 直接上最强档", "命中這些詞 → 直接上最強檔", "命中これらのキーワード → スマートな上位モデルに直接"),
+      placeholder: copy("Enter a keyword and press Return", "输入关键词，回车加入", "輸入一個關鍵詞並按回車", "キーワードを入力し、Returnキーを押してください"),
     },
     {
       slot: "mid",
-      label: copy("Medium model", "中模型"),
-      hint: copy("Matches go to the medium tier", "命中这些词 → 走中档"),
-      placeholder: copy("Enter a keyword and press Return", "输入关键词，回车加入"),
+      label: copy("Medium model", "中模型", "中模型", "中モデル"),
+      hint: copy("Matches go to the medium tier", "命中这些词 → 走中档", "命中這些詞 → 走中檔", "命中これらのキーワード → 中位モデルに移動"),
+      placeholder: copy("Enter a keyword and press Return", "输入关键词，回车加入", "輸入一個關鍵詞並按回車", "キーワードを入力し、Returnキーを押してください"),
     },
     {
       slot: "low",
-      label: copy("Low model", "弱模型"),
-      hint: copy("Matches go to the fast, low-cost tier", "命中这些词 → 走便宜快档"),
-      placeholder: copy("Enter a keyword and press Return", "输入关键词，回车加入"),
+      label: copy("Low model", "弱模型", "弱模型", "弱モデル"),
+      hint: copy("Matches go to the fast, low-cost tier", "命中这些词 → 走便宜快档", "命中這些詞 → 走便宜快檔", "命中これらのキーワード → 割安で速いモデルに移動"),
+      placeholder: copy("Enter a keyword and press Return", "输入关键词，回车加入", "輸入一個關鍵詞並按回車", "キーワードを入力し、Returnキーを押してください"),
     },
   ];
   // Keep independent input state for each tier.
@@ -82,7 +82,7 @@ export default function TierKeywords({
               <div
                 className="keyword-chips"
                 role="list"
-                aria-label={copy(`${label} keywords`, `${label}关键词列表`)}
+                aria-label={copy(`${label} keywords`, `${label}关键词列表`, `${label}關鍵詞列表`, `${label}キーワードリスト`)}
               >
                 {words.map((word) => (
                   <span className="keyword-chip" key={word} role="listitem">
@@ -90,7 +90,7 @@ export default function TierKeywords({
                     <button
                       type="button"
                       className="keyword-remove"
-                      aria-label={copy(`Delete keyword ${word}`, `删除关键词 ${word}`)}
+                      aria-label={copy(`Delete keyword ${word}`, `删除关键词 ${word}`, `刪除關鍵詞 ${word}`, `キーワード ${word} を削除`)}
                       disabled={disabled}
                       onClick={() => void onRemove(slot, word)}
                     >
@@ -103,8 +103,8 @@ export default function TierKeywords({
               <div className="keyword-add">
                 <input
                   className="input"
-                  aria-label={copy(`${label} keyword`, `${label}关键词`)}
-                  placeholder={ready ? placeholder : copy("This tier has no model", "该档未配置模型")}
+                  aria-label={copy(`${label} keyword`, `${label}关键词`, `${label}關鍵詞`, `${label}キーワード`)}
+                  placeholder={ready ? placeholder : copy("This tier has no model", "该档未配置模型", "該檔未配置模型", "この階層にはモデルが設定されていません")}
                   value={drafts[slot]}
                   disabled={rowDisabled}
                   onChange={(event) => setDraft(slot, event.target.value)}
@@ -121,7 +121,7 @@ export default function TierKeywords({
                   disabled={rowDisabled || !drafts[slot].trim()}
                   onClick={() => submit(slot)}
                 >
-                  {copy("Add", "添加")}
+                  {copy("Add", "添加", "新增", "追加")}
                 </button>
               </div>
             </div>

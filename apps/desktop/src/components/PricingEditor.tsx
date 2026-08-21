@@ -47,7 +47,7 @@ export default function PricingEditor() {
   const [suggestion, setSuggestion] = useState<ModelPriceSuggestionView | null>(null);
   const noPublicPriceMessage = copy(
     "No public price was found.",
-    "未找到公开价格。",
+    "未找到公开价格。", "未找到公開價格。", "公開価格が見つかりません。"
   );
 
   useEffect(() => {
@@ -116,7 +116,7 @@ export default function PricingEditor() {
     if (!model || model.trim() !== model || model.length > 256) {
       setError(copy(
         "Model ID must be 1–256 characters with no leading or trailing spaces.",
-        "模型 ID 必须是 1–256 个字符，且首尾不能有空格。",
+        "模型 ID 必须是 1–256 个字符，且首尾不能有空格。", "模型 ID 必須是 1–256 個字元，且首尾不能有空格。", "モデル ID は 1～256 文字で、先頭と末尾にスペースを含めないでください。"
       ));
       return;
     }
@@ -125,23 +125,23 @@ export default function PricingEditor() {
       price = {
         input_per_mtok: rateMicros(input, copy(
           "Input price must be a valid amount from 0 to 9 billion with at most 6 decimal places.",
-          "输入价格必须是 0 到 90 亿之间、最多 6 位小数的有效金额。",
+          "输入价格必须是 0 到 90 亿之间、最多 6 位小数的有效金额。", "輸入價格必須介於 0 到 90 億之間，小數點後最多 6 位。", "入力価格は 0～90億の有効な金額で、小数点以下は最大6桁です。"
         )),
         output_per_mtok: rateMicros(output, copy(
           "Output price must be a valid amount from 0 to 9 billion with at most 6 decimal places.",
-          "输出价格必须是 0 到 90 亿之间、最多 6 位小数的有效金额。",
+          "输出价格必须是 0 到 90 亿之间、最多 6 位小数的有效金额。", "輸出價格必須介於 0 到 90 億之間，小數點後最多 6 位。", "出力価格は 0～90億の有効な金額で、小数点以下は最大6桁です。"
         )),
         cache_read_per_mtok: rateMicros(cacheRead, copy(
           "Cache read price must be a valid amount from 0 to 9 billion with at most 6 decimal places.",
-          "缓存读取价格必须是 0 到 90 亿之间、最多 6 位小数的有效金额。",
+          "缓存读取价格必须是 0 到 90 亿之间、最多 6 位小数的有效金额。", "快取讀取價格必須介於 0 到 90 億之間，小數點後最多 6 位。", "キャッシュ読み取り価格は 0～90億の有効な金額で、小数点以下は最大6桁です。"
         )),
         cache_write_per_mtok: rateMicros(cacheWrite, copy(
           "Cache write price must be a valid amount from 0 to 9 billion with at most 6 decimal places.",
-          "缓存写入价格必须是 0 到 90 亿之间、最多 6 位小数的有效金额。",
+          "缓存写入价格必须是 0 到 90 亿之间、最多 6 位小数的有效金额。", "快取寫入價格必須介於 0 到 90 億之間，小數點後最多 6 位。", "キャッシュ書き込み価格は 0～90億の有効な金額で、小数点以下は最大6桁です。"
         )),
         reasoning_per_mtok: reasoning === "" ? null : rateMicros(reasoning, copy(
           "Reasoning price must be a valid amount from 0 to 9 billion with at most 6 decimal places.",
-          "推理价格必须是 0 到 90 亿之间、最多 6 位小数的有效金额。",
+          "推理价格必须是 0 到 90 亿之间、最多 6 位小数的有效金额。", "推理價格必須介於 0 到 90 億之間，小數點後最多 6 位。", "推論価格は 0～90億の有効な金額で、小数点以下は最大6桁です。"
         )),
       };
     } catch (value) {
@@ -153,7 +153,7 @@ export default function PricingEditor() {
       setTable(next);
       showSuccess(copy(
         `Created price v${next.version}. Reapply the configuration to update the running proxy.`,
-        `已生成 price v${next.version}；正在运行的代理需重新应用配置。`,
+        `已生成 price v${next.version}；正在运行的代理需重新应用配置。`, `已生成 price v${next.version}；正在執行的代理需重新應用配置。`, `price v${next.version} が生成されました；実行中のプロキシは構成を再適用する必要があります。`
       ), `model-price-save:${model}`);
     } catch (value) {
       showError(humanizeAppError(value), `model-price-save:${model}`);
@@ -179,7 +179,7 @@ export default function PricingEditor() {
       }
       showSuccess(copy(
         `Created price v${next.version}. Historical receipts keep their original cost.`,
-        `已生成 price v${next.version}；历史回执保持原成本。`,
+        `已生成 price v${next.version}；历史回执保持原成本。`, `已生成 price v${next.version}；歷史回執保持原成本。`, `price v${next.version} が生成されました；履歴レシートは元のコストを保持します。`
       ), `model-price-remove:${name}`);
     } catch (value) {
       showError(humanizeAppError(value), `model-price-remove:${name}`);
@@ -190,10 +190,10 @@ export default function PricingEditor() {
     <div className="pricing-section">
       <div className="budget-title-row">
         <div>
-          <h3>{copy("Versioned model pricing", "版本化模型定价")}</h3>
+          <h3>{copy("Versioned model pricing", "版本化模型定价", "版本化模型定價", "バージョン化モデル価格")}</h3>
           <p>{copy(
             "Amounts use the account currency per 1M tokens. Each price change creates a version; historical receipts are not recalculated.",
-            "金额单位：账户货币 / 1M tokens。每次实际改价生成新版本，历史回执不会重算。",
+            "金额单位：账户货币 / 1M tokens。每次实际改价生成新版本，历史回执不会重算。", "金額以帳戶貨幣 / 1M tokens 計算。每次實際改價會產生新版本；歷史回執不會重新計算。", "金額はアカウント通貨 / 1M tokens で計算されます。価格変更ごとに新しいバージョンが作成され、過去の請求は再計算されません。"
           )}</p>
         </div>
         <span className="price-version">price v{table?.version ?? "—"}</span>
@@ -202,20 +202,20 @@ export default function PricingEditor() {
       {table && Object.keys(table.models).length === 0 && (
         <div className="empty sm">{copy(
           "No model prices configured. Cost remains unknown for models without a price.",
-          "尚未配置模型价格；缺失模型的成本保持未知。",
+          "尚未配置模型价格；缺失模型的成本保持未知。", "尚未設定模型價格；未設定模型的成本保持未知。", "モデルの価格が設定されていません。価格が設定されていないモデルのコストは未知のままです。"
         )}</div>
       )}
       {table && Object.keys(table.models).length > 0 && (
         <table className="grid-table price-table">
           <thead>
             <tr>
-              <th>{copy("Model", "模型")}</th>
-              <th>{copy("Input", "输入")}</th>
-              <th>{copy("Output", "输出")}</th>
-              <th>{copy("Cache read", "缓存读")}</th>
-              <th>{copy("Cache write", "缓存写")}</th>
-              <th>{copy("Reasoning", "推理")}</th>
-              <th>{copy("Actions", "操作")}</th>
+              <th>{copy("Model", "模型", "模型", "モデル")}</th>
+              <th>{copy("Input", "输入", "輸入", "入力")}</th>
+              <th>{copy("Output", "输出", "輸出", "出力")}</th>
+              <th>{copy("Cache read", "缓存读", "快取讀取", "キャッシュ読み込み")}</th>
+              <th>{copy("Cache write", "缓存写", "快取寫入", "キャッシュ書き込み")}</th>
+              <th>{copy("Reasoning", "推理", "推理", "推論")}</th>
+              <th>{copy("Actions", "操作", "動作", "アクション")}</th>
             </tr>
           </thead>
           <tbody>
@@ -227,14 +227,14 @@ export default function PricingEditor() {
                 <td>{displayRate(price.cache_read_per_mtok)}</td>
                 <td>{displayRate(price.cache_write_per_mtok)}</td>
                 <td>{price.reasoning_per_mtok == null
-                  ? copy("Same as output", "跟随输出")
+                  ? copy("Same as output", "跟随输出", "跟隨輸出", "出力に従う")
                   : displayRate(price.reasoning_per_mtok)}</td>
                 <td className="price-actions">
-                  <button className="btn tiny" aria-label={copy(`Edit ${name}`, `编辑 ${name}`)} onClick={() => edit(name, price)}>
-                    {copy("Edit", "编辑")}
+                  <button className="btn tiny" aria-label={copy(`Edit ${name}`, `编辑 ${name}`, `編輯 ${name}`, `編集 ${name}`)} onClick={() => edit(name, price)}>
+                    {copy("Edit", "编辑", "編輯", "編集")}
                   </button>
-                  <button className="btn tiny danger" aria-label={copy(`Delete ${name}`, `删除 ${name}`)} onClick={() => remove(name)}>
-                    {copy("Delete", "删除")}
+                  <button className="btn tiny danger" aria-label={copy(`Delete ${name}`, `删除 ${name}`, `刪除 ${name}`, `削除 ${name}`)} onClick={() => remove(name)}>
+                    {copy("Delete", "删除", "刪除", "削除")}
                   </button>
                 </td>
               </tr>
@@ -245,9 +245,9 @@ export default function PricingEditor() {
 
       <div className="price-form">
         <label className="field-label price-model-field">
-          {copy("Model ID", "模型 ID")}
+          {copy("Model ID", "模型 ID", "模型 ID", "モデル ID")}
           <input
-            aria-label={copy("Model ID", "模型 ID")}
+            aria-label={copy("Model ID", "模型 ID", "模型 ID", "モデル ID")}
             className="input"
             value={model}
             onChange={(event) => {
@@ -266,14 +266,14 @@ export default function PricingEditor() {
           />
         </label>
         {[
-          [copy("Input price", "输入价格"), input, setInput, false],
-          [copy("Output price", "输出价格"), output, setOutput, false],
-          [copy("Cache read price", "缓存读取价格"), cacheRead, setCacheRead, false],
-          [copy("Cache write price", "缓存写入价格"), cacheWrite, setCacheWrite, false],
-          [copy("Reasoning price", "推理价格"), reasoning, setReasoning, true],
+          [copy("Input price", "输入价格", "輸入價格", "入力価格"), input, setInput, false],
+          [copy("Output price", "输出价格", "輸出價格", "出力価格"), output, setOutput, false],
+          [copy("Cache read price", "缓存读取价格", "快取讀取價格", "キャッシュ読み取り価格"), cacheRead, setCacheRead, false],
+          [copy("Cache write price", "缓存写入价格", "快取寫入價格", "キャッシュ書き込み価格"), cacheWrite, setCacheWrite, false],
+          [copy("Reasoning price", "推理价格", "推理價格", "推論価格"), reasoning, setReasoning, true],
         ].map(([label, value, setter, optional]) => (
           <label className="field-label" key={label as string}>
-            {label as string}{optional ? copy(" (empty uses output price)", "（空=跟随输出）") : ""}
+            {label as string}{optional ? copy(" (empty uses output price)", "（空=跟随输出）", "（空=使用輸出價格）", "（空=出力価格を使用）") : ""}
             <input
               aria-label={label as string}
               className="input"
@@ -295,10 +295,10 @@ export default function PricingEditor() {
             disabled={!table || model.trim().length === 0 || table.models[model.trim()] != null}
             onClick={() => setLookupRequestedFor(model.trim())}
           >
-            {copy("Look up public price", "查询公开价格")}
+            {copy("Look up public price", "查询公开价格", "查詢公開價格", "公開価格を照会")}
           </button>
           <button className="btn primary" disabled={!table} onClick={save}>
-            {copy("Save new version", "保存新版本")}
+            {copy("Save new version", "保存新版本", "儲存新版本", "新しいバージョンを保存")}
           </button>
         </div>
       </div>
@@ -306,7 +306,7 @@ export default function PricingEditor() {
         <div className="banner">
           {copy(
             `Prefilled from the public USD price published by ${suggestion.source} for ${suggestion.provider_name} / ${suggestion.display_name}. Review it before saving a new version.`,
-            `已按 ${suggestion.source} 的 ${suggestion.provider_name} / ${suggestion.display_name} 公开美元标价预填；尚未保存，请核对后生成新版本。`,
+            `已按 ${suggestion.source} 的 ${suggestion.provider_name} / ${suggestion.display_name} 公开美元标价预填；尚未保存，请核对后生成新版本。`, `已按 ${suggestion.source} 的 ${suggestion.provider_name} / ${suggestion.display_name} 公開美元標價預填；尚未儲存，請核對後生成新版本。`, `${suggestion.source} の ${suggestion.provider_name} / ${suggestion.display_name} 公開米ドル価格に基づき予め入力済みです；まだ保存されていませんので、保存前に確認してください。`
           )}
         </div>
       )}

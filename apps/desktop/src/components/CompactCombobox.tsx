@@ -213,7 +213,7 @@ export default function CompactCombobox({
       >
         <span className={`compact-combobox-value ${selected ? "" : "placeholder-copy"}`}>
           {selected?.icon && <span className="compact-combobox-icon" aria-hidden="true">{selected.icon}</span>}
-          <span>{selected?.label ?? placeholder ?? copy("Select", "请选择")}</span>
+          <span>{selected?.label ?? placeholder ?? copy("Select", "请选择", "請選擇", "選択してください")}</span>
         </span>
         <svg className="compact-combobox-chevron" viewBox="0 0 16 16" aria-hidden="true">
           <path d="m4 6 4 4 4-4" />
@@ -233,8 +233,8 @@ export default function CompactCombobox({
                 ref={searchRef}
                 type="search"
                 value={query}
-                aria-label={copy(`Search ${ariaLabel}`, `搜索${ariaLabel}`)}
-                placeholder={copy("Search", "搜索")}
+                aria-label={copy(`Search ${ariaLabel}`, `搜索${ariaLabel}`, `搜尋${ariaLabel}`, `${ariaLabel}を検索`)}
+                placeholder={copy("Search", "搜索", "搜尋", "検索")}
                 onChange={(event) => {
                   setQuery(event.target.value);
                   setActiveIndex(0);
@@ -313,12 +313,12 @@ export default function CompactCombobox({
             ))}
             {visibleOptions.length === 0 && (
               <div className="compact-combobox-empty">
-                {copy("No matching options", "没有匹配项")}
+                {copy("No matching options", "没有匹配项", "沒有匹配選項", "一致するオプションがありません")}
               </div>
             )}
             {!normalizedQuery && options.length > INITIAL_OPTION_LIMIT && (
               <div className="compact-combobox-limit">
-                {copy("Enter a name to search the remaining options", "输入名称可搜索其余选项")}
+                {copy("Enter a name to search the remaining options", "输入名称可搜索其余选项", "輸入名稱以搜尋其餘選項", "名前を入力して残りのオプションを検索")}
               </div>
             )}
           </div>

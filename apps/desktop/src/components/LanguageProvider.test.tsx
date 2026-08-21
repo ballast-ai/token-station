@@ -12,7 +12,7 @@ function LanguageProbe() {
   const { language, setLanguage, t, copy } = useLanguage();
   return (
     <div>
-      <output>{`${language}:${t("settings.title")}:${copy("Home routing", "主页路由")}`}</output>
+      <output>{`${language}:${t("settings.title")}:${copy("Home routing", "主页路由", "首頁路由", "ホームルーティング")}`}</output>
       <button type="button" onClick={() => setLanguage("en")}>English</button>
       <button type="button" onClick={() => setLanguage("zh-CN")}>简体中文</button>
       <button type="button" onClick={() => setLanguage("zh-TW")}>繁體中文</button>
@@ -67,10 +67,10 @@ describe("LanguageProvider", () => {
   });
 
   it.each([
-    ["zh-TW", "zh-TW:設定:Home routing"],
-    ["zh-HK", "zh-TW:設定:Home routing"],
-    ["zh-Hant", "zh-TW:設定:Home routing"],
-    ["ja-JP", "ja:設定:Home routing"],
+    ["zh-TW", "zh-TW:設定:首頁路由"],
+    ["zh-HK", "zh-TW:設定:首頁路由"],
+    ["zh-Hant", "zh-TW:設定:首頁路由"],
+    ["ja-JP", "ja:設定:ホームルーティング"],
   ])("detects %s on first launch", (browserLanguage, expected) => {
     setBrowserLanguages([browserLanguage, "en-US"]);
 
@@ -125,12 +125,12 @@ describe("LanguageProvider", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "繁體中文" }));
-    expect(screen.getByText("zh-TW:設定:Home routing")).toBeInTheDocument();
+    expect(screen.getByText("zh-TW:設定:首頁路由")).toBeInTheDocument();
     expect(document.documentElement).toHaveAttribute("lang", "zh-TW");
     expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("zh-TW");
 
     await user.click(screen.getByRole("button", { name: "日本語" }));
-    expect(screen.getByText("ja:設定:Home routing")).toBeInTheDocument();
+    expect(screen.getByText("ja:設定:ホームルーティング")).toBeInTheDocument();
     expect(document.documentElement).toHaveAttribute("lang", "ja");
     expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("ja");
   });

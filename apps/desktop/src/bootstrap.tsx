@@ -26,7 +26,7 @@ export function AppBootstrap() {
         <span className="loading-mark" aria-hidden="true"><i /><i /><i /></span>
         <strong>{copy(
           "Checking local data compatibility",
-          "正在检查本地数据兼容性",
+          "正在检查本地数据兼容性", "正在檢查本地資料相容性", "ローカルデータの互換性を確認中"
         )}</strong>
       </div>
     );

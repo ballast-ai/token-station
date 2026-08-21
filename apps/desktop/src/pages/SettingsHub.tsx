@@ -46,6 +46,10 @@ const SECTIONS: Array<{
   chineseLabel?: string;
   englishDescription?: string;
   chineseDescription?: string;
+  traditionalLabel?: string;
+  japaneseLabel?: string;
+  traditionalDescription?: string;
+  japaneseDescription?: string;
   icon: LucideIcon;
 }> = [
   {
@@ -78,8 +82,12 @@ const SECTIONS: Array<{
     description: "settings.generalHint",
     englishLabel: "Request logs",
     chineseLabel: "请求日志",
+    traditionalLabel: "請求記錄",
+    japaneseLabel: "リクエストログ",
     englishDescription: "Routing outcomes and local receipts",
     chineseDescription: "路由结果与本地回执",
+    traditionalDescription: "路由結果與本機回執",
+    japaneseDescription: "ルーティング結果とローカルレシート",
     icon: ScrollText,
   },
   {
@@ -120,6 +128,8 @@ function VirtualKeyCard({ serve }: { serve: ServeView }) {
         localizedCopy(
           "Could not copy the virtual API key. Check the system clipboard permission and try again.",
           "无法复制虚拟 API Key。请检查系统剪贴板权限，然后重试。",
+          "無法複製虛擬 API Key。請檢查系統剪貼簿權限，然後再試一次。",
+          "仮想 API Key をコピーできませんでした。システムのクリップボード権限を確認して再試行してください。",
         ),
         "copy-virtual-key",
       );
@@ -357,8 +367,18 @@ function SettingsHubContent({
               >
                 <Icon className="settings-subnav-icon" aria-hidden="true" />
                 <span>
-                  <strong>{item.englishLabel ? copy(item.englishLabel, item.chineseLabel ?? item.englishLabel) : t(item.label)}</strong>
-                  <small>{item.englishDescription ? copy(item.englishDescription, item.chineseDescription ?? item.englishDescription) : t(item.description)}</small>
+                  <strong>{item.englishLabel ? copy(
+                    item.englishLabel,
+                    item.chineseLabel ?? item.englishLabel,
+                    item.traditionalLabel ?? item.englishLabel,
+                    item.japaneseLabel ?? item.englishLabel,
+                  ) : t(item.label)}</strong>
+                  <small>{item.englishDescription ? copy(
+                    item.englishDescription,
+                    item.chineseDescription ?? item.englishDescription,
+                    item.traditionalDescription ?? item.englishDescription,
+                    item.japaneseDescription ?? item.englishDescription,
+                  ) : t(item.description)}</small>
                 </span>
               </Button>
             );
@@ -385,10 +405,10 @@ function SettingsHubContent({
           <section className="settings-request-logs">
             <header className="overview-heading">
               <div>
-                <h1>{copy("Request logs", "请求日志")}</h1>
+                <h1>{copy("Request logs", "请求日志", "請求日誌", "リクエストログ")}</h1>
                 <p>{copy(
                   "Inspect routing outcomes, failures, and locally retained plaintext bodies.",
-                  "查看路由结果、失败原因和本地保留的明文正文。",
+                  "查看路由结果、失败原因和本地保留的明文正文。", "檢視路由結果、失敗原因和本機保留的明文主體", "ルーティング結果、失敗原因およびローカルに保持された平文本文を確認"
                 )}</p>
               </div>
             </header>

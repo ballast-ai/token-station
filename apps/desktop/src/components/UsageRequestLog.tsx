@@ -389,20 +389,20 @@ function RequestPlaintext({
   const [viewMode, setViewMode] = useState<"parsed" | "source">("parsed");
   if (error) {
     return (
-      <section className="request-plaintext" aria-label={copy("Plaintext input and output", "明文输入输出")}>
+      <section className="request-plaintext" aria-label={copy("Plaintext input and output", "明文输入输出", "明文輸入輸出", "プレーンテキスト入出力")}>
         <div className="request-plaintext-state error-text" role="alert">
-          {copy(`Failed to read plaintext: ${error}`, `明文读取失败：${error}`)}
+          {copy(`Failed to read plaintext: ${error}`, `明文读取失败：${error}`, `明文讀取失敗：${error}`, `プレーンテキストの読み込みに失敗：${error}`)}
         </div>
       </section>
     );
   }
   if (!plaintext) {
     return (
-      <section className="request-plaintext" aria-label={copy("Plaintext input and output", "明文输入输出")}>
+      <section className="request-plaintext" aria-label={copy("Plaintext input and output", "明文输入输出", "明文輸入輸出", "プレーンテキスト入出力")}>
         <div className="request-plaintext-state" role="status">
           {copy(
             "No plaintext is available for this request. It may predate this feature, have failed to write, or have been removed by retention.",
-            "此请求没有可用明文。它可能早于本功能、写入失败或已被保留策略清理。",
+            "此请求没有可用明文。它可能早于本功能、写入失败或已被保留策略清理。", "此請求沒有可用明文。它可能早於本功能、寫入失敗或已被保留策略清理。", "このリクエストには利用可能なプレーンテキストがありません。これはこの機能以前のもの、書き込み失敗、または保持ポリシーにより削除された可能性があります。"
           )}
         </div>
       </section>
@@ -411,14 +411,14 @@ function RequestPlaintext({
   const panels = [
     {
       key: "input",
-      label: copy("Plaintext input", "明文输入"),
+      label: copy("Plaintext input", "明文输入", "明文輸入", "プレーンテキスト入力"),
       body: plaintext.input,
       truncated: plaintext.input_truncated,
       blocks: parseInputSemantics(plaintext.input),
     },
     {
       key: "output",
-      label: copy("Plaintext output", "明文输出"),
+      label: copy("Plaintext output", "明文输出", "明文輸出", "プレーンテキスト出力"),
       body: plaintext.output,
       truncated: plaintext.output_truncated,
       blocks: parseOutputSemantics(plaintext.output),
@@ -426,47 +426,47 @@ function RequestPlaintext({
   ];
   const semanticLabel = (block: SemanticBlock) => {
     switch (block.kind) {
-      case "system": return copy("System prompt", "系统提示词");
-      case "developer": return copy("Developer prompt", "开发者提示词");
-      case "user": return copy("User input", "用户输入");
-      case "assistant": return copy("Assistant output", "助手输出");
-      case "thinking": return copy("Assistant thinking", "助手思考");
+      case "system": return copy("System prompt", "系统提示词", "系統提示詞", "システムプロンプト");
+      case "developer": return copy("Developer prompt", "开发者提示词", "開發者提示詞", "開発者プロンプト");
+      case "user": return copy("User input", "用户输入", "使用者輸入", "ユーザー入力");
+      case "assistant": return copy("Assistant output", "助手输出", "助手輸出", "アシスタント出力");
+      case "thinking": return copy("Assistant thinking", "助手思考", "助手思考", "アシスタントの思考");
       case "tool-call": return block.detail
-        ? copy(`Tool call · ${block.detail}`, `工具调用 · ${block.detail}`)
-        : copy("Tool call", "工具调用");
+        ? copy(`Tool call · ${block.detail}`, `工具调用 · ${block.detail}`, `工具呼叫 · ${block.detail}`, `ツール呼び出し · ${block.detail}`)
+        : copy("Tool call", "工具调用", "工具呼叫", "ツール呼び出し");
       case "tool-result": return block.detail
-        ? copy(`Tool result · ${block.detail}`, `工具返回 · ${block.detail}`)
-        : copy("Tool result", "工具返回");
-      case "tools": return copy(`Tool definitions · ${block.detail} total`, `工具定义 · ${block.detail} 个`);
-      case "stream-end": return copy("Stream completed", "流式结束");
-      default: return copy("Unrecognized content", "未识别内容");
+        ? copy(`Tool result · ${block.detail}`, `工具返回 · ${block.detail}`, `工具返回 · ${block.detail}`, `ツール結果 · ${block.detail}`)
+        : copy("Tool result", "工具返回", "工具返回", "ツール結果");
+      case "tools": return copy(`Tool definitions · ${block.detail} total`, `工具定义 · ${block.detail} 个`, `工具定義 · ${block.detail} 個`, `ツール定義 · ${block.detail} 個`);
+      case "stream-end": return copy("Stream completed", "流式结束", "流式結束", "ストリーム終了");
+      default: return copy("Unrecognized content", "未识别内容", "未識別內容", "未識別コンテンツ");
     }
   };
   return (
-    <section className="request-plaintext" aria-label={copy("Plaintext input and output", "明文输入输出")}>
+    <section className="request-plaintext" aria-label={copy("Plaintext input and output", "明文输入输出", "明文輸入輸出", "プレーンテキスト入出力")}>
       <header>
         <div className="request-plaintext-title">
-          <strong>{copy("Plaintext input and output", "明文输入输出")}</strong>
-          <span>{copy("Retained for 7 days by default", "默认保留 7 天")}</span>
+          <strong>{copy("Plaintext input and output", "明文输入输出", "明文輸入輸出", "プレーンテキスト入出力")}</strong>
+          <span>{copy("Retained for 7 days by default", "默认保留 7 天", "預設保留 7 天", "デフォルトで7日間保持")}</span>
         </div>
         <div
           className="request-plaintext-mode"
           role="group"
-          aria-label={copy("Body display mode", "正文显示方式")}
+          aria-label={copy("Body display mode", "正文显示方式", "正文顯示方式", "本文表示モード")}
         >
           <button
             type="button"
             aria-pressed={viewMode === "parsed"}
             onClick={() => setViewMode("parsed")}
           >
-            {copy("Parsed", "解析视图")}
+            {copy("Parsed", "解析视图", "解析檢視", "解析ビュー")}
           </button>
           <button
             type="button"
             aria-pressed={viewMode === "source"}
             onClick={() => setViewMode("source")}
           >
-            {copy("Source", "原文")}
+            {copy("Source", "原文", "原文", "原文")}
           </button>
         </div>
       </header>
@@ -475,7 +475,7 @@ function RequestPlaintext({
           <div className="request-plaintext-panel" key={panel.key}>
             <div className="request-plaintext-label">
               <span>{panel.key.toUpperCase()}</span>
-              {panel.truncated && <em>{copy("Truncated", "已截断")}</em>}
+              {panel.truncated && <em>{copy("Truncated", "已截断", "已截斷", "切り捨てられた")}</em>}
             </div>
             {viewMode === "parsed" ? (
               <div
@@ -489,9 +489,9 @@ function RequestPlaintext({
                     <div>{semanticLabel(block)}</div>
                     <pre>{block.content}</pre>
                   </section>
-                )) : <span className="request-semantic-empty">{copy("Empty body", "空正文")}</span>}
+                )) : <span className="request-semantic-empty">{copy("Empty body", "空正文", "空本體", "空本文")}</span>}
                 {panel.truncated && (
-                  <div className="request-semantic-truncated">{copy("Body truncated", "正文已截断")}</div>
+                  <div className="request-semantic-truncated">{copy("Body truncated", "正文已截断", "本體已截斷", "本文が切り捨てられています")}</div>
                 )}
               </div>
             ) : (
@@ -501,7 +501,7 @@ function RequestPlaintext({
                 aria-label={panel.label}
                 tabIndex={0}
               >
-                {panel.body ? formatJsonSource(panel.body) : copy("Empty body", "空正文")}
+                {panel.body ? formatJsonSource(panel.body) : copy("Empty body", "空正文", "空本體", "空本文")}
               </pre>
             )}
           </div>
@@ -524,14 +524,14 @@ function CostState({
     receipt,
     copy(
       "The upstream did not return token usage, so cost cannot be estimated.",
-      "上游未返回 Token，无法估算成本。",
+      "上游未返回 Token，无法估算成本。", "上游未返回 Token，無法估算成本。", "上流から Token が返されなかったため、コストの推定ができません。"
     ),
-    (model) => copy(`No price configured for model: ${model}`, `缺少模型价格：${model}`),
+    (model) => copy(`No price configured for model: ${model}`, `缺少模型价格：${model}`, `缺少模型價格：${model}`, `モデルの価格が設定されていません：${model}`),
   );
   if (kind === "unknown" || receipt.cost_micros == null) {
     return (
       <span className="usage-log-cost unknown" title={reason}>
-        {compact ? copy("Unknown", "未知") : reason}
+        {compact ? copy("Unknown", "未知", "未知", "不明") : reason}
       </span>
     );
   }
@@ -539,9 +539,9 @@ function CostState({
     <span className={`usage-log-cost ${kind}`}>
       {costLabel(
         receipt,
-        copy("Actual", "实际"),
-        copy("Estimated", "估算"),
-        copy("Cost unknown", "成本未知"),
+        copy("Actual", "实际", "實際", "実際"),
+        copy("Estimated", "估算", "估算", "推定"),
+        copy("Cost unknown", "成本未知", "費用未知", "費用は不明"),
       )}
     </span>
   );
@@ -595,7 +595,7 @@ export default function UsageRequestLog({
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const range = useMemo(() => {
-    if (!total) return copy("0 items", "0 条");
+    if (!total) return copy("0 items", "0 条", "0 項", "0 項");
     const start = (page - 1) * PAGE_SIZE + 1;
     return `${start}–${Math.min(total, start + PAGE_SIZE - 1)} / ${total}`;
   }, [copy, page, total]);
@@ -604,15 +604,15 @@ export default function UsageRequestLog({
     <section className="usage-request-log">
       <header>
         <div>
-          <h2>{copy("Request log", "请求日志")}</h2>
+          <h2>{copy("Request log", "请求日志", "請求紀錄", "リクエストログ")}</h2>
           <p>{copy(
             "Complete local receipts · Plaintext bodies are retained separately for 7 days by default",
-            "完整本地 Receipt · 正文明文独立存储，默认保留 7 天",
+            "完整本地 Receipt · 正文明文独立存储，默认保留 7 天", "完整本機回執 · 純文字內文會獨立儲存，預設保留 7 天", "完全なローカルレシート · 平文の本文は別途保存され、既定では7日間保持されます"
           )}</p>
         </div>
         <div className="usage-log-tools">
           <div className="usage-log-filter">
-            <span>{copy("Status", "状态")}</span>
+            <span>{copy("Status", "状态", "狀態", "ステータス")}</span>
             <Select
               value={status || "all"}
               onValueChange={(next) => setStatus(next === "all" ? "" : (next as typeof status))}
@@ -620,14 +620,14 @@ export default function UsageRequestLog({
               <SelectTrigger
                 className="usage-log-status-select"
                 size="sm"
-                aria-label={copy("Request status", "请求状态")}
+                aria-label={copy("Request status", "请求状态", "請求狀態", "リクエストステータス")}
               >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent align="end">
-                <SelectItem value="all">{copy("All statuses", "全部状态")}</SelectItem>
-                <SelectItem value="success">{copy("Success", "成功")}</SelectItem>
-                <SelectItem value="error">{copy("Error", "失败")}</SelectItem>
+                <SelectItem value="all">{copy("All statuses", "全部状态", "全部狀態", "すべてのステータス")}</SelectItem>
+                <SelectItem value="success">{copy("Success", "成功", "成功", "成功")}</SelectItem>
+                <SelectItem value="error">{copy("Error", "失败", "錯誤", "失敗")}</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -636,29 +636,29 @@ export default function UsageRequestLog({
       </header>
 
       {loading && !data && (
-        <div className="usage-log-state">{copy("Loading request log…", "正在读取请求日志…")}</div>
+        <div className="usage-log-state">{copy("Loading request log…", "正在读取请求日志…", "正在讀取請求紀錄…", "リクエストログを読み込んでいます…")}</div>
       )}
       {error && (
         <div className="usage-log-state error-text">
-          {copy(`Failed to load request log: ${error}`, `请求日志读取失败：${error}`)}
+          {copy(`Failed to load request log: ${error}`, `请求日志读取失败：${error}`, `請求紀錄讀取失敗：${error}`, `リクエストログの読み込みに失敗しました：${error}`)}
         </div>
       )}
       {!loading && !error && data?.items.length === 0 && (
         <div className="usage-log-state">{copy(
           "No requests match the current filters.",
-          "当前筛选范围没有请求日志。",
+          "当前筛选范围没有请求日志。", "目前沒有符合篩選條件的請求。", "現在のフィルター条件に一致するリクエストはありません。"
         )}</div>
       )}
 
       {data && data.items.length > 0 && (
         <>
           <div className="usage-log-head" aria-hidden="true">
-            <span>{copy("Time", "时间")}</span>
-            <span>{copy("Agent / Route", "Agent / 路由")}</span>
-            <span>{copy("Status", "状态")}</span>
+            <span>{copy("Time", "时间", "時間", "時間")}</span>
+            <span>{copy("Agent / Route", "Agent / 路由", "Agent / 路由", "Agent / ルーティング")}</span>
+            <span>{copy("Status", "状态", "狀態", "ステータス")}</span>
             <span>Token</span>
-            <span>{copy("Latency", "延迟")}</span>
-            <span>{copy("Cost", "成本")}</span>
+            <span>{copy("Latency", "延迟", "延遲", "レイテンシー")}</span>
+            <span>{copy("Cost", "成本", "成本", "コスト")}</span>
           </div>
           <div className={`usage-log-list ${loading ? "refreshing" : ""}`}>
             {data.items.map((receipt) => {
@@ -673,11 +673,11 @@ export default function UsageRequestLog({
                       {formatTime(receipt.started_at_ms, language)}
                     </time>
                     <span className="usage-log-route">
-                      <small>{receipt.agent_id ?? copy("Unknown Agent", "未知 Agent")}</small>
-                      <strong>{routeOf(receipt, copy("No route", "未产生路由"))}</strong>
+                      <small>{receipt.agent_id ?? copy("Unknown Agent", "未知 Agent", "未知 Agent", "不明な Agent")}</small>
+                      <strong>{routeOf(receipt, copy("No route", "未产生路由", "未產生路由", "ルーティングが生成されませんでした"))}</strong>
                     </span>
                     <span className={`usage-log-status ${success ? "success" : cancelled ? "" : "error"}`}>
-                      {cancelled ? copy("Cancelled", "已取消") : `HTTP ${receipt.status}`}
+                      {cancelled ? copy("Cancelled", "已取消", "已取消", "キャンセル") : `HTTP ${receipt.status}`}
                     </span>
                     <span>{tokenTotal(receipt)}</span>
                     <span>{receipt.latency_ms.toLocaleString()} ms</span>
@@ -685,28 +685,28 @@ export default function UsageRequestLog({
                   </summary>
                   <div className="usage-log-expanded">
                     <div className="usage-log-facts">
-                      <span><small>{copy("Request ID", "请求 ID")}</small><code>{receipt.request_id}</code></span>
-                      <span><small>{copy("Requested model", "请求模型")}</small><strong>{receipt.requested_model}</strong></span>
-                      <span><small>{copy("Protocol", "协议")}</small><strong>{receipt.protocol}</strong></span>
+                      <span><small>{copy("Request ID", "请求 ID", "請求 ID", "リクエスト ID")}</small><code>{receipt.request_id}</code></span>
+                      <span><small>{copy("Requested model", "请求模型", "請求模型", "リクエストモデル")}</small><strong>{receipt.requested_model}</strong></span>
+                      <span><small>{copy("Protocol", "协议", "協議", "プロトコル")}</small><strong>{receipt.protocol}</strong></span>
                       <span>
-                        <small>{copy("Endpoint", "端点")}</small>
+                        <small>{copy("Endpoint", "端点", "端點", "エンドポイント")}</small>
                         <strong>{receipt.request_method ?? "—"} · {receipt.path_kind ?? "unknown"}</strong>
                       </span>
                       <span>
-                        <small>{copy("Transport", "传输")}</small>
-                        <strong>{receipt.stream ? copy("Streaming", "流式") : copy("Non-streaming", "非流式")}</strong>
+                        <small>{copy("Transport", "传输", "傳輸", "トランスポート")}</small>
+                        <strong>{receipt.stream ? copy("Streaming", "流式", "流式", "ストリーム") : copy("Non-streaming", "非流式", "非流式", "非ストリーム")}</strong>
                       </span>
                       {receipt.price_version != null && (
-                        <span><small>{copy("Price version", "价格版本")}</small><strong>v{receipt.price_version}</strong></span>
+                        <span><small>{copy("Price version", "价格版本", "價格版本", "価格バージョン")}</small><strong>v{receipt.price_version}</strong></span>
                       )}
                     </div>
                     {receipt.usage && (
                       <div className="usage-log-token-facts">
-                        <span>{copy("Input", "输入")} <strong>{receipt.usage.input_tokens.toLocaleString(language)}</strong></span>
-                        <span>{copy("Output", "输出")} <strong>{receipt.usage.output_tokens.toLocaleString(language)}</strong></span>
-                        <span>{copy("Cache read", "缓存读")} <strong>{receipt.usage.cache_read_tokens.toLocaleString(language)}</strong></span>
-                        <span>{copy("Cache write", "缓存写")} <strong>{receipt.usage.cache_write_tokens.toLocaleString(language)}</strong></span>
-                        <span>{copy("Reasoning", "推理")} <strong>{receipt.usage.reasoning_tokens.toLocaleString(language)}</strong></span>
+                        <span>{copy("Input", "输入", "輸入", "入力")} <strong>{receipt.usage.input_tokens.toLocaleString(language)}</strong></span>
+                        <span>{copy("Output", "输出", "輸出", "出力")} <strong>{receipt.usage.output_tokens.toLocaleString(language)}</strong></span>
+                        <span>{copy("Cache read", "缓存读", "快取讀取", "キャッシュ読み込み")} <strong>{receipt.usage.cache_read_tokens.toLocaleString(language)}</strong></span>
+                        <span>{copy("Cache write", "缓存写", "快取寫入", "キャッシュ書き込み")} <strong>{receipt.usage.cache_write_tokens.toLocaleString(language)}</strong></span>
+                        <span>{copy("Reasoning", "推理", "推理", "推論")} <strong>{receipt.usage.reasoning_tokens.toLocaleString(language)}</strong></span>
                       </div>
                     )}
                     <CostState receipt={receipt} />
@@ -726,16 +726,16 @@ export default function UsageRequestLog({
               disabled={page <= 1 || loading}
               onClick={() => setPage((value) => Math.max(1, value - 1))}
             >
-              {copy("Previous", "上一页")}
+              {copy("Previous", "上一页", "上一頁", "前ページ")}
             </button>
-            <span>{copy(`Page ${page} of ${totalPages}`, `第 ${page} / ${totalPages} 页`)}</span>
+            <span>{copy(`Page ${page} of ${totalPages}`, `第 ${page} / ${totalPages} 页`, `第 ${page} / ${totalPages} 頁`, `第 ${page} / ${totalPages} ページ`)}</span>
             <button
               type="button"
-              aria-label={copy("Next page", "下一页")}
+              aria-label={copy("Next page", "下一页", "下一頁", "次ページ")}
               disabled={page >= totalPages || loading}
               onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
             >
-              {copy("Next", "下一页")}
+              {copy("Next", "下一页", "下一頁", "次ページ")}
             </button>
           </footer>
         </>

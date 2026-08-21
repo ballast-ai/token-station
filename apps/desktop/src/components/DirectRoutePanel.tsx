@@ -108,11 +108,16 @@ function SortableDirectProviderRow({
     id: provider.name,
     disabled: busy,
     animateLayoutChanges: () => false,
-    attributes: { roleDescription: copy("sortable item", "可排序项") },
+    attributes: { roleDescription: copy("sortable item", "可排序项", "可排序專案", "並べ替え可能な項目") },
   });
   const hasModels = provider.models.length > 0;
-  const selectionLabel = copy(selected ? "Selected" : "Not selected", selected ? "已选中" : "未选中");
-  const modelLabel = model || copy("No available models", "无可用模型");
+  const selectionLabel = copy(
+    selected ? "Selected" : "Not selected",
+    selected ? "已选中" : "未选中",
+    selected ? "已選取" : "未選取",
+    selected ? "選択済み" : "未選択",
+  );
+  const modelLabel = model || copy("No available models", "无可用模型", "無可用模型", "利用可能なモデルがありません");
   const sortableStyle = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -149,7 +154,7 @@ function SortableDirectProviderRow({
           {...listeners}
           aria-label={copy(
             `Reorder ${provider.name}; position ${index + 1}; use the up or down arrow key`,
-            `调整 ${provider.name} 顺序；当前第 ${index + 1} 项；使用上下方向键`,
+            `调整 ${provider.name} 顺序；当前第 ${index + 1} 项；使用上下方向键`, `調整 ${provider.name} 順序；當前第 ${index + 1} 項；使用上下方向鍵`, `${provider.name} の順序を調整；現在の位置は ${index + 1} 番；上または下の矢印キーを使用`
           )}
           onKeyDown={handleSortKeyDown}
         >
@@ -164,7 +169,7 @@ function SortableDirectProviderRow({
           onChange={onSelect}
         />
         <CompactCombobox
-          ariaLabel={copy(`${provider.name} model`, `${provider.name} 模型`)}
+          ariaLabel={copy(`${provider.name} model`, `${provider.name} 模型`, `${provider.name} 模型`, `${provider.name} モデル`)}
           value={model}
           disabled={busy || !hasModels}
           options={provider.models.map((providerModel) => ({ value: providerModel, label: providerModel }))}
@@ -176,8 +181,8 @@ function SortableDirectProviderRow({
         <span className="direct-provider-copy">
           <strong>{provider.name}</strong>
           <small>{hasModels
-            ? copy("Provider", "供应商")
-            : copy("Manage a model before selecting", "请先添加已管理模型")}</small>
+            ? copy("Provider", "供应商", "供應商", "プロバイダー")
+            : copy("Manage a model before selecting", "请先添加已管理模型", "請先新增已管理模型", "まず管理済みモデルを追加してください")}</small>
         </span>
         <CheckCircle2 className="direct-selected-mark" aria-hidden="true" />
       </div>
@@ -280,7 +285,7 @@ export default function DirectRoutePanel({
     if (targetIndex < 0 || targetIndex >= providerOrder.length) {
       setSortAnnouncement(copy(
         `${name} is already at the ${targetIndex < 0 ? "top" : "bottom"} of the list.`,
-        `${name} 已在列表${targetIndex < 0 ? "顶部" : "底部"}。`,
+        `${name} 已在列表${targetIndex < 0 ? "顶部" : "底部"}。`, `${name} 已在列表${targetIndex < 0 ? "top" : "bottom"}。`, `${name} はリストの${targetIndex < 0 ? "top" : "bottom"}にすでにあります。`
       ));
       return;
     }
@@ -288,7 +293,7 @@ export default function DirectRoutePanel({
     setProviderOrder(arrayMove(providerOrder, fromIndex, targetIndex));
     setSortAnnouncement(copy(
       `Moved ${name} to position ${targetIndex + 1} of ${providerOrder.length}.`,
-      `已将 ${name} 移到第 ${targetIndex + 1} 项，共 ${providerOrder.length} 项。`,
+      `已将 ${name} 移到第 ${targetIndex + 1} 项，共 ${providerOrder.length} 项。`, `已將 ${name} 移到第 ${targetIndex + 1} 項，共 ${providerOrder.length} 項。`, `${name} を ${providerOrder.length} 項中の ${targetIndex + 1} 項に移動しました。`
     ));
   };
 
@@ -306,31 +311,31 @@ export default function DirectRoutePanel({
   const screenReaderInstructions: ScreenReaderInstructions = {
     draggable: copy(
       "Press Space or Enter to pick up this provider. Use the up and down arrow keys to move it, then press Space or Enter to drop it. Press Escape to cancel.",
-      "按空格或回车拾取该供应商，使用上下方向键移动，再按空格或回车放下；按 Escape 取消。",
+      "按空格或回车拾取该供应商，使用上下方向键移动，再按空格或回车放下；按 Escape 取消。", "按空白鍵或 Enter 鍵選取該供應商，使用上下方向鍵移動，再按空白鍵或 Enter 鍵放下；按 Escape 鍵取消。", "スペースキーまたは Enter キーでこのプロバイダーを選択し、上下矢印キーで移動して、もう一度スペースキーまたは Enter キーで配置します。Escape キーでキャンセルします。"
     ),
   };
   const announcements: Announcements = {
     onDragStart: ({ active }) => copy(
       `Picked up ${String(active.id)}, position ${providerPosition(active.id)} of ${providerOrder.length}.`,
-      `已拾取 ${String(active.id)}，当前第 ${providerPosition(active.id)} 项，共 ${providerOrder.length} 项。`,
+      `已拾取 ${String(active.id)}，当前第 ${providerPosition(active.id)} 项，共 ${providerOrder.length} 项。`, `已拾取 ${String(active.id)}，當前第 ${providerPosition(active.id)} 項，共 ${providerOrder.length} 項。`, `${String(active.id)} を選択しました。現在 ${providerOrder.length} 項中の ${providerPosition(active.id)} 項です。`
     ),
     onDragOver: ({ active, over }) => over ? copy(
       `${String(active.id)} is over position ${providerPosition(over.id)} of ${providerOrder.length}.`,
-      `${String(active.id)} 当前位于第 ${providerPosition(over.id)} 项，共 ${providerOrder.length} 项。`,
+      `${String(active.id)} 当前位于第 ${providerPosition(over.id)} 项，共 ${providerOrder.length} 项。`, `${String(active.id)} 當前位於第 ${providerPosition(over.id)} 項，共 ${providerOrder.length} 項。`, `${String(active.id)} は ${providerOrder.length} 項中の ${providerPosition(over.id)} 項に現在位置しています。`
     ) : copy(
       `${String(active.id)} is outside the provider list.`,
-      `${String(active.id)} 已移出供应商列表。`,
+      `${String(active.id)} 已移出供应商列表。`, `${String(active.id)} 已移出供應商列表。`, `${String(active.id)} はプロバイダー一覧から外れました。`
     ),
     onDragEnd: ({ active, over }) => over ? copy(
       `Dropped ${String(active.id)} at position ${providerPosition(over.id)} of ${providerOrder.length}.`,
-      `已将 ${String(active.id)} 放到第 ${providerPosition(over.id)} 项，共 ${providerOrder.length} 项。`,
+      `已将 ${String(active.id)} 放到第 ${providerPosition(over.id)} 项，共 ${providerOrder.length} 项。`, `已將 ${String(active.id)} 放到第 ${providerPosition(over.id)} 項，共 ${providerOrder.length} 項。`, `${String(active.id)} を ${providerOrder.length} 項中の ${providerPosition(over.id)} 項に配置しました。`
     ) : copy(
       `Sorting cancelled. ${String(active.id)} kept its position.`,
-      `已取消排序，${String(active.id)} 保持原位置。`,
+      `已取消排序，${String(active.id)} 保持原位置。`, `已取消排序，${String(active.id)} 保持原位置。`, `並べ替えをキャンセルしました。${String(active.id)} は元の位置を維持します。`
     ),
     onDragCancel: ({ active }) => copy(
       `Sorting cancelled. ${String(active.id)} kept its position.`,
-      `已取消排序，${String(active.id)} 保持原位置。`,
+      `已取消排序，${String(active.id)} 保持原位置。`, `已取消排序，${String(active.id)} 保持原位置。`, `並べ替えをキャンセルしました。${String(active.id)} は元の位置を維持します。`
     ),
   };
 
@@ -342,12 +347,12 @@ export default function DirectRoutePanel({
   return (
     <section
       className="panel direct-route-panel"
-      aria-label={copy("Direct routing configuration", "简单路由配置")}
+      aria-label={copy("Direct routing configuration", "简单路由配置", "簡單路由設定", "シンプルルーティングの設定")}
       data-onboarding-target="route-config"
     >
       <div className="panel-head split-heading direct-route-heading">
         <div>
-          <h2>{copy("Direct routing", "简单路由")}</h2>
+          <h2>{copy("Direct routing", "简单路由", "簡單路由", "シンプルルーティング")}</h2>
           <p className="sub">{copy(
             agent
               ? "Send this Agent to exactly one provider and managed model."
@@ -355,14 +360,20 @@ export default function DirectRoutePanel({
             agent
               ? "将当前客户端的请求固定发送给一个供应商及其已管理模型。"
               : "将请求固定发送给你明确选择的一个供应商及其已管理模型。",
+            agent
+              ? "將目前 Agent 的請求固定傳送至一個供應商及其已管理模型。"
+              : "將所有請求固定傳送至一個供應商及其已管理模型。",
+            agent
+              ? "この Agent のリクエストを、1 つのプロバイダーと管理対象モデルに固定します。"
+              : "すべてのリクエストを、1 つのプロバイダーと管理対象モデルに固定します。",
           )}</p>
         </div>
         <div className="direct-route-heading-actions">
           {target && (
             <span className="direct-applied-target">
               {target.model
-                ? <>{copy("Applied", "已应用")} · {target.upstream} / {target.model}</>
-                : <>{copy("Incomplete", "配置未完成")} · {target.upstream} / {copy("Select a model", "待选择模型")}</>}
+                ? <>{copy("Applied", "已应用", "已應用", "適用済み")} · {target.upstream} / {target.model}</>
+                : <>{copy("Incomplete", "配置未完成", "未完成", "未完成")} · {target.upstream} / {copy("Select a model", "待选择模型", "待選擇模型", "選択するモデル")}</>}
             </span>
           )}
           <button
@@ -372,7 +383,7 @@ export default function DirectRoutePanel({
             disabled={busy || applying || !selectedTargetValid}
             onClick={() => void onApply(selectedProvider, selectedModel)}
           >
-            {applying ? copy("Applying…", "应用中…") : copy("Apply", "应用")}
+            {applying ? copy("Applying…", "应用中…", "應用中…", "適用中…") : copy("Apply", "应用", "應用", "適用")}
           </button>
         </div>
       </div>
@@ -380,7 +391,7 @@ export default function DirectRoutePanel({
       {providers.length === 0 ? (
         <p className="direct-route-empty">{copy(
           "Add a provider and manage at least one model before using Direct routing.",
-          "请先添加供应商并管理至少一个模型。",
+          "请先添加供应商并管理至少一个模型。", "請先新增供應商並管理至少一個模型。", "シンプルルーティングを使用する前に、プロバイダーを追加し、少なくとも1つのモデルを管理してください。"
         )}</p>
       ) : (
         <DndContext
@@ -394,7 +405,7 @@ export default function DirectRoutePanel({
             items={orderedProviders.map((provider) => provider.name)}
             strategy={verticalListSortingStrategy}
           >
-            <div className="direct-provider-list" role="radiogroup" aria-label={copy("Direct provider", "简单路由供应商")}>
+            <div className="direct-provider-list" role="radiogroup" aria-label={copy("Direct provider", "简单路由供应商", "簡單路由供應商", "シンプルルーティングプロバイダー")}>
               {orderedProviders.map((provider, index) => (
                 <SortableDirectProviderRow
                   key={provider.name}
@@ -429,6 +440,12 @@ export default function DirectRoutePanel({
             target?.upstream === selectedProvider && !target.model
               ? `已保留供应商 ${target.upstream}；请选择模型后再应用。`
               : "请选择一个有可用模型的供应商，再点击应用。",
+            target?.upstream === selectedProvider && !target.model
+              ? `已保留供應商 ${target.upstream}；請選取模型後再套用。`
+              : "請選取具有可用模型的供應商，然後再套用。",
+            target?.upstream === selectedProvider && !target.model
+              ? `プロバイダー ${target.upstream} を保持しました。モデルを選択してから適用してください。`
+              : "利用可能なモデルがあるプロバイダーを選択してから適用してください。",
           )}</span>
         </footer>
       )}

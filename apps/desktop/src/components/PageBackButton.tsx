@@ -10,7 +10,7 @@ export default function PageBackButton({ onClick, disabled = false }: PageBackBu
   return (
     <button className="page-back" type="button" disabled={disabled} onClick={onClick}>
       <span aria-hidden="true">←</span>
-      <span>{copy("Back", "返回")}</span>
+      <span>{copy("Back", "返回", "返回", "戻る")}</span>
     </button>
   );
 }

@@ -672,11 +672,18 @@ export type TranslationKey = keyof (typeof messages)["zh-CN"];
 
 type Replacements = Record<string, string | number>;
 
+export type LocalizedCopy = (
+  english: string,
+  simplifiedChinese: string,
+  traditionalChinese: string,
+  japanese: string,
+) => string;
+
 type LanguageContextValue = {
   language: Language;
   setLanguage: (language: Language) => void;
   t: (key: TranslationKey, replacements?: Replacements) => string;
-  copy: (english: string, simplifiedChinese: string) => string;
+  copy: LocalizedCopy;
 };
 
 const LanguageContext = createContext<LanguageContextValue | null>(null);
@@ -762,7 +769,12 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
       language,
       setLanguage,
       t: (key, replacements) => format(messages[language][key], replacements),
-      copy: (english, simplifiedChinese) => language === "zh-CN" ? simplifiedChinese : english,
+      copy: (english, simplifiedChinese, traditionalChinese, japanese) => ({
+        en: english,
+        "zh-CN": simplifiedChinese,
+        "zh-TW": traditionalChinese,
+        ja: japanese,
+      })[language],
     }),
     [language],
   );
@@ -786,6 +798,11 @@ export function useLocalizedCopy(): Pick<LanguageContextValue, "language" | "cop
   const language = storedLanguage();
   return value ?? {
     language,
-    copy: (english, simplifiedChinese) => language === "zh-CN" ? simplifiedChinese : english,
+    copy: (english, simplifiedChinese, traditionalChinese, japanese) => ({
+      en: english,
+      "zh-CN": simplifiedChinese,
+      "zh-TW": traditionalChinese,
+      ja: japanese,
+    })[language],
   };
 }

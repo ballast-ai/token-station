@@ -79,31 +79,31 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
         || limitMicros <= 0) {
       setBudgetErr(copy(
         "Budget limit must be greater than 0, no more than 9 billion, and use at most 6 decimal places.",
-        "预算上限必须是大于 0、不超过 90 亿且最多 6 位小数的金额。",
+        "预算上限必须是大于 0、不超过 90 亿且最多 6 位小数的金额。", "預算上限必須大於 0、不超過 90 億且最多 6 位小數的金額。", "予算上限は 0 を超えて 90 億以下で、小数点以下は最大 6 桁までにしてください。"
       ));
       return;
     }
     if (!Number.isInteger(warning) || warning < 1 || warning > 100) {
-      setBudgetErr(copy("Warning threshold must be an integer from 1 to 100.", "预警阈值必须是 1–100 的整数。"));
+      setBudgetErr(copy("Warning threshold must be an integer from 1 to 100.", "预警阈值必须是 1–100 的整数。", "警告閾值必須是 1–100 的整數。", "警告閾値は 1 〜 100 の整数でなければなりません。"));
       return;
     }
     if (!Number.isInteger(expiryDays) || expiryDays < 0 || expiryDays > 365) {
-      setBudgetErr(copy("Expiry warning days must be an integer from 0 to 365.", "到期预警天数必须是 0–365 的整数。"));
+      setBudgetErr(copy("Expiry warning days must be an integer from 0 to 365.", "到期预警天数必须是 0–365 的整数。", "到期警告天數必須是 0–365 的整數。", "有効期限の警告日数は 0 〜 365 の整数でなければなりません。"));
       return;
     }
     if ((startMs != null && !Number.isFinite(startMs)) || (endMs != null && !Number.isFinite(endMs))) {
-      setBudgetErr(copy("Budget period date is invalid.", "预算周期时间无效。"));
+      setBudgetErr(copy("Budget period date is invalid.", "预算周期时间无效。", "預算週期時間無效。", "予算期間の日付が無効です。"));
       return;
     }
     if (startMs != null && endMs != null && startMs >= endMs) {
-      setBudgetErr(copy("Budget period end must be later than its start.", "预算周期结束时间必须晚于开始时间。"));
+      setBudgetErr(copy("Budget period end must be later than its start.", "预算周期结束时间必须晚于开始时间。", "預算週期結束時間必須晚於開始時間。", "予算期間の終了時間は開始時間より後でなければなりません。"));
       return;
     }
     try {
       const statuses = await setAgentBudget(agentId, limitMicros, warning, startMs, endMs, expiryDays);
       setBudgets(statuses);
       loadForm(agentId, statuses);
-      showSuccess(copy("Budget saved · Alerts only", "预算已保存 · 仅用于展示与预警"), `agent-budget-save:${agentId}`);
+      showSuccess(copy("Budget saved · Alerts only", "预算已保存 · 仅用于展示与预警", "預算已儲存 · 僅用於展示與預警", "予算が保存されました · 表示と警告用のみ"), `agent-budget-save:${agentId}`);
     } catch (error) {
       showError(humanizeAppError(error), `agent-budget-save:${agentId}`);
     }
@@ -115,7 +115,7 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
       const statuses = await removeAgentBudget(agentId);
       setBudgets(statuses);
       loadForm(agentId, statuses);
-      showSuccess(copy("Budget deleted", "预算已删除"), `agent-budget-remove:${agentId}`);
+      showSuccess(copy("Budget deleted", "预算已删除", "預算已刪除", "予算が削除されました"), `agent-budget-remove:${agentId}`);
     } catch (error) {
       showError(humanizeAppError(error), `agent-budget-remove:${agentId}`);
     }
@@ -128,21 +128,21 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
       <header className="overview-heading usage-management-heading">
         <div>
           <PageBackButton onClick={onBack} />
-          <h1>{copy("Budget and pricing", "预算与定价管理")}</h1>
+          <h1>{copy("Budget and pricing", "预算与定价管理", "預算與定價管理", "予算と価格設定")}</h1>
           <p>{copy(
             "Configure display-only budget alerts and versioned model prices.",
-            "配置展示型预算预警和版本化模型价格。",
+            "配置展示型预算预警和版本化模型价格。", "配置展示型預算預警和版本化模型價格。", "表示用の予算警告とバージョン化されたモデル価格を設定します。"
           )}</p>
         </div>
       </header>
 
       <section className="budget-section">
         <div className="budget-title-row">
-          <div><h2>{copy("Agent budget alerts", "Agent 预算预警")}</h2><p>{copy(
+          <div><h2>{copy("Agent budget alerts", "Agent 预算预警", "Agent 預算預警", "Agent 予算警告")}</h2><p>{copy(
             "Calculated from stored receipt prices. Unknown prices are reported separately.",
-            "按已落库 Receipt 的历史价格统计；未知价格单独提示。",
+            "按已落库 Receipt 的历史价格统计；未知价格单独提示。", "依據已儲存回執的歷史價格計算；未知價格會另外提示。", "保存済みレシートの過去価格に基づいて計算します。不明な価格は別途表示されます。"
           )}</p></div>
-          <span className="budget-observe-badge">{copy("ALERTS ONLY · ROUTING UNCHANGED", "仅提醒 · 不影响路由")}</span>
+          <span className="budget-observe-badge">{copy("ALERTS ONLY · ROUTING UNCHANGED", "仅提醒 · 不影响路由", "僅提醒 · 不影響路由", "のみ警告 · ルーティングに影響しません")}</span>
         </div>
         <div className="budget-form">
           <div className="field-label">
@@ -162,24 +162,24 @@ export default function BudgetPricingPage({ onBack }: { onBack: () => void }) {
               </SelectContent>
             </Select>
           </div>
-          <label className="field-label">{copy("Budget limit", "预算上限")}
-            <input aria-label={copy("Budget limit", "预算上限")} className="input" type="number" min="0.000001" step="0.000001" value={limit} onChange={(event) => setLimit(event.target.value)} />
+          <label className="field-label">{copy("Budget limit", "预算上限", "預算上限", "予算上限")}
+            <input aria-label={copy("Budget limit", "预算上限", "預算上限", "予算上限")} className="input" type="number" min="0.000001" step="0.000001" value={limit} onChange={(event) => setLimit(event.target.value)} />
           </label>
-          <label className="field-label">{copy("Warning threshold (%)", "预警阈值 (%)")}
-            <input aria-label={copy("Warning threshold", "预警阈值")} className="input" type="number" min="1" max="100" step="1" value={warningPercent} onChange={(event) => setWarningPercent(event.target.value)} />
+          <label className="field-label">{copy("Warning threshold (%)", "预警阈值 (%)", "警告閾值 (%)", "警告閾値 (%)")}
+            <input aria-label={copy("Warning threshold", "预警阈值", "警告閾值", "警告閾値")} className="input" type="number" min="1" max="100" step="1" value={warningPercent} onChange={(event) => setWarningPercent(event.target.value)} />
           </label>
-          <label className="field-label">{copy("Period start (optional)", "周期开始（可选）")}
-            <input aria-label={copy("Period start", "周期开始")} className="input" type="datetime-local" value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} />
+          <label className="field-label">{copy("Period start (optional)", "周期开始（可选）", "週期開始 (可選)", "周期開始 (オプション)")}
+            <input aria-label={copy("Period start", "周期开始", "週期起始", "期間開始")} className="input" type="datetime-local" value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} />
           </label>
-          <label className="field-label">{copy("Period end (optional)", "周期结束（可选）")}
-            <input aria-label={copy("Period end", "周期结束")} className="input" type="datetime-local" value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} />
+          <label className="field-label">{copy("Period end (optional)", "周期结束（可选）", "週期結束（可選）", "期間終了（オプション）")}
+            <input aria-label={copy("Period end", "周期结束", "週期結束", "期間終了")} className="input" type="datetime-local" value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} />
           </label>
-          <label className="field-label">{copy("Expiry warning (days)", "到期前预警（天）")}
-            <input aria-label={copy("Expiry warning", "到期前预警")} className="input" type="number" min="0" max="365" step="1" value={expiryWarningDays} onChange={(event) => setExpiryWarningDays(event.target.value)} />
+          <label className="field-label">{copy("Expiry warning (days)", "到期前预警（天）", "到期前警示（天）", "有効期限前通知（日数）")}
+            <input aria-label={copy("Expiry warning", "到期前预警", "到期前警示", "有効期限前通知")} className="input" type="number" min="0" max="365" step="1" value={expiryWarningDays} onChange={(event) => setExpiryWarningDays(event.target.value)} />
           </label>
           <div className="budget-actions">
-            <button className="btn primary" disabled={!agentId} onClick={() => void saveBudget()}>{copy("Save budget", "保存预算")}</button>
-            <button className="btn danger" disabled={!hasSelectedBudget} onClick={() => void deleteBudget()}>{copy("Delete budget", "删除预算")}</button>
+            <button className="btn primary" disabled={!agentId} onClick={() => void saveBudget()}>{copy("Save budget", "保存预算", "儲存預算", "予算を保存")}</button>
+            <button className="btn danger" disabled={!hasSelectedBudget} onClick={() => void deleteBudget()}>{copy("Delete budget", "删除预算", "刪除預算", "予算を削除")}</button>
           </div>
         </div>
         {budgetErr && <div className="banner err">{budgetErr}</div>}
