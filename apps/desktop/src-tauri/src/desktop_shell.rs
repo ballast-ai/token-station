@@ -659,7 +659,7 @@ mod tests {
             "status menu icon must contain the wide station bar"
         );
 
-        for pixel in rgba.chunks_exact(4).filter(|pixel| pixel[3] > 0) {
+        for pixel in rgba.as_chunks::<4>().0.iter().filter(|pixel| pixel[3] > 0) {
             assert_eq!(
                 pixel[0], pixel[1],
                 "template red and green channels must match"
