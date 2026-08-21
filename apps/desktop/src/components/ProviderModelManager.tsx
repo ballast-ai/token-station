@@ -20,7 +20,7 @@ import {
   updateProviderModels,
 } from "../api";
 import ModelPicker, { CatalogStatus } from "./ModelPicker";
-import { useLocalizedCopy } from "./LanguageProvider";
+import { useLocalizedCopy, type Language } from "./LanguageProvider";
 import { humanizeAppError } from "../errors";
 import { useErrorToast } from "./ErrorToast";
 import {
@@ -94,7 +94,7 @@ function costLabel(
 const resultStatus = (
   result: ModelDiscoveryView,
   copy: (english: string, simplifiedChinese: string) => string,
-  language: "en" | "zh-CN",
+  language: Language,
 ): CatalogStatus => {
   const warning = result.warning ? humanizeAppError(result.warning, language) : result.warning;
   if (result.source === "live") {

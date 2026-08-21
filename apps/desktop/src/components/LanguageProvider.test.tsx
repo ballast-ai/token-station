@@ -15,6 +15,8 @@ function LanguageProbe() {
       <output>{`${language}:${t("settings.title")}:${copy("Home routing", "主页路由")}`}</output>
       <button type="button" onClick={() => setLanguage("en")}>English</button>
       <button type="button" onClick={() => setLanguage("zh-CN")}>简体中文</button>
+      <button type="button" onClick={() => setLanguage("zh-TW")}>繁體中文</button>
+      <button type="button" onClick={() => setLanguage("ja")}>日本語</button>
     </div>
   );
 }
@@ -51,7 +53,7 @@ describe("LanguageProvider", () => {
   });
 
   it("detects Simplified Chinese from the browser language priority on first launch", () => {
-    setBrowserLanguages(["ja-JP", "zh-Hans-CN", "en-US"]);
+    setBrowserLanguages(["fr-FR", "zh-Hans-CN", "en-US"]);
 
     render(
       <LanguageProvider>
@@ -62,6 +64,23 @@ describe("LanguageProvider", () => {
     expect(screen.getByText("zh-CN:设置:主页路由")).toBeInTheDocument();
     expect(document.documentElement).toHaveAttribute("lang", "zh-CN");
     expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("zh-CN");
+  });
+
+  it.each([
+    ["zh-TW", "zh-TW:設定:Home routing"],
+    ["zh-HK", "zh-TW:設定:Home routing"],
+    ["zh-Hant", "zh-TW:設定:Home routing"],
+    ["ja-JP", "ja:設定:Home routing"],
+  ])("detects %s on first launch", (browserLanguage, expected) => {
+    setBrowserLanguages([browserLanguage, "en-US"]);
+
+    render(
+      <LanguageProvider>
+        <LanguageProbe />
+      </LanguageProvider>,
+    );
+
+    expect(screen.getByText(expected)).toBeInTheDocument();
   });
 
   it("keeps an explicit saved language ahead of the browser language", () => {
@@ -78,7 +97,7 @@ describe("LanguageProvider", () => {
   });
 
   it("skips unsupported locales in order and falls back to English", () => {
-    setBrowserLanguages(["ja-JP", "zh-TW", "en-GB"]);
+    setBrowserLanguages(["fr-FR", "de-DE", "en-GB"]);
     const { unmount } = render(
       <LanguageProvider>
         <LanguageProbe />
@@ -88,13 +107,32 @@ describe("LanguageProvider", () => {
     unmount();
 
     window.localStorage.clear();
-    setBrowserLanguages(["ja-JP", "fr-FR"]);
+    setBrowserLanguages(["fr-FR", "de-DE"]);
     render(
       <LanguageProvider>
         <LanguageProbe />
       </LanguageProvider>,
     );
     expect(screen.getByText("en:Settings:Home routing")).toBeInTheDocument();
+  });
+
+  it("restores and persists Traditional Chinese and Japanese selections", async () => {
+    const user = userEvent.setup();
+    render(
+      <LanguageProvider>
+        <LanguageProbe />
+      </LanguageProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "繁體中文" }));
+    expect(screen.getByText("zh-TW:設定:Home routing")).toBeInTheDocument();
+    expect(document.documentElement).toHaveAttribute("lang", "zh-TW");
+    expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("zh-TW");
+
+    await user.click(screen.getByRole("button", { name: "日本語" }));
+    expect(screen.getByText("ja:設定:Home routing")).toBeInTheDocument();
+    expect(document.documentElement).toHaveAttribute("lang", "ja");
+    expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe("ja");
   });
 
   it("restores and persists an explicit language selection", async () => {

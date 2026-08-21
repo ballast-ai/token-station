@@ -2547,6 +2547,9 @@ describe("desktop station navigation", () => {
     expect(languageButton.querySelector(".lucide-languages")).toBeNull();
     await user.click(languageButton);
     expect(screen.getByRole("heading", { name: "Interface language" })).toBeInTheDocument();
+    expect(screen.getAllByRole("radio")).toHaveLength(4);
+    expect(screen.getByRole("radio", { name: /繁體中文/ })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /日本語/ })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /English/ })).toHaveAttribute("aria-checked", "true");
 
     await user.click(screen.getByRole("radio", { name: /简体中文/ }));

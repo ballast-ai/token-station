@@ -273,6 +273,8 @@ const LANGUAGE_OPTIONS: Array<{
 }> = [
   { value: "en", label: "English", mark: "EN", hint: "language.enHint" },
   { value: "zh-CN", label: "简体中文", mark: "简", hint: "language.zhCNHint" },
+  { value: "zh-TW", label: "繁體中文", mark: "繁", hint: "language.zhTWHint" },
+  { value: "ja", label: "日本語", mark: "日", hint: "language.jaHint" },
 ];
 
 function LanguagePanel() {

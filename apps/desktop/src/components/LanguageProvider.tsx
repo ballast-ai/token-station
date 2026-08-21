@@ -9,7 +9,7 @@ import {
 } from "react";
 import { useErrorToast } from "./ErrorToast";
 
-export type Language = "zh-CN" | "en";
+export type Language = "zh-CN" | "zh-TW" | "en" | "ja";
 
 export const LANGUAGE_STORAGE_KEY = "token-station-language";
 
@@ -269,6 +269,7 @@ const messages = {
     "general.authSlotLabel": "代理驗證槽",
     "general.credentialCommand": "寫入憑證：token-station-cli key set egress-proxy {slot}",
     "general.routeSummary": "Provider 請求、模型目錄與健康探測：{route}；更新檢查固定直連。每次 3xx 仍拒絕跟隨，跨主機不會轉送原 Authorization。",
+    "general.resolvedRoutes": "實際出口解析",
     "general.pendingProxy": "待填寫代理",
     "general.matchedNoProxy": "符合 no_proxy",
     "general.metrics": "本機指標",
@@ -282,6 +283,18 @@ const messages = {
     "general.coreVersion": "核心版本",
     "about.title": "關於 · 更新",
     "about.description": "只在你主動點擊時匿名檢查最新版本。簽章驗證通過後可在 App 內下載、安裝並重新啟動。",
+    "about.productDescription": "本機 AI Agent 的模型請求路由站。",
+    "about.versionGroup": "應用程式版本",
+    "about.source": "GitHub",
+    "about.releases": "更新日誌",
+    "about.trustTitle": "更新如何抵達本機",
+    "about.trustDescription": "更新路徑保持明確且可驗證，同時盡量減少對本機請求的影響。",
+    "about.onDemandTitle": "按需檢查",
+    "about.onDemandDescription": "只有在你要求檢查後，應用程式才會匿名連線至發布服務。",
+    "about.signedTitle": "簽章驗證",
+    "about.signedDescription": "下載項目必須通過內建公開金鑰驗證後才能安裝。",
+    "about.gatewayTitle": "平穩交接",
+    "about.gatewayDescription": "閘道會短暫停止並排空處理中的請求，然後應用程式會重新啟動。",
     "about.currentVersion": "目前版本",
     "about.newVersion": "有新版本 {latest}（目前 {current}）。",
     "about.latest": "已是最新版本（{current}，最新發布 {latest}）。",
@@ -582,6 +595,7 @@ const messages = {
     "general.authSlotLabel": "プロキシ認証スロット",
     "general.credentialCommand": "認証情報を保存：token-station-cli key set egress-proxy {slot}",
     "general.routeSummary": "Provider リクエスト、モデルカタログ、ヘルスチェック：{route}。更新確認は常に直接接続です。3xx リダイレクトには追従せず、元の Authorization を別ホストへ転送しません。",
+    "general.resolvedRoutes": "実際の送信経路",
     "general.pendingProxy": "プロキシ URL が必要",
     "general.matchedNoProxy": "no_proxy に一致",
     "general.metrics": "ローカル指標",
@@ -595,6 +609,18 @@ const messages = {
     "general.coreVersion": "コアバージョン",
     "about.title": "このアプリについて · 更新",
     "about.description": "操作したときだけ最新リリースを匿名で確認します。署名検証後、アプリ内でダウンロード、インストール、再起動できます。",
+    "about.productDescription": "ローカル AI Agent 向けのモデルリクエストルーティングステーションです。",
+    "about.versionGroup": "アプリケーションのバージョン",
+    "about.source": "GitHub",
+    "about.releases": "変更履歴",
+    "about.trustTitle": "更新がこのデバイスに届くまで",
+    "about.trustDescription": "更新経路を明示して検証可能にし、ローカルリクエストへの影響を最小限に抑えます。",
+    "about.onDemandTitle": "オンデマンド確認",
+    "about.onDemandDescription": "確認を要求した場合にのみ、アプリはリリースサービスへ匿名で接続します。",
+    "about.signedTitle": "署名検証",
+    "about.signedDescription": "ダウンロードした更新は、インストール前に内蔵公開鍵による検証に合格する必要があります。",
+    "about.gatewayTitle": "制御された切り替え",
+    "about.gatewayDescription": "ゲートウェイを短時間停止して処理中のリクエストを排出した後、アプリを再起動します。",
     "about.currentVersion": "現在のバージョン",
     "about.newVersion": "新しいバージョン {latest} があります（現在：{current}）。",
     "about.latest": "最新版です（{current}、最新リリース：{latest}）。",
@@ -656,7 +682,7 @@ type LanguageContextValue = {
 const LanguageContext = createContext<LanguageContextValue | null>(null);
 
 function isLanguage(value: string | null): value is Language {
-  return value === "zh-CN" || value === "en";
+  return value === "zh-CN" || value === "zh-TW" || value === "en" || value === "ja";
 }
 
 function detectedLanguage(): Language {
@@ -668,15 +694,21 @@ function detectedLanguage(): Language {
     for (const locale of locales) {
       const parts = locale.replace(/_/g, "-").toLocaleLowerCase().split("-");
       if (parts[0] === "en") return "en";
-      if (
-        parts[0] === "zh"
-        && (
+      if (parts[0] === "ja") return "ja";
+      if (parts[0] === "zh") {
+        if (
+          parts.includes("hant")
+          || parts.includes("tw")
+          || parts.includes("hk")
+          || parts.includes("mo")
+        ) return "zh-TW";
+        if (
           parts.length === 1
           || parts.includes("hans")
           || parts.includes("cn")
           || parts.includes("sg")
-        )
-      ) return "zh-CN";
+        ) return "zh-CN";
+      }
     }
   } catch {
     // Locale detection is best-effort; English remains the safe complete fallback.
@@ -710,9 +742,12 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
       window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
     } catch {
       showError(
-        language === "zh-CN"
-          ? "语言已在本次会话生效，但无法保存到下次启动。"
-          : "The language changed for this session, but it could not be saved for the next launch.",
+        {
+          "zh-CN": "语言已在本次会话生效，但无法保存到下次启动。",
+          "zh-TW": "語言已在本次工作階段生效，但無法儲存供下次啟動使用。",
+          en: "The language changed for this session, but it could not be saved for the next launch.",
+          ja: "言語は今回のセッションに反映されましたが、次回の起動用に保存できませんでした。",
+        }[language],
         "language-storage",
       );
     }

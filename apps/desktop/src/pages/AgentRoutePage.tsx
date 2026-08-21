@@ -40,7 +40,7 @@ import {
   SelectValue,
 } from "../components/ui/select";
 import { AgentIcon } from "../brandIcons";
-import { useLocalizedCopy } from "../components/LanguageProvider";
+import { useLocalizedCopy, type Language } from "../components/LanguageProvider";
 import { humanizeAppError } from "../errors";
 import { Button } from "../components/ui/button";
 import {
@@ -112,7 +112,7 @@ function statusCopy(
   agent: AgentView | undefined,
   installation: AgentInstallationView | undefined,
   copy: (english: string, simplifiedChinese: string) => string,
-  language: "en" | "zh-CN",
+  language: Language,
 ) {
   const usesCursorDatabaseIntegration = metadata.agent_id === "cursor"
     && installation?.compatibility.reason_code === "CONNECTOR_BINDING_NOT_UNIQUE";
