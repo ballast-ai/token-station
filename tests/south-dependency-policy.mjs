@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const southRepository = "https://github.com/ballast-ai/token-station-south.git";
-const southRevision = "8a0fec515f323f612ea51b0ab178885094b4f32e";
-const southVersion = "0.11.0";
+const southRevision = "92123d78127cbc14d2e45bf66dd9150160ef27dd";
+const southVersion = "0.12.1";
 const southSource = `git+${southRepository}?rev=${southRevision}#${southRevision}`;
 const expectedSouthPackages = new Set([
   "south-contracts",
