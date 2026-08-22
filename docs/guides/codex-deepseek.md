@@ -9,31 +9,20 @@ Codex -> /v1/responses -> agent-openai-responses -> Canonical IR
 
 Use the sample configuration at [apps/cli/codex-deepseek-config.json](../../apps/cli/codex-deepseek-config.json). It listens only on `127.0.0.1:8791`. It writes runtime data to `token-station-m4/codex/data` and does not access an existing 8787 instance.
 
-## 1. Build and install plugins
+## 1. Build and stage packages
 
-From the repository root, build the CLI and the two plugins required by this Agent:
+From the repository root, build the CLI and stage the two packages this Agent needs:
 
 ```bash
 cargo build --release -p token-station-cli
+scripts/prepare-desktop-test-plugins.sh   # builds every official package into plugins-dist/
 
-./target/release/token-station-cli plugin build \
-  plugins/official/agent-openai-responses
-./target/release/token-station-cli plugin test \
-  plugins/official/agent-openai-responses
-./target/release/token-station-cli plugin build \
-  plugins/official/provider-openai-compatible
-./target/release/token-station-cli plugin test \
-  plugins/official/provider-openai-compatible
-
-./target/release/token-station-cli \
-  --config apps/cli/codex-deepseek-config.json \
-  plugin install plugins/official/agent-openai-responses
-./target/release/token-station-cli \
-  --config apps/cli/codex-deepseek-config.json \
-  plugin install plugins/official/provider-openai-compatible
+mkdir -p token-station-m4/plugins
+cp -R plugins-dist/agent-openai-responses plugins-dist/provider-openai-compatible-v2 \
+  token-station-m4/plugins/
 ```
 
-The three M4 configurations share `token-station-m4/plugins`. Install the plugins once. If a package with the same name exists, check it with `plugin info`. Do not overwrite the WASM file or acceptance receipt manually.
+The three M4 configurations share `token-station-m4/plugins`; stage the packages once and check what is there with `plugin list` or `plugin info`. `plugins-dist/provider-openai-compatible-v2/` is the South provider component (`manifest.json` + `component.wasm`, built from `token-station-south`). The sample configuration vouches for it through `plugins.providers`, which is what lets a component without a local conformance receipt serve traffic; its conformance ran where it was built. Official release binaries embed every official package, so this step is only needed for a source build. `.gitignore` excludes the plugin directory, runtime data, and the local virtual key.
 
 ## 2. Start the isolated proxy
 

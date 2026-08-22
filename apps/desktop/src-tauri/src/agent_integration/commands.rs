@@ -3384,15 +3384,15 @@ mod tests {
         let plugin_fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
             .join("plugins-dist");
-        for package in installed_agents
+        for (package, wasm_file) in installed_agents
             .iter()
-            .copied()
-            .chain(["provider-openai-compatible"])
+            .map(|agent| (*agent, "adapter.wasm"))
+            .chain([("provider-openai-compatible-v2", "component.wasm")])
         {
             let source = plugin_fixtures.join(package);
             let target = plugins_dir.join(package);
             std::fs::create_dir_all(&target).unwrap();
-            for file in ["manifest.json", "adapter.wasm"] {
+            for file in ["manifest.json", wasm_file] {
                 std::fs::copy(source.join(file), target.join(file)).unwrap();
             }
         }

@@ -13,16 +13,20 @@
 //! 1. [`accepts_manifest`] — everything decidable before loading any code.
 //! 2. [`reported_identity_matches`] — the loaded adapter is the package that was
 //!    vetted.
-//! 3. [`run_agent_suite`] / [`run_provider_suite`] — the adapter translates what
-//!    it claims to, deterministically, and stays inside its boundaries.
+//! 3. [`run_agent_suite`] — the adapter translates what it claims to,
+//!    deterministically, and tolerates a newer peer's fields.
+//!
+//! This crate gates the northbound (agent) side only. Southbound provider
+//! components are South's: `south-component-conformance` holds their suite and
+//! `south-provider-runtime` their load gates.
 //!
 //! # Why this crate does not know about WASM
 //!
-//! The suite is written against [`AgentAdapter`] and [`ProviderAdapter`], not
-//! against a component instance. `plugin-runtime` implements those traits over a
-//! WASM component; a plugin author implements them over a native build and runs
-//! the same suite in their own CI without a WASM toolchain. The seam is also why
-//! these gates exist and are tested before any runtime does.
+//! The suite is written against [`AgentAdapter`], not against a component
+//! instance. `plugin-runtime` implements that trait over a WASM component; a
+//! plugin author implements it over a native build and runs the same suite in
+//! their own CI without a WASM toolchain. The seam is also why these gates
+//! exist and are tested before any runtime does.
 //!
 //! What that seam cannot carry is the architecture's security row — no network, no
 //! file system, bounded memory and time. Those are properties of the sandbox the
@@ -34,10 +38,10 @@ mod fixture;
 mod report;
 mod suite;
 
-pub use adapter::{AdapterResult, AgentAdapter, ProviderAdapter, StreamParser};
-pub use fixture::{AgentFamily, Case, Family, FixtureError, FixturePack, ProviderFamily};
+pub use adapter::{AdapterResult, AgentAdapter};
+pub use fixture::{AgentFamily, Case, Family, FixtureError, FixturePack};
 pub use report::{Check, Outcome, Report, Verdict};
-pub use suite::{run_agent_suite, run_provider_suite};
+pub use suite::run_agent_suite;
 
 use token_station_plugin_api::{AdapterManifest, AdapterMetadata, ManifestError};
 
@@ -73,17 +77,16 @@ mod tests {
 
     fn manifest() -> AdapterManifest {
         AdapterManifest {
-            name: "provider-openai-compatible".to_owned(),
+            name: "agent-openai".to_owned(),
             version: "1.0.0".to_owned(),
-            kind: AdapterKind::Provider,
-            api_version: "provider-adapter-v1".to_owned(),
-            agent_protocols: Vec::new(),
+            kind: AdapterKind::Agent,
+            api_version: "agent-adapter-v1".to_owned(),
+            agent_protocols: vec!["openai-chat-completions".to_owned()],
             agent_tools: Vec::new(),
-            providers: vec!["openai-compatible".to_owned()],
             capabilities: BTreeSet::from([Capability::Chat]),
-            permissions: AdapterPermissions::new(false, false, ["provider_api_key"]),
+            permissions: AdapterPermissions::new(false, false, Vec::<String>::new()),
             conformance: ConformanceSpec {
-                required_suite: "provider-protocol-v1".to_owned(),
+                required_suite: "agent-protocol-v1".to_owned(),
                 fixtures: "fixtures/".to_owned(),
             },
         }

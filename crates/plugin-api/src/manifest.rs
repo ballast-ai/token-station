@@ -5,12 +5,15 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Which side of the host an adapter sits on.
+///
+/// Only the northbound (agent) side lives in this ABI. The southbound
+/// provider side is a South-owned component ABI
+/// (`token-station:adapter@2.0.0`, `provider-adapter-v2`), loaded by
+/// `south-provider-runtime` and never by this crate's manifest schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdapterKind {
     #[serde(rename = "agent-adapter")]
     Agent,
-    #[serde(rename = "provider-adapter")]
-    Provider,
 }
 
 impl AdapterKind {
@@ -19,7 +22,6 @@ impl AdapterKind {
     pub const fn expected_api_version(self) -> &'static str {
         match self {
             Self::Agent => "agent-adapter-v1",
-            Self::Provider => "provider-adapter-v1",
         }
     }
 
@@ -28,7 +30,6 @@ impl AdapterKind {
     pub const fn expected_conformance_suite(self) -> &'static str {
         match self {
             Self::Agent => "agent-protocol-v1",
-            Self::Provider => "provider-protocol-v1",
         }
     }
 }
@@ -51,8 +52,7 @@ pub enum Capability {
     Stream,
     ToolCall,
     JsonSchema,
-    /// Implements `extract-agent-hint`. Meaningless for a provider adapter,
-    /// which never sees an inbound request.
+    /// Implements `extract-agent-hint`.
     AgentHint,
 }
 
@@ -94,8 +94,10 @@ pub struct AdapterPermissions {
     pub network: bool,
     #[serde(default)]
     pub filesystem: bool,
-    /// Names of credentials, never credentials. Each must look like a reference
-    /// name, which is what stops a key being pasted here.
+    /// Names of credentials, never credentials. An agent adapter never sees
+    /// one, so validation requires this to stay empty; the field remains so a
+    /// manifest that *asks* is refused with a named reason rather than
+    /// silently dropped.
     #[serde(default)]
     pub secrets: Vec<String>,
 }
@@ -153,9 +155,6 @@ pub struct AdapterManifest {
     /// Agent adapters only, e.g. `cursor`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_tools: Vec<String>,
-    /// Provider adapters only, e.g. `openai-compatible`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub providers: Vec<String>,
     pub capabilities: BTreeSet<Capability>,
     pub permissions: AdapterPermissions,
     pub conformance: ConformanceSpec,
@@ -208,7 +207,7 @@ impl AdapterManifest {
         if self.permissions.filesystem {
             return Err(ManifestError::FilesystemPermissionDenied);
         }
-        if self.kind == AdapterKind::Agent && !self.permissions.secrets.is_empty() {
+        if !self.permissions.secrets.is_empty() {
             return Err(ManifestError::AgentAdapterCannotRequestSecrets);
         }
         for secret in &self.permissions.secrets {
@@ -228,20 +227,6 @@ impl AdapterManifest {
             AdapterKind::Agent => {
                 if self.agent_protocols.is_empty() {
                     return Err(ManifestError::AgentAdapterMustDeclareProtocol);
-                }
-                if !self.providers.is_empty() {
-                    return Err(ManifestError::AgentAdapterCannotDeclareProviders);
-                }
-            }
-            AdapterKind::Provider => {
-                if self.providers.is_empty() {
-                    return Err(ManifestError::ProviderAdapterMustDeclareProvider);
-                }
-                if !self.agent_protocols.is_empty() || !self.agent_tools.is_empty() {
-                    return Err(ManifestError::ProviderAdapterCannotDeclareAgentBinding);
-                }
-                if self.capabilities.contains(&Capability::AgentHint) {
-                    return Err(ManifestError::ProviderAdapterCannotExtractHints);
                 }
             }
         }
@@ -344,10 +329,6 @@ pub enum ManifestError {
     SecretIsNotAReferenceName(String),
     ChatCapabilityRequired,
     AgentAdapterMustDeclareProtocol,
-    AgentAdapterCannotDeclareProviders,
-    ProviderAdapterMustDeclareProvider,
-    ProviderAdapterCannotDeclareAgentBinding,
-    ProviderAdapterCannotExtractHints,
     ConformanceSuiteDoesNotMatchKind,
     MissingFixtures,
     InvalidFixturesPath(String),
@@ -382,18 +363,6 @@ impl fmt::Display for ManifestError {
             Self::AgentAdapterMustDeclareProtocol => {
                 f.write_str("an agent adapter must declare at least one agent protocol")
             }
-            Self::AgentAdapterCannotDeclareProviders => {
-                f.write_str("an agent adapter has no southbound binding")
-            }
-            Self::ProviderAdapterMustDeclareProvider => {
-                f.write_str("a provider adapter must declare at least one provider")
-            }
-            Self::ProviderAdapterCannotDeclareAgentBinding => {
-                f.write_str("a provider adapter has no northbound binding")
-            }
-            Self::ProviderAdapterCannotExtractHints => f.write_str(
-                "a provider adapter never sees an inbound request, so it cannot extract hints",
-            ),
             Self::ConformanceSuiteDoesNotMatchKind => {
                 f.write_str("conformance.required_suite does not match the adapter kind")
             }
@@ -416,24 +385,6 @@ mod tests {
     };
     use std::collections::BTreeSet;
 
-    fn provider_manifest() -> AdapterManifest {
-        AdapterManifest {
-            name: "adapter-openai-provider".to_owned(),
-            version: "1.2.0".to_owned(),
-            kind: AdapterKind::Provider,
-            api_version: "provider-adapter-v1".to_owned(),
-            agent_protocols: Vec::new(),
-            agent_tools: Vec::new(),
-            providers: vec!["openai-compatible".to_owned()],
-            capabilities: BTreeSet::from([Capability::Chat, Capability::Stream]),
-            permissions: AdapterPermissions::new(false, false, ["provider_api_key"]),
-            conformance: ConformanceSpec {
-                required_suite: "provider-protocol-v1".to_owned(),
-                fixtures: "fixtures/".to_owned(),
-            },
-        }
-    }
-
     fn agent_manifest() -> AdapterManifest {
         AdapterManifest {
             name: "adapter-openai-client".to_owned(),
@@ -442,7 +393,6 @@ mod tests {
             api_version: "agent-adapter-v1".to_owned(),
             agent_protocols: vec!["openai-chat-completions".to_owned()],
             agent_tools: vec!["cursor".to_owned()],
-            providers: Vec::new(),
             capabilities: BTreeSet::from([Capability::Chat, Capability::AgentHint]),
             permissions: AdapterPermissions::default(),
             conformance: ConformanceSpec {
@@ -453,29 +403,28 @@ mod tests {
     }
 
     #[test]
-    fn accepts_the_official_shapes() {
-        assert_eq!(provider_manifest().validate(), Ok(()));
+    fn accepts_the_official_shape() {
         assert_eq!(agent_manifest().validate(), Ok(()));
     }
 
     #[test]
     fn rejects_a_credential_pasted_into_the_secrets_list() {
-        let mut manifest = provider_manifest();
+        // Secrets are refused for an agent adapter before their shape is
+        // inspected, so the role rule fires first.
+        let mut manifest = agent_manifest();
         manifest.permissions.secrets = vec!["sk-live-abc123".to_owned()];
 
         assert_eq!(
             manifest.validate(),
-            Err(ManifestError::SecretIsNotAReferenceName(
-                "sk-live-abc123".to_owned()
-            ))
+            Err(ManifestError::AgentAdapterCannotRequestSecrets)
         );
     }
 
     #[test]
     fn rejects_network_and_filesystem_requests() {
-        let mut networked = provider_manifest();
+        let mut networked = agent_manifest();
         networked.permissions.network = true;
-        let mut on_disk = provider_manifest();
+        let mut on_disk = agent_manifest();
         on_disk.permissions.filesystem = true;
 
         assert_eq!(
@@ -500,38 +449,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_provider_adapter_that_claims_to_extract_hints() {
-        let mut manifest = provider_manifest();
-        manifest.capabilities.insert(Capability::AgentHint);
+    fn rejects_an_agent_adapter_without_a_protocol() {
+        let mut manifest = agent_manifest();
+        manifest.agent_protocols.clear();
 
         assert_eq!(
             manifest.validate(),
-            Err(ManifestError::ProviderAdapterCannotExtractHints)
+            Err(ManifestError::AgentAdapterMustDeclareProtocol)
         );
     }
 
     #[test]
-    fn rejects_a_role_that_declares_the_other_role_binding() {
-        let mut agent = agent_manifest();
-        agent.providers = vec!["openai-compatible".to_owned()];
-
-        let mut provider = provider_manifest();
-        provider.agent_protocols = vec!["openai-chat-completions".to_owned()];
-
-        assert_eq!(
-            agent.validate(),
-            Err(ManifestError::AgentAdapterCannotDeclareProviders)
-        );
-        assert_eq!(
-            provider.validate(),
-            Err(ManifestError::ProviderAdapterCannotDeclareAgentBinding)
-        );
-    }
-
-    #[test]
-    fn rejects_an_api_version_from_the_other_world() {
-        let mut manifest = provider_manifest();
-        manifest.api_version = "agent-adapter-v1".to_owned();
+    fn rejects_an_api_version_from_another_world() {
+        let mut manifest = agent_manifest();
+        manifest.api_version = "provider-adapter-v2".to_owned();
 
         assert_eq!(
             manifest.validate(),
@@ -540,9 +471,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_conformance_suite_from_the_other_kind() {
-        let mut manifest = provider_manifest();
-        manifest.conformance.required_suite = "agent-protocol-v1".to_owned();
+    fn rejects_a_conformance_suite_from_another_kind() {
+        let mut manifest = agent_manifest();
+        manifest.conformance.required_suite = "south.provider-component.v1".to_owned();
 
         assert_eq!(
             manifest.validate(),
@@ -552,9 +483,9 @@ mod tests {
 
     #[test]
     fn identity_is_checked_before_role_coherence() {
-        let mut manifest = provider_manifest();
+        let mut manifest = agent_manifest();
         manifest.name = String::new();
-        manifest.providers.clear();
+        manifest.agent_protocols.clear();
 
         assert_eq!(manifest.validate(), Err(ManifestError::MissingName));
     }
@@ -576,7 +507,7 @@ mod tests {
             "line\nbreak",
             overlong.as_str(),
         ] {
-            let mut manifest = provider_manifest();
+            let mut manifest = agent_manifest();
             manifest.name = unsafe_name.to_owned();
             assert!(
                 manifest.validate().is_err(),
@@ -597,7 +528,7 @@ mod tests {
             "fixtures//nested",
             "./fixtures",
         ] {
-            let mut manifest = provider_manifest();
+            let mut manifest = agent_manifest();
             manifest.conformance.fixtures = unsafe_path.to_owned();
             assert!(
                 manifest.validate().is_err(),

@@ -9,11 +9,14 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const wasmTarget = "wasm32-wasip2";
 const output = join(root, "plugins-dist");
 const plugins = [
-  "agent-openai",
-  "agent-anthropic",
-  "agent-openai-responses",
-  "agent-gemini",
-  "provider-openai-compatible",
+  ["agent-openai", "adapter.wasm"],
+  ["agent-anthropic", "adapter.wasm"],
+  ["agent-openai-responses", "adapter.wasm"],
+  ["agent-gemini", "adapter.wasm"],
+  // The South provider components ship beside the agents under the South
+  // loader's file name.
+  ["provider-openai-compatible-v2", "component.wasm"],
+  ["provider-anthropic-v2", "component.wasm"],
 ];
 
 function run(command, args, options = {}) {
@@ -49,7 +52,7 @@ if (!installedTargets.stdout.split(/\r?\n/u).includes(wasmTarget)) {
   process.exit(1);
 }
 
-for (const plugin of plugins) {
+for (const [plugin, wasmFile] of plugins) {
   const source = join(root, "plugins", "official", plugin);
   run("cargo", [
     "build",
@@ -71,7 +74,7 @@ for (const plugin of plugins) {
       "release",
       `${plugin.replaceAll("-", "_")}.wasm`,
     ),
-    join(destination, "adapter.wasm"),
+    join(destination, wasmFile),
   );
 }
 

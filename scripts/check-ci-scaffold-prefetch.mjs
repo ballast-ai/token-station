@@ -25,14 +25,15 @@ function jobBody(workflowName, jobName) {
 }
 
 const prefetch = [
-  "cargo fetch --locked --target wasm32-wasip2",
-  "--manifest-path plugins/official/provider-openai-compatible/Cargo.toml",
+  "plugins/official/provider-openai-compatible-v2/Cargo.toml",
+  "plugins/official/provider-anthropic-v2/Cargo.toml",
+  'cargo fetch --locked --target wasm32-wasip2 --manifest-path "$manifest"',
 ];
 
-// Every job that exercises the offline scaffold must fetch its locked
-// dependencies first. Windows repeats the workspace suite from the platform
-// workflow, where the Windows and macOS gates live — they are not part of
-// basic CI.
+// Every job whose tests build the official South provider components offline
+// must fetch their locked dependencies first. Windows repeats the workspace
+// suite from the platform workflow, where the Windows and macOS gates live —
+// they are not part of basic CI.
 for (const [workflowName, jobName, testCommand] of [
   ["ci", "rust", "cargo test --workspace"],
   ["ci", "rust-coverage", "cargo llvm-cov --workspace"],
@@ -49,9 +50,9 @@ for (const [workflowName, jobName, testCommand] of [
   const prefetchIndexes = prefetch.map((fragment) => body.indexOf(fragment));
   if (prefetchIndexes.some((index) => index === -1 || index > testIndex)) {
     throw new Error(
-      `Job '${jobName}' in ${workflowName}.yml runs the offline scaffold test without first fetching its locked dependencies.`,
+      `Job '${jobName}' in ${workflowName}.yml builds the official provider components offline without first fetching their locked dependencies.`,
     );
   }
 }
 
-console.log("CI scaffold dependency prefetch check: PASS");
+console.log("CI component dependency prefetch check: PASS");

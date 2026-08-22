@@ -80,7 +80,8 @@ runs:
               agent-openai \
               agent-openai-responses \
               agent-gemini \
-              provider-openai-compatible
+              provider-openai-compatible-v2 \
+              provider-anthropic-v2
           fi
           echo WORKSPACES_EOF
         } >> "$GITHUB_OUTPUT"

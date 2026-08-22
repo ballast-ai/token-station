@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use wasmtime::{Config, Engine};
@@ -29,7 +28,6 @@ impl Default for RuntimeLimits {
 /// How often the ticker thread advances the engine epoch. One tick is the
 /// resolution of every call deadline.
 pub(crate) const EPOCH_TICK: Duration = Duration::from_millis(10);
-const MAX_STREAM_INSTANCES: usize = 64;
 
 /// A shared engine, its epoch ticker, and the limits applied to every store.
 ///
@@ -39,7 +37,6 @@ const MAX_STREAM_INSTANCES: usize = 64;
 pub struct PluginRuntime {
     engine: Engine,
     limits: RuntimeLimits,
-    active_streams: Arc<AtomicUsize>,
     // Held so the ticker stops when the last clone drops.
     _ticker: Arc<TickerGuard>,
 }
@@ -70,7 +67,6 @@ impl PluginRuntime {
         Ok(Self {
             engine,
             limits,
-            active_streams: Arc::new(AtomicUsize::new(0)),
             _ticker: Arc::new(ticker),
         })
     }
@@ -92,28 +88,6 @@ impl PluginRuntime {
             .as_millis()
             .div_ceil(EPOCH_TICK.as_millis());
         u64::try_from(ticks).unwrap_or(u64::MAX).max(1)
-    }
-
-    pub(crate) fn try_acquire_stream(&self) -> Option<StreamPermit> {
-        let acquired = self
-            .active_streams
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < MAX_STREAM_INSTANCES).then(|| active + 1)
-            })
-            .is_ok();
-        acquired.then(|| StreamPermit {
-            active: Arc::clone(&self.active_streams),
-        })
-    }
-}
-
-pub(crate) struct StreamPermit {
-    active: Arc<AtomicUsize>,
-}
-
-impl Drop for StreamPermit {
-    fn drop(&mut self) {
-        self.active.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -157,7 +131,7 @@ impl Drop for TickerGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_STREAM_INSTANCES, PluginRuntime, RuntimeLimits};
+    use super::{PluginRuntime, RuntimeLimits};
     use std::time::Duration;
 
     #[test]
@@ -177,17 +151,5 @@ mod tests {
         .expect("engine builds");
 
         assert_eq!(runtime.deadline_ticks(), 3, "25ms of 10ms ticks rounds up");
-    }
-
-    #[test]
-    fn stream_instances_share_one_process_wide_budget_across_clones() {
-        let runtime = PluginRuntime::new(RuntimeLimits::default()).expect("engine builds");
-        let clone = runtime.clone();
-        let permits: Vec<_> = (0..MAX_STREAM_INSTANCES)
-            .map(|_| clone.try_acquire_stream().expect("within stream budget"))
-            .collect();
-        assert!(runtime.try_acquire_stream().is_none());
-        drop(permits);
-        assert!(runtime.try_acquire_stream().is_some());
     }
 }

@@ -5,14 +5,14 @@
 use token_station_plugin_api::{AdapterKind, AdapterManifest};
 
 const VALID: &str = r#"{
-  "name": "provider-openai-compatible",
+  "name": "agent-openai",
   "version": "1.0.0",
-  "kind": "provider-adapter",
-  "api_version": "provider-adapter-v1",
-  "providers": ["openai-compatible"],
+  "kind": "agent-adapter",
+  "api_version": "agent-adapter-v1",
+  "agent_protocols": ["openai-chat-completions"],
   "capabilities": ["chat", "stream"],
-  "permissions": { "network": false, "filesystem": false, "secrets": ["provider_api_key"] },
-  "conformance": { "required_suite": "provider-protocol-v1", "fixtures": "fixtures/" }
+  "permissions": { "network": false, "filesystem": false, "secrets": [] },
+  "conformance": { "required_suite": "agent-protocol-v1", "fixtures": "fixtures/" }
 }"#;
 
 fn with_permissions_block_named(key: &str) -> String {
@@ -23,7 +23,7 @@ fn with_permissions_block_named(key: &str) -> String {
 fn a_well_formed_manifest_parses_and_validates() {
     let manifest: AdapterManifest = serde_json::from_str(VALID).expect("valid manifest");
 
-    assert_eq!(manifest.kind, AdapterKind::Provider);
+    assert_eq!(manifest.kind, AdapterKind::Agent);
     assert_eq!(manifest.validate(), Ok(()));
 }
 
@@ -46,7 +46,7 @@ fn a_misspelled_permissions_block_is_refused_rather_than_defaulted() {
 #[test]
 fn an_absent_permissions_block_is_refused() {
     let without = VALID.replace(
-        "\"permissions\": { \"network\": false, \"filesystem\": false, \"secrets\": [\"provider_api_key\"] },\n  ",
+        "\"permissions\": { \"network\": false, \"filesystem\": false, \"secrets\": [] },\n  ",
         "",
     );
 
@@ -87,11 +87,8 @@ fn kind_is_spelled_as_the_architecture_spells_it() {
     let manifest: AdapterManifest = serde_json::from_str(VALID).expect("valid manifest");
     let json = serde_json::to_value(&manifest).expect("serializable manifest");
 
-    assert_eq!(json["kind"], serde_json::json!("provider-adapter"));
-    assert_eq!(
-        json["api_version"],
-        serde_json::json!("provider-adapter-v1")
-    );
+    assert_eq!(json["kind"], serde_json::json!("agent-adapter"));
+    assert_eq!(json["api_version"], serde_json::json!("agent-adapter-v1"));
 }
 
 #[test]

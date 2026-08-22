@@ -1,6 +1,6 @@
 # Connect Claude Code to DeepSeek through Token Station
 
-This procedure configures the two protocols separately. Claude Code continues to send Anthropic Messages. `agent-anthropic` normalizes them into Canonical IR. After routing, the existing `provider-openai-compatible` plugin calls DeepSeek. DeepSeek appears only in configuration. The Rust gateway, router, and inbound adapter have no DeepSeek-specific branches.
+This procedure configures the two protocols separately. Claude Code continues to send Anthropic Messages. `agent-anthropic` normalizes them into Canonical IR. After routing, the `provider-openai-compatible` South provider component calls DeepSeek. DeepSeek appears only in configuration. The Rust gateway, router, and inbound adapter have no DeepSeek-specific branches.
 
 ```text
 Claude Code
@@ -13,29 +13,20 @@ Claude Code
 
 Use the sample configuration at [apps/cli/claude-code-deepseek-config.json](../../apps/cli/claude-code-deepseek-config.json). The configuration only references the `DEEPSEEK_API_KEY` environment variable. It does not contain the key value.
 
-## 1. Build and install the two protocol plugins
+## 1. Stage the two protocol packages
 
 Run these commands from the repository root:
 
 ```bash
 cargo build --release -p token-station-cli
+scripts/prepare-desktop-test-plugins.sh   # builds every official package into plugins-dist/
 
-./target/release/token-station-cli plugin build \
-  plugins/official/agent-anthropic
-./target/release/token-station-cli plugin build \
-  plugins/official/provider-openai-compatible
-
-./target/release/token-station-cli \
-  --config apps/cli/claude-code-deepseek-config.json \
-  plugin install plugins/official/agent-anthropic
-./target/release/token-station-cli \
-  --config apps/cli/claude-code-deepseek-config.json \
-  plugin install plugins/official/provider-openai-compatible
+mkdir -p token-station-e2e/plugins
+cp -R plugins-dist/agent-anthropic plugins-dist/provider-openai-compatible-v2 \
+  token-station-e2e/plugins/
 ```
 
-`plugin install` runs the same conformance suite used during development. It copies accepted packages to `token-station-e2e/plugins/`. `.gitignore` excludes this directory, runtime data, and the local virtual key.
-
-The command refuses to overwrite an installed package. During development, run `plugin remove <name>` before you install an updated plugin. Do not overwrite a WASM file that has an acceptance receipt.
+`plugins-dist/provider-openai-compatible-v2/` is the South provider component (`manifest.json` + `component.wasm`, built from `token-station-south`). The sample configuration vouches for it through `plugins.providers`, which is what lets a component without a local conformance receipt serve traffic; its conformance ran where it was built. Official release binaries embed every official package, so this step is only needed for a source build. `.gitignore` excludes the plugin directory, runtime data, and the local virtual key.
 
 ## 2. Configure the DeepSeek key
 
@@ -115,7 +106,7 @@ claude --model claude-3-5-haiku-20241022 \
 Keep `plugins.agent = "agent-anthropic"` to continue receiving Anthropic Messages from Claude Code. Configure outbound traffic for the provider protocol:
 
 - For an OpenAI-compatible provider, add an `upstreams` entry and continue to use `provider-openai-compatible`.
-- For a provider that is not OpenAI-compatible, add a separate `provider-*` plugin. Map the provider dialect to that plugin in `plugins.providers`.
+- For a provider that is not OpenAI-compatible, stage its South provider component (the Anthropic wire ships as `provider-anthropic-v2`) and map the provider dialect to it in `plugins.providers`.
 - Combine providers and models in `router.pools`. Rules reference logical pools and capabilities. Do not test provider names in `agent-anthropic`.
 
 This design lets the caller protocol, routing decision, and provider protocol change independently.

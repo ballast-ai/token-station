@@ -4,8 +4,8 @@
 //! `conformance.fixtures` names:
 //!
 //! ```text
-//! provider.request.chat.input.json
-//! provider.request.chat.expected.json
+//! agent.normalize.chat.input.json
+//! agent.normalize.chat.expected.json
 //! ```
 //!
 //! The name is `<kind>.<family>.<case>`. `kind` must match the suite, `family`
@@ -14,12 +14,10 @@
 //! is a pack where adding the second case renames the first, and fixture names
 //! appear in conformance reports that outlive the pack.
 //!
-//! Inputs are the Canonical IR, not the provider's wire format. A fixture that
+//! Inputs are the Canonical IR, not the agent tool's wire format. A fixture that
 //! could hold a credential would be a way to smuggle one past the type system,
-//! so the IR's own boundaries — [`token_station_protocol::HeaderDigest`],
-//! [`token_station_protocol::SafeHeaders`],
-//! [`token_station_protocol::ProviderEndpoint`] — re-apply on deserialization
-//! here exactly as they do anywhere else.
+//! so the IR's own boundaries — [`token_station_protocol::HeaderDigest`] above
+//! all — re-apply on deserialization here exactly as they do anywhere else.
 
 use std::error::Error;
 use std::fmt;
@@ -52,51 +50,6 @@ pub trait Family: Copy + Eq + fmt::Debug + Sized + 'static {
 
     fn parse(token: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|f| f.token() == token)
-    }
-}
-
-/// The families of a `provider-adapter` pack.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderFamily {
-    /// `ProviderConfig` -> `list<ModelCapability>`.
-    Capabilities,
-    /// `{ provider_config, chat_request }` -> `HttpRequestDescriptor`.
-    Request,
-    /// `HttpResponseParts` -> `ChatResponse`.
-    Response,
-    /// `{ chunks: [string] }` -> `list<StreamEvent>`.
-    Stream,
-    /// `HttpResponseParts` -> `ErrorEnvelope`.
-    Error,
-}
-
-impl Family for ProviderFamily {
-    const KIND: &'static str = "provider";
-    const ALL: &'static [Self] = &[
-        Self::Capabilities,
-        Self::Request,
-        Self::Response,
-        Self::Stream,
-        Self::Error,
-    ];
-
-    fn token(self) -> &'static str {
-        match self {
-            Self::Capabilities => "capabilities",
-            Self::Request => "request",
-            Self::Response => "response",
-            Self::Stream => "stream",
-            Self::Error => "error",
-        }
-    }
-
-    fn unknown_field_pointer(self) -> Option<&'static str> {
-        match self {
-            // `ChatRequest` and `HttpResponseParts` both carry `extensions`.
-            Self::Request => Some("/chat_request"),
-            Self::Capabilities | Self::Response | Self::Error => Some(""),
-            Self::Stream => None,
-        }
     }
 }
 
@@ -351,16 +304,13 @@ impl Error for FixtureError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentFamily, Family, FixtureError, FixturePack, ProviderFamily, family_of};
+    use super::{AgentFamily, Family, FixtureError, FixturePack, family_of};
     use std::fs;
 
     #[test]
-    fn a_file_from_the_other_role_is_skipped_not_refused() {
-        // One package, two roles, one fixtures directory.
-        assert_eq!(
-            family_of::<ProviderFamily>("agent.normalize.chat"),
-            Ok(None)
-        );
+    fn a_file_from_another_kind_is_skipped_not_refused() {
+        // A fixtures directory may carry files for a kind this suite does not
+        // judge (a South component's pack, say); they are not this pack's.
         assert_eq!(family_of::<AgentFamily>("provider.request.chat"), Ok(None));
 
         assert_eq!(
@@ -372,9 +322,9 @@ mod tests {
     #[test]
     fn a_family_this_suite_does_not_know_is_refused_by_name() {
         assert_eq!(
-            family_of::<ProviderFamily>("provider.telemetry.chat"),
+            family_of::<AgentFamily>("agent.telemetry.chat"),
             Err(FixtureError::UnknownFamily {
-                name: "provider.telemetry.chat".to_owned(),
+                name: "agent.telemetry.chat".to_owned(),
                 family: "telemetry".to_owned(),
             })
         );
@@ -383,26 +333,22 @@ mod tests {
     #[test]
     fn a_case_name_is_required() {
         assert_eq!(
-            family_of::<ProviderFamily>("provider.request"),
+            family_of::<AgentFamily>("agent.normalize"),
             Err(FixtureError::MalformedName {
-                name: "provider.request".to_owned(),
+                name: "agent.normalize".to_owned(),
             })
         );
     }
 
     #[test]
     fn every_family_round_trips_through_its_token() {
-        for family in ProviderFamily::ALL {
-            assert_eq!(ProviderFamily::parse(family.token()), Some(*family));
-        }
         for family in AgentFamily::ALL {
             assert_eq!(AgentFamily::parse(family.token()), Some(*family));
         }
     }
 
     #[test]
-    fn stream_families_host_no_unknown_field() {
-        assert_eq!(ProviderFamily::Stream.unknown_field_pointer(), None);
+    fn stream_family_hosts_no_unknown_field() {
         assert_eq!(AgentFamily::Stream.unknown_field_pointer(), None);
     }
 

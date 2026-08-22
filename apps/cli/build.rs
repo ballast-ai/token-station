@@ -15,7 +15,8 @@ fn main() {
 
     let dist = std::env::var("TOKEN_STATION_PLUGINS_DIST").expect(
         "the `builtin-plugins` feature needs TOKEN_STATION_PLUGINS_DIST pointing at a directory \
-         holding all official agent/provider packages (manifest.json + adapter.wasm each) \
+         holding every official package (agents: manifest.json + adapter.wasm; South \
+         provider components: manifest.json + component.wasm) \
          — scripts/build-release.sh assembles one",
     );
     let dist = Path::new(&dist)
@@ -31,23 +32,17 @@ fn main() {
             "adapter.wasm",
         ),
         ("AGENT_GEMINI", "agent-gemini", "adapter.wasm"),
-        (
-            "PROVIDER_OPENAI",
-            "provider-openai-compatible",
-            "adapter.wasm",
-        ),
-        // The v2 south component: staged by the same scripts, embedded by the
-        // same mechanism, but consumed by the south loader, never the v1
-        // registry (its manifest is the v2 schema). It lives under the
-        // `south/` subtree so the v1 directory scan never reads its manifest.
+        // The South provider components: staged by the same scripts and
+        // embedded by the same mechanism, but loaded by `south-provider-runtime`
+        // (their manifest is South's v2 schema, their binary `component.wasm`).
         (
             "PROVIDER_OPENAI_V2",
-            "south/provider-openai-compatible-v2",
+            "provider-openai-compatible-v2",
             "component.wasm",
         ),
         (
             "PROVIDER_ANTHROPIC_V2",
-            "south/provider-anthropic-v2",
+            "provider-anthropic-v2",
             "component.wasm",
         ),
     ] {

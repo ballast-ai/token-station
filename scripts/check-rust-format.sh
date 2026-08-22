@@ -18,7 +18,8 @@ readonly plugin_manifests=(
   plugins/official/agent-openai/Cargo.toml
   plugins/official/agent-openai-responses/Cargo.toml
   plugins/official/agent-gemini/Cargo.toml
-  plugins/official/provider-openai-compatible/Cargo.toml
+  plugins/official/provider-openai-compatible-v2/Cargo.toml
+  plugins/official/provider-anthropic-v2/Cargo.toml
 )
 
 cd "$root"

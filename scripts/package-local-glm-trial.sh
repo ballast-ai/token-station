@@ -5,7 +5,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 binary="$root/target/release/token-station-cli"
 agent_wasm="$root/plugins/official/agent-openai/target/wasm32-wasip2/release/agent_openai.wasm"
-provider_wasm="$root/plugins/official/provider-openai-compatible/target/wasm32-wasip2/release/provider_openai_compatible.wasm"
+provider_wasm="$root/plugins/official/provider-openai-compatible-v2/target/wasm32-wasip2/release/provider_openai_compatible_v2.wasm"
 output="$root/dist"
 
 usage() {
@@ -32,13 +32,13 @@ test -n "$version"
 platform="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
 package="$output/token-station-glm-trial-$version-$platform"
 rm -rf "$package"
-mkdir -p "$package/plugins-dist/agent-openai" "$package/plugins-dist/provider-openai-compatible"
+mkdir -p "$package/plugins-dist/agent-openai" "$package/plugins-dist/provider-openai-compatible-v2"
 
 cp "$binary" "$package/token-station-cli"
 cp "$root/plugins/official/agent-openai/manifest.json" "$package/plugins-dist/agent-openai/manifest.json"
 cp "$agent_wasm" "$package/plugins-dist/agent-openai/adapter.wasm"
-cp "$root/plugins/official/provider-openai-compatible/manifest.json" "$package/plugins-dist/provider-openai-compatible/manifest.json"
-cp "$provider_wasm" "$package/plugins-dist/provider-openai-compatible/adapter.wasm"
+cp "$root/plugins/official/provider-openai-compatible-v2/manifest.json" "$package/plugins-dist/provider-openai-compatible-v2/manifest.json"
+cp "$provider_wasm" "$package/plugins-dist/provider-openai-compatible-v2/component.wasm"
 cp "$root/apps/cli/glm-5.2-local-config.json" "$package/token-station.json"
 cp "$root/docs/guides/GLM-5.2-本地启动指南.md" "$package/GLM-5.2-本地启动指南.md"
 cp "$root/LICENSE" "$package/LICENSE"

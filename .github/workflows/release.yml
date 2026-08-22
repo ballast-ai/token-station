@@ -84,7 +84,7 @@ jobs:
         run: |
           scripts/build-release.sh x86_64-unknown-linux-gnu
           sha256sum dist/*.tar.gz | tee first.sum
-          rm -rf dist target plugins/official/agent-openai/target plugins/official/agent-anthropic/target plugins/official/agent-openai-responses/target plugins/official/agent-gemini/target plugins/official/provider-openai-compatible/target
+          rm -rf dist target plugins/official/agent-openai/target plugins/official/agent-anthropic/target plugins/official/agent-openai-responses/target plugins/official/agent-gemini/target plugins/official/provider-openai-compatible-v2/target plugins/official/provider-anthropic-v2/target
           scripts/build-release.sh x86_64-unknown-linux-gnu
           sha256sum -c first.sum
 

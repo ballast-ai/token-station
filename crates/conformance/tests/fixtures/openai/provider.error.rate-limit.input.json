@@ -1,7 +1,0 @@
-{
-  "status": 429,
-  "headers": {
-    "retry-after": "2"
-  },
-  "body": "{\"error\":{\"message\":\"Rate limit reached for gpt-5.5\",\"type\":\"rate_limit_error\"}}"
-}

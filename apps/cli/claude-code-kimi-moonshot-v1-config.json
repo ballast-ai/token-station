@@ -9,7 +9,7 @@
     "dir": "token-station-e2e/plugins",
     "agent": "agent-anthropic",
     "providers": {
-      "openai-compatible": "provider-openai-compatible"
+      "openai-compatible": "provider-openai-compatible-v2"
     }
   },
   "upstreams": {

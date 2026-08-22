@@ -30,14 +30,14 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde_json::{Value, json};
-use token_station_conformance::{AgentAdapter, ProviderAdapter};
+use token_station_conformance::AgentAdapter;
 use token_station_metrics::{
     AttemptRecord, ConversionOutcome, ConversionReasonCode, ConversionReasonDetail,
     ConversionRecord, ConversionStage, CostKind, DecisionRecord,
     ProviderCallEngine as RecordedProviderCallEngine, Recorder, RequestPathKind, RequestRecord,
     RoutingRecord,
 };
-use token_station_plugin_runtime::{AgentPlugin, NoSecrets, PluginRuntime, ProviderPlugin};
+use token_station_plugin_runtime::{AgentPlugin, PluginRuntime};
 use token_station_protocol::{
     AgentRequestEnvelope, Auth, CapabilityState, ChatRequest, ChatResponse, Content, ContentPart,
     ErrorCode, ErrorEnvelope, HeaderDigest, HttpMethod, HttpRequestDescriptor, HttpResponseParts,
@@ -53,6 +53,7 @@ use crate::admission::Admission;
 use crate::bodylog::{BodyLog, BoundedBody};
 use crate::cancel::{CancelReason, CancelToken};
 use crate::request_context::RequestContext;
+use crate::south_component::ProviderAdapter;
 use crate::sse::SseFrameDecoder;
 
 use crate::config::{
@@ -1232,19 +1233,16 @@ fn record_actual_attempt_target(
 struct Upstream {
     config: ProviderConfig,
     auth_config: Option<AuthConfig>,
-    /// The translation engine: the v1 plugin, the v2 south component, or the
-    /// shadow decorator running both (S4). Chosen per upstream at assembly.
+    /// The translation engine: the South provider component that speaks this
+    /// upstream's dialect, resolved at assembly.
     plugin: Arc<dyn ProviderAdapter + Send + Sync>,
     /// The wire dialect, carried host-side only (never enters a WASM plugin).
     /// `AnthropicNative` diverts an anthropic-messages request onto the verbatim
     /// passthrough path instead of the Canonical-IR provider render.
     dialect: ApiDialect,
     provider_call: ConfiguredProviderCallEngine,
-    /// The v2 component's configured role for this upstream. The translated
-    /// path consumes it at assembly (it picks the engine); the passthrough
-    /// reads it here, because that path has no engine to pick and would
-    /// otherwise shadow an upstream that asked to be left alone.
-    south_component: crate::config::SouthComponentMode,
+    /// The dialect resolves to a component embedded by the signed release
+    /// pipeline, which is what the South transport slice requires.
     south_package_approved: bool,
 }
 
@@ -1287,20 +1285,16 @@ impl SouthProviderRuntime {
     }
 }
 
-/// The dialect the official Anthropic component declares. Stage C's shadow
-/// resolves by this, the same key the registry uses.
-const ANTHROPIC_DIALECT: &str = "anthropic";
-
-/// Everything the v2 south component lane needs, built once per gateway.
+/// Every South provider component the configured upstreams need, keyed by
+/// dialect.
 ///
-/// Keyed by dialect because there is more than one official component now.
-/// A package declares the dialects it speaks and the host resolves by that,
-/// the same rule the v1 registry has always used — adding a third component
-/// is a packaging change, not a wiring one.
+/// Keyed by dialect because there is more than one official component. A
+/// package declares the dialects it speaks and the registry resolves by that;
+/// adding a third component is a packaging change, not a wiring one. One
+/// package serving two dialects is loaded once.
 struct SouthComponentSupport {
     adapters:
         std::collections::BTreeMap<String, Arc<crate::south_component::SouthComponentAdapter>>,
-    report: Arc<crate::south_component::ShadowReport>,
 }
 
 impl SouthComponentSupport {
@@ -1312,17 +1306,15 @@ impl SouthComponentSupport {
     }
 }
 
-/// Resolves every configured upstream: its translation engine (v1, shadow,
-/// or v2 per the S4 mode), its fenced provider config, and its refined model
-/// catalog.
+/// Resolves every configured upstream: its translation component, its fenced
+/// provider config, and its refined model catalog.
 #[allow(
     clippy::type_complexity,
     reason = "one call site; the pair is unpacked immediately"
 )]
 fn assemble_upstreams(
     config: &ClientConfig,
-    provider_plugins: &BTreeMap<String, Arc<ProviderPlugin>>,
-    south_component: Option<&SouthComponentSupport>,
+    south_component: &SouthComponentSupport,
     registry: &crate::plugins::PluginRegistry,
 ) -> Result<
     (
@@ -1336,17 +1328,12 @@ fn assemble_upstreams(
 
     for (name, entry) in &config.upstreams {
         // `.clone()` rather than `Arc::clone`: the unsized coercion to the
-        // trait-object parameter must not flow backward into the map's
-        // concrete value type.
-        let plugin = south_component_engine(
-            provider_plugins
-                .get(&entry.provider)
-                .expect("the caller loaded a plugin for every configured dialect")
-                .clone(),
-            south_component,
-            entry.south_component,
-            &entry.provider,
-        );
+        // trait-object field must not flow backward into the map's concrete
+        // value type.
+        let plugin: Arc<dyn ProviderAdapter + Send + Sync> = south_component
+            .adapter_for(&entry.provider)
+            .expect("the caller loaded a component for every configured dialect")
+            .clone();
 
         let mut provider_config =
             ProviderConfig::new(entry.provider.clone(), entry.base_url.clone());
@@ -1358,7 +1345,7 @@ fn assemble_upstreams(
             .map(project_capability_evidence_for_v1)
             .collect();
 
-        // The adapter may refine the declared catalog; it cannot invent one,
+        // The component may refine the declared catalog; it cannot invent one,
         // having no network. This is `model_capabilities`' production call.
         let capabilities: Vec<_> = plugin
             .model_capabilities(&provider_config)
@@ -1384,9 +1371,7 @@ fn assemble_upstreams(
                 plugin,
                 dialect: entry.api_dialect,
                 provider_call: entry.provider_call,
-                south_component: entry.south_component,
-                south_package_approved: registry
-                    .provider_package_south_approved(&entry.provider, "provider-openai-compatible"),
+                south_package_approved: registry.provider_package_south_approved(&entry.provider),
             },
         );
     }
@@ -1394,80 +1379,72 @@ fn assemble_upstreams(
     Ok((upstreams, catalog))
 }
 
-/// S4: routes one upstream's translation through the v2 south component per
-/// its configured mode. Uncovered dialects and hosts without the v2 package
-/// stay on v1 regardless.
-fn south_component_engine(
-    plugin: Arc<dyn ProviderAdapter + Send + Sync>,
-    support: Option<&SouthComponentSupport>,
-    mode: crate::config::SouthComponentMode,
-    dialect: &str,
-) -> Arc<dyn ProviderAdapter + Send + Sync> {
-    let Some(component) = support.and_then(|support| {
-        support
-            .adapter_for(dialect)
-            .map(|adapter| (adapter, &support.report))
-    }) else {
-        return plugin;
-    };
-    match mode {
-        crate::config::SouthComponentMode::Shadow => {
-            Arc::new(crate::south_component::ShadowedProviderAdapter::new(
-                plugin,
-                Arc::clone(component.0),
-                Arc::clone(component.1),
-                dialect,
-            ))
-        }
-        crate::config::SouthComponentMode::Primary => Arc::clone(component.0) as _,
-        crate::config::SouthComponentMode::Off => plugin,
-    }
-}
-
-/// Loads the embedded v2 component when any upstream asks for it. A host
-/// without the builtin package degrades to the v1-only path with a notice —
-/// shadow is an observation lane, never a startup failure.
-fn south_component_support(config: &ClientConfig) -> Result<Option<SouthComponentSupport>, String> {
-    let wanted = config
-        .upstreams
-        .values()
-        .any(|entry| entry.south_component != crate::config::SouthComponentMode::Off);
-    if !wanted {
-        return Ok(None);
-    }
-    let mut packages = crate::plugins::builtin_south_components().peekable();
-    if packages.peek().is_none() {
-        eprintln!(
-            "south component packages unavailable in this build; upstream translation stays on \
-             the v1 plugin path"
-        );
-        return Ok(None);
-    }
+/// Loads one South provider component per dialect the configured upstreams
+/// speak, resolving each through the registry: builtin bytes or a package
+/// directory. A package declaring several dialects is loaded once and shared.
+fn south_component_support(
+    config: &ClientConfig,
+    registry: &crate::plugins::PluginRegistry,
+) -> Result<SouthComponentSupport, String> {
     let runtime = crate::south_component::south_component_runtime()?;
-    let mut adapters = std::collections::BTreeMap::new();
-    for (manifest_source, wasm) in packages {
-        let adapter = crate::south_component::SouthComponentAdapter::load_embedded(
-            &runtime,
-            manifest_source,
-            wasm,
-        )?;
-        let adapter = Arc::new(adapter);
-        for dialect in adapter.dialects() {
-            // Two packages claiming one dialect is a packaging mistake, not a
-            // runtime choice to make silently.
-            if let Some(previous) = adapters.insert(dialect.clone(), Arc::clone(&adapter)) {
-                return Err(format!(
-                    "two south component packages both declare `{dialect}`: `{}` and `{}`",
-                    previous.package_name(),
-                    adapter.package_name(),
-                ));
-            }
+    let mut by_package: BTreeMap<String, Arc<crate::south_component::SouthComponentAdapter>> =
+        BTreeMap::new();
+    let mut adapters = BTreeMap::new();
+    for (name, entry) in &config.upstreams {
+        if adapters.contains_key(&entry.provider) {
+            continue;
         }
+        let binding = registry.provider_binding(&entry.provider).ok_or_else(|| {
+            format!(
+                "upstream `{name}` speaks `{}`, but no provider component speaks that dialect; \
+                 available: [{}] (scanned {})",
+                entry.provider,
+                registry.provider_dialects().join(", "),
+                config.plugins.dir.display(),
+            )
+        })?;
+        let adapter = if let Some(adapter) = by_package.get(&binding.package) {
+            Arc::clone(adapter)
+        } else {
+            let adapter = match &binding.source {
+                crate::plugins::PackageSource::Builtin {
+                    manifest_source,
+                    wasm,
+                } => crate::south_component::SouthComponentAdapter::load_embedded(
+                    &runtime,
+                    manifest_source,
+                    wasm,
+                ),
+                crate::plugins::PackageSource::Dir(dir) => {
+                    crate::south_component::SouthComponentAdapter::load_dir(&runtime, dir)
+                }
+            }
+            .map_err(|error| {
+                format!(
+                    "provider component for `{}` (package `{}`): {error}",
+                    entry.provider, binding.package,
+                )
+            })?;
+            let adapter = Arc::new(adapter);
+            by_package.insert(binding.package.clone(), Arc::clone(&adapter));
+            adapter
+        };
+        // The registry resolved the dialect by the package's manifest; the
+        // loaded component must agree, or the package is not what it claims.
+        if !adapter
+            .dialects()
+            .iter()
+            .any(|dialect| dialect == &entry.provider)
+        {
+            return Err(format!(
+                "provider component `{}` does not declare `{}` once loaded",
+                adapter.package_name(),
+                entry.provider,
+            ));
+        }
+        adapters.insert(entry.provider.clone(), adapter);
     }
-    Ok(Some(SouthComponentSupport {
-        adapters,
-        report: Arc::new(crate::south_component::ShadowReport::default()),
-    }))
+    Ok(SouthComponentSupport { adapters })
 }
 
 fn south_runtime_for(
@@ -1817,10 +1794,6 @@ const CLAUDE_DESKTOP_MODELS_DOCUMENT: &str = r#"{"object":"list","data":[{"id":"
 
 /// The assembled data plane.
 pub struct Gateway {
-    /// Stage C's shadow over the `anthropic-native` passthrough, when an
-    /// Anthropic component is embedded. Present or absent; never in the
-    /// serving path either way.
-    anthropic_shadow: Option<crate::south_component::PassthroughShadow>,
     /// Inbound adapters in match-priority order. Each request is dispatched to
     /// the first whose `match_inbound` claims it — that is `match_inbound`, the
     /// multi-inbound multiplexing, done here in the host orchestrator.
@@ -2148,47 +2121,6 @@ pub enum Reply {
     Chunk(String),
 }
 
-/// Loads one provider plugin per dialect the configured upstreams speak,
-/// resolving each through the registry: builtin bytes or a package directory.
-fn load_provider_plugins(
-    runtime: &PluginRuntime,
-    registry: &crate::plugins::PluginRegistry,
-    config: &ClientConfig,
-) -> Result<BTreeMap<String, Arc<ProviderPlugin>>, String> {
-    let mut provider_plugins: BTreeMap<String, Arc<ProviderPlugin>> = BTreeMap::new();
-    for (name, entry) in &config.upstreams {
-        if provider_plugins.contains_key(&entry.provider) {
-            continue;
-        }
-        let binding = registry.provider_binding(&entry.provider).ok_or_else(|| {
-            format!(
-                "upstream `{name}` speaks `{}`, but no plugin provides that dialect; \
-                 available: [{}] (scanned {})",
-                entry.provider,
-                registry.provider_dialects().join(", "),
-                config.plugins.dir.display(),
-            )
-        })?;
-        let plugin = match &binding.source {
-            crate::plugins::PackageSource::Builtin {
-                manifest_source,
-                wasm,
-            } => ProviderPlugin::load_embedded(runtime, manifest_source, wasm, NoSecrets),
-            crate::plugins::PackageSource::Dir(dir) => {
-                ProviderPlugin::load(runtime, dir, NoSecrets)
-            }
-        }
-        .map_err(|error| {
-            format!(
-                "provider plugin for `{}` (package `{}`): {error}",
-                entry.provider, binding.package,
-            )
-        })?;
-        provider_plugins.insert(entry.provider.clone(), Arc::new(plugin));
-    }
-    Ok(provider_plugins)
-}
-
 impl Gateway {
     fn load_agent(
         runtime: &PluginRuntime,
@@ -2332,30 +2264,11 @@ impl Gateway {
             .collect::<std::collections::BTreeSet<_>>();
         supported_agent_ids.extend(config.agent_routes.keys().cloned());
 
-        let provider_plugins = load_provider_plugins(&runtime, &registry, config)?;
-
         let south_runtime = south_runtime_for(config, provider_runtime)?;
 
-        let south_component = south_component_support(config)?;
+        let south_component = south_component_support(config, &registry)?;
 
-        // Stage C: the passthrough keeps serving; the Anthropic component runs
-        // beside it only to be compared. Absent when no such component is
-        // embedded, which leaves the passthrough exactly as it was.
-        let anthropic_shadow = south_component.as_ref().and_then(|support| {
-            support.adapter_for(ANTHROPIC_DIALECT).map(|adapter| {
-                crate::south_component::PassthroughShadow::new(
-                    Arc::clone(adapter),
-                    Arc::new(crate::south_component::PassthroughShadowReport::default()),
-                )
-            })
-        });
-
-        let (upstreams, catalog) = assemble_upstreams(
-            config,
-            &provider_plugins,
-            south_component.as_ref(),
-            &registry,
-        )?;
+        let (upstreams, catalog) = assemble_upstreams(config, &south_component, &registry)?;
 
         let (local_upstreams, free_upstreams) = Self::upstream_boundary_sets(config);
 
@@ -2373,7 +2286,6 @@ impl Gateway {
         }
 
         Ok(Self {
-            anthropic_shadow,
             agents: loaded_agents.ready,
             skipped_agents: loaded_agents.skipped,
             home_router,
@@ -3766,7 +3678,7 @@ impl Gateway {
         // which would reject server-tool history blocks, is never called here.
         if agent.protocol == "anthropic-messages"
             && let Some(served) =
-                self.try_anthropic_passthrough(ctx, agent, router, headers, body, emit, record)?
+                self.try_anthropic_passthrough(ctx, router, headers, body, emit, record)?
         {
             return Ok(served);
         }
@@ -4634,48 +4546,6 @@ impl Gateway {
         }
     }
 
-    /// Stage C: run the translated route beside the passthrough and record how
-    /// the two compare. A no-op when no Anthropic component is embedded.
-    ///
-    /// `forwarded` is the caller's body; the routed model is applied here so
-    /// the comparison is against exactly the bytes the passthrough sends, not a
-    /// reconstruction of them.
-    fn shadow_translated_route(
-        &self,
-        agent: &LoadedAgent,
-        forwarded: &Value,
-        upstream: &Upstream,
-        routed_model: &str,
-    ) {
-        let Some(shadow) = &self.anthropic_shadow else {
-            return;
-        };
-        // `Off` means off on this path too. Only `Shadow` observes: `Primary`
-        // would mean serving the component's rendering, which is stage D's
-        // decision and not one to take by omission here.
-        if upstream.south_component != crate::config::SouthComponentMode::Shadow {
-            return;
-        }
-        let mut forwarded = forwarded.clone();
-        forwarded["model"] = json!(routed_model);
-        let normalize = |candidate: &Value| {
-            let envelope = AgentRequestEnvelope {
-                protocol: agent.protocol.clone(),
-                agent_tool: None,
-                headers: HeaderDigest::default(),
-                principal: Principal {
-                    subject: "local".to_owned(),
-                    tenant: None,
-                },
-                hints: Vec::new(),
-                body: candidate.clone(),
-                extensions: token_station_protocol::Extensions::new(),
-            };
-            agent.plugin.normalize_inbound(&envelope)
-        };
-        shadow.observe(&normalize, &forwarded, &upstream.config, routed_model);
-    }
-
     /// Native Anthropic passthrough decision + execution. Returns `Some(served)`
     /// when an anthropic-messages request routed to an `anthropic-native` upstream
     /// and was forwarded verbatim; `None` when it is not a passthrough and the
@@ -4686,7 +4556,6 @@ impl Gateway {
     fn try_anthropic_passthrough(
         &self,
         ctx: &RequestContext,
-        agent: &LoadedAgent,
         router: &Router,
         raw_headers: &[(String, String)],
         body: &[u8],
@@ -4771,13 +4640,6 @@ impl Gateway {
         }
 
         // Committed to the passthrough path.
-        //
-        // Stage C's shadow runs here, before the send: the body below is
-        // exactly what goes on the wire, so the comparison is against the
-        // served bytes rather than a reconstruction. Pure translation — the
-        // passthrough's request stays the only one issued.
-        self.shadow_translated_route(agent, &body_value, upstream, &decision.chosen.model);
-
         let configured = self
             .catalog
             .iter()

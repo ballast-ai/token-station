@@ -13,16 +13,11 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::json;
-use token_station_conformance::{
-    AgentAdapter, AgentFamily, FixturePack, ProviderAdapter, ProviderFamily, run_agent_suite,
-    run_provider_suite,
-};
-use token_station_plugin_runtime::{
-    AgentPlugin, LoadError, NoSecrets, PluginRuntime, ProviderPlugin, RuntimeLimits,
-};
+use token_station_conformance::{AgentAdapter, AgentFamily, FixturePack, run_agent_suite};
+use token_station_plugin_runtime::{AgentPlugin, LoadError, PluginRuntime, RuntimeLimits};
 use token_station_protocol::{
-    AgentRequestEnvelope, ChatRequest, ChatResponse, ErrorCode, ErrorEnvelope, Extensions,
-    FinishReason, HeaderDigest, Principal, ProviderConfig, ResponseFormat, StreamEvent, ToolChoice,
+    AgentRequestEnvelope, ChatResponse, ErrorCode, ErrorEnvelope, Extensions, FinishReason,
+    HeaderDigest, Principal, ResponseFormat, StreamEvent, ToolChoice,
 };
 
 fn repo_root() -> &'static Path {
@@ -60,11 +55,6 @@ fn build_package(plugin: &str) -> PathBuf {
     .expect("manifest copies");
     std::fs::copy(&wasm, package.join("adapter.wasm")).expect("wasm copies");
     package
-}
-
-fn provider_package() -> &'static Path {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| build_package("provider-openai-compatible"))
 }
 
 fn agent_package() -> &'static Path {
@@ -124,21 +114,6 @@ fn response_sse_events(rendered: &serde_json::Value) -> Vec<serde_json::Value> {
                 .map(|data| serde_json::from_str(data).expect("Responses SSE data is JSON"))
         })
         .collect()
-}
-
-#[test]
-fn the_official_provider_adapter_passes_the_full_suite_as_wasm() {
-    let plugin =
-        ProviderPlugin::load(&runtime(), provider_package(), NoSecrets).expect("loads clean");
-
-    let fixtures = repo_root().join("plugins/official/provider-openai-compatible/fixtures");
-    let pack: FixturePack<ProviderFamily> =
-        FixturePack::load(&fixtures).expect("the shipped pack loads");
-
-    let report = run_provider_suite(&plugin, &pack);
-
-    assert!(report.is_passing(), "{report}");
-    assert_eq!(report.suite(), plugin.manifest().conformance.required_suite);
 }
 
 #[test]
@@ -1016,52 +991,6 @@ fn anthropic_adaptive_thinking_normalizes_without_losing_compatibility_metadata(
 }
 
 #[test]
-fn anthropic_reasoning_effort_requires_an_explicit_provider_capability() {
-    let plugin =
-        ProviderPlugin::load(&runtime(), provider_package(), NoSecrets).expect("loads clean");
-    let request: ChatRequest = serde_json::from_value(json!({
-        "model": "deepseek-v4-flash",
-        "messages": [{"role": "user", "content": "hi"}],
-        "anthropic_thinking": {"type": "adaptive"},
-        "reasoning_effort": "medium"
-    }))
-    .expect("valid canonical request");
-    let config = |supported_parameters: serde_json::Value| -> ProviderConfig {
-        serde_json::from_value(json!({
-            "provider": "openai-compatible",
-            "base_url": "https://api.deepseek.example/v1",
-            "models": [{
-                "model": "deepseek-v4-flash",
-                "supported_parameters": supported_parameters
-            }]
-        }))
-        .expect("valid provider config")
-    };
-
-    let undeclared = plugin
-        .build_http_request(&request, &config(json!([])))
-        .expect("request builds");
-    assert!(
-        undeclared
-            .body
-            .as_ref()
-            .is_some_and(|body| body.get("reasoning_effort").is_none()),
-        "adaptive effort must be omitted when the model did not declare support"
-    );
-
-    let declared = plugin
-        .build_http_request(&request, &config(json!(["reasoning_effort"])))
-        .expect("request builds");
-    assert_eq!(
-        declared
-            .body
-            .as_ref()
-            .and_then(|body| body.get("reasoning_effort")),
-        Some(&json!("medium"))
-    );
-}
-
-#[test]
 fn anthropic_server_tool_history_blocks_fail_with_capability() {
     let plugin = AgentPlugin::load(&runtime(), anthropic_agent_package()).expect("loads clean");
     let request = |block: serde_json::Value| {
@@ -1465,22 +1394,12 @@ fn responses_match_inbound_owns_only_post_responses() {
 }
 
 #[test]
-fn the_two_kinds_do_not_load_through_each_other() {
-    // An agent package through the provider loader and vice versa: refused at
-    // the kind check, before any wasm is instantiated.
-    let wrong = ProviderPlugin::load(&runtime(), agent_package(), NoSecrets);
-    assert!(matches!(wrong, Err(LoadError::WrongKind(_))), "{wrong:?}");
-
-    let wrong = AgentPlugin::load(&runtime(), provider_package());
-    assert!(matches!(wrong, Err(LoadError::WrongKind(_))), "{wrong:?}");
-}
-
-#[test]
 fn an_agent_component_that_asks_to_name_credentials_is_refused() {
-    // The provider world may import `token-station:adapter/host`; the agent
-    // world may not — an agent adapter cannot even *name* a credential. The
-    // WIT declares that; this proves the loader enforces it on a compiled
-    // artifact that ignored the declaration.
+    // `token-station:adapter/host` was the retired southbound world's
+    // credential-naming import; the agent world may not carry it — an agent
+    // adapter cannot even *name* a credential. The WIT declares that; this
+    // proves the loader enforces it on a compiled artifact that ignored the
+    // declaration.
     let wat = r#"(component
         (import "token-station:adapter/host@1.0.0" (instance))
     )"#;

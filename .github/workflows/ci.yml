@@ -46,12 +46,17 @@ jobs:
           components: rustfmt, clippy
           workspaces: |
             .
-            crates/plugin-runtime/tests/guests/test-provider
+            plugins/official/provider-openai-compatible-v2
+            plugins/official/provider-anthropic-v2
       - run: node tests/south-dependency-policy.mjs
-      - name: Fetch the locked scaffold dependency set
-        run: >-
-          cargo fetch --locked --target wasm32-wasip2
-          --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
+      - name: Fetch the locked official component dependency sets
+        shell: bash
+        run: |
+          for manifest in \
+            plugins/official/provider-openai-compatible-v2/Cargo.toml \
+            plugins/official/provider-anthropic-v2/Cargo.toml; do
+            cargo fetch --locked --target wasm32-wasip2 --manifest-path "$manifest"
+          done
       - run: scripts/check-rust-format.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -87,14 +92,19 @@ jobs:
           components: llvm-tools-preview
           workspaces: |
             .
-            crates/plugin-runtime/tests/guests/test-provider
+            plugins/official/provider-openai-compatible-v2
+            plugins/official/provider-anthropic-v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov@0.8.7
-      - name: Fetch the locked scaffold dependency set
-        run: >-
-          cargo fetch --locked --target wasm32-wasip2
-          --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
+      - name: Fetch the locked official component dependency sets
+        shell: bash
+        run: |
+          for manifest in \
+            plugins/official/provider-openai-compatible-v2/Cargo.toml \
+            plugins/official/provider-anthropic-v2/Cargo.toml; do
+            cargo fetch --locked --target wasm32-wasip2 --manifest-path "$manifest"
+          done
       - run: >-
           cargo llvm-cov --workspace --coverage-host-only --summary-only
           --fail-under-lines 80

@@ -50,21 +50,14 @@ Run these commands from the repository root:
 
 ```bash
 cargo build --release -p token-station-cli
+scripts/prepare-desktop-test-plugins.sh   # builds every official package into plugins-dist/
 
-./target/release/token-station-cli plugin build \
-  plugins/official/agent-anthropic
-./target/release/token-station-cli plugin build \
-  plugins/official/provider-openai-compatible
-
-./target/release/token-station-cli \
-  --config apps/cli/claude-code-qwen-config.json \
-  plugin install plugins/official/agent-anthropic
-./target/release/token-station-cli \
-  --config apps/cli/claude-code-qwen-config.json \
-  plugin install plugins/official/provider-openai-compatible
+mkdir -p token-station-e2e/plugins
+cp -R plugins-dist/agent-anthropic plugins-dist/provider-openai-compatible-v2 \
+  token-station-e2e/plugins/
 ```
 
-The four configurations share `token-station-e2e/plugins/`. Install the plugins once. If an old package exists in the development directory, remove it with `plugin remove` before reinstallation. Do not overwrite WASM files or acceptance receipts manually.
+The four configurations share `token-station-e2e/plugins/`; stage the packages once. `plugins-dist/provider-openai-compatible-v2/` is the South provider component (`manifest.json` + `component.wasm`, built from `token-station-south`). The sample configuration vouches for it through `plugins.providers`, which is what lets a component without a local conformance receipt serve traffic; its conformance ran where it was built. Official release binaries embed every official package, so this step is only needed for a source build. `.gitignore` excludes the plugin directory, runtime data, and the local virtual key.
 
 ## 4. Store API keys safely
 

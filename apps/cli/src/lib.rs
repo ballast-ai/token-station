@@ -35,7 +35,6 @@ pub mod quota_lease;
 pub mod quota_ledger;
 pub mod quota_tracker;
 pub mod request_context;
-pub mod scaffold;
 pub mod secrets;
 pub mod server;
 pub mod south_component;

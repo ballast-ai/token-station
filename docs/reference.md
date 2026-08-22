@@ -103,7 +103,7 @@ npm --prefix apps/desktop ci
 npm --prefix apps/desktop run tauri:dev
 ```
 
-Use the repository `tauri:dev` command. It builds and embeds the five official WASM adapters before starting Tauri. For frontend-only work, use `npm --prefix apps/desktop run dev`.
+Use the repository `tauri:dev` command. It builds and embeds the official WASM packages (four agent adapters and two South provider components) before starting Tauri. For frontend-only work, use `npm --prefix apps/desktop run dev`.
 
 ```bash
 scripts/build-desktop.sh --local
@@ -120,7 +120,7 @@ cargo build -p token-station-cli
 ./target/debug/token-station-cli --help
 ```
 
-A normal debug or release-profile Cargo build does not embed the five official adapters. Supply an external plugin directory when serving locally. Official packaging uses `scripts/build-release.sh <target-triple>`.
+A normal debug or release-profile Cargo build does not embed the official packages. Supply an external plugin directory when serving locally. Official packaging uses `scripts/build-release.sh <target-triple>`.
 
 The Tauri crate is excluded from the root Cargo workspace, so its Rust checks must run separately.
 
@@ -147,7 +147,8 @@ See the [CI workflow](../.github/workflows/ci.yml) for the complete matrix.
 apps/cli/                    Native CLI and local gateway
 apps/desktop/                React and Tauri desktop app
 crates/                      Shared routing, protocol, storage, and security crates
-plugins/official/            Five official WASM adapters
+plugins/official/            Official WASM packages: four northbound agent adapters and two
+                             South provider components (token-station-south)
 docs/guides/                 Agent integration guides
 scripts/                     Build, release, validation, and maintenance scripts
 ```

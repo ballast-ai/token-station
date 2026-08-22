@@ -50,7 +50,12 @@ readonly plugins=(
   agent-anthropic
   agent-openai-responses
   agent-gemini
-  provider-openai-compatible
+)
+# The South provider components ship beside the agents under the South
+# loader's file name (`component.wasm`).
+readonly south_components=(
+  provider-openai-compatible-v2
+  provider-anthropic-v2
 )
 
 host_os="$(uname -s)"
@@ -139,6 +144,15 @@ for plugin in "${plugins[@]}"; do
   if [[ -d "$source/fixtures" ]]; then
     cp -R "$source/fixtures" "$stage/plugins-dist/$plugin/fixtures"
   fi
+done
+
+for component in "${south_components[@]}"; do
+  source="$root/plugins/official/$component"
+  cargo build --locked --release --manifest-path "$source/Cargo.toml" --target "$wasm_target"
+  mkdir -p "$stage/plugins-dist/$component"
+  cp "$source/manifest.json" "$stage/plugins-dist/$component/manifest.json"
+  cp "$source/target/$wasm_target/release/${component//-/_}.wasm" \
+    "$stage/plugins-dist/$component/component.wasm"
 done
 
 export TOKEN_STATION_PLUGINS_DIST="$stage/plugins-dist"

@@ -15,9 +15,7 @@ use token_station_cli::config::ClientConfig;
 use token_station_cli::filelog::{FileLog, Recorders};
 use token_station_cli::gateway::{Gateway, StageStatus};
 use token_station_cli::store::SqliteStore;
-use token_station_cli::{
-    backup, manage, plugins, scaffold, secrets, server, stats, upgrade, virtual_key,
-};
+use token_station_cli::{backup, manage, plugins, secrets, server, stats, upgrade, virtual_key};
 use token_station_metrics::Recorder;
 
 #[derive(Parser)]
@@ -173,32 +171,8 @@ enum PluginCommand {
     /// Delete an installed package and its approval (refused while an
     /// upstream still routes through it).
     Remove { name: String },
-    /// One package in full: identity, trust, dialects, declared secrets.
+    /// One package in full: identity, trust, dialects.
     Info { name: String },
-    /// Scaffold a provider-adapter project: the official OpenAI-compatible
-    /// adapter renamed, compiling and conformance-passing from the start.
-    New {
-        /// Package name, lowercase kebab-case (e.g. `provider-acme`).
-        name: String,
-        /// The provider dialect it will speak; defaults to the package name.
-        #[arg(long)]
-        dialect: Option<String>,
-        /// Parent directory to scaffold into.
-        #[arg(long, default_value = ".")]
-        dir: PathBuf,
-    },
-    /// cargo build --target wasm32-wasip2, then place adapter.wasm beside
-    /// the manifest so the project directory is directly installable.
-    Build {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-    /// Run the package's conformance suite — the exact one `plugin install`
-    /// holds it to.
-    Test {
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
 }
 
 #[derive(Subcommand)]
@@ -405,20 +379,6 @@ fn plugin(command: PluginCommand, config_path: &Path) -> Result<(), String> {
         PluginCommand::Info { name } => {
             let config = load(config_path)?;
             print!("{}", plugins::info(&config, &name)?);
-            Ok(())
-        }
-        // The developer chain works on package directories, not the config.
-        PluginCommand::New { name, dialect, dir } => {
-            let dialect = dialect.as_deref().unwrap_or(name.as_str());
-            println!("{}", scaffold::new_package(&dir, &name, dialect)?);
-            Ok(())
-        }
-        PluginCommand::Build { path } => {
-            println!("{}", scaffold::build_package(&path)?);
-            Ok(())
-        }
-        PluginCommand::Test { path } => {
-            println!("{}", scaffold::test_package(&path)?);
             Ok(())
         }
     }

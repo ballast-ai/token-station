@@ -14,11 +14,9 @@ members = [
 # WASM guest test fixture targeting wasm32-wasip2. Keep it out of the main
 # workspace build graph; plugin-runtime tests build it in a cargo subprocess.
 exclude = [
-    "crates/plugin-runtime/tests/guests/test-provider",
     "plugins/official/agent-anthropic",
     "plugins/official/agent-openai",
     "plugins/official/agent-openai-responses",
-    "plugins/official/provider-openai-compatible",
     # Deliberately exclude the Tauri desktop app from the strict workspace so its
     # large GUI dependency tree does not enter clippy-pedantic or cargo-deny gates.
     # Its path dependency on token-station-cli reuses the core without a fork.

@@ -28,7 +28,8 @@ make_fixture() {
     agent-anthropic \
     agent-openai-responses \
     agent-gemini \
-    provider-openai-compatible; do
+    provider-openai-compatible-v2 \
+    provider-anthropic-v2; do
     mkdir -p "$repo/plugins/official/$plugin/target/wasm32-wasip2/release"
     printf '{}\n' >"$repo/plugins/official/$plugin/manifest.json"
     : >"$repo/plugins/official/$plugin/target/wasm32-wasip2/release/${plugin//-/_}.wasm"
@@ -170,11 +171,11 @@ test_all_rust_builds_remap_private_host_paths() {
   checkout_remap="--remap-path-prefix=$repo_root=/build"
   cargo_home_remap="--remap-path-prefix=$fixture/cargo-home=/cargo"
   rust_sysroot_remap="--remap-path-prefix=$fixture/rust-sysroot=/rustc"
-  [[ "$(grep -Fc -- "$checkout_remap" "$state/cargo-rustflags" || true)" == "6" ]] \
+  [[ "$(grep -Fc -- "$checkout_remap" "$state/cargo-rustflags" || true)" == "7" ]] \
     || fail "plugin and Desktop Rust builds did not share the checkout path remap"
-  [[ "$(grep -Fc -- "$cargo_home_remap" "$state/cargo-rustflags" || true)" == "6" ]] \
+  [[ "$(grep -Fc -- "$cargo_home_remap" "$state/cargo-rustflags" || true)" == "7" ]] \
     || fail "plugin and Desktop Rust builds did not share the Cargo Home path remap"
-  [[ "$(grep -Fc -- "$rust_sysroot_remap" "$state/cargo-rustflags" || true)" == "6" ]] \
+  [[ "$(grep -Fc -- "$rust_sysroot_remap" "$state/cargo-rustflags" || true)" == "7" ]] \
     || fail "plugin and Desktop Rust builds did not share the Rust sysroot path remap"
 }
 

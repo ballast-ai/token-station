@@ -39,7 +39,7 @@ use token_station_cli::config::{
     ClientConfig, EgressConfig, PluginsConfig, RoutingMode as HostRoutingMode,
 };
 use token_station_cli::gateway::{FeatureLayer, Gateway, HealthLayer, StageStatus};
-use token_station_cli::plugins::{PluginRegistry, Receipts};
+use token_station_cli::plugins::{PackageManifest, PluginRegistry, Receipts};
 use token_station_cli::pricing::{ModelPrice, PriceTable};
 use token_station_cli::{
     secrets, stats,
@@ -317,7 +317,7 @@ fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value 
         "plugins": {
             "dir": plugins_dir,
             "agents": desktop_agents(),
-            "providers": { "openai-compatible": "provider-openai-compatible" }
+            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
         },
         "upstreams": {},
         "pricing": pricing,
@@ -336,12 +336,13 @@ fn template(data_dir: &std::path::Path, plugins_dir: &std::path::Path) -> Value 
     })
 }
 
-const BUNDLED_PLUGIN_IDS: [&str; 5] = [
+const BUNDLED_PLUGIN_IDS: [&str; 6] = [
     "agent-openai",
     "agent-anthropic",
     "agent-openai-responses",
     "agent-gemini",
     "provider-openai-compatible",
+    "provider-anthropic",
 ];
 
 #[derive(Serialize)]
@@ -427,33 +428,45 @@ fn collect_installed_self_test() -> Result<Value, String> {
                     "plugin `{id}` did not come from the signed builtin tier"
                 ));
             }
-            let manifest = &package.manifest;
-            let kind = serde_json::to_value(manifest.kind)
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .unwrap_or_else(|| "unknown".to_owned());
-            let capabilities = manifest
-                .capabilities
-                .iter()
-                .filter_map(|capability| {
-                    serde_json::to_value(capability)
-                        .ok()
-                        .and_then(|value| value.as_str().map(str::to_owned))
-                })
-                .collect();
+            fn capability_names<T: serde::Serialize>(capabilities: &T) -> Vec<String> {
+                serde_json::to_value(capabilities)
+                    .ok()
+                    .and_then(|value| value.as_array().cloned())
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_owned))
+                    .collect()
+            }
+            let (kind, protocols, agent_tools, providers, capabilities) = match &package.manifest
+            {
+                PackageManifest::Agent(agent) => (
+                    "agent-adapter",
+                    agent.agent_protocols.clone(),
+                    agent.agent_tools.clone(),
+                    Vec::new(),
+                    capability_names(&agent.capabilities),
+                ),
+                PackageManifest::Provider(component) => (
+                    "provider-component",
+                    Vec::new(),
+                    Vec::new(),
+                    component.providers.clone(),
+                    capability_names(&component.capabilities),
+                ),
+            };
             plugins.push(InstalledPluginSelfTest {
-                id: manifest.name.clone(),
-                version: manifest.version.clone(),
-                kind,
+                id: package.manifest.name().to_owned(),
+                version: package.manifest.version().to_owned(),
+                kind: kind.to_owned(),
                 source: "builtin",
-                protocols: manifest.agent_protocols.clone(),
-                agent_tools: manifest.agent_tools.clone(),
-                providers: manifest.providers.clone(),
+                protocols,
+                agent_tools,
+                providers,
                 capabilities,
                 loadable: true,
             });
         }
-        for dialect in ["openai-compatible", "azure-openai-v1"] {
+        for dialect in ["openai-compatible", "azure-openai-v1", "anthropic"] {
             if registry.provider_binding(dialect).is_none() {
                 return Err(format!("builtin provider dialect `{dialect}` is not bound"));
             }
@@ -1043,6 +1056,15 @@ fn provider_brand_id(
         .find_map(|(known_url, brand_id)| (*known_url == normalized).then_some(*brand_id))
 }
 
+/// The official OpenAI-compatible South component, by its builtin manifest
+/// name or by the package directory the staged copy lives in.
+fn is_official_openai_compatible_package(package: &str) -> bool {
+    matches!(
+        package,
+        "provider-openai-compatible" | "provider-openai-compatible-v2"
+    )
+}
+
 fn south_v1_unavailable_reason(
     draft: &Value,
     upstream: &Value,
@@ -1052,7 +1074,7 @@ fn south_v1_unavailable_reason(
         || upstream["provider"].as_str() != Some("openai-compatible")
         || draft["plugins"]["providers"]["openai-compatible"]
             .as_str()
-            .is_some_and(|package| package != "provider-openai-compatible")
+            .is_some_and(|package| !is_official_openai_compatible_package(package))
     {
         return Some("provider_package");
     }
@@ -1085,7 +1107,7 @@ fn south_header_auth_v1_unavailable_reason(
         || !matches!(provider, "openai-compatible" | "azure-openai-v1")
         || draft["plugins"]["providers"][provider]
             .as_str()
-            .is_some_and(|package| package != "provider-openai-compatible")
+            .is_some_and(|package| !is_official_openai_compatible_package(package))
     {
         return Some("provider_package");
     }
@@ -1430,9 +1452,7 @@ fn south_approved_dialects(registry: &PluginRegistry) -> BTreeSet<String> {
     registry
         .provider_dialects()
         .into_iter()
-        .filter(|dialect| {
-            registry.provider_package_south_approved(dialect, "provider-openai-compatible")
-        })
+        .filter(|dialect| registry.provider_package_south_approved(dialect))
         .map(str::to_owned)
         .collect()
 }

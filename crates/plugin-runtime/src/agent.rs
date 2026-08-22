@@ -1,6 +1,6 @@
 use std::fmt;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use serde_json::Value;
 use token_station_conformance::{AdapterResult, AgentAdapter, reported_identity_matches};
@@ -18,7 +18,6 @@ use crate::loader::{
     Ctx, FORBIDDEN_FOR_AGENTS, LoadError, from_json, parse_package, read_package, to_json,
     trap_envelope,
 };
-use crate::provider::NoSecrets;
 use crate::runtime::PluginRuntime;
 
 /// A loaded, gated agent adapter.
@@ -150,14 +149,9 @@ impl AgentPlugin {
     }
 }
 
-/// The sandbox context an agent-world instance runs under: no secrets to
-/// declare and no signer to reach, since the agent world never links `host`.
+/// The sandbox context an agent-world instance runs under.
 fn agent_ctx(runtime: &PluginRuntime) -> Ctx {
-    Ctx::new(
-        runtime.limits().memory_bytes,
-        std::collections::BTreeSet::new(),
-        Arc::new(NoSecrets),
-    )
+    Ctx::new(runtime.limits().memory_bytes)
 }
 
 impl AdapterWorld for AgentAdapterV1 {
@@ -183,7 +177,6 @@ fn convert_metadata(wit: wit_common::AdapterMetadata) -> AdapterMetadata {
         wit.version,
         match wit.kind {
             wit_common::AdapterKind::Agent => AdapterKind::Agent,
-            wit_common::AdapterKind::Provider => AdapterKind::Provider,
         },
         wit.api_version,
     )

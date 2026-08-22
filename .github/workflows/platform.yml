@@ -111,10 +111,14 @@ jobs:
             apps/desktop/src-tauri
       - run: npm --prefix apps/desktop ci
       - run: node scripts/check-windows-release-config.mjs
-      - name: Fetch the locked scaffold dependency set
-        run: >-
-          cargo fetch --locked --target wasm32-wasip2
-          --manifest-path plugins/official/provider-openai-compatible/Cargo.toml
+      - name: Fetch the locked official component dependency sets
+        shell: bash
+        run: |
+          for manifest in \
+            plugins/official/provider-openai-compatible-v2/Cargo.toml \
+            plugins/official/provider-anthropic-v2/Cargo.toml; do
+            cargo fetch --locked --target wasm32-wasip2 --manifest-path "$manifest"
+          done
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - name: Prepare official plugins for desktop gateway tests

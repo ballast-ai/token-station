@@ -9,7 +9,7 @@
     "dir": "token-station-m4/plugins",
     "agent": "agent-openai",
     "providers": {
-      "openai-compatible": "provider-openai-compatible"
+      "openai-compatible": "provider-openai-compatible-v2"
     }
   },
   "upstreams": {

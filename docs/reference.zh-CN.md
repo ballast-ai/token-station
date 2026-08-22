@@ -103,7 +103,7 @@ npm --prefix apps/desktop ci
 npm --prefix apps/desktop run tauri:dev
 ```
 
-请使用仓库提供的 `tauri:dev` 命令。它会先构建并内嵌 5 个官方 WASM 适配器，再启动 Tauri。只开发前端时，可以使用 `npm --prefix apps/desktop run dev`。
+请使用仓库提供的 `tauri:dev` 命令。它会先构建并内嵌全部官方 WASM 包（4 个 Agent 适配器 + 2 个 South Provider 组件），再启动 Tauri。只开发前端时，可以使用 `npm --prefix apps/desktop run dev`。
 
 ```bash
 scripts/build-desktop.sh --local
@@ -120,7 +120,7 @@ cargo build -p token-station-cli
 ./target/debug/token-station-cli --help
 ```
 
-常规 Debug 或 Release Profile 的 Cargo 构建都不会内嵌 5 个官方适配器。本地启动网关时需要提供外部插件目录。官方打包使用 `scripts/build-release.sh <target-triple>`。
+常规 Debug 或 Release Profile 的 Cargo 构建都不会内嵌官方包。本地启动网关时需要提供外部插件目录。官方打包使用 `scripts/build-release.sh <target-triple>`。
 
 Tauri Crate 被排除在根 Cargo Workspace 之外，因此它的 Rust 检查必须单独执行。
 
@@ -147,7 +147,8 @@ npm --prefix apps/desktop run build
 apps/cli/                    原生 CLI 与本地网关
 apps/desktop/                React 与 Tauri 桌面 App
 crates/                      共享路由、协议、存储和安全 Crate
-plugins/official/            5 个官方 WASM 适配器
+plugins/official/            官方 WASM 包：4 个北向 Agent 适配器 + 2 个 South Provider 组件
+                             （来自 token-station-south）
 docs/guides/                 Agent 接入指南
 scripts/                     构建、发布、校验和维护脚本
 ```

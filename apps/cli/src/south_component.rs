@@ -1,29 +1,92 @@
-//! S4: the v2 South component in this host's adapter layer.
+//! The southbound seam: South's v2 provider components in this host's adapter
+//! layer.
 //!
-//! Two pieces. [`SouthComponentAdapter`] is the typed seam: it implements the
-//! conformance crate's `ProviderAdapter` over the South runtime's JSON face,
-//! serializing this host's own Canonical IR types — the runtime itself never
-//! parses the IR, so the host side of the boundary lives here.
-//! [`ShadowedProviderAdapter`] is the migration's first stage: every eligible
-//! translation runs through both the v1 provider plugin and the v2 component,
-//! byte-compares the canonical JSON of both outcomes, logs and counts any
-//! divergence, and always serves the v1 result. Pure translation — nothing in
-//! either piece opens a socket, so the shadow can never double-send.
+//! Every southbound translation runs through a `provider-adapter-v2` component
+//! loaded by `south-provider-runtime`. [`ProviderAdapter`] is the typed face
+//! the gateway calls; [`SouthComponentAdapter`] implements it over the South
+//! runtime's JSON face, serializing this host's own Canonical IR types — the
+//! runtime itself never parses the IR, so the host side of the boundary lives
+//! here. Nothing in this module opens a socket: translation and transport are
+//! separate seams (see `south_provider_call`).
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::Path;
 
-use serde_json::Value;
 use south_provider_runtime::{
     CallErrorV1, ComponentRuntimeV1, ComponentStreamV1, LoadedComponentV1, NoSecretsV1,
     RuntimeLimitsV1,
 };
-use token_station_conformance::{AdapterResult, ProviderAdapter, StreamParser};
-use token_station_plugin_api::{AdapterKind, AdapterMetadata};
 use token_station_protocol::{
     ChatRequest, ChatResponse, ErrorCode, ErrorEnvelope, HttpRequestDescriptor, HttpResponseParts,
     ModelCapability, ProviderConfig, StreamChunk, StreamEvent,
 };
+
+/// What an adapter returns. The error is the adapter's own [`ErrorEnvelope`],
+/// which is also what the runtime reports when a component traps.
+pub type AdapterResult<T> = Result<T, ErrorEnvelope>;
+
+/// One provider stream, mid-parse.
+///
+/// Streaming is the only stateful part of the ABI. A chunk off the socket is
+/// not a whole SSE frame, so an adapter must hold the tail until the rest
+/// arrives. The component runtime keeps that state in a per-stream instance,
+/// which is why this hands out a fresh parser per stream rather than
+/// pretending the call is pure.
+pub trait StreamParser {
+    /// Consumes one fragment and emits whatever complete events it completed.
+    ///
+    /// Zero events is a normal answer: the fragment ended mid-frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns the envelope the caller should be answered with.
+    fn parse_chunk(&mut self, chunk: &StreamChunk) -> AdapterResult<Vec<StreamEvent>>;
+
+    /// Flushes a clean transport EOF, represented as an empty fragment, which a
+    /// successful network read can never produce.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed protocol failure when buffered state cannot finish.
+    fn finish(&mut self) -> AdapterResult<Vec<StreamEvent>> {
+        self.parse_chunk(&StreamChunk {
+            data: String::new(),
+        })
+    }
+}
+
+/// Southbound: the Canonical IR, in and out of one provider's HTTP dialect.
+pub trait ProviderAdapter {
+    /// # Errors
+    ///
+    /// Returns the envelope the caller should be answered with.
+    fn model_capabilities(&self, config: &ProviderConfig) -> AdapterResult<Vec<ModelCapability>>;
+
+    /// # Errors
+    ///
+    /// Returns the envelope the caller should be answered with.
+    fn build_http_request(
+        &self,
+        request: &ChatRequest,
+        config: &ProviderConfig,
+    ) -> AdapterResult<HttpRequestDescriptor>;
+
+    /// # Errors
+    ///
+    /// Returns the envelope the caller should be answered with.
+    fn parse_response(&self, parts: &HttpResponseParts) -> AdapterResult<ChatResponse>;
+
+    /// Maps a failed upstream response onto the stable error catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns the envelope the caller should be answered with. An adapter that
+    /// cannot classify a failure returns `Ok(ErrorEnvelope { code: Internal, .. })`
+    /// rather than `Err`; `Err` here means the mapping itself broke.
+    fn map_provider_error(&self, parts: &HttpResponseParts) -> AdapterResult<ErrorEnvelope>;
+
+    /// A parser for one stream. Called once per exchange.
+    fn stream_parser(&self) -> Box<dyn StreamParser>;
+}
 
 /// One process-wide South engine for every v2 component instance.
 ///
@@ -35,7 +98,7 @@ pub fn south_component_runtime() -> Result<ComponentRuntimeV1, String> {
         .map_err(|error| format!("south component runtime: {error:#}"))
 }
 
-/// The official v2 component, loaded through the South gates.
+/// A v2 component, loaded through the South gates.
 pub struct SouthComponentAdapter {
     component: LoadedComponentV1,
 }
@@ -54,6 +117,18 @@ impl SouthComponentAdapter {
         let component =
             LoadedComponentV1::load_embedded(runtime, manifest_source, wasm, NoSecretsV1)
                 .map_err(|error| format!("south v2 component: {error}"))?;
+        Ok(Self { component })
+    }
+
+    /// Loads `manifest.json` and `component.wasm` from a package directory
+    /// through the same gates as [`Self::load_embedded`].
+    ///
+    /// # Errors
+    ///
+    /// The South loader's refusal, formatted with the directory.
+    pub fn load_dir(runtime: &ComponentRuntimeV1, dir: &Path) -> Result<Self, String> {
+        let component = LoadedComponentV1::load(runtime, dir, NoSecretsV1)
+            .map_err(|error| format!("south v2 component at {}: {error}", dir.display()))?;
         Ok(Self { component })
     }
 
@@ -97,16 +172,6 @@ fn from_json<T: for<'de> serde::Deserialize<'de>>(json: &str) -> AdapterResult<T
 }
 
 impl ProviderAdapter for SouthComponentAdapter {
-    fn metadata(&self) -> AdapterMetadata {
-        let reported = self.component.metadata();
-        AdapterMetadata::new(
-            reported.name,
-            reported.version,
-            AdapterKind::Provider,
-            reported.api_version,
-        )
-    }
-
     fn model_capabilities(&self, config: &ProviderConfig) -> AdapterResult<Vec<ModelCapability>> {
         let out = self
             .component
@@ -167,7 +232,7 @@ struct SouthComponentStreamParser {
 
 impl StreamParser for SouthComponentStreamParser {
     fn parse_chunk(&mut self, chunk: &StreamChunk) -> AdapterResult<Vec<StreamEvent>> {
-        // The v1 seam carries UTF-8 chunk text; the v2 ABI carries bytes.
+        // The host seam carries UTF-8 chunk text; the v2 ABI carries bytes.
         // Feeding the text's bytes is lossless, and the empty chunk keeps its
         // EOF-flush meaning on both sides.
         let out = self
@@ -188,279 +253,4 @@ impl StreamParser for BrokenStreamParser {
     fn parse_chunk(&mut self, _: &StreamChunk) -> AdapterResult<Vec<StreamEvent>> {
         Err(self.envelope.clone())
     }
-}
-
-/// Counts what the shadow lane observed. Shared so tests and diagnostics can
-/// read it; divergences are also logged as they happen.
-#[derive(Debug, Default)]
-pub struct ShadowReport {
-    pub comparisons: AtomicU64,
-    pub divergences: AtomicU64,
-}
-
-/// The migration's first stage: v1 serves, v2 shadows, every output is
-/// byte-compared after canonical serialization.
-pub struct ShadowedProviderAdapter {
-    primary: Arc<dyn ProviderAdapter + Send + Sync>,
-    shadow: Arc<SouthComponentAdapter>,
-    report: Arc<ShadowReport>,
-    dialect: String,
-}
-
-impl ShadowedProviderAdapter {
-    #[must_use]
-    pub fn new(
-        primary: Arc<dyn ProviderAdapter + Send + Sync>,
-        shadow: Arc<SouthComponentAdapter>,
-        report: Arc<ShadowReport>,
-        dialect: impl Into<String>,
-    ) -> Self {
-        Self {
-            primary,
-            shadow,
-            report,
-            dialect: dialect.into(),
-        }
-    }
-
-    fn compare<T: serde::Serialize>(
-        &self,
-        operation: &'static str,
-        primary: &AdapterResult<T>,
-        shadow: &AdapterResult<T>,
-    ) {
-        compare_outcomes(&self.report, &self.dialect, operation, primary, shadow);
-    }
-}
-
-fn canonical<T: serde::Serialize>(outcome: &AdapterResult<T>) -> Value {
-    match outcome {
-        Ok(value) => serde_json::json!({ "ok": serde_json::to_value(value).ok() }),
-        Err(envelope) => serde_json::json!({ "err": serde_json::to_value(envelope).ok() }),
-    }
-}
-
-fn compare_outcomes<T: serde::Serialize>(
-    report: &ShadowReport,
-    dialect: &str,
-    operation: &'static str,
-    primary: &AdapterResult<T>,
-    shadow: &AdapterResult<T>,
-) {
-    report.comparisons.fetch_add(1, Ordering::Relaxed);
-    let left = canonical(primary);
-    let right = canonical(shadow);
-    if left != right {
-        report.divergences.fetch_add(1, Ordering::Relaxed);
-        let rendered_left = truncate(&left.to_string());
-        let rendered_right = truncate(&right.to_string());
-        eprintln!(
-            "south shadow divergence [{dialect}] {operation}: v1 {rendered_left} vs v2 \
-             {rendered_right}"
-        );
-    }
-}
-
-fn truncate(rendered: &str) -> String {
-    if rendered.chars().count() <= 400 {
-        return rendered.to_owned();
-    }
-    let head: String = rendered.chars().take(400).collect();
-    format!("{head}…")
-}
-
-impl ProviderAdapter for ShadowedProviderAdapter {
-    fn metadata(&self) -> AdapterMetadata {
-        // Identity stays the serving adapter's; the shadow's differing
-        // api_version is expected, not a divergence.
-        self.primary.metadata()
-    }
-
-    fn model_capabilities(&self, config: &ProviderConfig) -> AdapterResult<Vec<ModelCapability>> {
-        let primary = self.primary.model_capabilities(config);
-        let shadow = self.shadow.model_capabilities(config);
-        self.compare("model_capabilities", &primary, &shadow);
-        primary
-    }
-
-    fn build_http_request(
-        &self,
-        request: &ChatRequest,
-        config: &ProviderConfig,
-    ) -> AdapterResult<HttpRequestDescriptor> {
-        let primary = self.primary.build_http_request(request, config);
-        let shadow = self.shadow.build_http_request(request, config);
-        self.compare("build_http_request", &primary, &shadow);
-        primary
-    }
-
-    fn parse_response(&self, parts: &HttpResponseParts) -> AdapterResult<ChatResponse> {
-        let primary = self.primary.parse_response(parts);
-        let shadow = self.shadow.parse_response(parts);
-        self.compare("parse_response", &primary, &shadow);
-        primary
-    }
-
-    fn map_provider_error(&self, parts: &HttpResponseParts) -> AdapterResult<ErrorEnvelope> {
-        let primary = self.primary.map_provider_error(parts);
-        let shadow = self.shadow.map_provider_error(parts);
-        self.compare("map_provider_error", &primary, &shadow);
-        primary
-    }
-
-    fn stream_parser(&self) -> Box<dyn StreamParser> {
-        Box::new(ShadowedStreamParser {
-            primary: self.primary.stream_parser(),
-            shadow: self.shadow.stream_parser(),
-            report: Arc::clone(&self.report),
-            dialect: self.dialect.clone(),
-            shadow_poisoned: AtomicBool::new(false),
-        })
-    }
-}
-
-impl std::fmt::Debug for ShadowedProviderAdapter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ShadowedProviderAdapter")
-            .field("dialect", &self.dialect)
-            .finish_non_exhaustive()
-    }
-}
-
-/// One stream, both lanes. The primary's events are served; the shadow's are
-/// compared chunk-for-chunk. A shadow that errors is poisoned and skipped for
-/// the rest of the stream (counted once), never affecting the serving lane.
-struct ShadowedStreamParser {
-    primary: Box<dyn StreamParser>,
-    shadow: Box<dyn StreamParser>,
-    report: Arc<ShadowReport>,
-    dialect: String,
-    shadow_poisoned: AtomicBool,
-}
-
-impl StreamParser for ShadowedStreamParser {
-    fn parse_chunk(&mut self, chunk: &StreamChunk) -> AdapterResult<Vec<StreamEvent>> {
-        let primary = self.primary.parse_chunk(chunk);
-        if !self.shadow_poisoned.load(Ordering::Relaxed) {
-            let shadow = self.shadow.parse_chunk(chunk);
-            if shadow.is_err() && primary.is_ok() {
-                self.shadow_poisoned.store(true, Ordering::Relaxed);
-            }
-            compare_outcomes(
-                &self.report,
-                &self.dialect,
-                "parse_stream_chunk",
-                &primary,
-                &shadow,
-            );
-        }
-        primary
-    }
-}
-
-/// Stage C's shadow over the `anthropic-native` passthrough.
-///
-/// The passthrough forwards the caller's body verbatim, so unlike S4's lane
-/// this one is not comparing two translators: the served side *is* the ground
-/// truth, and the question is whether the IR round trip preserves it. The
-/// design record calls that `f(g(x)) ≟ x`.
-///
-/// This lane measures; it does not adjudicate. The offline ledger
-/// (`anthropic_roundtrip_ledger`) is the gate that decides which differences
-/// are registered, and it runs a 200,000-body sweep to do it. What no offline
-/// corpus can supply is the *distribution* on real traffic — which shapes
-/// actually arrive, and how often the translated route refuses one outright.
-/// That is the number stage A′ needs, so refusals are counted as their own
-/// outcome rather than folded into divergences.
-///
-/// Nothing here opens a socket. The passthrough's request is the only one sent.
-pub struct PassthroughShadow {
-    component: Arc<SouthComponentAdapter>,
-    report: Arc<PassthroughShadowReport>,
-}
-
-/// What the lane has seen. Divergences and refusals are separate counters
-/// because they answer different questions: a divergence asks "is the round
-/// trip faithful", a refusal asks "can the translated route carry this at all".
-#[derive(Debug, Default)]
-pub struct PassthroughShadowReport {
-    pub equivalent: AtomicU64,
-    pub divergent: AtomicU64,
-    pub refused: AtomicU64,
-}
-
-impl PassthroughShadow {
-    #[must_use]
-    pub fn new(
-        component: Arc<SouthComponentAdapter>,
-        report: Arc<PassthroughShadowReport>,
-    ) -> Self {
-        Self { component, report }
-    }
-
-    #[must_use]
-    pub fn report(&self) -> &Arc<PassthroughShadowReport> {
-        &self.report
-    }
-
-    /// Compare one exchange. `forwarded` is exactly what the passthrough will
-    /// put on the wire, `routed_model` the model routing chose — the caller has
-    /// both before it sends, so the comparison costs one translation and no
-    /// network at all.
-    pub fn observe(
-        &self,
-        normalize: &dyn Fn(&Value) -> Result<ChatRequest, ErrorEnvelope>,
-        forwarded: &Value,
-        config: &ProviderConfig,
-        routed_model: &str,
-    ) {
-        let mut request = match normalize(forwarded) {
-            Ok(request) => request,
-            Err(envelope) => {
-                self.report.refused.fetch_add(1, Ordering::Relaxed);
-                eprintln!(
-                    "south passthrough shadow: the translated route would refuse this request: {}",
-                    envelope.message
-                );
-                return;
-            }
-        };
-        routed_model.clone_into(&mut request.model);
-
-        let Ok(descriptor) = self.component.build_http_request(&request, config) else {
-            self.report.refused.fetch_add(1, Ordering::Relaxed);
-            eprintln!("south passthrough shadow: the component refused to render this request");
-            return;
-        };
-        let Some(rendered) = descriptor.body else {
-            self.report.divergent.fetch_add(1, Ordering::Relaxed);
-            eprintln!("south passthrough shadow: the component produced no body");
-            return;
-        };
-        if &rendered == forwarded {
-            self.report.equivalent.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        self.report.divergent.fetch_add(1, Ordering::Relaxed);
-        eprintln!(
-            "south passthrough shadow divergence: passthrough {} vs translated {}",
-            truncated(forwarded),
-            truncated(&rendered)
-        );
-    }
-}
-
-/// Divergence logs are diagnostics, not a transcript: a full body would put
-/// caller content in the host's log.
-fn truncated(value: &Value) -> String {
-    const LIMIT: usize = 240;
-    let rendered = value.to_string();
-    if rendered.len() <= LIMIT {
-        return rendered;
-    }
-    let mut cut = LIMIT;
-    while !rendered.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}…", &rendered[..cut])
 }

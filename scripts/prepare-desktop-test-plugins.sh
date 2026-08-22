@@ -9,11 +9,10 @@ readonly plugins=(
   agent-anthropic
   agent-openai-responses
   agent-gemini
-  provider-openai-compatible
 )
-# The v2 south component ships under the south loader's file name and never
-# enters the v1 registry: it is staged under the south/ subtree, which the v1
-# directory scan skips (no manifest.json at its top level).
+# The South provider components ship beside the agents under the South
+# loader's file name (`component.wasm`); the directory scan dispatches on
+# each manifest's api_version.
 readonly south_components=(
   provider-openai-compatible-v2
   provider-anthropic-v2
@@ -33,10 +32,10 @@ done
 for component in "${south_components[@]}"; do
   source="$root/plugins/official/$component"
   cargo build --locked --release --manifest-path "$source/Cargo.toml" --target "$target"
-  mkdir -p "$output/south/$component"
-  cp "$source/manifest.json" "$output/south/$component/manifest.json"
+  mkdir -p "$output/$component"
+  cp "$source/manifest.json" "$output/$component/manifest.json"
   cp "$source/target/$target/release/${component//-/_}.wasm" \
-    "$output/south/$component/component.wasm"
+    "$output/$component/component.wasm"
 done
 
 echo "desktop test plugins: PASS ($((${#plugins[@]} + ${#south_components[@]})) packages in $output)"

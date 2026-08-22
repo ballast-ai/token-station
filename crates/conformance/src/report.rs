@@ -42,25 +42,6 @@ pub enum Check {
     ///
     /// A `v1` adapter meeting a `v2` peer must degrade, not fail.
     UnknownFieldTolerance,
-    /// However a provider's streaming body is split into chunks, the adapter
-    /// emits the same events.
-    ///
-    /// A chunk off a socket is not a whole SSE frame. An adapter that assumes it
-    /// is will pass every fixture and then corrupt or drop events in production,
-    /// where the split points depend on the network.
-    StreamIncrementality,
-    /// Every request the adapter built addresses the upstream it was configured
-    /// against.
-    ///
-    /// The adapter chooses the URL and names the credential the host will attach
-    /// to it. This is the check that keeps those two from combining.
-    EndpointConfinement,
-    /// A `401` or `403` from the upstream did not map onto a retriable code.
-    ///
-    /// Retriable means "try another upstream". Classifying a rejected credential
-    /// as retriable would replay it across every provider the user configured,
-    /// which is how one bad key becomes several locked accounts.
-    AuthErrorsAreNotRetriable,
 }
 
 impl Check {
@@ -71,9 +52,6 @@ impl Check {
             Self::FixtureMatch => "fixture_match",
             Self::Determinism => "determinism",
             Self::UnknownFieldTolerance => "unknown_field_tolerance",
-            Self::StreamIncrementality => "stream_incrementality",
-            Self::EndpointConfinement => "endpoint_confinement",
-            Self::AuthErrorsAreNotRetriable => "auth_errors_are_not_retriable",
         }
     }
 }
@@ -157,7 +135,7 @@ impl Report {
         Self { suite, outcomes }
     }
 
-    /// The suite that produced this, e.g. `provider-protocol-v1`. Matches the
+    /// The suite that produced this, e.g. `agent-protocol-v1`. Matches the
     /// `conformance.required_suite` the manifest declared.
     #[must_use]
     pub fn suite(&self) -> &'static str {
@@ -204,7 +182,7 @@ mod tests {
     fn a_report_with_no_outcomes_is_not_a_pass_by_accident() {
         // It is vacuously passing, which is exactly why `Coverage` exists: an
         // empty fixture pack fails before it can produce an empty report.
-        let report = Report::new("provider-protocol-v1", Vec::new());
+        let report = Report::new("agent-protocol-v1", Vec::new());
 
         assert!(report.is_passing());
         assert_eq!(report.outcomes().len(), 0);
@@ -213,29 +191,29 @@ mod tests {
     #[test]
     fn a_single_failure_refuses_the_package_and_says_why() {
         let report = Report::new(
-            "provider-protocol-v1",
+            "agent-protocol-v1",
             vec![
-                Outcome::passed(Check::FixtureMatch, "provider.request.chat"),
+                Outcome::passed(Check::FixtureMatch, "agent.normalize.chat"),
                 Outcome::failed(
-                    Check::EndpointConfinement,
-                    "provider.request.chat",
-                    "adapter addressed `https://attacker.example/collect`",
+                    Check::Determinism,
+                    "agent.normalize.chat",
+                    "second invocation rendered a different document",
                 ),
             ],
         );
 
         assert!(!report.is_passing());
         assert_eq!(report.failures().count(), 1);
-        assert!(format!("{report}").contains("attacker.example"));
+        assert!(format!("{report}").contains("different document"));
     }
 
     #[test]
     fn outcome_renders_the_case_and_the_reason() {
-        let outcome = Outcome::failed(Check::Determinism, "provider.stream.tool-call", "differed");
+        let outcome = Outcome::failed(Check::Determinism, "agent.stream.delta", "differed");
 
         assert_eq!(
             outcome.to_string(),
-            "provider.stream.tool-call: determinism failed: differed"
+            "agent.stream.delta: determinism failed: differed"
         );
         assert_eq!(outcome.verdict, Verdict::Failed("differed".to_owned()));
     }
