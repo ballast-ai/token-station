@@ -44,6 +44,7 @@ fn plugins_dir() -> &'static Path {
             ("agent-anthropic", "adapter.wasm"),
             ("agent-gemini", "adapter.wasm"),
             ("provider-openai-compatible-v2", "component.wasm"),
+            ("provider-anthropic-v2", "component.wasm"),
         ] {
             let source = repo_root().join("plugins/official").join(plugin);
             let status = Command::new("cargo")
@@ -809,11 +810,14 @@ fn start_native_anthropic_proxy_with(
         "plugins": {
             "dir": plugins_dir(),
             "agents": ["agent-anthropic"],
-            "providers": { "openai-compatible": "provider-openai-compatible-v2" }
+            "providers": {
+                "openai-compatible": "provider-openai-compatible-v2",
+                "anthropic": "provider-anthropic-v2"
+            }
         },
         "upstreams": {
             "deepseek_native": {
-                "provider": "openai-compatible",
+                "provider": "anthropic",
                 "api_dialect": "anthropic-native",
                 "base_url": upstream.base_url(),
                 "auth": { "slot": "provider_api_key", "file": key_file },

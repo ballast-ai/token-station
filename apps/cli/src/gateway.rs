@@ -1083,6 +1083,29 @@ const fn fallback_reason_for(reason: IneligibleV1) -> SouthFallbackReason {
     }
 }
 
+/// Whether an Anthropic Messages body declares a tool the upstream executes
+/// itself. Mirrors `agent-anthropic`'s `is_anthropic_server_tool`: the six
+/// families Anthropic runs server-side, by `type` prefix.
+fn anthropic_request_declares_server_tool(body: &Value) -> bool {
+    const SERVER_TOOL_PREFIXES: [&str; 6] = [
+        "web_search_",
+        "web_fetch_",
+        "code_execution_",
+        "tool_search_",
+        "mcp_",
+        "advisor_",
+    ];
+    body.get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                tool.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| SERVER_TOOL_PREFIXES.iter().any(|p| kind.starts_with(p)))
+            })
+        })
+}
+
 fn attempt_receipt(
     target: &UpstreamModel,
     ordinal: u32,
@@ -3710,12 +3733,14 @@ impl Gateway {
         emit: &mut dyn FnMut(Reply) -> bool,
         record: &mut RequestRecord,
     ) -> Result<(UpstreamModel, StreamOutcome), ErrorEnvelope> {
-        // Native Anthropic passthrough: an anthropic-messages request that routes
-        // to an `anthropic-native` upstream is forwarded verbatim — preserving
-        // server tools (web_search), tool_choice:{type:tool}, server-tool history
-        // and thinking — instead of being lowered through the Canonical IR. The
-        // decision runs on a minimal request (model only) so `normalize_inbound`,
-        // which would reject server-tool history blocks, is never called here.
+        // Native Anthropic passthrough, the server-tool escape hatch: an
+        // anthropic-messages request that routes to an `anthropic-native`
+        // upstream *and declares a server tool* (web_search, code_execution, …)
+        // is forwarded verbatim. Everything else — thinking, tool_choice:{type:
+        // tool}, server-tool history blocks — round-trips through the Canonical
+        // IR and the Anthropic provider component now, so only the one thing
+        // the IR cannot carry, a tool the upstream executes itself, takes the
+        // verbatim route. The decision runs on a minimal request (model only).
         if agent.protocol == "anthropic-messages"
             && let Some(served) =
                 self.try_anthropic_passthrough(ctx, router, headers, body, emit, record)?
@@ -4588,10 +4613,9 @@ impl Gateway {
 
     /// Native Anthropic passthrough decision + execution. Returns `Some(served)`
     /// when an anthropic-messages request routed to an `anthropic-native` upstream
-    /// and was forwarded verbatim; `None` when it is not a passthrough and the
-    /// caller must fall through to the Canonical-IR pipeline. Never runs
-    /// `normalize_inbound`, so server-tool history and `tool_choice:{type:tool}` —
-    /// which the IR path rejects — survive.
+    /// and declared a server tool, and was forwarded verbatim; `None` when it is
+    /// not a passthrough and the caller must fall through to the Canonical-IR
+    /// pipeline. Never runs `normalize_inbound`.
     #[allow(clippy::too_many_arguments)] // decision, fallbacks and dispatch stay one path
     fn try_anthropic_passthrough(
         &self,
@@ -4655,6 +4679,14 @@ impl Gateway {
             return Ok(None);
         };
         if upstream.dialect != ApiDialect::AnthropicNative {
+            return Ok(None);
+        }
+        // The escape hatch is for what the IR cannot carry: a server tool has
+        // no `ToolDef` representation (there is no `type` to say "the upstream
+        // runs this"). A request without one round-trips through the IR and the
+        // Anthropic component instead, where thinking, forced tool choice and
+        // server-tool history all survive.
+        if !anthropic_request_declares_server_tool(&body_value) {
             return Ok(None);
         }
         let vision_state = candidates

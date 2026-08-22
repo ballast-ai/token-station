@@ -1073,6 +1073,13 @@ fn south_v1_unavailable_reason(
     upstream: &Value,
     package_verified: bool,
 ) -> Option<&'static str> {
+    if upstream
+        .get("api_dialect")
+        .and_then(Value::as_str)
+        .is_some_and(|dialect| dialect != "translated")
+    {
+        return Some("api_dialect");
+    }
     if !package_verified
         || upstream["provider"].as_str() != Some("openai-compatible")
         || draft["plugins"]["providers"]["openai-compatible"]
@@ -1081,13 +1088,7 @@ fn south_v1_unavailable_reason(
     {
         return Some("provider_package");
     }
-    if upstream
-        .get("api_dialect")
-        .and_then(Value::as_str)
-        .is_some_and(|dialect| dialect != "translated")
-    {
-        return Some("api_dialect");
-    }
+
     if draft["egress"]["mode"]
         .as_str()
         .is_some_and(|mode| mode != "direct")
@@ -1106,6 +1107,13 @@ fn south_header_auth_v1_unavailable_reason(
     package_verified: bool,
 ) -> Option<&'static str> {
     let provider = upstream["provider"].as_str().unwrap_or_default();
+    if upstream
+        .get("api_dialect")
+        .and_then(Value::as_str)
+        .is_some_and(|dialect| dialect != "translated")
+    {
+        return Some("api_dialect");
+    }
     if !package_verified
         || !matches!(provider, "openai-compatible" | "azure-openai-v1")
         || draft["plugins"]["providers"][provider]
@@ -1114,13 +1122,7 @@ fn south_header_auth_v1_unavailable_reason(
     {
         return Some("provider_package");
     }
-    if upstream
-        .get("api_dialect")
-        .and_then(Value::as_str)
-        .is_some_and(|dialect| dialect != "translated")
-    {
-        return Some("api_dialect");
-    }
+
     if draft["egress"]["mode"]
         .as_str()
         .is_some_and(|mode| mode != "direct")
@@ -7473,7 +7475,7 @@ mod tests {
             (
                 json!({
                     "provider": "openai-compatible",
-                    "api_dialect": "anthropic_native",
+                    "api_dialect": "anthropic-native",
                     "auth": {"store": true}
                 }),
                 eligible_draft.clone(),
@@ -12633,7 +12635,7 @@ mod tests {
         assert!(!provider_health_uses_south(&proxied, &eligible, true));
 
         let mut native = eligible.clone();
-        native["api_dialect"] = json!("anthropic_native");
+        native["api_dialect"] = json!("anthropic-native");
         assert!(!provider_health_uses_south(&draft, &native, true));
         assert!(!provider_health_uses_south(&draft, &eligible, false));
 

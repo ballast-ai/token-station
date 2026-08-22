@@ -206,31 +206,18 @@ fn parse_plain_block(block: &Value) -> Result<ContentPart, String> {
                 .ok_or_else(|| invalid("redacted_thinking block declares no data"))?
                 .to_owned(),
         }),
-        // Server-tool history blocks. These arrive on a follow-up turn after a
-        // native Anthropic upstream ran a server tool. Canonical IR has no
-        // representation for them, so a multi-turn continuation that carries
-        // server-tool results cannot be replayed. Name them explicitly rather
-        // than reporting a generic "unsupported content block", so the failure
-        // is actionable (native Anthropic route, or an approved IR extension).
-        Some(
-            kind @ ("server_tool_use"
-            | "web_search_tool_result"
-            | "web_fetch_tool_result"
-            | "code_execution_tool_result"
-            | "mcp_tool_use"
-            | "mcp_tool_result"),
-        ) => Err(capability(format!(
-            "Anthropic server-tool history block `{kind}` cannot be replayed through Canonical \
-             IR; continuing a conversation that carries server-tool results needs a native \
-             Anthropic route or an approved IR extension."
-        ))),
-        Some(kind @ ("document" | "search_result")) => Err(capability(format!(
-            "Anthropic tool-result content block `{kind}` has no Canonical IR representation; its \
-             structure would be lost if flattened to plain text."
-        ))),
-        Some(kind) => Err(capability(format!(
-            "unsupported Anthropic content block `{kind}`"
-        ))),
+        // Every other typed block — server-tool history (`server_tool_use`,
+        // `web_search_tool_result`, `mcp_tool_use`, …), `document`,
+        // `search_result`, or a type this adapter has never heard of — rides
+        // through the IR verbatim as `ContentPart::Unknown`. This adapter runs
+        // before routing and cannot know which renderer will serve the
+        // request, so it is not the place to decide what can be expressed:
+        // the Anthropic renderer writes these blocks back unchanged, and a
+        // renderer for another wire refuses them by name at render time
+        // (stage A′; south 0.15.0 renderer refusal). Refusing here used to
+        // turn every such request into a 400 even when an Anthropic upstream
+        // would have served it.
+        Some(_) => Ok(ContentPart::Unknown(block.clone())),
         None => Err(invalid("content block declares no type")),
     }
 }
@@ -842,19 +829,25 @@ impl Guest for AnthropicClient {
             tools: parse_tools(body)?,
             response_format: None,
             // Translate honestly at the wire boundary. `any` is lossless →
-            // `Required` (every OpenAI-compatible upstream understands it). A
-            // forced specific `tool` degrades to `Auto`: the egress serializes
-            // `ToolChoice` verbatim and the chat wire expects
-            // `{type:function,function:{name}}`, not Anthropic's `{type:tool,name}`
-            // — and the forced tool is frequently a native/server tool the chat
-            // provider can't run. `validate_tool_choice` already refused any other
-            // shape. (The native Anthropic passthrough path preserves `{type:tool}`
-            // and server tools instead of taking this translate path.)
+            // `Required`. A forced specific `tool` is carried as
+            // `ToolChoice::Other` in the OpenAI object form
+            // `{type:function,function:{name}}`: the OpenAI-compatible renderer
+            // serializes it verbatim, and the Anthropic renderer maps it back
+            // to `{type:tool,name}` (stage A′ retired the old degrade to
+            // `auto`, which lost the caller's instruction on every wire).
+            // `validate_tool_choice` already refused any other shape.
             tool_choice: body
                 .get("tool_choice")
                 .filter(|value| !value.is_null())
                 .map(|value| match value.get("type").and_then(Value::as_str) {
                     Some("any") => ToolChoice::Required,
+                    Some("tool") => match value.get("name").and_then(Value::as_str) {
+                        Some(name) => ToolChoice::Other(json!({
+                            "type": "function",
+                            "function": {"name": name}
+                        })),
+                        None => ToolChoice::Auto,
+                    },
                     _ => ToolChoice::Auto,
                 }),
             sampling: Sampling {

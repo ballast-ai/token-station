@@ -552,13 +552,14 @@ pub struct UpstreamConfig {
     pub access_tier: AccessTier,
     /// The wire dialect this upstream speaks natively. Default `translated`
     /// keeps the Canonical-IR path (inbound adapter → `ChatRequest` → South
-    /// provider component → the provider's wire). `anthropic-native` forwards the caller's
-    /// original Anthropic Messages body verbatim to `base_url` + `/messages`,
-    /// preserving server tools (`web_search`), `tool_choice:{type:tool}`,
-    /// server-tool result history and thinking — the things the Canonical IR
-    /// cannot round-trip. Only meaningful for an anthropic-messages inbound whose
-    /// upstream genuinely speaks the Anthropic wire (e.g. `DeepSeek`'s `/anthropic`
-    /// endpoint). `base_url` must end at the version segment, e.g.
+    /// provider component → the provider's wire). `anthropic-native` is the
+    /// server-tool escape hatch: an anthropic-messages request that declares a
+    /// tool the upstream executes itself (`web_search`, `code_execution`, …)
+    /// is forwarded verbatim to `base_url` + `/messages`, because the IR has no
+    /// way to say "the upstream runs this tool". Every other request to the
+    /// upstream takes the translated path through the Anthropic provider
+    /// component, so the upstream must be `provider: anthropic`. `base_url`
+    /// must end at the version segment, e.g.
     /// `https://api.deepseek.com/anthropic/v1`, so the resolved URL is
     /// `…/anthropic/v1/messages`.
     #[serde(default, skip_serializing_if = "ApiDialect::is_default")]
@@ -1009,6 +1010,18 @@ impl ClientConfig {
             token_station_router_core::UpstreamRef::new(name.clone())
                 .map_err(|error| error.to_string())?;
             validate_local_identity(name, upstream)?;
+            // The escape hatch forwards Anthropic Messages verbatim; every other
+            // request to the same upstream is rendered by the Anthropic provider
+            // component, so the dialect must be one it speaks.
+            if upstream.api_dialect == ApiDialect::AnthropicNative
+                && upstream.provider != "anthropic"
+            {
+                return Err(format!(
+                    "upstream `{name}` is `api_dialect: anthropic-native` but speaks `{}`; an \
+                     anthropic-native upstream must be `provider: anthropic`",
+                    upstream.provider
+                ));
+            }
             if !upstream.base_url.uses_https() && !upstream.base_url.is_loopback() {
                 return Err(format!(
                     "upstream `{name}` must use HTTPS unless its endpoint is loopback"

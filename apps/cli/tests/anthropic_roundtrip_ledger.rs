@@ -368,28 +368,17 @@ fn discover_request_direction_divergences() {
 // retirement, and the 200,000-body sweep confirmed the fix introduced nothing
 // new in its place.
 //
-// **R-2 — a forced `tool_choice` degrades to `auto`.** Not an accident, and not
-// an IR limitation: `validate_tool_choice` says so itself — "`ToolChoice::Other`
-// can carry any shape; the real constraint is the downstream OpenAI-compatible
-// chat provider." Someone already corrected the error message that blamed
-// Canonical IR but could not correct the behaviour, because there was no
-// Anthropic renderer to route to. Stage C supplies one; stage A′ then stops the
-// degradation.
+// **R-2 — retired.** A forced `tool_choice` used to degrade to `auto` because
+// there was no Anthropic renderer to route to. Stage C supplied one and stage A′
+// stopped the degradation: `agent-anthropic` now carries `{type:tool,name}` as
+// `ToolChoice::Other` in the OpenAI object form and the component maps it back.
+// Retired like R-1: the load-bearing gate demanded it, and the sweep confirmed
+// nothing took its place.
 //
 // Erasers run on **both** sides and stay narrow, so a new difference in the same
 // area still survives. When a class is really fixed its eraser stops being
 // load-bearing, which `every_registered_class_is_still_load_bearing` reports —
 // retiring the eraser is then the evidence the class is gone rather than hidden.
-
-/// R-2: rewrite a forced `tool_choice` to the `auto` the translate path emits.
-fn erase_r2_degraded_tool_choice(value: &mut Value) {
-    let Some(choice) = value.get_mut("tool_choice") else {
-        return;
-    };
-    if choice.get("type").and_then(Value::as_str) == Some("tool") {
-        *choice = json!({"type": "auto"});
-    }
-}
 
 /// R-3: a block-array `system` is flattened to the string the IR carries.
 fn erase_r3_flattened_system(value: &mut Value) {
@@ -466,10 +455,6 @@ type Eraser = (&'static str, fn(&mut Value));
 
 const ERASERS: &[Eraser] = &[
     (
-        "R-2 a forced tool_choice degrades to auto",
-        erase_r2_degraded_tool_choice,
-    ),
-    (
         "R-3 a block-array system is flattened",
         erase_r3_flattened_system,
     ),
@@ -488,7 +473,12 @@ const ERASERS: &[Eraser] = &[
 /// divergence — it is a measurement of what the translated route cannot serve
 /// yet — but an *unrecognised* refusal still fails the gate, because the point
 /// of the ledger is that nothing goes unlisted.
-const REGISTERED_REFUSALS: &[&str] = &["server-tool history block"];
+///
+/// Empty since stage A′: the northbound adapter no longer refuses server-tool
+/// history blocks (they ride through as `ContentPart::Unknown` and the
+/// Anthropic renderer writes them back), so the request direction has no
+/// recognised refusal left. A new one would turn the gate red by design.
+const REGISTERED_REFUSALS: &[&str] = &[];
 
 fn erased(mut value: Value) -> Value {
     for (_, erase) in ERASERS {
