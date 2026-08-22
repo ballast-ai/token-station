@@ -716,8 +716,8 @@ impl AsyncHttpTransport for InspectingTransport {
         assert_eq!(request.body().as_str(), r#"{"model":"test"}"#);
         assert_eq!(request.headers().get("x-trace-id"), Some("trace-1"));
         assert_eq!(
-            request.auth_header(),
-            ("authorization", b"Bearer synthetic-test-secret".as_slice())
+            request.auth_headers().collect::<Vec<_>>(),
+            vec![("authorization", b"Bearer synthetic-test-secret".as_slice())]
         );
         Box::pin(async {
             let quota_metadata = ProviderQuotaMetadataV1::try_from_iter([
@@ -777,8 +777,8 @@ impl AsyncHttpTransport for HeaderInspectingTransport<'_> {
     ) -> TransportFuture<'a> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(
-            request.auth_header(),
-            (self.expected_name, b"synthetic-test-secret".as_slice())
+            request.auth_headers().collect::<Vec<_>>(),
+            vec![(self.expected_name, b"synthetic-test-secret".as_slice())]
         );
         Box::pin(async {
             BufferedHttpResponseV1::try_from_parts(
@@ -1595,7 +1595,11 @@ impl HeaderAuthProbe {
     }
 
     fn inspect(&self, request: &PreparedHttpRequestV1<'_>, fixture: &HeaderAuthFixtureV1) {
-        let (name, value) = request.auth_header();
+        let mut auth_headers = request.auth_headers();
+        let (name, value) = auth_headers
+            .next()
+            .expect("a header-auth request binds exactly one auth header");
+        assert!(auth_headers.next().is_none());
         self.sanctioned_header_exact.store(
             name == fixture.secret_header().header_name()
                 && value == FAKE_HEADER_SECRET_V1.as_bytes(),
